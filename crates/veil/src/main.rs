@@ -79,6 +79,8 @@ impl veil_egui::Exporter for NoExport {
 
 /// latex-rust 渲染器（ADR-002）：STIX Two Math 字体内嵌于 crate，无 vendor 资产。
 /// 手写 parse→layout→render_png 链以取 MathBox.height 算基线（行内公式与文本基线对齐）。
+/// 3.0.1 的 render_png 文档仍明示忽略 PngOptions.display（display 只对 latex_to_png 生效），
+/// 且基线本就需要 tree.height，故手写链保留。
 /// 字号：块级 display 12pt；行内 text 8pt（8pt@144dpi = 16px em，与正文 BASE_FONT_SIZE 对齐）。
 /// 颜色由调用方给定（切片 17）：深色主题下公式与正文同色，否则深底黑字不可读。
 struct LatexMath {
@@ -375,7 +377,8 @@ mod tests {
     use veil_egui::{AssetStore, ImageLoader};
 
     /// 真 latex-rust 渲染链（切片 8）：基线公式 baseline = height(em) × em_px，
-    /// 与 crate 内 raster.rs 的图内基线一致。数值为 latex-rust 2.1.1 实测校准：
+    /// 与 crate 内 raster.rs 的图内基线一致。数值为 latex-rust 2.1.1 实测校准，
+    /// 3.0.1 升级后复测不变（430 测试全绿，2026-10-25）：
     /// 行内 "x"（8pt@144dpi，em=16px）→ 9x8 图，"x" 无下伸部（depth=0）故 baseline == 图高。
     #[test]
     fn inline_render_has_baseline_and_pixels() {

@@ -1,13 +1,12 @@
 //! 门面：视图层的唯一入口（docs/01-define-design.md B2）。
 //! 视图层每次交互 ≤3 行：翻译事件 → `Session::apply` → 按 `Events` 失效重绘。
 
-use crate::annotate::{Annotation, AnnotationId, AnnotationKind};
 use crate::buffer::Buffer;
 use crate::history::{History, PrimEdit, Transaction};
 use crate::range::{Bias, MarkId, Range};
 use crate::syntax::{Block, BlockId, BlockKind, InlineNode, Syntax, Table};
 
-/// 一次文本变更。注解增删不走这里（不入撤销栈）。
+/// 一次文本变更。
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Edit {
     Insert { at: usize, text: String },
@@ -33,8 +32,6 @@ pub struct Events {
 pub struct Session {
     buf: Buffer,
     syntax: Syntax,
-    annotations: Vec<Annotation>,
-    next_annotation: u64,
     history: History,
 }
 
@@ -45,8 +42,6 @@ impl Session {
         Session {
             buf,
             syntax,
-            annotations: Vec::new(),
-            next_annotation: 0,
             history: History::default(),
         }
     }
@@ -139,34 +134,6 @@ impl Session {
             return None;
         }
         self.buf.next_grapheme(offset)
-    }
-
-    pub fn annotate(&mut self, kind: AnnotationKind, start: MarkId, end: MarkId) -> AnnotationId {
-        let id = AnnotationId(self.next_annotation);
-        self.next_annotation += 1;
-        self.annotations.push(Annotation {
-            id,
-            kind,
-            start,
-            end,
-        });
-        id
-    }
-
-    pub fn remove_annotation(&mut self, id: AnnotationId) {
-        self.annotations.retain(|a| a.id != id);
-    }
-
-    /// 注解快照：mark 解析为当前字节区间。被删内容坍缩后 start==end（空区间）。
-    pub fn annotations(&self) -> Vec<(AnnotationKind, Range)> {
-        self.annotations
-            .iter()
-            .filter_map(|a| {
-                let s = self.buf.offset_of(a.start)?;
-                let e = self.buf.offset_of(a.end)?;
-                Some((a.kind.clone(), Range::new(s.min(e), s.max(e))))
-            })
-            .collect()
     }
 
     /// 块结构快照：(id, 种类, 字节区间)。

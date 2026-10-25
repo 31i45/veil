@@ -1,8 +1,7 @@
 //! Session 级集成测试：INSTANCE §3 不变量 + 定义文档反例的回归锚点。
 
 use veil_core::{
-    AnnotationKind, Bias, BlockId, BlockKind, Edit, EditError, InlineKind, InlineNode, Range,
-    Session,
+    Bias, BlockId, BlockKind, Edit, EditError, InlineKind, InlineNode, Range, Session,
 };
 
 const SAMPLE: &str = "# Title\n\nfirst para\n\n```\ncode\n```\n\nlast para\n";
@@ -73,22 +72,6 @@ fn atx_interrupts_paragraph() {
     assert_eq!(blocks[1].1, BlockKind::AtxHeading(1));
     assert!(!ev.dirty_blocks.is_empty());
     assert_eq!(s.serialize(), "foo\n# bar\n");
-}
-
-#[test]
-fn annotations_follow_edits_via_marks() {
-    // 注解经 mark 间接寻址，文本编辑时自动跟随、无需重排
-    let mut s = Session::open("hello world");
-    let start = s.create_mark(0, Bias::Right).unwrap();
-    let end = s.create_mark(5, Bias::Left).unwrap();
-    let aid = s.annotate(AnnotationKind::Reveal, start, end);
-    s.apply(insert(0, "> ")).unwrap();
-    assert_eq!(
-        s.annotations(),
-        vec![(AnnotationKind::Reveal, Range::new(2, 7))]
-    );
-    s.remove_annotation(aid);
-    assert!(s.annotations().is_empty());
 }
 
 #[test]
@@ -349,26 +332,7 @@ fn insert_inside_emph_grows_content() {
     assert_eq!((ns[0].content.start, ns[0].content.end), (1, 4)); // "axb"
 }
 
-// ===== undo/redo 与 mark/annotation 交叉 =====
-
-#[test]
-fn undo_restores_annotation_range() {
-    let mut s = Session::open("hello world");
-    let m0 = s.create_mark(0, Bias::Right).unwrap();
-    let m1 = s.create_mark(5, Bias::Left).unwrap();
-    s.annotate(AnnotationKind::Reveal, m0, m1);
-    s.apply(insert(2, "X")).unwrap();
-    assert_eq!(
-        s.annotations(),
-        vec![(AnnotationKind::Reveal, Range::new(0, 6))]
-    );
-    s.undo().unwrap();
-    assert_eq!(
-        s.annotations(),
-        vec![(AnnotationKind::Reveal, Range::new(0, 5))]
-    );
-    assert_eq!(s.serialize(), "hello world");
-}
+// ===== undo/redo 与 mark 交叉 =====
 
 #[test]
 fn undo_marks_outside_region_restore_interior_collapses() {
@@ -386,50 +350,6 @@ fn undo_marks_outside_region_restore_interior_collapses() {
     assert_eq!(s.mark_offset(m0), Some(0));
     assert_eq!(s.mark_offset(m1), Some(6)); // 坍缩后停在插入物之后，不回到 5
     assert_eq!(s.mark_offset(m2), Some(11));
-}
-
-#[test]
-fn redo_reapplies_annotation_range() {
-    let mut s = Session::open("hello world");
-    let m0 = s.create_mark(0, Bias::Right).unwrap();
-    let m1 = s.create_mark(5, Bias::Left).unwrap();
-    s.annotate(AnnotationKind::Reveal, m0, m1);
-    s.apply(insert(2, "X")).unwrap();
-    s.undo().unwrap();
-    s.redo().unwrap();
-    assert_eq!(
-        s.annotations(),
-        vec![(AnnotationKind::Reveal, Range::new(0, 6))]
-    );
-    assert_eq!(s.serialize(), "heXllo world");
-}
-
-#[test]
-fn annotation_on_deleted_region_collapses_to_empty() {
-    // 被删内容坍缩后注解区间为空（session.rs annotations() 文档语义）
-    let mut s = Session::open("hello world");
-    let a = s.create_mark(2, Bias::Right).unwrap();
-    let b = s.create_mark(6, Bias::Left).unwrap();
-    s.annotate(AnnotationKind::Reveal, a, b);
-    s.apply(Edit::Delete {
-        range: Range::new(0, 11),
-    })
-    .unwrap();
-    assert_eq!(
-        s.annotations(),
-        vec![(AnnotationKind::Reveal, Range::new(0, 0))]
-    );
-}
-
-#[test]
-fn annotations_never_enter_serialized_source() {
-    // 注解不持久化不变量（INSTANCE §3）：含 Reveal/缓存句柄时序列化恒等于源
-    let mut s = Session::open("a **b**\n");
-    let m0 = s.create_mark(2, Bias::Right).unwrap();
-    let m1 = s.create_mark(7, Bias::Left).unwrap();
-    s.annotate(AnnotationKind::Reveal, m0, m1);
-    s.annotate(AnnotationKind::BlockRenderCacheId(42), m0, m1);
-    assert_eq!(s.serialize(), "a **b**\n");
 }
 
 #[test]

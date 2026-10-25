@@ -42,6 +42,24 @@ const THEME_POLL: Duration = Duration::from_secs(1);
 const MARGIN: f32 = 16.0;
 const PARA_GAP: f32 = 10.0;
 
+/// 单块几何缓存：块清单一次枚举后复用，避免每次击键反复全量枚举（P1a）。
+/// P3 迁出本文件，当前就近放置以减少跨模块改动。
+struct BlockGeom {
+    id: BlockId,
+    kind: BlockKind,
+    range: Range,
+    top: f32,
+    height: f32,
+}
+
+/// 文档几何索引：`blocks` 与 `total_h` 只在本层刷新/重算后读取。
+#[derive(Default)]
+struct BlockIndex {
+    blocks: Vec<BlockGeom>,
+    /// 文档总高（含首尾外边距），即原 `doc_height()` 语义。
+    total_h: f32,
+}
+
 /// 系统剪贴板抽象：实现由产品层（veil）注入，本层不依赖具体剪贴板库（INSTANCE §6）。
 pub trait Clipboard {
     fn get(&mut self) -> Option<String>;
@@ -149,6 +167,8 @@ struct App {
     surface: Option<Surface<Arc<Window>, Arc<Window>>>,
     editor: Editor,
     engine: LayoutEngine,
+    /// 块几何索引（P1a）：全量块枚举的唯一缓存来源，替代每次读取时的 `blocks()`。
+    index: BlockIndex,
     /// 块布局与光栅缓存：干净块不重排（脏块由 Events.dirty_blocks 驱动失效）。
     layouts: HashMap<BlockId, BlockLayout>,
     rasters: HashMap<BlockId, (Vec<u8>, u32, u32)>,
@@ -251,6 +271,7 @@ impl App {
             surface: None,
             editor: Editor::new(&doc.text),
             engine: LayoutEngine::new(),
+            index: BlockIndex::default(),
             layouts: HashMap::new(),
             rasters: HashMap::new(),
             scroll_y: 0.0,
@@ -292,6 +313,8 @@ impl App {
             effects,
         };
         app.chrome.notice = config_notice;
+        app.refresh_index();
+        app.recompute_geometry();
         app.watch_current();
         app
     }
@@ -338,6 +361,9 @@ impl App {
         self.math_imgs.clear();
         self.inline_math.clear();
         self.chrome.clear_label_cache();
+        // 清缓存后可能按新调色板重排/重渲：几何须重建，避免读取陈旧高度
+        self.refresh_index();
+        self.recompute_geometry();
         self.apply_window_effects();
         self.request_redraw();
     }
@@ -724,6 +750,9 @@ impl App {
         self.tables.clear();
         self.scroll_y = 0.0;
         self.goal_x = None;
+        // 新文档块结构替换：索引必须与编辑器同源重建，后续读取才有效
+        self.refresh_index();
+        self.recompute_geometry();
         self.chrome.notice = format!("已打开 {}", path.display());
         self.watch_current(); // 失败提示覆盖「已打开」，避免隐藏降级原因
         self.update_title();
@@ -753,12 +782,10 @@ impl App {
 
     /// 文档总高（含首尾外边距），滚动条与滚轮钳位依据。
     fn doc_height(&self) -> f32 {
-        let tops = self.block_tops();
-        match tops.last() {
-            Some((id, kind, range, top)) => {
-                top + self.block_height(*id, *kind, range) + MARGIN * self.scale
-            }
-            None => 2.0 * MARGIN * self.scale,
+        if self.index.blocks.is_empty() {
+            2.0 * MARGIN * self.scale
+        } else {
+            self.index.total_h
         }
     }
 
@@ -775,8 +802,12 @@ impl App {
             self.math_failed.remove(&id);
             self.tables.remove(&id);
         }
+        // 先按新块结构重建索引，ensure_* 才能只遍历索引（不再各自全量枚举）
+        self.refresh_index();
         self.ensure_layouts();
         self.ensure_tables();
+        // 布局/表格已就绪：高度来源稳定后才累计 top
+        self.recompute_geometry();
         self.scroll_to_caret();
         self.update_title(); // 脏标随编辑翻转
         self.request_redraw();
@@ -800,7 +831,8 @@ impl App {
         self.engine.set_scale(self.scale);
         // 先收集待排块与其行内公式/图片（session 借用期），再调渲染器/加载器（&mut self）
         let mut pending = Vec::new();
-        for (id, kind, range) in self.editor.session().blocks() {
+        for g in &self.index.blocks {
+            let (id, kind, range) = (g.id, g.kind, g.range);
             if self.layouts.contains_key(&id) {
                 continue;
             }
@@ -897,6 +929,8 @@ impl App {
                 .layout_block(kind, &text, range, &inlines, width, caret, &imgs);
             self.layouts.insert(id, l);
         }
+        // 直接调用方（如测试/无 paint 的路径）也会读取 doc_height：布局就绪即同步几何
+        self.recompute_geometry();
     }
 
     /// 光标移动引起的 Reveal 状态变化：仅旧/新光标所在块的激活态可能改变。
@@ -904,7 +938,8 @@ impl App {
         if old == new {
             return;
         }
-        for (id, kind, range) in self.editor.session().blocks() {
+        for g in &self.index.blocks {
+            let (id, kind, range) = (g.id, g.kind, g.range);
             let touches = |p: usize| range.start <= p && p <= range.end;
             if !touches(old) && !touches(new) {
                 continue;
@@ -935,7 +970,8 @@ impl App {
         let caret = self.editor.caret();
         let scale = self.scale;
         let fg = self.theme.fg;
-        for (id, kind, range) in self.editor.session().blocks() {
+        for g in &self.index.blocks {
+            let (id, kind, range) = (g.id, g.kind, g.range);
             if kind != BlockKind::Math
                 || (range.start <= caret && caret <= range.end)
                 || self.math_imgs.contains_key(&id)
@@ -971,7 +1007,8 @@ impl App {
         let caret = self.editor.caret();
         let fg = self.theme.fg;
         let mut pending = Vec::new();
-        for (id, kind, range) in self.editor.session().blocks() {
+        for g in &self.index.blocks {
+            let (id, kind, range) = (g.id, g.kind, g.range);
             if kind != BlockKind::Table
                 || self.tables.contains_key(&id)
                 || (range.start <= caret && caret <= range.end)
@@ -1008,26 +1045,50 @@ impl App {
             .unwrap_or(BASE_LINE_HEIGHT * self.scale)
     }
 
-    /// 各块顶部 y（文档坐标，含间距）。
-    fn block_tops(&self) -> Vec<(BlockId, BlockKind, veil_core::Range, f32)> {
-        let mut y = MARGIN * self.scale;
-        let mut out = Vec::new();
-        for (id, kind, range) in self.editor.session().blocks() {
-            out.push((id, kind, range, y));
-            y += self.block_height(id, kind, &range) + PARA_GAP * self.scale;
+    /// 重建块清单：生产代码唯一允许全量枚举块的位置；其余读取一律走索引。
+    fn refresh_index(&mut self) {
+        let blocks = self.editor.session().blocks();
+        self.index.blocks.clear();
+        self.index.blocks.reserve(blocks.len());
+        for (id, kind, range) in blocks {
+            self.index.blocks.push(BlockGeom {
+                id,
+                kind,
+                range,
+                top: 0.0,
+                height: 0.0,
+            });
         }
-        out
+    }
+
+    /// 按当前布局/公式/表格缓存重算高度与累计 top（不再枚举块）。
+    /// 取出 Vec 再循环：`block_height(&self)` 与 `index` 的可变借用无法同时成立。
+    fn recompute_geometry(&mut self) {
+        let mut blocks = std::mem::take(&mut self.index.blocks);
+        let mut y = MARGIN * self.scale;
+        for g in &mut blocks {
+            g.height = self.block_height(g.id, g.kind, &g.range);
+            g.top = y;
+            y += g.height + PARA_GAP * self.scale;
+        }
+        // 末块后不累加块间距（与原 block_tops 一致），文档尾部只留外边距
+        self.index.total_h = if blocks.is_empty() {
+            2.0 * MARGIN * self.scale
+        } else {
+            y - PARA_GAP * self.scale + MARGIN * self.scale
+        };
+        self.index.blocks = blocks;
     }
 
     /// 光标屏幕矩形（物理像素，含菜单栏偏移）。(x, y, h)；找不到所在块（空文档）时落视口原点。
     fn caret_screen(&self) -> (f32, f32, f32) {
         let caret = self.editor.caret();
         let vp = self.viewport();
-        for (id, _, range, top) in self.block_tops() {
-            if range.start <= caret && caret <= range.end {
-                if let Some(l) = self.layouts.get(&id) {
-                    let (x, y, h) = self.engine.caret_xy(l, caret - range.start);
-                    return (MARGIN * self.scale + x, vp.y + top + y - self.scroll_y, h);
+        for g in &self.index.blocks {
+            if g.range.start <= caret && caret <= g.range.end {
+                if let Some(l) = self.layouts.get(&g.id) {
+                    let (x, y, h) = self.engine.caret_xy(l, caret - g.range.start);
+                    return (MARGIN * self.scale + x, vp.y + g.top + y - self.scroll_y, h);
                 }
             }
         }
@@ -1153,15 +1214,16 @@ impl App {
     /// Home/End（及 Shift 扩选）：光标落到当前视觉行首/尾（`visual_line_edges` 语义）。
     fn move_line_edge(&mut self, start: bool, extend: bool) {
         let caret = self.editor.caret();
-        let tops = self.block_tops();
-        let Some(bi) = tops
+        let Some(g) = self
+            .index
+            .blocks
             .iter()
-            .position(|(_, _, r, _)| r.start <= caret && caret <= r.end)
+            .find(|g| g.range.start <= caret && caret <= g.range.end)
         else {
             return;
         };
-        let (id, _, range, _) = &tops[bi];
-        let Some(l) = self.layouts.get(id) else {
+        let (id, range) = (g.id, g.range);
+        let Some(l) = self.layouts.get(&id) else {
             return;
         };
         let (s, e) = self.engine.visual_line_edges(l, caret - range.start);
@@ -1182,15 +1244,16 @@ impl App {
 
     fn move_vertical(&mut self, delta: i32, extend: bool) {
         let caret = self.editor.caret();
-        let tops = self.block_tops();
-        let Some(bi) = tops
+        let blocks = &self.index.blocks;
+        let Some(bi) = blocks
             .iter()
-            .position(|(_, _, r, _)| r.start <= caret && caret <= r.end)
+            .position(|g| g.range.start <= caret && caret <= g.range.end)
         else {
             return;
         };
-        let (id, _, range, _) = &tops[bi];
-        let Some(l) = self.layouts.get(id) else {
+        let g = &blocks[bi];
+        let (id, range) = (g.id, g.range);
+        let Some(l) = self.layouts.get(&id) else {
             return;
         };
         let (cx, cy, ch) = self.engine.caret_xy(l, caret - range.start);
@@ -1200,13 +1263,15 @@ impl App {
         let target = if target_y_local >= 0.0 && target_y_local < l.height {
             range.start + self.engine.hit(l, goal, target_y_local)
         } else {
-            let Some(&(nid, nkind, nrange, _)) = (if delta < 0 {
-                bi.checked_sub(1).and_then(|i| tops.get(i))
+            let next = if delta < 0 {
+                bi.checked_sub(1).and_then(|i| blocks.get(i))
             } else {
-                tops.get(bi + 1)
-            }) else {
+                blocks.get(bi + 1)
+            };
+            let Some(ng) = next else {
                 return;
             };
+            let (nid, nkind, nrange) = (ng.id, ng.kind, ng.range);
             if nkind == BlockKind::Table && self.table_shows_grid(nid, &nrange) {
                 let Some(t) = self.tables.get(&nid) else {
                     return;
@@ -1253,12 +1318,13 @@ impl App {
         let vp = self.viewport();
         let x = (self.mouse.x as f32 - MARGIN * self.scale).max(0.0);
         let y = (self.mouse.y as f32 - vp.y + self.scroll_y).max(0.0);
-        let tops = self.block_tops();
-        let &(id, kind, range, top) = tops
+        let blocks = &self.index.blocks;
+        let g = blocks
             .iter()
             .rev()
-            .find(|(_, _, _, t)| *t <= y)
-            .or(tops.first())?;
+            .find(|g| g.top <= y)
+            .or_else(|| blocks.first())?;
+        let (id, kind, range, top) = (g.id, g.kind, g.range, g.top);
         self.hit_block(id, kind, &range, x, (y - top).max(0.0))
     }
 
@@ -1408,9 +1474,15 @@ impl App {
             }
             None => return,
         };
+        // 首次绘制（或索引尚未建立）时补一次；其余时机由编辑/打开/resize 维护
+        if self.index.blocks.is_empty() {
+            self.refresh_index();
+        }
         self.ensure_layouts();
         self.ensure_math();
         self.ensure_tables();
+        // 布局/公式/表格就绪后统一重算几何，后续 doc_height 与块绘制同源
+        self.recompute_geometry();
         let mut frame = Frame::new(w, h, self.theme.bg);
         let scale = self.scale;
         let theme = self.theme;
@@ -1421,7 +1493,8 @@ impl App {
             .clamp(0.0, chrome::max_scroll(vp, self.doc_height()));
         let sel = self.editor.selection();
         let caret = self.editor.caret();
-        for (id, kind, range, top) in self.block_tops() {
+        for g in &self.index.blocks {
+            let (id, kind, range, top) = (g.id, g.kind, g.range, g.top);
             let sy = (vp.y + top - self.scroll_y) as i32;
             if (sy as f32) >= vp.y + vp.h
                 || sy + self.block_height(id, kind, &range) as i32 <= vp.y as i32
@@ -1682,6 +1755,9 @@ impl ApplicationHandler for App {
                 self.layouts.clear(); // 宽度变化：全量重排（换行依赖宽度）
                 self.rasters.clear();
                 self.tables.clear(); // 列宽/折行依赖版心宽
+                // 清缓存后宽度/块高都可能变化：几何须立即重建
+                self.refresh_index();
+                self.recompute_geometry();
                 self.request_redraw();
             }
             WindowEvent::ScaleFactorChanged { .. } => {
@@ -1696,6 +1772,9 @@ impl ApplicationHandler for App {
                 self.inline_failed.clear();
                 self.tables.clear(); // 网格尺寸随 DPI 变化
                 self.chrome.clear_label_cache(); // chrome 标签按旧 scale 光栅化
+                // scale 变了，几何累计均按新 scale：索引重建并重算
+                self.refresh_index();
+                self.recompute_geometry();
                 self.request_redraw();
             }
             WindowEvent::Ime(Ime::Preedit(text, cursor)) => {
@@ -3911,5 +3990,46 @@ mod tests {
             "提示保存失败: {}",
             a.chrome.notice
         );
+    }
+
+    /// 真实路径性能探针（默认忽略，不参与常规门禁）：
+    /// cargo test -p veil-egui --release -- --ignored --nocapture perf_keystroke_path
+    /// 度量 apply + after_edit + paint 的端到端延迟；bench_typing 只测单点 API，
+    /// 无法反映视图层真实装配路径，故以此探针作为 P1/P2 的验收依据。
+    #[test]
+    #[ignore = "性能探针，不参与常规门禁"]
+    fn perf_keystroke_path() {
+        let mut text = String::with_capacity(200_000);
+        for i in 0..715 {
+            text.push_str(&format!(
+                "## Section {i}\n\nParagraph {i} with **bold** text, `code`, and a [link](https://example.com/{i}).\n\n- item A {i}\n- item B {i}\n\n```rust\nfn f{i}() -> u32 {{ {i} }}\n```\n\n> quote {i}\n\n---\n\n"
+            ));
+        }
+        let store = MemStore::default();
+        let mut a = app(&text, None, false, &store);
+        a.editor.apply(Intent::MoveDocStart).unwrap();
+        for _ in 0..5 {
+            a.editor.apply(Intent::MoveRight).unwrap();
+        }
+        a.paint(); // 预热：首帧含全量排版
+        let mut samples = Vec::with_capacity(300);
+        for _ in 0..300 {
+            let t = Instant::now();
+            let dirty = a.editor.apply(Intent::InsertText("a".into())).unwrap();
+            a.after_edit(dirty);
+            a.paint();
+            samples.push(t.elapsed().as_secs_f64() * 1e3);
+        }
+        samples.sort_by(|x, y| x.partial_cmp(y).unwrap());
+        let pick = |q: f64| {
+            let i = ((samples.len() as f64 * q).ceil() as usize)
+                .saturating_sub(1)
+                .min(samples.len() - 1);
+            samples[i]
+        };
+        println!("perf_blocks={}", a.index.blocks.len());
+        println!("perf_keystroke_ms_p50={:.3}", pick(0.5));
+        println!("perf_keystroke_ms_p95={:.3}", pick(0.95));
+        println!("perf_keystroke_ms_max={:.3}", samples[samples.len() - 1]);
     }
 }

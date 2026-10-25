@@ -9,4 +9,4 @@ veil-core = { path = "../veil-core" }
 # chrome 自绘 + Win32 FFI 对话框已定案（ADR-005），不引入 egui/GL。
 winit = "0.30"
 softbuffer = "0.4"
-cosmic-text = "0.12"
+cosmic-text = "0.19"

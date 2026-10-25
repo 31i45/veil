@@ -178,7 +178,7 @@ impl LayoutEngine {
         } else {
             Attrs::new()
         };
-        buffer.set_text(fs, text, attrs, Shaping::Advanced);
+        buffer.set_text(text, &attrs, Shaping::Advanced, None);
         let align = match align {
             CellAlign::Center => Some(Align::Center),
             CellAlign::Right => Some(Align::Right),
@@ -187,15 +187,12 @@ impl LayoutEngine {
         for line in buffer.lines.iter_mut() {
             line.set_align(align);
         }
-        buffer.set_wrap(
-            fs,
-            if wrap_w.is_some() {
-                Wrap::Glyph
-            } else {
-                Wrap::None
-            },
-        );
-        buffer.set_size(fs, wrap_w, None);
+        buffer.set_wrap(if wrap_w.is_some() {
+            Wrap::Glyph
+        } else {
+            Wrap::None
+        });
+        buffer.set_size(wrap_w, None);
         buffer.shape_until_scroll(fs, false);
         let mut w = 0.0f32;
         let mut h = metrics.line_height;

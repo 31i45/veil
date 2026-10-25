@@ -283,8 +283,8 @@ impl LayoutEngine {
     pub fn layout_preedit(&mut self, text: &str) -> BlockLayout {
         let metrics = Metrics::new(BASE_FONT_SIZE * self.scale, BASE_LINE_HEIGHT * self.scale);
         let mut buffer = Buffer::new(&mut self.font_system, metrics);
-        buffer.set_text(&mut self.font_system, text, Attrs::new(), Shaping::Advanced);
-        buffer.set_size(&mut self.font_system, None, None);
+        buffer.set_text(text, &Attrs::new(), Shaping::Advanced, None);
+        buffer.set_size(None, None);
         buffer.shape_until_scroll(&mut self.font_system, false);
         let height = buffer
             .layout_runs()
@@ -359,20 +359,15 @@ impl LayoutEngine {
         for im in &kept {
             let ls = map.doc_to_layout(im.range.start.saturating_sub(block.start));
             let ll = map.doc_to_layout(im.range.end.saturating_sub(block.start)) - ls;
-            spans.push((&layout_text[ls..ls + ll], default_attrs));
+            spans.push((&layout_text[ls..ls + ll], default_attrs.clone()));
         }
         if spans.is_empty() {
-            spans.push(("", default_attrs)); // 空行也需默认样式
+            spans.push(("", default_attrs.clone())); // 空行也需默认样式
         }
         spans.sort_by_key(|(s, _)| s.as_ptr() as usize);
-        buffer.set_rich_text(
-            &mut self.font_system,
-            spans,
-            default_attrs,
-            Shaping::Advanced,
-        );
-        buffer.set_wrap(&mut self.font_system, Wrap::Glyph);
-        buffer.set_size(&mut self.font_system, Some(width), None);
+        buffer.set_rich_text(spans, &default_attrs, Shaping::Advanced, None);
+        buffer.set_wrap(Wrap::Glyph);
+        buffer.set_size(Some(width), None);
         buffer.shape_until_scroll(&mut self.font_system, false);
         let mut height = buffer
             .layout_runs()
@@ -435,13 +430,8 @@ impl LayoutEngine {
     fn measure_nbsp(&mut self, metrics: Metrics) -> f32 {
         let probe = "\u{A0}\u{A0}\u{A0}\u{A0}\u{A0}\u{A0}\u{A0}\u{A0}";
         let mut b = Buffer::new(&mut self.font_system, metrics);
-        b.set_text(
-            &mut self.font_system,
-            probe,
-            Attrs::new(),
-            Shaping::Advanced,
-        );
-        b.set_size(&mut self.font_system, None, None);
+        b.set_text(probe, &Attrs::new(), Shaping::Advanced, None);
+        b.set_size(None, None);
         b.shape_until_scroll(&mut self.font_system, false);
         let w: f32 = b
             .layout_runs()
@@ -509,7 +499,8 @@ impl LayoutEngine {
         (s.min(e), s.max(e))
     }
 
-    /// 选区高亮矩形集（块内物理像素，(x, y_top, w, h)，每视觉行至多一条）。
+    /// 选区高亮矩形集（块内物理像素，(x, y_top, w, h)；0.19 起同一视觉行在
+    /// BiDi/样式切换处可产多条，逐段收齐）。
     /// `start`/`end` 为块相对文档偏移，经 OffsetMap 映射后逐 run 求交；
     /// 换行符本身不产生矩形，空行/纯消隐段无字形故无矩形（v0 已知简化）。
     pub fn selection_rects(
@@ -533,9 +524,8 @@ impl LayoutEngine {
             if s >= e {
                 continue;
             }
-            if let Some((x, w)) =
-                run.highlight(Cursor::new(run.line_i, s), Cursor::new(run.line_i, e))
-            {
+            // cosmic-text 0.19：highlight 返回迭代器，BiDi/样式切换处单 run 可产多段，须收齐
+            for (x, w) in run.highlight(Cursor::new(run.line_i, s), Cursor::new(run.line_i, e)) {
                 if w > 0.0 {
                     rects.push((x, run.line_top, w, run.line_height));
                 }
@@ -742,7 +732,7 @@ fn attrs_of(kind: BlockKind, st: Style) -> Attrs<'static> {
     } else {
         a
     };
-    // st.underline：cosmic-text 0.12 Attrs 无下划线属性，链接视觉线索随 Reveal 切片落地
+    // st.underline：0.19 Attrs 虽有 text_decoration，下划线渲染随 Reveal 切片另行落地
     a
 }
 

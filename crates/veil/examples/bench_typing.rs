@@ -122,9 +122,8 @@ fn measure_cold_start(text: &str) -> (f64, f64) {
 /// 连续 1000 次单字符插入的 apply 耗时（µs），返回 (p50, p95)。
 fn measure_keystrokes(text: &str, caret0: usize) -> (f64, f64) {
     let mut session = Session::open(text);
-    let mut at = caret0;
     let mut samples = Vec::with_capacity(1000);
-    for _ in 0..1000 {
+    for at in (caret0..).take(1000) {
         let t = Instant::now();
         let ev = session
             .apply(Edit::Insert {
@@ -134,7 +133,6 @@ fn measure_keystrokes(text: &str, caret0: usize) -> (f64, f64) {
             .expect("插入点恒合法");
         samples.push(t.elapsed().as_secs_f64() * 1e6);
         black_box(ev.dirty_blocks.len());
-        at += 1;
     }
     (pctl(&mut samples, 50.0), pctl(&mut samples, 95.0))
 }
@@ -143,10 +141,9 @@ fn measure_keystrokes(text: &str, caret0: usize) -> (f64, f64) {
 /// 返回 ((p50, p95), (alloc_count, alloc_bytes))，分配计数覆盖「1000 次编辑 × 12 次枚举」。
 fn measure_full_scan(text: &str, caret0: usize) -> ((f64, f64), (u64, u64)) {
     let mut session = Session::open(text);
-    let mut at = caret0;
     let mut samples = Vec::with_capacity(1000);
     let (a0, b0) = snapshot();
-    for _ in 0..1000 {
+    for at in (caret0..).take(1000) {
         session
             .apply(Edit::Insert {
                 at,
@@ -164,7 +161,6 @@ fn measure_full_scan(text: &str, caret0: usize) -> ((f64, f64), (u64, u64)) {
         }
         samples.push(t.elapsed().as_secs_f64() * 1e6);
         black_box(sum);
-        at += 1;
     }
     let (a1, b1) = snapshot();
     (
@@ -178,9 +174,8 @@ fn measure_full_scan(text: &str, caret0: usize) -> ((f64, f64), (u64, u64)) {
 fn measure_dirty_layout(text: &str, caret0: usize) -> (f64, f64) {
     let mut session = Session::open(text);
     let mut eng = LayoutEngine::new();
-    let mut at = caret0;
     let mut samples = Vec::with_capacity(1000);
-    for _ in 0..1000 {
+    for at in (caret0..).take(1000) {
         let ev = session
             .apply(Edit::Insert {
                 at,
@@ -199,13 +194,12 @@ fn measure_dirty_layout(text: &str, caret0: usize) -> (f64, f64) {
             }
         }
         samples.push(t.elapsed().as_secs_f64() * 1e6);
-        at += 1;
     }
     (pctl(&mut samples, 50.0), pctl(&mut samples, 95.0))
 }
 
-/// 1920×1080 帧：构造 + 铺满背景 + into_u32，各 100 次，(p50, p95) 毫秒。
-fn measure_frame() -> (f64, f64) {
+/// 1920×1080 帧：构造 + 铺满背景（含分配），100 次，(p50, p95) 毫秒。
+fn measure_frame_alloc() -> (f64, f64) {
     const W: u32 = 1920;
     const H: u32 = 1080;
     let mut samples = Vec::with_capacity(100);
@@ -213,8 +207,22 @@ fn measure_frame() -> (f64, f64) {
         let t = Instant::now();
         let mut f = Frame::new(W, H, [0, 0, 0, 0]);
         f.fill_rect(0, 0, W, H, [250, 250, 245, 255]);
-        let packed = f.into_u32();
-        black_box(packed.len());
+        black_box(f.pixels.len());
+        samples.push(t.elapsed().as_secs_f64() * 1000.0);
+    }
+    (pctl(&mut samples, 50.0), pctl(&mut samples, 95.0))
+}
+
+/// 热路径：复用同一缓冲做 reset（尺寸不变 → 零分配）+ 铺满背景，100 次。
+fn measure_frame_reuse() -> (f64, f64) {
+    const W: u32 = 1920;
+    const H: u32 = 1080;
+    let mut f = Frame::new(W, H, [0, 0, 0, 0]);
+    let mut samples = Vec::with_capacity(100);
+    for _ in 0..100 {
+        let t = Instant::now();
+        f.reset(W, H, [250, 250, 245, 255]);
+        black_box(f.pixels.len());
         samples.push(t.elapsed().as_secs_f64() * 1000.0);
     }
     (pctl(&mut samples, 50.0), pctl(&mut samples, 95.0))
@@ -231,13 +239,15 @@ fn main() {
     let (key_p50, key_p95) = measure_keystrokes(&doc, caret);
     let ((scan_p50, scan_p95), (alloc_count, alloc_bytes)) = measure_full_scan(&doc, caret);
     let (dirty_p50, dirty_p95) = measure_dirty_layout(&doc, caret);
-    let (frame_p50, frame_p95) = measure_frame();
+    let (frame_p50, frame_p95) = measure_frame_alloc();
+    let (frame_reuse_p50, frame_reuse_p95) = measure_frame_reuse();
 
     println!("cold_start_ms={cold_med:.2}/{cold_max:.2}");
     println!("keystroke_core_us={key_p50:.2}/{key_p95:.2}");
     println!("full_scan_cost_us={scan_p50:.2}/{scan_p95:.2}");
     println!("layout_dirty_us={dirty_p50:.2}/{dirty_p95:.2}");
-    println!("frame_ms={frame_p50:.2}/{frame_p95:.2}");
+    println!("frame_alloc_ms={frame_p50:.2}/{frame_p95:.2}");
+    println!("frame_reuse_ms={frame_reuse_p50:.2}/{frame_reuse_p95:.2}");
     println!("alloc_count={alloc_count}");
     println!("alloc_bytes={alloc_bytes}");
     println!("peak_heap_mb={:.2}", live_bytes() as f64 / (1024.0 * 1024.0));

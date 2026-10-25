@@ -1,6 +1,7 @@
 //! 块几何与派生缓存：块清单索引、估算/真实高度、累计 top、视口区间、
 //! 文本/行内公式/表格的按需排版与失效。绘制与交互不在此文件。
 
+use super::interaction::{activation_changed, quote_line_of};
 use super::paint::{fit_size, local_image_path};
 use super::*;
 use crate::layout::{InlineAsset, InlineImg, BASE_FONT_SIZE};

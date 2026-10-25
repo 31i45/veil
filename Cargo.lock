@@ -2215,7 +2215,7 @@ dependencies = [
  "arboard",
  "latex-rust",
  "notify",
- "png 0.17.16",
+ "png 0.18.1",
  "pulldown-cmark",
  "veil-core",
  "veil-egui",

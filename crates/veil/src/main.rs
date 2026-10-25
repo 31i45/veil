@@ -149,11 +149,12 @@ impl veil_egui::MathRenderer for NoMath {
 /// PNG 字节 → RGBA8 位图（切片 13 通用解码：latex-rust 产物为 RGBA8；文档图片可能是
 /// RGB/灰度/调色板，统一经 png 变换展开为 straight alpha RGBA8）。
 fn decode_png_rgba(png: &[u8]) -> Result<ImageData, String> {
-    let mut decoder = png::Decoder::new(png);
+    let mut decoder = png::Decoder::new(std::io::Cursor::new(png));
     // 调色板/低位深灰度展开、16-bit 降为 8-bit、tRNS 转 alpha
     decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
     let mut reader = decoder.read_info().map_err(|e| e.to_string())?;
-    let mut buf = vec![0; reader.output_buffer_size()];
+    let size = reader.output_buffer_size().ok_or("PNG 输出尺寸溢出")?;
+    let mut buf = vec![0; size];
     let info = reader.next_frame(&mut buf).map_err(|e| e.to_string())?;
     if info.bit_depth != png::BitDepth::Eight {
         return Err(format!("非预期 PNG 位深: {:?}", info.bit_depth));

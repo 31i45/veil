@@ -15,6 +15,7 @@
   - 内核单线程主编辑模型；后台任务（公式渲染）经消息队列回主线程，禁止跨线程改内核。
   - 内核零 GUI、零异步运行时依赖。
   - 非目标：wgpu 视图、协作/CRDT、插件系统、移动端、表格可视化编辑（v1 仅渲染+源码编辑）、Mermaid 内嵌渲染。
+- crate 名 `veil-egui` 为历史遗留（ADR-005 后已无 egui 依赖），v1 不更名，v2 再评估。
 
 ## 1. 真机验证实例（Skill 03 A1）
 
@@ -47,7 +48,7 @@
 | Markdown 往返一致率（无编辑时 serialize 输出 == 输入字节） | == 100% | 100%（`roundtrip_identity_without_edits` + `prop_random_edits_roundtrip_and_undo` 随机语料属性测试） |
 | `veil-core` 的 GUI/异步运行时依赖数（`cargo tree -p veil-core` grep egui/winit/tokio） | == 0 | 0 ✓（2026-10-24 实测） |
 | `veil-egui`+`veil` 直接依赖总数（`cargo tree -p veil-egui -p veil --depth 1` 去重） | ≤ 8 | 8 ✓（winit/softbuffer/cosmic-text/arboard/pulldown-cmark/latex-rust/png/notify；切片 16 新增 notify 即达预算上限，后续不得再加直接依赖） |
-| workspace 传递依赖总数（`cargo tree --prefix none --depth 100` 去重） | ≤ 200 | 120 ✓（2026-10-25 切片 16 实测：notify 引入 +6 行去重条目，`unique_names` 99） |
+| workspace 传递依赖总数（`cargo tree --prefix none --depth 100 | sort -u` 去重） | ≤ 200 | 120 ✓（2026-10-25 切片 16 实测：notify 引入 +6 行去重条目，`unique_names` 99） |
 
 - 版本号一致性：git tag == workspace `Cargo.toml` version == 产物元数据（`veil.exe` 文件属性版本）
 - 版本失配处置记录：无
@@ -96,7 +97,7 @@ v1 无网络输入点（无同步、无更新检查、无遥测）。
   - `veil-core` ≤ 3：rope 实现 `lapce-xi-rope`（ADR-001 已定，含 vendor 退路）、解析手写（GFM 增量解析无现成轮子，不引入 pulldown-cmark 进内核）。grapheme 导航由 rope 内置（`prev/next_grapheme_offset`），原计划的 `unicode-segmentation` 已删除（2026-10-24 简化）
   - `veil-egui`：≤ 5。切片 1（2026-10-24）：`winit`（直收 IME，spike 验证路径）、`softbuffer`（软件呈现）、`cosmic-text`（排版）。切片 15 推翻了「chrome 落地引入 egui/GL」的原计划：菜单/状态栏/滚动条用 `Frame` 原语自绘，文件对话框走产品层手写 Win32 FFI，直接依赖保持 3（`winit`/`softbuffer`/`cosmic-text`）——见 ADR-005
   - `veil`：`pulldown-cmark`（仅 HTML 导出）、`notify`（文件监听）、`arboard`（剪贴板：文本/HTML/位图，`image-data` 属默认特性）、`latex-rust`（公式渲染，ADR-002 已定：KaTeX/rquickjs 只出 HTML 无法在无 webview 像素管线下光栅化，latex-rust spike 实测 100 公式同步 21ms 占预算 7%，详见 ADR-002 spike 表二）、`png`（latex-rust PNG 字节解码为 RGBA 与粘贴图片编码落盘，latex-rust 本身不依赖 png crate，此为独立直接依赖）。配置不引入 `serde`/`toml`：手写极简 TOML 子集解析（ADR-007），直接依赖维持 8/8
-- 传递依赖总数阈值：≤ 200（CI：`cargo tree --prefix none --depth 100 | sort -u | wc -l`）；2026-10-25 实测 114（workspace 全树去重口径；切片 15 手写 Win32 FFI 不引入 crate，直接/传递依赖均零新增），余量充足
+- 传递依赖总数阈值：≤ 200（CI：`cargo tree --prefix none --depth 100 | sort -u | wc -l`）；2026-10-25 实测 120（与 §2 同口径：`cargo tree --prefix none --depth 100 | sort -u`，2026-10-25 实测；切片 16 notify 引入 +6 行去重条目），余量充足
 - 黑名单（任何 crate 引入即 CI 失败）：`tokio`、`wasmtime`、`webview2-com`/`wry` 等一切 webview（无 Chromium/WebView2 进程是产品级承诺）
 
 ## 7. 平台接缝实例（Skill 01 B3）
@@ -112,6 +113,7 @@ v1 无网络输入点（无同步、无更新检查、无遥测）。
   - [ADR-005](../docs/adr/ADR-005-self-drawn-chrome.md)：chrome 自绘（winit+softbuffer 不变）+ 系统文件对话框手写 Win32 FFI，不引入 egui/GL
   - [ADR-006](../docs/adr/ADR-006-external-file-watch.md)：外部文件变更只提示不自动重载；notify 写入通道、主线程 300ms 轮询、覆盖前才备份
   - [ADR-007](../docs/adr/ADR-007-config-theme.md)：手写 TOML 子集（不用 serde/toml，守住 8/8 预算）；`Theme` 唯一颜色来源；注册表系统外观 1s 轮询；DWM 深色标题栏 + Mica（内容区纯色兜底）；配置原子写；切换即失效颜色派生缓存
+  - [ADR-008](../docs/adr/ADR-008-dependency-upgrade-policy.md)：依赖升级策略——切片完成后允许 minor/patch `cargo update`；major 单独立项、单一 commit、可回滚；升级引起的数字变化与 INSTANCE.md 同 commit 回写；黑名单与 8/8 预算不变
 
 ## 8. 违禁项清单（Skill 03 A3）
 

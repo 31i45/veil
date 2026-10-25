@@ -6,7 +6,7 @@ version.workspace = true
 [dependencies]
 veil-core = { path = "../veil-core" }
 # 切片 1：winit 直收 IME（spike 验证路径）+ softbuffer 软件呈现 + cosmic-text 排版。
-# egui/GL 栈在首个 chrome UI（菜单/状态栏）落地时引入，届时替换 present 层。
+# chrome 自绘 + Win32 FFI 对话框已定案（ADR-005），不引入 egui/GL。
 winit = "0.30"
 softbuffer = "0.4"
 cosmic-text = "0.12"

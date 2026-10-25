@@ -25,7 +25,8 @@ use crate::html::html_to_markdown;
 use crate::image::{AssetStore, ImageData, ImageLoader};
 use crate::input::{translate, Action, Key, Mods};
 use crate::layout::{
-    node_active, BlockLayout, InlineAsset, InlineImg, LayoutEngine, BASE_LINE_HEIGHT,
+    node_active, BlockLayout, InlineAsset, InlineImg, LayoutEngine, BASE_FONT_SIZE,
+    BASE_LINE_HEIGHT,
 };
 use crate::math::{MathImage, MathRenderer};
 use crate::table::TableLayout;
@@ -50,6 +51,9 @@ struct BlockGeom {
     range: Range,
     top: f32,
     height: f32,
+    /// 估算高度（P1b）：refresh_index 时按换行数与折行字符数廉价估算，
+    /// 视口外块以它参与几何累计，几何重算不再读取 rope。
+    est_h: f32,
 }
 
 /// 文档几何索引：`blocks` 与 `total_h` 只在本层刷新/重算后读取。
@@ -361,8 +365,11 @@ impl App {
         self.math_imgs.clear();
         self.inline_math.clear();
         self.chrome.clear_label_cache();
-        // 清缓存后可能按新调色板重排/重渲：几何须重建，避免读取陈旧高度
+        // 清缓存后可能按新调色板重排/重渲：只重做可见块，几何按新高度重算
         self.refresh_index();
+        self.ensure_layouts_visible();
+        self.ensure_math_visible();
+        self.ensure_tables_visible();
         self.recompute_geometry();
         self.apply_window_effects();
         self.request_redraw();
@@ -752,6 +759,10 @@ impl App {
         self.goal_x = None;
         // 新文档块结构替换：索引必须与编辑器同源重建，后续读取才有效
         self.refresh_index();
+        // 视口驱动：只准备当前可见块，其余留待滚动/光标路径按需排版
+        self.ensure_layouts_visible();
+        self.ensure_math_visible();
+        self.ensure_tables_visible();
         self.recompute_geometry();
         self.chrome.notice = format!("已打开 {}", path.display());
         self.watch_current(); // 失败提示覆盖「已打开」，避免隐藏降级原因
@@ -804,8 +815,13 @@ impl App {
         }
         // 先按新块结构重建索引，ensure_* 才能只遍历索引（不再各自全量枚举）
         self.refresh_index();
-        self.ensure_layouts();
-        self.ensure_tables();
+        // 视口驱动：只排可见块；光标所在块可能已滚出视口，单独补齐
+        self.ensure_layouts_visible();
+        let caret_id = self.caret_block_index().map(|i| self.index.blocks[i].id);
+        if let Some(id) = caret_id {
+            self.ensure_block(id);
+        }
+        self.ensure_tables_visible();
         // 布局/表格已就绪：高度来源稳定后才累计 top
         self.recompute_geometry();
         self.scroll_to_caret();
@@ -825,13 +841,16 @@ impl App {
     /// 传占位信息给 layout；失败记 inline_failed 降级源码显示，不每帧重试。
     /// 文档内图片（切片 13）：非激活 Image 节点按文档目录解析相对 URL，经 ImageLoader
     /// 加载自然尺寸位图；宽超版心等比缩放后占位；失败/远程 URL 降级 alt 文本。
-    fn ensure_layouts(&mut self) {
+    fn ensure_layouts_range(&mut self, indices: std::ops::Range<usize>) {
         let width = self.content_width();
         let caret = self.editor.caret();
         self.engine.set_scale(self.scale);
+        let Some(blocks) = self.index.blocks.get(indices) else {
+            return;
+        };
         // 先收集待排块与其行内公式/图片（session 借用期），再调渲染器/加载器（&mut self）
         let mut pending = Vec::new();
-        for g in &self.index.blocks {
+        for g in blocks {
             let (id, kind, range) = (g.id, g.kind, g.range);
             if self.layouts.contains_key(&id) {
                 continue;
@@ -929,8 +948,40 @@ impl App {
                 .layout_block(kind, &text, range, &inlines, width, caret, &imgs);
             self.layouts.insert(id, l);
         }
-        // 直接调用方（如测试/无 paint 的路径）也会读取 doc_height：布局就绪即同步几何
-        self.recompute_geometry();
+    }
+
+    /// 仅补齐视口内（含上下各一屏 overscan）缺失布局（P1b 惰性排版）。
+    fn ensure_layouts_visible(&mut self) {
+        let range = self.visible_index_range();
+        self.ensure_layouts_range(range);
+    }
+
+    /// 测试专用：等价全量排版；不参与非测试构建，避免 dead_code。
+    #[cfg(test)]
+    fn ensure_layouts_all(&mut self) {
+        self.ensure_layouts_range(0..self.index.blocks.len());
+    }
+
+    /// 按需排版单块（含其数学渲染/表格网格）：光标、命中、垂直移动等路径使用。
+    fn ensure_block(&mut self, id: BlockId) {
+        let Some(i) = self.index.blocks.iter().position(|g| g.id == id) else {
+            return;
+        };
+        self.ensure_layouts_range(i..i + 1);
+        self.ensure_math_range(i..i + 1);
+        self.ensure_tables_range(i..i + 1);
+    }
+
+    /// 视口覆盖的块索引区间（含上下各一屏 overscan）：`top` 已由几何重算保证
+    /// 单调不减，二分定位首尾，避免逐块线性扫描。
+    fn visible_index_range(&self) -> std::ops::Range<usize> {
+        let vp = self.viewport();
+        let lo = self.scroll_y - vp.h;
+        let hi = self.scroll_y + 2.0 * vp.h;
+        let blocks = &self.index.blocks;
+        let start = blocks.partition_point(|g| g.top + g.height < lo);
+        let end = blocks.partition_point(|g| g.top < hi);
+        start.min(blocks.len())..end.max(start).min(blocks.len())
     }
 
     /// 光标移动引起的 Reveal 状态变化：仅旧/新光标所在块的激活态可能改变。
@@ -966,11 +1017,14 @@ impl App {
 
     /// 数学块按需渲染（同步 v0：spike 实测单公式 <1ms、百公式 21ms，预算内，ADR-002）。
     /// 光标在块内为源码态不渲染；失败记入 math_failed 不再每帧重试（降级源码显示）。
-    fn ensure_math(&mut self) {
+    fn ensure_math_range(&mut self, indices: std::ops::Range<usize>) {
         let caret = self.editor.caret();
         let scale = self.scale;
         let fg = self.theme.fg;
-        for g in &self.index.blocks {
+        let Some(blocks) = self.index.blocks.get(indices) else {
+            return;
+        };
+        for g in blocks {
             let (id, kind, range) = (g.id, g.kind, g.range);
             if kind != BlockKind::Math
                 || (range.start <= caret && caret <= range.end)
@@ -994,6 +1048,18 @@ impl App {
         }
     }
 
+    /// 仅渲染视口内（含 overscan）的数学块。
+    fn ensure_math_visible(&mut self) {
+        let range = self.visible_index_range();
+        self.ensure_math_range(range);
+    }
+
+    /// 测试专用：全量数学渲染。
+    #[cfg(test)]
+    fn ensure_math(&mut self) {
+        self.ensure_math_range(0..self.index.blocks.len());
+    }
+
     /// 数学块当前是否按渲染图显示：光标在块内（Reveal 同语义）或未渲染时显示源码。
     fn math_shows_image(&self, id: BlockId, range: &veil_core::Range) -> bool {
         let caret = self.editor.caret();
@@ -1002,12 +1068,15 @@ impl App {
 
     /// 表格按需网格排版（光标在表格内为源码态，不排版网格；离开后首次绘制时补齐）。
     /// 网格缓存与文本布局缓存独立：网格仅供渲染/命中，源码态仍走既有块排版。
-    fn ensure_tables(&mut self) {
+    fn ensure_tables_range(&mut self, indices: std::ops::Range<usize>) {
         let width = self.content_width();
         let caret = self.editor.caret();
         let fg = self.theme.fg;
+        let Some(blocks) = self.index.blocks.get(indices) else {
+            return;
+        };
         let mut pending = Vec::new();
-        for g in &self.index.blocks {
+        for g in blocks {
             let (id, kind, range) = (g.id, g.kind, g.range);
             if kind != BlockKind::Table
                 || self.tables.contains_key(&id)
@@ -1025,40 +1094,67 @@ impl App {
         }
     }
 
+    /// 仅排版视口内（含 overscan）的表格网格。
+    fn ensure_tables_visible(&mut self) {
+        let range = self.visible_index_range();
+        self.ensure_tables_range(range);
+    }
+
+    /// 测试专用：全量表格排版。
+    #[cfg(test)]
+    fn ensure_tables(&mut self) {
+        self.ensure_tables_range(0..self.index.blocks.len());
+    }
+
     /// 表格当前是否按网格显示：光标在表格内（Reveal 同语义）或未排版时显示源码。
     fn table_shows_grid(&self, id: BlockId, range: &veil_core::Range) -> bool {
         let caret = self.editor.caret();
         !(range.start <= caret && caret <= range.end) && self.tables.contains_key(&id)
     }
 
-    /// 块显示高度：数学块渲染态取图高、表格网格态取网格高，其余取文本布局高。
-    fn block_height(&self, id: BlockId, kind: BlockKind, range: &veil_core::Range) -> f32 {
-        if kind == BlockKind::Math && self.math_shows_image(id, range) {
-            return self.math_imgs[&id].height as f32;
+    /// 块显示高度：数学块渲染态取图高、表格网格态取网格高，其余取文本布局高；
+    /// 文本布局缺失（视口外未排版）时回退廉价估算高度。
+    fn block_height(&self, g: &BlockGeom) -> f32 {
+        if g.kind == BlockKind::Math && self.math_shows_image(g.id, &g.range) {
+            return self.math_imgs[&g.id].height as f32;
         }
-        if kind == BlockKind::Table && self.table_shows_grid(id, range) {
-            return self.tables[&id].height;
+        if g.kind == BlockKind::Table && self.table_shows_grid(g.id, &g.range) {
+            return self.tables[&g.id].height;
         }
         self.layouts
-            .get(&id)
+            .get(&g.id)
             .map(|l| l.height)
-            .unwrap_or(BASE_LINE_HEIGHT * self.scale)
+            .unwrap_or(g.est_h)
     }
 
     /// 重建块清单：生产代码唯一允许全量枚举块的位置；其余读取一律走索引。
+    /// 估算高度在此一次性算好（P1b）：几何重算不再读取 rope。
     fn refresh_index(&mut self) {
         let blocks = self.editor.session().blocks();
+        let scale = self.scale;
+        let chars_per_line = self.chars_per_line();
         self.index.blocks.clear();
         self.index.blocks.reserve(blocks.len());
         for (id, kind, range) in blocks {
+            let text = self.editor.session().text_slice(range).unwrap_or_default();
+            let est_h = estimate_height(&text, chars_per_line, scale);
             self.index.blocks.push(BlockGeom {
                 id,
                 kind,
                 range,
                 top: 0.0,
                 height: 0.0,
+                est_h,
             });
         }
+        // 索引重建后 top/height 归零：立即按估算高度累计一次，可见区间/滚动条
+        // 才有有效几何；排版后用 recompute_geometry 以真实高度覆盖。
+        self.recompute_geometry();
+    }
+
+    /// 每视觉行可容纳的字符数（按平均字宽 0.5em 估算，仅用于便宜高度）。
+    fn chars_per_line(&self) -> f32 {
+        (self.content_width() / (0.5 * BASE_FONT_SIZE * self.scale)).max(1.0)
     }
 
     /// 按当前布局/公式/表格缓存重算高度与累计 top（不再枚举块）。
@@ -1067,9 +1163,10 @@ impl App {
         let mut blocks = std::mem::take(&mut self.index.blocks);
         let mut y = MARGIN * self.scale;
         for g in &mut blocks {
-            g.height = self.block_height(g.id, g.kind, &g.range);
+            let h = self.block_height(g);
+            g.height = h;
             g.top = y;
-            y += g.height + PARA_GAP * self.scale;
+            y += h + PARA_GAP * self.scale;
         }
         // 末块后不累加块间距（与原 block_tops 一致），文档尾部只留外边距
         self.index.total_h = if blocks.is_empty() {
@@ -1080,16 +1177,36 @@ impl App {
         self.index.blocks = blocks;
     }
 
+    /// 光标所在块索引；文末光标可能落在最后一块的尾换行之后，回退末块。
+    fn caret_block_index(&self) -> Option<usize> {
+        let caret = self.editor.caret();
+        self.index
+            .blocks
+            .iter()
+            .position(|g| g.range.start <= caret && caret <= g.range.end)
+            .or_else(|| {
+                if caret >= self.editor.session().text_len() {
+                    self.index.blocks.len().checked_sub(1)
+                } else {
+                    None
+                }
+            })
+    }
+
     /// 光标屏幕矩形（物理像素，含菜单栏偏移）。(x, y, h)；找不到所在块（空文档）时落视口原点。
-    fn caret_screen(&self) -> (f32, f32, f32) {
+    fn caret_screen(&mut self) -> (f32, f32, f32) {
         let caret = self.editor.caret();
         let vp = self.viewport();
-        for g in &self.index.blocks {
-            if g.range.start <= caret && caret <= g.range.end {
-                if let Some(l) = self.layouts.get(&g.id) {
-                    let (x, y, h) = self.engine.caret_xy(l, caret - g.range.start);
-                    return (MARGIN * self.scale + x, vp.y + g.top + y - self.scroll_y, h);
-                }
+        if let Some(i) = self.caret_block_index() {
+            let (id, start, top) = {
+                let g = &self.index.blocks[i];
+                (g.id, g.range.start, g.top)
+            };
+            // 视口外块可能尚未布局：光标路径按需补齐
+            self.ensure_block(id);
+            if let Some(l) = self.layouts.get(&id) {
+                let (x, y, h) = self.engine.caret_xy(l, caret - start);
+                return (MARGIN * self.scale + x, vp.y + top + y - self.scroll_y, h);
             }
         }
         (
@@ -1112,14 +1229,15 @@ impl App {
             .clamp(0.0, chrome::max_scroll(vp, self.doc_height()));
     }
 
-    fn set_ime_area(&self) {
-        if let Some(w) = &self.window {
-            let (x, y, h) = self.caret_screen();
-            w.set_ime_cursor_area(
-                PhysicalPosition::new(x as f64, y as f64),
-                PhysicalSize::new(2.0, h as f64),
-            );
-        }
+    fn set_ime_area(&mut self) {
+        let Some(w) = self.window.clone() else {
+            return; // 无窗口（测试）：不触发按需排版
+        };
+        let (x, y, h) = self.caret_screen();
+        w.set_ime_cursor_area(
+            PhysicalPosition::new(x as f64, y as f64),
+            PhysicalSize::new(2.0, h as f64),
+        );
     }
 
     fn on_key(&mut self, event: &winit::event::KeyEvent) {
@@ -1214,15 +1332,16 @@ impl App {
     /// Home/End（及 Shift 扩选）：光标落到当前视觉行首/尾（`visual_line_edges` 语义）。
     fn move_line_edge(&mut self, start: bool, extend: bool) {
         let caret = self.editor.caret();
-        let Some(g) = self
+        let Some((id, range)) = self
             .index
             .blocks
             .iter()
             .find(|g| g.range.start <= caret && caret <= g.range.end)
+            .map(|g| (g.id, g.range))
         else {
             return;
         };
-        let (id, range) = (g.id, g.range);
+        self.ensure_block(id);
         let Some(l) = self.layouts.get(&id) else {
             return;
         };
@@ -1244,34 +1363,50 @@ impl App {
 
     fn move_vertical(&mut self, delta: i32, extend: bool) {
         let caret = self.editor.caret();
-        let blocks = &self.index.blocks;
-        let Some(bi) = blocks
+        let Some(bi) = self
+            .index
+            .blocks
             .iter()
             .position(|g| g.range.start <= caret && caret <= g.range.end)
         else {
             return;
         };
-        let g = &blocks[bi];
-        let (id, range) = (g.id, g.range);
-        let Some(l) = self.layouts.get(&id) else {
-            return;
+        let (id, range) = {
+            let g = &self.index.blocks[bi];
+            (g.id, g.range)
         };
-        let (cx, cy, ch) = self.engine.caret_xy(l, caret - range.start);
+        // 当前块可能不在视口内：垂直移动前按需补齐
+        self.ensure_block(id);
+        let (cx, cy, ch, lh) = {
+            let Some(l) = self.layouts.get(&id) else {
+                return;
+            };
+            let (cx, cy, ch) = self.engine.caret_xy(l, caret - range.start);
+            (cx, cy, ch, l.height)
+        };
         let goal = *self.goal_x.get_or_insert(cx);
         // 目标：本块上/下一视觉行；越界则上/下一块的末/首行
         let target_y_local = cy + if delta < 0 { -1.0 } else { ch };
-        let target = if target_y_local >= 0.0 && target_y_local < l.height {
+        let target = if target_y_local >= 0.0 && target_y_local < lh {
+            let l = &self.layouts[&id];
             range.start + self.engine.hit(l, goal, target_y_local)
         } else {
-            let next = if delta < 0 {
-                bi.checked_sub(1).and_then(|i| blocks.get(i))
+            let next_i = if delta < 0 {
+                bi.checked_sub(1)
+            } else if bi + 1 < self.index.blocks.len() {
+                Some(bi + 1)
             } else {
-                blocks.get(bi + 1)
+                None
             };
-            let Some(ng) = next else {
+            let Some(ni) = next_i else {
                 return;
             };
-            let (nid, nkind, nrange) = (ng.id, ng.kind, ng.range);
+            let (nid, nkind, nrange) = {
+                let g = &self.index.blocks[ni];
+                (g.id, g.kind, g.range)
+            };
+            // 目标相邻块同样按需补齐（含表格网格/数学图）
+            self.ensure_block(nid);
             if nkind == BlockKind::Table && self.table_shows_grid(nid, &nrange) {
                 let Some(t) = self.tables.get(&nid) else {
                     return;
@@ -1314,17 +1449,17 @@ impl App {
     }
 
     /// 鼠标位置 → 文档偏移（块间空白归入下一块起始；视口顶部之上归首块）。
-    fn hit_offset(&self) -> Option<usize> {
+    fn hit_offset(&mut self) -> Option<usize> {
         let vp = self.viewport();
         let x = (self.mouse.x as f32 - MARGIN * self.scale).max(0.0);
         let y = (self.mouse.y as f32 - vp.y + self.scroll_y).max(0.0);
-        let blocks = &self.index.blocks;
-        let g = blocks
-            .iter()
-            .rev()
-            .find(|g| g.top <= y)
-            .or_else(|| blocks.first())?;
-        let (id, kind, range, top) = (g.id, g.kind, g.range, g.top);
+        let (id, kind, range, top) = {
+            let blocks = &self.index.blocks;
+            let g = blocks.iter().rev().find(|g| g.top <= y).or_else(|| blocks.first())?;
+            (g.id, g.kind, g.range, g.top)
+        };
+        // 命中块可能尚未布局：先按需补齐再读缓存
+        self.ensure_block(id);
         self.hit_block(id, kind, &range, x, (y - top).max(0.0))
     }
 
@@ -1478,11 +1613,24 @@ impl App {
         if self.index.blocks.is_empty() {
             self.refresh_index();
         }
-        self.ensure_layouts();
-        self.ensure_math();
-        self.ensure_tables();
-        // 布局/公式/表格就绪后统一重算几何，后续 doc_height 与块绘制同源
+        // 视口驱动惰性排版（P1b）：先排当前可见区间并重算几何；估算高度偏小
+        // 可能让视口底部露出未排版块，故重算可见区间后再补跑一遍即收敛。
+        self.ensure_layouts_visible();
+        self.ensure_math_visible();
+        self.ensure_tables_visible();
         self.recompute_geometry();
+        let range = self.visible_index_range();
+        if self
+            .index
+            .blocks
+            .get(range)
+            .is_some_and(|bs| bs.iter().any(|g| !self.layouts.contains_key(&g.id)))
+        {
+            self.ensure_layouts_visible();
+            self.ensure_math_visible();
+            self.ensure_tables_visible();
+            self.recompute_geometry();
+        }
         let mut frame = Frame::new(w, h, self.theme.bg);
         let scale = self.scale;
         let theme = self.theme;
@@ -1493,11 +1641,13 @@ impl App {
             .clamp(0.0, chrome::max_scroll(vp, self.doc_height()));
         let sel = self.editor.selection();
         let caret = self.editor.caret();
-        for g in &self.index.blocks {
+        // 只遍历视口覆盖的块（含 overscan），不再逐块判定后 continue
+        let vis = self.visible_index_range();
+        for g in &self.index.blocks[vis] {
             let (id, kind, range, top) = (g.id, g.kind, g.range, g.top);
             let sy = (vp.y + top - self.scroll_y) as i32;
             if (sy as f32) >= vp.y + vp.h
-                || sy + self.block_height(id, kind, &range) as i32 <= vp.y as i32
+                || sy + self.block_height(g) as i32 <= vp.y as i32
             {
                 continue; // 视口外不画（布局已缓存，光栅按需）
             }
@@ -1580,7 +1730,7 @@ impl App {
             // 块级装饰（切片 12）：引用左竖条；分隔线非激活时画居中横线
             match kind {
                 BlockKind::BlockQuote => {
-                    let bh = self.block_height(id, kind, &range) as u32;
+                    let bh = self.block_height(g) as u32;
                     frame.fill_rect(
                         (MARGIN * scale) as i32 - (8.0 * scale) as i32,
                         sy,
@@ -1590,7 +1740,7 @@ impl App {
                     );
                 }
                 BlockKind::ThematicBreak if !node_active(range, caret) => {
-                    let bh = self.block_height(id, kind, &range);
+                    let bh = self.block_height(g);
                     frame.fill_rect(
                         (MARGIN * scale) as i32,
                         sy + (bh * 0.5) as i32,
@@ -1755,8 +1905,10 @@ impl ApplicationHandler for App {
                 self.layouts.clear(); // 宽度变化：全量重排（换行依赖宽度）
                 self.rasters.clear();
                 self.tables.clear(); // 列宽/折行依赖版心宽
-                // 清缓存后宽度/块高都可能变化：几何须立即重建
+                // 清缓存后宽度/块高都可能变化：只重排可见块并立即重建几何
                 self.refresh_index();
+                self.ensure_layouts_visible();
+                self.ensure_tables_visible();
                 self.recompute_geometry();
                 self.request_redraw();
             }
@@ -1772,8 +1924,11 @@ impl ApplicationHandler for App {
                 self.inline_failed.clear();
                 self.tables.clear(); // 网格尺寸随 DPI 变化
                 self.chrome.clear_label_cache(); // chrome 标签按旧 scale 光栅化
-                // scale 变了，几何累计均按新 scale：索引重建并重算
+                // scale 变了，几何累计均按新 scale：索引重建、可见块按新 DPI 重排
                 self.refresh_index();
+                self.ensure_layouts_visible();
+                self.ensure_math_visible();
+                self.ensure_tables_visible();
                 self.recompute_geometry();
                 self.request_redraw();
             }
@@ -1906,6 +2061,15 @@ fn conflict_copy_path(store: &mut dyn FileStore, path: &Path) -> Option<PathBuf>
 fn activation_changed(n: &InlineNode, old: usize, new: usize) -> bool {
     node_active(n.range, old) != node_active(n.range, new)
         || n.children.iter().any(|c| activation_changed(c, old, new))
+}
+
+/// 视口外块的廉价高度估算（P1b）：换行数与原文字符数折算的折行数取大，
+/// 乘以基准行高；不触发 shaping，仅用于几何累计。
+fn estimate_height(text: &str, chars_per_line: f32, scale: f32) -> f32 {
+    let hard_lines = text.bytes().filter(|&b| b == b'\n').count() as f32 + 1.0;
+    let chars = text.chars().count() as f32;
+    let wrapped = (chars / chars_per_line.max(1.0)).ceil().max(1.0);
+    hard_lines.max(wrapped) * BASE_LINE_HEIGHT * scale
 }
 
 /// 光标在引用块内的行号（块外 None）：按 `\n` 计数，行数规则与排版一致（剥唯一尾换行）。
@@ -2297,51 +2461,60 @@ mod tests {
         (a, calls)
     }
 
+    /// 按块 id 取索引几何（测试断言 block_height 用）。
+    fn geom(a: &App, id: BlockId) -> &BlockGeom {
+        a.index
+            .blocks
+            .iter()
+            .find(|g| g.id == id)
+            .expect("块索引应包含目标块")
+    }
+
     #[test]
     fn math_block_renders_image_when_caret_outside() {
         // 「a\n\n$$\nx\n$$\n」：数学块 bytes [3,11)，初始 caret=0 在块外
         let (mut a, calls) = app_math("a\n\n$$\nx\n$$\n", false);
-        a.ensure_layouts();
+        a.ensure_layouts_all();
         a.ensure_math();
         a.ensure_math(); // 幂等：缓存命中不重渲
         assert_eq!(calls.borrow().len(), 1);
         let (id, kind, range) = a.editor.session().blocks()[1];
         assert_eq!(kind, BlockKind::Math);
         assert!(a.math_shows_image(id, &range));
-        assert_eq!(a.block_height(id, kind, &range), 4.0); // 图高即块高
+        assert_eq!(a.block_height(geom(&a, id)), 4.0); // 图高即块高
     }
 
     #[test]
     fn math_block_shows_source_when_caret_inside() {
         let (mut a, calls) = app_math("a\n\n$$\nx\n$$\n", false);
         assert!(a.editor.set_caret(6)); // 「x」处，块内
-        a.ensure_layouts();
+        a.ensure_layouts_all();
         a.ensure_math();
         assert_eq!(calls.borrow().len(), 0); // 源码态不渲染
-        let (id, kind, range) = a.editor.session().blocks()[1];
+        let (id, _, range) = a.editor.session().blocks()[1];
         assert!(!a.math_shows_image(id, &range));
         let h = a.layouts.get(&id).unwrap().height;
-        assert_eq!(a.block_height(id, kind, &range), h); // 文本布局高
+        assert_eq!(a.block_height(geom(&a, id)), h); // 文本布局高
     }
 
     #[test]
     fn math_render_failure_degrades_to_source() {
         let (mut a, calls) = app_math("a\n\n$$\nx\n$$\n", true);
-        a.ensure_layouts();
+        a.ensure_layouts_all();
         a.ensure_math();
         a.ensure_math(); // 失败记忆：不每帧重试
         assert_eq!(calls.borrow().len(), 1);
-        let (id, kind, range) = a.editor.session().blocks()[1];
+        let (id, _, range) = a.editor.session().blocks()[1];
         assert!(a.math_failed.contains(&id));
         assert!(!a.math_shows_image(id, &range));
         let h = a.layouts.get(&id).unwrap().height;
-        assert_eq!(a.block_height(id, kind, &range), h); // 降级为源码显示
+        assert_eq!(a.block_height(geom(&a, id)), h); // 降级为源码显示
     }
 
     #[test]
     fn dirty_edit_clears_math_cache() {
         let (mut a, _calls) = app_math("a\n\n$$\nx\n$$\n", false);
-        a.ensure_layouts();
+        a.ensure_layouts_all();
         a.ensure_math();
         let (id, _, _) = a.editor.session().blocks()[1];
         assert!(a.math_imgs.contains_key(&id));
@@ -2355,7 +2528,7 @@ mod tests {
     #[test]
     fn inline_math_renders_image_when_caret_outside() {
         let (mut a, calls) = app_math("a $x$ b", false);
-        a.ensure_layouts();
+        a.ensure_layouts_all();
         let (id, _, _) = a.editor.session().blocks()[0];
         assert_eq!(a.layouts[&id].imgs.len(), 1);
         assert_eq!(a.layouts[&id].imgs[0].width, 8, "FakeMath 行内分支（8x4）");
@@ -2366,7 +2539,7 @@ mod tests {
         );
         // 内容寻址缓存：重排（如 Resized 清布局）不重渲
         a.layouts.remove(&id);
-        a.ensure_layouts();
+        a.ensure_layouts_all();
         assert_eq!(calls.borrow().len(), 1);
     }
 
@@ -2374,7 +2547,7 @@ mod tests {
     fn inline_math_shows_source_when_caret_inside() {
         let (mut a, calls) = app_math("a $x$ b", false);
         assert!(a.editor.set_caret(3)); // 「x」处，节点内
-        a.ensure_layouts();
+        a.ensure_layouts_all();
         let (id, _, _) = a.editor.session().blocks()[0];
         assert!(a.layouts[&id].imgs.is_empty());
         assert_eq!(a.layouts[&id].layout_text(), "a $x$ b");
@@ -2384,19 +2557,19 @@ mod tests {
     #[test]
     fn inline_math_toggles_on_caret_enter_leave() {
         let (mut a, calls) = app_math("a $x$ b", false);
-        a.ensure_layouts();
+        a.ensure_layouts_all();
         let (id, _, _) = a.editor.session().blocks()[0];
         assert_eq!(a.layouts[&id].imgs.len(), 1);
         // 进入节点：invalidate_reveal 失效 → 重排显源码
         let old = a.editor.caret();
         assert!(a.editor.set_caret(3));
         a.invalidate_reveal(old, 3);
-        a.ensure_layouts();
+        a.ensure_layouts_all();
         assert!(a.layouts[&id].imgs.is_empty());
         // 离开节点：恢复出图，缓存命中不重渲
         assert!(a.editor.set_caret(0));
         a.invalidate_reveal(3, 0);
-        a.ensure_layouts();
+        a.ensure_layouts_all();
         assert_eq!(a.layouts[&id].imgs.len(), 1);
         assert_eq!(calls.borrow().len(), 1);
     }
@@ -2404,18 +2577,18 @@ mod tests {
     #[test]
     fn inline_math_failure_degrades_and_memoizes() {
         let (mut a, calls) = app_math("a $x$ b", true);
-        a.ensure_layouts();
+        a.ensure_layouts_all();
         let (id, _, _) = a.editor.session().blocks()[0];
         assert!(a.layouts[&id].imgs.is_empty(), "失败降级：占位不入排版");
         a.layouts.remove(&id);
-        a.ensure_layouts(); // 失败记忆：不每帧重试
+        a.ensure_layouts_all(); // 失败记忆：不每帧重试
         assert_eq!(calls.borrow().len(), 1);
     }
 
     #[test]
     fn edit_math_source_rerenders_new_tex() {
         let (mut a, calls) = app_math("a $x$ b", false);
-        a.ensure_layouts();
+        a.ensure_layouts_all();
         assert_eq!(calls.borrow().len(), 1);
         // 光标进节点（3），插入 y：「a $yx$ b」，caret=4 在新区间 [2,6) 内 → 显源码不重渲
         assert!(a.editor.set_caret(3));
@@ -2428,7 +2601,7 @@ mod tests {
         let old = a.editor.caret();
         assert!(a.editor.set_caret(0));
         a.invalidate_reveal(old, 0);
-        a.ensure_layouts();
+        a.ensure_layouts_all();
         let (id, _, _) = a.editor.session().blocks()[0];
         assert_eq!(a.layouts[&id].imgs.len(), 1);
         assert_eq!(
@@ -2525,7 +2698,7 @@ mod tests {
             Some("dir/doc.md"),
             &[("dir/img/p.png", 100, 50)],
         );
-        a.ensure_layouts();
+        a.ensure_layouts_all();
         let (id, _, _) = a.editor.session().blocks()[0];
         let l = &a.layouts[&id];
         assert_eq!(l.imgs.len(), 1);
@@ -2541,7 +2714,7 @@ mod tests {
         assert_eq!(calls.borrow().as_slice(), &[PathBuf::from("dir/img/p.png")]);
         // 缓存命中：重排不重载
         a.layouts.remove(&id);
-        a.ensure_layouts();
+        a.ensure_layouts_all();
         assert_eq!(calls.borrow().len(), 1);
     }
 
@@ -2553,7 +2726,7 @@ mod tests {
             Some("dir/doc.md"),
             &[("dir/p.png", 1600, 900)],
         );
-        a.ensure_layouts();
+        a.ensure_layouts_all();
         let (id, _, _) = a.editor.session().blocks()[0];
         // 默认版心宽 = 800 - 2*16 - 滚动条 12 = 756；1600×900 等比缩放
         assert_eq!(
@@ -2565,13 +2738,13 @@ mod tests {
     #[test]
     fn image_failure_degrades_to_alt_and_memoizes() {
         let (mut a, calls) = app_with_images("a ![alt](img/p.png) b", Some("dir/doc.md"), &[]);
-        a.ensure_layouts();
+        a.ensure_layouts_all();
         let (id, _, _) = a.editor.session().blocks()[0];
         assert!(a.layouts[&id].imgs.is_empty());
         assert_eq!(a.layouts[&id].layout_text(), "a alt b");
         assert_eq!(calls.borrow().len(), 1);
         a.layouts.remove(&id);
-        a.ensure_layouts(); // 失败记忆：不每帧重试
+        a.ensure_layouts_all(); // 失败记忆：不每帧重试
         assert_eq!(calls.borrow().len(), 1);
     }
 
@@ -2579,13 +2752,13 @@ mod tests {
     fn remote_or_draft_image_is_never_loaded() {
         let (mut a, calls) =
             app_with_images("x ![a](https://example.com/x.png)", Some("dir/doc.md"), &[]);
-        a.ensure_layouts();
+        a.ensure_layouts_all();
         assert!(calls.borrow().is_empty());
         let (id, _, _) = a.editor.session().blocks()[0];
         assert_eq!(a.layouts[&id].layout_text(), "x a");
 
         let (mut b, calls2) = app_with_images("x ![a](p.png)", None, &[]);
-        b.ensure_layouts();
+        b.ensure_layouts_all();
         assert!(calls2.borrow().is_empty(), "草稿相对路径无解析基准");
         let (id, _, _) = b.editor.session().blocks()[0];
         assert_eq!(b.layouts[&id].layout_text(), "x a");
@@ -2599,7 +2772,7 @@ mod tests {
             &[("dir/img/p.png", 100, 50)],
         );
         assert!(a.editor.set_caret(5)); // alt 内
-        a.ensure_layouts();
+        a.ensure_layouts_all();
         let (id, _, _) = a.editor.session().blocks()[0];
         assert!(a.layouts[&id].imgs.is_empty());
         assert_eq!(a.layouts[&id].layout_text(), "a ![alt](img/p.png) b");
@@ -2729,30 +2902,30 @@ mod tests {
     #[test]
     fn table_renders_grid_when_caret_outside() {
         let (mut a, _) = app_math(TABLE_DOC, false);
-        a.ensure_layouts();
+        a.ensure_layouts_all();
         a.ensure_tables();
         let (id, kind, range) = a.editor.session().blocks()[1];
         assert_eq!(kind, BlockKind::Table);
         assert!(a.table_shows_grid(id, &range));
-        assert_eq!(a.block_height(id, kind, &range), a.tables[&id].height);
+        assert_eq!(a.block_height(geom(&a, id)), a.tables[&id].height);
     }
 
     #[test]
     fn table_shows_source_when_caret_inside() {
         let (mut a, _) = app_math(TABLE_DOC, false);
         assert!(a.editor.set_caret(5)); // 表头单元格内
-        a.ensure_layouts();
+        a.ensure_layouts_all();
         a.ensure_tables();
-        let (id, kind, range) = a.editor.session().blocks()[1];
+        let (id, _, range) = a.editor.session().blocks()[1];
         assert!(!a.tables.contains_key(&id), "源码态不排版网格");
         assert!(!a.table_shows_grid(id, &range));
-        assert_eq!(a.block_height(id, kind, &range), a.layouts[&id].height);
+        assert_eq!(a.block_height(geom(&a, id)), a.layouts[&id].height);
     }
 
     #[test]
     fn table_grid_hit_maps_to_cell_content_start() {
         let (mut a, _) = app_math(TABLE_DOC, false);
-        a.ensure_layouts();
+        a.ensure_layouts_all();
         a.ensure_tables();
         let (id, kind, range) = a.editor.session().blocks()[1];
         let want = a.editor.session().table(id).unwrap().rows[0][1].range.start; // 表体「d」
@@ -2766,7 +2939,7 @@ mod tests {
     #[test]
     fn dirty_edit_invalidates_table_grid() {
         let (mut a, _) = app_math(TABLE_DOC, false);
-        a.ensure_layouts();
+        a.ensure_layouts_all();
         a.ensure_tables();
         let (id, _, _) = a.editor.session().blocks()[1];
         let old_w = a.tables[&id].width;
@@ -2790,8 +2963,8 @@ mod tests {
     fn list_bullet_toggles_on_caret_enter_leave() {
         // 「p\n\n- a\n」：列表块 bytes [3,7)，初始 caret=0 在块外
         let (mut a, _) = app_math("p\n\n- a\n", false);
-        a.ensure_layouts();
-        let (id, kind, range) = a.editor.session().blocks()[1];
+        a.ensure_layouts_all();
+        let (id, kind, _) = a.editor.session().blocks()[1];
         assert_eq!(
             kind,
             BlockKind::ListItem {
@@ -2803,27 +2976,27 @@ mod tests {
         // 进入块：失效 → 重排显源码
         assert!(a.editor.set_caret(4));
         a.invalidate_reveal(0, 4);
-        a.ensure_layouts();
+        a.ensure_layouts_all();
         assert_eq!(a.layouts[&id].layout_text(), "- a");
         // 离开块：恢复符号
         assert!(a.editor.set_caret(0));
         a.invalidate_reveal(4, 0);
-        a.ensure_layouts();
+        a.ensure_layouts_all();
         assert_eq!(a.layouts[&id].layout_text(), "• a");
-        assert_eq!(a.block_height(id, kind, &range), a.layouts[&id].height);
+        assert_eq!(a.block_height(geom(&a, id)), a.layouts[&id].height);
     }
 
     #[test]
     fn blockquote_line_reveal_reflows_only_across_lines() {
         // 「p\n\n> a\n> b\n」：引用块 bytes [3,11)，行 1 [3,7)、行 2 [7,11)
         let (mut a, _) = app_math("p\n\n> a\n> b\n", false);
-        a.ensure_layouts();
+        a.ensure_layouts_all();
         let (id, _, _) = a.editor.session().blocks()[1];
         assert_eq!(a.layouts[&id].layout_text(), "  a\n  b");
         // 块内跨行移动（0 → 9，行 2 内容）：逐行激活变化 → 重排
         assert!(a.editor.set_caret(9));
         a.invalidate_reveal(0, 9);
-        a.ensure_layouts();
+        a.ensure_layouts_all();
         assert_eq!(a.layouts[&id].layout_text(), "  a\n> b");
         // 同一行内移动（9 → 10）：激活行不变 → 布局缓存保留（不重排）
         assert!(a.editor.set_caret(10));
@@ -2835,18 +3008,24 @@ mod tests {
     fn thematic_break_elides_and_keeps_line_height() {
         // 「p\n\n---\n」：分隔线块 bytes [3,7)，初始 caret=0 在块外
         let (mut a, _) = app_math("p\n\n---\n", false);
-        a.ensure_layouts();
-        let (id, kind, range) = a.editor.session().blocks()[1];
+        a.ensure_layouts_all();
+        let (id, kind, _) = a.editor.session().blocks()[1];
         assert_eq!(kind, BlockKind::ThematicBreak);
         assert_eq!(a.layouts[&id].layout_text(), "");
         // 消隐后仍占一行高，块高不塌缩
-        assert_eq!(a.block_height(id, kind, &range), BASE_LINE_HEIGHT * a.scale);
+        assert_eq!(
+            a.block_height(geom(&a, id)),
+            BASE_LINE_HEIGHT * a.scale
+        );
         // 进入块：显源码，块高不变
         assert!(a.editor.set_caret(5));
         a.invalidate_reveal(0, 5);
-        a.ensure_layouts();
+        a.ensure_layouts_all();
         assert_eq!(a.layouts[&id].layout_text(), "---");
-        assert_eq!(a.block_height(id, kind, &range), BASE_LINE_HEIGHT * a.scale);
+        assert_eq!(
+            a.block_height(geom(&a, id)),
+            BASE_LINE_HEIGHT * a.scale
+        );
     }
 
     #[derive(Clone, Default)]
@@ -3442,7 +3621,7 @@ mod tests {
         let store = MemStore::default();
         let (mut a, _) = app_dialogs("ab", None, false, &store, None, None);
         a.editor.set_caret(2);
-        a.ensure_layouts();
+        a.ensure_layouts_all();
         let vp = a.viewport();
         click_at(&mut a, 16.0, vp.y + 16.0 + 5.0); // 首行
         assert_eq!(a.editor.caret(), 0, "y 需扣除菜单栏高度");
@@ -3454,7 +3633,7 @@ mod tests {
         let store = MemStore::default();
         let text: String = (0..200).map(|i| format!("line {i}\n")).collect();
         let (mut a, _) = app_dialogs(&text, None, false, &store, None, None);
-        a.ensure_layouts();
+        a.ensure_layouts_all();
         let vp = a.viewport();
         let doc_h = a.doc_height();
         assert!(doc_h > vp.h, "长文档溢出");
@@ -3926,7 +4105,7 @@ mod tests {
         let sys = Rc::new(Cell::new(Some(false)));
         let mut a = app_theme(Box::new(MemConfig::default()), sys.clone());
         assert!(!a.theme.dark);
-        a.ensure_layouts();
+        a.ensure_layouts_all();
         let (id, _, _) = a.editor.session().blocks()[0];
         a.rasters.insert(id, (vec![0; 4], 1, 1));
         a.inline_math.insert(
@@ -3992,6 +4171,101 @@ mod tests {
         );
     }
 
+    /// 5005 块压力文档（715 × 7 块），冷启动/击键探针与惰性排版测试共用。
+    fn stress_doc() -> String {
+        let mut text = String::with_capacity(200_000);
+        for i in 0..715 {
+            text.push_str(&format!(
+                "## Section {i}\n\nParagraph {i} with **bold** text, `code`, and a [link](https://example.com/{i}).\n\n- item A {i}\n- item B {i}\n\n```rust\nfn f{i}() -> u32 {{ {i} }}\n```\n\n> quote {i}\n\n---\n\n"
+            ));
+        }
+        text
+    }
+
+    // ---- P1b：视口驱动惰性排版 ----
+
+    #[test]
+    fn first_edit_lays_out_far_fewer_blocks_than_document() {
+        let store = MemStore::default();
+        let mut a = app(&stress_doc(), None, false, &store);
+        assert!(a.index.blocks.len() >= 5005);
+        let dirty = a.editor.apply(Intent::InsertText("a".into())).unwrap();
+        a.after_edit(dirty);
+        assert!(
+            a.layouts.len() < 100,
+            "首次编辑只应排版视口内块，实际 {} / {} 块",
+            a.layouts.len(),
+            a.index.blocks.len()
+        );
+    }
+
+    #[test]
+    fn geometry_index_is_monotonic_and_consistent() {
+        let store = MemStore::default();
+        let mut a = app(&stress_doc(), None, false, &store);
+        let dirty = a.editor.apply(Intent::InsertText("a".into())).unwrap();
+        a.after_edit(dirty);
+        let mut prev = f32::NEG_INFINITY;
+        let mut y = MARGIN * a.scale;
+        for g in &a.index.blocks {
+            assert!(g.height > 0.0, "块高须为正: {:?}", g.id);
+            assert!(g.top >= prev, "top 须单调不减: {:?}", g.id);
+            assert!(
+                (g.top - y).abs() < 1e-3,
+                "top 应与逐块累计一致: {} vs {}",
+                g.top,
+                y
+            );
+            prev = g.top;
+            y += g.height + PARA_GAP * a.scale;
+        }
+        let want = y - PARA_GAP * a.scale + MARGIN * a.scale;
+        assert!(
+            (a.index.total_h - want).abs() < 1e-3,
+            "total_h 应与累计一致: {} vs {}",
+            a.index.total_h,
+            want
+        );
+    }
+
+    #[test]
+    fn ensure_block_lays_out_far_block_with_real_height() {
+        let store = MemStore::default();
+        let mut a = app(&stress_doc(), None, false, &store);
+        let id = a.index.blocks.last().unwrap().id;
+        assert!(!a.layouts.contains_key(&id), "远块初始不应已排版");
+        a.ensure_block(id);
+        let h = a.layouts.get(&id).expect("按需排版应写入布局").height;
+        assert!(h > 0.0);
+        assert_eq!(a.block_height(geom(&a, id)), h);
+    }
+
+    #[test]
+    fn move_doc_end_ensures_caret_block_layout() {
+        let store = MemStore::default();
+        let mut a = app(&stress_doc(), None, false, &store);
+        let dirty = a.editor.apply(Intent::MoveDocEnd).unwrap();
+        a.after_edit(dirty);
+        let id = a
+            .caret_block_index()
+            .map(|i| a.index.blocks[i].id)
+            .expect("文末应落在某块内");
+        assert!(a.layouts.contains_key(&id), "光标块须已排版");
+        let (x, y, h) = a.caret_screen();
+        assert!(x.is_finite() && y.is_finite() && h > 0.0);
+    }
+
+    #[test]
+    fn estimated_height_positive_for_all_block_kinds() {
+        let doc = "# h\n\np\n\n```\ncode\n```\n\n$$\nx\n$$\n\n| a | b |\n| --- | --- |\n| c | d |\n\n- li\n\n> q\n\n---\n";
+        let store = MemStore::default();
+        let a = app(doc, None, false, &store);
+        assert!(a.index.blocks.len() >= 8, "覆盖全部块类型");
+        for g in &a.index.blocks {
+            assert!(g.est_h > 0.0, "估算高度须为正: {:?}", g.kind);
+        }
+    }
+
     /// 真实路径性能探针（默认忽略，不参与常规门禁）：
     /// cargo test -p veil-egui --release -- --ignored --nocapture perf_keystroke_path
     /// 度量 apply + after_edit + paint 的端到端延迟；bench_typing 只测单点 API，
@@ -3999,12 +4273,7 @@ mod tests {
     #[test]
     #[ignore = "性能探针，不参与常规门禁"]
     fn perf_keystroke_path() {
-        let mut text = String::with_capacity(200_000);
-        for i in 0..715 {
-            text.push_str(&format!(
-                "## Section {i}\n\nParagraph {i} with **bold** text, `code`, and a [link](https://example.com/{i}).\n\n- item A {i}\n- item B {i}\n\n```rust\nfn f{i}() -> u32 {{ {i} }}\n```\n\n> quote {i}\n\n---\n\n"
-            ));
-        }
+        let text = stress_doc();
         let store = MemStore::default();
         let mut a = app(&text, None, false, &store);
         a.editor.apply(Intent::MoveDocStart).unwrap();
@@ -4031,5 +4300,21 @@ mod tests {
         println!("perf_keystroke_ms_p50={:.3}", pick(0.5));
         println!("perf_keystroke_ms_p95={:.3}", pick(0.95));
         println!("perf_keystroke_ms_max={:.3}", samples[samples.len() - 1]);
+    }
+
+    /// P1b 验收探针（默认忽略）：构造 5005 块文档 + 第一次编辑的端到端耗时。
+    /// cargo test -p veil-egui --release -- --ignored --nocapture perf_cold_first_edit
+    #[test]
+    #[ignore = "性能探针，不参与常规门禁"]
+    fn perf_cold_first_edit() {
+        let text = stress_doc();
+        let store = MemStore::default();
+        let t = Instant::now();
+        let mut a = app(&text, None, false, &store);
+        let dirty = a.editor.apply(Intent::InsertText("a".into())).unwrap();
+        a.after_edit(dirty);
+        let ms = t.elapsed().as_secs_f64() * 1e3;
+        println!("perf_cold_first_edit_ms={ms:.3}");
+        println!("perf_layouts_after_first_edit={}", a.layouts.len());
     }
 }

@@ -1,0 +1,12 @@
+[workspace]
+resolver = "2"
+members = ["crates/veil-core", "crates/veil-egui", "crates/veil"]
+
+[workspace.package]
+edition = "2021"
+version = "0.1.0"
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"

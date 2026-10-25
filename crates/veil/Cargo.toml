@@ -1,0 +1,17 @@
+[package]
+name = "veil"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+veil-core = { path = "../veil-core" }
+veil-egui = { path = "../veil-egui" }
+arboard = "3"
+# 公式渲染（ADR-002）：纯 Rust 排版+光栅化，字体内嵌；3.x 需 Rust 1.99，锁定 2.x
+latex-rust = { version = "2.1", features = ["png"] }
+# latex-rust 只出 PNG 字节，解码为 RGBA 供帧合成
+png = "0.17"
+# 仅 HTML 导出使用（INSTANCE §6 预算内）；编辑/渲染主链路不经过它
+pulldown-cmark = "0.13"
+# 外部文件监听（切片 16）：事件线程 + 非阻塞通道，策略在 veil-egui
+notify = "8"

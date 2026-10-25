@@ -1,0 +1,15 @@
+# Spike 独立工作区：不进入主 workspace 成员列表，验证完即可整体删除
+[package]
+name = "katex-timing"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+# quick-js 后端仅支持 unix / windows-gnu（见 katex-0.4.6 src/js_engine.rs cfg）；
+# v1 目标 windows-msvc 上唯一可用后端是 duktape
+katex = { version = "0.4.6", default-features = false, features = ["duktape"] }
+# 路径 B：直接集成（ADR-002 备选）。生产形态为 vendor katex.min.js 进 veil 资产目录
+rquickjs = "0.14"

@@ -42,13 +42,13 @@
 | 冷启动（发布构建，进程创建→首帧可交互，本机） | ≤ 300 ms | ⏳ |
 | 10 万字文档击键→提交上屏延迟 p95（测量脚本 ⏳ 待建） | ≤ 16 ms | ⏳ |
 | 10 万字文档常驻内存（任务管理器私有工作集） | ≤ 150 MB | ⏳ |
-| 安装产物体积（`veil.exe` 单文件发布构建） | ≤ 15 MiB | ⏳ |
+| 安装产物体积（`veil.exe` 单文件发布构建） | ≤ 15 MiB | 5,485,056 B ≈ 5.23 MiB ✓（2026-10-25 实测；含 latex-rust 内嵌 STIX 字体 838,652 B） |
 | `veil-core` 单元+属性测试数 | ≥ 80 | 145（2026-10-25：81 单测 + 64 集成；切片 15 新增 `line_col` 2 项） |
 | e2e 断言数 | ≥ 20 | 0 |
 | Markdown 往返一致率（无编辑时 serialize 输出 == 输入字节） | == 100% | 100%（`roundtrip_identity_without_edits` + `prop_random_edits_roundtrip_and_undo` 随机语料属性测试） |
 | `veil-core` 的 GUI/异步运行时依赖数（`cargo tree -p veil-core` grep egui/winit/tokio） | == 0 | 0 ✓（2026-10-24 实测） |
 | `veil-egui`+`veil` 直接依赖总数（`cargo tree -p veil-egui -p veil --depth 1` 去重） | ≤ 8 | 8 ✓（winit/softbuffer/cosmic-text/arboard/pulldown-cmark/latex-rust/png/notify；切片 16 新增 notify 即达预算上限，后续不得再加直接依赖） |
-| workspace 传递依赖总数（`cargo tree --prefix none --depth 100 | sort -u` 去重） | ≤ 200 | 120 ✓（2026-10-25 切片 16 实测：notify 引入 +6 行去重条目，`unique_names` 99） |
+| workspace 传递依赖总数（`cargo tree --prefix none --depth 100 | sort -u` 去重） | ≤ 200 | 121 ✓（2026-10-25 升级后实测：cosmic-text 0.19 + latex-rust 3.0.1；ttf-parser 与 rustybuzz 已消除，新增 skrifa/read-fonts/font-types 各三版本，全部上游锁定） |
 
 - 版本号一致性：git tag == workspace `Cargo.toml` version == 产物元数据（`veil.exe` 文件属性版本）
 - 版本失配处置记录：无
@@ -97,7 +97,7 @@ v1 无网络输入点（无同步、无更新检查、无遥测）。
   - `veil-core` ≤ 3：rope 实现 `lapce-xi-rope`（ADR-001 已定，含 vendor 退路）、解析手写（GFM 增量解析无现成轮子，不引入 pulldown-cmark 进内核）。grapheme 导航由 rope 内置（`prev/next_grapheme_offset`），原计划的 `unicode-segmentation` 已删除（2026-10-24 简化）
   - `veil-egui`：≤ 5。切片 1（2026-10-24）：`winit`（直收 IME，spike 验证路径）、`softbuffer`（软件呈现）、`cosmic-text`（排版）。切片 15 推翻了「chrome 落地引入 egui/GL」的原计划：菜单/状态栏/滚动条用 `Frame` 原语自绘，文件对话框走产品层手写 Win32 FFI，直接依赖保持 3（`winit`/`softbuffer`/`cosmic-text`）——见 ADR-005
   - `veil`：`pulldown-cmark`（仅 HTML 导出）、`notify`（文件监听）、`arboard`（剪贴板：文本/HTML/位图，`image-data` 属默认特性）、`latex-rust`（公式渲染，ADR-002 已定：KaTeX/rquickjs 只出 HTML 无法在无 webview 像素管线下光栅化，latex-rust spike 实测 100 公式同步 21ms 占预算 7%，详见 ADR-002 spike 表二）、`png`（latex-rust PNG 字节解码为 RGBA 与粘贴图片编码落盘，latex-rust 本身不依赖 png crate，此为独立直接依赖）。配置不引入 `serde`/`toml`：手写极简 TOML 子集解析（ADR-007），直接依赖维持 8/8
-- 传递依赖总数阈值：≤ 200（CI：`cargo tree --prefix none --depth 100 | sort -u | wc -l`）；2026-10-25 实测 120（与 §2 同口径：`cargo tree --prefix none --depth 100 | sort -u`，2026-10-25 实测；切片 16 notify 引入 +6 行去重条目），余量充足
+- 传递依赖总数阈值：≤ 200（CI：`cargo tree --prefix none --depth 100 | sort -u | wc -l`）；2026-10-25 升级后实测 121（与 §2 同口径），余量充足。现存重复版本全部上游锁定、本项目不可动作，登记为已知状态：png 0.17/0.18 + bitflags 1.3/2 + miniz_oxide 0.8/0.9 ← latex-rust 3.0.1 钉 tiny-skia 0.11；skrifa 0.39/0.40/0.44 + read-fonts/font-types 各三版 ← latex-rust / cosmic-text(harfrust) / cosmic-text(swash) 三消费者各自锁定；smol_str 0.2/0.3 与 windows-sys 0.52/0.61 ← winit 0.30。收敛路径：上游（latex-rust/winit）发版后随版本升级自然消除
 - 黑名单（任何 crate 引入即 CI 失败）：`tokio`、`wasmtime`、`webview2-com`/`wry` 等一切 webview（无 Chromium/WebView2 进程是产品级承诺）
 
 ## 7. 平台接缝实例（Skill 01 B3）

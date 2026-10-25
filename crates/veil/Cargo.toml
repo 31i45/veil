@@ -7,8 +7,8 @@ version.workspace = true
 veil-core = { path = "../veil-core" }
 veil-egui = { path = "../veil-egui" }
 arboard = "3"
-# 公式渲染（ADR-002）：纯 Rust 排版+光栅化，字体内嵌；3.x 需 Rust 1.99，锁定 2.x
-latex-rust = { version = "2.1", features = ["png"] }
+# 公式渲染（ADR-002）：纯 Rust 排版+光栅化，字体内嵌；3.x 需 Rust 1.99（已满足）
+latex-rust = { version = "3.0", features = ["png"] }
 # latex-rust 只出 PNG 字节，解码为 RGBA 供帧合成
 png = "0.18"
 # 仅 HTML 导出使用（INSTANCE §6 预算内）；编辑/渲染主链路不经过它

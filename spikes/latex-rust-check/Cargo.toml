@@ -1,0 +1,12 @@
+# Spike 独立工作区：不进入主 workspace 成员列表，验证完即可整体删除
+[package]
+name = "latex-rust-check"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+# png feature 走 tiny-skia 光栅化；编辑器侧若要 RGBA 原始像素可后续再评估是否走 SVG→resvg
+latex-rust = { version = "2", features = ["png"] }

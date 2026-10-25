@@ -1,0 +1,11 @@
+# Spike 独立工作区：不进入主 workspace 成员列表，验证完即可整体删除
+[package]
+name = "winit-ime"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+winit = "0.30"

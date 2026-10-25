@@ -1,0 +1,9 @@
+[package]
+name = "veil-core"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+# ADR-001：rope 实现，mark 语义在本 crate 内自封装，不向外暴露 rope 类型。
+# grapheme 导航由 rope 内置（prev/next_grapheme_offset），无需 unicode-segmentation。
+lapce-xi-rope = "0.4"

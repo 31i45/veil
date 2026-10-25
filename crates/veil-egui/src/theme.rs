@@ -3,12 +3,11 @@
 //! 零 GUI 依赖：解析/序列化/路径推导/主题判定全部为纯函数，headless 可测。
 //! 平台能力（注册表系统外观、DWM 深色标题栏/Mica、配置落盘）以 trait 声明，由产品层注入。
 //!
-//! 配置格式（极简 TOML 子集，唯一支持的项）：
+//! 配置格式（极简，唯一支持的项写在顶层）：
 //! ```toml
-//! [theme]
 //! mode = "system"   # system | light | dark
 //! ```
-//! 支持注释、空行、`[section]`、单双引号字符串；其余内容一律计入 ignored（提示后忽略）。
+//! 历史格式的 `[theme]` 段标题行仍被接受但直接跳过，便于旧配置无损升级。
 
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -135,7 +134,7 @@ impl Config {
     /// 生成配置文件文本（写入即此格式；`parse_config(to_toml())` 恒等往返）。
     pub fn to_toml(self) -> String {
         format!(
-            "# Veil 配置（自动生成）\n# mode: system（跟随系统）| light | dark\n[theme]\nmode = \"{}\"\n",
+            "# Veil 配置（自动生成）\n# mode: system（跟随系统）| light | dark\nmode = \"{}\"\n",
             self.mode.as_str()
         )
     }
@@ -148,18 +147,17 @@ pub struct ConfigParse {
     pub ignored: usize,
 }
 
-/// 极简 TOML 子集解析：只认 `[theme]` 段的 `mode`，其余条目计数忽略。
+/// 极简配置解析：只认顶层 `mode` 键，其余条目计数忽略。
+/// 段标题行（如历史格式 `[theme]`）不承载配置项，直接跳过；
 /// 同一键重复出现时后者生效（无歧义地覆盖）。
 pub fn parse_config(text: &str) -> ConfigParse {
     let mut out = ConfigParse::default();
-    let mut section = "";
     for raw in text.lines() {
         let line = strip_comment(raw).trim();
         if line.is_empty() {
             continue;
         }
         if line.starts_with('[') && line.ends_with(']') {
-            section = line[1..line.len() - 1].trim();
             continue;
         }
         let Some((key, value)) = line.split_once('=') else {
@@ -167,7 +165,7 @@ pub fn parse_config(text: &str) -> ConfigParse {
             continue;
         };
         let (key, value) = (key.trim(), value.trim());
-        if section == "theme" && key == "mode" {
+        if key == "mode" {
             match unquote(value).and_then(ThemeMode::parse) {
                 Some(m) => out.config.mode = m,
                 None => out.ignored += 1,
@@ -330,19 +328,22 @@ mod tests {
     }
 
     #[test]
-    fn reads_theme_section_mode() {
-        assert_eq!(parse("[theme]\nmode = \"dark\"").config.mode, ThemeMode::Dark);
-        assert_eq!(parse("[theme]\nmode = 'light'").config.mode, ThemeMode::Light);
-        assert_eq!(parse("[theme]\nmode = \"system\"").config.mode, ThemeMode::System);
+    fn reads_mode_key_plain_and_legacy_section() {
+        assert_eq!(parse("mode = \"dark\"").config.mode, ThemeMode::Dark);
+        assert_eq!(parse("mode = 'light'").config.mode, ThemeMode::Light);
+        assert_eq!(parse("mode = \"system\"").config.mode, ThemeMode::System);
+        // 历史格式段标题行跳过，不产生 ignored
+        let p = parse("[theme]\nmode = \"dark\"");
+        assert_eq!((p.config.mode, p.ignored), (ThemeMode::Dark, 0));
     }
 
     #[test]
     fn ignores_unknown_keys_sections_and_bare_values() {
-        // 裸值不是 TOML 字符串；未知键/段/无等号行均计入 ignored
+        // 裸值不是 TOML 字符串；未知键/无等号行均计入 ignored；段标题行静默跳过
         let p = parse("mode = dark\n[theme]\nfoo = \"x\"\nmode = \"light\"\nbar = 1\n");
         assert_eq!(p.config.mode, ThemeMode::Light);
         assert_eq!(p.ignored, 3, "顶层裸值 mode + foo + bar");
-        assert_eq!(parse("[other]\nmode = \"dark\"\n").ignored, 1);
+        assert_eq!(parse("[other]\nmode = \"dark\"\n").ignored, 0);
     }
 
     #[test]
@@ -379,6 +380,7 @@ mod tests {
     fn config_round_trips_through_toml() {
         for mode in [ThemeMode::System, ThemeMode::Light, ThemeMode::Dark] {
             let text = Config { mode }.to_toml();
+            assert!(!text.contains("[theme]"), "新版配置不再写段标题");
             let p = parse(&text);
             assert_eq!(p.config.mode, mode);
             assert_eq!(p.ignored, 0, "自产配置不得含无法识别条目");

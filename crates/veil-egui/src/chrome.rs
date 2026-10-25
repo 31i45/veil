@@ -94,13 +94,16 @@ pub const MENUS: [MenuDef; 3] = [
     },
 ];
 
-/// 文本宽度估算：CJK 全角按字号、ASCII 按半字号（菜单/状态栏布局无需真实字体度量，
-/// 避免命中依赖上一帧绘制状态）。
+/// chrome 专用近似文本宽度：CJK 全角按字号、ASCII 按半字号。
+/// 只服务菜单栏/弹窗的矩形与命中区，不参与文档排版；文字绘制走 LayoutEngine
+/// 实测光栅，二者允许数像素差异（命中框略宽无碍）。这样命中判定不依赖上一帧绘制状态。
+const ASCII_ADVANCE_RATIO: f32 = 0.52;
+
 fn text_width(text: &str, scale: f32) -> f32 {
     text.chars()
         .map(|c| {
             if c.is_ascii() {
-                BASE_FONT_SIZE * 0.52 * scale
+                BASE_FONT_SIZE * ASCII_ADVANCE_RATIO * scale
             } else {
                 BASE_FONT_SIZE * scale
             }

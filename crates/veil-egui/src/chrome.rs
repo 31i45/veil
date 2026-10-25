@@ -768,13 +768,19 @@ mod tests {
             2000.0,
             0.0,
         );
-        assert_eq!(&frame.pixels[0..4], &theme.chrome_bg, "菜单栏底色");
+        assert_eq!(frame.get(0, 0), theme.chrome_bg, "菜单栏底色");
         let status_y = 200 - STATUS_H as i32;
-        let i = ((status_y + 5) as u32 * 300) as usize * 4;
-        assert_eq!(&frame.pixels[i..i + 4], &theme.chrome_bg, "状态栏底色");
+        assert_eq!(
+            frame.get(0, (status_y + 5) as u32),
+            theme.chrome_bg,
+            "状态栏底色"
+        );
         let p = popup_layout(0, 1.0);
-        let i = ((p.y + p.h / 2.0) as u32 * 300 + (p.x + p.w / 2.0) as u32) as usize * 4;
-        assert_eq!(&frame.pixels[i..i + 4], &theme.popup_bg, "弹窗底色");
+        assert_eq!(
+            frame.get((p.x + p.w / 2.0) as u32, (p.y + p.h / 2.0) as u32),
+            theme.popup_bg,
+            "弹窗底色"
+        );
         assert!(!chrome.labels.is_empty());
         // 缓存复用：同帧重复绘制不增长
         let n = chrome.labels.len();
@@ -815,7 +821,7 @@ mod tests {
             10.0,
             0.0,
         );
-        assert_eq!(&frame.pixels[0..4], &theme.chrome_bg, "深色菜单栏");
+        assert_eq!(frame.get(0, 0), theme.chrome_bg, "深色菜单栏");
         assert_eq!(theme.chrome_bg, [38, 38, 38, 255]);
     }
 
@@ -854,7 +860,6 @@ mod tests {
         );
         let x = (300.0 - SCROLL_W + 2.0) as u32;
         let y = (v.y + 2.0) as u32;
-        let i = (y * 300 + x) as usize * 4;
-        assert_eq!(&frame.pixels[i..i + 4], &theme.thumb);
+        assert_eq!(frame.get(x, y), theme.thumb);
     }
 }

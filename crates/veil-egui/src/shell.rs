@@ -169,6 +169,8 @@ struct App {
     bom: bool,
     window: Option<Arc<Window>>,
     surface: Option<Surface<Arc<Window>, Arc<Window>>>,
+    /// 跨帧复用的像素缓冲（P2）：尺寸不变时零分配，绘制结束整块拷入 surface。
+    frame: Option<Frame>,
     editor: Editor,
     engine: LayoutEngine,
     /// 块几何索引（P1a）：全量块枚举的唯一缓存来源，替代每次读取时的 `blocks()`。
@@ -273,6 +275,7 @@ impl App {
             bom: doc.bom,
             window: None,
             surface: None,
+            frame: None,
             editor: Editor::new(&doc.text),
             engine: LayoutEngine::new(),
             index: BlockIndex::default(),
@@ -1631,7 +1634,9 @@ impl App {
             self.ensure_tables_visible();
             self.recompute_geometry();
         }
-        let mut frame = Frame::new(w, h, self.theme.bg);
+        // 帧缓冲跨帧复用：仅尺寸变化才重新分配（每帧只做一次底色填充）
+        let mut frame = self.frame.take().unwrap_or_else(|| Frame::new(w, h, self.theme.bg));
+        frame.reset(w, h, self.theme.bg);
         let scale = self.scale;
         let theme = self.theme;
         let vp = self.viewport();
@@ -1772,15 +1777,14 @@ impl App {
             doc_h,
             self.scroll_y,
         );
-        let buf = frame.into_u32();
         if let Some(surface) = &mut self.surface {
-            let mut target = match surface.buffer_mut() {
-                Ok(b) => b,
-                Err(_) => return, // 瞬时取缓冲失败：丢帧不崩溃，下一帧自愈
-            };
-            target.copy_from_slice(&buf);
-            let _ = target.present();
+            // 取缓冲失败属瞬时状态：丢帧不崩溃，下一帧自愈
+            if let Ok(mut target) = surface.buffer_mut() {
+                target.copy_from_slice(&frame.pixels);
+                let _ = target.present();
+            }
         }
+        self.frame = Some(frame); // 归还缓冲供下一帧复用
     }
 
     /// 绘制表格网格：表头底色 → 单元格文本 → 网格线（先底后字，线压边）。

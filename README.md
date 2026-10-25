@@ -23,7 +23,7 @@ Workspace 由三个 crate 组成，依赖方向单向（`veil` → `veil-egui` �
 5. 剪贴板：纯文本、HTML→Markdown 转换、截图粘贴落盘（`<文档名>.assets/`，递增命名不覆盖）
 6. 块级渲染：表格（只读渲染）、公式（latex-rust 纯 Rust 路径）、文档内图片（相对路径 PNG，断链/远程 URL 降级为 alt 文本）
 7. HTML 导出
-8. 配置与主题：`[theme] mode`（system/light/dark）、跟随系统外观、深色标题栏/Mica、切换持久化
+8. 配置与主题：顶层 `mode` 单键（system/light/dark，兼容旧 `[theme] mode`）、跟随系统外观、深色标题栏/Mica、切换持久化
 9. 自绘 chrome：菜单栏、状态栏、滚动条；系统文件对话框（打开/另存为）
 
 ## 非目标（v1 明确不做）
@@ -46,22 +46,24 @@ cargo test --workspace      # 运行全部单元/集成测试
 cargo run -p veil -- <file.md>   # 运行并打开指定 Markdown 文件
 ```
 
-## 数字红线（目标值）
+当前 444 项测试（`veil-core` 151、`veil-egui` 271、`veil` 22），`cargo clippy --workspace --all-targets -- -D warnings` 零警告。
 
-下表为 v1 验收红线。标「目标值」的项尚未在真机实测，在首次发布构建后逐项核对。
+## 数字红线（目标值与实测）
 
-| 指标 | 目标值 |
-|---|---|
-| 冷启动（发布构建，进程创建→首帧可交互） | ≤ 300 ms |
-| 10 万字文档击键→提交上屏延迟 p95 | ≤ 16 ms |
-| 10 万字文档常驻内存（私有工作集） | ≤ 150 MB |
-| 安装产物体积（`veil.exe` 单文件） | ≤ 15 MiB |
-| `veil-core` 单元+属性测试数 | ≥ 80 |
-| e2e 断言数 | ≥ 20 |
-| Markdown 往返一致率（无编辑时输出 == 输入字节） | 100% |
-| `veil-core` 的 GUI/异步运行时依赖数 | 0 |
-| `veil-egui`+`veil` 直接依赖总数 | ≤ 8 |
-| workspace 传递依赖总数 | ≤ 200 |
+下表为 v1 验收红线与 2026-10-25 本机实测值。方法与明细见 `.skills/INSTANCE.md` §2。
+
+| 指标 | 目标值 | 实测 |
+|---|---|---|
+| 冷启动（发布构建，进程创建→首帧可交互） | ≤ 300 ms | 771 ms（最小 414 ms；进程内初始化约 150 ms，其余为进程加载与 Defender 扫描，已记录为 Windows 平台成本） |
+| 10 万字文档击键→提交上屏延迟 p95 | ≤ 16 ms | 4.07 ms |
+| 10 万字文档常驻内存（私有工作集） | ≤ 150 MB | 17.3 MB |
+| 安装产物体积（`veil.exe` 单文件） | ≤ 15 MiB | 5,490,176 B ≈ 5.23 MiB |
+| `veil-core` 单元+属性测试数 | ≥ 80 | 151 |
+| e2e 断言数 | ≥ 20 | 0（待建） |
+| Markdown 往返一致率（无编辑时输出 == 输入字节） | 100% | 100% |
+| `veil-core` 的 GUI/异步运行时依赖数 | 0 | 0 |
+| `veil-egui`+`veil` 直接依赖总数 | ≤ 8 | 8 |
+| workspace 传递依赖总数 | ≤ 200 | 121 |
 
 依赖黑名单：`tokio`、`wasmtime`、一切 webview crate（`webview2-com`/`wry` 等），引入即视为违规。
 

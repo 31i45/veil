@@ -108,6 +108,33 @@ fn undo_redo_restores_text() {
 }
 
 #[test]
+fn consecutive_typing_merges_into_one_undo_step() {
+    // 编辑器惯例：连续单字符输入合并为一步撤销，静默窗 500ms 内
+    let mut s = Session::open("x");
+    for (i, ch) in "abc".chars().enumerate() {
+        s.apply(insert(1 + i, &ch.to_string())).unwrap();
+    }
+    assert_eq!(s.serialize(), "xabc");
+    s.undo().unwrap();
+    assert_eq!(s.serialize(), "x", "连续单字符输入应合并为一步");
+    assert!(s.undo().is_none());
+}
+
+#[test]
+fn newline_breaks_undo_group() {
+    let mut s = Session::open("");
+    s.apply(insert(0, "a")).unwrap();
+    s.apply(insert(1, "\n")).unwrap();
+    s.apply(insert(2, "b")).unwrap();
+    s.undo().unwrap();
+    assert_eq!(s.serialize(), "a\n");
+    s.undo().unwrap();
+    assert_eq!(s.serialize(), "a");
+    s.undo().unwrap();
+    assert_eq!(s.serialize(), "");
+}
+
+#[test]
 fn new_edit_invalidates_redo() {
     let mut s = Session::open("a");
     s.apply(insert(1, "b")).unwrap();

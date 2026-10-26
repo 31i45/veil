@@ -7,8 +7,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use crate::frame::Frame;
-use crate::layout::{LayoutEngine, BASE_FONT_SIZE};
+use crate::view::{Frame, LayoutEngine, BASE_FONT_SIZE};
 use crate::theme::{Theme, ThemeMode};
 
 /// chrome 基准高度/宽度（乘 DPI scale 使用）。

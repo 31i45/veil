@@ -10,7 +10,7 @@
 use cosmic_text::{Align, Attrs, Buffer, Metrics, Shaping, Weight, Wrap};
 use veil_core::{CellAlign, Table, TableCell};
 
-use crate::layout::{LayoutEngine, BASE_FONT_SIZE, BASE_LINE_HEIGHT};
+use super::layout::{LayoutEngine, BASE_FONT_SIZE, BASE_LINE_HEIGHT};
 
 /// 单元格水平/垂直内边距（基准字号下），随 DPI 缩放。
 const CELL_PAD_X: f32 = 8.0;

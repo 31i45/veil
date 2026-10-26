@@ -4,7 +4,7 @@
 
 use veil_core::{BlockId, BlockKind, Range};
 
-use crate::shell::{App, MARGIN, PARA_GAP};
+use crate::app::{App, MARGIN, PARA_GAP};
 use crate::view::BASE_LINE_HEIGHT;
 
 /// 单块几何缓存：块清单一次枚举后复用，避免每次击键反复全量枚举（P1a）。

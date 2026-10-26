@@ -12,7 +12,7 @@ use cosmic_text::{
 };
 use veil_core::{BlockKind, InlineNode, Range};
 
-use crate::style::{style_spans, Style};
+use super::style::{style_spans, Style};
 
 /// 行内资源键：占位图与位图缓存之间的寻址键（切片 8/13 共用占位机制）。
 #[derive(Clone, PartialEq, Eq, Debug)]

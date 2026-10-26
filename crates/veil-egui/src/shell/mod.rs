@@ -1,7 +1,6 @@
 //! winit + softbuffer 薄壳：事件翻译、脏块失效、帧合成与呈现。
 //! 策略全在 editor/input；本层只做接线与像素搬运（INSTANCE §7 接缝）。
 
-use std::collections::{HashMap, HashSet};
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -19,22 +18,19 @@ use crate::autosave::Autosave;
 use crate::chrome::{self, Chrome, Viewport};
 use crate::docio::encode;
 use crate::editor::Editor;
-use crate::frame::Frame;
 use crate::image::{AssetStore, ImageData, ImageLoader};
 use crate::input::Mods;
-use crate::layout::{node_active, BlockLayout, LayoutEngine, BASE_LINE_HEIGHT};
-use crate::math::{MathImage, MathRenderer};
-use crate::table::TableLayout;
+use crate::math::MathRenderer;
+use crate::view::{node_active, Cache, Frame, LayoutEngine, BASE_LINE_HEIGHT};
 use crate::theme::{
     self, Config, ConfigStore, SystemTheme, Theme, ThemeEnv, ThemeMode, WindowEffects,
 };
 
-mod document;
 mod geometry;
 mod interaction;
 mod paint;
 
-use geometry::BlockIndex;
+use crate::document::block_index::BlockIndex;
 
 /// 外部文件监听轮询间隔（切片 16）：事件在实现侧入队，主线程按此节奏非阻塞取走。
 /// 仅在有路径时设置唤醒，草稿空转不产生周期性唤醒。
@@ -42,8 +38,8 @@ const WATCH_POLL: Duration = Duration::from_millis(300);
 /// 系统外观轮询间隔（切片 17）：仅在「跟随系统」时启用；注册表读取开销可忽略。
 const THEME_POLL: Duration = Duration::from_secs(1);
 
-const MARGIN: f32 = 16.0;
-const PARA_GAP: f32 = 10.0;
+pub(crate) const MARGIN: f32 = 16.0;
+pub(crate) const PARA_GAP: f32 = 10.0;
 
 /// 系统剪贴板抽象：实现由产品层（veil）注入，本层不依赖具体剪贴板库（INSTANCE §6）。
 pub trait Clipboard {
@@ -136,79 +132,69 @@ pub fn run(
         .map_err(|e| format!("事件循环错误: {e}"))
 }
 
-struct App {
+/// 应用编排器：三域（document 真值 / view 派生 / 交互事件）的装配点。
+/// 字段 pub(crate) 供各域文件的 `impl App` 直接读写——同一 crate 内的模块即协作者，
+/// 行为约束由各领域方法的文档与测试承载，不经访问器转发。
+pub(crate) struct App {
     /// 关联文件路径（None = 草稿）；标题由此派生。
-    path: Option<PathBuf>,
+    pub(crate) path: Option<PathBuf>,
     /// 读入时的 BOM 标记，保存时还原。
-    bom: bool,
-    window: Option<Arc<Window>>,
-    surface: Option<Surface<Arc<Window>, Arc<Window>>>,
+    pub(crate) bom: bool,
+    pub(crate) window: Option<Arc<Window>>,
+    pub(crate) surface: Option<Surface<Arc<Window>, Arc<Window>>>,
     /// 跨帧复用的像素缓冲（P2）：尺寸不变时零分配，绘制结束整块拷入 surface。
-    frame: Option<Frame>,
-    editor: Editor,
-    engine: LayoutEngine,
+    pub(crate) frame: Option<Frame>,
+    pub(crate) editor: Editor,
+    pub(crate) engine: LayoutEngine,
     /// 块几何索引（P1a）：全量块枚举的唯一缓存来源，替代每次读取时的 `blocks()`。
-    index: BlockIndex,
-    /// 块布局与光栅缓存：干净块不重排（脏块由 Events.dirty_blocks 驱动失效）。
-    layouts: HashMap<BlockId, BlockLayout>,
-    rasters: HashMap<BlockId, (Vec<u8>, u32, u32)>,
-    scroll_y: f32,
-    mouse: PhysicalPosition<f64>,
-    mods: Mods,
-    scale: f32,
+    pub(crate) index: BlockIndex,
+    /// 派生缓存（布局/光栅/公式/图片/表格）与统一失效入口。
+    pub(crate) cache: Cache,
+    pub(crate) scroll_y: f32,
+    pub(crate) mouse: PhysicalPosition<f64>,
+    pub(crate) mods: Mods,
+    pub(crate) scale: f32,
     /// 垂直移动的目标列（goal column），上下移动时保持。
-    goal_x: Option<f32>,
+    pub(crate) goal_x: Option<f32>,
     /// 左键按住中：CursorMoved 转化为拖选（扩选）。
-    dragging: bool,
-    clipboard: Box<dyn Clipboard>,
-    store: Box<dyn FileStore>,
-    math: Box<dyn MathRenderer>,
-    exporter: Box<dyn Exporter>,
-    /// 数学块渲染图缓存 / 失败记忆：脏块驱动失效（同 layouts/rasters）。
-    math_imgs: HashMap<BlockId, MathImage>,
-    math_failed: HashSet<BlockId>,
-    /// 行内公式图缓存 / 失败记忆（切片 8）：按 tex 内容寻址，布局失效即重取，
-    /// 无需随编辑显式失效（旧 tex 残留仅费少量内存，DPI 变化时随 scale 清）。
-    inline_math: HashMap<String, MathImage>,
-    inline_failed: HashSet<String>,
-    /// 文档内图片缓存（切片 13）：键 = 解析后的路径，值为自然尺寸位图（绘制时最近邻缩放）；
-    /// 失败记忆不每帧重试，打开新文档/拖放时清空。
-    images: Box<dyn ImageLoader>,
-    inline_images: HashMap<String, ImageData>,
-    image_failed: HashSet<String>,
+    pub(crate) dragging: bool,
+    pub(crate) clipboard: Box<dyn Clipboard>,
+    pub(crate) store: Box<dyn FileStore>,
+    pub(crate) math: Box<dyn MathRenderer>,
+    pub(crate) exporter: Box<dyn Exporter>,
+    /// 文档内图片加载器（切片 13）：加载结果入 cache.inline_images。
+    pub(crate) images: Box<dyn ImageLoader>,
     /// 粘贴图片落盘（切片 14）：产品层实现，视图只插入其返回的相对 URL。
-    assets: Box<dyn AssetStore>,
-    /// 表格网格缓存（切片 9）：光标离开表格时按需排版；脏块/宽度/DPI 变化即失效。
-    tables: HashMap<BlockId, TableLayout>,
+    pub(crate) assets: Box<dyn AssetStore>,
     /// 磁盘基线：上次读取/成功保存的字节。保存前与之对比即「内容哈希对比」的字节等价物。
-    baseline: Vec<u8>,
+    pub(crate) baseline: Vec<u8>,
     /// 上次内容编辑或自动保存尝试的时刻；None = 无待自动保存内容。
-    last_activity: Option<Instant>,
+    pub(crate) last_activity: Option<Instant>,
     /// 自动保存曾撞上外部修改：挂起自动保存，等待用户显式保存（绝不静默覆盖）。
-    autosave_hold: bool,
+    pub(crate) autosave_hold: bool,
     /// 曾发生外部修改冲突且已写备份副本：标题提示，直至下次无冲突保存。
-    conflict: bool,
+    pub(crate) conflict: bool,
     /// 已备份的外部版本字节：同一版本不重复写冲突副本（自动冲突后手工保存走此路径）。
-    external_saved: Option<Vec<u8>>,
-    autosave: Autosave,
+    pub(crate) external_saved: Option<Vec<u8>>,
+    pub(crate) autosave: Autosave,
     /// 自绘 chrome（切片 15）：菜单/状态栏/滚动条交互态与标签缓存。
-    chrome: Chrome,
-    dialogs: Box<dyn FileDialog>,
+    pub(crate) chrome: Chrome,
+    pub(crate) dialogs: Box<dyn FileDialog>,
     /// 外部文件监听（切片 16）：实现由产品层注入（notify），本层只消费事件。
-    watcher: Box<dyn FileWatcher>,
+    pub(crate) watcher: Box<dyn FileWatcher>,
     /// 监听检测到但尚未备份的外部版本：同一版本只提示一次；保存覆盖前才写副本。
-    external_changed: Option<Vec<u8>>,
+    pub(crate) external_changed: Option<Vec<u8>>,
     /// 磁盘文件被删除/不可读的提示去重标记（恢复可读后清除）。
-    external_missing: bool,
+    pub(crate) external_missing: bool,
     /// 主题调色板（切片 17）：全部绘制颜色唯一来源。
-    theme: Theme,
+    pub(crate) theme: Theme,
     /// 上次读取到的系统外观（跟随系统模式下用于判定是否切换）。
-    system_dark: bool,
+    pub(crate) system_dark: bool,
     /// 上次系统外观轮询时刻（跟随系统模式限频）。
-    last_theme_check: Option<Instant>,
-    config: Box<dyn ConfigStore>,
-    system: Box<dyn SystemTheme>,
-    effects: Box<dyn WindowEffects>,
+    pub(crate) last_theme_check: Option<Instant>,
+    pub(crate) config: Box<dyn ConfigStore>,
+    pub(crate) system: Box<dyn SystemTheme>,
+    pub(crate) effects: Box<dyn WindowEffects>,
 }
 
 impl App {
@@ -253,8 +239,7 @@ impl App {
             editor: Editor::new(&doc.text),
             engine: LayoutEngine::new(),
             index: BlockIndex::default(),
-            layouts: HashMap::new(),
-            rasters: HashMap::new(),
+            cache: Cache::default(),
             scroll_y: 0.0,
             mouse: PhysicalPosition::new(0.0, 0.0),
             mods: Mods::default(),
@@ -265,15 +250,8 @@ impl App {
             store,
             math,
             exporter,
-            math_imgs: HashMap::new(),
-            math_failed: HashSet::new(),
-            inline_math: HashMap::new(),
-            inline_failed: HashSet::new(),
             images,
-            inline_images: HashMap::new(),
-            image_failed: HashSet::new(),
             assets,
-            tables: HashMap::new(),
             // 入参文本即磁盘内容（产品层解码所得）：编码还原后与源字节逐字节一致
             baseline: encode(&doc.text, doc.bom),
             last_activity: None,
@@ -325,10 +303,7 @@ impl App {
     /// 主题切换后刷新按颜色生成的全部缓存：文本/表格/公式光栅须按新前景色重做，
     /// 布局几何与图片位图不受影响。窗口外观同步更新。
     fn refresh_theme_visuals(&mut self) {
-        self.rasters.clear();
-        self.tables.clear();
-        self.math_imgs.clear();
-        self.inline_math.clear();
+        self.cache.clear_themed();
         self.chrome.clear_label_cache();
         // 清缓存后可能按新调色板重排/重渲：只重做可见块，几何按新高度重算
         self.refresh_index();
@@ -341,7 +316,7 @@ impl App {
     }
 
     /// 切换主题模式并持久化。切到「跟随系统」时立即重读一次系统外观，避免沿用陈旧值。
-    fn set_theme_mode(&mut self, mode: ThemeMode) {
+    pub(crate) fn set_theme_mode(&mut self, mode: ThemeMode) {
         if mode == ThemeMode::System {
             if let Some(dark) = self.system.is_dark() {
                 self.system_dark = dark;
@@ -390,7 +365,7 @@ impl App {
         }
     }
 
-    fn win_size(&self) -> (u32, u32) {
+    pub(crate) fn win_size(&self) -> (u32, u32) {
         self.window
             .as_ref()
             .map(|w| {
@@ -400,18 +375,18 @@ impl App {
             .unwrap_or((800, 600))
     }
 
-    fn viewport(&self) -> Viewport {
+    pub(crate) fn viewport(&self) -> Viewport {
         let (w, h) = self.win_size();
         chrome::viewport(w, h, self.scale)
     }
 
-    fn request_redraw(&self) {
+    pub(crate) fn request_redraw(&self) {
         if let Some(w) = &self.window {
             w.request_redraw();
         }
     }
 
-    fn set_ime_area(&mut self) {
+    pub(crate) fn set_ime_area(&mut self) {
         let Some(w) = self.window.clone() else {
             return; // 无窗口（测试）：不触发按需排版
         };
@@ -467,9 +442,8 @@ impl ApplicationHandler for App {
                 ) {
                     let _ = s.resize(w, h);
                 }
-                self.layouts.clear(); // 宽度变化：全量重排（换行依赖宽度）
-                self.rasters.clear();
-                self.tables.clear(); // 列宽/折行依赖版心宽
+                // 宽度变化：全量重排（换行/列宽依赖版心宽）
+                self.cache.clear_resize();
                 // 清缓存后宽度/块高都可能变化：只重排可见块并立即重建几何
                 self.refresh_index();
                 self.ensure_layouts_visible();
@@ -481,14 +455,9 @@ impl ApplicationHandler for App {
                 if let Some(w) = &self.window {
                     self.scale = w.scale_factor() as f32;
                 }
-                self.layouts.clear();
-                self.rasters.clear();
-                self.math_imgs.clear(); // DPI 变化：按新 scale 重渲
-                self.math_failed.clear();
-                self.inline_math.clear();
-                self.inline_failed.clear();
-                self.tables.clear(); // 网格尺寸随 DPI 变化
-                self.chrome.clear_label_cache(); // chrome 标签按旧 scale 光栅化
+                // DPI 变化：按新 scale 重排/重渲；chrome 标签按旧 scale 光栅化，一并作废
+                self.cache.clear_scale();
+                self.chrome.clear_label_cache();
                 // scale 变了，几何累计均按新 scale：索引重建、可见块按新 DPI 重排
                 self.refresh_index();
                 self.ensure_layouts_visible();

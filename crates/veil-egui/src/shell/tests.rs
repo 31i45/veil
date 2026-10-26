@@ -1,13 +1,14 @@
 //! shell 行为测试：以 headless App 驱动真实编辑/排版/绘制路径。
 
-use super::geometry::BlockGeom;
+use crate::document::block_index::BlockGeom;
 use super::paint::{fit_size, local_image_path};
 use super::*;
 use crate::chrome::{ExternalState, MenuAction};
 use crate::editor::Intent;
-use crate::layout::InlineAsset;
+use crate::view::InlineAsset;
 use crate::math::{MathImage, MathRenderer};
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 use veil_core::Range;
@@ -349,7 +350,7 @@ fn math_block_shows_source_when_caret_inside() {
     assert_eq!(calls.borrow().len(), 0); // 源码态不渲染
     let (id, _, range) = a.editor.session().blocks()[1];
     assert!(!a.math_shows_image(id, &range));
-    let h = a.layouts.get(&id).unwrap().height;
+    let h = a.cache.layouts.get(&id).unwrap().height;
     assert_eq!(a.block_height(geom(&a, id)), h); // 文本布局高
 }
 
@@ -361,9 +362,9 @@ fn math_render_failure_degrades_to_source() {
     a.ensure_math(); // 失败记忆：不每帧重试
     assert_eq!(calls.borrow().len(), 1);
     let (id, _, range) = a.editor.session().blocks()[1];
-    assert!(a.math_failed.contains(&id));
+    assert!(a.cache.math_failed.contains(&id));
     assert!(!a.math_shows_image(id, &range));
-    let h = a.layouts.get(&id).unwrap().height;
+    let h = a.cache.layouts.get(&id).unwrap().height;
     assert_eq!(a.block_height(geom(&a, id)), h); // 降级为源码显示
 }
 
@@ -373,9 +374,9 @@ fn dirty_edit_clears_math_cache() {
     a.ensure_layouts_all();
     a.ensure_math();
     let (id, _, _) = a.editor.session().blocks()[1];
-    assert!(a.math_imgs.contains_key(&id));
+    assert!(a.cache.math_imgs.contains_key(&id));
     a.after_edit(vec![id]); // 块脏 → 图缓存失效，下帧重渲
-    assert!(!a.math_imgs.contains_key(&id));
+    assert!(!a.cache.math_imgs.contains_key(&id));
 }
 
 // ---- 行内公式（切片 8）：非激活 Math 节点出图、激活显源码、tex 内容寻址缓存 ----
@@ -386,15 +387,15 @@ fn inline_math_renders_image_when_caret_outside() {
     let (mut a, calls) = app_math("a $x$ b", false);
     a.ensure_layouts_all();
     let (id, _, _) = a.editor.session().blocks()[0];
-    assert_eq!(a.layouts[&id].imgs.len(), 1);
-    assert_eq!(a.layouts[&id].imgs[0].width, 8, "FakeMath 行内分支（8x4）");
+    assert_eq!(a.cache.layouts[&id].imgs.len(), 1);
+    assert_eq!(a.cache.layouts[&id].imgs[0].width, 8, "FakeMath 行内分支（8x4）");
     assert_eq!(
         calls.borrow().as_slice(),
         &[("x".to_string(), false)],
         "display=false"
     );
     // 内容寻址缓存：重排（如 Resized 清布局）不重渲
-    a.layouts.remove(&id);
+    a.cache.layouts.remove(&id);
     a.ensure_layouts_all();
     assert_eq!(calls.borrow().len(), 1);
 }
@@ -405,8 +406,8 @@ fn inline_math_shows_source_when_caret_inside() {
     assert!(a.editor.set_caret(3)); // 「x」处，节点内
     a.ensure_layouts_all();
     let (id, _, _) = a.editor.session().blocks()[0];
-    assert!(a.layouts[&id].imgs.is_empty());
-    assert_eq!(a.layouts[&id].layout_text(), "a $x$ b");
+    assert!(a.cache.layouts[&id].imgs.is_empty());
+    assert_eq!(a.cache.layouts[&id].layout_text(), "a $x$ b");
     assert!(calls.borrow().is_empty(), "源码态不渲染");
 }
 
@@ -415,18 +416,18 @@ fn inline_math_toggles_on_caret_enter_leave() {
     let (mut a, calls) = app_math("a $x$ b", false);
     a.ensure_layouts_all();
     let (id, _, _) = a.editor.session().blocks()[0];
-    assert_eq!(a.layouts[&id].imgs.len(), 1);
+    assert_eq!(a.cache.layouts[&id].imgs.len(), 1);
     // 进入节点：invalidate_reveal 失效 → 重排显源码
     let old = a.editor.caret();
     assert!(a.editor.set_caret(3));
     a.invalidate_reveal(old, 3);
     a.ensure_layouts_all();
-    assert!(a.layouts[&id].imgs.is_empty());
+    assert!(a.cache.layouts[&id].imgs.is_empty());
     // 离开节点：恢复出图，缓存命中不重渲
     assert!(a.editor.set_caret(0));
     a.invalidate_reveal(3, 0);
     a.ensure_layouts_all();
-    assert_eq!(a.layouts[&id].imgs.len(), 1);
+    assert_eq!(a.cache.layouts[&id].imgs.len(), 1);
     assert_eq!(calls.borrow().len(), 1);
 }
 
@@ -435,8 +436,8 @@ fn inline_math_failure_degrades_and_memoizes() {
     let (mut a, calls) = app_math("a $x$ b", true);
     a.ensure_layouts_all();
     let (id, _, _) = a.editor.session().blocks()[0];
-    assert!(a.layouts[&id].imgs.is_empty(), "失败降级：占位不入排版");
-    a.layouts.remove(&id);
+    assert!(a.cache.layouts[&id].imgs.is_empty(), "失败降级：占位不入排版");
+    a.cache.layouts.remove(&id);
     a.ensure_layouts_all(); // 失败记忆：不每帧重试
     assert_eq!(calls.borrow().len(), 1);
 }
@@ -459,7 +460,7 @@ fn edit_math_source_rerenders_new_tex() {
     a.invalidate_reveal(old, 0);
     a.ensure_layouts_all();
     let (id, _, _) = a.editor.session().blocks()[0];
-    assert_eq!(a.layouts[&id].imgs.len(), 1);
+    assert_eq!(a.cache.layouts[&id].imgs.len(), 1);
     assert_eq!(
         calls.borrow().as_slice(),
         &[("x".to_string(), false), ("yx".to_string(), false)]
@@ -556,7 +557,7 @@ fn image_loads_relative_to_document_and_caches() {
     );
     a.ensure_layouts_all();
     let (id, _, _) = a.editor.session().blocks()[0];
-    let l = &a.layouts[&id];
+    let l = &a.cache.layouts[&id];
     assert_eq!(l.imgs.len(), 1);
     let InlineAsset::Image(key) = &l.imgs[0].key else {
         panic!("应为图片键")
@@ -569,7 +570,7 @@ fn image_loads_relative_to_document_and_caches() {
     );
     assert_eq!(calls.borrow().as_slice(), &[PathBuf::from("dir/img/p.png")]);
     // 缓存命中：重排不重载
-    a.layouts.remove(&id);
+    a.cache.layouts.remove(&id);
     a.ensure_layouts_all();
     assert_eq!(calls.borrow().len(), 1);
 }
@@ -586,7 +587,7 @@ fn image_wider_than_content_scales_proportionally() {
     let (id, _, _) = a.editor.session().blocks()[0];
     // 默认版心宽 = 800 - 2*16 - 滚动条 12 = 756；1600×900 等比缩放
     assert_eq!(
-        (a.layouts[&id].imgs[0].width, a.layouts[&id].imgs[0].height),
+        (a.cache.layouts[&id].imgs[0].width, a.cache.layouts[&id].imgs[0].height),
         (756, 425)
     );
 }
@@ -596,10 +597,10 @@ fn image_failure_degrades_to_alt_and_memoizes() {
     let (mut a, calls) = app_with_images("a ![alt](img/p.png) b", Some("dir/doc.md"), &[]);
     a.ensure_layouts_all();
     let (id, _, _) = a.editor.session().blocks()[0];
-    assert!(a.layouts[&id].imgs.is_empty());
-    assert_eq!(a.layouts[&id].layout_text(), "a alt b");
+    assert!(a.cache.layouts[&id].imgs.is_empty());
+    assert_eq!(a.cache.layouts[&id].layout_text(), "a alt b");
     assert_eq!(calls.borrow().len(), 1);
-    a.layouts.remove(&id);
+    a.cache.layouts.remove(&id);
     a.ensure_layouts_all(); // 失败记忆：不每帧重试
     assert_eq!(calls.borrow().len(), 1);
 }
@@ -611,13 +612,13 @@ fn remote_or_draft_image_is_never_loaded() {
     a.ensure_layouts_all();
     assert!(calls.borrow().is_empty());
     let (id, _, _) = a.editor.session().blocks()[0];
-    assert_eq!(a.layouts[&id].layout_text(), "x a");
+    assert_eq!(a.cache.layouts[&id].layout_text(), "x a");
 
     let (mut b, calls2) = app_with_images("x ![a](p.png)", None, &[]);
     b.ensure_layouts_all();
     assert!(calls2.borrow().is_empty(), "草稿相对路径无解析基准");
     let (id, _, _) = b.editor.session().blocks()[0];
-    assert_eq!(b.layouts[&id].layout_text(), "x a");
+    assert_eq!(b.cache.layouts[&id].layout_text(), "x a");
 }
 
 #[test]
@@ -630,8 +631,8 @@ fn image_shows_source_when_caret_inside() {
     assert!(a.editor.set_caret(5)); // alt 内
     a.ensure_layouts_all();
     let (id, _, _) = a.editor.session().blocks()[0];
-    assert!(a.layouts[&id].imgs.is_empty());
-    assert_eq!(a.layouts[&id].layout_text(), "a ![alt](img/p.png) b");
+    assert!(a.cache.layouts[&id].imgs.is_empty());
+    assert_eq!(a.cache.layouts[&id].layout_text(), "a ![alt](img/p.png) b");
     assert!(calls.borrow().is_empty(), "源码态不加载");
 }
 
@@ -763,7 +764,7 @@ fn table_renders_grid_when_caret_outside() {
     let (id, kind, range) = a.editor.session().blocks()[1];
     assert_eq!(kind, BlockKind::Table);
     assert!(a.table_shows_grid(id, &range));
-    assert_eq!(a.block_height(geom(&a, id)), a.tables[&id].height);
+    assert_eq!(a.block_height(geom(&a, id)), a.cache.tables[&id].height);
 }
 
 #[test]
@@ -773,9 +774,9 @@ fn table_shows_source_when_caret_inside() {
     a.ensure_layouts_all();
     a.ensure_tables();
     let (id, _, range) = a.editor.session().blocks()[1];
-    assert!(!a.tables.contains_key(&id), "源码态不排版网格");
+    assert!(!a.cache.tables.contains_key(&id), "源码态不排版网格");
     assert!(!a.table_shows_grid(id, &range));
-    assert_eq!(a.block_height(geom(&a, id)), a.layouts[&id].height);
+    assert_eq!(a.block_height(geom(&a, id)), a.cache.layouts[&id].height);
 }
 
 #[test]
@@ -785,7 +786,7 @@ fn table_grid_hit_maps_to_cell_content_start() {
     a.ensure_tables();
     let (id, kind, range) = a.editor.session().blocks()[1];
     let want = a.editor.session().table(id).unwrap().rows[0][1].range.start; // 表体「d」
-    let t = a.tables.get(&id).unwrap();
+    let t = a.cache.tables.get(&id).unwrap();
     let cell = &t.cells[3]; // 第 2 行第 2 列
     let x = cell.x + cell.w / 2.0;
     let y = t.rows[1].top + t.rows[1].height / 2.0;
@@ -798,19 +799,19 @@ fn dirty_edit_invalidates_table_grid() {
     a.ensure_layouts_all();
     a.ensure_tables();
     let (id, _, _) = a.editor.session().blocks()[1];
-    let old_w = a.tables[&id].width;
+    let old_w = a.cache.tables[&id].width;
     // 表头「a」变宽（xxxxa）→ 块脏；光标仍在表内故不重建网格
     assert!(a.editor.set_caret(5));
     let dirty = a.editor.apply(Intent::InsertText("xxxx".into())).unwrap();
     assert_eq!(dirty.len(), 1);
     a.after_edit(dirty);
     let id = a.editor.session().blocks()[1].0;
-    assert!(!a.tables.contains_key(&id), "表格光标内 → 脏后不建网格");
+    assert!(!a.cache.tables.contains_key(&id), "表格光标内 → 脏后不建网格");
     // 光标离开表格 → 按新内容重建（列宽变大）
     assert!(a.editor.set_caret(0));
     a.ensure_tables();
-    assert!(a.tables.contains_key(&id));
-    assert!(a.tables[&id].width > old_w, "内容变宽 → 网格重建");
+    assert!(a.cache.tables.contains_key(&id));
+    assert!(a.cache.tables[&id].width > old_w, "内容变宽 → 网格重建");
 }
 
 // ---- 列表 / 引用 / 分隔线 Reveal（切片 12）：块级重排与块高 ----
@@ -828,18 +829,18 @@ fn list_bullet_toggles_on_caret_enter_leave() {
             depth: 0
         }
     );
-    assert_eq!(a.layouts[&id].layout_text(), "• a");
+    assert_eq!(a.cache.layouts[&id].layout_text(), "• a");
     // 进入块：失效 → 重排显源码
     assert!(a.editor.set_caret(4));
     a.invalidate_reveal(0, 4);
     a.ensure_layouts_all();
-    assert_eq!(a.layouts[&id].layout_text(), "- a");
+    assert_eq!(a.cache.layouts[&id].layout_text(), "- a");
     // 离开块：恢复符号
     assert!(a.editor.set_caret(0));
     a.invalidate_reveal(4, 0);
     a.ensure_layouts_all();
-    assert_eq!(a.layouts[&id].layout_text(), "• a");
-    assert_eq!(a.block_height(geom(&a, id)), a.layouts[&id].height);
+    assert_eq!(a.cache.layouts[&id].layout_text(), "• a");
+    assert_eq!(a.block_height(geom(&a, id)), a.cache.layouts[&id].height);
 }
 
 #[test]
@@ -848,16 +849,16 @@ fn blockquote_line_reveal_reflows_only_across_lines() {
     let (mut a, _) = app_math("p\n\n> a\n> b\n", false);
     a.ensure_layouts_all();
     let (id, _, _) = a.editor.session().blocks()[1];
-    assert_eq!(a.layouts[&id].layout_text(), "  a\n  b");
+    assert_eq!(a.cache.layouts[&id].layout_text(), "  a\n  b");
     // 块内跨行移动（0 → 9，行 2 内容）：逐行激活变化 → 重排
     assert!(a.editor.set_caret(9));
     a.invalidate_reveal(0, 9);
     a.ensure_layouts_all();
-    assert_eq!(a.layouts[&id].layout_text(), "  a\n> b");
+    assert_eq!(a.cache.layouts[&id].layout_text(), "  a\n> b");
     // 同一行内移动（9 → 10）：激活行不变 → 布局缓存保留（不重排）
     assert!(a.editor.set_caret(10));
     a.invalidate_reveal(9, 10);
-    assert!(a.layouts.contains_key(&id), "行内移动不得失效引用块布局");
+    assert!(a.cache.layouts.contains_key(&id), "行内移动不得失效引用块布局");
 }
 
 #[test]
@@ -867,7 +868,7 @@ fn thematic_break_elides_and_keeps_line_height() {
     a.ensure_layouts_all();
     let (id, kind, _) = a.editor.session().blocks()[1];
     assert_eq!(kind, BlockKind::ThematicBreak);
-    assert_eq!(a.layouts[&id].layout_text(), "");
+    assert_eq!(a.cache.layouts[&id].layout_text(), "");
     // 消隐后仍占一行高，块高不塌缩
     assert_eq!(
         a.block_height(geom(&a, id)),
@@ -877,7 +878,7 @@ fn thematic_break_elides_and_keeps_line_height() {
     assert!(a.editor.set_caret(5));
     a.invalidate_reveal(0, 5);
     a.ensure_layouts_all();
-    assert_eq!(a.layouts[&id].layout_text(), "---");
+    assert_eq!(a.cache.layouts[&id].layout_text(), "---");
     assert_eq!(
         a.block_height(geom(&a, id)),
         BASE_LINE_HEIGHT * a.scale
@@ -1963,8 +1964,8 @@ fn system_mode_follows_live_switch_and_clears_color_caches() {
     assert!(!a.theme.dark);
     a.ensure_layouts_all();
     let (id, _, _) = a.editor.session().blocks()[0];
-    a.rasters.insert(id, (vec![0; 4], 1, 1));
-    a.inline_math.insert(
+    a.cache.rasters.insert(id, (vec![0; 4], 1, 1));
+    a.cache.inline_math.insert(
         "x".into(),
         MathImage {
             pixels: vec![0; 16],
@@ -1976,8 +1977,8 @@ fn system_mode_follows_live_switch_and_clears_color_caches() {
     sys.set(Some(true));
     a.poll_system_theme(Instant::now());
     assert!(a.theme.dark, "系统切深色后调色板跟随");
-    assert!(a.rasters.is_empty(), "按旧前景色光栅化的文本须作废");
-    assert!(a.inline_math.is_empty(), "公式图须按新前景色重渲");
+    assert!(a.cache.rasters.is_empty(), "按旧前景色光栅化的文本须作废");
+    assert!(a.cache.inline_math.is_empty(), "公式图须按新前景色重渲");
 }
 
 #[test]
@@ -2048,9 +2049,9 @@ fn first_edit_lays_out_far_fewer_blocks_than_document() {
     let dirty = a.editor.apply(Intent::InsertText("a".into())).unwrap();
     a.after_edit(dirty);
     assert!(
-        a.layouts.len() < 100,
+        a.cache.layouts.len() < 100,
         "首次编辑只应排版视口内块，实际 {} / {} 块",
-        a.layouts.len(),
+        a.cache.layouts.len(),
         a.index.blocks.len()
     );
 }
@@ -2089,9 +2090,9 @@ fn ensure_block_lays_out_far_block_with_real_height() {
     let store = MemStore::default();
     let mut a = app(&stress_doc(), None, false, &store);
     let id = a.index.blocks.last().unwrap().id;
-    assert!(!a.layouts.contains_key(&id), "远块初始不应已排版");
+    assert!(!a.cache.layouts.contains_key(&id), "远块初始不应已排版");
     a.ensure_block(id);
-    let h = a.layouts.get(&id).expect("按需排版应写入布局").height;
+    let h = a.cache.layouts.get(&id).expect("按需排版应写入布局").height;
     assert!(h > 0.0);
     assert_eq!(a.block_height(geom(&a, id)), h);
 }
@@ -2106,7 +2107,7 @@ fn move_doc_end_ensures_caret_block_layout() {
         .caret_block_index()
         .map(|i| a.index.blocks[i].id)
         .expect("文末应落在某块内");
-    assert!(a.layouts.contains_key(&id), "光标块须已排版");
+    assert!(a.cache.layouts.contains_key(&id), "光标块须已排版");
     let (x, y, h) = a.caret_screen();
     assert!(x.is_finite() && y.is_finite() && h > 0.0);
 }
@@ -2171,5 +2172,5 @@ fn perf_cold_first_edit() {
     a.after_edit(dirty);
     let ms = t.elapsed().as_secs_f64() * 1e3;
     println!("perf_cold_first_edit_ms={ms:.3}");
-    println!("perf_layouts_after_first_edit={}", a.layouts.len());
+    println!("perf_layouts_after_first_edit={}", a.cache.layouts.len());
 }

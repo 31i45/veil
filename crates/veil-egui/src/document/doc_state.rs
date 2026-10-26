@@ -1,20 +1,24 @@
 //! 文档生命周期：打开/另存/保存（含冲突备份与原子落盘）、自动保存调度、
 //! 外部变更轮询与标题派生。纯策略与 IO 编排，绘制与交互不在此文件。
 
-use super::*;
+use std::path::{Path, PathBuf};
+use std::time::Instant;
+
 use crate::chrome::ExternalState;
-use crate::docio::decode;
+use crate::docio::{decode, encode};
+use crate::editor::Editor;
+use crate::shell::{App, FileEvent, FileStore};
 
 /// 保存来源：自动保存绝不覆盖外部修改，手工保存经备份后允许覆盖。
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum SaveKind {
+pub(crate) enum SaveKind {
     Manual,
     Auto,
 }
 
 impl App {
     /// 把监听目标切换到当前路径（草稿则停止监听）。失败仅提示，不影响编辑。
-    pub(super) fn watch_current(&mut self) {
+    pub(crate) fn watch_current(&mut self) {
         let Some(path) = self.path.clone() else {
             self.watcher.unwatch();
             return;
@@ -27,7 +31,7 @@ impl App {
 
     /// 外部变更对外呈现的单一状态（状态栏/标题共用）。
     /// 待备份的新版本优先于「已备份」：备份登记只说明旧版本有副本，不能掩盖新版本。
-    pub(super) fn external_state(&self) -> ExternalState {
+    pub(crate) fn external_state(&self) -> ExternalState {
         if self.external_changed.is_some() {
             ExternalState::Changed
         } else if self.conflict {
@@ -40,7 +44,7 @@ impl App {
     }
 
     /// 窗口标题：路径派生。脏标 ` *` 与冲突提示后缀是 chrome UI 落地前的最小可见载体。
-    pub(super) fn title_text(&self) -> String {
+    pub(crate) fn title_text(&self) -> String {
         let base = match &self.path {
             Some(p) => format!("veil — {}", p.display()),
             None => "veil".to_string(),
@@ -58,14 +62,14 @@ impl App {
         t
     }
 
-    pub(super) fn update_title(&self) {
+    pub(crate) fn update_title(&self) {
         if let Some(w) = &self.window {
             w.set_title(&self.title_text());
         }
     }
 
     /// Ctrl+S：显式保存（允许在备份外部版本后覆盖）。
-    pub(super) fn save_now(&mut self) {
+    pub(crate) fn save_now(&mut self) {
         self.save(SaveKind::Manual);
     }
 
@@ -78,7 +82,7 @@ impl App {
     /// - 备份失败：取消保存（不允许无备份覆盖）；磁盘读不到（新建/被删）不算冲突。
     ///
     /// 成功清脏并更新基线；失败保持脏态（可读错误同时写状态栏 notice）。
-    pub(super) fn save(&mut self, kind: SaveKind) {
+    pub(crate) fn save(&mut self, kind: SaveKind) {
         let Some(path) = self.path.clone() else {
             if kind == SaveKind::Manual {
                 self.chrome.notice = "草稿无关联文件；可用 Ctrl+Shift+S 另存为".into();
@@ -145,7 +149,7 @@ impl App {
     }
 
     /// 把磁盘现存版本写到同目录冲突副本（首个未占用序号，经 FileStore 原子写）。
-    pub(super) fn write_conflict_copy(
+    pub(crate) fn write_conflict_copy(
         &mut self,
         path: &Path,
         disk: &[u8],
@@ -157,7 +161,7 @@ impl App {
     }
 
     /// 自动保存判定：距上次内容编辑/自动保存尝试达静默期，且无路径/IME/冲突挂起阻碍。
-    pub(super) fn autosave_due(&self, now: Instant) -> bool {
+    pub(crate) fn autosave_due(&self, now: Instant) -> bool {
         let Some(last) = self.last_activity else {
             return false;
         };
@@ -171,7 +175,7 @@ impl App {
     }
 
     /// 尝试自动保存（事件循环空闲回调调用）。无论成败都推进计时起点，避免忙轮询。
-    pub(super) fn maybe_autosave(&mut self, now: Instant) {
+    pub(crate) fn maybe_autosave(&mut self, now: Instant) {
         if !self.autosave_due(now) {
             return;
         }
@@ -184,7 +188,7 @@ impl App {
     ///
     /// 检测：监听事件 → 读磁盘 → 与基线/已备份版本比较。备份仍只在保存覆盖前执行，
     /// 避免外部程序每保存一次就在文档旁积一份副本；同一版本/已备份版本不重复提示。
-    pub(super) fn poll_external(&mut self) {
+    pub(crate) fn poll_external(&mut self) {
         let events = self.watcher.poll();
         if events.is_empty() {
             return;
@@ -241,7 +245,7 @@ impl App {
 
     /// Ctrl+E：经注入的 Exporter 导出 HTML。草稿无路径 / 导出失败走 stderr 不崩溃
     /// （同 save_now 草稿分支语义；界面呈现待 chrome UI）。导出不清脏标（源文件未变）。
-    pub(super) fn export_now(&mut self) {
+    pub(crate) fn export_now(&mut self) {
         match self
             .exporter
             .export_html(self.editor.session(), self.path.as_deref())
@@ -260,7 +264,7 @@ impl App {
 
     /// Ctrl+Shift+S：另存为。写入成功才切换关联路径/基线并清脏；失败保留旧路径与脏标。
     /// 新路径改变图片相对基准：清图片缓存与布局，按新位置重新解析。
-    pub(super) fn save_as(&mut self) {
+    pub(crate) fn save_as(&mut self) {
         let suggested = self
             .path
             .as_ref()
@@ -285,11 +289,7 @@ impl App {
                 self.external_missing = false;
                 self.autosave_hold = false;
                 self.last_activity = None;
-                self.inline_images.clear();
-                self.image_failed.clear();
-                self.layouts.clear();
-                self.rasters.clear();
-                self.tables.clear();
+                self.cache.clear_repath(); // 图片相对基准变化：图片缓存与布局一并作废
                 self.chrome.notice = format!("已另存为 {}", path.display());
                 self.watch_current(); // 监听目标随关联路径切换；失败提示覆盖成功提示
                 self.update_title();
@@ -304,7 +304,7 @@ impl App {
 
     /// Ctrl+O / 菜单打开：脏文档先拒绝（v0 无确认对话框，宁丢操作不丢数据），
     /// 拒绝时不弹对话框（避免选完文件才发现无法打开）。
-    pub(super) fn open_via_dialog(&mut self) {
+    pub(crate) fn open_via_dialog(&mut self) {
         if self.editor.is_dirty() {
             self.chrome.notice = "当前文档未保存，已取消打开".into();
             self.request_redraw();
@@ -317,7 +317,7 @@ impl App {
 
     /// 拖放打开：脏文档拒绝替换（v0 无确认对话框，宁丢操作不丢数据）；
     /// 成功后整体替换编辑器（新文档新撤销栈）、清全部缓存、复位滚动。
-    pub(super) fn open_path(&mut self, path: PathBuf) {
+    pub(crate) fn open_path(&mut self, path: PathBuf) {
         if self.editor.is_dirty() {
             self.chrome.notice = "当前文档未保存，已拒绝打开".into();
             eprintln!("当前文档未保存，拒绝打开 {}", path.display());
@@ -352,13 +352,8 @@ impl App {
         self.external_missing = false;
         self.autosave_hold = false;
         self.last_activity = None;
-        self.layouts.clear();
-        self.rasters.clear();
-        self.math_imgs.clear();
-        self.math_failed.clear();
-        self.inline_images.clear(); // 新文档：相对路径基准变化，失败记忆一并作废
-        self.image_failed.clear();
-        self.tables.clear();
+        // 新文档：图片相对路径基准变化，失败记忆一并作废；行内公式按 tex 寻址保留
+        self.cache.clear_document();
         self.scroll_y = 0.0;
         self.goal_x = None;
         // 新文档块结构替换：索引必须与编辑器同源重建，后续读取才有效

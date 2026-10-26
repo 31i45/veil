@@ -2,10 +2,10 @@
 //! 已排版的几何与缓存，本文件不触发重新排版（除 paint 开头的两遍收敛）。
 
 use super::*;
-use crate::layout::InlineAsset;
+use crate::view::InlineAsset;
 
 impl App {
-    pub(super) fn paint(&mut self) {
+    pub(crate) fn paint(&mut self) {
         let (w, h) = match self.window.as_ref() {
             Some(win) => {
                 let s = win.inner_size();
@@ -28,7 +28,7 @@ impl App {
             .index
             .blocks
             .get(range)
-            .is_some_and(|bs| bs.iter().any(|g| !self.layouts.contains_key(&g.id)))
+            .is_some_and(|bs| bs.iter().any(|g| !self.cache.layouts.contains_key(&g.id)))
         {
             self.ensure_layouts_visible();
             self.ensure_math_visible();
@@ -59,7 +59,7 @@ impl App {
             }
             if self.math_shows_image(id, &range) {
                 // 数学块渲染态：图整体替换文本光栅（display 公式居中）
-                let img = &self.math_imgs[&id];
+                let img = &self.cache.math_imgs[&id];
                 let x = (MARGIN * scale
                     + ((self.content_width() - img.width as f32) / 2.0).max(0.0))
                     as i32;
@@ -70,15 +70,15 @@ impl App {
                 self.paint_table(&mut frame, id, sy);
                 continue;
             }
-            let Some(l) = self.layouts.get(&id) else {
+            let Some(l) = self.cache.layouts.get(&id) else {
                 continue;
             };
-            if !self.rasters.contains_key(&id) {
+            if !self.cache.rasters.contains_key(&id) {
                 let r = self.engine.rasterize(l, theme.fg);
-                self.rasters.insert(id, r);
+                self.cache.rasters.insert(id, r);
             }
             if matches!(kind, BlockKind::FencedCode) {
-                let (rw, rh) = (self.rasters[&id].1, self.rasters[&id].2);
+                let (rw, rh) = (self.cache.rasters[&id].1, self.cache.rasters[&id].2);
                 frame.fill_rect(
                     (MARGIN * scale) as i32 - 4,
                     sy - 2,
@@ -105,7 +105,7 @@ impl App {
                     }
                 }
             }
-            let (px, rw, rh) = &self.rasters[&id];
+            let (px, rw, rh) = &self.cache.rasters[&id];
             frame.blit(px, *rw, *rh, (MARGIN * scale) as i32, sy);
             // 行内公式/图片：位置在排版期已定（PlacedImg），叠在文本光栅之上。
             // 图片按占位显示尺寸最近邻缩放（缓存保留自然尺寸，不生成缩放副本）。
@@ -114,12 +114,12 @@ impl App {
                 let dy = sy + p.y as i32;
                 match &p.key {
                     InlineAsset::Math(tex) => {
-                        if let Some(img) = self.inline_math.get(tex) {
+                        if let Some(img) = self.cache.inline_math.get(tex) {
                             frame.blit(&img.pixels, img.width, img.height, dx, dy);
                         }
                     }
                     InlineAsset::Image(key) => {
-                        if let Some(img) = self.inline_images.get(key) {
+                        if let Some(img) = self.cache.inline_images.get(key) {
                             frame.blit_scaled(
                                 &img.pixels,
                                 img.width,
@@ -190,8 +190,8 @@ impl App {
 
     /// 绘制表格网格：表头底色 → 单元格文本 → 网格线（先底后字，线压边）。
     /// 选区跨网格态表格时不画高亮（同数学块 v0 已知简化）。
-    pub(super) fn paint_table(&self, frame: &mut Frame, id: BlockId, top: i32) {
-        let Some(t) = self.tables.get(&id) else {
+    pub(crate) fn paint_table(&self, frame: &mut Frame, id: BlockId, top: i32) {
+        let Some(t) = self.cache.tables.get(&id) else {
             return;
         };
         let x0 = (MARGIN * self.scale) as i32;
@@ -233,7 +233,7 @@ impl App {
         }
     }
 
-    pub(super) fn paint_caret_and_preedit(&mut self, frame: &mut Frame) {
+    pub(crate) fn paint_caret_and_preedit(&mut self, frame: &mut Frame) {
         let (cx, cy, ch) = self.caret_screen();
         let vp = self.viewport();
         if cy + ch <= vp.y || cy >= vp.y + vp.h {
@@ -262,7 +262,7 @@ impl App {
         }
     }
 
-    pub(super) fn scroll_to_caret(&mut self) {
+    pub(crate) fn scroll_to_caret(&mut self) {
         let vp = self.viewport();
         let (_, cy, ch) = self.caret_screen();
         if cy < vp.y {
@@ -279,7 +279,7 @@ impl App {
 /// 图片 URL → 本地路径（切片 13）。相对 URL 相对文档所在目录；草稿（无路径）的
 /// 相对 URL 无法解析；`http:`/`https:`/`data:`/`file:` 等带 scheme 的 URL v0 不加载。
 /// Windows 盘符（`C:`）只 1 个字母，不误判为 scheme。
-pub(super) fn local_image_path(url: &str, doc: Option<&Path>) -> Option<PathBuf> {
+pub(crate) fn local_image_path(url: &str, doc: Option<&Path>) -> Option<PathBuf> {
     let url = url.trim();
     if url.is_empty() {
         return None;
@@ -297,7 +297,7 @@ pub(super) fn local_image_path(url: &str, doc: Option<&Path>) -> Option<PathBuf>
 }
 
 /// 图片显示尺寸：宽超版心按比例缩放（高同比），至少 1px。
-pub(super) fn fit_size(w: u32, h: u32, max_width: f32) -> (u32, u32) {
+pub(crate) fn fit_size(w: u32, h: u32, max_width: f32) -> (u32, u32) {
     let w = w.max(1) as f32;
     let h = h.max(1) as f32;
     let s = if w > max_width { max_width / w } else { 1.0 };

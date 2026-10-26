@@ -1,17 +1,23 @@
-//! shell 行为测试：以 headless App 驱动真实编辑/排版/绘制路径。
+//! 跨域行为测试：以 headless App 驱动真实编辑/排版/绘制/持久化路径。
 
+use crate::app::*;
 use crate::document::block_index::BlockGeom;
-use super::paint::{fit_size, local_image_path};
-use super::*;
+use crate::paint::{fit_size, local_image_path};
 use crate::chrome::{ExternalState, MenuAction};
 use crate::editor::Intent;
 use crate::view::InlineAsset;
+use crate::image::{AssetStore, ImageData, ImageLoader};
 use crate::math::{MathImage, MathRenderer};
+use crate::theme::{self, ConfigStore, SystemTheme, ThemeEnv, ThemeMode};
+use crate::view::BASE_LINE_HEIGHT;
+use crate::chrome;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
-use veil_core::Range;
+use veil_core::{BlockId, BlockKind, Range};
+use winit::dpi::PhysicalPosition;
 
 struct NoClip;
 impl Clipboard for NoClip {

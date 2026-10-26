@@ -1,11 +1,17 @@
 //! 交互策略：按键到意图的翻译、编辑后的几何刷新编排、光标移动/命中/点选/
 //! 拖选、剪贴板、菜单动作。只发意图与调几何，不做像素绘制。
 
-use super::*;
-use crate::chrome::MenuAction;
+use crate::app::{App, MARGIN};
+use crate::document::block_index::BlockGeom;
+use crate::chrome::{self, MenuAction};
 use crate::editor::Intent;
 use crate::html::html_to_markdown;
 use crate::input::{translate, Action, Key};
+use crate::theme::ThemeMode;
+use crate::view::{node_active, BASE_FONT_SIZE, BASE_LINE_HEIGHT};
+use std::time::Instant;
+use veil_core::{BlockId, BlockKind, InlineNode};
+use winit::event::ElementState;
 use winit::keyboard::{Key as WKey, NamedKey};
 
 impl App {
@@ -439,4 +445,112 @@ pub(crate) fn map_key(event: &winit::event::KeyEvent) -> Option<Key> {
         WKey::Character(c) if c.as_str().eq_ignore_ascii_case("e") => Some(Key::E),
         _ => None,
     }
+}
+
+// ── 几何编排（原 geometry.rs）：视口区间/块高/光标坐标/Reveal 失效 ────────────
+
+impl App {
+    pub(crate) fn content_width(&self) -> f32 {
+        let (w, _) = self.win_size();
+        (w as f32 - 2.0 * MARGIN * self.scale - chrome::SCROLL_W * self.scale).max(32.0)
+    }
+
+    /// 文档总高（含首尾外边距），滚动条与滚轮钳位依据。
+    pub(crate) fn doc_height(&self) -> f32 {
+        if self.index.blocks.is_empty() {
+            2.0 * MARGIN * self.scale
+        } else {
+            self.index.total_h
+        }
+    }
+
+
+    pub(crate) fn invalidate_reveal(&mut self, old: usize, new: usize) {
+        if old == new {
+            return;
+        }
+        for g in &self.index.blocks {
+            let (id, kind, range) = (g.id, g.kind, g.range);
+            let touches = |p: usize| range.start <= p && p <= range.end;
+            if !touches(old) && !touches(new) {
+                continue;
+            }
+            // 块级 Reveal（切片 12）：列表项/分隔线按块激活（进/出块才变）；
+            // 引用块逐行激活（块内跨行移动亦变，行内移动不变）。
+            let block_reveal = match kind {
+                BlockKind::ListItem { .. } | BlockKind::ThematicBreak => {
+                    touches(old) != touches(new)
+                }
+                BlockKind::BlockQuote => {
+                    let text = self.editor.session().text_slice(range).unwrap_or_default();
+                    quote_line_of(&text, &range, old) != quote_line_of(&text, &range, new)
+                }
+                _ => false,
+            };
+            let inlines = self.editor.session().block_inlines(id).unwrap_or_default();
+            if block_reveal || inlines.iter().any(|n| activation_changed(n, old, new)) {
+                self.cache.invalidate_reveal(id);
+            }
+        }
+    }
+
+
+    /// 文本布局缺失（视口外未排版）时回退廉价估算高度。
+    pub(crate) fn block_height(&self, g: &BlockGeom) -> f32 {
+        if g.kind == BlockKind::Math && self.math_shows_image(g.id, &g.range) {
+            return self.cache.math_imgs[&g.id].height as f32;
+        }
+        if g.kind == BlockKind::Table && self.table_shows_grid(g.id, &g.range) {
+            return self.cache.tables[&g.id].height;
+        }
+        self.cache.layouts
+            .get(&g.id)
+            .map(|l| l.height)
+            .unwrap_or(g.est_h)
+    }
+
+    /// 每视觉行可容纳的字符数（按平均字宽 0.5em 估算，仅用于便宜高度）。
+    pub(crate) fn chars_per_line(&self) -> f32 {
+        (self.content_width() / (0.5 * BASE_FONT_SIZE * self.scale)).max(1.0)
+    }
+
+    /// 光标所在块索引；文末光标可能落在最后一块的尾换行之后，回退末块。
+    pub(crate) fn caret_block_index(&self) -> Option<usize> {
+        let caret = self.editor.caret();
+        self.index
+            .blocks
+            .iter()
+            .position(|g| g.range.start <= caret && caret <= g.range.end)
+            .or_else(|| {
+                if caret >= self.editor.session().text_len() {
+                    self.index.blocks.len().checked_sub(1)
+                } else {
+                    None
+                }
+            })
+    }
+
+    /// 光标屏幕矩形（物理像素，含菜单栏偏移）。(x, y, h)；找不到所在块（空文档）时落视口原点。
+    pub(crate) fn caret_screen(&mut self) -> (f32, f32, f32) {
+        let caret = self.editor.caret();
+        let vp = self.viewport();
+        if let Some(i) = self.caret_block_index() {
+            let (id, start, top) = {
+                let g = &self.index.blocks[i];
+                (g.id, g.range.start, g.top)
+            };
+            // 视口外块可能尚未布局：光标路径按需补齐
+            self.ensure_block(id);
+            if let Some(l) = self.cache.layouts.get(&id) {
+                let (x, y, h) = self.engine.caret_xy(l, caret - start);
+                return (MARGIN * self.scale + x, vp.y + top + y - self.scroll_y, h);
+            }
+        }
+        (
+            MARGIN * self.scale,
+            vp.y + MARGIN * self.scale - self.scroll_y,
+            BASE_LINE_HEIGHT * self.scale,
+        )
+    }
+
 }

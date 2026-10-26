@@ -7,7 +7,7 @@ use std::time::Instant;
 use crate::chrome::ExternalState;
 use crate::docio::{decode, encode};
 use crate::editor::Editor;
-use crate::shell::{App, FileEvent, FileStore};
+use crate::app::{App, FileEvent, FileStore};
 
 /// 保存来源：自动保存绝不覆盖外部修改，手工保存经备份后允许覆盖。
 #[derive(Clone, Copy, PartialEq, Eq)]

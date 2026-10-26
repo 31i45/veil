@@ -7,6 +7,7 @@
 //! 分层：editor/input/style/frame 纯逻辑零 GUI（机制与策略分离，全部 headless 可测）；
 //! layout 依赖 cosmic-text（字体相关断言从宽）；shell 为 winit/softbuffer 薄胶合。
 
+mod app;
 mod autosave;
 mod chrome;
 mod docio;
@@ -15,10 +16,14 @@ mod editor;
 mod html;
 mod image;
 mod input;
+mod interaction;
 mod math;
-mod shell;
+mod paint;
 mod theme;
 mod view;
+
+#[cfg(test)]
+mod app_tests;
 
 pub use autosave::Autosave;
 pub use chrome::{Chrome, ExternalState, MenuAction, Viewport};
@@ -27,10 +32,8 @@ pub use editor::{Editor, Intent, Preedit};
 pub use html::html_to_markdown;
 pub use image::{AssetStore, ImageData, ImageLoader};
 pub use input::{translate, Action, Key, Mods};
+pub use app::{run, Clipboard, Doc, Exporter, FileDialog, FileEvent, FileStore, FileWatcher};
 pub use math::{MathImage, MathRenderer};
-pub use shell::{
-    run, Clipboard, Doc, Exporter, FileDialog, FileEvent, FileStore, FileWatcher,
-};
 pub use theme::{
     config_path, ConfigStore, NativeWindow, SystemTheme, Theme, ThemeEnv, ThemeMode, WindowEffects,
 };

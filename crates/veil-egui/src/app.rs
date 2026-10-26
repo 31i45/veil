@@ -7,7 +7,6 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use softbuffer::{Context, Surface};
-use veil_core::{BlockId, BlockKind, InlineNode};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, Ime, MouseButton, MouseScrollDelta, WindowEvent};
@@ -21,14 +20,12 @@ use crate::editor::Editor;
 use crate::image::{AssetStore, ImageData, ImageLoader};
 use crate::input::Mods;
 use crate::math::MathRenderer;
-use crate::view::{node_active, Cache, Frame, LayoutEngine, BASE_LINE_HEIGHT};
+use crate::view::{Cache, Frame, LayoutEngine, BASE_LINE_HEIGHT};
 use crate::theme::{
     self, Config, ConfigStore, SystemTheme, Theme, ThemeEnv, ThemeMode, WindowEffects,
 };
 
-mod geometry;
-mod interaction;
-mod paint;
+// 各域 impl App 的注册由 lib.rs 的模块声明承担（同 crate 内 impl 自动链接）。
 
 use crate::document::block_index::BlockIndex;
 
@@ -198,7 +195,7 @@ pub(crate) struct App {
 }
 
 impl App {
-    fn new(
+    pub(crate) fn new(
         doc: Doc,
         clipboard: Box<dyn Clipboard>,
         store: Box<dyn FileStore>,
@@ -344,7 +341,7 @@ impl App {
     }
 
     /// 跟随系统时轮询系统外观（限频）；外观切换则重建调色板并刷新颜色缓存。
-    fn poll_system_theme(&mut self, now: Instant) {
+    pub(crate) fn poll_system_theme(&mut self, now: Instant) {
         if self.theme.mode != ThemeMode::System {
             return;
         }
@@ -577,5 +574,3 @@ impl ApplicationHandler for App {
     }
 }
 
-#[cfg(test)]
-mod tests;

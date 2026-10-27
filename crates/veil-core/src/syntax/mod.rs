@@ -91,6 +91,7 @@ impl Syntax {
                 | BlockKind::Table
                 | BlockKind::ThematicBreak
                 | BlockKind::LinkRefDef
+                | BlockKind::HtmlBlock
         ) {
             return Some(Vec::new());
         }

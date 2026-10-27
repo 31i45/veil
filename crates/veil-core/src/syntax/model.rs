@@ -43,6 +43,9 @@ pub enum BlockKind {
     /// 链接引用定义（`[label]: dest "title"`，可多行）：注册进文档引用表，
     /// 无 HTML 输出、无 inline；编辑器按源码行渲染（不背叛源码）。
     LinkRefDef,
+    /// 原始 HTML 块（CommonMark §4.6，类型 1–7）：块内不解析 inline，源码原样渲染。
+    /// 类型 1–5 以闭合模式终止；类型 6（块级标签）与 7（完整标签行）以空行终止。
+    HtmlBlock,
 }
 
 /// 表格列对齐（GFM 分隔行 `:--` / `--:` / `:-:` 语法）。

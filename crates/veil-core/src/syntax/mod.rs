@@ -20,9 +20,9 @@ pub use model::{BlockId, BlockKind, CellAlign, InlineKind, InlineNode, Table, Ta
 
 use crate::buffer::Buffer;
 use block::{
-    heading_content_span, is_fence, is_thematic_break, line_text, list_mark, normalize_label,
-    parse_delim_row, parse_link_ref_def, parse_table_cells, quote_marker_pos, scan_blocks,
-    scan_next, visible_text, RefMap,
+    fence_close, fence_open, heading_content_span, is_thematic_break, line_text, list_mark,
+    normalize_label, parse_delim_row, parse_link_ref_def, parse_table_cells, quote_marker_pos,
+    scan_blocks, scan_next, visible_text, RefMap,
 };
 use inline::parse_inlines;
 
@@ -79,13 +79,14 @@ impl Syntax {
 
     /// 某块的 inline 节点（绝对字节偏移）。派生数据：访问时按块当前文本即时解析，
     /// 不持久化、不进撤销栈——块区间由 reparse 维护，故编辑后查询恒正确。
-    /// FencedCode/Math/Table/ThematicBreak 恒为空（无 inline）；未知 id 返回 None。
+    /// FencedCode/IndentedCode/Math/Table/ThematicBreak 恒为空（无 inline）；未知 id 返回 None。
     /// 列表/引用仅解析标记（`- ` / `> `）之后的内容，标记本身不得被 inline 误认。
     pub fn inlines(&self, buf: &Buffer, block: BlockId) -> Option<Vec<InlineNode>> {
         let b = self.blocks.iter().find(|b| b.id == block)?;
         if matches!(
             b.kind,
             BlockKind::FencedCode(_)
+                | BlockKind::IndentedCode
                 | BlockKind::Math
                 | BlockKind::Table
                 | BlockKind::ThematicBreak
@@ -106,18 +107,18 @@ impl Syntax {
                 // 项内围栏代码不解析 inline（0c P0-3：多行项可含围栏，v0 规则同
                 // 区域扫描器——闭合围栏任意缩进）；首行跳过标记，续行整行解析。
                 let mut out = Vec::new();
-                let mut in_fence = false;
+                let mut in_fence: Option<(u8, usize)> = None;
                 let mut off = 0usize;
                 for (idx, line) in text.split_inclusive('\n').enumerate() {
                     let skip = if idx == 0 { cs.min(line.len()) } else { 0 };
                     let seg = &line[skip..];
                     let t = seg.trim_start();
-                    if in_fence {
-                        if is_fence(t) {
-                            in_fence = false;
+                    if let Some((ch, len)) = in_fence {
+                        if fence_close(t, ch, len) {
+                            in_fence = None;
                         }
-                    } else if is_fence(t) {
-                        in_fence = true;
+                    } else if let Some((ch, len, _)) = fence_open(t) {
+                        in_fence = Some((ch, len));
                     } else if is_thematic_break(t) {
                         // 项内分隔线（Example 61）：无 inline
                     } else {

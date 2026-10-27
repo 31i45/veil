@@ -916,7 +916,7 @@ fn attrs_of(kind: BlockKind, st: Style) -> Attrs<'static> {
     } else {
         a
     };
-    let a = if st.mono || matches!(kind, BlockKind::FencedCode(_)) {
+    let a = if st.mono || matches!(kind, BlockKind::FencedCode(_) | BlockKind::IndentedCode) {
         a.family(Family::Monospace)
     } else {
         a

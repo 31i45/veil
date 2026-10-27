@@ -16,6 +16,9 @@ pub enum BlockKind {
     SetextHeading(u8),
     /// 围栏代码块。`lang` 为 info string 首词（```rust → Some("rust")），无标记为 None。
     FencedCode(Option<String>),
+    /// 缩进代码块（4 列及以上前导缩进，tab 按 4 列制表位展开）。块内不解析 inline。
+    /// 与 FencedCode 一样按源码原样渲染（不背叛源码）。
+    IndentedCode,
     /// 展示数学块（`$$...$$`）。块内不解析 inline，TeX 源码经 `math_source` 提取。
     Math,
     /// GFM 表格（表头行 + 分隔行 + 至多若干表体行）。块内不解析 inline，

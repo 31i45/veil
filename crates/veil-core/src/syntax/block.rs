@@ -34,14 +34,19 @@ pub(super) fn scan_next(
     total: usize,
 ) -> (Vec<(BlockKind, usize, usize)>, usize) {
     let text = line_text(buf, line);
+    // 缩进 ≥4 列（tab 展开后）属缩进代码领地：先于一切标记判定
+    if indent_info(&text).0 >= 4 {
+        let (kind, n) = scan_one(buf, line, total);
+        return (vec![(kind, line, line + n)], n);
+    }
     let t = text.trim_start();
     // 判定序与 scan_one 一致：ATX/围栏/数学/分隔线/引用 优先于列表
     let earlier = atx_level(t).is_some()
-        || is_fence(t)
+        || is_fence(&text)
         || math_marker(text.trim()).is_some()
         || is_thematic_break(t)
         || quote_marker_pos(&text).is_some();
-    if !earlier && list_mark(&text).is_some_and(|m| m.indent <= 3) {
+    if !earlier && list_mark(&text).is_some_and(|m| m.indent_cols <= 3) {
         return scan_list_region(buf, line, total);
     }
     let (kind, n) = scan_one(buf, line, total);
@@ -51,15 +56,19 @@ pub(super) fn scan_next(
 /// 扫描单个非列表块，返回 (种类, 消耗行数)。列表项由 `scan_next` 的区域扫描接管。
 pub(super) fn scan_one(buf: &Buffer, line: usize, total: usize) -> (BlockKind, usize) {
     let text = line_text(buf, line);
+    // 缩进代码块（0c P1）：前导缩进 ≥4 列优先于一切块标记（`    # foo` 是代码）。
+    // 空行暂存、非空行须 ≥4 列续块；末尾空行不计入块区间。
+    if indent_info(&text).0 >= 4 {
+        return (BlockKind::IndentedCode, indented_code_lines(buf, line, total));
+    }
     let t = text.trim_start();
     if let Some(level) = atx_level(t) {
         return (BlockKind::AtxHeading(level), 1);
     }
-    if is_fence(t) {
-        let lang = fence_lang(t);
+    if let Some((ch, len, lang)) = fence_open(&text) {
         let mut n = 1;
         while line + n < total {
-            if is_fence(line_text(buf, line + n).trim_start()) {
+            if fence_close(&line_text(buf, line + n), ch, len) {
                 return (BlockKind::FencedCode(lang), n + 1);
             }
             n += 1;
@@ -119,8 +128,13 @@ pub(super) fn scan_one(buf: &Buffer, line: usize, total: usize) -> (BlockKind, u
 /// 分隔线（缩进 ≤3，4+ 属缩进代码领地——Example 87）/ 引用标记（≤3）/ 列表标记
 /// （空内容标记与起始号非 1 的有序标记不打断——Example 285/304）。
 fn interrupts_paragraph(l: &str) -> bool {
+    // 缩进 ≥4 列（tab 展开后）是缩进代码块，而缩进代码块不能打断段落
+    // （Example 70：`foo\n    # bar` 是同一段落）。
+    if indent_info(l).0 >= 4 {
+        return false;
+    }
     let lt = l.trim_start();
-    is_fence(lt)
+    is_fence(l)
         || atx_level(lt).is_some()
         || math_marker(l.trim()).is_some()
         || (indent_le3(l) && is_thematic_break(lt))
@@ -128,9 +142,9 @@ fn interrupts_paragraph(l: &str) -> bool {
         || list_mark(l).is_some_and(|m| marker_interrupts_paragraph(&m))
 }
 
-/// 列表标记打断段落的附加规则：缩进 ≤3、内容非空、有序起始号为 1。
+/// 列表标记打断段落的附加规则：缩进 ≤3 列、内容非空、有序起始号为 1。
 fn marker_interrupts_paragraph(m: &ListMark) -> bool {
-    m.indent <= 3 && !m.blank_content && (!m.ordered || m.start == 1)
+    m.indent_cols <= 3 && !m.blank_content && (!m.ordered || m.start == 1)
 }
 
 /// Setext 下划线（0c P0-2）：`=+` → 1 级、`-+` → 2 级；前导 ≤3 空格（\t 不合法，
@@ -219,21 +233,111 @@ fn atx_level(t: &str) -> Option<u8> {
     }
 }
 
-/// v0 仅识别 ``` 围栏；~~~ 属于 GFM 全量子集，后续增量补。
-pub(super) fn is_fence(t: &str) -> bool {
-    t.starts_with("```")
+// ===== 制表位 / 缩进（0c P1） =====
+//
+// CommonMark 以 4 列为一个制表位：`\t` 推进到下一个 4 的倍数。块级缩进判定必须
+// 按列而非字节（`\tfoo` 与 `    foo` 等价），内容切片再由列映射回字节。
+
+/// 前导空白列宽（tab 展开到 4 列制表位）+ 首个非空白字节偏移。
+pub(super) fn indent_info(line: &str) -> (usize, usize) {
+    let mut col = 0usize;
+    for (idx, ch) in line.char_indices() {
+        match ch {
+            ' ' => col += 1,
+            '\t' => col += 4 - col % 4,
+            _ => return (col, idx),
+        }
+    }
+    (col, line.len())
 }
 
-/// 提取围栏 info string 首词为语言名（```rust → "rust"，``` → None）。
-/// 首词以空白或行尾结束，大小写原样保留（视图层按需归一化）。
-fn fence_lang(t: &str) -> Option<String> {
-    let after = t.strip_prefix("```")?;
-    let word = after.split_whitespace().next()?;
-    if word.is_empty() {
-        None
-    } else {
-        Some(word.to_string())
+/// 列位置 → 字节偏移（跨越制表位的列取该 tab 之后的字节）。
+fn col_to_byte(line: &str, target: usize) -> usize {
+    let mut col = 0usize;
+    for (idx, ch) in line.char_indices() {
+        if col >= target {
+            return idx;
+        }
+        match ch {
+            ' ' => col += 1,
+            '\t' => col += 4 - col % 4,
+            _ => return idx,
+        }
     }
+    line.len()
+}
+
+/// 缩进代码块消耗行数：空行暂存（可含尾随空白），非空行须缩进 ≥4 列才续块；
+/// 末尾空行不计入块区间（块在最后一个非空行结束）。
+fn indented_code_lines(buf: &Buffer, line: usize, total: usize) -> usize {
+    let mut n = 1usize;
+    let mut last_nonblank = 1usize;
+    while line + n < total {
+        let l = line_text(buf, line + n);
+        if l.trim().is_empty() {
+            n += 1;
+            continue;
+        }
+        if indent_info(&l).0 >= 4 {
+            n += 1;
+            last_nonblank = n;
+            continue;
+        }
+        break;
+    }
+    last_nonblank
+}
+
+/// 开围栏判定：缩进 ≤3 列，≥3 个连续 ``` 或 ~~~；反引号围栏的 info string
+/// 不得含反引号（Example 138/145：```` ``` ```` 是段落而非围栏）。
+/// 返回 (围栏字符, 长度, info 首词)。
+pub(super) fn fence_open(line: &str) -> Option<(u8, usize, Option<String>)> {
+    let (indent, start) = indent_info(line);
+    if indent > 3 {
+        return None;
+    }
+    let b = line.as_bytes();
+    let ch = *b.get(start)?;
+    if ch != b'`' && ch != b'~' {
+        return None;
+    }
+    let mut n = 0usize;
+    while b.get(start + n) == Some(&ch) {
+        n += 1;
+    }
+    if n < 3 {
+        return None;
+    }
+    let info = line[start + n..].trim_end_matches(['\r', '\n']);
+    if ch == b'`' && info.contains('`') {
+        return None;
+    }
+    let lang = info.split_whitespace().next().map(str::to_string);
+    Some((ch, n, lang))
+}
+
+/// 闭围栏判定：同字符、长度 ≥ 开围栏长度，标记后只允许空白；缩进 ≤3 列
+/// （Example 137：4 空格缩进的 ``` 只是内容）。
+pub(super) fn fence_close(line: &str, ch: u8, len: usize) -> bool {
+    let (indent, start) = indent_info(line);
+    if indent > 3 {
+        return false;
+    }
+    let b = line.as_bytes();
+    let mut n = 0usize;
+    while b.get(start + n) == Some(&ch) {
+        n += 1;
+    }
+    n >= len
+        && line[start + n..]
+            .trim_end_matches(['\r', '\n'])
+            .bytes()
+            .all(|c| c == b' ' || c == b'\t')
+}
+
+/// 是否为围栏开标记行（含 `~~~`）。
+pub(super) fn is_fence(line: &str) -> bool {
+    fence_open(line).is_some()
 }
 
 /// v0 数学块标记（pandoc 风格 `$$`）：`$$` 独占行 = 开/闭标记（Some(false)）；
@@ -267,15 +371,15 @@ fn math_marker(t: &str) -> Option<bool> {
 /// 列表标记几何。
 pub(super) struct ListMark {
     pub ordered: bool,
-    /// 视觉深度 = 缩进字节 / 2（上限 8）；结构嵌套由区域扫描器的栈判定。
+    /// 视觉深度 = 缩进列 / 2（上限 8）；结构嵌套由区域扫描器的栈判定。
     pub depth: u8,
     /// 首行内容实际起点（inline 解析 / 任务复选框定位用）。
     pub content_start: usize,
-    /// 前导空白字节数（空格/制表符按字节计——制表位列宽属 Tabs 增量已知分歧）。
-    pub indent: usize,
-    /// 标记后空白数 N。
+    /// 前导空白列宽（tab 按 4 列制表位展开；缩进合法性/嵌套判定用）。
+    pub indent_cols: usize,
+    /// 标记后空白字节数 N。
     pub n_spaces: usize,
-    /// 内容列 = 缩进 + 标记宽 W + N；N ≥ 5 或空内容时取 W+1（CommonMark §5.2）。
+    /// 内容列 = 缩进列 + 标记宽 W + N 列；N ≥ 5 或空内容时取 W+1（CommonMark §5.2）。
     pub content_col: usize,
     /// 标记字节：`-`/`*`/`+` 或有序分隔符 `.`/`)`（列表分组签名用）。
     pub marker: u8,
@@ -287,7 +391,7 @@ pub(super) struct ListMark {
 
 /// 识别行首列表标记；非列表返回 None。`text` 可为整行（含行尾换行）。
 pub(super) fn list_mark(text: &str) -> Option<ListMark> {
-    let indent = text.len() - text.trim_start_matches([' ', '\t']).len();
+    let (indent_cols, indent) = indent_info(text);
     let b = text.as_bytes();
     let (ordered, marker, marker_len, start) = match b.get(indent)? {
         &c @ (b'-' | b'*' | b'+') => (false, c, 1, 0),
@@ -310,24 +414,39 @@ pub(super) fn list_mark(text: &str) -> Option<ListMark> {
         _ => return None,
     };
     let after = indent + marker_len;
-    let n_spaces = b[after..]
-        .iter()
-        .take_while(|&&c| c == b' ' || c == b'\t')
-        .count();
+    // 标记后空白：字节数与列数分开记（tab 按 4 列制表位推进）
+    let mut n_spaces = 0usize;
+    let mut n_cols = 0usize;
+    let mut col = indent_cols + marker_len;
+    while let Some(&c) = b.get(after + n_spaces) {
+        match c {
+            b' ' => {
+                col += 1;
+                n_cols += 1;
+            }
+            b'\t' => {
+                let adv = 4 - col % 4;
+                col += adv;
+                n_cols += adv;
+            }
+            _ => break,
+        }
+        n_spaces += 1;
+    }
     let blank_content = matches!(b.get(after + n_spaces), None | Some(b'\n') | Some(b'\r'));
     if n_spaces == 0 && !blank_content {
         return None; // 标记后非空白：`-tag` / `1.x`
     }
-    let content_col = if blank_content || n_spaces >= 5 {
-        indent + marker_len + 1
+    let content_col = if blank_content || n_cols >= 5 {
+        indent_cols + marker_len + 1
     } else {
-        indent + marker_len + n_spaces
+        indent_cols + marker_len + n_cols
     };
     Some(ListMark {
         ordered,
-        depth: (indent / 2).min(8) as u8,
+        depth: (indent_cols / 2).min(8) as u8,
         content_start: after + n_spaces,
-        indent,
+        indent_cols,
         n_spaces,
         content_col,
         marker,
@@ -340,7 +459,7 @@ pub(super) fn list_mark(text: &str) -> Option<ListMark> {
 /// 续块首行（无合法标记）返回 None——调用方据此令续块随前项归并。
 pub fn list_signature(line: &str) -> Option<(bool, u8)> {
     let m = list_mark(line)?;
-    (m.indent <= 3).then_some((m.ordered, m.marker))
+    (m.indent_cols <= 3).then_some((m.ordered, m.marker))
 }
 
 /// GFM 任务列表复选框（P3-5）：`- [ ]` / `- [x]` / `- [X]`（有序标记同）。
@@ -469,16 +588,17 @@ fn scan_list_region(
     let mut cur = 0usize; // 当前生长块下标（首行必开项，恒定有效）
     let mut cur_item = usize::MAX;
     let mut cur_para = false;
-    let mut in_fence = false;
+    // 项内围栏：(字符, 长度)；闭合须同字符且长度 ≥ 开围栏。
+    let mut in_fence: Option<(u8, usize)> = None;
     let mut pending_blanks = 0usize;
     let mut i = start;
 
     while i < total {
         let l = line_text(buf, i);
-        if in_fence {
+        if let Some((ch, len)) = in_fence {
             blocks[cur].2 = i + 1;
-            if is_fence(l.trim_start()) {
-                in_fence = false;
+            if fence_close(l.trim_start(), ch, len) {
+                in_fence = None;
             }
             i += 1;
             continue;
@@ -493,7 +613,7 @@ fn scan_list_region(
             i += 1;
             continue;
         }
-        let indent = l.len() - l.trim_start_matches([' ', '\t']).len();
+        let (indent, _) = indent_info(&l);
         // 试弹栈：内容列 > 本行缩进的项对本行闭合（懒续行命中时不提交）
         let mut popped_len = stack.len();
         while popped_len > 0 && stack[popped_len - 1].col > indent {
@@ -580,7 +700,8 @@ fn scan_list_region(
                 cur_item = owner_id;
             }
             pending_blanks = 0;
-            let (para, fence) = classify_content(&l[owner_col.min(l.len())..]);
+            // 内容列按列计，切片前映射回字节（tab 跨越内容列时取 tab 之后）
+            let (para, fence) = classify_content(&l[col_to_byte(&l, owner_col)..]);
             cur_para = para;
             in_fence = fence;
             i += 1;
@@ -597,15 +718,15 @@ fn scan_list_region(
     (blocks, i - start)
 }
 
-/// 项内容分类（懒续行/围栏吞咽判定）：(是否段落, 是否开启围栏)。
+/// 项内容分类（懒续行/围栏吞咽判定）：(是否段落, 开启的围栏 (字符, 长度))。
 /// 容器性内容（ATX/围栏/数学/分隔线/引用/嵌套标记）均非段落。
-fn classify_content(content: &str) -> (bool, bool) {
+fn classify_content(content: &str) -> (bool, Option<(u8, usize)>) {
     let t = content.trim_start();
     if t.trim().is_empty() {
-        return (false, false);
+        return (false, None);
     }
-    if is_fence(t) {
-        return (false, true);
+    if let Some((ch, len, _)) = fence_open(t) {
+        return (false, Some((ch, len)));
     }
     if atx_level(t).is_some()
         || math_marker(content.trim()).is_some()
@@ -613,9 +734,9 @@ fn classify_content(content: &str) -> (bool, bool) {
         || t.starts_with('>')
         || list_mark(content).is_some()
     {
-        return (false, false);
+        return (false, None);
     }
-    (true, false)
+    (true, None)
 }
 
 /// 分隔线：同字符 `-` / `*` / `_` ≥ 3，其间只允许空白。
@@ -1395,11 +1516,12 @@ mod tests {
         // Example 273：N=5 → 内容列 = W+1 = 3；`   paragraph` 并入
         let b = Buffer::new("1.     indented code\n\n   paragraph\n\n       more code\n");
         assert_eq!(kinds(&b), [li(true, 0, 0, 5)]);
-        // Example 257/258 边界：` -    one` → 内容列 6；缩进 5 不入项、缩进 6 入项
+        // Example 257/258 边界：` -    one` → 内容列 6；缩进 5 不入项（≥4 列 → 缩进代码）、
+        // 缩进 6 入项
         let b = Buffer::new(" -    one\n\n     two\n");
         assert_eq!(
             kinds(&b),
-            [li(false, 0, 0, 1), (BlockKind::Paragraph, 2, 3)]
+            [li(false, 0, 0, 1), (BlockKind::IndentedCode, 2, 3)]
         );
         let b = Buffer::new(" -    one\n\n      two\n");
         assert_eq!(kinds(&b), [li(false, 0, 0, 3)]);
@@ -1407,9 +1529,9 @@ mod tests {
 
     #[test]
     fn list_marker_at_block_start_max_indent_3() {
-        // Example 289：4 空格缩进的标记不是列表（缩进代码领地，P1 前按段落）
+        // Example 289：4 空格缩进的标记不是列表（缩进代码块）
         let b = Buffer::new("    1.  A paragraph\n        with two lines.\n");
-        assert_eq!(kinds(&b), [(BlockKind::Paragraph, 0, 2)]);
+        assert_eq!(kinds(&b), [(BlockKind::IndentedCode, 0, 2)]);
         // 3 空格合法
         let b = Buffer::new("   1.  A paragraph\n       with two lines.\n");
         assert_eq!(kinds(&b), [li(true, 1, 0, 2)]);
@@ -1616,9 +1738,9 @@ mod tests {
 
     #[test]
     fn blockquote_marker_max_indent_3() {
-        // Example 231：4 空格缩进的 `>` 不是引用（缩进代码领地，P1 前按段落）
+        // Example 231：4 空格缩进的 `>` 不是引用（缩进代码块）
         let b = Buffer::new("    > # Foo\n    > bar\n");
-        assert_eq!(kinds(&b), [(BlockKind::Paragraph, 0, 2)]);
+        assert_eq!(kinds(&b), [(BlockKind::IndentedCode, 0, 2)]);
         // 3 空格合法
         let b = Buffer::new("   > foo\n");
         assert_eq!(kinds(&b), [(BlockKind::BlockQuote, 0, 1)]);
@@ -1951,7 +2073,6 @@ mod tests {
             "[foo]: <bar>(baz)\n",      // title 与 dest 间无空白（Example 201）
             "[foo]:\n",                 // 缺 dest
             "[foo]: /url \"unclosed\n", // title 未闭合
-            "    [foo]: /url\n",        // 缩进 ≥4
             "[]: /url\n",               // 空 label
             "[foo]: /url(baz\n",        // 裸 dest 括号不平衡
         ] {
@@ -1962,6 +2083,11 @@ mod tests {
                 kinds(&b)
             );
         }
+        // 缩进 ≥4 列：定义行落入缩进代码块，不注册定义
+        assert_eq!(
+            kinds(&Buffer::new("    [foo]: /url\n")),
+            [(BlockKind::IndentedCode, 0, 1)]
+        );
     }
 
     #[test]
@@ -1989,5 +2115,104 @@ mod tests {
         // 段落中的定义行是普通文本（定义只识别于块起始）
         let b = Buffer::new("foo\n[bar]: /url\n");
         assert_eq!(kinds(&b), [(BlockKind::Paragraph, 0, 2)]);
+    }
+
+    // ===== 缩进代码块 / 围栏边界（0c P1） =====
+
+    #[test]
+    fn indented_code_basic_block() {
+        let b = Buffer::new("    a simple\n      indented code block\n");
+        assert_eq!(kinds(&b), [(BlockKind::IndentedCode, 0, 2)]);
+    }
+
+    #[test]
+    fn indented_code_blank_lines_continue_and_trailing_trimmed() {
+        // 空行暂存：后续 ≥4 列行续块；末尾空行不计入块区间
+        let b = Buffer::new("    chunk1\n\n    chunk2\n\n");
+        assert_eq!(kinds(&b), [(BlockKind::IndentedCode, 0, 3)]);
+        // 纯空白行同样视为空行
+        let b = Buffer::new("    chunk1\n  \n    chunk2\n");
+        assert_eq!(kinds(&b), [(BlockKind::IndentedCode, 0, 3)]);
+    }
+
+    #[test]
+    fn indented_code_cannot_interrupt_paragraph() {
+        // Example 70：4 空格缩进的行是段落续行，而非 ATX 标题
+        let b = Buffer::new("foo\n    # bar\n");
+        assert_eq!(kinds(&b), [(BlockKind::Paragraph, 0, 2)]);
+    }
+
+    #[test]
+    fn indented_code_tab_stops() {
+        // \t 从列 0 推进到列 4：与 4 空格等价
+        assert_eq!(kinds(&Buffer::new("\tfoo\n\tbar\n")), [(BlockKind::IndentedCode, 0, 2)]);
+        // 2 空格 + \t 同样到列 4
+        assert_eq!(kinds(&Buffer::new("  \tfoo\n")), [(BlockKind::IndentedCode, 0, 1)]);
+        // 4 空格 + \t 的续行
+        assert_eq!(kinds(&Buffer::new("    foo\n\tbar\n")), [(BlockKind::IndentedCode, 0, 2)]);
+    }
+
+    #[test]
+    fn indented_code_precedes_block_markers() {
+        // Example 48/69：缩进的分隔线/ATX 是代码，不是块标记
+        assert_eq!(kinds(&Buffer::new("    ***\n")), [(BlockKind::IndentedCode, 0, 1)]);
+        assert_eq!(kinds(&Buffer::new("    # foo\n")), [(BlockKind::IndentedCode, 0, 1)]);
+    }
+
+    #[test]
+    fn tilde_fence_supported() {
+        assert_eq!(
+            kinds(&Buffer::new("~~~\naaa\n~~~\n")),
+            [(BlockKind::FencedCode(None), 0, 3)]
+        );
+        // 闭合围栏须同字符：``` 不闭合 ~~~ 围栏
+        assert_eq!(
+            kinds(&Buffer::new("~~~\naaa\n```\n~~~\n")),
+            [(BlockKind::FencedCode(None), 0, 4)]
+        );
+    }
+
+    #[test]
+    fn fence_close_requires_length_and_whitespace_tail() {
+        // 闭合 ≥ 开围栏长度（3 个 ~~~ 不闭合 4 个 ~~~~）
+        assert_eq!(
+            kinds(&Buffer::new("~~~~\naaa\n~~~\n~~~~\n")),
+            [(BlockKind::FencedCode(None), 0, 4)]
+        );
+        // 闭合标记后只允许空白：` ``` aaa ` 是内容（Example 147）
+        assert_eq!(
+            kinds(&Buffer::new("```\n``` aaa\n```\n")),
+            [(BlockKind::FencedCode(None), 0, 3)]
+        );
+        // 闭合缩进 >3 列不合法（Example 137）：围栏未闭合，吞咽至 EOF（含尾空行）
+        assert_eq!(
+            kinds(&Buffer::new("```\naaa\n    ```\n")),
+            [(BlockKind::FencedCode(None), 0, 4)]
+        );
+        // 闭合缩进 ≤3 列合法（Example 135）
+        assert_eq!(
+            kinds(&Buffer::new("```\naaa\n  ```\n")),
+            [(BlockKind::FencedCode(None), 0, 3)]
+        );
+    }
+
+    #[test]
+    fn fence_info_backticks_invalid_for_backtick_fence() {
+        // Example 138：``` ``` 的 info 含反引号 → 段落
+        assert_eq!(kinds(&Buffer::new("``` ```\naaa\n")), [(BlockKind::Paragraph, 0, 2)]);
+        // Example 145：``` aa ``` 同理
+        assert_eq!(kinds(&Buffer::new("``` aa ```\nfoo\n")), [(BlockKind::Paragraph, 0, 2)]);
+        // ~~~ 围栏的 info 可含反引号（Example 146）
+        assert_eq!(
+            kinds(&Buffer::new("~~~ aa ``` ~~~\nfoo\n~~~\n")),
+            [(BlockKind::FencedCode(Some("aa".to_string())), 0, 3)]
+        );
+    }
+
+    #[test]
+    fn fence_requires_three_markers() {
+        // `` 只有两个反引号：不是围栏
+        assert!(!is_fence("``"));
+        assert_eq!(kinds(&Buffer::new("``\nfoo\n``\n")), [(BlockKind::Paragraph, 0, 3)]);
     }
 }

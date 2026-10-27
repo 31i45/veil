@@ -25,16 +25,16 @@ use veil_core::{BlockKind, InlineKind, InlineNode, Range, Session};
 /// C 567→595、条件 C 506→568/603=94.2%，D 567→595；B 606→618 / 607→619。
 /// 另修代码段开闭 run 必须等长（Example 340/347），Code spans C 16→21；
 /// 自动链接 8→19/19；强调段 127→129（0475-0481 的 `<...>` 交互）。
-const BASELINE_A: usize = 603;
-const BASELINE_B_EXACT: usize = 618;
-const BASELINE_B_CANON: usize = 619;
-const BASELINE_C: usize = 595;
+const BASELINE_A: usize = 637;
+const BASELINE_B_EXACT: usize = 628;
+const BASELINE_B_CANON: usize = 629;
+const BASELINE_C: usize = 609;
 /// 条件基线（仅 A 通过时统计）。
-const BASELINE_B_EXACT_WHEN_A: usize = 580;
-const BASELINE_C_WHEN_A: usize = 568;
-/// Suite D 基线（行内结构签名；0c P1 缩进代码/围栏/自动链接落地后实测，2026-10-27）。
-const BASELINE_D: usize = 595;
-const BASELINE_D_WHEN_A: usize = 568;
+const BASELINE_B_EXACT_WHEN_A: usize = 614;
+const BASELINE_C_WHEN_A: usize = 596;
+/// Suite D 基线（行内结构签名；P2 HTML 块落地后实测）。
+const BASELINE_D: usize = 610;
+const BASELINE_D_WHEN_A: usize = 596;
 /// 分节 C 基线（2026-10-27 缩进代码/围栏/自动链接落地后实测）：任何一节只允许改善。
 /// 与 SECTIONS 打印同序（BTreeMap 字典序）。
 const BASELINE_C_SECTION: &[(&str, usize)] = &[
@@ -47,13 +47,13 @@ const BASELINE_C_SECTION: &[(&str, usize)] = &[
     ("Emphasis and strong emphasis", 129),
     ("Entity and numeric character references", 15),
     ("Fenced code blocks", 29),
-    ("HTML blocks", 24),
+    ("HTML blocks", 36),
     ("Hard line breaks", 13),
     ("Images", 16),
     ("Indented code blocks", 12),
     ("Inlines", 1),
-    ("Link reference definitions", 25),
-    ("Links", 76),
+    ("Link reference definitions", 26),
+    ("Links", 77),
     ("List items", 48),
     ("Lists", 26),
     ("Paragraphs", 8),
@@ -188,6 +188,31 @@ fn actual_blocks(s: &Session) -> Vec<B> {
             BlockKind::BlockQuote => B::Quote,
             BlockKind::ThematicBreak => B::Rule,
             BlockKind::LinkRefDef => continue,
+            BlockKind::HtmlBlock => {
+                // 按首行首标签映射：<pre → Pre；<script/style/div/table/section/
+                // article/details/summary 或注释 → Html；其余（<a>、</div>、
+                // <!DOCTYPE、<Warning> 等）跳过（与 LinkRefDef 同，规范期望序列
+                // 中此类不对应顶层块）。
+                let text = s.text_slice(range).unwrap_or_default();
+                let first = text.split_inclusive('\n').next().unwrap_or(&text);
+                let t = first.trim_start();
+                if t.starts_with("<pre") {
+                    B::Pre
+                } else if t.starts_with("<!--")
+                    || t.starts_with("<script")
+                    || t.starts_with("<style")
+                    || t.starts_with("<div")
+                    || t.starts_with("<table")
+                    || t.starts_with("<section")
+                    || t.starts_with("<article")
+                    || t.starts_with("<details")
+                    || t.starts_with("<summary")
+                {
+                    B::Html
+                } else {
+                    continue;
+                }
+            }
             BlockKind::ListItem { .. } => unreachable!("列表项已在上方处理"),
         };
         out.push(b);

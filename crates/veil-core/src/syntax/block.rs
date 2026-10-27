@@ -104,6 +104,11 @@ pub(super) fn scan_one(buf: &Buffer, line: usize, total: usize) -> (BlockKind, u
     if let Some(n) = link_ref_def(buf, line, total) {
         return (BlockKind::LinkRefDef, n);
     }
+    // 原始 HTML 块（CommonMark §4.6，类型 1–7）：块起始识别；类型 6 可打断段落（见
+    // interrupts_paragraph），类型 7 不可。块内不解析 inline，源码原样渲染。
+    if let Some(start) = html_block_start(&text) {
+        return (BlockKind::HtmlBlock, html_block_lines(buf, line, total, start));
+    }
     // 段落：直到空行 / 可打断段落的块起始（打断规则集中于 `interrupts_paragraph`）。
     // 表格 v0 不打断段落——同 GFM，表头须位于块起始。
     // Setext 下划线（0c P0-2）优先于全部打断判定：`Foo\n---` 整体成 2 级标题。
@@ -140,6 +145,8 @@ fn interrupts_paragraph(l: &str) -> bool {
         || (indent_le3(l) && is_thematic_break(lt))
         || quote_marker_pos(l).is_some()
         || list_mark(l).is_some_and(|m| marker_interrupts_paragraph(&m))
+        // HTML 块类型 1–6 可打断段落；类型 7（完整标签行）不可。
+        || html_block_interrupts_paragraph(l)
 }
 
 /// 列表标记打断段落的附加规则：缩进 ≤3 列、内容非空、有序起始号为 1。
@@ -536,6 +543,10 @@ fn quote_inner_para(line: &str) -> bool {
     if t.trim().is_empty() {
         return false;
     }
+    // 内部缩进 ≥4 列为缩进代码块（Example 236），非段落，懒续行不适用。
+    if indent_info(inner).0 >= 4 {
+        return false;
+    }
     !(is_fence(t)
         || atx_level(t).is_some()
         || math_marker(inner.trim()).is_some()
@@ -818,7 +829,7 @@ pub(super) fn parse_link_ref_def(text: &str, base: usize) -> Option<RefDefAst> {
     if i > 3 {
         return None; // 缩进超限：属缩进代码块领地
     }
-    // label：`[...]`，无未转义方括号，不跨行，至少一个非空白
+    // label：`[...]`，无未转义方括号，可跨行（CommonMark），至少一个非空白
     if b.get(i) != Some(&b'[') {
         return None;
     }
@@ -827,10 +838,21 @@ pub(super) fn parse_link_ref_def(text: &str, base: usize) -> Option<RefDefAst> {
     let mut has_non_ws = false;
     let le = loop {
         match b.get(j) {
-            None | Some(b'\n') => return None,
+            None => return None,
             Some(b'\\') => j += 2,
             Some(b'[') => return None,
             Some(b']') => break j,
+            Some(b'\n') => {
+                // label 可跨行，但空行终止 label
+                let mut k = j + 1;
+                while matches!(b.get(k), Some(b' ') | Some(b'\t')) {
+                    k += 1;
+                }
+                if matches!(b.get(k), Some(b'\n') | None) {
+                    return None;
+                }
+                j += 1;
+            }
             Some(&c) => {
                 if !c.is_ascii_whitespace() {
                     has_non_ws = true;
@@ -928,9 +950,22 @@ pub(super) fn parse_link_ref_def(text: &str, base: usize) -> Option<RefDefAst> {
                 match b.get(m) {
                     Some(b'\\') => m += 2,
                     Some(&c) if c == closer => break m,
-                    // `(…)` 内不允许未转义 `(`；title 不跨行
+                    // `(…)` 内不允许未转义 `(`；`(…)` title 不跨行
                     Some(b'(') if closer == b')' => return None,
-                    None | Some(b'\n') => return None,
+                    Some(b'\n') if closer == b')' => return None,
+                    // `"…"` / `'…'` title 可跨行（CommonMark），但空行终止 title。
+                    Some(b'\n') => {
+                        // 检查下一行是否为空行（仅空白至下一个 \n）
+                        let mut k = m + 1;
+                        while matches!(b.get(k), Some(b' ') | Some(b'\t')) {
+                            k += 1;
+                        }
+                        if matches!(b.get(k), Some(b'\n') | None) {
+                            return None; // 空行 → title 非法
+                        }
+                        m += 1;
+                    }
+                    None => return None,
                     Some(_) => m += 1,
                 }
             };
@@ -964,11 +999,12 @@ pub(super) fn parse_link_ref_def(text: &str, base: usize) -> Option<RefDefAst> {
     })
 }
 
-/// 块起始处识别链接引用定义，返回消耗行数（1–3）。非定义返回 None。
+/// 块起始处识别链接引用定义，返回消耗行数（1–N）。非定义返回 None。
 fn link_ref_def(buf: &Buffer, line: usize, total: usize) -> Option<usize> {
     let mut text = line_text(buf, line);
     let mut starts = vec![0usize];
-    for k in 1..3usize {
+    // label/title 均可跨行（CommonMark），多读几行以覆盖（上限 10 行）。
+    for k in 1..10usize {
         if line + k >= total {
             break;
         }
@@ -978,6 +1014,275 @@ fn link_ref_def(buf: &Buffer, line: usize, total: usize) -> Option<usize> {
     let ast = parse_link_ref_def(&text, 0)?;
     // 消耗行数 = 终点覆盖到的行数（行起点 ≤ 终点位置）
     Some(starts.iter().filter(|&&s| s <= ast.len).count().max(1))
+}
+
+// ===== 原始 HTML 块（CommonMark §4.6） =====
+//
+// 七种类型，起始条件均为「行首 ≤3 缩进后以 `<` 开头」：
+// - 类型 1：`<script`/`<pre`/`<style`/`<textarea`（大小写不敏感，后接空白/>//）
+//   → 终止于匹配的闭合标签（同标签名，大小写不敏感）。
+// - 类型 2：`<!--` → 终止于 `-->`。
+// - 类型 3：`<?` → 终止于 `?>`。
+// - 类型 4：`<!` 后接大写 ASCII 字母 → 终止于 `>`。
+// - 类型 5：`<![CDATA[` → 终止于 `]]>`。
+// - 类型 6：`<`/`</` 后接块级标签名（见 BLOCK_LEVEL_TAGS），后接空白/>// →
+//   终止于空行；可打断段落。
+// - 类型 7：整行为一个完整开标签 `</?name attrs>` 或闭标签 `</name>`，标签名不在
+//   类型 6 列表中 → 终止于空行；不可打断段落。
+// 块内不解析 inline，源码原样渲染（与 FencedCode/IndentedCode 一致）。
+
+/// HTML 块起始类型。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum HtmlStart {
+    /// 类型 1：闭合标签名（小写）。
+    CloseTag(&'static str),
+    /// 类型 2：`-->`。
+    Comment,
+    /// 类型 3：`?>`。
+    ProcInst,
+    /// 类型 4：`>`。
+    Doctype,
+    /// 类型 5：`]]>`。
+    Cdata,
+    /// 类型 6/7：空行终止（type6 决定是否打断段落）。
+    BlankLine { type6: bool },
+}
+
+/// 块级标签名（CommonMark §4.6 类型 6 列表，全部小写）。
+const BLOCK_LEVEL_TAGS: &[&str] = &[
+    "address", "article", "aside", "base", "basefont", "blockquote", "body", "caption",
+    "center", "col", "colgroup", "dd", "details", "dialog", "dir", "div", "dl", "dt",
+    "fieldset", "figcaption", "figure", "footer", "form", "frame", "frameset", "h1", "h2",
+    "h3", "h4", "h5", "h6", "head", "header", "hr", "html", "iframe", "legend", "li", "link",
+    "main", "menu", "menuitem", "nav", "noframes", "ol", "optgroup", "option", "p", "param",
+    "section", "source", "title", "tr", "track", "ul",
+];
+
+/// 判定行首是否为 HTML 块起始；返回起始类型（含终止方式）。
+fn html_block_start(line: &str) -> Option<HtmlStart> {
+    let (indent, start) = indent_info(line);
+    if indent > 3 {
+        return None;
+    }
+    let b = line.as_bytes();
+    if b.get(start) != Some(&b'<') {
+        return None;
+    }
+    let rest = &line[start..];
+    // 类型 2：注释 `<!--`
+    if rest.starts_with("<!--") {
+        return Some(HtmlStart::Comment);
+    }
+    // 类型 3：处理指令 `<?`
+    if rest.starts_with("<?") {
+        return Some(HtmlStart::ProcInst);
+    }
+    // 类型 5：CDATA `<![CDATA[`
+    if rest.starts_with("<![CDATA[") {
+        return Some(HtmlStart::Cdata);
+    }
+    // 类型 4：`<!` 后接大写字母
+    if rest.len() >= 3
+        && rest.as_bytes()[1] == b'!'
+        && rest.as_bytes()[2].is_ascii_uppercase()
+    {
+        return Some(HtmlStart::Doctype);
+    }
+    // 类型 1：script/pre/style/textarea
+    let lower = rest.to_ascii_lowercase();
+    for tag in ["script", "pre", "style", "textarea"] {
+        if lower.starts_with(&format!("<{tag}")) {
+            let after = lower.as_bytes().get(tag.len() + 1);
+            if matches!(after, Some(b' ') | Some(b'\t') | Some(b'\n') | Some(b'\r') | Some(b'>') | Some(b'/')) {
+                return Some(HtmlStart::CloseTag(tag));
+            }
+        }
+    }
+    // 解析标签名：可选 `/`，然后 `[A-Za-z][A-Za-z0-9-]*`
+    let after_lt = &rest[1..];
+    let (closing, name_start) = if after_lt.starts_with('/') {
+        (true, 1)
+    } else {
+        (false, 0)
+    };
+    let name_bytes = &after_lt.as_bytes()[name_start..];
+    let name_len = name_bytes
+        .iter()
+        .take(1)
+        .filter(|c| c.is_ascii_alphabetic())
+        .count();
+    if name_len == 0 {
+        return None;
+    }
+    let mut n = 1usize;
+    while n < name_bytes.len()
+        && (name_bytes[n].is_ascii_alphanumeric() || name_bytes[n] == b'-')
+    {
+        n += 1;
+    }
+    let name = std::str::from_utf8(&name_bytes[..n]).ok()?.to_ascii_lowercase();
+    let after_name = &after_lt[name_start + n..];
+    // 类型 6：块级标签，后接空白/>//
+    if BLOCK_LEVEL_TAGS.contains(&name.as_str()) {
+        let c = after_name.as_bytes().first().copied();
+        if matches!(c, Some(b' ') | Some(b'\t') | Some(b'\n') | Some(b'\r') | Some(b'>') | Some(b'/')) {
+            return Some(HtmlStart::BlankLine { type6: true });
+        }
+    }
+    // 类型 7：完整标签行（开或闭），标签名后至行尾只允许属性 + `>` + 空白。
+    // 闭合标签：`</name>` 后只允许空白至行尾。
+    if closing {
+        let after = after_name.trim_end_matches(['\r', '\n']);
+        if after.starts_with('>') && after[1..].trim().is_empty() {
+            return Some(HtmlStart::BlankLine { type6: false });
+        }
+        return None;
+    }
+    // 开标签：解析属性（仅允许双引号属性值，保守匹配类型 7），然后 `>` + 空白至行尾。
+    // 属性前必须有空白（`<m:abc>` 非法：`m` 后非空白且非 `>`/`/`）。
+    let mut i = 0usize;
+    let ab = after_name.as_bytes();
+    // 标签名后必须紧跟 `>`、`/>` 或空白（引出属性）；否则非完整标签。
+    match ab.first().copied() {
+        Some(b'>') => {
+            if after_name[1..].trim_end_matches(['\r', '\n']).trim().is_empty() {
+                return Some(HtmlStart::BlankLine { type6: false });
+            }
+            return None;
+        }
+        Some(b'/') if ab.get(1) == Some(&b'>') => {
+            if after_name[2..].trim_end_matches(['\r', '\n']).trim().is_empty() {
+                return Some(HtmlStart::BlankLine { type6: false });
+            }
+            return None;
+        }
+        Some(b' ') | Some(b'\t') => {}
+        _ => return None,
+    }
+    // 属性序列：名称 + 可选 `="..."`，属性间空白
+    while i < ab.len() {
+        // 跳过前导空白
+        while i < ab.len() && matches!(ab[i], b' ' | b'\t') {
+            i += 1;
+        }
+        if i < ab.len() && ab[i] == b'>' {
+            i += 1;
+            // 行尾只允许空白
+            if after_name[i..].trim_end_matches(['\r', '\n']).trim().is_empty() {
+                return Some(HtmlStart::BlankLine { type6: false });
+            }
+            return None;
+        }
+        if i < ab.len() && ab[i] == b'/' && ab.get(i + 1) == Some(&b'>') {
+            i += 2;
+            if after_name[i..].trim_end_matches(['\r', '\n']).trim().is_empty() {
+                return Some(HtmlStart::BlankLine { type6: false });
+            }
+            return None;
+        }
+        // 属性名：`[A-Za-z_:][A-Za-z0-9_.:-]*`
+        if !ab[i].is_ascii_alphabetic() && ab[i] != b'_' && ab[i] != b':' {
+            return None;
+        }
+        i += 1;
+        while i < ab.len()
+            && (ab[i].is_ascii_alphanumeric() || matches!(ab[i], b'_' | b'.' | b':' | b'-'))
+        {
+            i += 1;
+        }
+        // 可选 `="..."` 值
+        if i < ab.len() && ab[i] == b'=' {
+            i += 1;
+            if ab.get(i) != Some(&b'"') {
+                return None; // 类型 7 仅允许双引号属性值
+            }
+            i += 1;
+            while i < ab.len() && ab[i] != b'"' {
+                i += 1;
+            }
+            if i >= ab.len() {
+                return None;
+            }
+            i += 1; // 跳过闭合引号
+        }
+    }
+    None
+}
+
+/// 判定行是否为可打断段落的 HTML 块起始（类型 1–6；类型 7 不可打断段落）。
+fn html_block_interrupts_paragraph(line: &str) -> bool {
+    match html_block_start(line) {
+        Some(HtmlStart::BlankLine { type6 }) => type6,
+        Some(_) => true, // 类型 1–5
+        None => false,
+    }
+}
+
+/// HTML 块消耗行数：按起始类型的终止条件扫描。
+fn html_block_lines(
+    buf: &Buffer,
+    line: usize,
+    total: usize,
+    start: HtmlStart,
+) -> usize {
+    match start {
+        HtmlStart::BlankLine { .. } => {
+            // 类型 6/7：空行终止（不消耗空行）
+            let mut n = 1;
+            while line + n < total {
+                if line_text(buf, line + n).trim().is_empty() {
+                    break;
+                }
+                n += 1;
+            }
+            n
+        }
+        _ => {
+            // 类型 1–5：扫描终止模式；未闭合则吞咽至 EOF。
+            // 首行若已含终止模式（如 `<style>x</style>` 单行），块仅占 1 行。
+            if html_line_terminates(&line_text(buf, line), start) {
+                return 1;
+            }
+            let mut n = 1;
+            while line + n < total {
+                let l = line_text(buf, line + n);
+                if html_line_terminates(&l, start) {
+                    return n + 1;
+                }
+                n += 1;
+            }
+            n
+        }
+    }
+}
+
+/// 单行是否含 HTML 块终止模式（类型 1–5）。
+fn html_line_terminates(line: &str, start: HtmlStart) -> bool {
+    match start {
+        HtmlStart::CloseTag(tag) => {
+            // 匹配 `</tag>`（大小写不敏感），tag 后须为 `>` 或空白
+            let lower = line.to_ascii_lowercase();
+            let needle = format!("</{}", tag);
+            let mut search = 0usize;
+            while let Some(p) = lower[search..].find(&needle) {
+                let pos = search + p;
+                let after = pos + needle.len();
+                if matches!(
+                    lower.as_bytes().get(after),
+                    Some(b'>') | Some(b' ') | Some(b'\t') | Some(b'\n') | Some(b'\r')
+                ) {
+                    return true;
+                }
+                search = pos + 1;
+            }
+            false
+        }
+        HtmlStart::Comment => line.contains("-->"),
+        HtmlStart::ProcInst => line.contains("?>"),
+        HtmlStart::Doctype => line.contains('>'),
+        HtmlStart::Cdata => line.contains("]]>"),
+        HtmlStart::BlankLine { .. } => false,
+    }
 }
 
 // ===== GFM 表格（切片 9） =====
@@ -2214,5 +2519,45 @@ mod tests {
         // `` 只有两个反引号：不是围栏
         assert!(!is_fence("``"));
         assert_eq!(kinds(&Buffer::new("``\nfoo\n``\n")), [(BlockKind::Paragraph, 0, 3)]);
+    }
+
+    // ===== 原始 HTML 块（CommonMark §4.6）：识别边界 =====
+
+    #[test]
+    fn html_block_type6_div_starts_block() {
+        // `<div>` 在类型 6 块级标签列表中；空行终止
+        let b = Buffer::new("<div>\nfoo\n</div>\n");
+        assert_eq!(
+            kinds(&b),
+            [(BlockKind::HtmlBlock, 0, 3)]
+        );
+    }
+
+    #[test]
+    fn html_block_table_not_type6() {
+        // `table` 不在类型 6 列表；`<table>` 独占行为类型 7
+        let b = Buffer::new("<table>\nfoo\n</table>\n");
+        assert_eq!(
+            kinds(&b),
+            [(BlockKind::HtmlBlock, 0, 3)]
+        );
+    }
+
+    #[test]
+    fn html_block_type1_script_ends_at_close() {
+        let b = Buffer::new("<script>\nfoo\n</script>\nbar\n");
+        assert_eq!(
+            kinds(&b),
+            [(BlockKind::HtmlBlock, 0, 3), (BlockKind::Paragraph, 3, 4)]
+        );
+    }
+
+    #[test]
+    fn html_block_type2_comment_ends_at_close() {
+        let b = Buffer::new("<!-- foo\nbar -->\nbaz\n");
+        assert_eq!(
+            kinds(&b),
+            [(BlockKind::HtmlBlock, 0, 2), (BlockKind::Paragraph, 2, 3)]
+        );
     }
 }

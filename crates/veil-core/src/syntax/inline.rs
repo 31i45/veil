@@ -48,6 +48,48 @@ fn is_escapable(c: char) -> bool {
     c.is_ascii_punctuation()
 }
 
+/// URI 自动链接（`<scheme:...>`）：scheme = `[A-Za-z][A-Za-z0-9+.-]{1,31}` + `:`。
+/// 例：`<https://../>` / `<made-up-scheme://foo,bar>` 合法，`<m:abc>`（scheme 1 字符）非法。
+fn is_uri_autolink(body: &str) -> bool {
+    let b = body.as_bytes();
+    let Some(colon) = b.iter().position(|&c| c == b':') else {
+        return false;
+    };
+    let scheme = &b[..colon];
+    if !(2..=32).contains(&scheme.len()) || !scheme[0].is_ascii_alphabetic() {
+        return false;
+    }
+    scheme[1..]
+        .iter()
+        .all(|&c| c.is_ascii_alphanumeric() || matches!(c, b'+' | b'.' | b'-'))
+}
+
+/// 邮箱自动链接（`<local@domain>`）：local 允许 `[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]`，
+/// domain 为 ≥2 个点分 label（alnum 起止，内部可含 `-`，长度 ≤63）。
+fn is_email_autolink(body: &str) -> bool {
+    let Some(at) = body.find('@') else {
+        return false;
+    };
+    let (local, domain) = (&body[..at], &body[at + 1..]);
+    if local.is_empty()
+        || !local
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || b".!#$%&'*+/=?^_`{|}~-".contains(&c))
+    {
+        return false;
+    }
+    let labels: Vec<&str> = domain.split('.').collect();
+    labels.len() >= 2
+        && labels.iter().all(|l| {
+            let b = l.as_bytes();
+            !b.is_empty()
+                && b.len() <= 63
+                && b[0].is_ascii_alphanumeric()
+                && b[b.len() - 1].is_ascii_alphanumeric()
+                && b.iter().all(|c| c.is_ascii_alphanumeric() || *c == b'-')
+        })
+}
+
 /// Unicode 标点（flanking 判定用）：ASCII 精确；非 ASCII 近似 P/S 类（见模块头注）。
 fn is_unicode_punctuation(c: char) -> bool {
     if c.is_ascii() {
@@ -242,7 +284,8 @@ impl<'a> InlineParser<'a> {
             }
             if depth < MAX_INLINE_DEPTH {
                 if let Some(node) = self
-                    .try_code_span()
+                    .try_autolink()
+                    .or_else(|| self.try_code_span())
                     .or_else(|| self.try_math())
                     .or_else(|| self.try_strikethrough(depth))
                     .or_else(|| self.try_image(depth))
@@ -265,9 +308,17 @@ impl<'a> InlineParser<'a> {
             }
             // 普通字符：按 UTF-8 字符边界前进，保证不慢于线性、不切碎多字节字符。
             // 注意须按当前 pos 重新切片：scan_delim_run 对不可开闭的 run 已整段消费
-            // （落为纯文本），循环顶部的 rest 已过期；run 在段尾时 pos 已至 EOF
+            // （落为纯文本），循环顶部的 rest 已过期；run 在段尾时 pos 已至 EOF。
+            // 反引号 run 同样整段消费：开 run 匹配失败时，run 内部任一位置都不能再
+            // 作为开标记（CommonMark 的 run 是极大连续段，Example 347）。
             if self.pos < self.s.len() {
-                self.pos += self.s[self.pos..].chars().next().unwrap().len_utf8();
+                let c = self.s[self.pos..].chars().next().unwrap();
+                let adv = if c == '`' {
+                    self.s[self.pos..].bytes().take_while(|&b| b == b'`').count()
+                } else {
+                    c.len_utf8()
+                };
+                self.pos += adv;
             }
         }
         resolve_emphasis(toks, self.base)
@@ -326,27 +377,65 @@ impl<'a> InlineParser<'a> {
         }
     }
 
-    /// `` `code` ``：下一个反引号闭合；内容非空、原样（不嵌套）。
-    fn try_code_span(&mut self) -> Option<InlineNode> {
+    /// 自动链接（CommonMark §6.5）：`<scheme:...>` 或 `<local@domain>`。
+    /// 内容不含空白/控制字符/`<`/`>`；URI 不做反斜杠转义（Example 603 的 `\[\` 原样）。
+    fn try_autolink(&mut self) -> Option<InlineNode> {
         let rest = &self.s[self.pos..];
-        if !rest.starts_with('`') {
+        let inner = rest.strip_prefix('<')?;
+        let rel = inner
+            .bytes()
+            .position(|c| c == b'>' || c == b'<' || c <= b' ' || c == 0x7f)?;
+        if inner.as_bytes()[rel] != b'>' {
             return None;
         }
-        let rel = rest[1..].find('`')?;
-        if rel == 0 {
+        let body = &inner[..rel];
+        if !is_uri_autolink(body) && !is_email_autolink(body) {
             return None;
         }
         let start = self.pos;
         let content_end = start + 1 + rel;
         self.pos = content_end + 1;
         Some(self.node(
-            InlineKind::Code,
+            InlineKind::Link,
             start,
             start + 1,
             content_end,
-            None,
+            Some((start + 1, content_end)),
             Vec::new(),
         ))
+    }
+
+    /// `` `code` ``：开/闭反引号 run 长度必须相等（CommonMark §6.1）；内容非空、原样
+    /// （不嵌套）。`` ```foo`` `` 的闭 run 只有 2 个反引号 → 不成代码段（Example 347）。
+    fn try_code_span(&mut self) -> Option<InlineNode> {
+        let rest = &self.s[self.pos..];
+        let open = rest.bytes().take_while(|&b| b == b'`').count();
+        if open == 0 {
+            return None;
+        }
+        let mut i = open;
+        loop {
+            let off = rest[i..].find('`')?;
+            i += off;
+            let run = rest[i..].bytes().take_while(|&b| b == b'`').count();
+            if run == open {
+                if i == open {
+                    return None; // 空内容（` `` `）不成节点
+                }
+                let start = self.pos;
+                let content_end = start + i;
+                self.pos = content_end + run;
+                return Some(self.node(
+                    InlineKind::Code,
+                    start,
+                    start + open,
+                    content_end,
+                    None,
+                    Vec::new(),
+                ));
+            }
+            i += run;
+        }
     }
 
     /// `$math$`：内容非空、首尾非空格、闭 `$` 后不随数字（pandoc 规则）。
@@ -604,6 +693,16 @@ mod tests {
     }
 
     #[test]
+    fn code_span_marker_runs_must_match_length() {
+        // Example 347：开 run 3 个、闭 run 2 个 → 不成代码段
+        assert_eq!(sexp(&parse("```foo``")), "");
+        // 等长 run：``a``
+        assert_eq!(sexp(&parse("``a``")), "Code[0..5 c=2..3]");
+        // Example 340：内层 `` 不是闭标记，等长的末尾单反引号闭合
+        assert_eq!(sexp(&parse("` foo `` bar `")), "Code[0..14 c=1..13]");
+    }
+
+    #[test]
     fn math_basic() {
         assert_eq!(sexp(&parse("$x+y$")), "Math[0..5 c=1..4]");
     }
@@ -614,6 +713,18 @@ mod tests {
         assert_eq!(sexp(&parse("$x$5")), ""); // 闭 $ 后随数字
         assert_eq!(sexp(&parse("$ x$")), ""); // 首空格
         assert_eq!(sexp(&parse("$x $")), ""); // 尾空格
+    }
+
+    #[test]
+    fn autolink_uri_and_email() {
+        assert_eq!(sexp(&parse("<a+b+c:d>")), "Link[0..9 c=1..8 url=1..8]");
+        assert_eq!(sexp(&parse("<a@b.c>")), "Link[0..7 c=1..6 url=1..6]");
+        // scheme 至少 2 字符：`<m:abc>` 不是自动链接
+        assert_eq!(sexp(&parse("<m:abc>")), "");
+        // 内容含空格 / 无 scheme / 空：均非自动链接
+        assert_eq!(sexp(&parse("<https://foo.bar/baz bim>")), "");
+        assert_eq!(sexp(&parse("<foo.bar.baz>")), "");
+        assert_eq!(sexp(&parse("<>")), "");
     }
 
     #[test]

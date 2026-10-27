@@ -20,37 +20,37 @@ use std::path::Path;
 use pulldown_cmark::{html, Options, Parser};
 use veil_core::{BlockKind, InlineKind, InlineNode, Range, Session};
 
-/// 一致性基线（0c P1 行内强调 delimiter-run 落地后，2026-10-27）。
-/// P1 收益（C 505→567，条件 C 444→506/560=90.4% 达 0c 门禁线；D 501→567）：
-/// Emphasis 段 68→127/132（flanking + `_` intraword + rule of 3 + run 拆分消费），
-/// Links 段 73→76（链接文本内强调解析修正）。Emphasis 剩余 5 例（0475-0477/0480/0481）
-/// 为自动链接/行内 HTML 交互，归下一条 P1。A/B 持平 560、606/607。
-const BASELINE_A: usize = 560;
-const BASELINE_B_EXACT: usize = 606;
-const BASELINE_B_CANON: usize = 607;
-const BASELINE_C: usize = 567;
+/// 一致性基线（0c P1 缩进代码/围栏边界/自动链接落地后，2026-10-27）。
+/// 本轮收益：A 560→603（缩进代码 12/12、围栏 29/29、Tabs 11/11，均满分），
+/// C 567→595、条件 C 506→568/603=94.2%，D 567→595；B 606→618 / 607→619。
+/// 另修代码段开闭 run 必须等长（Example 340/347），Code spans C 16→21；
+/// 自动链接 8→19/19；强调段 127→129（0475-0481 的 `<...>` 交互）。
+const BASELINE_A: usize = 603;
+const BASELINE_B_EXACT: usize = 618;
+const BASELINE_B_CANON: usize = 619;
+const BASELINE_C: usize = 595;
 /// 条件基线（仅 A 通过时统计）。
-const BASELINE_B_EXACT_WHEN_A: usize = 538;
-const BASELINE_C_WHEN_A: usize = 506;
-/// Suite D 基线（行内结构签名；0c P1 delimiter-run 落地后实测，2026-10-27）。
-const BASELINE_D: usize = 567;
-const BASELINE_D_WHEN_A: usize = 506;
-/// 分节 C 基线（2026-10-27 delimiter-run 落地后实测）：任何一节只允许改善。
+const BASELINE_B_EXACT_WHEN_A: usize = 580;
+const BASELINE_C_WHEN_A: usize = 568;
+/// Suite D 基线（行内结构签名；0c P1 缩进代码/围栏/自动链接落地后实测，2026-10-27）。
+const BASELINE_D: usize = 595;
+const BASELINE_D_WHEN_A: usize = 568;
+/// 分节 C 基线（2026-10-27 缩进代码/围栏/自动链接落地后实测）：任何一节只允许改善。
 /// 与 SECTIONS 打印同序（BTreeMap 字典序）。
 const BASELINE_C_SECTION: &[(&str, usize)] = &[
     ("ATX headings", 18),
-    ("Autolinks", 8),
-    ("Backslash escapes", 10),
+    ("Autolinks", 19),
+    ("Backslash escapes", 12),
     ("Blank lines", 1),
     ("Block quotes", 25),
-    ("Code spans", 16),
-    ("Emphasis and strong emphasis", 127),
+    ("Code spans", 21),
+    ("Emphasis and strong emphasis", 129),
     ("Entity and numeric character references", 15),
-    ("Fenced code blocks", 22),
+    ("Fenced code blocks", 29),
     ("HTML blocks", 24),
     ("Hard line breaks", 13),
     ("Images", 16),
-    ("Indented code blocks", 11),
+    ("Indented code blocks", 12),
     ("Inlines", 1),
     ("Link reference definitions", 25),
     ("Links", 76),
@@ -182,7 +182,7 @@ fn actual_blocks(s: &Session) -> Vec<B> {
         let b = match kind {
             BlockKind::Paragraph => B::P,
             BlockKind::AtxHeading(n) | BlockKind::SetextHeading(n) => B::H(n),
-            BlockKind::FencedCode(_) => B::Pre,
+            BlockKind::FencedCode(_) | BlockKind::IndentedCode => B::Pre,
             BlockKind::Math => B::Other,
             BlockKind::Table => B::Table,
             BlockKind::BlockQuote => B::Quote,

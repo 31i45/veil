@@ -395,7 +395,7 @@ impl App {
                 self.cache.rasters.insert(id, Memo { key: lk, value: r });
             }
             let l = &self.cache.layouts[&id].value;
-            if matches!(kind, BlockKind::FencedCode(_)) {
+            if matches!(kind, BlockKind::FencedCode(_) | BlockKind::IndentedCode) {
                 let (rw, rh) = {
                     let r = &self.cache.rasters[&id].value;
                     (r.1, r.2)

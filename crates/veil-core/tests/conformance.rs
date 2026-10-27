@@ -4,8 +4,11 @@
 //! - Suite A：Veil 自有块解析器的顶层块序列 vs 规范期望 HTML 的顶层块标签序列。
 //! - Suite B：产品导出路径复刻（块分段 + pulldown-cmark）的 HTML vs 规范 HTML。
 //! - Suite C：Veil 自有行内节点计数 vs 规范 HTML 行内标签计数（弱判定，视为上限）。
+//! - Suite D（0c P1 行内强调前置门禁）：行内前序森林签名 (kind, depth) 逐例比对，
+//!   覆盖 C 的「计数抵消」盲区（如并列 vs 嵌套 strong 计数相同）。另按 26 节设
+//!   C 分段基线：强调改动只允许目标节改善、任何节不得退化。
 //!
-//! 门禁方向：三套指标只允许改善、不允许退化（`>=` 基线）。修复提升通过率后，
+//! 门禁方向：四套指标只允许改善、不允许退化（`>=` 基线）。修复提升通过率后，
 //! 应同步上调基线常量。已知 A 存在少量工具误判（规范 HTML 为裸行内标签时
 //! 期望序列扫描为空），此类由基线吸收，不计产品缺陷。
 
@@ -17,19 +20,51 @@ use std::path::Path;
 use pulldown_cmark::{html, Options, Parser};
 use veil_core::{BlockKind, InlineKind, InlineNode, Range, Session};
 
-/// 一致性基线（0c P0-3 宽松/多段列表项 + 引用懒续行完成后，2026-10-27）。
-/// 上一基线（P0-2 Setext 标题，2026-10-27）：A=518 B=565/566 C=505 条件 B=495 C=402。
-/// P0-3 收益（A 518→560，+42）：Block quotes 段 23/25（懒续行）、List items 段 44/48、
-/// Lists 段 23/26（区域扫描 + 内容列规则 + 宽松列表）。剩余 A 失败：0231/0236/0253/
-/// 0257/0272/0289/0313 归 P1（缩进代码/围栏边界），0308/0309 归 P2（HTML 块）；
-/// C 持平 505（行内强调/自动链接属 P1）。
+/// 一致性基线（0c P1 行内强调 delimiter-run 落地后，2026-10-27）。
+/// P1 收益（C 505→567，条件 C 444→506/560=90.4% 达 0c 门禁线；D 501→567）：
+/// Emphasis 段 68→127/132（flanking + `_` intraword + rule of 3 + run 拆分消费），
+/// Links 段 73→76（链接文本内强调解析修正）。Emphasis 剩余 5 例（0475-0477/0480/0481）
+/// 为自动链接/行内 HTML 交互，归下一条 P1。A/B 持平 560、606/607。
 const BASELINE_A: usize = 560;
 const BASELINE_B_EXACT: usize = 606;
 const BASELINE_B_CANON: usize = 607;
-const BASELINE_C: usize = 505;
+const BASELINE_C: usize = 567;
 /// 条件基线（仅 A 通过时统计）。
 const BASELINE_B_EXACT_WHEN_A: usize = 538;
-const BASELINE_C_WHEN_A: usize = 444;
+const BASELINE_C_WHEN_A: usize = 506;
+/// Suite D 基线（行内结构签名；0c P1 delimiter-run 落地后实测，2026-10-27）。
+const BASELINE_D: usize = 567;
+const BASELINE_D_WHEN_A: usize = 506;
+/// 分节 C 基线（2026-10-27 delimiter-run 落地后实测）：任何一节只允许改善。
+/// 与 SECTIONS 打印同序（BTreeMap 字典序）。
+const BASELINE_C_SECTION: &[(&str, usize)] = &[
+    ("ATX headings", 18),
+    ("Autolinks", 8),
+    ("Backslash escapes", 10),
+    ("Blank lines", 1),
+    ("Block quotes", 25),
+    ("Code spans", 16),
+    ("Emphasis and strong emphasis", 127),
+    ("Entity and numeric character references", 15),
+    ("Fenced code blocks", 22),
+    ("HTML blocks", 24),
+    ("Hard line breaks", 13),
+    ("Images", 16),
+    ("Indented code blocks", 11),
+    ("Inlines", 1),
+    ("Link reference definitions", 25),
+    ("Links", 76),
+    ("List items", 48),
+    ("Lists", 26),
+    ("Paragraphs", 8),
+    ("Precedence", 1),
+    ("Raw HTML", 14),
+    ("Setext headings", 27),
+    ("Soft line breaks", 2),
+    ("Tabs", 11),
+    ("Textual content", 3),
+    ("Thematic breaks", 19),
+];
 
 const EXAMPLES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/conformance/examples");
 
@@ -331,6 +366,103 @@ fn actual_inline(s: &Session) -> Counts {
     c
 }
 
+// ===== Suite D：行内前序森林签名 (kind, depth) =====
+
+/// 规范 HTML 的行内标签前序签名。标签栈给出深度；`<img>` 为 void 不入栈；
+/// `<pre>` 内的 `<code>` 是块级代码，整段忽略。栈失配（语料中不会出现）静默忽略，
+/// 避免单点工具问题级联成大量噪声失败。
+fn expected_inline_structure(html: &str) -> Vec<(&'static str, usize)> {
+    let mut out = Vec::new();
+    let mut stack: Vec<&'static str> = Vec::new();
+    let mut pre = 0i32;
+    let mut i = 0usize;
+    while i < html.len() {
+        let Some(off) = html[i..].find('<') else {
+            break;
+        };
+        i += off;
+        if html[i..].starts_with("<!--") {
+            match html[i..].find("-->") {
+                Some(e) => i += e + 3,
+                None => break,
+            }
+            continue;
+        }
+        let Some(end) = html[i..].find('>') else {
+            break;
+        };
+        let tag = &html[i + 1..i + end];
+        let name = base_name(tag);
+        let closing = tag.starts_with('/');
+        let self_closing = tag.ends_with('/');
+        i += end + 1;
+        if name == "pre" {
+            pre += if closing { -1 } else { 1 };
+            continue;
+        }
+        if pre > 0 {
+            continue;
+        }
+        let kind = match name.as_str() {
+            "strong" => "strong",
+            "em" => "em",
+            "code" => "code",
+            "a" => "link",
+            "img" => "image",
+            "del" => "del",
+            _ => continue,
+        };
+        if closing {
+            if stack.last() == Some(&kind) {
+                stack.pop();
+            }
+            continue;
+        }
+        out.push((kind, stack.len()));
+        if !self_closing && kind != "image" {
+            stack.push(kind);
+        }
+    }
+    out
+}
+
+/// Veil 行内树的前序签名；Math 不产生标签（与 C 口径一致）。
+fn actual_inline_structure(s: &Session) -> Vec<(&'static str, usize)> {
+    fn walk(nodes: &[InlineNode], depth: usize, out: &mut Vec<(&'static str, usize)>) {
+        for n in nodes {
+            let kind = match n.kind {
+                InlineKind::Strong => "strong",
+                InlineKind::Emph => "em",
+                InlineKind::Code => "code",
+                InlineKind::Link => "link",
+                InlineKind::Image => "image",
+                InlineKind::Strikethrough => "del",
+                InlineKind::Math => continue,
+            };
+            out.push((kind, depth));
+            walk(&n.children, depth + 1, out);
+        }
+    }
+    let mut out = Vec::new();
+    for (id, _, _) in s.blocks() {
+        if let Some(nodes) = s.block_inlines(id) {
+            walk(&nodes, 0, &mut out);
+        }
+    }
+    out
+}
+
+fn sig_short(sig: &[(&'static str, usize)]) -> String {
+    let mut s = String::new();
+    for (k, d) in sig.iter().take(12) {
+        s.push_str(&format!("{k}@{d} "));
+    }
+    if sig.len() > 12 {
+        s.push('…');
+    }
+    s.trim_end().to_string()
+}
+
 fn short(seq: &[B]) -> String {
     let mut s = String::new();
     for b in seq.iter().take(8) {
@@ -355,9 +487,12 @@ fn commonmark_0_31_2_conformance() {
     let mut b_canon_a = 0usize;
     let mut c_pass_a = 0usize;
     let mut panics = 0usize;
+    let mut d_pass = 0usize;
+    let mut d_pass_a = 0usize;
     let mut by_section: BTreeMap<String, (usize, usize, usize, usize, usize)> = BTreeMap::new();
     let mut a_fail: Vec<String> = Vec::new();
     let mut c_fail: Vec<String> = Vec::new();
+    let mut d_fail: Vec<String> = Vec::new();
 
     for line in index.lines() {
         let mut it = line.split('\t');
@@ -372,7 +507,8 @@ fn commonmark_0_31_2_conformance() {
             let a = actual_blocks(&s);
             let body = export_body(&s);
             let counts = actual_inline(&s);
-            (a, body, counts)
+            let sig = actual_inline_structure(&s);
+            (a, body, counts, sig)
         }));
         let entry = by_section.entry(section.to_string()).or_default();
         entry.0 += 1;
@@ -382,7 +518,7 @@ fn commonmark_0_31_2_conformance() {
                 a_fail.push(format!("#{id} {section}: PANIC"));
                 continue;
             }
-            Ok((actual, body, counts)) => {
+            Ok((actual, body, counts, asig)) => {
                 let exp = expected_blocks(&expected);
                 let a_ok = actual == exp;
                 if a_ok {
@@ -415,6 +551,20 @@ fn commonmark_0_31_2_conformance() {
                 } else if c_fail.len() < 60 {
                     c_fail.push(format!("#{id} {section}: expected={ec:?} actual={counts:?}"));
                 }
+                let esig = expected_inline_structure(&expected);
+                let d_ok = esig == asig;
+                if d_ok {
+                    d_pass += 1;
+                    if a_ok {
+                        d_pass_a += 1;
+                    }
+                } else if d_fail.len() < 60 {
+                    d_fail.push(format!(
+                        "#{id} {section}: expected=[{}] actual=[{}]",
+                        sig_short(&esig),
+                        sig_short(&asig)
+                    ));
+                }
                 if a_ok {
                     if be_ok {
                         b_exact_a += 1;
@@ -438,6 +588,8 @@ fn commonmark_0_31_2_conformance() {
     println!("B_EXACT_WHEN_A_PASS={b_exact_a}/{a_pass} (baseline {BASELINE_B_EXACT_WHEN_A})");
     println!("B_CANON_WHEN_A_PASS={b_canon_a}/{a_pass}");
     println!("C_INLINE_WHEN_A_PASS={c_pass_a}/{a_pass} (baseline {BASELINE_C_WHEN_A})");
+    println!("D_INLINE_STRUCTURE={d_pass}/{total} (baseline {BASELINE_D})");
+    println!("D_STRUCTURE_WHEN_A_PASS={d_pass_a}/{a_pass} (baseline {BASELINE_D_WHEN_A})");
     println!("SECTIONS (total, A, Bexact, Bcanon, C):");
     for (sec, (n, a, be, bc, c)) in &by_section {
         println!("  {sec}: {n}, {a}, {be}, {bc}, {c}");
@@ -448,6 +600,10 @@ fn commonmark_0_31_2_conformance() {
     }
     println!("--- C failures (first 60) ---");
     for f in &c_fail {
+        println!("{f}");
+    }
+    println!("--- D failures (first 60) ---");
+    for f in &d_fail {
         println!("{f}");
     }
 
@@ -477,4 +633,23 @@ fn commonmark_0_31_2_conformance() {
         c_pass_a >= BASELINE_C_WHEN_A,
         "条件 C 退化：{c_pass_a} < 基线 {BASELINE_C_WHEN_A}"
     );
+    assert!(
+        d_pass >= BASELINE_D,
+        "Suite D 退化：{d_pass} < 基线 {BASELINE_D}"
+    );
+    assert!(
+        d_pass_a >= BASELINE_D_WHEN_A,
+        "条件 D 退化：{d_pass_a} < 基线 {BASELINE_D_WHEN_A}"
+    );
+    assert_eq!(
+        by_section.len(),
+        BASELINE_C_SECTION.len(),
+        "语料分节数变化：{} -> {}",
+        BASELINE_C_SECTION.len(),
+        by_section.len()
+    );
+    for &(sec, base) in BASELINE_C_SECTION {
+        let got = by_section.get(sec).map_or(0, |e| e.4);
+        assert!(got >= base, "Suite C 分段退化：{sec} {got} < 基线 {base}");
+    }
 }

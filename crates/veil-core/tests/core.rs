@@ -1,7 +1,7 @@
 //! Session 级集成测试：INSTANCE §3 不变量 + 定义文档反例的回归锚点。
 
 use veil_core::{
-    Bias, BlockId, BlockKind, Edit, EditError, InlineKind, InlineNode, Range, Session,
+    task_span, Bias, BlockId, BlockKind, Edit, EditError, InlineKind, InlineNode, Range, Session,
 };
 
 const SAMPLE: &str = "# Title\n\nfirst para\n\n```\ncode\n```\n\nlast para\n";
@@ -53,7 +53,7 @@ fn fence_swallow_resync_regression() {
     let ev = s.apply(insert(0, "```\n")).unwrap();
     let blocks = s.blocks();
     assert_eq!(blocks.len(), 1);
-    assert_eq!(blocks[0].1, BlockKind::FencedCode);
+    assert_eq!(blocks[0].1, BlockKind::FencedCode(None));
     assert_eq!(ev.dirty_blocks, vec![blocks[0].0]);
     // 撤销后恢复原有三段（undo 路径同样走重同步）
     s.undo().unwrap();
@@ -228,7 +228,7 @@ fn insert_fence_into_gap_swallows_forward() {
     let blocks = s.blocks();
     assert_eq!(blocks.len(), 2);
     assert_eq!(blocks[0].1, BlockKind::Paragraph);
-    assert_eq!(blocks[1].1, BlockKind::FencedCode);
+    assert_eq!(blocks[1].1, BlockKind::FencedCode(None));
 }
 
 #[test]
@@ -290,7 +290,7 @@ fn block_inlines_absolute_offsets() {
 fn fenced_code_block_has_no_inlines() {
     let s = Session::open("```\n**not bold**\n```\n");
     let blocks = s.blocks();
-    assert_eq!(blocks[0].1, BlockKind::FencedCode);
+    assert_eq!(blocks[0].1, BlockKind::FencedCode(None));
     assert_eq!(s.block_inlines(blocks[0].0).unwrap(), Vec::new());
 }
 
@@ -370,7 +370,7 @@ fn redo_restores_fence_swallow_structure() {
     s.redo().unwrap();
     let blocks = s.blocks();
     assert_eq!(blocks.len(), 1);
-    assert_eq!(blocks[0].1, BlockKind::FencedCode);
+    assert_eq!(blocks[0].1, BlockKind::FencedCode(None));
 }
 
 // ===== inline × 编辑交叉 =====
@@ -670,7 +670,7 @@ fn grapheme_navigation_after_edit_uses_current_text() {
 #[test]
 fn session_math_source_roundtrip() {
     let s = Session::open("$$\nx^2\n$$\n");
-    let (id, kind, range) = s.blocks()[0];
+    let (id, kind, range) = s.blocks()[0].clone();
     assert_eq!(kind, BlockKind::Math);
     assert_eq!(range, Range::new(0, 10)); // 逐字节：3+4+3=10
     assert_eq!(s.math_source(id).as_deref(), Some("x^2"));
@@ -713,7 +713,7 @@ fn edit_closing_math_block_reparse() {
 fn session_table_exposes_aligns_cells_and_ranges() {
     let doc = "| a | b |\n| :- | -: |\n| c | d |\n";
     let s = Session::open(doc);
-    let (id, kind, range) = s.blocks()[0];
+    let (id, kind, range) = s.blocks()[0].clone();
     assert_eq!(kind, BlockKind::Table);
     assert_eq!(range, Range::new(0, 32));
     let t = s.table(id).unwrap();
@@ -745,7 +745,7 @@ fn table_cell_visible_text_strips_inline_markers() {
     // 逐字节：`| **a** | `c` |\n| --- | --- |\n`
     // 「**a**」内容区间 [2,7)、可见文本 "a"；「`c`」[10,13)、可见文本 "c"
     let s = Session::open("| **a** | `c` |\n| --- | --- |\n");
-    let (id, kind, _) = s.blocks()[0];
+    let (id, kind, _) = s.blocks()[0].clone();
     assert_eq!(kind, BlockKind::Table);
     let t = s.table(id).unwrap();
     assert_eq!(t.header[0].text, "a");
@@ -758,7 +758,7 @@ fn table_cell_visible_text_strips_inline_markers() {
 fn table_escaped_pipe_renders_literal() {
     // `| a \| b | c |`：`\|` 不切分，且可见文本还原为字面 `|`
     let s = Session::open("| a \\| b | c |\n| --- | --- |\n");
-    let (id, kind, _) = s.blocks()[0];
+    let (id, kind, _) = s.blocks()[0].clone();
     assert_eq!(kind, BlockKind::Table);
     let t = s.table(id).unwrap();
     assert_eq!(t.header[0].text, "a | b");
@@ -769,7 +769,7 @@ fn table_escaped_pipe_renders_literal() {
 fn table_body_pads_missing_cells_and_truncates_extra() {
     // 表体 `| c |` 缺第二格 → 补空；`| e | f | g |` 多格 → 截断
     let s = Session::open("| a | b |\n| --- | --- |\n| c |\n| e | f | g |\n");
-    let (id, kind, _) = s.blocks()[0];
+    let (id, kind, _) = s.blocks()[0].clone();
     assert_eq!(kind, BlockKind::Table);
     let t = s.table(id).unwrap();
     assert_eq!(t.rows[0].len(), 2);
@@ -826,7 +826,7 @@ fn inserting_delimiter_row_turns_paragraph_into_table() {
 #[test]
 fn table_none_for_non_table_or_unknown_id() {
     let s = Session::open("para\n");
-    let (id, kind, _) = s.blocks()[0];
+    let (id, kind, _) = s.blocks()[0].clone();
     assert_eq!(kind, BlockKind::Paragraph);
     assert_eq!(s.table(id), None);
     assert_eq!(s.table(BlockId(999)), None);
@@ -838,12 +838,13 @@ fn table_none_for_non_table_or_unknown_id() {
 fn session_list_item_range_and_inline_scope() {
     // 「1. **b**\n」：块区间 [0,9)，inline 仅解析标记后内容（strong [3,8)）
     let s = Session::open("1. **b**\n");
-    let (id, kind, range) = s.blocks()[0];
+    let (id, kind, range) = s.blocks()[0].clone();
     assert_eq!(
         kind,
         BlockKind::ListItem {
             ordered: true,
-            depth: 0
+            depth: 0,
+            task: None
         }
     );
     assert_eq!(range, Range::new(0, 9));
@@ -864,7 +865,8 @@ fn edit_turns_paragraph_into_list_item_and_back() {
         bs[0].1,
         BlockKind::ListItem {
             ordered: false,
-            depth: 0
+            depth: 0,
+            task: None
         }
     );
     assert_eq!(bs[0].2, Range::new(0, 4)); // "- a\n"
@@ -909,6 +911,23 @@ fn thematic_break_recognized_after_paragraph_and_editable() {
 }
 
 #[test]
+fn session_setext_heading_edit_transitions() {
+    // 「Foo\n---\n」：下划线行并入块区间 [0,8)
+    let mut s = Session::open("Foo\n---\n");
+    let bs = s.blocks();
+    assert_eq!(bs.len(), 1);
+    assert_eq!(bs[0].1, BlockKind::SetextHeading(2));
+    assert_eq!(bs[0].2, Range::new(0, 8));
+    // 下划线替换为 `===` → 升级为 1 级
+    s.apply(replace(4, 7, "===")).unwrap();
+    assert_eq!(s.blocks()[0].1, BlockKind::SetextHeading(1));
+    // 下划线替换为普通文本 → 两行并回段落
+    s.apply(replace(4, 7, "x")).unwrap();
+    assert_eq!(s.blocks()[0].1, BlockKind::Paragraph);
+    assert_eq!(s.serialize(), "Foo\nx\n");
+}
+
+#[test]
 fn indent_edit_changes_list_depth_kind() {
     // 缩进 2 空格 → depth 1，块种类变化必须被重解析感知（脏块 id 更新）
     let mut s = Session::open("- a\n");
@@ -920,8 +939,147 @@ fn indent_edit_changes_list_depth_kind() {
         bs[0].1,
         BlockKind::ListItem {
             ordered: false,
-            depth: 1
+            depth: 1,
+            task: None
         }
     );
     assert_ne!(bs[0].0, before_id);
+}
+
+// ===== 任务列表（P3-5）：`- [ ]` / `- [x]` =====
+
+#[test]
+fn task_list_item_kinds_and_edits() {
+    // 勾选态两向解析 + 编辑切换块种类即时感知
+    let s = Session::open("- [ ] a\n- [x] b\n- [X] c\n");
+    let bs = s.blocks();
+    assert_eq!(
+        bs[0].1,
+        BlockKind::ListItem {
+            ordered: false,
+            depth: 0,
+            task: Some(false)
+        }
+    );
+    assert_eq!(
+        bs[1].1,
+        BlockKind::ListItem {
+            ordered: false,
+            depth: 0,
+            task: Some(true)
+        }
+    );
+    assert_eq!(
+        bs[2].1,
+        BlockKind::ListItem {
+            ordered: false,
+            depth: 0,
+            task: Some(true)
+        }
+    );
+    // 编辑 `[ ]` → `[x]`：种类更新为勾选（状态字符在 3..4）
+    let mut s2 = Session::open("- [ ] a\n");
+    s2.apply(replace(3, 4, "x")).unwrap();
+    assert_eq!(
+        s2.blocks()[0].1,
+        BlockKind::ListItem {
+            ordered: false,
+            depth: 0,
+            task: Some(true)
+        }
+    );
+}
+
+#[test]
+fn task_marker_negative_cases() {
+    // 非任务：复选框不在内容起点 / 后无空白 / 单独 `[x]` 段落
+    let cases = [
+        "- [ ]a\n",    // 复选框后无空白
+        "- a [ ] b\n", // 不在内容起点
+        "-  [x] a\n",  // 标记后双空格（复选框不在内容起点，v0 严格）
+        "- [] x\n",    // 空复选框
+        "[x] y\n",     // 非列表行
+        "- [y] x\n",   // 非法状态字符
+    ];
+    for c in cases {
+        let s = Session::open(c);
+        let (_, k, _) = s.blocks()[0].clone();
+        let BlockKind::ListItem { task, .. } = k else {
+            continue; // 非列表行（如 `[x] y`）直接通过
+        };
+        assert_eq!(task, None, "case {c:?} 不应为任务");
+    }
+    // 有序列表任务
+    let s = Session::open("1. [x] a\n");
+    assert_eq!(
+        s.blocks()[0].1,
+        BlockKind::ListItem {
+            ordered: true,
+            depth: 0,
+            task: Some(true)
+        }
+    );
+}
+
+#[test]
+fn task_span_offsets() {
+    // (标记起点, 状态字符, 区间终点, 勾选态)；尾空格并入区间
+    assert_eq!(task_span("- [ ] foo"), Some((0, 3, 6, false)));
+    assert_eq!(task_span("- [x] foo"), Some((0, 3, 6, true)));
+    assert_eq!(task_span("  1. [X] bar"), Some((2, 6, 9, true)));
+    assert_eq!(task_span("- [x]\n"), Some((0, 3, 5, true)));
+    assert_eq!(task_span("- a"), None);
+}
+
+// ---- 多行列表项与懒续行（0c P0-3）：Session 门面 ----
+
+#[test]
+fn session_multiline_list_item_range_and_inlines() {
+    // 「- one\n\n  two\n」：宽松单项多行，块区间覆盖内部空行
+    let s = Session::open("- one\n\n  two\n");
+    let bs = s.blocks();
+    assert_eq!(bs.len(), 1);
+    assert_eq!(
+        bs[0].1,
+        BlockKind::ListItem {
+            ordered: false,
+            depth: 0,
+            task: None
+        }
+    );
+    assert_eq!(bs[0].2, Range::new(0, 13));
+    // inline 覆盖全部内容行（two 中的 emph）
+    let ns = s.block_inlines(bs[0].0).unwrap();
+    assert!(ns.is_empty());
+}
+
+#[test]
+fn session_blockquote_lazy_continuation() {
+    // 「> foo\nbar\n」：懒续行并入引用块
+    let s = Session::open("> foo\nbar\n");
+    let bs = s.blocks();
+    assert_eq!(bs.len(), 1);
+    assert_eq!(bs[0].1, BlockKind::BlockQuote);
+    assert_eq!(bs[0].2, Range::new(0, 10));
+}
+
+#[test]
+fn session_list_marker_change_still_exports_as_two_lists() {
+    // 「- foo\n- bar\n+ baz\n\nafter\n」：块层三项各自成块；导出经 pulldown 重解析得两个列表
+    // （`after` 前须空行阻断——否则按规范它是第 3 项段落的懒续行）
+    let s = Session::open("- foo\n- bar\n+ baz\n\nafter\n");
+    let bs = s.blocks();
+    assert_eq!(bs.len(), 4);
+    assert!(matches!(bs[3].1, BlockKind::Paragraph));
+}
+
+#[test]
+fn session_list_item_grows_on_continuation_edit() {
+    // 「- a\n」追加续行文本 → 单项多行；导出文本保持源码原样
+    let mut s = Session::open("- a\n");
+    s.apply(insert(4, "  b\n")).unwrap();
+    let bs = s.blocks();
+    assert_eq!(bs.len(), 1);
+    assert_eq!(bs[0].2, Range::new(0, 8));
+    assert_eq!(s.serialize(), "- a\n  b\n");
 }

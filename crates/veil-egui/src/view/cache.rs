@@ -1,108 +1,304 @@
-//! 派生缓存：布局/光栅/块级与行内公式/文档图片/表格网格的统一存放与失效入口。
+//! 派生缓存：布局/光栅/块级与行内公式/文档图片/表格网格的统一存放。
 //!
-//! 失效语义（逐条对照原 shell 散落调用点，行为零变化）：
-//! - 编辑脏块：内容变化使该块的布局/光栅/公式图/失败记忆/表格网格全部作废；
-//! - Reveal 激活变化：只影响块内文本排版与其光栅（公式/表格网格与激活无关）；
-//! - 主题切换：按颜色生成的缓存作废（光栅/表格位图/公式图），布局几何不受影响；
-//! - 窗口宽度变化：换行与列宽依赖版心宽，布局/光栅/表格作废（公式图尺寸不依赖宽度）；
-//! - DPI 变化：一切按 scale 生成的缓存作废，含失败记忆（新 DPI 下渲染可能成功）；
-//! - 另存为/打开：图片相对路径基准变化，图片缓存与失败记忆一并作废；
-//!   行内公式按 tex 内容寻址，与文档无关，跨文档保留。
+//! 正确性由因果键承载（ADR-009 决策四）：每个缓存项记录生成它时的全部外部输入，
+//! 读取时比对键，不匹配即视为缺失——不再有 `invalidate_*`/`clear_*` 失效方法族。
+//! 键的构成逐类如下（与原手工失效语义逐一对应）：
+//! - 块布局/光栅/表格网格：`BaseKey`（版心宽、DPI、主题、会话、图片基准）+ 激活指纹；
+//!   宽/DPI/主题/新会话/另存为变化时键自然失配；
+//! - 块级公式图：块 id + DPI + 主题 + 会话；失败记忆不含主题（换主题不重试渲染）；
+//! - 行内公式：tex 内容寻址 + DPI + 主题；失败记忆仅按 DPI（跨文档保留）；
+//! - 文档图片：解析后路径 + 图片基准；失败记忆同键。
+//!
+//! `BlockId` 在重解析脏块时新鲜分配（veil-core），故同一会话内 id 即内容修订；
+//! 跨会话 id 会复用，故 `BaseKey` 与会话型键均携带会话代次。
+//!
+//! `prune` 只做内存回收：删掉已不存在块或已过期代次的条目，不承担正确性——
+//! 即使某条目未被回收，读取时键不匹配同样不会命中。
 
 use std::collections::{HashMap, HashSet};
+use std::ops::Deref;
 
-use veil_core::BlockId;
+use veil_core::{BlockId, BlockKind, Range};
 
 use super::layout::BlockLayout;
 use super::table::TableLayout;
+use crate::app::App;
 use crate::image::ImageData;
 use crate::math::MathImage;
 
-/// 五类派生缓存的统一存放。字段对 crate 内可见（ensure_* 编排仍由 App 方法承担，
-/// 缓存本身不做策略）；失效时机一律经 `invalidate_*`/`clear_*` 方法族表达。
+/// 文本光栅：RGBA8 像素 + 宽高（物理像素）。
+pub(crate) type Raster = (Vec<u8>, u32, u32);
+
+/// 带因果键的缓存项。读取方只比较 `key`，命中后经 `Deref` 直接用值。
+pub(crate) struct Memo<K, V> {
+    pub(crate) key: K,
+    pub(crate) value: V,
+}
+
+impl<K: PartialEq, V> Memo<K, V> {
+    pub(crate) fn matches(&self, key: &K) -> bool {
+        &self.key == key
+    }
+}
+
+impl<K, V> Deref for Memo<K, V> {
+    type Target = V;
+
+    fn deref(&self) -> &V {
+        &self.value
+    }
+}
+
+/// 外部输入代次：主题、会话（新文档）、图片基准（打开/另存为）各自单调递增。
+/// 键不存时间戳，只存代次值，故同一代次内的条目天然复用。
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+pub(crate) struct Revs {
+    /// 主题切换代次：颜色相关缓存据此作废。
+    pub(crate) theme: u32,
+    /// 会话代次：新文档（BlockId 可能复用）据此作废。
+    pub(crate) session: u32,
+    /// 图片相对路径基准代次：打开/另存为时递增。
+    pub(crate) image_base: u32,
+}
+
+impl Revs {
+    pub(crate) fn base(self, width: f32, scale: f32) -> BaseKey {
+        BaseKey {
+            width_q: quantize(width, 100.0),
+            scale_q: quantize(scale, 1000.0),
+            theme_rev: self.theme,
+            session_rev: self.session,
+            image_base: self.image_base,
+        }
+    }
+}
+
+/// 与版心宽/DPI/主题/会话/图片基准相关的键：布局、光栅、表格网格共用。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct BaseKey {
+    width_q: u32,
+    scale_q: u32,
+    theme_rev: u32,
+    session_rev: u32,
+    image_base: u32,
+}
+
+/// 布局键 = 基础键 + Reveal 激活指纹（0 = 无激活，其余为块结构的激活状态哈希）。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct LayoutKey {
+    pub(crate) base: BaseKey,
+    pub(crate) reveal: u64,
+}
+
+/// 行内公式图键：按 tex 内容寻址，另含 DPI 与主题。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct InlineKey {
+    scale_q: u32,
+    theme_rev: u32,
+}
+
+/// 块级公式图键：块 id 即内容修订，另含 DPI/主题/会话。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct MathKey {
+    pub(crate) block: BlockId,
+    pub(crate) scale_q: u32,
+    pub(crate) theme_rev: u32,
+    pub(crate) session_rev: u32,
+}
+
+/// 块级公式失败记忆：不含主题（换主题不重试），按 DPI/会话作废。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct MathFailKey {
+    pub(crate) block: BlockId,
+    pub(crate) scale_q: u32,
+    pub(crate) session_rev: u32,
+}
+
+fn quantize(v: f32, factor: f32) -> u32 {
+    (v * factor).round().clamp(0.0, u32::MAX as f32) as u32
+}
+
+/// DPI 量化值：公式渲染器与缓存键共用同一取整口径。
+pub(crate) fn scale_q(scale: f32) -> u32 {
+    quantize(scale, 1000.0)
+}
+
+/// 五类派生缓存的统一存放。字段对 crate 内可见；读取一律经本文件的带键查询方法，
+/// 不经字段直接判断存在性。
 #[derive(Default)]
 pub(crate) struct Cache {
-    /// 块布局：脏块驱动失效，干净块不重排。
-    pub(crate) layouts: HashMap<BlockId, BlockLayout>,
-    /// 文本光栅：布局失效/主题切换后按新前景色重光栅。
-    pub(crate) rasters: HashMap<BlockId, (Vec<u8>, u32, u32)>,
-    /// 数学块渲染图与失败记忆：脏块驱动失效。
-    pub(crate) math_imgs: HashMap<BlockId, MathImage>,
-    pub(crate) math_failed: HashSet<BlockId>,
-    /// 行内公式图与失败记忆：按 tex 内容寻址，无需随编辑显式失效。
-    pub(crate) inline_math: HashMap<String, MathImage>,
-    pub(crate) inline_failed: HashSet<String>,
+    /// 块布局：键 = 宽度/DPI/主题/图片基准 + 激活指纹。
+    pub(crate) layouts: HashMap<BlockId, Memo<LayoutKey, BlockLayout>>,
+    /// 文本光栅：键与布局键一致（光栅由该次布局生成、按前景色光栅化）。
+    pub(crate) rasters: HashMap<BlockId, Memo<LayoutKey, Raster>>,
+    /// 数学块渲染图与失败记忆。
+    pub(crate) math_imgs: HashMap<BlockId, Memo<MathKey, MathImage>>,
+    pub(crate) math_failed: HashMap<BlockId, Memo<MathFailKey, ()>>,
+    /// 行内公式图与失败记忆：按 tex 内容寻址。
+    pub(crate) inline_math: HashMap<String, Memo<InlineKey, MathImage>>,
+    pub(crate) inline_failed: HashMap<String, Memo<u32, ()>>,
     /// 文档内图片（自然尺寸位图）与失败记忆：键 = 按文档目录解析后的路径。
-    pub(crate) inline_images: HashMap<String, ImageData>,
-    pub(crate) image_failed: HashSet<String>,
-    /// 表格网格：脏块/宽度/DPI 变化即失效。
-    pub(crate) tables: HashMap<BlockId, TableLayout>,
+    pub(crate) inline_images: HashMap<String, Memo<u32, ImageData>>,
+    pub(crate) image_failed: HashMap<String, Memo<u32, ()>>,
+    /// 表格网格。
+    pub(crate) tables: HashMap<BlockId, Memo<BaseKey, TableLayout>>,
 }
 
 impl Cache {
-    /// 编辑脏块失效（after_edit 唯一失效入口）。
-    pub(crate) fn invalidate_dirty(&mut self, dirty: &[BlockId]) {
-        for id in dirty {
-            self.layouts.remove(id);
-            self.rasters.remove(id);
-            self.math_imgs.remove(id);
-            self.math_failed.remove(id);
-            self.tables.remove(id);
+    /// 命中校验：基础键相等且激活指纹一致。指纹由布局自身记录的结构重算，
+    /// 不读 session（缓存命中路径零分配）。
+    fn layout_key(
+        &self,
+        id: BlockId,
+        kind: &BlockKind,
+        range: Range,
+        base: BaseKey,
+        caret: usize,
+    ) -> Option<LayoutKey> {
+        let m = self.layouts.get(&id)?;
+        (m.key.base == base && m.key.reveal == m.value.reveal_state(kind, range, caret))
+            .then_some(m.key)
+    }
+
+    pub(crate) fn layout(
+        &self,
+        id: BlockId,
+        kind: &BlockKind,
+        range: Range,
+        base: BaseKey,
+        caret: usize,
+    ) -> Option<&BlockLayout> {
+        self.layout_key(id, kind, range, base, caret)
+            .map(|_| &self.layouts[&id].value)
+    }
+
+    /// 绘制路径用：光栅与布局共用同一键，布局命中后直接取键比对光栅。
+    pub(crate) fn raster_key(
+        &self,
+        id: BlockId,
+        kind: &BlockKind,
+        range: Range,
+        base: BaseKey,
+        caret: usize,
+    ) -> Option<LayoutKey> {
+        self.layout_key(id, kind, range, base, caret)
+    }
+
+    pub(crate) fn raster(&self, id: BlockId, key: LayoutKey) -> Option<&Raster> {
+        self.rasters
+            .get(&id)
+            .filter(|m| m.matches(&key))
+            .map(|m| &m.value)
+    }
+
+    pub(crate) fn math(&self, id: BlockId, key: MathKey) -> Option<&MathImage> {
+        self.math_imgs
+            .get(&id)
+            .filter(|m| m.matches(&key))
+            .map(|m| &m.value)
+    }
+
+    pub(crate) fn math_failed(&self, id: BlockId, key: MathFailKey) -> bool {
+        self.math_failed.get(&id).is_some_and(|m| m.matches(&key))
+    }
+
+    pub(crate) fn inline_math(&self, tex: &str, key: InlineKey) -> Option<&MathImage> {
+        self.inline_math
+            .get(tex)
+            .filter(|m| m.matches(&key))
+            .map(|m| &m.value)
+    }
+
+    pub(crate) fn inline_failed(&self, tex: &str, key: u32) -> bool {
+        self.inline_failed.get(tex).is_some_and(|m| m.matches(&key))
+    }
+
+    pub(crate) fn image(&self, path: &str, key: u32) -> Option<&ImageData> {
+        self.inline_images
+            .get(path)
+            .filter(|m| m.matches(&key))
+            .map(|m| &m.value)
+    }
+
+    pub(crate) fn image_failed(&self, path: &str, key: u32) -> bool {
+        self.image_failed.get(path).is_some_and(|m| m.matches(&key))
+    }
+
+    pub(crate) fn table(&self, id: BlockId, base: BaseKey) -> Option<&TableLayout> {
+        self.tables
+            .get(&id)
+            .filter(|m| m.matches(&base))
+            .map(|m| &m.value)
+    }
+
+    /// 内存回收（不承担正确性）：删除已消失的块或已过期代次的条目。
+    /// 调用点唯一：索引重建后（`refresh_index`），与块真值同源。
+    pub(crate) fn prune(&mut self, alive: &HashSet<BlockId>, revs: &Revs, base: &BaseKey) {
+        let inline_key = InlineKey {
+            scale_q: base.scale_q,
+            theme_rev: revs.theme,
+        };
+        self.layouts
+            .retain(|id, m| alive.contains(id) && m.key.base == *base);
+        self.rasters
+            .retain(|id, m| alive.contains(id) && m.key.base == *base);
+        self.tables
+            .retain(|id, m| alive.contains(id) && m.matches(base));
+        self.math_imgs.retain(|id, m| {
+            alive.contains(id)
+                && m.key.block == *id
+                && m.key.scale_q == base.scale_q
+                && m.key.theme_rev == revs.theme
+                && m.key.session_rev == revs.session
+        });
+        self.math_failed.retain(|id, m| {
+            alive.contains(id)
+                && m.key.block == *id
+                && m.key.scale_q == base.scale_q
+                && m.key.session_rev == revs.session
+        });
+        self.inline_math.retain(|_, m| m.matches(&inline_key));
+        self.inline_failed.retain(|_, m| m.key == base.scale_q);
+        self.inline_images.retain(|_, m| m.key == revs.image_base);
+        self.image_failed.retain(|_, m| m.key == revs.image_base);
+    }
+}
+
+/// 键构造：全部来自 App 的外部输入与当前几何，各 ensure/绘制路径共用同一口径。
+impl App {
+    pub(crate) fn base_key(&self) -> BaseKey {
+        self.input_state
+            .revs
+            .base(self.content_width(), self.input_state.scale)
+    }
+
+    pub(crate) fn math_key(&self, block: BlockId) -> MathKey {
+        MathKey {
+            block,
+            scale_q: scale_q(self.input_state.scale),
+            theme_rev: self.input_state.revs.theme,
+            session_rev: self.input_state.revs.session,
         }
     }
 
-    /// Reveal 激活态变化：仅块内文本排版与光栅受影响。
-    pub(crate) fn invalidate_reveal(&mut self, id: BlockId) {
-        self.layouts.remove(&id);
-        self.rasters.remove(&id);
+    pub(crate) fn math_fail_key(&self, block: BlockId) -> MathFailKey {
+        MathFailKey {
+            block,
+            scale_q: scale_q(self.input_state.scale),
+            session_rev: self.input_state.revs.session,
+        }
     }
 
-    /// 主题切换：按颜色生成的缓存全部作废；失败记忆与颜色无关，保留。
-    /// （chrome 标签缓存随 `Chrome::clear_label_cache` 同步作废。）
-    pub(crate) fn clear_themed(&mut self) {
-        self.rasters.clear();
-        self.tables.clear();
-        self.math_imgs.clear();
-        self.inline_math.clear();
+    pub(crate) fn inline_key(&self) -> InlineKey {
+        InlineKey {
+            scale_q: scale_q(self.input_state.scale),
+            theme_rev: self.input_state.revs.theme,
+        }
     }
 
-    /// 窗口宽度变化：换行/列宽依赖版心宽。
-    pub(crate) fn clear_resize(&mut self) {
-        self.layouts.clear();
-        self.rasters.clear();
-        self.tables.clear();
-    }
-
-    /// DPI 变化：全部按 scale 生成的缓存（含失败记忆）作废。
-    /// （chrome 标签缓存随 `Chrome::clear_label_cache` 同步作废。）
-    pub(crate) fn clear_scale(&mut self) {
-        self.layouts.clear();
-        self.rasters.clear();
-        self.math_imgs.clear();
-        self.math_failed.clear();
-        self.inline_math.clear();
-        self.inline_failed.clear();
-        self.tables.clear();
-    }
-
-    /// 另存为：图片相对路径基准变化；占位尺寸变化使布局/光栅/表格一并重排。
-    pub(crate) fn clear_repath(&mut self) {
-        self.inline_images.clear();
-        self.image_failed.clear();
-        self.layouts.clear();
-        self.rasters.clear();
-        self.tables.clear();
-    }
-
-    /// 打开新文档：内容寻址的行内公式跨文档保留，其余内容缓存全部作废。
-    pub(crate) fn clear_document(&mut self) {
-        self.layouts.clear();
-        self.rasters.clear();
-        self.math_imgs.clear();
-        self.math_failed.clear();
-        self.inline_images.clear();
-        self.image_failed.clear();
-        self.tables.clear();
+    /// 行内公式/图片失败记忆的键（仅 DPI）。
+    pub(crate) fn dpi_q(&self) -> u32 {
+        scale_q(self.input_state.scale)
     }
 }
 
@@ -111,59 +307,121 @@ mod tests {
     use super::*;
 
     fn ids() -> Vec<BlockId> {
-        // 脏块失效只要求可构造的 BlockId；经由 Session 取得真实 id。
         let s = veil_core::Session::open("# a\n\nb\n\nc\n");
         s.blocks().iter().map(|(id, _, _)| *id).collect()
     }
 
     #[test]
-    fn invalidate_dirty_drops_per_block_entries() {
-        let ids = ids();
-        let mut c = Cache::default();
-        for &id in &ids {
-            c.math_failed.insert(id);
-        }
-        c.invalidate_dirty(&[ids[0]]);
-        assert!(!c.math_failed.contains(&ids[0]));
-        assert!(c.math_failed.contains(&ids[1]));
+    fn base_key_quantizes_stably_and_tracks_inputs() {
+        let revs = Revs::default();
+        let b = revs.base(800.0, 1.25);
+        assert_eq!(b, revs.base(800.0, 1.25), "同一输入必得同键");
+        assert_ne!(b, revs.base(800.5, 1.25), "版心宽变化即换键");
+        assert_ne!(b, revs.base(800.0, 1.5), "DPI 变化即换键");
+        let revs2 = Revs { theme: 1, ..revs };
+        assert_ne!(b, revs2.base(800.0, 1.25), "主题代次变化即换键");
+        let revs3 = Revs {
+            image_base: 1,
+            ..revs
+        };
+        assert_ne!(b, revs3.base(800.0, 1.25), "图片基准变化即换键");
+        let revs4 = Revs { session: 1, ..revs };
+        assert_ne!(b, revs4.base(800.0, 1.25), "新会话（BlockId 复用）即换键");
     }
 
     #[test]
-    fn clear_themed_keeps_layouts_and_failure_memory() {
+    fn prune_keeps_only_current_generation() {
         let ids = ids();
         let mut c = Cache::default();
-        c.math_failed.insert(ids[0]);
-        c.inline_failed.insert("x".into());
+        let revs = Revs::default();
+        let base = revs.base(800.0, 1.0);
+        c.math_failed.insert(
+            ids[0],
+            Memo {
+                key: MathFailKey {
+                    block: ids[0],
+                    scale_q: base.scale_q,
+                    session_rev: revs.session,
+                },
+                value: (),
+            },
+        );
         c.inline_math.insert(
+            "x".into(),
+            Memo {
+                key: InlineKey {
+                    scale_q: base.scale_q,
+                    theme_rev: revs.theme,
+                },
+                value: MathImage {
+                    pixels: vec![0; 4],
+                    width: 1,
+                    height: 1,
+                    baseline: 1,
+                },
+            },
+        );
+        c.inline_failed.insert(
             "y".into(),
-            MathImage {
-                pixels: vec![0; 4],
-                width: 1,
-                height: 1,
-                baseline: 1,
+            Memo {
+                key: base.scale_q,
+                value: (),
             },
         );
-        c.clear_themed();
-        assert!(c.inline_math.is_empty(), "公式图按前景色生成，须作废");
-        assert!(c.math_failed.contains(&ids[0]), "失败记忆与颜色无关，保留");
-        assert!(c.inline_failed.contains("x"), "行内失败记忆保留");
-    }
-
-    #[test]
-    fn clear_document_keeps_tex_keyed_inline_math() {
-        let mut c = Cache::default();
-        c.inline_math.insert(
-            "z".into(),
-            MathImage {
-                pixels: vec![0; 4],
-                width: 1,
-                height: 1,
-                baseline: 1,
+        c.inline_images.insert(
+            "img".into(),
+            Memo {
+                key: revs.image_base,
+                value: ImageData {
+                    pixels: vec![0; 4],
+                    width: 1,
+                    height: 1,
+                },
             },
         );
-        c.image_failed.insert("img".into());
-        c.clear_document();
-        assert!(c.inline_math.contains_key("z"), "tex 内容寻址，跨文档有效");
-        assert!(c.image_failed.is_empty(), "路径基准变化，失败记忆作废");
+        let alive: HashSet<BlockId> = ids.iter().copied().collect();
+        c.prune(&alive, &revs, &base);
+        assert!(c.math_failed.contains_key(&ids[0]), "同代次保留");
+        assert!(
+            c.inline_math.contains_key("x"),
+            "行内公式按 tex 寻址，同代次保留"
+        );
+        assert!(c.inline_failed.contains_key("y"), "行内失败记忆保留");
+        assert!(c.inline_images.contains_key("img"), "图片同基准保留");
+        // 主题切换：颜色相关条目过期；失败记忆与图片保留
+        let mut c2 = c;
+        let revs2 = Revs { theme: 1, ..revs };
+        let base2 = revs2.base(800.0, 1.0);
+        c2.prune(&alive, &revs2, &base2);
+        assert!(c2.inline_math.is_empty(), "公式图随主题作废");
+        assert!(
+            c2.math_failed.contains_key(&ids[0]),
+            "失败记忆与颜色无关，保留"
+        );
+        assert!(c2.inline_images.contains_key("img"), "图片与主题无关，保留");
+        // DPI 变化：失败记忆过期
+        let revs3 = Revs { theme: 1, ..revs };
+        let base3 = revs3.base(800.0, 2.0);
+        c2.prune(&alive, &revs3, &base3);
+        assert!(!c2.inline_failed.contains_key("y"), "失败记忆随 DPI 作废");
+        // 新会话：块相关条目过期，行内公式与失败记忆跨文档保留
+        let revs4 = Revs {
+            theme: 1,
+            session: 1,
+            image_base: 1,
+        };
+        let base4 = revs4.base(800.0, 2.0);
+        // 行内失败记忆按当前 DPI 代次重新登记（上一轮 DPI 变化已使其过期）
+        c2.inline_failed.insert(
+            "y".into(),
+            Memo {
+                key: base4.scale_q,
+                value: (),
+            },
+        );
+        c2.prune(&alive, &revs4, &base4);
+        assert!(c2.math_failed.is_empty(), "新会话：块失效记忆作废");
+        assert!(c2.inline_images.is_empty(), "新图片基准：位图作废");
+        assert!(c2.inline_failed.contains_key("y"), "行内失败记忆跨文档保留");
     }
 }

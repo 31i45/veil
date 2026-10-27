@@ -110,7 +110,15 @@ fn measure_cold_start(text: &str) -> (f64, f64) {
         for (id, kind, range) in &blocks {
             let body = session.text_slice(*range).unwrap_or_default();
             let inlines = session.block_inlines(*id).unwrap_or_default();
-            let l = eng.layout_block(*kind, &body, *range, &inlines, 1200.0, usize::MAX, &[]);
+            let l = eng.layout_block(
+                kind.clone(),
+                &body,
+                *range,
+                &inlines,
+                1200.0,
+                usize::MAX,
+                &[],
+            );
             black_box(l.height);
         }
         runs.push(t.elapsed().as_secs_f64() * 1000.0);
@@ -189,7 +197,15 @@ fn measure_dirty_layout(text: &str, caret0: usize) -> (f64, f64) {
             if let Some((_, kind, range)) = all.iter().find(|(bid, _, _)| bid == id) {
                 let body = session.text_slice(*range).unwrap_or_default();
                 let inlines = session.block_inlines(*id).unwrap_or_default();
-                let l = eng.layout_block(*kind, &body, *range, &inlines, 1200.0, usize::MAX, &[]);
+                let l = eng.layout_block(
+                    kind.clone(),
+                    &body,
+                    *range,
+                    &inlines,
+                    1200.0,
+                    usize::MAX,
+                    &[],
+                );
                 black_box(l.height);
             }
         }
@@ -250,7 +266,10 @@ fn main() {
     println!("frame_reuse_ms={frame_reuse_p50:.2}/{frame_reuse_p95:.2}");
     println!("alloc_count={alloc_count}");
     println!("alloc_bytes={alloc_bytes}");
-    println!("peak_heap_mb={:.2}", live_bytes() as f64 / (1024.0 * 1024.0));
+    println!(
+        "peak_heap_mb={:.2}",
+        live_bytes() as f64 / (1024.0 * 1024.0)
+    );
     println!("block_count={block_count}");
 
     assert!(block_count >= 4500, "文档块数不足 4500：{block_count}");

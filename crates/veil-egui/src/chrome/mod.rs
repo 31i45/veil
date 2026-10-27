@@ -12,7 +12,8 @@ mod paint;
 
 use std::path::Path;
 
-use crate::view::BASE_FONT_SIZE;
+use crate::document::ExternalState;
+use crate::geometry::BASE_FONT_SIZE;
 use crate::theme::ThemeMode;
 
 pub(crate) use cache::LabelCache;
@@ -48,6 +49,8 @@ pub fn viewport(win_w: u32, win_h: u32, scale: f32) -> Viewport {
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum MenuAction {
+    /// 新建空白草稿（Ctrl+N）。
+    New,
     Open,
     Save,
     SaveAs,
@@ -57,10 +60,20 @@ pub enum MenuAction {
     Cut,
     Copy,
     Paste,
+    /// 全选（Ctrl+A）。
+    SelectAll,
+    /// 切换大纲面板（P3-2）。
+    ToggleOutline,
+    /// 打开文档内查找栏（P3-3）。
+    Find,
+    /// 打开查找替换栏（Ctrl+H）。
+    Replace,
     ThemeSystem,
     ThemeLight,
     ThemeDark,
     Quit,
+    /// 打开最近文件（0b）：下标为最近列表位置（0 = 最近一次）。
+    OpenRecent(usize),
 }
 
 pub struct MenuDef {
@@ -73,6 +86,7 @@ pub const MENUS: [MenuDef; 3] = [
     MenuDef {
         title: "文件",
         items: &[
+            ("新建", "Ctrl+N", MenuAction::New),
             ("打开…", "Ctrl+O", MenuAction::Open),
             ("保存", "Ctrl+S", MenuAction::Save),
             ("另存为…", "Ctrl+Shift+S", MenuAction::SaveAs),
@@ -88,11 +102,15 @@ pub const MENUS: [MenuDef; 3] = [
             ("剪切", "Ctrl+X", MenuAction::Cut),
             ("复制", "Ctrl+C", MenuAction::Copy),
             ("粘贴", "Ctrl+V", MenuAction::Paste),
+            ("全选", "Ctrl+A", MenuAction::SelectAll),
+            ("查找…", "Ctrl+F", MenuAction::Find),
+            ("替换…", "Ctrl+H", MenuAction::Replace),
         ],
     },
     MenuDef {
         title: "视图",
         items: &[
+            ("大纲面板", "Ctrl+Shift+O", MenuAction::ToggleOutline),
             ("跟随系统", "", MenuAction::ThemeSystem),
             ("浅色", "", MenuAction::ThemeLight),
             ("深色", "", MenuAction::ThemeDark),
@@ -141,6 +159,30 @@ pub fn hit_menu_bar(x: f32, y: f32, scale: f32) -> Option<usize> {
         .map(|(i, _, _)| i)
 }
 
+/// 菜单项行（0b 动态化）：静态项 + 文件菜单末尾插入的最近文件（在「退出」之前）。
+/// 返回 (标签, 快捷键提示, 动作)；最近文件标签为文件名（无文件名回退全路径）。
+/// 布局/命中/分发共用本函数，保证三者对同一菜单结构一致。
+pub(crate) fn menu_rows(open: usize, recent: &[String]) -> Vec<(String, &'static str, MenuAction)> {
+    let Some(menu) = MENUS.get(open) else {
+        return Vec::new();
+    };
+    let statics = || menu.items.iter().map(|(l, s, a)| (l.to_string(), *s, *a));
+    // 仅文件菜单（下标 0）且有最近文件时动态插入；插入点为最后一项（退出）之前
+    if open != 0 || recent.is_empty() {
+        return statics().collect();
+    }
+    let tail = menu.items.len() - 1;
+    let mut out: Vec<_> = statics().take(tail).collect();
+    out.extend(
+        recent
+            .iter()
+            .enumerate()
+            .map(|(i, l)| (l.clone(), "", MenuAction::OpenRecent(i))),
+    );
+    out.extend(statics().skip(tail));
+    out
+}
+
 /// 弹出菜单布局：位置贴当前菜单标题左缘，宽取最长项（含快捷键）并留内边距。
 pub struct PopupLayout {
     pub x: f32,
@@ -151,8 +193,9 @@ pub struct PopupLayout {
     pub items: Vec<(usize, f32, f32, f32, f32)>,
 }
 
-pub fn popup_layout(open: usize, scale: f32) -> PopupLayout {
-    let Some(menu) = MENUS.get(open) else {
+pub fn popup_layout(open: usize, scale: f32, recent: &[String]) -> PopupLayout {
+    let rows = menu_rows(open, recent);
+    if rows.is_empty() {
         return PopupLayout {
             x: 0.0,
             y: 0.0,
@@ -160,7 +203,7 @@ pub fn popup_layout(open: usize, scale: f32) -> PopupLayout {
             h: 0.0,
             items: Vec::new(),
         };
-    };
+    }
     let x = menu_bar_rects(scale)
         .into_iter()
         .find(|&(i, _, _)| i == open)
@@ -168,8 +211,7 @@ pub fn popup_layout(open: usize, scale: f32) -> PopupLayout {
         .unwrap_or(0.0);
     let pad = 12.0 * scale;
     let gap = 24.0 * scale;
-    let widest = menu
-        .items
+    let widest = rows
         .iter()
         .map(|(label, sc, _)| {
             text_width(label, scale)
@@ -184,9 +226,8 @@ pub fn popup_layout(open: usize, scale: f32) -> PopupLayout {
     let item_h = ITEM_H * scale;
     let top_pad = 4.0 * scale;
     let y = MENU_H * scale;
-    let h = 2.0 * top_pad + item_h * menu.items.len() as f32;
-    let items = menu
-        .items
+    let h = 2.0 * top_pad + item_h * rows.len() as f32;
+    let items = rows
         .iter()
         .enumerate()
         .map(|(i, _)| (i, x, y + top_pad + item_h * i as f32, w, item_h))
@@ -195,8 +236,8 @@ pub fn popup_layout(open: usize, scale: f32) -> PopupLayout {
 }
 
 /// 弹出菜单内命中项下标。
-pub fn hit_popup_item(x: f32, y: f32, open: usize, scale: f32) -> Option<usize> {
-    popup_layout(open, scale)
+pub fn hit_popup_item(x: f32, y: f32, open: usize, scale: f32, recent: &[String]) -> Option<usize> {
+    popup_layout(open, scale, recent)
         .items
         .into_iter()
         .find(|&(_, ix, iy, iw, ih)| x >= ix && x < ix + iw && y >= iy && y < iy + ih)
@@ -204,13 +245,13 @@ pub fn hit_popup_item(x: f32, y: f32, open: usize, scale: f32) -> Option<usize> 
 }
 
 /// 点是否落在弹出菜单矩形内（含内边距；用于「点在菜单内但不在项上」时吞掉点击）。
-pub fn popup_contains(x: f32, y: f32, open: usize, scale: f32) -> bool {
-    let p = popup_layout(open, scale);
+pub fn popup_contains(x: f32, y: f32, open: usize, scale: f32, recent: &[String]) -> bool {
+    let p = popup_layout(open, scale, recent);
     x >= p.x && x < p.x + p.w && y >= p.y && y < p.y + p.h
 }
 
-pub fn action_at(open: usize, item: usize) -> Option<MenuAction> {
-    MENUS.get(open)?.items.get(item).map(|(_, _, a)| *a)
+pub fn action_at(open: usize, item: usize, recent: &[String]) -> Option<MenuAction> {
+    menu_rows(open, recent).get(item).map(|(_, _, a)| *a)
 }
 
 /// 最大滚动量（文档高不超过视口时恒 0）。
@@ -256,20 +297,6 @@ pub fn scrollbar_hit(vp: Viewport, doc_h: f32, x: f32, y: f32, scale: f32) -> bo
         && y < vp.y + vp.h
         && x >= vp.x + vp.w - SCROLL_W * scale
         && x < vp.x + vp.w
-}
-
-/// 外部变更状态（状态栏/标题提示，切片 16）。优先级：`Changed` > `BackedUp` > `Missing`。
-/// 新的待备份版本必须盖过旧版本的「已备份」提示，否则用户会误以为当前磁盘版本已有副本。
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-pub enum ExternalState {
-    #[default]
-    None,
-    /// 检测到外部内容变化，尚未备份（保存覆盖前会先备份）。
-    Changed,
-    /// 已把外部版本写成冲突副本。
-    BackedUp,
-    /// 磁盘文件被删除或不可读。
-    Missing,
 }
 
 /// 状态栏文本：(左, 右)。左 = 路径或「未命名草稿」+ 脏标 + 外部变更提示；右 = 行列。

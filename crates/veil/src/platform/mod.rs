@@ -4,17 +4,18 @@
 
 #[cfg(windows)]
 mod theme;
+mod watch;
 #[cfg(windows)]
 mod windows;
-mod watch;
 
 use std::path::PathBuf;
 
-use veil_egui::{
-    ConfigStore, FileDialog, FileWatcher, SystemTheme, ThemeEnv, WindowEffects,
-};
 #[cfg(not(windows))]
 use veil_egui::NativeWindow;
+use veil_egui::{
+    ConfigStore, FileDialog, FileWatcher, PersistEnv, RecoveryStore, SessionStore, SystemTheme,
+    ThemeEnv, WindowEffects,
+};
 
 /// 系统文件对话框。非 Windows 平台为「总是取消」的兜底实现。
 pub fn dialogs() -> Box<dyn FileDialog> {
@@ -55,8 +56,7 @@ pub struct FsConfig {
 impl ConfigStore for FsConfig {
     fn load(&mut self) -> Result<String, String> {
         let path = self.path.as_ref().ok_or("无法定位配置目录")?;
-        let bytes =
-            std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
         // 非法 UTF-8 不整文件拒绝：逐行解析时非法值会被忽略并提示（容错优于失效）
         Ok(String::from_utf8_lossy(&bytes).into_owned())
     }
@@ -64,8 +64,7 @@ impl ConfigStore for FsConfig {
     fn save(&mut self, text: &str) -> Result<(), String> {
         let path = self.path.as_ref().ok_or("无法定位配置目录")?;
         if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir)
-                .map_err(|e| format!("{e}（创建 {}）", dir.display()))?;
+            std::fs::create_dir_all(dir).map_err(|e| format!("{e}（创建 {}）", dir.display()))?;
         }
         let mut tmp = path.as_os_str().to_owned();
         tmp.push(".veil-tmp");
@@ -84,6 +83,73 @@ pub fn theme_env() -> ThemeEnv {
         }),
         system: system_theme(),
         effects: window_effects(),
+    }
+}
+
+/// 原子写小助手：同目录 tmp + rename，并按需创建父目录（config/recovery/session 共用）。
+fn atomic_write(path: &std::path::Path, data: &[u8]) -> Result<(), String> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| format!("{e}（创建 {}）", dir.display()))?;
+    }
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(".veil-tmp");
+    let tmp = PathBuf::from(tmp);
+    std::fs::write(&tmp, data)
+        .and_then(|()| std::fs::rename(&tmp, path))
+        .map_err(|e| format!("{e}（写入 {}）", path.display()))
+}
+
+/// 崩溃恢复草稿（0b）：`<数据目录>/recovery.dat` 单槽，原子写；清除时文件不存在视为成功。
+pub struct FsRecovery {
+    pub path: Option<PathBuf>,
+}
+
+impl RecoveryStore for FsRecovery {
+    fn load(&mut self) -> Result<Vec<u8>, String> {
+        let path = self.path.as_ref().ok_or("无法定位数据目录")?;
+        std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))
+    }
+    fn save(&mut self, data: &[u8]) -> Result<(), String> {
+        let path = self.path.as_ref().ok_or("无法定位数据目录")?;
+        atomic_write(path, data)
+    }
+    fn clear(&mut self) -> Result<(), String> {
+        let path = self.path.as_ref().ok_or("无法定位数据目录")?;
+        match std::fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(format!("{}: {e}", path.display())),
+        }
+    }
+}
+
+/// 会话状态（0b 最近文件）：`<数据目录>/session.txt` 小文本，原子写。
+pub struct FsSession {
+    pub path: Option<PathBuf>,
+}
+
+impl SessionStore for FsSession {
+    fn load(&mut self) -> Result<String, String> {
+        let path = self.path.as_ref().ok_or("无法定位数据目录")?;
+        let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        Ok(String::from_utf8_lossy(&bytes).into_owned())
+    }
+    fn save(&mut self, text: &str) -> Result<(), String> {
+        let path = self.path.as_ref().ok_or("无法定位数据目录")?;
+        atomic_write(path, text.as_bytes())
+    }
+}
+
+/// 持久化能力装配（0b）：恢复草稿 + 会话/最近文件，同一数据目录下两个文件。
+pub fn persist_env() -> PersistEnv {
+    let dir = veil_egui::data_dir();
+    PersistEnv {
+        recovery: Box::new(FsRecovery {
+            path: dir.as_ref().map(|d| d.join("recovery.dat")),
+        }),
+        session: Box::new(FsSession {
+            path: dir.as_ref().map(|d| d.join("session.txt")),
+        }),
     }
 }
 

@@ -14,6 +14,10 @@ pub struct Style {
     pub italic: bool,
     pub mono: bool,
     pub underline: bool,
+    /// 删除线：由 paint 层按区间绘制横线（cosmic-text 无原生支持）。
+    pub strikethrough: bool,
+    /// 语法高亮前景色；None 表示沿用主题默认前景色。
+    pub color: Option<[u8; 3]>,
 }
 
 /// 产出致密覆盖 `[0, text_len)` 的样式段。`inlines` 为文档绝对偏移，`block` 为块区间。
@@ -46,6 +50,7 @@ pub fn style_spans(
                 st.italic |= mst.italic;
                 st.mono |= mst.mono;
                 st.underline |= mst.underline;
+                st.strikethrough |= mst.strikethrough;
             }
         }
         match out.last_mut() {
@@ -75,6 +80,10 @@ fn collect(nodes: &[InlineNode], block: Range, out: &mut Vec<(usize, usize, Styl
                 underline: true,
                 ..Default::default()
             },
+            InlineKind::Strikethrough => Style {
+                strikethrough: true,
+                ..Default::default()
+            },
             // Image 非激活时整段被占位图替换（layout），无可见文本需要样式；
             // 降级态（加载失败/远程 URL）只显 alt 文本，与正文同式。
             InlineKind::Image | InlineKind::Math => Style::default(),
@@ -98,7 +107,7 @@ mod tests {
     /// 便捷：以 Session 解析拿真实 inline 树，保证与内核语义一致。
     fn spans(text: &str) -> Vec<(usize, usize, Style)> {
         let s = Session::open(text);
-        let (id, _, range) = s.blocks()[0];
+        let (id, _, range) = s.blocks()[0].clone();
         style_spans(range.len(), range, &s.block_inlines(id).unwrap())
     }
 
@@ -166,5 +175,21 @@ mod tests {
         let sp = spans("中文 **粗**");
         assert!(find(&sp, 9).bold);
         assert!(!find(&sp, 3).bold);
+    }
+
+    #[test]
+    fn strikethrough_covers_markers() {
+        // 「~~del~~」整节点（含标记）strikethrough
+        let sp = spans("a ~~del~~ c");
+        assert!(find(&sp, 2).strikethrough && find(&sp, 8).strikethrough);
+        assert!(!find(&sp, 0).strikethrough && !find(&sp, 10).strikethrough);
+    }
+
+    #[test]
+    fn strikethrough_nests_with_strong() {
+        // 「~~**x**~~」：内层同时 bold + strikethrough
+        let sp = spans("~~**x**~~");
+        let mid = find(&sp, 4);
+        assert!(mid.strikethrough && mid.bold);
     }
 }

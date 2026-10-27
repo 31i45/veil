@@ -20,6 +20,7 @@ fn main() {
                     text,
                     path: Some(path),
                     bom,
+                    resume: false,
                 },
                 Err(e) => {
                     eprintln!("无法读取 {}: {e}", path.display());
@@ -31,6 +32,7 @@ fn main() {
             text: SAMPLE.to_owned(),
             path: None,
             bom: false,
+            resume: true,
         },
     };
     if let Err(e) = veil_egui::run(
@@ -44,6 +46,7 @@ fn main() {
         platform::dialogs(),
         platform::watcher(),
         platform::theme_env(),
+        platform::persist_env(),
     ) {
         eprintln!("{e}");
         std::process::exit(1);
@@ -383,7 +386,9 @@ mod tests {
     #[test]
     fn inline_render_has_baseline_and_pixels() {
         let mut m = math_renderer();
-        let img = m.render("x", false, 1.0, [30, 30, 30]).expect("行内 x 渲染");
+        let img = m
+            .render("x", false, 1.0, [30, 30, 30])
+            .expect("行内 x 渲染");
         assert_eq!(
             (img.width, img.height),
             (9, 8),
@@ -431,9 +436,7 @@ mod tests {
             .expect("图非空");
         assert_eq!(px[3], 255, "实心笔画存在全覆盖像素");
         assert_eq!(&px[..3], &[255, 255, 255], "浅色前景传入渲染器");
-        let black = m
-            .render("x", false, 1.0, [0, 0, 0])
-            .expect("黑色行内渲染");
+        let black = m.render("x", false, 1.0, [0, 0, 0]).expect("黑色行内渲染");
         let px = black
             .pixels
             .chunks_exact(4)

@@ -50,6 +50,33 @@ impl ThemeMode {
     }
 }
 
+/// 代码块语法高亮色板。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct SyntaxColors {
+    pub keyword: [u8; 3],
+    pub string: [u8; 3],
+    pub comment: [u8; 3],
+    pub number: [u8; 3],
+    pub function: [u8; 3],
+    pub type_name: [u8; 3],
+    pub punctuation: [u8; 3],
+}
+
+impl SyntaxColors {
+    /// 浅色默认色板（LayoutEngine 无主题时的兜底）。
+    pub const fn default_light() -> Self {
+        SyntaxColors {
+            keyword: [132, 48, 137],
+            string: [3, 106, 78],
+            comment: [120, 120, 120],
+            number: [12, 94, 188],
+            function: [115, 82, 3],
+            type_name: [26, 82, 168],
+            punctuation: [90, 90, 90],
+        }
+    }
+}
+
 /// 调色板：正文/ chrome / 交互态全套颜色。浅色值与原硬编码常量逐字节一致（视觉不回退）。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Theme {
@@ -68,6 +95,7 @@ pub struct Theme {
     pub thumb: [u8; 4],
     pub muted: [u8; 3],
     pub text: [u8; 3],
+    pub syntax: SyntaxColors,
 }
 
 impl Theme {
@@ -100,6 +128,15 @@ impl Theme {
             thumb: [176, 184, 195, 255],
             muted: [110, 110, 110],
             text: [45, 45, 45],
+            syntax: SyntaxColors {
+                keyword: [132, 48, 137],   // 紫
+                string: [3, 106, 78],      // 深绿
+                comment: [120, 120, 120],  // 灰
+                number: [12, 94, 188],     // 蓝
+                function: [115, 82, 3],    // 棕
+                type_name: [26, 82, 168],  // 蓝
+                punctuation: [90, 90, 90], // 深灰
+            },
         }
     }
 
@@ -120,6 +157,15 @@ impl Theme {
             thumb: [96, 102, 110, 255],
             muted: [160, 160, 160],
             text: [225, 225, 225],
+            syntax: SyntaxColors {
+                keyword: [197, 134, 192],     // 亮紫
+                string: [125, 191, 153],      // 青绿
+                comment: [120, 120, 120],     // 灰
+                number: [104, 166, 232],      // 亮蓝
+                function: [220, 180, 100],    // 金
+                type_name: [120, 170, 230],   // 蓝
+                punctuation: [160, 160, 160], // 浅灰
+            },
         }
     }
 }
@@ -219,6 +265,31 @@ pub fn config_path() -> Option<PathBuf> {
         std::env::var_os("XDG_CONFIG_HOME").filter(|s| !s.is_empty()),
         std::env::var_os("HOME").filter(|s| !s.is_empty()),
     )
+}
+
+/// 应用数据目录（0b 恢复/会话文件的公共父目录）：与配置同根。
+/// Windows `%APPDATA%\Veil`；其余 `$XDG_CONFIG_HOME/veil` 或 `$HOME/.config/veil`。
+pub fn data_dir() -> Option<PathBuf> {
+    data_dir_of(
+        std::env::var_os("APPDATA").filter(|s| !s.is_empty()),
+        std::env::var_os("XDG_CONFIG_HOME").filter(|s| !s.is_empty()),
+        std::env::var_os("HOME").filter(|s| !s.is_empty()),
+    )
+}
+
+/// 数据目录推导的纯函数形态（测试注入环境变量，不触碰真实用户目录）。
+pub fn data_dir_of(
+    appdata: Option<OsString>,
+    xdg: Option<OsString>,
+    home: Option<OsString>,
+) -> Option<PathBuf> {
+    if let Some(dir) = appdata {
+        return Some(PathBuf::from(dir).join("Veil"));
+    }
+    if let Some(dir) = xdg {
+        return Some(PathBuf::from(dir).join("veil"));
+    }
+    home.map(|dir| PathBuf::from(dir).join(".config").join("veil"))
 }
 
 /// 路径推导的纯函数形态（测试注入环境变量，不触碰真实用户目录）。
@@ -470,11 +541,7 @@ mod tests {
         let home = OsString::from("/home/u");
         assert_eq!(
             config_path_of(Some(appdata.clone()), Some(xdg.clone()), Some(home.clone())),
-            Some(
-                PathBuf::from(&appdata)
-                    .join("Veil")
-                    .join("config.toml")
-            )
+            Some(PathBuf::from(&appdata).join("Veil").join("config.toml"))
         );
         assert_eq!(
             config_path_of(None, Some(xdg.clone()), Some(home.clone())),

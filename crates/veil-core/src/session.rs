@@ -99,6 +99,11 @@ impl Session {
         self.buf.len()
     }
 
+    /// offset 所在行号（0-based）。供视图层估算块高时避免 text_slice 全量拷贝。
+    pub fn line_of_offset(&self, offset: usize) -> usize {
+        self.buf.line_of_offset(offset.min(self.buf.len()))
+    }
+
     /// 光标行列（1-based，列按字符计数而非字节）。offset 越界或非字符边界返回 None。
     pub fn line_col(&self, offset: usize) -> Option<(usize, usize)> {
         if offset > self.buf.len() || !self.buf.is_char_boundary(offset) {
@@ -149,7 +154,7 @@ impl Session {
                 } else {
                     self.buf.offset_of_line(b.end_line)
                 };
-                (b.id, b.kind, Range::new(start, end))
+                (b.id, b.kind.clone(), Range::new(start, end))
             })
             .collect()
     }
@@ -163,6 +168,11 @@ impl Session {
     /// 数学块的 TeX 源码（剥开闭 `$$` 标记）。非数学块/未知 id 返回 None。
     pub fn math_source(&self, block: BlockId) -> Option<String> {
         self.syntax.math_source(&self.buf, block)
+    }
+
+    /// 标题块派生数据：(级别, 可见文本)。非标题块/未知 id 返回 None。
+    pub fn heading(&self, block: BlockId) -> Option<(u8, String)> {
+        self.syntax.heading(&self.buf, block)
     }
 
     /// GFM 表格派生数据（列对齐 + 单元格文本/区间）。非表格块/未知 id 返回 None。

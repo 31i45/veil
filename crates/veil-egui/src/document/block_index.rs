@@ -2,10 +2,12 @@
 //! 本文件是生产代码唯一允许全量枚举块的位置；其余读取一律走本索引。
 //! 不依赖 cosmic-text/像素概念，属文档域而非排版细节。
 
+use std::collections::HashSet;
+
 use veil_core::{BlockId, BlockKind, Range};
 
-use crate::app::{App, MARGIN, PARA_GAP};
-use crate::view::BASE_LINE_HEIGHT;
+use crate::app::App;
+use crate::geometry::{BASE_LINE_HEIGHT, MARGIN, PARA_GAP};
 
 /// 单块几何缓存：块清单一次枚举后复用，避免每次击键反复全量枚举（P1a）。
 pub(crate) struct BlockGeom {
@@ -32,13 +34,28 @@ impl App {
     /// 估算高度在此一次性算好（P1b）：几何重算不再读取 rope。
     pub(crate) fn refresh_index(&mut self) {
         let blocks = self.editor.session().blocks();
-        let scale = self.scale;
+        let scale = self.input_state.scale;
         let chars_per_line = self.chars_per_line();
+        let base = self.base_key();
+        let caret = self.editor.caret();
+        let mut alive: HashSet<BlockId> = HashSet::with_capacity(blocks.len());
         self.index.blocks.clear();
         self.index.blocks.reserve(blocks.len());
         for (id, kind, range) in blocks {
-            let text = self.editor.session().text_slice(range).unwrap_or_default();
-            let est_h = estimate_height(&text, chars_per_line, scale);
+            alive.insert(id);
+            // 键命中（同宽/DPI/主题/图片基准且激活指纹一致）的布局直接复用其高度；
+            // 其余块用行号+字节长度估算，避免 text_slice 创建 String
+            //（10k 块文档下是 O(全文) 开销）。
+            let est_h = if let Some(layout) = self.cache.layout(id, &kind, range, base, caret) {
+                layout.height
+            } else {
+                let start_line = self.editor.session().line_of_offset(range.start);
+                let end_line = self.editor.session().line_of_offset(range.end);
+                let hard_lines = (end_line - start_line) as f32 + 1.0;
+                let byte_len = (range.end - range.start) as f32;
+                let wrapped = (byte_len / chars_per_line.max(1.0)).ceil().max(1.0);
+                hard_lines.max(wrapped) * BASE_LINE_HEIGHT * scale
+            };
             self.index.blocks.push(BlockGeom {
                 id,
                 kind,
@@ -48,6 +65,9 @@ impl App {
                 est_h,
             });
         }
+        // 内存回收：与块真值同源，删掉已消失的块与过期代次条目（键校验不受影响）
+        let revs = self.input_state.revs;
+        self.cache.prune(&alive, &revs, &base);
         // 索引重建后 top/height 归零：立即按估算高度累计一次，可见区间/滚动条
         // 才有有效几何；排版后用 recompute_geometry 以真实高度覆盖。
         self.recompute_geometry();
@@ -57,28 +77,19 @@ impl App {
     /// 取出 Vec 再循环：`block_height(&self)` 与 `index` 的可变借用无法同时成立。
     pub(crate) fn recompute_geometry(&mut self) {
         let mut blocks = std::mem::take(&mut self.index.blocks);
-        let mut y = MARGIN * self.scale;
+        let mut y = MARGIN * self.input_state.scale;
         for g in &mut blocks {
             let h = self.block_height(g);
             g.height = h;
             g.top = y;
-            y += h + PARA_GAP * self.scale;
+            y += h + PARA_GAP * self.input_state.scale;
         }
         // 末块后不累加块间距（与原 block_tops 一致），文档尾部只留外边距
         self.index.total_h = if blocks.is_empty() {
-            2.0 * MARGIN * self.scale
+            2.0 * MARGIN * self.input_state.scale
         } else {
-            y - PARA_GAP * self.scale + MARGIN * self.scale
+            y - PARA_GAP * self.input_state.scale + MARGIN * self.input_state.scale
         };
         self.index.blocks = blocks;
     }
-}
-
-/// 视口外块的廉价高度估算（P1b）：换行数与原文字符数折算的折行数取大，
-/// 乘以基准行高；不触发 shaping，仅用于几何累计。
-fn estimate_height(text: &str, chars_per_line: f32, scale: f32) -> f32 {
-    let hard_lines = text.bytes().filter(|&b| b == b'\n').count() as f32 + 1.0;
-    let chars = text.chars().count() as f32;
-    let wrapped = (chars / chars_per_line.max(1.0)).ceil().max(1.0);
-    hard_lines.max(wrapped) * BASE_LINE_HEIGHT * scale
 }

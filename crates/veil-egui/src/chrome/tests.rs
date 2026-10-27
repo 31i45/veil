@@ -1,6 +1,7 @@
 //! chrome 模型/绘制/缓存测试（原 chrome.rs 内联测试平移，labels 访问适配封装）。
 
 use super::*;
+use crate::document::ExternalState;
 use crate::theme::Theme;
 use crate::view::{Frame, LayoutEngine};
 
@@ -42,24 +43,55 @@ fn menu_bar_hit_and_toggle_zones() {
 
 #[test]
 fn popup_hit_maps_items_and_contains_padding() {
-    let p = popup_layout(0, 1.0);
+    let p = popup_layout(0, 1.0, &[]);
     assert!(p.h > 0.0);
     assert_eq!(p.y, MENU_H);
     for (i, ix, iy, iw, ih) in &p.items {
         assert_eq!(
-            hit_popup_item(ix + iw / 2.0, iy + ih / 2.0, 0, 1.0),
+            hit_popup_item(ix + iw / 2.0, iy + ih / 2.0, 0, 1.0, &[]),
             Some(*i)
         );
     }
     assert_eq!(
-        hit_popup_item(p.x + 1.0, p.y + 1.0, 0, 1.0),
+        hit_popup_item(p.x + 1.0, p.y + 1.0, 0, 1.0, &[]),
         None,
         "内边距非项区"
     );
-    assert!(popup_contains(p.x + 1.0, p.y + 1.0, 0, 1.0));
-    assert!(!popup_contains(p.x - 1.0, p.y + 1.0, 0, 1.0));
-    assert_eq!(action_at(0, 0), Some(MenuAction::Open));
-    assert_eq!(action_at(0, 99), None);
+    assert!(popup_contains(p.x + 1.0, p.y + 1.0, 0, 1.0, &[]));
+    assert!(!popup_contains(p.x - 1.0, p.y + 1.0, 0, 1.0, &[]));
+    assert_eq!(action_at(0, 0, &[]), Some(MenuAction::New));
+    assert_eq!(action_at(0, 1, &[]), Some(MenuAction::Open));
+    assert_eq!(action_at(0, 99, &[]), None);
+}
+
+/// 0b 动态菜单：最近文件插在「退出」之前，布局/命中/分发三者一致。
+#[test]
+fn file_menu_injects_recent_before_quit() {
+    let recent = vec!["a.md".to_string(), "b.md".to_string()];
+    let static_len = MENUS[0].items.len();
+    let rows = menu_rows(0, &recent);
+    assert_eq!(rows.len(), static_len + 2, "静态项 + 两个最近文件");
+    assert_eq!(rows[static_len - 1].2, MenuAction::OpenRecent(0));
+    assert_eq!(rows[static_len].2, MenuAction::OpenRecent(1));
+    assert_eq!(rows[static_len + 1].2, MenuAction::Quit, "退出仍在最后");
+    // 分发与布局同源
+    assert_eq!(action_at(0, static_len - 1, &recent), Some(MenuAction::OpenRecent(0)));
+    assert_eq!(action_at(0, static_len + 1, &recent), Some(MenuAction::Quit));
+    assert_eq!(action_at(0, static_len + 2, &recent), None);
+    // 高度随项数增长；项命中与下标一致
+    let p0 = popup_layout(0, 1.0, &[]);
+    let p1 = popup_layout(0, 1.0, &recent);
+    assert_eq!(p1.h - p0.h, 2.0 * ITEM_H);
+    for (i, ix, iy, iw, ih) in &p1.items {
+        assert_eq!(
+            hit_popup_item(ix + iw / 2.0, iy + ih / 2.0, 0, 1.0, &recent),
+            Some(*i)
+        );
+    }
+    // 其它菜单不受最近文件影响
+    assert_eq!(menu_rows(1, &recent).len(), MENUS[1].items.len());
+    // 空最近列表：零动态项
+    assert_eq!(menu_rows(0, &[]).len(), static_len);
 }
 
 #[test]
@@ -68,6 +100,7 @@ fn menu_definitions_cover_shortcuts() {
     assert_eq!(
         file,
         vec![
+            MenuAction::New,
             MenuAction::Open,
             MenuAction::Save,
             MenuAction::SaveAs,
@@ -83,7 +116,10 @@ fn menu_definitions_cover_shortcuts() {
             MenuAction::Redo,
             MenuAction::Cut,
             MenuAction::Copy,
-            MenuAction::Paste
+            MenuAction::Paste,
+            MenuAction::SelectAll,
+            MenuAction::Find,
+            MenuAction::Replace
         ]
     );
 }
@@ -157,7 +193,13 @@ fn status_line_variants() {
         ("未命名草稿".into(), "行 1，列 1".into())
     );
     assert_eq!(
-        status_line(Some(Path::new("dir/a.md")), true, ExternalState::BackedUp, 12, 3),
+        status_line(
+            Some(Path::new("dir/a.md")),
+            true,
+            ExternalState::BackedUp,
+            12,
+            3
+        ),
         ("dir/a.md *（外部修改已备份）".into(), "行 12，列 3".into())
     );
     assert_eq!(
@@ -202,6 +244,7 @@ fn paint_draws_menu_status_and_popup() {
         1,
         2000.0,
         0.0,
+        &[],
     );
     assert_eq!(frame.get(0, 0), theme.chrome_bg, "菜单栏底色");
     let status_y = 200 - STATUS_H as i32;
@@ -210,7 +253,7 @@ fn paint_draws_menu_status_and_popup() {
         theme.chrome_bg,
         "状态栏底色"
     );
-    let p = popup_layout(0, 1.0);
+    let p = popup_layout(0, 1.0, &[]);
     assert_eq!(
         frame.get((p.x + p.w / 2.0) as u32, (p.y + p.h / 2.0) as u32),
         theme.popup_bg,
@@ -232,6 +275,7 @@ fn paint_draws_menu_status_and_popup() {
         1,
         2000.0,
         0.0,
+        &[],
     );
     assert_eq!(chrome.labels.len(), n);
 }
@@ -255,6 +299,7 @@ fn paint_uses_dark_palette() {
         1,
         10.0,
         0.0,
+        &[],
     );
     assert_eq!(frame.get(0, 0), theme.chrome_bg, "深色菜单栏");
     assert_eq!(theme.chrome_bg, [38, 38, 38, 255]);
@@ -263,12 +308,19 @@ fn paint_uses_dark_palette() {
 #[test]
 fn theme_menu_marks_current_mode() {
     assert_eq!(MENUS.len(), 3);
-    assert_eq!(action_at(2, 0), Some(MenuAction::ThemeSystem));
-    assert_eq!(action_at(2, 1), Some(MenuAction::ThemeLight));
-    assert_eq!(action_at(2, 2), Some(MenuAction::ThemeDark));
-    assert!(theme_action_matches(MenuAction::ThemeSystem, ThemeMode::System));
+    assert_eq!(action_at(2, 0, &[]), Some(MenuAction::ToggleOutline));
+    assert_eq!(action_at(2, 1, &[]), Some(MenuAction::ThemeSystem));
+    assert_eq!(action_at(2, 2, &[]), Some(MenuAction::ThemeLight));
+    assert_eq!(action_at(2, 3, &[]), Some(MenuAction::ThemeDark));
+    assert!(theme_action_matches(
+        MenuAction::ThemeSystem,
+        ThemeMode::System
+    ));
     assert!(theme_action_matches(MenuAction::ThemeDark, ThemeMode::Dark));
-    assert!(!theme_action_matches(MenuAction::ThemeDark, ThemeMode::Light));
+    assert!(!theme_action_matches(
+        MenuAction::ThemeDark,
+        ThemeMode::Light
+    ));
     assert!(!theme_action_matches(MenuAction::Save, ThemeMode::Dark));
 }
 
@@ -292,6 +344,7 @@ fn scrollbar_thumb_painted_when_overflowing() {
         1,
         3000.0,
         0.0,
+        &[],
     );
     let x = (300.0 - SCROLL_W + 2.0) as u32;
     let y = (v.y + 2.0) as u32;

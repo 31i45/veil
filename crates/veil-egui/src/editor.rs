@@ -18,8 +18,20 @@ pub enum Intent {
     MoveDocEnd,
     SelectLeft,
     SelectRight,
+    /// Ctrl+←/→：按词移动（字母数字/下划线 + CJK 表意字为一个词，换行是硬边界）。
+    WordLeft,
+    WordRight,
+    /// Ctrl+Shift+←/→：按词扩选（anchor 不动）。
+    SelectWordLeft,
+    SelectWordRight,
     SelectDocStart,
     SelectDocEnd,
+    /// 全选（Ctrl+A）：anchor 落文首、caret 落文末，随后输入即整体替换。
+    SelectAll,
+    /// 缩进（Tab）：无选区插 4 空格；有选区对触及的每行加 4 空格（空行跳过）。
+    Indent,
+    /// 反缩进（Shift+Tab）：删除行首至多 4 个空格或 1 个制表符，绝不删非空白字符。
+    Dedent,
     Undo,
     Redo,
 }
@@ -67,6 +79,12 @@ impl Editor {
         self.dirty
     }
 
+    /// 恢复场景专用（0b）：崩溃恢复的内容相对磁盘基线是「未保存修改」，打开即标脏。
+    /// 正常编辑路径不得调用（脏标只能由内容编辑置位、mark_saved 清除）。
+    pub(crate) fn set_dirty(&mut self, dirty: bool) {
+        self.dirty = dirty;
+    }
+
     /// 保存成功后由调用方（shell）置回干净态。
     pub fn mark_saved(&mut self) {
         self.dirty = false;
@@ -101,10 +119,15 @@ impl Editor {
 
     /// 点击/视觉移动落点：移动光标并坍缩选区。非法偏移（越界/非字符边界）拒绝并返回 false。
     pub fn set_caret(&mut self, offset: usize) -> bool {
-        // 同一偏移两次 create 校验一致、同成同败，无半截状态
+        self.set_marks(offset, offset)
+    }
+
+    /// 同时重置 caret（Bias::Right）与 anchor（Bias::Left）。同一偏移两次 create
+    /// 校验一致、同成同败，无半截状态；任一失败则旧标记原样保留。
+    fn set_marks(&mut self, caret: usize, anchor: usize) -> bool {
         match (
-            self.session.create_mark(offset, Bias::Right),
-            self.session.create_mark(offset, Bias::Left),
+            self.session.create_mark(caret, Bias::Right),
+            self.session.create_mark(anchor, Bias::Left),
         ) {
             (Ok(c), Ok(a)) => {
                 self.session.remove_mark(self.caret);
@@ -127,6 +150,34 @@ impl Editor {
             }
             Err(_) => false,
         }
+    }
+
+    /// 双击选词：选中 `offset` 处字符所属类别（词 / 空白 / 标点）的连续串。
+    /// 换行是硬边界（空白串不跨行）；游标落在行尾换行处时按前一字符取词。
+    /// 返回 false = 空文档 / 空行 / 无内容可选。
+    pub fn select_word_at(&mut self, offset: usize) -> bool {
+        let Some(text) = self.full_text() else {
+            return false;
+        };
+        let Some((start, end)) = word_run(&text, offset) else {
+            return false;
+        };
+        self.set_marks(end, start)
+    }
+
+    /// 三击选行：选中 `offset` 所在行（不含行尾换行）；空行无可选内容。
+    pub fn select_line_at(&mut self, offset: usize) -> bool {
+        let r = self.line_bounds(offset);
+        if r.start == r.end {
+            return false;
+        }
+        self.set_marks(r.end, r.start)
+    }
+
+    /// 全文文本（词边界扫描用）；空文档返回空串。
+    fn full_text(&self) -> Option<String> {
+        self.session
+            .text_slice(Range::new(0, self.session.text_len()))
     }
 
     pub fn preedit(&self) -> Option<&Preedit> {
@@ -183,6 +234,8 @@ impl Editor {
                 | Intent::DeleteBackward
                 | Intent::DeleteForward
                 | Intent::Newline
+                | Intent::Indent
+                | Intent::Dedent
                 | Intent::Undo
                 | Intent::Redo
         );
@@ -191,6 +244,69 @@ impl Editor {
             self.dirty = true;
         }
         r
+    }
+
+    /// 切换任务列表复选框（P3-5，点击方框）。`state_range` 为状态字符（` `/`x`）的
+    /// 文档字节区间，`checked` 为目标态。光标保持原位（点击方框不移动光标，
+    /// 与 GitHub 行为一致）；等长替换故各标记无需位移。成功即置脏标。
+    pub(crate) fn toggle_task(
+        &mut self,
+        state_range: Range,
+        checked: bool,
+    ) -> Option<Vec<BlockId>> {
+        let ev = self
+            .session
+            .apply(Edit::Replace {
+                range: state_range,
+                text: if checked { "x" } else { " " }.into(),
+            })
+            .ok()?;
+        self.dirty = true;
+        Some(ev.dirty_blocks)
+    }
+
+    /// 查找替换·单次：替换某个命中区间（一步事务），光标落在替换文本之后。
+    pub(crate) fn replace_range(&mut self, range: Range, text: &str) -> Option<Vec<BlockId>> {
+        let ev = self
+            .session
+            .apply(Edit::Replace {
+                range,
+                text: text.into(),
+            })
+            .ok()?;
+        self.dirty = true;
+        self.set_caret(range.start + text.len());
+        Some(ev.dirty_blocks)
+    }
+
+    /// 查找替换·全部：`ranges` 按起点升序且互不重叠，首尾之间整段一次 `Replace`，
+    /// 保证全部替换是单个撤销事务。返回 (脏块, 替换次数)；无命中 None。
+    pub(crate) fn replace_all(
+        &mut self,
+        ranges: &[Range],
+        text: &str,
+    ) -> Option<(Vec<BlockId>, usize)> {
+        let (first, last) = (ranges.first()?, ranges.last()?);
+        let len = self.session.text_len();
+        let hay = self.session.text_slice(Range::new(0, len))?;
+        let mut out = String::with_capacity(len + ranges.len() * text.len());
+        let mut at = first.start;
+        for r in ranges {
+            out.push_str(&hay[at..r.start]);
+            out.push_str(text);
+            at = r.end;
+        }
+        debug_assert_eq!(at, last.end, "命中区间升序且互不重叠");
+        let ev = self
+            .session
+            .apply(Edit::Replace {
+                range: Range::new(first.start, last.end),
+                text: out,
+            })
+            .ok()?;
+        self.dirty = true;
+        self.set_caret(first.start);
+        Some((ev.dirty_blocks, ranges.len()))
     }
 
     fn apply_inner(&mut self, intent: Intent) -> Option<Vec<BlockId>> {
@@ -225,8 +341,8 @@ impl Editor {
                         .expect("选区恒合法");
                     return Some(self.collapse_and_return(ev.dirty_blocks, sel.start));
                 }
-                Intent::MoveLeft => return Some(self.collapse_to(sel.start)),
-                Intent::MoveRight => return Some(self.collapse_to(sel.end)),
+                Intent::MoveLeft | Intent::WordLeft => return Some(self.collapse_to(sel.start)),
+                Intent::MoveRight | Intent::WordRight => return Some(self.collapse_to(sel.end)),
                 Intent::MoveDocStart => return Some(self.collapse_to(0)),
                 Intent::MoveDocEnd => {
                     let end = self.session.text_len();
@@ -236,8 +352,13 @@ impl Editor {
                 // Select* 意图继续扩选（不走「编辑意图」优先通道）
                 Intent::SelectLeft
                 | Intent::SelectRight
+                | Intent::SelectWordLeft
+                | Intent::SelectWordRight
                 | Intent::SelectDocStart
-                | Intent::SelectDocEnd => {}
+                | Intent::SelectDocEnd
+                | Intent::SelectAll => {}
+                // 缩进选中行：选区保留（落点随行首前缀平移），在主 match 中统一处理
+                Intent::Indent | Intent::Dedent => {}
             }
         }
         match intent {
@@ -270,20 +391,13 @@ impl Editor {
                     .ok()
                     .map(|e| e.dirty_blocks)
             }
-            Intent::Newline => {
-                let dirty = self
-                    .session
-                    .apply(Edit::Insert {
-                        at: c,
-                        text: "\n".into(),
-                    })
-                    .expect("caret 恒合法")
-                    .dirty_blocks;
-                self.collapse_to(self.caret()); // 同 InsertText：换行后 anchor 追齐 caret
-                Some(dirty)
-            }
+            Intent::Newline => Some(self.newline(c)),
             Intent::MoveLeft => self.session.prev_grapheme(c).map(|p| self.collapse_to(p)),
             Intent::MoveRight => self.session.next_grapheme(c).map(|p| self.collapse_to(p)),
+            Intent::WordLeft => self.word_move(c, false, false),
+            Intent::WordRight => self.word_move(c, true, false),
+            Intent::SelectWordLeft => self.word_move(c, false, true),
+            Intent::SelectWordRight => self.word_move(c, true, true),
             Intent::MoveDocStart => Some(self.collapse_to(0)),
             Intent::MoveDocEnd => Some(self.collapse_to(self.session.text_len())),
             Intent::SelectLeft => self.session.prev_grapheme(c).map(|p| self.extend_to(p)),
@@ -293,6 +407,17 @@ impl Editor {
                 let end = self.session.text_len();
                 (c < end).then(|| self.extend_to(end))
             }
+            Intent::SelectAll => {
+                let end = self.session.text_len();
+                if end == 0 {
+                    return None; // 空文档无可选内容
+                }
+                // 先坍缩到文首（anchor=Bias::Left 落 0），再扩到文末（caret=Bias::Right 落 end）
+                self.set_caret(0);
+                Some(self.extend_to(end))
+            }
+            Intent::Indent => self.apply_indent(true),
+            Intent::Dedent => self.apply_indent(false),
             Intent::Undo => {
                 let r = self.session.undo().map(|e| e.dirty_blocks);
                 if r.is_some() {
@@ -322,11 +447,398 @@ impl Editor {
         Vec::new()
     }
 
+    /// 按词移动/扩选：目标与当前位置相同（文首向左/文末向右）视为无效果。
+    fn word_move(&mut self, c: usize, forward: bool, extend: bool) -> Option<Vec<BlockId>> {
+        let text = self.full_text()?;
+        let target = if forward {
+            word_right(&text, c)
+        } else {
+            word_left(&text, c)
+        };
+        if target == c {
+            return None;
+        }
+        Some(if extend {
+            self.extend_to(target)
+        } else {
+            self.collapse_to(target)
+        })
+    }
+
     /// 先坍缩光标再返回脏块（替换/删除/撤销共用）。
     fn collapse_and_return(&mut self, dirty: Vec<BlockId>, offset: usize) -> Vec<BlockId> {
         self.set_caret(offset);
         dirty
     }
+
+    /// Tab / Shift+Tab（C3）：无选区时 Tab 在光标处插 4 空格、Shift+Tab 反缩进当前行；
+    /// 有选区时对触及的每一行做行首前缀变换，整段一次 `Replace`——单撤销步可整体回退。
+    /// 落点按行前缀增量平移：caret 含行首前缀（Bias::Right），anchor 不含
+    /// （Bias::Left 恒留新行首之前，与 mark 偏置语义一致）。
+    fn apply_indent(&mut self, indent: bool) -> Option<Vec<BlockId>> {
+        let selection = self.selection();
+        if selection.is_none() && indent {
+            let at = self.caret();
+            let dirty = self
+                .session
+                .apply(Edit::Insert {
+                    at,
+                    text: INDENT.into(),
+                })
+                .expect("caret 恒合法")
+                .dirty_blocks;
+            self.collapse_to(self.caret());
+            return Some(dirty);
+        }
+        let sel = selection.unwrap_or_else(|| self.line_bounds(self.caret()));
+        let plan = self.indent_plan(sel, !indent)?;
+        let (caret, anchor) = (self.caret(), self.anchor_offset());
+        let (new_caret, new_anchor) = (plan.map(caret, true), plan.map(anchor, false));
+        let dirty = self
+            .session
+            .apply(Edit::Replace {
+                range: plan.span,
+                text: plan.text,
+            })
+            .ok()?
+            .dirty_blocks;
+        self.set_marks(new_caret, new_anchor);
+        Some(dirty)
+    }
+
+    /// Enter（C4）：行尾且行首是列表/引用标记时续写下一项（编号递增、任务项给未勾选）；
+    /// 空列表项则删去整行标记以收束列表；其余情形仍是普通换行。
+    /// 行中间回车不做续行（与主流编辑器一致，避免拆词时凭空造出列表）。
+    fn newline(&mut self, caret: usize) -> Vec<BlockId> {
+        let at_line_end = match self.session.next_grapheme(caret) {
+            None => true,
+            Some(next) => self.session.text_slice(Range::new(caret, next)).as_deref() == Some("\n"),
+        };
+        let marker = if at_line_end {
+            let line = self.line_bounds(caret);
+            self.session
+                .text_slice(line)
+                .as_deref()
+                .and_then(list_marker)
+        } else {
+            None
+        };
+        match marker {
+            Some(m) if m.empty => {
+                let line = self.line_bounds(caret);
+                let dirty = self
+                    .session
+                    .apply(Edit::Delete { range: line })
+                    .expect("行区间恒合法")
+                    .dirty_blocks;
+                self.collapse_to(self.caret());
+                dirty
+            }
+            Some(m) => {
+                let dirty = self
+                    .session
+                    .apply(Edit::Insert {
+                        at: caret,
+                        text: format!("\n{}", m.next),
+                    })
+                    .expect("caret 恒合法")
+                    .dirty_blocks;
+                self.collapse_to(self.caret()); // 同 InsertText：换行后 anchor 追齐 caret
+                dirty
+            }
+            None => {
+                let dirty = self
+                    .session
+                    .apply(Edit::Insert {
+                        at: caret,
+                        text: "\n".into(),
+                    })
+                    .expect("caret 恒合法")
+                    .dirty_blocks;
+                self.collapse_to(self.caret());
+                dirty
+            }
+        }
+    }
+
+    /// 光标所在行的字节区间（不含行尾换行）。
+    fn line_bounds(&self, offset: usize) -> Range {
+        let len = self.session.text_len();
+        let text = self
+            .session
+            .text_slice(Range::new(0, len))
+            .unwrap_or_default();
+        let starts = line_starts(&text);
+        let i = line_index(&starts, offset);
+        let end = starts.get(i + 1).map(|&s| s - 1).unwrap_or(len);
+        Range::new(starts[i], end)
+    }
+
+    /// 行级缩进计划：行区间 = 选区起点行 ..= 终点行；去掉换行后为空的行不做前缀
+    /// 变换（Ctrl+A 后 Tab 不会给文末幻影行留下尾随空格）。全部变动为空时 None。
+    fn indent_plan(&self, sel: Range, dedent: bool) -> Option<IndentPlan> {
+        let len = self.session.text_len();
+        let text = self.session.text_slice(Range::new(0, len))?;
+        let starts = line_starts(&text);
+        let first = line_index(&starts, sel.start);
+        let last = line_index(&starts, sel.end);
+        let mut out = String::with_capacity(text.len() + INDENT.len());
+        let mut lines = Vec::new();
+        for i in first..=last {
+            let s = starts[i];
+            let e = starts.get(i + 1).copied().unwrap_or(len);
+            let line = &text[s..e];
+            let content = line.strip_suffix('\n').unwrap_or(line);
+            if content.is_empty() {
+                out.push_str(line); // 空行不缩进
+                continue;
+            }
+            if dedent {
+                let cut = dedent_prefix_len(content);
+                out.push_str(&line[cut..]);
+                if cut > 0 {
+                    lines.push((s, -(cut as isize)));
+                }
+            } else {
+                out.push_str(INDENT);
+                out.push_str(line);
+                lines.push((s, INDENT.len() as isize));
+            }
+        }
+        if lines.is_empty() {
+            return None;
+        }
+        let end = starts.get(last + 1).copied().unwrap_or(len);
+        Some(IndentPlan {
+            span: Range::new(starts[first], end),
+            text: out,
+            lines,
+        })
+    }
+}
+
+/// 缩进单位（4 空格）。
+const INDENT: &str = "    ";
+
+/// 一行前缀变换计划：`span` 为被整体替换的区间，`text` 为替换后文本，
+/// `lines` 为 (行首旧偏移, 行前缀增量) 升序表，供 caret/anchor 落点映射。
+struct IndentPlan {
+    span: Range,
+    text: String,
+    lines: Vec<(usize, isize)>,
+}
+
+impl IndentPlan {
+    /// 旧坐标 → 变换后坐标。`with_prefix_at_line_start` 为 true 时行首位置也随前缀
+    /// 右移（caret）；false 时留在新行首之前（anchor，含缩进）。反缩进落点位于被删
+    /// 空白内时夹到新行首。
+    fn map(&self, offset: usize, with_prefix_at_line_start: bool) -> usize {
+        let mut cum: isize = 0;
+        for &(start, delta) in &self.lines {
+            if offset < start {
+                break;
+            }
+            if offset == start && !with_prefix_at_line_start {
+                continue;
+            }
+            if delta < 0 && offset < start + (-delta) as usize {
+                return (start as isize + cum) as usize;
+            }
+            cum += delta;
+        }
+        (offset as isize + cum) as usize
+    }
+}
+
+/// 词字符（Ctrl+←/→ 判定）：字母/数字/下划线（含 CJK 表意字）；空白与换行不算。
+fn is_word_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+
+/// 左邻字符（`i` 前的字符及其起点）；`i` 为字符边界。
+fn prev_char(text: &str, i: usize) -> Option<(usize, char)> {
+    text[..i].char_indices().next_back()
+}
+
+/// 右邻字符（`i` 处字符及其下一偏移）。
+fn next_char(text: &str, i: usize) -> Option<(usize, char)> {
+    let c = text[i..].chars().next()?;
+    Some((i + c.len_utf8(), c))
+}
+
+/// Ctrl+← 落点：先向左跳过非词字符，再停在词首。
+fn word_left(text: &str, offset: usize) -> usize {
+    let mut i = offset;
+    while let Some((j, c)) = prev_char(text, i) {
+        if is_word_char(c) {
+            break;
+        }
+        i = j;
+    }
+    while let Some((j, c)) = prev_char(text, i) {
+        if !is_word_char(c) {
+            break;
+        }
+        i = j;
+    }
+    i
+}
+
+/// Ctrl+→ 落点：先向右跳过非词字符，再停在词尾。
+fn word_right(text: &str, offset: usize) -> usize {
+    let mut i = offset;
+    while let Some((j, c)) = next_char(text, i) {
+        if is_word_char(c) {
+            break;
+        }
+        i = j;
+    }
+    while let Some((j, c)) = next_char(text, i) {
+        if !is_word_char(c) {
+            break;
+        }
+        i = j;
+    }
+    i
+}
+
+/// 双击选词类别：词 / 空白 / 标点（换行是硬边界，不参与同类扩展）。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CharClass {
+    Word,
+    Space,
+    Other,
+}
+
+fn char_class(c: char) -> CharClass {
+    if c.is_whitespace() {
+        CharClass::Space
+    } else if is_word_char(c) {
+        CharClass::Word
+    } else {
+        CharClass::Other
+    }
+}
+
+fn is_line_break(c: char) -> bool {
+    c == '\n' || c == '\r'
+}
+
+/// 双击所选串的字节区间：以 `offset` 处字符（行尾换行则退到前一字符）为基准，
+/// 向两侧扩展到同类字符，换行处截断。空文档/空行返回 None。
+fn word_run(text: &str, offset: usize) -> Option<(usize, usize)> {
+    let mut at = offset.min(text.len());
+    while !text.is_char_boundary(at) {
+        at -= 1; // 非字符边界（布局外调用）：退到所在字符起点
+    }
+    let mut ch = text[at..].chars().next();
+    if ch.is_none() || ch.is_some_and(is_line_break) {
+        let (i, c) = prev_char(text, at)?;
+        if is_line_break(c) {
+            return None; // 空行：无可选内容
+        }
+        at = i;
+        ch = Some(c);
+    }
+    let cls = char_class(ch?);
+    let same = |c: char| !is_line_break(c) && char_class(c) == cls;
+    let mut start = at;
+    for (i, c) in text[..at].char_indices().rev() {
+        if !same(c) {
+            break;
+        }
+        start = i;
+    }
+    let mut end = at;
+    for c in text[at..].chars() {
+        if !same(c) {
+            break;
+        }
+        end += c.len_utf8();
+    }
+    Some((start, end))
+}
+
+/// 全文字节偏移的行首表：`[0, 每个 '\n' 之后的偏移]`；末尾换行会多出一个幻影空行。
+fn line_starts(text: &str) -> Vec<usize> {
+    let mut starts = vec![0];
+    starts.extend(
+        text.bytes()
+            .enumerate()
+            .filter(|&(_, b)| b == b'\n')
+            .map(|(i, _)| i + 1),
+    );
+    starts
+}
+
+/// 偏移所在行下标（`starts` 由 `line_starts` 生成，至少含 0）。
+fn line_index(starts: &[usize], offset: usize) -> usize {
+    starts.partition_point(|&s| s <= offset) - 1
+}
+
+/// 反缩进要删除的行首长度：一个制表符，或至多 4 个空格；非空白字符绝不动。
+fn dedent_prefix_len(content: &str) -> usize {
+    if content.starts_with('\t') {
+        return 1;
+    }
+    content.bytes().take(4).take_while(|&b| b == b' ').count()
+}
+
+/// 行首列表/引用标记：`next` 为续行前缀（含原缩进），`empty` 表示标记后无正文。
+struct ListMarker {
+    next: String,
+    empty: bool,
+}
+
+/// 解析行首标记（C4）。任务项优先于普通无序项；编号项取原数字 +1；
+/// 续行前缀保留原缩进，任务项一律续成未勾选。不支持的写法（无空格分隔、
+/// `*`/`+` 项目符号、`1)` 编号等）返回 None，走普通换行。
+fn list_marker(content: &str) -> Option<ListMarker> {
+    let ws_len = content
+        .bytes()
+        .take_while(|&b| b == b' ' || b == b'\t')
+        .count();
+    let ws = &content[..ws_len];
+    let rest = &content[ws_len..];
+    let task = rest
+        .strip_prefix("- [ ] ")
+        .or_else(|| rest.strip_prefix("- [x] "))
+        .or_else(|| rest.strip_prefix("- [X] "));
+    if let Some(after) = task {
+        return Some(ListMarker {
+            next: format!("{ws}- [ ] "),
+            empty: after.trim().is_empty(),
+        });
+    }
+    if let Some(after) = rest.strip_prefix("- ") {
+        return Some(ListMarker {
+            next: format!("{ws}- "),
+            empty: after.trim().is_empty(),
+        });
+    }
+    let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+    if digits > 0 {
+        if let Some(after) = rest[digits..].strip_prefix(". ") {
+            let n: u64 = rest[..digits].parse().ok()?;
+            return Some(ListMarker {
+                next: format!("{ws}{}. ", n.saturating_add(1)),
+                empty: after.trim().is_empty(),
+            });
+        }
+    }
+    if let Some(after) = rest.strip_prefix("> ") {
+        return Some(ListMarker {
+            next: format!("{ws}> "),
+            empty: after.trim().is_empty(),
+        });
+    }
+    if rest == ">" {
+        return Some(ListMarker {
+            next: format!("{ws}> "),
+            empty: true,
+        });
+    }
+    None
 }
 
 #[cfg(test)]
@@ -771,5 +1283,281 @@ mod tests {
         e.mark_saved();
         e.paste("Z").unwrap();
         assert!(e.is_dirty()); // 粘贴即插入
+    }
+
+    // ---- 全选（Ctrl+A）----
+
+    #[test]
+    fn select_all_covers_whole_document() {
+        let mut e = ed("ab\ncd", 3); // 光标在中部
+        e.apply(Intent::SelectAll).unwrap();
+        assert_eq!(e.selection(), Some(Range::new(0, 5)));
+        assert_eq!(e.caret(), 5, "caret 落文末，Shift+← 可自尾回收");
+    }
+
+    #[test]
+    fn select_all_then_insert_replaces_document() {
+        let mut e = ed("ab\ncd", 0);
+        e.apply(Intent::SelectAll).unwrap();
+        e.apply(Intent::InsertText("x".into())).unwrap();
+        assert_eq!(e.session().serialize(), "x", "全选后输入整体替换");
+        assert_eq!(e.selection(), None);
+        assert_eq!(e.caret(), 1);
+    }
+
+    #[test]
+    fn select_all_then_undo_restores_document() {
+        let mut e = ed("ab\ncd", 0);
+        e.apply(Intent::SelectAll).unwrap();
+        e.apply(Intent::InsertText("x".into())).unwrap();
+        e.apply(Intent::Undo).unwrap();
+        assert_eq!(e.session().serialize(), "ab\ncd", "整体替换是单撤销步");
+    }
+
+    #[test]
+    fn select_all_on_empty_document_is_noop() {
+        let mut e = Editor::new("");
+        assert_eq!(e.apply(Intent::SelectAll), None);
+        assert_eq!(e.selection(), None);
+    }
+
+    #[test]
+    fn select_all_does_not_dirty() {
+        let mut e = ed("ab", 1);
+        e.apply(Intent::SelectAll);
+        assert!(!e.is_dirty(), "全选不是内容编辑，不置脏");
+    }
+
+    // ---- 按词移动 / 扩选（C6）----
+
+    #[test]
+    fn ctrl_arrows_stop_at_word_boundaries() {
+        let mut e = ed("foo bar_baz 中文字", 0);
+        e.apply(Intent::WordRight).unwrap();
+        assert_eq!(e.caret(), 3);
+        e.apply(Intent::WordRight).unwrap();
+        assert_eq!(e.caret(), 11);
+        e.apply(Intent::WordRight).unwrap();
+        assert_eq!(e.caret(), 21, "CJK 连续串按一个词");
+        assert_eq!(e.apply(Intent::WordRight), None, "文末向右无效果");
+        e.apply(Intent::WordLeft).unwrap();
+        assert_eq!(e.caret(), 12);
+        e.apply(Intent::WordLeft).unwrap();
+        assert_eq!(e.caret(), 4);
+        e.apply(Intent::WordLeft).unwrap();
+        assert_eq!(e.caret(), 0);
+        assert_eq!(e.apply(Intent::WordLeft), None, "文首向左无效果");
+    }
+
+    #[test]
+    fn ctrl_shift_arrows_extend_by_word() {
+        let mut e = ed("foo bar", 5);
+        e.apply(Intent::SelectWordRight).unwrap();
+        assert_eq!(e.selection(), Some(Range::new(5, 7)));
+        assert_eq!(
+            e.apply(Intent::SelectWordRight),
+            None,
+            "已在词尾：目标不动即无效果"
+        );
+        e.apply(Intent::SelectWordLeft).unwrap();
+        assert_eq!(e.selection(), Some(Range::new(4, 5)), "反向扩选收缩");
+        e.apply(Intent::SelectWordLeft).unwrap();
+        assert_eq!(e.selection(), Some(Range::new(0, 5)));
+    }
+
+    #[test]
+    fn word_move_with_selection_collapses_to_selection_edge() {
+        let mut e = ed("foo bar", 0);
+        e.apply(Intent::SelectAll).unwrap();
+        e.apply(Intent::WordRight).unwrap();
+        assert_eq!(e.selection(), None);
+        assert_eq!(e.caret(), 7, "有选区时先坍缩到选区末端");
+    }
+
+    #[test]
+    fn double_click_selects_word_space_and_handles_line_end() {
+        let mut e = ed("foo bar  baz\nqux", 0);
+        assert!(e.select_word_at(5));
+        assert_eq!(e.selection(), Some(Range::new(4, 7)));
+        assert!(e.select_word_at(8));
+        assert_eq!(e.selection(), Some(Range::new(7, 9)), "空白串不跨行");
+        assert!(e.select_word_at(12));
+        assert_eq!(
+            e.selection(),
+            Some(Range::new(9, 12)),
+            "行尾换行处按前一字符取词"
+        );
+        assert!(e.select_word_at(15));
+        assert_eq!(e.selection(), Some(Range::new(13, 16)));
+    }
+
+    #[test]
+    fn double_click_cjk_run_is_one_word() {
+        let mut e = ed("中文字 abc", 0);
+        assert!(e.select_word_at(4)); // 「文」内（字节 3..6）
+        assert_eq!(e.selection(), Some(Range::new(0, 9)));
+        assert!(e.select_word_at(1), "非字符边界退到所在字符起点");
+        assert_eq!(e.selection(), Some(Range::new(0, 9)));
+    }
+
+    #[test]
+    fn double_click_on_empty_line_selects_nothing() {
+        let mut e = ed("a\n\nb", 0);
+        assert!(!e.select_word_at(2), "空行无可选内容");
+    }
+
+    #[test]
+    fn triple_click_selects_line_without_newline() {
+        let mut e = ed("ab\ncd\n", 0);
+        assert!(e.select_line_at(1));
+        assert_eq!(e.selection(), Some(Range::new(0, 2)));
+        assert!(e.select_line_at(4));
+        assert_eq!(e.selection(), Some(Range::new(3, 5)));
+        assert!(!e.select_line_at(6), "文末幻影空行无可选内容");
+    }
+
+    // ---- 缩进 / 反缩进（C3）----
+
+    #[test]
+    fn tab_without_selection_inserts_four_spaces() {
+        let mut e = ed("ab", 1);
+        assert!(e.apply(Intent::Indent).is_some());
+        assert_eq!(e.session().serialize(), "a    b");
+        assert_eq!(e.caret(), 5, "光标停在插入空白之后");
+        assert!(e.is_dirty());
+    }
+
+    #[test]
+    fn tab_indents_touched_lines_in_one_undo_step() {
+        let mut e = ed("ab\ncd", 0);
+        e.apply(Intent::SelectAll).unwrap();
+        assert!(e.apply(Intent::Indent).is_some());
+        assert_eq!(e.session().serialize(), "    ab\n    cd");
+        assert_eq!(e.caret(), 13, "caret 含行首缩进（Bias::Right）");
+        assert_eq!(
+            e.selection(),
+            Some(Range::new(0, 13)),
+            "anchor 留在新行首之前，缩进仍在选区内"
+        );
+        e.apply(Intent::Undo).unwrap();
+        assert_eq!(e.session().serialize(), "ab\ncd", "多行缩进是单撤销步");
+    }
+
+    #[test]
+    fn indent_skips_empty_lines_and_trailing_phantom_line() {
+        let mut e = ed("a\n\nb", 0);
+        e.apply(Intent::SelectAll).unwrap();
+        e.apply(Intent::Indent).unwrap();
+        assert_eq!(e.session().serialize(), "    a\n\n    b", "空行不缩进");
+
+        let mut e = ed("ab\n", 0);
+        e.apply(Intent::SelectAll).unwrap();
+        e.apply(Intent::Indent).unwrap();
+        assert_eq!(
+            e.session().serialize(),
+            "    ab\n",
+            "文末换行后的幻影行不产生尾随空格"
+        );
+    }
+
+    #[test]
+    fn tab_indents_only_the_selected_line() {
+        let mut e = ed("ab\ncd", 3);
+        e.set_caret(3);
+        assert!(e.set_caret_extend(5));
+        assert!(e.apply(Intent::Indent).is_some());
+        assert_eq!(e.session().serialize(), "ab\n    cd");
+        assert_eq!(e.selection(), Some(Range::new(3, 9)));
+    }
+
+    #[test]
+    fn dedent_strips_up_to_four_spaces_or_one_tab() {
+        let mut e = ed("    a\n  b\n\tc\nd", 0);
+        e.apply(Intent::SelectAll).unwrap();
+        assert!(e.apply(Intent::Dedent).is_some());
+        assert_eq!(e.session().serialize(), "a\nb\nc\nd");
+    }
+
+    #[test]
+    fn dedent_without_leading_whitespace_is_noop() {
+        let mut e = ed("abcd", 0);
+        assert_eq!(e.apply(Intent::Dedent), None);
+        assert_eq!(e.session().serialize(), "abcd");
+        assert!(!e.is_dirty(), "无变动不置脏");
+    }
+
+    #[test]
+    fn dedent_collapsed_caret_keeps_relative_position() {
+        let mut e = ed("  ab", 3);
+        assert!(e.apply(Intent::Dedent).is_some());
+        assert_eq!(e.session().serialize(), "ab");
+        assert_eq!(e.caret(), 1, "光标随被删前缀左移");
+    }
+
+    // ---- 列表续行（C4）----
+
+    #[test]
+    fn newline_continues_unordered_list() {
+        let mut e = ed("- a", 3);
+        e.apply(Intent::Newline).unwrap();
+        assert_eq!(e.session().serialize(), "- a\n- ");
+        assert_eq!(e.caret(), 6);
+    }
+
+    #[test]
+    fn newline_increments_ordered_list() {
+        let mut e = ed("9. a", 4);
+        e.apply(Intent::Newline).unwrap();
+        assert_eq!(e.session().serialize(), "9. a\n10. ");
+    }
+
+    #[test]
+    fn newline_continues_blockquote_and_task_list() {
+        let mut e = ed("> q", 3);
+        e.apply(Intent::Newline).unwrap();
+        assert_eq!(e.session().serialize(), "> q\n> ");
+
+        let mut e = ed("- [x] done", 10);
+        e.apply(Intent::Newline).unwrap();
+        assert_eq!(
+            e.session().serialize(),
+            "- [x] done\n- [ ] ",
+            "任务项续行一律未勾选"
+        );
+    }
+
+    #[test]
+    fn newline_preserves_list_indentation() {
+        let mut e = ed("  - a", 5);
+        e.apply(Intent::Newline).unwrap();
+        assert_eq!(e.session().serialize(), "  - a\n  - ");
+    }
+
+    #[test]
+    fn newline_on_empty_item_ends_list() {
+        let mut e = ed("- ", 2);
+        e.apply(Intent::Newline).unwrap();
+        assert_eq!(e.session().serialize(), "", "空项回车删标记收束列表");
+        assert_eq!(e.caret(), 0);
+
+        let mut e = ed("1. \ntext", 3);
+        e.apply(Intent::Newline).unwrap();
+        assert_eq!(e.session().serialize(), "\ntext");
+        assert_eq!(e.caret(), 0);
+    }
+
+    #[test]
+    fn newline_mid_line_does_not_continue_list() {
+        let mut e = ed("- ab", 2);
+        e.apply(Intent::Newline).unwrap();
+        assert_eq!(e.session().serialize(), "- \nab");
+    }
+
+    #[test]
+    fn newline_on_plain_text_is_plain() {
+        let mut e = ed("abc", 3);
+        e.apply(Intent::Newline).unwrap();
+        assert_eq!(e.session().serialize(), "abc\n");
+        assert_eq!(e.caret(), 4);
     }
 }

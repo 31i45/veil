@@ -8,10 +8,15 @@
 // - Code/Math 内容原样不嵌套；Math 要求内容非空、首尾非空格、闭 `$` 后非数字
 //   （pandoc 规则，避免 `$5 and $6` 误判为公式）。
 // - Link 文本可嵌套除 Link 外的任意 inline；URL 扫至首个 `)`，不支持 title。
+//   引用式（0c P0-1）：`[text][label]` / `[text][]` / `[text]` shortcut 查文档引用表，
+//   节点的 url 指向定义处 dest 的绝对区间；查无定义则整体按纯文本（内部 inline 正常解析）。
+//   优先级：inline 链接 > full/collapsed 引用 > shortcut（与 CommonMark 一致）。
 // - Image 语法同 Link，alt 允许为空；URL 可空（`![]()` 合法，视图侧无加载键则只显
-//   alt）。Image 可出现在 Link 文本内（徽章写法），alt 内亦可嵌套 inline（切片 13）。
+//   alt）。Image 可出现在 Link 文本内（徽章写法），alt 内亦可嵌套 inline（切片 13）；
+//   引用式图片 `![alt][label]` / `![alt][]` / `![alt]` 同引用式链接（0c P0-1）。
 // - `\` 转义 v0 标记字符；递归深度硬上限 MAX_INLINE_DEPTH（B5：超深嵌套不得栈溢出）。
 
+use super::block::{normalize_label, RefMap};
 use super::model::{InlineKind, InlineNode};
 use crate::range::Range;
 
@@ -20,10 +25,11 @@ use crate::range::Range;
 const MAX_INLINE_DEPTH: usize = 16;
 
 /// 解析一段文本的 inline 节点，偏移以 `base` 为基准（文档字节偏移）。
-pub(super) fn parse_inlines(text: &str, base: usize) -> Vec<InlineNode> {
+pub(super) fn parse_inlines(text: &str, base: usize, refs: &RefMap) -> Vec<InlineNode> {
     InlineParser {
         s: text,
         base,
+        refs,
         pos: 0,
     }
     .parse_until(None, true, 0)
@@ -31,12 +37,16 @@ pub(super) fn parse_inlines(text: &str, base: usize) -> Vec<InlineNode> {
 
 /// v0 可转义字符：inline 标记字符 + 反斜杠自身（`!` 为 Image 开标记首字符）。
 fn is_escapable(c: char) -> bool {
-    matches!(c, '\\' | '*' | '$' | '[' | ']' | '(' | ')' | '`' | '!')
+    matches!(
+        c,
+        '\\' | '*' | '$' | '[' | ']' | '(' | ')' | '`' | '!' | '~'
+    )
 }
 
 struct InlineParser<'a> {
     s: &'a str,
     base: usize,
+    refs: &'a RefMap,
     pos: usize,
 }
 
@@ -68,6 +78,7 @@ impl<'a> InlineParser<'a> {
                     .or_else(|| self.try_math())
                     .or_else(|| self.try_strong(depth))
                     .or_else(|| self.try_emph(depth))
+                    .or_else(|| self.try_strikethrough(depth))
                     .or_else(|| self.try_image(depth))
                     .or_else(|| {
                         if allow_link {
@@ -209,69 +220,174 @@ impl<'a> InlineParser<'a> {
         ))
     }
 
-    /// `[text](url)`：文本可嵌套除 Link 外的任意 inline；URL 扫至首个 `)`。
+    /// `~~del~~`（GFM 删除线）：最近闭标记成节点，内容非空，子节点递归。
+    /// 单个 `~` 为纯文本（下标语法不在 v0 范围）。
+    fn try_strikethrough(&mut self, depth: usize) -> Option<InlineNode> {
+        if !self.s[self.pos..].starts_with("~~") {
+            return None;
+        }
+        let start = self.pos;
+        self.pos = start + 2;
+        let children = self.parse_until(Some("~~"), true, depth + 1);
+        let content_end = self.pos;
+        if !self.s[content_end..].starts_with("~~") || content_end == start + 2 {
+            self.pos = start; // 未闭合或空内容：还原，开标记按纯文本
+            return None;
+        }
+        self.pos = content_end + 2;
+        Some(self.node(
+            InlineKind::Strikethrough,
+            start,
+            start + 2,
+            content_end,
+            None,
+            children,
+        ))
+    }
+
+    /// `[text](url)` / `[text][label]` / `[text][]` / `[text]`（shortcut）。
+    /// 文本可嵌套除 Link 外的任意 inline；inline 形式 URL 扫至首个 `)`。
+    /// 引用式查文档引用表，url 指向定义处 dest 绝对区间；查无定义按纯文本。
     fn try_link(&mut self, depth: usize) -> Option<InlineNode> {
         if !self.s[self.pos..].starts_with('[') {
             return None;
         }
         let start = self.pos;
         self.pos = start + 1;
-        let children = self.parse_until(Some("]("), false, depth + 1);
+        let children = self.parse_until(Some("]"), false, depth + 1);
         let text_end = self.pos;
-        if !self.s[text_end..].starts_with("](") {
+        if !self.s[text_end..].starts_with(']') {
             self.pos = start;
             return None;
         }
-        let url_start = text_end + 2;
-        let rel = match self.s[url_start..].find(')') {
-            Some(r) => r,
-            None => {
+        // 分支 1：`](` inline 链接（优先于引用式）
+        if self.s[text_end..].starts_with("](") {
+            let url_start = text_end + 2;
+            let rel = match self.s[url_start..].find(')') {
+                Some(r) => r,
+                None => {
+                    self.pos = start;
+                    return None;
+                }
+            };
+            self.pos = url_start + rel + 1;
+            return Some(self.node(
+                InlineKind::Link,
+                start,
+                start + 1,
+                text_end,
+                Some((url_start, url_start + rel)),
+                children,
+            ));
+        }
+        // 分支 2：`][label]` full / `][]` collapsed（查无定义即纯文本，不再试 shortcut）
+        if self.s[text_end..].starts_with("][") {
+            let ls = text_end + 2;
+            let Some(rel) = self.s[ls..].find(']') else {
+                self.pos = start;
+                return None;
+            };
+            let le = ls + rel;
+            // label 不可含 `[`、长度 ≤999；空 label（collapsed）取链接文本
+            if self.s[ls..le].contains('[') || le - ls > 999 {
                 self.pos = start;
                 return None;
             }
+            let label_src = if le == ls {
+                &self.s[start + 1..text_end]
+            } else {
+                &self.s[ls..le]
+            };
+            let Some(&(dest, _)) = self.refs.get(&normalize_label(label_src)) else {
+                self.pos = start;
+                return None;
+            };
+            self.pos = le + 1;
+            let mut n = self.node(InlineKind::Link, start, start + 1, text_end, None, children);
+            n.url = Some(dest); // 绝对区间：定义处 dest
+            return Some(n);
+        }
+        // 分支 3：shortcut——以链接文本为 label 查表
+        let Some(&(dest, _)) = self.refs.get(&normalize_label(&self.s[start + 1..text_end]))
+        else {
+            self.pos = start;
+            return None;
         };
-        self.pos = url_start + rel + 1;
-        Some(self.node(
-            InlineKind::Link,
-            start,
-            start + 1,
-            text_end,
-            Some((url_start, url_start + rel)),
-            children,
-        ))
+        self.pos = text_end + 1;
+        let mut n = self.node(InlineKind::Link, start, start + 1, text_end, None, children);
+        n.url = Some(dest);
+        Some(n)
     }
 
-    /// `![alt](url)`：alt 可空、可嵌套 inline；URL 扫至首个 `)`（可空）。
-    /// 未闭合或缺 `](` 按纯文本处理。
+    /// `![alt](url)` / `![alt][label]` / `![alt][]` / `![alt]`：alt 可空、可嵌套 inline。
+    /// 未闭合、缺 `]` 或引用查无定义按纯文本处理。
     fn try_image(&mut self, depth: usize) -> Option<InlineNode> {
         if !self.s[self.pos..].starts_with("![") {
             return None;
         }
         let start = self.pos;
         self.pos = start + 2;
-        let children = self.parse_until(Some("]("), false, depth + 1);
+        let children = self.parse_until(Some("]"), false, depth + 1);
         let alt_end = self.pos;
-        if !self.s[alt_end..].starts_with("](") {
+        if !self.s[alt_end..].starts_with(']') {
             self.pos = start;
             return None;
         }
-        let url_start = alt_end + 2;
-        let rel = match self.s[url_start..].find(')') {
-            Some(r) => r,
-            None => {
+        // 分支 1：`](` inline 图片
+        if self.s[alt_end..].starts_with("](") {
+            let url_start = alt_end + 2;
+            let rel = match self.s[url_start..].find(')') {
+                Some(r) => r,
+                None => {
+                    self.pos = start;
+                    return None;
+                }
+            };
+            self.pos = url_start + rel + 1;
+            return Some(self.node(
+                InlineKind::Image,
+                start,
+                start + 2,
+                alt_end,
+                Some((url_start, url_start + rel)),
+                children,
+            ));
+        }
+        // 分支 2：`][label]` / `][]`
+        if self.s[alt_end..].starts_with("][") {
+            let ls = alt_end + 2;
+            let Some(rel) = self.s[ls..].find(']') else {
+                self.pos = start;
+                return None;
+            };
+            let le = ls + rel;
+            if self.s[ls..le].contains('[') || le - ls > 999 {
                 self.pos = start;
                 return None;
             }
+            let label_src = if le == ls {
+                &self.s[start + 2..alt_end]
+            } else {
+                &self.s[ls..le]
+            };
+            let Some(&(dest, _)) = self.refs.get(&normalize_label(label_src)) else {
+                self.pos = start;
+                return None;
+            };
+            self.pos = le + 1;
+            let mut n = self.node(InlineKind::Image, start, start + 2, alt_end, None, children);
+            n.url = Some(dest);
+            return Some(n);
+        }
+        // 分支 3：shortcut 图片
+        let Some(&(dest, _)) = self.refs.get(&normalize_label(&self.s[start + 2..alt_end])) else {
+            self.pos = start;
+            return None;
         };
-        self.pos = url_start + rel + 1;
-        Some(self.node(
-            InlineKind::Image,
-            start,
-            start + 2,
-            alt_end,
-            Some((url_start, url_start + rel)),
-            children,
-        ))
+        self.pos = alt_end + 1;
+        let mut n = self.node(InlineKind::Image, start, start + 2, alt_end, None, children);
+        n.url = Some(dest);
+        Some(n)
     }
 }
 
@@ -304,7 +420,7 @@ mod tests {
     use super::*;
 
     fn parse(text: &str) -> Vec<InlineNode> {
-        parse_inlines(text, 0)
+        parse_inlines(text, 0, &RefMap::new())
     }
 
     fn depth(ns: &[InlineNode]) -> usize {
@@ -488,5 +604,46 @@ mod tests {
     fn escaped_bang_is_literal() {
         // `\!` 转义后余下 `[a](u)` 按普通 Link 解析
         assert_eq!(sexp(&parse("\\![a](u)")), "Link[2..8 c=3..4 url=6..7]");
+    }
+
+    // ===== Strikethrough（P3-4）：`~~del~~` =====
+
+    #[test]
+    fn strikethrough_basic() {
+        assert_eq!(sexp(&parse("a ~~del~~ c")), "Strikethrough[2..9 c=4..7]");
+    }
+
+    #[test]
+    fn strikethrough_nests_strong() {
+        assert_eq!(
+            sexp(&parse("~~a **b** c~~")),
+            "Strikethrough[0..13 c=2..11 Strong[4..9 c=6..7]]"
+        );
+    }
+
+    #[test]
+    fn strikethrough_unclosed_empty_or_single_tilde_is_text() {
+        assert_eq!(sexp(&parse("~~a")), ""); // 未闭合
+        assert_eq!(sexp(&parse("~~~~")), ""); // 空内容
+        assert_eq!(sexp(&parse("a ~x~ b")), ""); // 单 `~` 为纯文本
+        assert_eq!(sexp(&parse("a ~1 b ~2")), ""); // 价格风单波浪线不误判
+    }
+
+    #[test]
+    fn escaped_tilde_is_literal() {
+        assert_eq!(sexp(&parse("\\~\\~x")), ""); // `\~` 两处均为字面文本
+    }
+
+    #[test]
+    fn strikethrough_adjacent_leftmost() {
+        // 最左匹配：`~~a ~~b~~` 先在内部 `~~` 闭合（content "a "），
+        // 余下 `b~~` 的开标记未闭合为纯文本——与 strong 的已知分歧一致
+        assert_eq!(sexp(&parse("~~a ~~b~~")), "Strikethrough[0..6 c=2..4]");
+    }
+
+    #[test]
+    fn strikethrough_multibyte_offsets_are_bytes() {
+        // `中文 ` 7 字节；删 = 3 字节
+        assert_eq!(sexp(&parse("中文 ~~删~~")), "Strikethrough[7..14 c=9..12]");
     }
 }

@@ -244,7 +244,10 @@ mod tests {
         h.record_at(ins(3, "a"), t0);
         h.record_at(del(4, "a"), t0);
         let d = only(&mut h);
-        assert_eq!((d.start, d.deleted.as_str(), d.inserted.as_str()), (4, "a", ""));
+        assert_eq!(
+            (d.start, d.deleted.as_str(), d.inserted.as_str()),
+            (4, "a", "")
+        );
         assert_eq!(only(&mut h).inserted, "a");
     }
 

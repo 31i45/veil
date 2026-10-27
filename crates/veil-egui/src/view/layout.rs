@@ -10,9 +10,12 @@ use cosmic_text::{
     Attrs, Buffer, Color, Cursor, Family, FontSystem, Metrics, Shaping, Style as FontStyle,
     SwashCache, Weight, Wrap,
 };
-use veil_core::{BlockKind, InlineNode, Range};
+use veil_core::{task_span, BlockKind, InlineNode, Range};
 
+use super::highlight::{highlight, to_styles};
 use super::style::{style_spans, Style};
+use crate::geometry::{BASE_FONT_SIZE, BASE_LINE_HEIGHT};
+use crate::theme::SyntaxColors;
 
 /// 行内资源键：占位图与位图缓存之间的寻址键（切片 8/13 共用占位机制）。
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -46,18 +49,63 @@ pub struct PlacedImg {
     pub height: u32,
 }
 
-pub const BASE_FONT_SIZE: f32 = 16.0;
-pub const BASE_LINE_HEIGHT: f32 = 22.0;
-
 /// 块级字号倍率（标题）。样式语义见 style.rs 头注。
 fn block_scale(kind: BlockKind) -> f32 {
     match kind {
-        BlockKind::AtxHeading(1) => 1.6,
-        BlockKind::AtxHeading(2) => 1.4,
+        BlockKind::AtxHeading(1) | BlockKind::SetextHeading(1) => 1.6,
+        BlockKind::AtxHeading(2) | BlockKind::SetextHeading(2) => 1.4,
         BlockKind::AtxHeading(3) => 1.2,
-        BlockKind::AtxHeading(_) => 1.1,
+        BlockKind::AtxHeading(_) | BlockKind::SetextHeading(_) => 1.1,
         _ => 1.0,
     }
+}
+
+/// 单块排版上限（v0 保护）：超过只排前缀并显式降级，不再为整块成形。
+/// 根因：`shape_until_scroll` 会为块内全部字符生成字形，光栅又按「宽 × 块高 × 4B」
+/// 分配，1MB 文本即可放大到约 1.9GB。64 KiB / 512 硬行把最坏情况限制在几十 MB，
+/// 且正常段落与常规代码块远低于该值，不受影响。
+pub(crate) const MAX_BLOCK_BYTES: usize = 64 * 1024;
+pub(crate) const MAX_BLOCK_LINES: usize = 512;
+/// 光栅面积上限（像素）：极端版心/字体度量下的安全网。
+pub(crate) const MAX_RASTER_PX: usize = 24_000_000;
+
+/// 超限提示文案：由绘制层画在内容之后，明确告知「未渲染」而非静默截断。
+pub(crate) fn oversize_notice(full_len: usize) -> String {
+    format!(
+        "该块约 {:.1} MB，超出单块渲染上限，后续内容未渲染；源码完整保留",
+        full_len as f64 / (1024.0 * 1024.0)
+    )
+}
+
+/// 取可排版前缀：先按字节上限截到字符边界，再按硬行上限回退到行首。
+/// 返回 (前缀, 是否截断)。优先整行截断，避免把一行切成半个字形。
+fn cap_body(body: &str) -> (&str, bool) {
+    let mut end = body.len().min(MAX_BLOCK_BYTES);
+    while end > 0 && !body.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut lines = 0usize;
+    let mut cut = end;
+    for (i, b) in body.as_bytes().iter().enumerate().take(end) {
+        if *b == b'\n' {
+            lines += 1;
+            if lines >= MAX_BLOCK_LINES {
+                cut = i; // 不含该换行：硬行数不超过上限
+                break;
+            }
+        }
+    }
+    end = end.min(cut);
+    if end >= body.len() {
+        return (body, false);
+    }
+    // 回退到最近的换行（最多 4 KiB，避免极长行丢掉过多内容）
+    if let Some(p) = body[..end].rfind('\n') {
+        if end - p <= 4096 {
+            end = p;
+        }
+    }
+    (&body[..end], true)
 }
 
 /// 替换段：块相对 doc 区间 `[doc_start, doc_end)` → `fill` 文本。
@@ -235,12 +283,53 @@ pub struct BlockLayout {
     pub height: f32,
     /// 行内公式图的块内位置（切片 8）；shell 按 tex 取位图 blit。
     pub imgs: Vec<PlacedImg>,
+    /// 删除线区间（块相对 doc 坐标，含标记；paint 层经 selection_rects 取可视矩形）。
+    pub strikes: Vec<(usize, usize)>,
+    /// 全部行内节点区间（doc 绝对坐标，先序遍历）：Reveal 激活指纹的输入。
+    node_ranges: Vec<Range>,
+    /// 源文本换行符的块相对偏移（不含尾 `\n`）：引用块按行激活判定的输入。
+    source_newlines: Vec<usize>,
+    /// 原块正文字节数（不含尾换行）；大于排版覆盖范围时说明只排了前缀。
+    pub full_len: usize,
+    /// 是否因超单块上限而只排前缀（绘制层据此画降级提示）。
+    pub truncated: bool,
 }
 
 impl BlockLayout {
     pub fn layout_text(&self) -> &str {
         &self.layout_text
     }
+
+    /// Reveal 激活指纹：块级激活（引用按行、列表/分隔线按块）与全部行内节点的激活位。
+    /// 仅依赖 caret 与块结构（结构随 BlockId 固化），供派生缓存按因果键判定是否重排。
+    /// 指纹相等 ⇔ 排版依赖的激活状态相同（64 位 FNV 折叠；碰撞概率忽略不计）。
+    pub(crate) fn reveal_state(&self, kind: &BlockKind, block: Range, caret: usize) -> u64 {
+        let mut h = 0xcbf2_9ce4_8422_2325u64;
+        match kind {
+            BlockKind::BlockQuote => {
+                let line = if block.start <= caret && caret <= block.end {
+                    let rel = caret - block.start;
+                    self.source_newlines.partition_point(|&o| o < rel) as u64 + 1
+                } else {
+                    0
+                };
+                fnv(&mut h, line);
+            }
+            BlockKind::ListItem { .. } | BlockKind::ThematicBreak => {
+                fnv(&mut h, node_active(block, caret) as u64);
+            }
+            _ => {}
+        }
+        for (i, r) in self.node_ranges.iter().enumerate() {
+            fnv(&mut h, (i as u64) << 1 | node_active(*r, caret) as u64);
+        }
+        h
+    }
+}
+
+/// FNV-1a 折叠：缓存键只需稳定与分散，不需要密码学强度。
+fn fnv(h: &mut u64, v: u64) {
+    *h = (*h ^ v).wrapping_mul(0x0100_0000_01b3);
 }
 
 pub struct LayoutEngine {
@@ -248,6 +337,8 @@ pub struct LayoutEngine {
     swash: SwashCache,
     /// DPI 缩放：metrics 统一乘此值，布局单位保持物理像素。
     scale: f32,
+    /// 代码块语法高亮色板（随主题切换更新）。
+    syntax: SyntaxColors,
 }
 
 impl Default for LayoutEngine {
@@ -262,7 +353,13 @@ impl LayoutEngine {
             font_system: FontSystem::new(),
             swash: SwashCache::new(),
             scale: 1.0,
+            syntax: SyntaxColors::default_light(),
         }
+    }
+
+    /// 更新语法高亮色板（主题切换时调用）。
+    pub fn set_syntax_colors(&mut self, colors: SyntaxColors) {
+        self.syntax = colors;
     }
 
     pub fn set_scale(&mut self, scale: f32) {
@@ -297,6 +394,11 @@ impl LayoutEngine {
             layout_text: text.to_string(),
             height,
             imgs: Vec::new(),
+            strikes: Vec::new(),
+            node_ranges: Vec::new(),
+            source_newlines: Vec::new(),
+            full_len: text.len(),
+            truncated: false,
         }
     }
 
@@ -318,8 +420,10 @@ impl LayoutEngine {
         caret: usize,
         imgs: &[InlineImg],
     ) -> BlockLayout {
-        let body = text.strip_suffix('\n').unwrap_or(text);
-        let scale = block_scale(kind) * self.scale;
+        let full = text.strip_suffix('\n').unwrap_or(text);
+        // 单块上限（v0）：只排前缀，超出部分不参与成形/光栅，避免内存放大
+        let (body, mut truncated) = cap_body(full);
+        let scale = block_scale(kind.clone()) * self.scale;
         let metrics = Metrics::new(BASE_FONT_SIZE * scale, BASE_LINE_HEIGHT * scale);
         // NBSP 占位段：NBSP 为 2 字节，个数 = 图宽 / NBSP 宽四舍五入（误差 ≤ 半个 NBSP）。
         let nbsp_w = if imgs.is_empty() {
@@ -329,7 +433,7 @@ impl LayoutEngine {
         };
         let mut kept: Vec<&InlineImg> = Vec::new();
         // 块级替换（切片 12）先入表；行内公式占位段随后按起点排序归并
-        let mut subs: Vec<Sub> = block_subs(kind, body, block, caret);
+        let mut subs: Vec<Sub> = block_subs(kind.clone(), body, block, caret);
         for im in imgs {
             if node_active(im.range, caret) {
                 continue; // 激活态显源码，不占位
@@ -343,17 +447,29 @@ impl LayoutEngine {
             subs.push(Sub::fill(rs, re, "\u{A0}".repeat(nbsp)));
             kept.push(im);
         }
-        let (layout_text, map, line_bases) = build_layout_text(body, block, inlines, caret, &subs);
+        let (layout_text, map, line_bases, source_newlines) =
+            build_layout_text(body, block, inlines, caret, &subs);
+        let mut node_ranges = Vec::new();
+        collect_node_ranges(inlines, &mut node_ranges);
         let mut buffer = Buffer::new(&mut self.font_system, metrics);
-        let default_attrs = attrs_of(kind, Style::default());
+        let default_attrs = attrs_of(kind.clone(), Style::default());
         // style_spans 产出文档坐标，经映射转 layout 坐标；整体落入消隐/占位区的 span 零宽丢弃。
         // 占位 NBSP 区无样式来源，显式补默认样式 span（cosmic 排版文本 = 各 span 顺次拼接，
         // 覆盖必须完备且有序）；指针序即 layout 偏移序。
+        //
+        // FencedCode 块带语言标记时走语法高亮（inlines 为空，style_spans 仅产出默认段）。
+        let style_segments: Vec<(usize, usize, Style)> = match &kind {
+            BlockKind::FencedCode(Some(lang)) => {
+                let tk = highlight(lang, body);
+                to_styles(&tk, body.len(), &self.syntax, Style::default())
+            }
+            _ => style_spans(body.len(), block, inlines),
+        };
         let mut spans: Vec<(&str, Attrs)> = Vec::new();
-        for (s, e, st) in style_spans(body.len(), block, inlines) {
+        for &(s, e, st) in &style_segments {
             let (ls, le) = (map.doc_to_layout(s), map.doc_to_layout(e));
             if ls < le {
-                spans.push((&layout_text[ls..le], attrs_of(kind, st)));
+                spans.push((&layout_text[ls..le], attrs_of(kind.clone(), st)));
             }
         }
         for im in &kept {
@@ -373,6 +489,25 @@ impl LayoutEngine {
             .layout_runs()
             .map(|r| r.line_top + r.line_height)
             .fold(metrics.line_height, f32::max);
+        // 面积上限与排版同源：先按「最宽视觉行 × 块高」预估光栅像素，
+        // 超限就截短块高并标记降级。几何与光栅必须一致，否则绘制会在块尾留白。
+        let notice_h = if truncated {
+            BASE_LINE_HEIGHT * self.scale
+        } else {
+            0.0
+        };
+        let max_line_w = buffer
+            .layout_runs()
+            .flat_map(|r| r.glyphs.iter())
+            .map(|g| g.x + g.w)
+            .fold(width, f32::max)
+            .max(1.0);
+        let budget_h = MAX_RASTER_PX as f32 / max_line_w;
+        if height + notice_h > budget_h {
+            height = (budget_h - notice_h).max(metrics.line_height);
+            truncated = true;
+        }
+        height += notice_h;
         // 占位段首字形定位：x = 字形左缘，图顶 = 行基线(line_y) - baseline；块高扩展到图底。
         // 图片底边贴基线，高位图会把图顶推到行顶之上：钳到行顶，避免上侵前一块
         // （同块后续视觉行的重叠属 v0 已知简化，块高已扩展故不影响后续块）。
@@ -423,6 +558,15 @@ impl LayoutEngine {
             layout_text,
             height,
             imgs: placed,
+            strikes: style_segments
+                .iter()
+                .filter(|(_, _, st)| st.strikethrough)
+                .map(|&(s, e, _)| (s, e))
+                .collect(),
+            node_ranges,
+            source_newlines,
+            full_len: full.len(),
+            truncated,
         }
     }
 
@@ -452,9 +596,13 @@ impl LayoutEngine {
     }
 
     /// 块内字节偏移（文档坐标）→ 光标矩形 (x, y_top, height)。
-    /// 簇内中点按线性比例近似（hit/键盘导航产出恒在 grapheme 边界，该路径仅为防御）。
-    /// 折行：同一逻辑行产出多个 run，须跳过字形区间不覆盖 index 的前置视觉行。
+    /// 超限降级的块只渲染前缀高度：落点统一钳进可视区，避免光标画到下一块上。
     pub fn caret_xy(&self, layout: &BlockLayout, offset: usize) -> (f32, f32, f32) {
+        let (x, y, h) = self.caret_xy_raw(layout, offset);
+        (x, y.min((layout.height - h).max(0.0)), h)
+    }
+
+    fn caret_xy_raw(&self, layout: &BlockLayout, offset: usize) -> (f32, f32, f32) {
         let lo = layout.map.doc_to_layout(offset);
         let line_i = layout
             .line_bases
@@ -518,6 +666,9 @@ impl LayoutEngine {
         }
         let mut rects = Vec::new();
         for run in layout.buffer.layout_runs() {
+            if run.line_top >= layout.height {
+                continue; // 超出降级可视区（面积上限截短）不画选区
+            }
             let base = layout.line_bases.get(run.line_i).copied().unwrap_or(0);
             // 行内字节区间（半开）：Cursor 默认 Affinity::Before，比较天然排除右端点起始字形
             let (s, e) = (lo0.saturating_sub(base), lo1.saturating_sub(base));
@@ -557,6 +708,13 @@ impl LayoutEngine {
             max_w.ceil().max(1.0) as usize,
             height.ceil().max(1.0) as usize,
         );
+        // 光栅面积安全网：单块上限之下仍可能因版心极窄/行极密而偏大，
+        // 超出部分直接裁掉（像素越界本就有边界检查），绝不为病态输入分配巨缓冲。
+        let h = if w * h > MAX_RASTER_PX {
+            (MAX_RASTER_PX / w).max(1)
+        } else {
+            h
+        };
         let mut px = vec![0u8; w * h * 4];
         for run in buffer.layout_runs() {
             for g in run.glyphs {
@@ -612,14 +770,15 @@ fn collect_elide(nodes: &[InlineNode], block: Range, caret: usize, out: &mut Vec
 }
 
 /// 构造排版文本与坐标映射：行尾 `\r`、非激活节点标记、块级替换统一进替换表。
-/// 返回 (排版文本, OffsetMap, 每逻辑行布局起始偏移)。调用方已剥唯一尾 `\n`。
+/// 返回 (排版文本, OffsetMap, 每逻辑行布局起始偏移, 源换行符的块相对偏移)。
+/// 调用方已剥唯一尾 `\n`。
 fn build_layout_text(
     body: &str,
     block: Range,
     inlines: &[InlineNode],
     caret: usize,
     subs: &[Sub],
-) -> (String, OffsetMap, Vec<usize>) {
+) -> (String, OffsetMap, Vec<usize>, Vec<usize>) {
     let mut all: Vec<Sub> = Vec::new();
     // 行尾 \r：仅剥「后继为 \n 或文末」的 \r（行内孤 \r 保持原样，与切片 1 行为一致）
     let bytes = body.as_bytes();
@@ -636,6 +795,7 @@ fn build_layout_text(
     // 保留段取源文本并记行基；替换段写 fill（调用方保证不含换行）
     let mut layout_text = String::with_capacity(map.layout_len);
     let mut line_bases = vec![0];
+    let mut source_newlines: Vec<usize> = Vec::new();
     for seg in &map.segs {
         match seg.sub {
             Some(i) => layout_text.push_str(&accepted[i].fill),
@@ -644,19 +804,43 @@ fn build_layout_text(
                 for (j, b) in seg_text.bytes().enumerate() {
                     if b == b'\n' {
                         line_bases.push(seg.layout_start + j + 1);
+                        source_newlines.push(seg.doc_start + j);
                     }
                 }
                 layout_text.push_str(seg_text);
             }
         }
     }
-    (layout_text, map, line_bases)
+    (layout_text, map, line_bases, source_newlines)
 }
 
-/// 块级替换（切片 12）：无序列表符号 `•`、引用行首 `>` → 空格、分隔线整行消隐。
+/// 先序收集全部行内节点区间（doc 绝对坐标）：激活指纹按固定顺序折叠。
+fn collect_node_ranges(nodes: &[InlineNode], out: &mut Vec<Range>) {
+    for n in nodes {
+        out.push(n.range);
+        collect_node_ranges(&n.children, out);
+    }
+}
+
+/// 块级替换（切片 12）：任务列表复选框 `☐`/`☑`、无序列表符号 `•`、
+/// 引用行首 `>` → 空格、分隔线整行消隐。
 /// 激活判据沿用块区间闭区间；引用块逐行判定（光标所在行显源码，其余行隐标记）。
 fn block_subs(kind: BlockKind, body: &str, block: Range, caret: usize) -> Vec<Sub> {
     match kind {
+        BlockKind::ListItem {
+            task: Some(done), ..
+        } => {
+            if node_active(block, caret) {
+                return Vec::new();
+            }
+            // 列表标记 + `[ ]`（含尾空格）整体折叠为 ☐/☑（与 `•` 字形替换同机制）
+            match task_span(body) {
+                Some((start, _, end, _)) => {
+                    vec![Sub::fill(start, end, if done { "☑ " } else { "☐ " })]
+                }
+                None => Vec::new(),
+            }
+        }
         BlockKind::ListItem { ordered: false, .. } => {
             if node_active(block, caret) {
                 return Vec::new();
@@ -717,7 +901,12 @@ fn quote_marker_pos(line: &str) -> Option<usize> {
 
 fn attrs_of(kind: BlockKind, st: Style) -> Attrs<'static> {
     let a = Attrs::new();
-    let a = if st.bold || matches!(kind, BlockKind::AtxHeading(_)) {
+    let a = if st.bold
+        || matches!(
+            kind,
+            BlockKind::AtxHeading(_) | BlockKind::SetextHeading(_)
+        )
+    {
         a.weight(Weight::BOLD)
     } else {
         a
@@ -727,8 +916,13 @@ fn attrs_of(kind: BlockKind, st: Style) -> Attrs<'static> {
     } else {
         a
     };
-    let a = if st.mono || matches!(kind, BlockKind::FencedCode) {
+    let a = if st.mono || matches!(kind, BlockKind::FencedCode(_)) {
         a.family(Family::Monospace)
+    } else {
+        a
+    };
+    let a = if let Some([r, g, b]) = st.color {
+        a.color(Color::rgb(r, g, b))
     } else {
         a
     };
@@ -759,7 +953,7 @@ mod tests {
         imgs: &[InlineImg],
     ) -> (LayoutEngine, BlockLayout) {
         let s = Session::open(text);
-        let (id, kind, range) = s.blocks()[0];
+        let (id, kind, range) = s.blocks()[0].clone();
         let inlines = s.block_inlines(id).unwrap();
         let mut eng = LayoutEngine::new();
         let block_text = &text[range.start..range.end];
@@ -1239,6 +1433,77 @@ mod tests {
         let (x1, _, _) = eng.caret_xy(&l, 5);
         assert_eq!((x, y, h), (x0, 0.0, ch));
         assert_eq!(w, x1 - x0, "高亮宽度 = 两端光标 x 之差");
+    }
+
+    // ---- 代码块语法高亮（P3-1） ----
+
+    #[test]
+    fn fenced_code_with_lang_layouts_without_panic() {
+        let src = "```rust\nlet x = 1;\nfn f() {}\n```";
+        let (_eng, l) = layout_of(src, 400.0);
+        assert!(l.height > BASE_LINE_HEIGHT * 2.0, "代码块应有多行高度");
+    }
+
+    #[test]
+    fn fenced_code_without_lang_uses_default_style() {
+        let src = "```\nlet x = 1;\n```";
+        let (_eng, l) = layout_of(src, 400.0);
+        assert!(l.height > BASE_LINE_HEIGHT);
+    }
+
+    // ---- 删除线（P3-4） ----
+
+    #[test]
+    fn strikethrough_span_recorded_whole_node() {
+        // 样式恒按整节点（含标记）记录；paint 层经 OffsetMap 映射到可视文本
+        let (_eng, l) = layout_of("a ~~del~~ c", 400.0);
+        assert_eq!(l.strikes, vec![(2, 9)]);
+    }
+
+    #[test]
+    fn strikethrough_markers_hidden_when_inactive() {
+        // 非激活（无光标）时标记消隐：删除线矩形宽 ≈ 可视文本 "del" 宽
+        let (eng, l) = layout_of("a ~~del~~ c", 400.0);
+        let rects = eng.selection_rects(&l, 2, 9);
+        assert_eq!(rects.len(), 1, "单行删除线");
+        let (sx, _, sw, _) = rects[0];
+        let (x_del, _, _) = eng.caret_xy(&l, 4);
+        let (x_end, _, _) = eng.caret_xy(&l, 7);
+        assert!((sx - x_del).abs() < 1.0, "矩形起点 = 可视文本起点");
+        assert!((sw - (x_end - x_del)).abs() < 1.0, "矩形宽 = 可视文本宽");
+    }
+
+    #[test]
+    fn strikethrough_absent_without_syntax() {
+        let (_eng, l) = layout_of("a ~ b", 400.0);
+        assert!(l.strikes.is_empty());
+    }
+
+    // ---- 任务列表复选框（P3-5） ----
+
+    #[test]
+    fn task_item_checkbox_substitution() {
+        // 非激活：`- [ ] foo` → `☐ foo`；勾选 → `☑`
+        let (_eng, l) = layout_of("- [ ] foo", 400.0);
+        assert_eq!(l.layout_text(), "☐ foo");
+        let (_eng, l) = layout_of("- [x] bar", 400.0);
+        assert_eq!(l.layout_text(), "☑ bar");
+        // 有序列表任务同规则
+        let (_eng, l) = layout_of("1. [x] done", 400.0);
+        assert_eq!(l.layout_text(), "☑ done");
+    }
+
+    #[test]
+    fn task_item_active_shows_source() {
+        // 光标进入块内：显源码 `- [ ] foo`（与列表符号/引用的激活行为一致）
+        let (_eng, l) = layout_with_caret("- [ ] foo", 4, 400.0);
+        assert_eq!(l.layout_text(), "- [ ] foo");
+    }
+
+    #[test]
+    fn plain_list_item_unaffected_by_task_rules() {
+        let (_eng, l) = layout_of("- [ ]a", 400.0); // 后无空白：非任务 → `• [ ]a`
+        assert_eq!(l.layout_text(), "• [ ]a");
     }
 
     #[test]

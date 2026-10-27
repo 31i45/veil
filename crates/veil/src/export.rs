@@ -16,13 +16,33 @@ pub fn html_of(session: &Session, font: &latex_rust::MathFont) -> String {
     let mut body = String::new();
     let blocks = session.blocks();
     // 表格依赖 GFM 扩展，须显式开启（Parser::new 默认关闭 tables）
-    let opts = pulldown_cmark::Options::ENABLE_TABLES;
+    let opts = pulldown_cmark::Options::ENABLE_TABLES
+        | pulldown_cmark::Options::ENABLE_STRIKETHROUGH
+        | pulldown_cmark::Options::ENABLE_TASKLISTS;
+    // 引用式链接跨块可见性（0c P0-1）：逐块独立解析时定义对后续块不可见，
+    // 故收集全部定义源码作为每个解析单元的前缀；定义无 HTML 输出，重复定义 first-wins 无害。
+    let mut defs = String::new();
+    for (_, kind, range) in &blocks {
+        if *kind == BlockKind::LinkRefDef {
+            if let Some(t) = session.text_slice(*range) {
+                defs.push_str(&t);
+                if !t.ends_with('\n') {
+                    defs.push('\n');
+                }
+            }
+        }
+    }
     let mut i = 0;
     while i < blocks.len() {
-        let (id, kind, range) = blocks[i];
+        let (id, kind, range) = blocks[i].clone();
         if kind == BlockKind::Math {
             let tex = session.math_source(id).unwrap_or_default();
             body.push_str(&math_html(&tex, font));
+            i += 1;
+            continue;
+        }
+        // 定义块自身无输出（已并入 defs 前缀）
+        if kind == BlockKind::LinkRefDef {
             i += 1;
             continue;
         }
@@ -33,7 +53,7 @@ pub fn html_of(session: &Session, font: &latex_rust::MathFont) -> String {
             let start = range.start;
             let mut end = range.end;
             let mut j = i + 1;
-            while let Some(&(_, k, r)) = blocks.get(j) {
+            while let Some((_, k, r)) = blocks.get(j) {
                 if matches!(k, BlockKind::ListItem { .. }) {
                     end = r.end;
                     j += 1;
@@ -44,7 +64,7 @@ pub fn html_of(session: &Session, font: &latex_rust::MathFont) -> String {
             if let Some(text) = session.text_slice(Range::new(start, end)) {
                 pulldown_cmark::html::push_html(
                     &mut body,
-                    pulldown_cmark::Parser::new_ext(&text, opts),
+                    pulldown_cmark::Parser::new_ext(&format!("{defs}{text}"), opts),
                 );
             }
             i = j;
@@ -55,7 +75,10 @@ pub fn html_of(session: &Session, font: &latex_rust::MathFont) -> String {
             i += 1;
             continue;
         };
-        pulldown_cmark::html::push_html(&mut body, pulldown_cmark::Parser::new_ext(&text, opts));
+        pulldown_cmark::html::push_html(
+            &mut body,
+            pulldown_cmark::Parser::new_ext(&format!("{defs}{text}"), opts),
+        );
         i += 1;
     }
     format!("{HEAD}{body}</body>\n</html>\n")
@@ -137,6 +160,24 @@ mod tests {
         assert_eq!(
             body_of("```\nif a < b {}\n```\n"),
             "<pre><code>if a &lt; b {}\n</code></pre>\n"
+        );
+    }
+
+    #[test]
+    fn strikethrough_exports_as_del() {
+        // GFM 扩展显式开启：~~ → <del>
+        assert_eq!(
+            body_of("done ~~gone~~ keep\n"),
+            "<p>done <del>gone</del> keep</p>\n"
+        );
+    }
+
+    #[test]
+    fn task_list_exports_as_checkbox_input() {
+        // GFM 任务列表：`[ ]` / `[x]` → checkbox input（pulldown 原生输出带换行）
+        assert_eq!(
+            body_of("- [ ] todo\n- [x] done\n"),
+            "<ul>\n<li><input disabled=\"\" type=\"checkbox\"/>\ntodo</li>\n<li><input disabled=\"\" type=\"checkbox\" checked=\"\"/>\ndone</li>\n</ul>\n"
         );
     }
 

@@ -5,27 +5,41 @@
 
 use crate::range::Range;
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub enum BlockKind {
     Paragraph,
     /// ATX 标题，级别 1–6。
     AtxHeading(u8),
-    FencedCode,
+    /// Setext 标题（0c P0-2）：内容行 + `===`/`---` 下划线行，级别 1–2。
+    /// 块区间含下划线行；下划线仅识别于段落续行位置（块起始的 `---` 仍为分隔线，
+    /// 列表项/引用块后的 `---` 同理）。inline 仅解析内容行（下划线行不参与）。
+    SetextHeading(u8),
+    /// 围栏代码块。`lang` 为 info string 首词（```rust → Some("rust")），无标记为 None。
+    FencedCode(Option<String>),
     /// 展示数学块（`$$...$$`）。块内不解析 inline，TeX 源码经 `math_source` 提取。
     Math,
     /// GFM 表格（表头行 + 分隔行 + 至多若干表体行）。块内不解析 inline，
     /// 单元格文本/对齐经 `table` 提取（视图只读渲染，切片 9）。
     Table,
-    /// 列表项（v0：单行项，续行不并入）。`ordered` 区分有序/无序；`depth` = 缩进字节 / 2
-    /// （上限 8，v0 简化：GFM 的 4 空格制与续行属后续增量）。inline 仅解析标记后内容。
+    /// 列表项（0c P0-3：多行项——项内续行/空行/懒续行并入本块；嵌套项与外层续块
+    /// 各为独立块，续块无标记、`task` 恒 None）。`ordered` 区分有序/无序；
+    /// `depth` = 缩进字节 / 2（上限 8，视觉深度；结构嵌套由块序列表达）。
+    /// inline 仅解析标记后内容（续块无标记则解析全行）。
+    /// `task` = GFM 任务列表复选框：`Some(false)`/`Some(true)` 为未勾/勾选。
     ListItem {
         ordered: bool,
         depth: u8,
+        task: Option<bool>,
     },
-    /// 引用块：连续以 `>` 开头的行合为一块（v0 不支持惰性续行）。inline 逐行解析标记后内容。
+    /// 引用块：连续 `>` 标记行合为一块，支持懒续行（0c P0-3：段落的无标记
+    /// 续行并入，`---` 等可打断段落者除外）。inline 逐行解析标记后内容，
+    /// 懒续行从行首解析。
     BlockQuote,
     /// 分隔线：`---` / `***` / `___`（同字符 ≥ 3，其间可夹空白）。无 inline。
     ThematicBreak,
+    /// 链接引用定义（`[label]: dest "title"`，可多行）：注册进文档引用表，
+    /// 无 HTML 输出、无 inline；编辑器按源码行渲染（不背叛源码）。
+    LinkRefDef,
 }
 
 /// 表格列对齐（GFM 分隔行 `:--` / `--:` / `:-:` 语法）。
@@ -60,7 +74,7 @@ pub struct Table {
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct BlockId(pub u64);
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub(crate) struct Block {
     pub id: BlockId,
     pub kind: BlockKind,
@@ -83,6 +97,8 @@ pub enum InlineKind {
     Image,
     /// `$math$`，内容原样不嵌套
     Math,
+    /// `~~del~~`（GFM 删除线）
+    Strikethrough,
 }
 
 /// 一棵 inline 子树。所有区间为文档字节偏移、半开 `[start, end)`。

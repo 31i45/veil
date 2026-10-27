@@ -2,7 +2,7 @@
 
 > 本文件是 ai-dev-skills 通用方法论在本项目的全部实例化：项目专有事实（命令、红线、工具名、平台名、专有清单）只存在于此，skills 本体不内嵌。
 > 有效期：下列任一事实变更时需更新
-> 最后验证：2026-10-26（架构重构 S0~S5 落地：veil-core syntax/ 四分；veil-egui 三域分离——document/{doc_state,block_index}、view/{cache,layout,frame,style,table}、chrome/{mod,paint,cache}，app.rs/interaction.rs/paint.rs 归位根级，shell/ 消解；workspace 447 测试全绿、clippy 零警告、红线复测见 §2）
+> 最后验证：2026-10-26（架构重构 S0~S5 落地：veil-core syntax/ 四分；veil-egui 三域分离——document/{doc_state,block_index,persist}、view/{cache,layout,frame,style,table}、chrome/{mod,paint,cache}，app.rs/interaction.rs/paint.rs/mode.rs 归位根级，shell/ 消解；ADR-009 S1~S5 落地——mode.rs 路由、persist.rs 单结构、Memo 因果键取消手工失效、render/present 分离、Ports 聚合 + 公共导出收敛 49→25 项；workspace 523 测试全绿、clippy 零警告、红线复测见 §2）
 
 ## 0. 项目骨架事实
 
@@ -33,17 +33,17 @@
 | 无效输入不可误运行（损坏 UTF-8、0 字节文件、10MB 单文件不崩溃） | ⏳ | 半 |
 
 - 抽检：① 微软拼音连续输入 200 字，候选框跟随光标不漂移；② 光标进出 `**bold**` 标记展开/收起，光标视觉位置不跳；③ 10 万字文档滚动到底部编辑，无全文档卡顿；④ 列表符号 `•`/引用左竖条/分隔线随光标进出切换显隐，行高不跳变；⑤ 相对路径 PNG 在行内/列表内渲染且超版心宽时等比缩放，点击图片进入源码态，断链/远程 URL 降级 alt 文本不崩溃；⑥ 截图后 Ctrl+V：`<文档名>.assets/` 生成且插入 `![](相对路径)`，重复粘贴递增 `image-2.png` 不覆盖，草稿态拒绝并保持文档不变；⑦ 菜单栏「文件/编辑」点击展开与切换、菜单项快捷键提示与悬停高亮、Ctrl+O 系统打开对话框、Ctrl+Shift+S 另存为（成功后标题去脏标/基线切换、取消无副作用）、长文档滚动条拖动与轨道翻页、状态栏行列随光标实时更新、菜单打开时 Esc 关闭且不误编辑；⑧ 外部编辑器改写当前文件：标题/状态栏出现「外部修改」、脏文档自动保存挂起、Ctrl+S 先备份（`.backup-*`）再覆盖；外部删除文件：提示「文件缺失」、继续编辑后自动保存重建文件；⑨ 「视图」菜单切换跟随系统/浅色/深色即时生效且「当前」标记移动、重启后保持、`%APPDATA%\Veil\config.toml` 内容与选择一致、系统深色模式下标题栏变深、Mica 在 Win11 显示于边框区域。
-- 最近全绿：2026-10-26 架构重构 S0~S5：workspace 447 测试全绿（veil-core 90 单测 + 61 集成、veil-egui 274 + 2 ignored、veil 22）、clippy 零警告；三域分离目录——`document/`（doc_state 文档持久化编排 + block_index 块几何索引）、`view/`（cache 派生缓存统一收口与失效入口方法族 + layout/frame/style/table）、`chrome/`（mod 几何与菜单模型 / paint 绘制 / cache 标签缓存）、根级 `app.rs`（App 结构体 + ApplicationHandler + 平台 trait）、`interaction.rs`（交互策略 + 几何编排）、`paint.rs`（帧合成 + ensure_* 缓存补齐）、`app_tests.rs`（跨域行为测试）；veil-core `syntax/{mod,model,block,inline}`；每切片独立可 revert commit（5592b19→7662214）；历史状态：阶段二 P1a~P6（444 测试：块几何索引击键 p95 13.25→4.07 ms、视口惰性排版、Frame 单缓冲帧合成 4.22→0.28 ms、shell.rs 3916 行首拆、配置单键、撤销分组、删除注解层）、切片 17 配置与主题（430）、16 文件系统监听（407）、15 自绘 chrome + Win32 对话框（395）、14 图片粘贴落盘、13 文档内图片、10~12 自动保存/冲突备份/富文本粘贴/列表引用分隔线；场景表逐格仍待真机人工验证，上列 ①~⑨ 尤需人工
+- 最近全绿：2026-10-26 ADR-009 S1~S5 + S6 三阶段收尾：workspace 527 测试全绿（veil-core 98 单测 + 64 集成、veil-egui 341 + 5 ignored、veil 24）、clippy 零警告；S6 阶段 A 清零全部 dead_code（导出收敛遗留 6 项 + Autosave::idle）、阶段 B 引入 proptest 钉死两类性质（任意编辑×主题/DPI 序列下 memo 命中值恒等于强制重算值；任意序列后连续两次 render 逐像素同）、阶段 B+ 为 persist 状态机补两条性质（六条可观察不变量：status 优先级自洽 / hold 必有原因 / 自动保存绝不覆盖外部版本 / 手工保存后磁盘==基线 / 外部版本必落冲突副本且旧副本不被改写 / 连续轮询幂等；同序列重放投影完全一致）、阶段 C 将 App 顶层字段 26→10（WindowState / DocState / PersistState / InputState / UIState 五子结构，C5 cache+index 因 16 处同时借用结构性冲突保留顶层）；S3 将 7 个手工失效方法与 30 处调用点替换为因果键 memo；S4 拆分 render/present（paint() = render + present），幂等性断言连续两次 render 逐像素同，present 无 surface 时纯 no-op；paint 在 headless 下真实跑像素（win_size 兜底 800×600），性能探针口径修正为真实 render→present 路径；S1 新增 mode.rs；S2 新增 document/persist.rs；三域分离目录——document/（doc_state + block_index + persist）、view/（cache + layout/frame/style/table/highlight/outline/search）、chrome/（mod + paint + cache）；根级 app.rs/mode.rs/interaction.rs/paint.rs/app_tests.rs；veil-core syntax/{mod,model,block,inline}；每切片独立可 revert commit；历史状态：阶段二 P1a~P6（444 测试：击键 p95 13.25→4.07 ms、视口惰性排版、Frame 单缓冲帧合成 4.22→0.28 ms、shell.rs 3916 行首拆、配置单键、撤销分组、删除注解层）；场景表逐格仍待真机人工验证，上列 ①~⑨ 尤需人工
 
 ## 2. 数字红线（Skill 03 A2）
 
 | 数字 | 红线/目标 | 实测 |
 |---|---|---|
 | 冷启动（发布构建，进程创建→首帧可交互，本机） | ≤ 300 ms | **超标**：进程创建→主窗口句柄 5 次中位 771 ms（最小 414 ms；进程内初始化实测 ~150 ms，其余为进程加载与 Defender 实时扫描）。2026-10-25 决策：如实记录，标注为 Windows 平台成本，不设缓解项 |
-| 10 万字文档击键→提交上屏延迟 p95（`cargo test -p veil-egui --release -- --ignored --nocapture perf_keystroke_path`） | ≤ 16 ms | 4.07 ms ✓（5005 块 ≈16 万字，apply+after_edit+paint 端到端 300 次；p50 3.27 ms；P1a 前 13.25 ms） |
+| 10 万字文档击键→提交上屏延迟 p95（`cargo test -p veil-egui --release -- --ignored --nocapture perf_keystroke_path`） | ≤ 16 ms | 5.67 ms ✓（5005 块 ≈16 万字，apply+after_edit+paint 真实 render→present 端到端 300 次；p50 5.23 ms；S4 口径修正：原手动模拟 4.73ms，真实路径包含 chrome 绘制与两遍收敛）；10.5k 块探针 p95 10.87 ms ✓ |
 | 10 万字文档常驻内存（任务管理器私有工作集） | ≤ 150 MB | 17.3 MB ✓（100,480 字符文档，启动后 2 s 采样，5 次一致） |
 | 安装产物体积（`veil.exe` 单文件发布构建） | ≤ 15 MiB | 5,489,152 B ≈ 5.23 MiB ✓（2026-10-26 S5 后实测；含 latex-rust 内嵌 STIX 字体 838,652 B） |
-| `veil-core` 单元+属性测试数 | ≥ 80 | 151（2026-10-26：90 单测 + 61 集成；S1 syntax 四分纯搬移零增减） |
+| `veil-core` 单元+属性测试数 | ≥ 80 | 162（2026-10-26：98 单测 + 64 集成；S1 syntax 四分纯搬移零增减） |
 | e2e 断言数 | ≥ 20 | 0 |
 | Markdown 往返一致率（无编辑时 serialize 输出 == 输入字节） | == 100% | 100%（`roundtrip_identity_without_edits` + `prop_random_edits_roundtrip_and_undo` 随机语料属性测试） |
 | `veil-core` 的 GUI/异步运行时依赖数（`cargo tree -p veil-core` grep egui/winit/tokio） | == 0 | 0 ✓（2026-10-24 实测） |
@@ -113,6 +113,7 @@ v1 无网络输入点（无同步、无更新检查、无遥测）。
   - [ADR-006](../docs/adr/ADR-006-external-file-watch.md)：外部文件变更只提示不自动重载；notify 写入通道、主线程 300ms 轮询、覆盖前才备份
   - [ADR-007](../docs/adr/ADR-007-config-theme.md)：手写 TOML 子集（不用 serde/toml，守住 8/8 预算）；`Theme` 唯一颜色来源；注册表系统外观 1s 轮询；DWM 深色标题栏 + Mica（内容区纯色兜底）；配置原子写；切换即失效颜色派生缓存
   - [ADR-008](../docs/adr/ADR-008-dependency-upgrade-policy.md)：依赖升级策略——切片完成后允许 minor/patch `cargo update`；major 单独立项、单一 commit、可回滚；升级引起的数字变化与 INSTANCE.md 同 commit 回写；黑名单与 8/8 预算不变
+  - [ADR-009](../docs/adr/ADR-009-state-model.md)：状态模型与架构极致化——状态五分类（真值/输入/派生/端口/瞬态）与唯一派生公式；交互模式状态机；持久化二维正交 + 时间即输入；`BlockId` 新鲜度作内容因果键、取消手工失效；`render`/`present` 分离使渲染幂等可测；公共导出 49→≤20；迁移按 S1~S5 独立可回滚
 
 ## 8. 违禁项清单（Skill 03 A3）
 

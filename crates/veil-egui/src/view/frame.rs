@@ -36,7 +36,12 @@ impl Frame {
     /// 读取像素为 RGBA8（alpha 恒 255），测试与调试用。
     pub fn get(&self, x: u32, y: u32) -> [u8; 4] {
         let p = self.pixels[(y as usize) * (self.width as usize) + x as usize];
-        [((p >> 16) & 0xFF) as u8, ((p >> 8) & 0xFF) as u8, (p & 0xFF) as u8, 255]
+        [
+            ((p >> 16) & 0xFF) as u8,
+            ((p >> 8) & 0xFF) as u8,
+            (p & 0xFF) as u8,
+            255,
+        ]
     }
 
     /// src-over 混合位图到 (dx, dy)，越界部分裁剪。src 为 straight alpha RGBA8。

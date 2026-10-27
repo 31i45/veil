@@ -10,3 +10,8 @@ veil-core = { path = "../veil-core" }
 winit = "0.30"
 softbuffer = "0.4"
 cosmic-text = "0.19"
+
+[dev-dependencies]
+# 性质级测试（ADR-009 S6 阶段 B）：验证 Memo 因果键对任意编辑序列的正确性。
+# 只进测试二进制，release build 零膨胀；传递依赖 +~30，仍在 200 红线内。
+proptest = "1"

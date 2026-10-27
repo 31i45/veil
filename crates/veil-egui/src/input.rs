@@ -1,6 +1,6 @@
 //! 键盘事件 → 意图翻译。GUI 无关：`Key` 由 shell 从 winit 事件构造，此处不依赖 winit。
 //!
-//! v0 取舍：Ctrl+←/→ 词级移动不支持（退化为字符级）。
+//! Ctrl+←/→ 按词移动、Ctrl+Shift+←/→ 按词扩选（C6）；词边界规则在 editor 层。
 
 use crate::editor::Intent;
 
@@ -27,6 +27,14 @@ pub enum Key {
     O,
     /// 逻辑键 e（无论是否带 ctrl；用于 Ctrl+E 导出与文本分流）。
     E,
+    /// 逻辑键 f（无论是否带 ctrl；用于 Ctrl+F 查找与文本分流）。
+    F,
+    /// 逻辑键 h（无论是否带 ctrl；用于 Ctrl+H 替换与文本分流）。
+    H,
+    /// 逻辑键 a（无论是否带 ctrl；用于 Ctrl+A 全选与文本分流）。
+    A,
+    /// 逻辑键 n（无论是否带 ctrl；用于 Ctrl+N 新建与文本分流）。
+    N,
     /// Escape：关闭菜单（切片 15）。
     Escape,
     Left,
@@ -38,6 +46,8 @@ pub enum Key {
     Backspace,
     Delete,
     Enter,
+    /// Tab：缩进（Shift 按住为反缩进）。
+    Tab,
 }
 
 /// 翻译产物：文档级交 `Editor::apply`；视图级由 shell 经 layout 换算。
@@ -63,10 +73,18 @@ pub enum Action {
     SaveAs,
     /// 打开（Ctrl+O）：路径由 shell 经 `FileDialog` 选择。
     Open,
+    /// 新建（Ctrl+N）：以空白草稿替换当前文档（脏文档拒绝）。
+    New,
     /// 关闭菜单（Esc）：纯视图动作。
     CloseMenu,
+    /// 切换大纲面板（Ctrl+Shift+O）：纯视图动作。
+    ToggleOutline,
     /// 导出 HTML（Ctrl+E）：由 shell 经 `Exporter` trait 完成（此处不产文档意图）。
     Export,
+    /// 打开文档内查找栏（Ctrl+F）：纯视图动作。
+    Find,
+    /// 打开查找栏并展开替换行（Ctrl+H）：纯视图动作。
+    Replace,
 }
 
 pub fn translate(key: Key, mods: Mods) -> Option<Action> {
@@ -89,12 +107,25 @@ pub fn translate(key: Key, mods: Mods) -> Option<Action> {
         Key::S if mods.ctrl && mods.shift => Some(Action::SaveAs),
         Key::S if mods.ctrl => Some(Action::Save),
         Key::S => None, // 无 ctrl 的 s 文本由 Text 变体承载
+        Key::O if mods.ctrl && mods.shift => Some(Action::ToggleOutline),
         Key::O if mods.ctrl => Some(Action::Open),
         Key::O => None, // 无 ctrl 的 o 文本由 Text 变体承载
         Key::Escape => Some(Action::CloseMenu),
         Key::E if mods.ctrl => Some(Action::Export),
         Key::E => None, // 无 ctrl 的 e 文本由 Text 变体承载
-        // Shift+方向：扩选。Ctrl+Shift+←/→ 词级扩选 v0 不支持，退化为字符级（与 Ctrl+←/→ 一致）。
+        Key::F if mods.ctrl => Some(Action::Find),
+        Key::F => None, // 无 ctrl 的 f 文本由 Text 变体承载
+        Key::H if mods.ctrl => Some(Action::Replace),
+        Key::H => None, // 无 ctrl 的 h 文本由 Text 变体承载
+        Key::A if mods.ctrl => Some(Action::Doc(Intent::SelectAll)),
+        Key::A => None, // 无 ctrl 的 a 文本由 Text 变体承载
+        Key::N if mods.ctrl => Some(Action::New),
+        Key::N => None, // 无 ctrl 的 n 文本由 Text 变体承载
+        // Ctrl+Shift+←/→ 按词扩选；Ctrl+←/→ 按词移动；Shift+方向为字符级扩选。
+        Key::Left if mods.ctrl && mods.shift => Some(Action::Doc(Intent::SelectWordLeft)),
+        Key::Right if mods.ctrl && mods.shift => Some(Action::Doc(Intent::SelectWordRight)),
+        Key::Left if mods.ctrl => Some(Action::Doc(Intent::WordLeft)),
+        Key::Right if mods.ctrl => Some(Action::Doc(Intent::WordRight)),
         Key::Left if mods.shift => Some(Action::Doc(Intent::SelectLeft)),
         Key::Right if mods.shift => Some(Action::Doc(Intent::SelectRight)),
         Key::Left => Some(Action::Doc(Intent::MoveLeft)),
@@ -114,6 +145,8 @@ pub fn translate(key: Key, mods: Mods) -> Option<Action> {
         Key::Backspace => Some(Action::Doc(Intent::DeleteBackward)),
         Key::Delete => Some(Action::Doc(Intent::DeleteForward)),
         Key::Enter => Some(Action::Doc(Intent::Newline)),
+        Key::Tab if mods.shift => Some(Action::Doc(Intent::Dedent)),
+        Key::Tab => Some(Action::Doc(Intent::Indent)),
     }
 }
 
@@ -225,6 +258,37 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_arrows_move_and_select_by_word() {
+        assert_eq!(
+            translate(Key::Left, CTRL),
+            Some(Action::Doc(Intent::WordLeft))
+        );
+        assert_eq!(
+            translate(Key::Right, CTRL),
+            Some(Action::Doc(Intent::WordRight))
+        );
+        assert_eq!(
+            translate(Key::Left, CTRL_SHIFT),
+            Some(Action::Doc(Intent::SelectWordLeft))
+        );
+        assert_eq!(
+            translate(Key::Right, CTRL_SHIFT),
+            Some(Action::Doc(Intent::SelectWordRight))
+        );
+        // Ctrl 优先于 Shift：不带 Ctrl 时仍是字符级扩选
+        assert_eq!(
+            translate(
+                Key::Left,
+                Mods {
+                    ctrl: false,
+                    shift: true
+                }
+            ),
+            Some(Action::Doc(Intent::SelectLeft))
+        );
+    }
+
+    #[test]
     fn shift_vertical_selects() {
         let shift = Mods {
             ctrl: false,
@@ -286,8 +350,54 @@ mod tests {
     }
 
     #[test]
+    fn outline_toggle_binding() {
+        assert_eq!(translate(Key::O, CTRL_SHIFT), Some(Action::ToggleOutline));
+        assert_eq!(translate(Key::O, NONE), None);
+    }
+
+    #[test]
     fn export_binding() {
         assert_eq!(translate(Key::E, CTRL), Some(Action::Export));
         assert_eq!(translate(Key::E, NONE), None); // 无 ctrl 的 e 由 Text 变体承载
+    }
+
+    #[test]
+    fn find_binding() {
+        assert_eq!(translate(Key::F, CTRL), Some(Action::Find));
+        assert_eq!(translate(Key::F, NONE), None); // 无 ctrl 的 f 由 Text 变体承载
+    }
+
+    #[test]
+    fn replace_binding() {
+        assert_eq!(translate(Key::H, CTRL), Some(Action::Replace));
+        assert_eq!(translate(Key::H, NONE), None); // 无 ctrl 的 h 由 Text 变体承载
+    }
+
+    #[test]
+    fn select_all_binding() {
+        assert_eq!(
+            translate(Key::A, CTRL),
+            Some(Action::Doc(Intent::SelectAll))
+        );
+        assert_eq!(translate(Key::A, NONE), None); // 无 ctrl 的 a 由 Text 变体承载
+    }
+
+    #[test]
+    fn new_binding() {
+        assert_eq!(translate(Key::N, CTRL), Some(Action::New));
+        assert_eq!(translate(Key::N, NONE), None); // 无 ctrl 的 n 由 Text 变体承载
+    }
+
+    #[test]
+    fn tab_bindings() {
+        let shift = Mods {
+            ctrl: false,
+            shift: true,
+        };
+        assert_eq!(translate(Key::Tab, NONE), Some(Action::Doc(Intent::Indent)));
+        assert_eq!(
+            translate(Key::Tab, shift),
+            Some(Action::Doc(Intent::Dedent))
+        );
     }
 }

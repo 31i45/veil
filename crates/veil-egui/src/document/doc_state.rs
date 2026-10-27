@@ -2,12 +2,16 @@
 //! 外部变更轮询与标题派生。纯策略与 IO 编排，绘制与交互不在此文件。
 
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
-use crate::chrome::ExternalState;
+use crate::app::{App, FileEvent, FileStore};
 use crate::docio::{decode, encode};
 use crate::editor::Editor;
-use crate::app::{App, FileEvent, FileStore};
+
+use super::{recovery, session, ExternalState};
+
+/// 恢复写盘失败后的退避间隔（0b）：磁盘写失败多为持续状态，5s 重试避免忙轮询。
+pub(crate) const RECOVERY_RETRY: Duration = Duration::from_secs(5);
 
 /// 保存来源：自动保存绝不覆盖外部修改，手工保存经备份后允许覆盖。
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -19,12 +23,12 @@ pub(crate) enum SaveKind {
 impl App {
     /// 把监听目标切换到当前路径（草稿则停止监听）。失败仅提示，不影响编辑。
     pub(crate) fn watch_current(&mut self) {
-        let Some(path) = self.path.clone() else {
-            self.watcher.unwatch();
+        let Some(path) = self.doc.path.clone() else {
+            self.ports.watcher.unwatch();
             return;
         };
-        if let Err(e) = self.watcher.watch(&path) {
-            self.chrome.notice = format!("文件监听不可用: {e}");
+        if let Err(e) = self.ports.watcher.watch(&path) {
+            self.ui_state.chrome.notice = format!("文件监听不可用: {e}");
             eprintln!("文件监听不可用 {}: {e}", path.display());
         }
     }
@@ -32,20 +36,12 @@ impl App {
     /// 外部变更对外呈现的单一状态（状态栏/标题共用）。
     /// 待备份的新版本优先于「已备份」：备份登记只说明旧版本有副本，不能掩盖新版本。
     pub(crate) fn external_state(&self) -> ExternalState {
-        if self.external_changed.is_some() {
-            ExternalState::Changed
-        } else if self.conflict {
-            ExternalState::BackedUp
-        } else if self.external_missing {
-            ExternalState::Missing
-        } else {
-            ExternalState::None
-        }
+        self.persist_state.persist.status()
     }
 
     /// 窗口标题：路径派生。脏标 ` *` 与冲突提示后缀是 chrome UI 落地前的最小可见载体。
     pub(crate) fn title_text(&self) -> String {
-        let base = match &self.path {
+        let base = match &self.doc.path {
             Some(p) => format!("veil — {}", p.display()),
             None => "veil".to_string(),
         };
@@ -63,7 +59,7 @@ impl App {
     }
 
     pub(crate) fn update_title(&self) {
-        if let Some(w) = &self.window {
+        if let Some(w) = &self.window_state.window {
             w.set_title(&self.title_text());
         }
     }
@@ -83,65 +79,64 @@ impl App {
     ///
     /// 成功清脏并更新基线；失败保持脏态（可读错误同时写状态栏 notice）。
     pub(crate) fn save(&mut self, kind: SaveKind) {
-        let Some(path) = self.path.clone() else {
+        let Some(path) = self.doc.path.clone() else {
             if kind == SaveKind::Manual {
-                self.chrome.notice = "草稿无关联文件；可用 Ctrl+Shift+S 另存为".into();
+                self.ui_state.chrome.notice = "草稿无关联文件；可用 Ctrl+Shift+S 另存为".into();
                 eprintln!("草稿无关联文件，保存被忽略");
                 self.request_redraw();
             }
             return;
         };
-        let data = encode(&self.editor.session().serialize(), self.bom);
-        let external = match self.store.load(&path) {
-            Ok(disk) if disk != self.baseline => Some(disk),
+        let data = encode(&self.editor.session().serialize(), self.doc.bom);
+        let external = match self.ports.store.load(&path) {
+            Ok(disk) if disk != self.doc.baseline => Some(disk),
             _ => None,
         };
         if let Some(disk) = &external {
             // 同一外部版本只备份一次（自动冲突已写副本 → 手工保存不再重复）
-            if self.external_saved.as_deref() != Some(disk.as_slice()) {
+            if self.persist_state.persist.registry() != Some(disk.as_slice()) {
                 match self.write_conflict_copy(&path, disk) {
                     Ok(bp) => {
-                        self.conflict = true;
-                        self.external_saved = Some(disk.clone());
+                        self.persist_state.persist.mark_backed_up(disk.clone());
                         eprintln!("检测到外部修改，原文件已备份到 {}", bp.display());
                     }
                     Err(e) => {
-                        self.chrome.notice = format!("外部版本备份失败，取消保存: {e}");
+                        self.ui_state.chrome.notice = format!("外部版本备份失败，取消保存: {e}");
                         eprintln!("外部修改备份失败，取消保存（不覆盖原文件）: {e}");
                         self.update_title();
                         self.request_redraw();
                         return;
                     }
                 }
-            } else {
-                self.conflict = true;
             }
+            // 否则登记已等于磁盘版本：提示态本就为「已备份」，无需再写副本
             if kind == SaveKind::Auto {
-                self.autosave_hold = true;
+                self.persist_state.persist.set_hold(true);
                 eprintln!("自动保存已暂停：{} 被外部修改", path.display());
                 self.update_title();
                 return;
             }
         }
-        match self.store.save(&path, &data) {
+        match self.ports.store.save(&path, &data) {
             Ok(()) => {
                 self.editor.mark_saved();
-                self.baseline = data;
-                self.external_saved = None; // 基线已与磁盘一致，备份登记作废
-                self.external_changed = None; // 磁盘已是本版内容：待备份提示作废
-                self.external_missing = false; // 删除/不可读状态由本次写入恢复
+                self.doc.baseline = data;
+                self.persist_state.persist.keep_notice_only(); // 备份登记作废，「已备份」提示保留
+                self.persist_state.persist.clear_pending(); // 磁盘已是本版内容：待备份提示作废
+                self.persist_state.persist.set_missing(false); // 删除/不可读状态由本次写入恢复
                 if external.is_none() {
-                    self.conflict = false; // 本次无冲突（含手工覆盖后）→ 清提示
+                    self.persist_state.persist.clear_backup(); // 本次无冲突（含手工覆盖后）→ 清提示
                 }
                 if kind == SaveKind::Manual {
-                    self.autosave_hold = false;
-                    self.chrome.notice = format!("已保存 {}", path.display());
+                    self.persist_state.persist.set_hold(false);
+                    self.ui_state.chrome.notice = format!("已保存 {}", path.display());
                 }
-                self.last_activity = None; // 已干净：取消自动保存调度
+                self.persist_state.persist.clear_activity(); // 已干净：取消自动保存调度
+                self.clear_recovery(); // 磁盘已是最新：恢复副本作废（0b）
                 self.update_title();
             }
             Err(e) => {
-                self.chrome.notice = format!("保存失败: {e}");
+                self.ui_state.chrome.notice = format!("保存失败: {e}");
                 eprintln!("保存失败 {}: {e}", path.display());
             }
         }
@@ -154,22 +149,22 @@ impl App {
         path: &Path,
         disk: &[u8],
     ) -> Result<PathBuf, String> {
-        let bp = conflict_copy_path(&mut *self.store, path)
+        let bp = conflict_copy_path(&mut *self.ports.store, path)
             .ok_or_else(|| "冲突副本名已耗尽".to_string())?;
-        self.store.save(&bp, disk)?;
+        self.ports.store.save(&bp, disk)?;
         Ok(bp)
     }
 
     /// 自动保存判定：距上次内容编辑/自动保存尝试达静默期，且无路径/IME/冲突挂起阻碍。
     pub(crate) fn autosave_due(&self, now: Instant) -> bool {
-        let Some(last) = self.last_activity else {
+        let Some(last) = self.persist_state.persist.activity() else {
             return false;
         };
-        self.autosave.due(
+        self.persist_state.autosave.due(
             self.editor.is_dirty(),
-            self.path.is_some(),
+            self.doc.path.is_some(),
             self.editor.preedit().is_some(),
-            self.autosave_hold,
+            self.persist_state.persist.hold(),
             now.saturating_duration_since(last),
         )
     }
@@ -179,9 +174,72 @@ impl App {
         if !self.autosave_due(now) {
             return;
         }
-        self.last_activity = Some(now);
+        self.persist_state.persist.note_activity(now);
         self.save(SaveKind::Auto);
         self.request_redraw();
+    }
+
+    /// 恢复写盘判定（0b）：脏且非 IME 组合期即候选（无路径草稿/冲突挂起也覆盖）；
+    /// 正常路径按静默期（复用自动保存的 2s），上次失败后按退避节奏重试。
+    pub(crate) fn recovery_write_due(&self, now: Instant) -> bool {
+        if !self.editor.is_dirty() || self.editor.preedit().is_some() {
+            return false;
+        }
+        if let Some(t) = self.persist_state.recovery_failed_at {
+            return now.saturating_duration_since(t) >= RECOVERY_RETRY;
+        }
+        self.persist_state
+            .autosave
+            .deadline(self.persist_state.persist.activity())
+            .is_some_and(|at| now >= at)
+    }
+
+    /// 崩溃恢复写盘（0b）：把当前完整内容原子写入恢复槽。内容未变（哈希相同）不重写；
+    /// 失败给 notice 并记录失败时刻（退避重试），绝不 panic——恢复是最后防线，不是新风险。
+    pub(crate) fn maybe_recovery_write(&mut self, now: Instant) {
+        if !self.recovery_write_due(now) {
+            return;
+        }
+        let text = self.editor.session().serialize();
+        let data = recovery::encode_recovery(self.doc.path.as_deref(), self.doc.bom, &text);
+        let hash = recovery::fnv64(&data);
+        if self.persist_state.recovery_hash == Some(hash) {
+            self.persist_state.recovery_failed_at = None;
+            return; // 磁盘已是当前内容快照
+        }
+        match self.ports.recovery.save(&data) {
+            Ok(()) => {
+                self.persist_state.recovery_hash = Some(hash);
+                self.persist_state.recovery_failed_at = None;
+            }
+            Err(e) => {
+                self.persist_state.recovery_failed_at = Some(now);
+                self.ui_state.chrome.notice = format!("崩溃恢复写入失败: {e}");
+                eprintln!("崩溃恢复写入失败: {e}");
+            }
+        }
+    }
+
+    /// 保存/另存为成功后清除恢复副本（0b）。清除失败仅记录：残留文件在下次启动时
+    /// 经「恢复内容 == 磁盘内容」判定自清，不会造成错误恢复。
+    pub(crate) fn clear_recovery(&mut self) {
+        if self.persist_state.recovery_hash.is_none() {
+            return; // 本会话未写过恢复文件，磁盘上不会有属于本内容的副本
+        }
+        if let Err(e) = self.ports.recovery.clear() {
+            eprintln!("恢复副本清理失败（下次启动将自清）: {e}");
+        }
+        self.persist_state.recovery_hash = None;
+        self.persist_state.recovery_failed_at = None;
+    }
+
+    /// 打开/另存为成功时登记最近文件并持久化（0b）。写失败不阻断主流程。
+    pub(crate) fn note_opened(&mut self, path: PathBuf) {
+        session::touch_recent(&mut self.persist_state.recent, path);
+        let text = session::encode_session(&self.persist_state.recent);
+        if let Err(e) = self.ports.session.save(&text) {
+            eprintln!("最近文件记录失败: {e}");
+        }
     }
 
     /// 外部变更轮询（空闲回调调用）：只置状态与提示，绝不自动改文档内容或落盘。
@@ -189,50 +247,51 @@ impl App {
     /// 检测：监听事件 → 读磁盘 → 与基线/已备份版本比较。备份仍只在保存覆盖前执行，
     /// 避免外部程序每保存一次就在文档旁积一份副本；同一版本/已备份版本不重复提示。
     pub(crate) fn poll_external(&mut self) {
-        let events = self.watcher.poll();
+        let events = self.ports.watcher.poll();
         if events.is_empty() {
             return;
         }
-        let Some(path) = self.path.clone() else {
+        let Some(path) = self.doc.path.clone() else {
             return;
         };
         let removed = events.contains(&FileEvent::Removed);
-        match self.store.load(&path) {
+        match self.ports.store.load(&path) {
             Ok(disk) => {
-                let recovered = std::mem::take(&mut self.external_missing);
-                if disk == self.baseline {
+                let recovered = self.persist_state.persist.missing();
+                self.persist_state.persist.set_missing(false);
+                if disk == self.doc.baseline {
                     // 外部内容回到基线：撤销「待备份」状态（已备份提示保留至下次保存）
-                    if self.external_changed.take().is_some() && !self.conflict {
-                        self.autosave_hold = false;
+                    let had_pending = self.persist_state.persist.clear_pending();
+                    if had_pending && !self.persist_state.persist.backed_up() {
+                        self.persist_state.persist.set_hold(false);
                     }
                     if recovered {
-                        self.chrome.notice = format!("文件已恢复：{}", path.display());
+                        self.ui_state.chrome.notice = format!("文件已恢复：{}", path.display());
                         self.update_title();
                         self.request_redraw();
                     }
                     return;
                 }
-                if self.external_saved.as_deref() == Some(disk.as_slice())
-                    || self.external_changed.as_deref() == Some(disk.as_slice())
+                if self.persist_state.persist.registry() == Some(disk.as_slice())
+                    || self.persist_state.persist.pending() == Some(disk.as_slice())
                 {
                     return; // 已备份 / 同一外部版本：不重复提示
                 }
-                self.external_changed = Some(disk);
-                self.autosave_hold = true; // 脏文档绝不静默覆盖外部版本
-                self.chrome.notice = "检测到外部修改：保存时将先备份磁盘版本".into();
+                self.persist_state.persist.begin_external(disk); // 脏文档绝不静默覆盖外部版本
+                self.ui_state.chrome.notice = "检测到外部修改：保存时将先备份磁盘版本".into();
                 self.update_title();
                 self.request_redraw();
             }
             Err(_) => {
-                if self.external_missing {
+                if self.persist_state.persist.missing() {
                     return;
                 }
-                self.external_missing = true;
-                self.external_changed = None;
-                if !self.conflict {
-                    self.autosave_hold = false; // 重建文件不构成覆盖，允许自动保存
+                self.persist_state.persist.set_missing(true);
+                self.persist_state.persist.clear_pending();
+                if !self.persist_state.persist.backed_up() {
+                    self.persist_state.persist.set_hold(false); // 重建文件不构成覆盖，允许自动保存
                 }
-                self.chrome.notice = if removed {
+                self.ui_state.chrome.notice = if removed {
                     "文件已被外部删除；保存将重建".into()
                 } else {
                     "文件暂不可读（可能被外部程序占用）".into()
@@ -247,15 +306,16 @@ impl App {
     /// （同 save_now 草稿分支语义；界面呈现待 chrome UI）。导出不清脏标（源文件未变）。
     pub(crate) fn export_now(&mut self) {
         match self
+            .ports
             .exporter
-            .export_html(self.editor.session(), self.path.as_deref())
+            .export_html(self.editor.session(), self.doc.path.as_deref())
         {
             Ok(p) => {
-                self.chrome.notice = format!("已导出 {}", p.display());
+                self.ui_state.chrome.notice = format!("已导出 {}", p.display());
                 eprintln!("已导出 {}", p.display());
             }
             Err(e) => {
-                self.chrome.notice = format!("导出失败: {e}");
+                self.ui_state.chrome.notice = format!("导出失败: {e}");
                 eprintln!("导出失败: {e}");
             }
         }
@@ -263,39 +323,37 @@ impl App {
     }
 
     /// Ctrl+Shift+S：另存为。写入成功才切换关联路径/基线并清脏；失败保留旧路径与脏标。
-    /// 新路径改变图片相对基准：清图片缓存与布局，按新位置重新解析。
+    /// 新路径改变图片相对基准：图片代次递增，图片/布局/表格按因果键失配重取。
     pub(crate) fn save_as(&mut self) {
         let suggested = self
+            .doc
             .path
             .as_ref()
             .and_then(|p| p.file_name())
             .and_then(|s| s.to_str())
             .unwrap_or("未命名.md")
             .to_string();
-        let Some(path) = self.dialogs.save_markdown(&suggested) else {
-            self.chrome.notice = "另存为已取消".into();
+        let Some(path) = self.ports.dialogs.save_markdown(&suggested) else {
+            self.ui_state.chrome.notice = "另存为已取消".into();
             self.request_redraw();
             return;
         };
-        let data = encode(&self.editor.session().serialize(), self.bom);
-        match self.store.save(&path, &data) {
+        let data = encode(&self.editor.session().serialize(), self.doc.bom);
+        match self.ports.store.save(&path, &data) {
             Ok(()) => {
                 self.editor.mark_saved();
-                self.path = Some(path.clone());
-                self.baseline = data;
-                self.conflict = false;
-                self.external_saved = None;
-                self.external_changed = None;
-                self.external_missing = false;
-                self.autosave_hold = false;
-                self.last_activity = None;
-                self.cache.clear_repath(); // 图片相对基准变化：图片缓存与布局一并作废
-                self.chrome.notice = format!("已另存为 {}", path.display());
+                self.doc.path = Some(path.clone());
+                self.doc.baseline = data;
+                self.persist_state.persist.reset();
+                self.input_state.revs.image_base += 1; // 图片相对基准变化：相关派生缓存键失配
+                self.clear_recovery(); // 旧路径的恢复副本已随另存失效（0b）
+                self.note_opened(path.clone()); // 登记最近文件（0b）
+                self.ui_state.chrome.notice = format!("已另存为 {}", path.display());
                 self.watch_current(); // 监听目标随关联路径切换；失败提示覆盖成功提示
                 self.update_title();
             }
             Err(e) => {
-                self.chrome.notice = format!("另存为失败: {e}");
+                self.ui_state.chrome.notice = format!("另存为失败: {e}");
                 eprintln!("另存为失败 {}: {e}", path.display());
             }
         }
@@ -306,28 +364,28 @@ impl App {
     /// 拒绝时不弹对话框（避免选完文件才发现无法打开）。
     pub(crate) fn open_via_dialog(&mut self) {
         if self.editor.is_dirty() {
-            self.chrome.notice = "当前文档未保存，已取消打开".into();
+            self.ui_state.chrome.notice = "当前文档未保存，已取消打开".into();
             self.request_redraw();
             return;
         }
-        if let Some(path) = self.dialogs.open_markdown() {
+        if let Some(path) = self.ports.dialogs.open_markdown() {
             self.open_path(path);
         }
     }
 
     /// 拖放打开：脏文档拒绝替换（v0 无确认对话框，宁丢操作不丢数据）；
-    /// 成功后整体替换编辑器（新文档新撤销栈）、清全部缓存、复位滚动。
+    /// 成功后整体替换编辑器（新文档新撤销栈）、会话代次递增、复位滚动。
     pub(crate) fn open_path(&mut self, path: PathBuf) {
         if self.editor.is_dirty() {
-            self.chrome.notice = "当前文档未保存，已拒绝打开".into();
+            self.ui_state.chrome.notice = "当前文档未保存，已拒绝打开".into();
             eprintln!("当前文档未保存，拒绝打开 {}", path.display());
             self.request_redraw();
             return;
         }
-        let bytes = match self.store.load(&path) {
+        let bytes = match self.ports.store.load(&path) {
             Ok(b) => b,
             Err(e) => {
-                self.chrome.notice = format!("打开失败: {e}");
+                self.ui_state.chrome.notice = format!("打开失败: {e}");
                 eprintln!("打开失败 {}: {e}", path.display());
                 self.request_redraw();
                 return;
@@ -336,35 +394,79 @@ impl App {
         let (text, bom) = match decode(&bytes) {
             Ok(x) => x,
             Err(e) => {
-                self.chrome.notice = format!("打开失败: {e}");
+                self.ui_state.chrome.notice = format!("打开失败: {e}");
                 eprintln!("打开失败 {}: {e}", path.display());
                 self.request_redraw();
                 return;
             }
         };
         self.editor = Editor::new(&text);
-        self.path = Some(path.clone());
-        self.bom = bom;
-        self.baseline = bytes; // 新文件：磁盘内容即基线
-        self.conflict = false;
-        self.external_saved = None;
-        self.external_changed = None;
-        self.external_missing = false;
-        self.autosave_hold = false;
-        self.last_activity = None;
-        // 新文档：图片相对路径基准变化，失败记忆一并作废；行内公式按 tex 寻址保留
-        self.cache.clear_document();
-        self.scroll_y = 0.0;
-        self.goal_x = None;
+        self.doc.path = Some(path.clone());
+        self.doc.bom = bom;
+        self.doc.baseline = bytes; // 新文件：磁盘内容即基线
+        self.persist_state.persist.reset();
+        self.note_opened(path.clone()); // 登记最近文件（0b）
+        // 新文档：会话与图片基准代次递增，块相关缓存按因果键失配；
+        // 行内公式按 tex 内容寻址，跨文档保留
+        self.input_state.revs.session += 1;
+        self.input_state.revs.image_base += 1;
+        self.window_state.scroll_y = 0.0;
+        self.window_state.goal_x = None;
+        self.ui_state.outline.scroll = 0.0;
+        self.ui_state.outline.hover = None;
+        // 新文档：旧查询的命中偏移全部失效（栏保持打开，查询清空）
+        self.ui_state.search.clear();
         // 新文档块结构替换：索引必须与编辑器同源重建，后续读取才有效
         self.refresh_index();
+        if self.ui_state.outline.open {
+            self.refresh_outline();
+        }
         // 视口驱动：只准备当前可见块，其余留待滚动/光标路径按需排版
         self.ensure_layouts_visible();
         self.ensure_math_visible();
         self.ensure_tables_visible();
         self.recompute_geometry();
-        self.chrome.notice = format!("已打开 {}", path.display());
+        self.ui_state.chrome.notice = format!("已打开 {}", path.display());
         self.watch_current(); // 失败提示覆盖「已打开」，避免隐藏降级原因
+        self.update_title();
+        self.set_ime_area();
+        self.request_redraw();
+    }
+
+    /// Ctrl+N / 菜单新建：以空白草稿替换当前文档。
+    /// 脏文档拒绝（v0 无确认对话框，宁丢操作不丢数据，与打开一致）。
+    /// 成功即换新编辑器（新撤销栈、脏标清除）、文件监听解除、派生缓存按会话代次失效。
+    pub(crate) fn new_draft(&mut self) {
+        if self.editor.is_dirty() {
+            self.ui_state.chrome.notice = "当前文档未保存，已取消新建".into();
+            self.request_redraw();
+            return;
+        }
+        self.editor = Editor::new("");
+        self.doc.path = None;
+        self.doc.bom = false;
+        self.doc.baseline = encode("", false); // 空白草稿：基线为空字节
+        self.persist_state.persist.reset();
+        // 新文档：会话与图片基准代次递增，块相关缓存按因果键失配；
+        // 行内公式按 tex 内容寻址，跨文档保留
+        self.input_state.revs.session += 1;
+        self.input_state.revs.image_base += 1;
+        self.window_state.scroll_y = 0.0;
+        self.window_state.goal_x = None;
+        self.ui_state.outline.scroll = 0.0;
+        self.ui_state.outline.hover = None;
+        // 新文档：旧查询的命中偏移全部失效（栏保持打开，查询清空）
+        self.ui_state.search.clear();
+        self.refresh_index();
+        if self.ui_state.outline.open {
+            self.refresh_outline();
+        }
+        self.ensure_layouts_visible();
+        self.ensure_math_visible();
+        self.ensure_tables_visible();
+        self.recompute_geometry();
+        self.ui_state.chrome.notice = "已新建空白文档".into();
+        self.watch_current(); // 旧路径解绑：无路径时 watcher.unwatch
         self.update_title();
         self.set_ime_area();
         self.request_redraw();

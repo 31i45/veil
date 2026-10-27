@@ -3,15 +3,19 @@
 
 pub(crate) mod cache;
 mod frame;
+mod highlight;
 mod layout;
+pub(crate) mod outline;
+pub(crate) mod search;
 mod style;
 mod table;
 
-pub(crate) use cache::Cache;
-pub(crate) use layout::node_active;
+pub use crate::geometry::{BASE_FONT_SIZE, BASE_LINE_HEIGHT};
+pub(crate) use cache::{Cache, LayoutKey, Memo, Revs};
 pub use frame::Frame;
-pub use layout::{
-    BlockLayout, InlineAsset, InlineImg, LayoutEngine, PlacedImg, BASE_FONT_SIZE, BASE_LINE_HEIGHT,
-};
-pub use style::{style_spans, Style};
-pub use table::{TableCellLayout, TableLayout, TableRow};
+pub(crate) use layout::{node_active, oversize_notice};
+#[cfg(test)]
+pub(crate) use layout::MAX_BLOCK_BYTES;
+pub use layout::{BlockLayout, InlineAsset, InlineImg, LayoutEngine};
+pub(crate) use outline::{Outline, OutlineEntry};
+pub(crate) use search::Search;

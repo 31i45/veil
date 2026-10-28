@@ -20,22 +20,21 @@ use std::path::Path;
 use pulldown_cmark::{html, Options, Parser};
 use veil_core::{BlockKind, InlineKind, InlineNode, Range, Session};
 
-/// 一致性基线（0c P1 缩进代码/围栏边界/自动链接落地后，2026-10-27）。
-/// 本轮收益：A 560→603（缩进代码 12/12、围栏 29/29、Tabs 11/11，均满分），
-/// C 567→595、条件 C 506→568/603=94.2%，D 567→595；B 606→618 / 607→619。
-/// 另修代码段开闭 run 必须等长（Example 340/347），Code spans C 16→21；
-/// 自动链接 8→19/19；强调段 127→129（0475-0481 的 `<...>` 交互）。
+/// 一致性基线（0c P1 链接目标/图片 alt/引用可见性/括号配对落地后，2026-10-28）。
+/// 本轮收益：C 609→630、D 610→631、条件 C/D 596→617。Links 节 77→90（满分：
+/// 括号栈配对 + 目标/title 解析 + case folding + 容器内定义），Images 16→22
+/// （满分），Link reference definitions 26→27（满分），Entity 15→16。
 const BASELINE_A: usize = 637;
 const BASELINE_B_EXACT: usize = 628;
 const BASELINE_B_CANON: usize = 629;
-const BASELINE_C: usize = 609;
+const BASELINE_C: usize = 630;
 /// 条件基线（仅 A 通过时统计）。
 const BASELINE_B_EXACT_WHEN_A: usize = 614;
-const BASELINE_C_WHEN_A: usize = 596;
+const BASELINE_C_WHEN_A: usize = 617;
 /// Suite D 基线（行内结构签名；P2 HTML 块落地后实测）。
-const BASELINE_D: usize = 610;
-const BASELINE_D_WHEN_A: usize = 596;
-/// 分节 C 基线（2026-10-27 缩进代码/围栏/自动链接落地后实测）：任何一节只允许改善。
+const BASELINE_D: usize = 631;
+const BASELINE_D_WHEN_A: usize = 617;
+/// 分节 C 基线（2026-10-28 链接/图片/引用落地后实测）：任何一节只允许改善。
 /// 与 SECTIONS 打印同序（BTreeMap 字典序）。
 const BASELINE_C_SECTION: &[(&str, usize)] = &[
     ("ATX headings", 18),
@@ -45,15 +44,15 @@ const BASELINE_C_SECTION: &[(&str, usize)] = &[
     ("Block quotes", 25),
     ("Code spans", 21),
     ("Emphasis and strong emphasis", 129),
-    ("Entity and numeric character references", 15),
+    ("Entity and numeric character references", 16),
     ("Fenced code blocks", 29),
     ("HTML blocks", 36),
     ("Hard line breaks", 13),
-    ("Images", 16),
+    ("Images", 22),
     ("Indented code blocks", 12),
     ("Inlines", 1),
-    ("Link reference definitions", 26),
-    ("Links", 77),
+    ("Link reference definitions", 27),
+    ("Links", 90),
     ("List items", 48),
     ("Lists", 26),
     ("Paragraphs", 8),

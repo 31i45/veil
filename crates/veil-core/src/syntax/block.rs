@@ -795,8 +795,7 @@ pub(super) fn normalize_label(s: &str) -> String {
         .collect::<Vec<_>>()
         .join(" ")
         .to_lowercase()
-        .replace('\u{00DF}', "ss") // ß → ss
-        .replace('\u{1E9E}', "ss") // ẞ → ss（to_lowercase 已转 ß，双保险）
+        .replace(['\u{00DF}', '\u{1E9E}'], "ss") // ß/ẞ → ss（to_lowercase 已转 ß，双保险）
 }
 
 /// 定义解析结果；区间为 `base` 基准的绝对偏移。

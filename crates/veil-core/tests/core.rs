@@ -766,6 +766,44 @@ fn table_escaped_pipe_renders_literal() {
 }
 
 #[test]
+fn table_body_accepts_pipe_less_row_until_blank_line() {
+    // GFM tables-005：表体行不要求竖线；空行才结束表格。
+    let s = Session::open("| abc | def |\n| --- | --- |\n| bar | baz |\nbar\n\nbar\n");
+    let bs = s.blocks();
+    assert_eq!(bs.len(), 2);
+    assert_eq!(bs[0].1, BlockKind::Table);
+    assert_eq!(bs[0].2, Range::new(0, 46)); // 吞到第二行 `bar\n` 末
+    let t = s.table(bs[0].0).unwrap();
+    assert_eq!(t.rows.len(), 2);
+    assert_eq!(t.rows[1][0].text, "bar");
+    assert_eq!(t.rows[1][1].text, "");
+    assert_eq!(bs[1].1, BlockKind::Paragraph);
+    assert_eq!(bs[1].2, Range::new(47, 51)); // 空行后的 `bar\n`
+}
+
+#[test]
+fn table_body_stops_at_block_structure_without_blank_line() {
+    // 引用标记是「另一个块级结构」，表格在其前结束（GFM tables-004）。
+    let s = Session::open("| abc | def |\n| --- | --- |\n| bar | baz |\n> bar\n");
+    let bs = s.blocks();
+    assert_eq!(bs.len(), 2);
+    assert_eq!(bs[0].1, BlockKind::Table);
+    assert_eq!(bs[1].1, BlockKind::BlockQuote);
+}
+
+#[test]
+fn table_cells_expose_inline_nodes() {
+    let s = Session::open("| **a** | `c` |\n| --- | --- |\n");
+    let (id, kind, _) = s.blocks()[0].clone();
+    assert_eq!(kind, BlockKind::Table);
+    let t = s.table(id).unwrap();
+    assert_eq!(t.header[0].inlines.len(), 1);
+    assert_eq!(t.header[0].inlines[0].kind, InlineKind::Strong);
+    assert_eq!(t.header[1].inlines.len(), 1);
+    assert_eq!(t.header[1].inlines[0].kind, InlineKind::Code);
+}
+
+#[test]
 fn table_body_pads_missing_cells_and_truncates_extra() {
     // 表体 `| c |` 缺第二格 → 补空；`| e | f | g |` 多格 → 截断
     let s = Session::open("| a | b |\n| --- | --- |\n| c |\n| e | f | g |\n");

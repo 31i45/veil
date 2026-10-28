@@ -1403,10 +1403,16 @@ fn table_rows(buf: &Buffer, line: usize, total: usize) -> Option<usize> {
     while line + n < total {
         let l = line_text(buf, line + n);
         let lt = l.trim_start();
-        let interrupted = is_fence(lt)
+        // GFM：表体行不要求含竖线（`bar` 也是单格行，缺格补空）；表格在首个空行或
+        // 另一块级结构起始处结束——与段落打断集合一致，另补缩进代码（≥4 列）。
+        let interrupted = indent_info(&l).0 >= 4
+            || is_fence(lt)
             || atx_level(lt).is_some()
             || math_marker(l.trim()).is_some()
-            || !has_unescaped_pipe(&l);
+            || (indent_le3(&l) && is_thematic_break(lt))
+            || quote_marker_pos(&l).is_some()
+            || list_mark(&l).is_some_and(|m| m.indent_cols <= 3)
+            || html_block_interrupts_paragraph(&l);
         if lt.trim().is_empty() || interrupted {
             break;
         }
@@ -1514,6 +1520,7 @@ pub(super) fn parse_table_cells(
         let text = unescape_cell_pipes(&visible_text(content, &nodes, line_off + cs));
         out.push(TableCell {
             text,
+            inlines: nodes,
             range: Range::new(line_off + cs, line_off + ce),
         });
     }
@@ -2397,19 +2404,16 @@ mod tests {
     }
 
     #[test]
-    fn table_body_stops_at_blank_no_pipe_or_block_start() {
+    fn table_body_stops_at_blank_or_block_start() {
         // 空行终止表格；其后新表头缺分隔行 → 段落
         let b = Buffer::new("| a |\n| --- |\n| b |\n\n| c |\n");
         assert_eq!(
             kinds(&b),
             [(BlockKind::Table, 0, 3), (BlockKind::Paragraph, 4, 5)]
         );
-        // 无竖线的非空行终止表格（GFM 例 200）
+        // 无竖线的非空行仍是表体行（GFM tables-005：缺格补空），不终止表格
         let b = Buffer::new("| a |\n| --- |\n| b |\ntail\n");
-        assert_eq!(
-            kinds(&b),
-            [(BlockKind::Table, 0, 3), (BlockKind::Paragraph, 3, 4)]
-        );
+        assert_eq!(kinds(&b), [(BlockKind::Table, 0, 4)]);
         // 下一块起始（ATX）打断表格
         let b = Buffer::new("| a |\n| --- |\n| b |\n## h | x\n");
         assert_eq!(

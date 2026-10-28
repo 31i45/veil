@@ -21,8 +21,8 @@ pub enum BlockKind {
     IndentedCode,
     /// 展示数学块（`$$...$$`）。块内不解析 inline，TeX 源码经 `math_source` 提取。
     Math,
-    /// GFM 表格（表头行 + 分隔行 + 至多若干表体行）。块内不解析 inline，
-    /// 单元格文本/对齐经 `table` 提取（视图只读渲染，切片 9）。
+    /// GFM 表格（表头行 + 分隔行 + 至多若干表体行）。块级 inline 恒为空；
+    /// 单元格文本/对齐/inline 节点经 `table` 提取（视图只读渲染，切片 9）。
     Table,
     /// 列表项（0c P0-3：多行项——项内续行/空行/懒续行并入本块；嵌套项与外层续块
     /// 各为独立块，续块无标记、`task` 恒 None）。`ordered` 区分有序/无序；
@@ -58,11 +58,13 @@ pub enum CellAlign {
     Right,
 }
 
-/// 单元格派生数据：可见文本 + 内容区间（文档字节偏移，已 trim）。
+/// 单元格派生数据：可见文本 + inline 节点 + 内容区间（文档字节偏移，已 trim）。
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct TableCell {
     /// 剥除 inline 标记后的可见文本（`**b**` → `b`），供只读渲染直接使用。
     pub text: String,
+    /// 单元格内 inline 节点（GFM「inlines are parsed」）：供样式渲染与一致性门禁。
+    pub inlines: Vec<InlineNode>,
     /// 内容区间；网格点击以此起点进入表格源码态。
     pub range: Range,
 }

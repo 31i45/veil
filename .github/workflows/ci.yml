@@ -1,0 +1,27 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  gate:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+
+      - name: 全量测试
+        run: cargo test --workspace
+
+      - name: Clippy（零警告）
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      # 一致性基线只升不降：任一指标低于 conformance.rs 顶部常量即失败。
+      # 单独跑一次以打印各套数字，便于在 CI 日志中定位退化来源。
+      - name: CommonMark 一致性门禁
+        run: cargo test -p veil-core --test conformance -- --nocapture

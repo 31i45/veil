@@ -25,3 +25,6 @@ jobs:
       # 单独跑一次以打印各套数字，便于在 CI 日志中定位退化来源。
       - name: CommonMark 一致性门禁
         run: cargo test -p veil-core --test conformance -- --nocapture
+
+      - name: GFM 扩展一致性门禁
+        run: cargo test -p veil-core --test gfm_conformance -- --nocapture

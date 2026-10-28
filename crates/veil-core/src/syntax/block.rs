@@ -788,9 +788,15 @@ pub(super) fn is_thematic_break(t: &str) -> bool {
 /// 引用表：规范化 label → (dest 区间, title 区间)，文档绝对字节偏移。
 pub(super) type RefMap = std::collections::HashMap<String, (Range, Option<Range>)>;
 
-/// 规范化 label：折叠内部空白为单空格 + lowercase（不解反斜杠转义，v0 简化）。
+/// 规范化 label：折叠内部空白为单空格 + Unicode case folding（不解反斜杠转义，v0 简化）。
+/// `to_lowercase` 不处理 `ß`/`ẞ` → `ss`（CommonMark 要求），此处补上。
 pub(super) fn normalize_label(s: &str) -> String {
-    s.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()
+    s.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+        .replace('\u{00DF}', "ss") // ß → ss
+        .replace('\u{1E9E}', "ss") // ẞ → ss（to_lowercase 已转 ß，双保险）
 }
 
 /// 定义解析结果；区间为 `base` 基准的绝对偏移。
@@ -1014,6 +1020,90 @@ fn link_ref_def(buf: &Buffer, line: usize, total: usize) -> Option<usize> {
     let ast = parse_link_ref_def(&text, 0)?;
     // 消耗行数 = 终点覆盖到的行数（行起点 ≤ 终点位置）
     Some(starts.iter().filter(|&&s| s <= ast.len).count().max(1))
+}
+
+/// 引用块的容器剥离视图 + 其中 LinkRefDef 块的行区间（剥离视图与原文行 1:1 对应）。
+struct QuoteDefScan {
+    /// 剥离容器标记后的文本（临时 Buffer，行号与原文一致）。
+    buf: Buffer,
+    /// (剥离行起点, 该行内容文档绝对起点)
+    line_map: Vec<(usize, usize)>,
+    /// LinkRefDef 块覆盖的行区间 [start, end)。
+    def_lines: Vec<(usize, usize)>,
+}
+
+/// 剥除引用块各行容器标记并扫描其中的 LinkRefDef 块；无 `]:` 快路径返回 None
+/// （热路径上不为普通引用块分配临时 Buffer）。
+fn scan_quote_defs(text: &str, base: usize) -> Option<QuoteDefScan> {
+    if !text.contains("]:") {
+        return None;
+    }
+    let mut stripped = String::with_capacity(text.len());
+    let mut line_map: Vec<(usize, usize)> = Vec::new();
+    let mut off = 0usize;
+    for line in text.split_inclusive('\n') {
+        let content = strip_containers(line);
+        line_map.push((stripped.len(), base + off + (line.len() - content.len())));
+        stripped.push_str(content);
+        off += line.len();
+    }
+    if line_map.is_empty() {
+        return None;
+    }
+    let buf = Buffer::new(&stripped);
+    // 剥离文本走同一套块扫描：保证「定义不能打断进行中段落」等规则与顶层一致
+    let def_lines = scan_blocks(&buf, 0, buf.line_count())
+        .into_iter()
+        .filter(|(k, _, _)| *k == BlockKind::LinkRefDef)
+        .map(|(_, s, e)| (s, e))
+        .collect();
+    Some(QuoteDefScan {
+        buf,
+        line_map,
+        def_lines,
+    })
+}
+
+/// 引用块内属于链接引用定义的行区间（行号为块内相对行）。
+/// 这些行不产生 inline（Example 218：定义被消耗后引用块为空）。
+pub(super) fn quote_def_lines(text: &str) -> Vec<(usize, usize)> {
+    scan_quote_defs(text, 0)
+        .map(|s| s.def_lines)
+        .unwrap_or_default()
+}
+
+/// 引用块内的链接引用定义（CommonMark：容器内定义对全文档可见，Example 218）。
+/// 返回 (规范化 label, dest 区间, title 区间)，区间为文档绝对偏移。
+pub(super) fn quote_link_ref_defs(text: &str, base: usize) -> Vec<(String, Range, Option<Range>)> {
+    let Some(scan) = scan_quote_defs(text, base) else {
+        return Vec::new();
+    };
+    // 剥离偏移 → 文档绝对偏移（行内内容 1:1 连续）
+    let map = |p: usize| -> usize {
+        let idx = scan.line_map.partition_point(|&(ls, _)| ls <= p) - 1;
+        scan.line_map[idx].1 + (p - scan.line_map[idx].0)
+    };
+    let mut out = Vec::new();
+    for &(s, e) in &scan.def_lines {
+        let bs = scan.buf.offset_of_line(s);
+        let be = if e < scan.buf.line_count() {
+            scan.buf.offset_of_line(e)
+        } else {
+            scan.buf.len()
+        };
+        let seg = scan.buf.slice(bs, be);
+        let Some(ast) = parse_link_ref_def(&seg, 0) else {
+            continue;
+        };
+        // label 从剥离文本规范化（跨行 label 才不会带进 `>` 标记）
+        let label = normalize_label(&seg[ast.label.start..ast.label.end]);
+        let dest = Range::new(map(bs + ast.dest.start), map(bs + ast.dest.end));
+        let title = ast
+            .title
+            .map(|t| Range::new(map(bs + t.start), map(bs + t.end)));
+        out.push((label, dest, title));
+    }
+    out
 }
 
 // ===== 原始 HTML 块（CommonMark §4.6） =====

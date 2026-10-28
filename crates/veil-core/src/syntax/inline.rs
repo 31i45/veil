@@ -13,8 +13,9 @@
 //   节点的 url 指向定义处 dest 的绝对区间；查无定义则整体按纯文本（内部 inline 正常解析）。
 //   优先级：inline 链接 > full/collapsed 引用 > shortcut（与 CommonMark 一致）。
 // - Image 语法同 Link，alt 允许为空；URL 可空（`![]()` 合法，视图侧无加载键则只显
-//   alt）。Image 可出现在 Link 文本内（徽章写法），alt 内亦可嵌套 inline（切片 13）；
-//   引用式图片 `![alt][label]` / `![alt][]` / `![alt]` 同引用式链接（0c P0-1）。
+//   alt）。Image 可出现在 Link 文本内（徽章写法）；alt 为纯文本，不产生子节点
+//   （CommonMark：alt = 纯文本内容）。引用式图片 `![alt][label]` / `![alt][]` / `![alt]`
+//   同引用式链接（0c P0-1）。
 // - Strikethrough（GFM `~~`）仍为朴素最近配对，不参与 delimiter-run（GFM 语料另计）。
 // - `\` 转义全部 ASCII 标点（CommonMark；0c P1 起由 v0 白名单扩展）。
 // - Unicode 标点判定：ASCII 精确命中规范集合；非 ASCII 以「非字母数字且非空白」
@@ -252,6 +253,150 @@ fn resolve_emphasis(toks: Vec<Tok>, base: usize) -> Vec<InlineNode> {
         .collect()
 }
 
+/// 解析 `](` 后的链接目标与可选 title（CommonMark §6.3）。
+/// 返回 `(url_start, url_end, end)`：url 区间为内容（不含尖括号），end 为 `)` 之后。
+/// 目标：`<...>`（无换行/未转义尖括号）或裸目标（无空格/换行/控制字符，括号须平衡）。
+/// title：`"..."` / `'...'` / `(...)`（无换行，未转义闭标记结束）。
+fn parse_link_dest(s: &str, start: usize) -> Option<(usize, usize, usize)> {
+    let b = s.as_bytes();
+    let mut pos = start;
+    // 跳过前导空白（含换行——CommonMark 允许组件间空白含换行）
+    while pos < b.len() && matches!(b[pos], b' ' | b'\t' | b'\n' | b'\r') {
+        pos += 1;
+    }
+    let (url_start, url_end);
+    if pos < b.len() && b[pos] == b'<' {
+        // 尖括号目标
+        let cs = pos + 1;
+        let mut i = cs;
+        loop {
+            if i >= b.len() {
+                return None;
+            }
+            match b[i] {
+                b'>' => {
+                    let inner = &s[cs..i];
+                    if inner.contains('\n') || inner.contains('\r') {
+                        return None;
+                    }
+                    url_start = cs;
+                    url_end = i;
+                    pos = i + 1;
+                    break;
+                }
+                b'\\' if i + 1 < b.len() => i += 2,
+                b'<' | b'\n' | b'\r' => return None,
+                _ => i += 1,
+            }
+        }
+    } else {
+        // 裸目标
+        let mut depth: u32 = 0;
+        let mut i = pos;
+        loop {
+            if i >= b.len() {
+                return None; // 无 `)` 闭合
+            }
+            match b[i] {
+                b')' => {
+                    if depth == 0 {
+                        url_start = pos;
+                        url_end = i;
+                        pos = i;
+                        break;
+                    }
+                    depth -= 1;
+                    i += 1;
+                }
+                b'(' => {
+                    depth += 1;
+                    i += 1;
+                }
+                b'\\' if i + 1 < b.len() => i += 2,
+                b' ' | b'\t' | b'\n' | b'\r' => {
+                    url_start = pos;
+                    url_end = i;
+                    pos = i;
+                    break;
+                }
+                c if c <= 0x1f || c == 0x7f => return None,
+                _ => i += 1,
+            }
+        }
+        if depth > 0 {
+            return None; // 括号未平衡
+        }
+    }
+    // 跳过目标后空白（含换行）
+    while pos < b.len() && matches!(b[pos], b' ' | b'\t' | b'\n' | b'\r') {
+        pos += 1;
+    }
+    // 可选 title
+    if pos < b.len() && matches!(b[pos], b'"' | b'\'' | b'(') {
+        let close = match b[pos] {
+            b'"' => b'"',
+            b'\'' => b'\'',
+            _ => b')',
+        };
+        pos += 1;
+        loop {
+            if pos >= b.len() {
+                return None;
+            }
+            match b[pos] {
+                b'\\' if pos + 1 < b.len() => pos += 2,
+                b'\n' | b'\r' => return None,
+                c if c == close => {
+                    pos += 1;
+                    break;
+                }
+                _ => pos += 1,
+            }
+        }
+        while pos < b.len() && matches!(b[pos], b' ' | b'\t' | b'\n' | b'\r') {
+            pos += 1;
+        }
+    }
+    if pos < b.len() && b[pos] == b')' {
+        Some((url_start, url_end, pos + 1))
+    } else {
+        None
+    }
+}
+
+/// 代码段闭 run：从 `open`（开 run 起点，长 `len`）之后寻找等长反引号 run，
+/// 返回其结束位置；空内容（闭 run 紧贴开 run）与无等长 run 均返回 None。
+/// 供链接括号配对扫描跳过代码段（段内方括号不参与配对）。
+fn code_span_close(s: &str, open: usize, len: usize) -> Option<usize> {
+    let b = s.as_bytes();
+    let mut i = open + len;
+    while i < b.len() {
+        if b[i] == b'`' {
+            let run = s[i..].bytes().take_while(|&c| c == b'`').count();
+            if run == len {
+                // 与 try_code_span 一致：空内容不成代码段，且不再向后找
+                return (i > open + len).then_some(i + run);
+            }
+            i += run;
+        } else {
+            i += 1;
+        }
+    }
+    None
+}
+
+/// 行内 HTML 标签/自动链接的结束位置（`>` 之后）：`lt` 处 `<` 后须接字母或 /!?，
+/// 且其后存在 `>`；否则返回 None（按普通字符处理）。
+fn html_tag_end(s: &str, lt: usize) -> Option<usize> {
+    let b = s.as_bytes();
+    let tag_like = matches!(b.get(lt + 1), Some(c) if c.is_ascii_alphabetic()
+        || *c == b'/' || *c == b'!' || *c == b'?');
+    if !tag_like {
+        return None;
+    }
+    s[lt..].find('>').map(|rel| lt + rel + 1)
+}
+
 struct InlineParser<'a> {
     s: &'a str,
     base: usize,
@@ -288,7 +433,7 @@ impl<'a> InlineParser<'a> {
                     .or_else(|| self.try_code_span())
                     .or_else(|| self.try_math())
                     .or_else(|| self.try_strikethrough(depth))
-                    .or_else(|| self.try_image(depth))
+                    .or_else(|| self.try_image())
                     .or_else(|| {
                         if allow_link {
                             self.try_link(depth)
@@ -315,6 +460,13 @@ impl<'a> InlineParser<'a> {
                 let c = self.s[self.pos..].chars().next().unwrap();
                 let adv = if c == '`' {
                     self.s[self.pos..].bytes().take_while(|&b| b == b'`').count()
+                } else if c == '<' {
+                    // 行内 HTML/自动链接形态整段跳过：标签内的 `[`/`]`/`*` 等不参与
+                    // 行内解析（#0536：标签属性里的 `[ref]` 不成链）
+                    match html_tag_end(self.s, self.pos) {
+                        Some(end) => end - self.pos,
+                        None => 1,
+                    }
                 } else {
                     c.len_utf8()
                 };
@@ -496,51 +648,40 @@ impl<'a> InlineParser<'a> {
     }
 
     /// `[text](url)` / `[text][label]` / `[text][]` / `[text]`（shortcut）。
-    /// 文本可嵌套除 Link 外的任意 inline；inline 形式 URL 扫至首个 `)`。
-    /// 引用式查文档引用表，url 指向定义处 dest 绝对区间；查无定义按纯文本。
+    /// 闭合 `]` 由括号栈配对定位（cmark 语义）：文本可含成对嵌套方括号（#0512）；
+    /// 内层 `[...]` 先配对，内层成链则本开括号失效——链接不可嵌套链接（#0519/#0533）。
+    /// 文本可嵌套除 Link 外的任意 inline。引用式查文档引用表，url 指向定义处 dest
+    /// 绝对区间；查无定义按纯文本。
     fn try_link(&mut self, depth: usize) -> Option<InlineNode> {
         if !self.s[self.pos..].starts_with('[') {
             return None;
         }
         let start = self.pos;
-        self.pos = start + 1;
-        let children = self.parse_until(Some("]"), false, depth + 1);
-        let text_end = self.pos;
-        if !self.s[text_end..].starts_with(']') {
-            self.pos = start;
-            return None;
-        }
+        let text_end = self.link_close(start + 1, false)?;
         // 分支 1：`](` inline 链接（优先于引用式）
         if self.s[text_end..].starts_with("](") {
-            let url_start = text_end + 2;
-            let rel = match self.s[url_start..].find(')') {
-                Some(r) => r,
-                None => {
-                    self.pos = start;
-                    return None;
-                }
-            };
-            self.pos = url_start + rel + 1;
-            return Some(self.node(
-                InlineKind::Link,
-                start,
-                start + 1,
-                text_end,
-                Some((url_start, url_start + rel)),
-                children,
-            ));
+            let after_open = text_end + 2;
+            if let Some((url_s, url_e, end)) = parse_link_dest(self.s, after_open) {
+                let children = self.link_children(start, text_end, depth);
+                self.pos = end;
+                return Some(self.node(
+                    InlineKind::Link,
+                    start,
+                    start + 1,
+                    text_end,
+                    Some((url_s, url_e)),
+                    children,
+                ));
+            }
+            // 目标/title 不合法：回退到 shortcut 引用（#0568）
         }
         // 分支 2：`][label]` full / `][]` collapsed（查无定义即纯文本，不再试 shortcut）
         if self.s[text_end..].starts_with("][") {
             let ls = text_end + 2;
-            let Some(rel) = self.s[ls..].find(']') else {
-                self.pos = start;
-                return None;
-            };
+            let rel = self.s[ls..].find(']')?;
             let le = ls + rel;
             // label 不可含 `[`、长度 ≤999；空 label（collapsed）取链接文本
             if self.s[ls..le].contains('[') || le - ls > 999 {
-                self.pos = start;
                 return None;
             }
             let label_src = if le == ls {
@@ -548,71 +689,136 @@ impl<'a> InlineParser<'a> {
             } else {
                 &self.s[ls..le]
             };
-            let Some(&(dest, _)) = self.refs.get(&normalize_label(label_src)) else {
-                self.pos = start;
-                return None;
-            };
+            let &(dest, _) = self.refs.get(&normalize_label(label_src))?;
+            let children = self.link_children(start, text_end, depth);
             self.pos = le + 1;
             let mut n = self.node(InlineKind::Link, start, start + 1, text_end, None, children);
             n.url = Some(dest); // 绝对区间：定义处 dest
             return Some(n);
         }
         // 分支 3：shortcut——以链接文本为 label 查表
-        let Some(&(dest, _)) = self.refs.get(&normalize_label(&self.s[start + 1..text_end]))
-        else {
-            self.pos = start;
-            return None;
-        };
+        let &(dest, _) = self
+            .refs
+            .get(&normalize_label(&self.s[start + 1..text_end]))?;
+        let children = self.link_children(start, text_end, depth);
         self.pos = text_end + 1;
         let mut n = self.node(InlineKind::Link, start, start + 1, text_end, None, children);
         n.url = Some(dest);
         Some(n)
     }
 
-    /// `![alt](url)` / `![alt][label]` / `![alt][]` / `![alt]`：alt 可空、可嵌套 inline。
-    /// 未闭合、缺 `]` 或引用查无定义按纯文本处理。
-    fn try_image(&mut self, depth: usize) -> Option<InlineNode> {
+    /// 链接文本子节点：文本区间已知为 (start, text_end)，子解析不再被 `]` 截断
+    /// （嵌套方括号已由 link_close 平衡）；文本内不允许 Link（allow_link=false）。
+    fn link_children(&self, start: usize, text_end: usize, depth: usize) -> Vec<InlineNode> {
+        let mut sub = InlineParser {
+            s: &self.s[start + 1..text_end],
+            base: self.base + start + 1,
+            refs: self.refs,
+            pos: 0,
+        };
+        sub.parse_until(None, false, depth + 1)
+    }
+
+    /// 定位与本开括号（`from` 为其后一字节）配对的闭合 `]`，括号栈模拟 cmark：
+    /// 内部 `[` 压栈，`]` 先配对内层；内层成链且本开括号为链接时返回 None
+    /// （成链仅淘汰链接开括号，图片开括号存活——#0520/#0575）；内层配对失败仅
+    /// 消耗内层开括号。代码段/行内 HTML/自动链接内的方括号不参与配对（#0524/#0536）。
+    fn link_close(&self, from: usize, ours_is_image: bool) -> Option<usize> {
+        let b = self.s.as_bytes();
+        let mut stack: Vec<usize> = Vec::new();
+        let mut i = from;
+        while i < b.len() {
+            match b[i] {
+                b'\\' if i + 1 < b.len() => i += 2,
+                b'[' => {
+                    stack.push(i);
+                    i += 1;
+                }
+                b']' => match stack.pop() {
+                    None => return Some(i),
+                    Some(o) => {
+                        if self.inner_pair_kills_opener(o, i, ours_is_image) {
+                            return None;
+                        }
+                        i += 1;
+                    }
+                },
+                b'`' => {
+                    // 代码段：等长闭 run 存在则整段跳过；否则开 run 为普通文本
+                    let len = self.s[i..].bytes().take_while(|&c| c == b'`').count();
+                    i = code_span_close(self.s, i, len).unwrap_or(i + len);
+                }
+                b'<' => {
+                    // 行内 HTML / 自动链接：标签内方括号不参与配对
+                    i = html_tag_end(self.s, i).unwrap_or(i + 1);
+                }
+                _ => i += 1,
+            }
+        }
+        None
+    }
+
+    /// 内层配对 (o, p) 成链是否淘汰本开括号：内层为图片开括号（前邻未转义 `!`）
+    /// 永不淘汰（成图不影响任何开括号）；内层成链仅淘汰链接开括号。
+    fn inner_pair_kills_opener(&self, o: usize, p: usize, ours_is_image: bool) -> bool {
+        let b = self.s.as_bytes();
+        if o >= 1 && b[o - 1] == b'!' && (o < 2 || b[o - 2] != b'\\') {
+            return false;
+        }
+        !ours_is_image && self.pair_resolves(o, p)
+    }
+
+    /// 配对 (o, p) 能否成链/成图：`](`+合法目标、`][label]`/`][]`+定义、shortcut+定义。
+    fn pair_resolves(&self, o: usize, p: usize) -> bool {
+        let after = &self.s[p + 1..];
+        if after.starts_with('(') && parse_link_dest(self.s, p + 2).is_some() {
+            return true;
+        }
+        if after.starts_with('[') {
+            let ls = p + 2;
+            let Some(rel) = self.s[ls..].find(']') else {
+                return false;
+            };
+            let le = ls + rel;
+            if self.s[ls..le].contains('[') || le - ls > 999 {
+                return false;
+            }
+            let src = if le == ls { &self.s[o + 1..p] } else { &self.s[ls..le] };
+            return self.refs.contains_key(&normalize_label(src));
+        }
+        self.refs.contains_key(&normalize_label(&self.s[o + 1..p]))
+    }
+
+    /// `![alt](url)` / `![alt][label]` / `![alt][]` / `![alt]`：alt 可空、为纯文本
+    /// （不产生子节点）；闭合 `]` 与链接同一套括号配对。未闭合或查无定义按纯文本。
+    fn try_image(&mut self) -> Option<InlineNode> {
         if !self.s[self.pos..].starts_with("![") {
             return None;
         }
         let start = self.pos;
-        self.pos = start + 2;
-        let children = self.parse_until(Some("]"), false, depth + 1);
-        let alt_end = self.pos;
-        if !self.s[alt_end..].starts_with(']') {
-            self.pos = start;
-            return None;
-        }
+        let alt_end = self.link_close(start + 2, true)?;
         // 分支 1：`](` inline 图片
         if self.s[alt_end..].starts_with("](") {
-            let url_start = alt_end + 2;
-            let rel = match self.s[url_start..].find(')') {
-                Some(r) => r,
-                None => {
-                    self.pos = start;
-                    return None;
-                }
-            };
-            self.pos = url_start + rel + 1;
-            return Some(self.node(
-                InlineKind::Image,
-                start,
-                start + 2,
-                alt_end,
-                Some((url_start, url_start + rel)),
-                children,
-            ));
+            let after_open = alt_end + 2;
+            if let Some((url_s, url_e, end)) = parse_link_dest(self.s, after_open) {
+                self.pos = end;
+                return Some(self.node(
+                    InlineKind::Image,
+                    start,
+                    start + 2,
+                    alt_end,
+                    Some((url_s, url_e)),
+                    Vec::new(),
+                ));
+            }
+            // 目标/title 不合法：回退到 shortcut 引用
         }
         // 分支 2：`][label]` / `][]`
         if self.s[alt_end..].starts_with("][") {
             let ls = alt_end + 2;
-            let Some(rel) = self.s[ls..].find(']') else {
-                self.pos = start;
-                return None;
-            };
+            let rel = self.s[ls..].find(']')?;
             let le = ls + rel;
             if self.s[ls..le].contains('[') || le - ls > 999 {
-                self.pos = start;
                 return None;
             }
             let label_src = if le == ls {
@@ -620,22 +826,18 @@ impl<'a> InlineParser<'a> {
             } else {
                 &self.s[ls..le]
             };
-            let Some(&(dest, _)) = self.refs.get(&normalize_label(label_src)) else {
-                self.pos = start;
-                return None;
-            };
+            let &(dest, _) = self.refs.get(&normalize_label(label_src))?;
             self.pos = le + 1;
-            let mut n = self.node(InlineKind::Image, start, start + 2, alt_end, None, children);
+            let mut n = self.node(InlineKind::Image, start, start + 2, alt_end, None, Vec::new());
             n.url = Some(dest);
             return Some(n);
         }
         // 分支 3：shortcut 图片
-        let Some(&(dest, _)) = self.refs.get(&normalize_label(&self.s[start + 2..alt_end])) else {
-            self.pos = start;
-            return None;
-        };
+        let &(dest, _) = self
+            .refs
+            .get(&normalize_label(&self.s[start + 2..alt_end]))?;
         self.pos = alt_end + 1;
-        let mut n = self.node(InlineKind::Image, start, start + 2, alt_end, None, children);
+        let mut n = self.node(InlineKind::Image, start, start + 2, alt_end, None, Vec::new());
         n.url = Some(dest);
         Some(n)
     }
@@ -671,10 +873,6 @@ mod tests {
 
     fn parse(text: &str) -> Vec<InlineNode> {
         parse_inlines(text, 0, &RefMap::new())
-    }
-
-    fn depth(ns: &[InlineNode]) -> usize {
-        ns.iter().map(|n| 1 + depth(&n.children)).max().unwrap_or(0)
     }
 
     #[test]
@@ -779,12 +977,10 @@ mod tests {
 
     #[test]
     fn nesting_depth_capped_at_max() {
-        // B5 保险丝：`![**` 交替制造 image↔strong 真嵌套（CommonMark 禁止链接嵌套，
-        // 图片 alt 不受限）。0c P1 起强调不再消耗递归深度：16 层 image（MAX_INLINE_DEPTH）
-        // + 其内 15 层 strong（delimiter-run 匹配）= 31；EMPH_MAX_DEPTH=32 下不触发
-        let doc = format!("{}a{}", "![**".repeat(40), "**](u)".repeat(40));
-        let nodes = parse(&doc);
-        assert_eq!(depth(&nodes), 31);
+        // B5 保险丝：超深嵌套不得栈溢出（MAX_INLINE_DEPTH=16）。
+        // image alt 为纯文本（无子节点），嵌套链靠 link→image→link 交替
+        let doc = format!("{}a{}", "[![".repeat(40), "](i)](u)".repeat(40));
+        let _ = parse(&doc); // 不 panic 即通过
     }
 
     #[test]
@@ -795,8 +991,21 @@ mod tests {
 
     #[test]
     fn links_do_not_nest() {
-        // v0 外层贪婪：文本含 `[b`；CommonMark 内层优先——已知分歧
-        assert_eq!(sexp(&parse("[a [b](u)](v)")), "Link[0..9 c=1..5 url=7..8]");
+        // 内层优先（cmark 括号栈语义）：`[b](u)` 成链，外层开括号失效为纯文本
+        assert_eq!(sexp(&parse("[a [b](u)](v)")), "Link[3..9 c=4..5 url=7..8]");
+        // 文本可含成对嵌套方括号（#0512）：内层不成链时外层成链
+        assert_eq!(
+            sexp(&parse("[link [foo [bar]]](/uri)")),
+            "Link[0..24 c=1..17 url=19..23]"
+        );
+        // 内层 `]` 在代码段/行内 HTML 内不参与配对（#0524/#0536）
+        assert!(parse("[foo <bar attr=\"](baz)\">")
+            .iter()
+            .all(|n| n.kind != InlineKind::Link));
+        assert_eq!(
+            sexp(&parse("[a `]` b](u)")),
+            "Link[0..12 c=1..8 url=10..11 Code[3..6 c=4..5]]"
+        );
     }
 
     #[test]
@@ -829,8 +1038,93 @@ mod tests {
 
     #[test]
     fn link_url_stops_at_first_paren() {
-        // v0：URL 扫至首个 `)`，不支持括号转义/嵌套
-        assert_eq!(sexp(&parse("[t](a(b)c)")), "Link[0..8 c=1..2 url=4..7]");
+        // CommonMark：非尖括号 URL 允许平衡括号
+        assert_eq!(sexp(&parse("[t](a(b)c)")), "Link[0..10 c=1..2 url=4..9]");
+        assert_eq!(sexp(&parse("[t](a(b))")), "Link[0..9 c=1..2 url=4..8]");
+        // 未平衡：末尾 `)` 消费后 depth>0，整段非链接
+        assert_eq!(sexp(&parse("[t](a(b)")), "");
+    }
+
+    #[test]
+    fn link_dest_rejects_space() {
+        // #0488：`/my uri` 含空格，非合法目标
+        assert_eq!(sexp(&parse("[link](/my uri)")), "");
+    }
+
+    #[test]
+    fn link_dest_rejects_newline() {
+        // #0490：裸目标不可含换行
+        assert_eq!(sexp(&parse("[link](foo\nbar)")), "");
+        // #0491：尖括号目标同样不可含换行
+        assert_eq!(sexp(&parse("[link](<foo\nbar>)")), "");
+    }
+
+    #[test]
+    fn link_dest_angle_bracket() {
+        // 尖括号目标：内容不含换行/未转义尖括号
+        assert_eq!(
+            sexp(&parse("[t](</my uri>)")),
+            "Link[0..14 c=1..2 url=5..12]"
+        );
+        // #0493：转义 `>` 后无闭合尖括号 → 非链接
+        assert_eq!(sexp(&parse("[link](<foo\\>)")), "");
+        // #0494：`<b)c` 缺闭合尖括号
+        assert_eq!(sexp(&parse("[a](<b)c")), "");
+    }
+
+    #[test]
+    fn link_dest_balanced_parens() {
+        // #0497：`foo(and(bar)` 缺一层闭括号
+        assert_eq!(sexp(&parse("[link](foo(and(bar))")), "");
+        // 平衡括号合法
+        assert_eq!(
+            sexp(&parse("[link](foo(and(bar)))")),
+            "Link[0..21 c=1..5 url=7..20]"
+        );
+    }
+
+    #[test]
+    fn link_dest_with_title() {
+        assert_eq!(
+            sexp(&parse("[t](/url \"title\")")),
+            "Link[0..17 c=1..2 url=4..8]"
+        );
+        assert_eq!(
+            sexp(&parse("[t](/url 'title')")),
+            "Link[0..17 c=1..2 url=4..8]"
+        );
+        assert_eq!(
+            sexp(&parse("[t](/url (title))")),
+            "Link[0..17 c=1..2 url=4..8]"
+        );
+        // #0508：双引号 title 内含未转义 `"`
+        assert_eq!(sexp(&parse("[t](/url \"title \"and\" title\")")), "");
+    }
+
+    #[test]
+    fn link_dest_empty_allowed() {
+        assert_eq!(sexp(&parse("[t]()")), "Link[0..5 c=1..2 url=4..4]");
+    }
+
+    #[test]
+    fn link_dest_multiline_whitespace() {
+        // #0510：`](` 与目标之间、目标与 title 之间允许换行
+        assert_eq!(
+            sexp(&parse("[link](   /uri\n  \"title\"  )")),
+            "Link[0..27 c=1..5 url=10..14]"
+        );
+    }
+
+    #[test]
+    fn link_dest_invalid_falls_back_to_shortcut() {
+        // #0568：`[foo](not a link)` URL 含空格 → inline 链接失败，shortcut 查表
+        let mut refs = RefMap::new();
+        refs.insert(
+            "foo".into(),
+            (crate::range::Range::new(21, 26), None),
+        );
+        let nodes = parse_inlines("[foo](not a link)", 0, &refs);
+        assert_eq!(sexp(&nodes), "Link[0..5 c=1..4 url=21..26]");
     }
 
     // ===== Image（切片 13）：`![alt](url)` =====
@@ -858,10 +1152,10 @@ mod tests {
 
     #[test]
     fn image_alt_may_nest_inline() {
-        // alt 按 inline 解析：`![**b**](u)` 的 alt 内为 Strong
+        // CommonMark：image alt 为纯文本，不产生子节点
         assert_eq!(
             sexp(&parse("![**b**](u)")),
-            "Image[0..11 c=2..7 url=9..10 Strong[2..7 c=4..5]]"
+            "Image[0..11 c=2..7 url=9..10]"
         );
     }
 

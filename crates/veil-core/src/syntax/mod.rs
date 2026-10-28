@@ -21,8 +21,8 @@ pub use model::{BlockId, BlockKind, CellAlign, InlineKind, InlineNode, Table, Ta
 use crate::buffer::Buffer;
 use block::{
     fence_close, fence_open, heading_content_span, is_thematic_break, line_text, list_mark,
-    normalize_label, parse_delim_row, parse_link_ref_def, parse_table_cells, quote_marker_pos,
-    scan_blocks, scan_next, visible_text, RefMap,
+    normalize_label, parse_delim_row, parse_link_ref_def, parse_table_cells, quote_def_lines,
+    quote_link_ref_defs, quote_marker_pos, scan_blocks, scan_next, visible_text, RefMap,
 };
 use inline::parse_inlines;
 
@@ -50,12 +50,13 @@ impl Syntax {
         syntax
     }
 
-    /// 重建引用表：遍历 LinkRefDef 块解析定义文本（first wins）。O(块数) + O(定义数)，
-    /// 击键热路径可接受（定义块稀少；普通块不触碰文本）。
+    /// 重建引用表：遍历 LinkRefDef 块解析定义文本（first wins）；引用块内部经
+    /// 容器剥离后同样扫描（CommonMark：容器内定义对全文档可见，Example 218）。
+    /// O(块数) + O(定义数)，击键热路径可接受（定义块稀少；普通块不触碰文本）。
     fn build_refs(&mut self, buf: &Buffer) {
         self.refs.clear();
         for b in &self.blocks {
-            if b.kind != BlockKind::LinkRefDef {
+            if !matches!(b.kind, BlockKind::LinkRefDef | BlockKind::BlockQuote) {
                 continue;
             }
             let start = buf.offset_of_line(b.start_line);
@@ -65,6 +66,12 @@ impl Syntax {
                 buf.len()
             };
             let text = buf.slice(start, end);
+            if b.kind == BlockKind::BlockQuote {
+                for (label, dest, title) in quote_link_ref_defs(&text, start) {
+                    self.refs.entry(label).or_insert((dest, title));
+                }
+                continue;
+            }
             let Some(ast) = parse_link_ref_def(&text, start) else {
                 continue; // 防御：块种类与解析同源，不应失败
             };
@@ -368,10 +375,16 @@ impl Syntax {
 }
 
 /// 引用块 inline：逐行解析 `>` 与至多一个随行空白之后的内容（base 为行绝对起点）。
+/// 属链接引用定义的行跳过——定义被引用表消耗，不产生 inline（Example 218）。
 fn quote_inlines(text: &str, base: usize, refs: &RefMap) -> Vec<InlineNode> {
+    let defs = quote_def_lines(text);
     let mut out = Vec::new();
     let mut off = 0;
-    for line in text.split_inclusive('\n') {
+    for (idx, line) in text.split_inclusive('\n').enumerate() {
+        if defs.iter().any(|&(s, e)| (s..e).contains(&idx)) {
+            off += line.len();
+            continue;
+        }
         let cs = match quote_marker_pos(line) {
             Some(p) => {
                 let mut e = p + 1;
@@ -420,6 +433,23 @@ mod tests {
             sexp(&s.inlines(&b, id).unwrap()),
             "Strong[2..7 c=4..5] Emph[12..15 c=13..14]"
         );
+    }
+
+    #[test]
+    fn quote_link_ref_def_visible_document_wide() {
+        // Example 218：引用块内的定义对全文档可见，且定义行自身不产生 inline
+        let b = Buffer::new("[foo]\n\n> [foo]: /url\n");
+        let s = Syntax::new(&b);
+        assert_eq!(s.blocks().len(), 2);
+        assert_eq!(
+            sexp(&s.inlines(&b, s.blocks()[0].id).unwrap()),
+            "Link[0..5 c=1..4 url=16..20]"
+        );
+        assert!(s.inlines(&b, s.blocks()[1].id).unwrap().is_empty());
+        // 定义不能打断进行中段落：剥离视图为单段落时不注册（与顶层规则一致）
+        let b2 = Buffer::new("[foo]\n\n> text\n> [foo]: /url\n");
+        let s2 = Syntax::new(&b2);
+        assert!(s2.inlines(&b2, s2.blocks()[0].id).unwrap().is_empty());
     }
 
     #[test]

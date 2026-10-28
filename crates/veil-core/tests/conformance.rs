@@ -1,53 +1,59 @@
 //! CommonMark 0.31.2 一致性门禁（652 例官方规范语料，固化自 P1 评审 harness）。
 //!
-//! 三套判定（口径详见 docs/review/P1-commonmark-conformance.md §2）：
-//! - Suite A：Veil 自有块解析器的顶层块序列 vs 规范期望 HTML 的顶层块标签序列。
+//! 四套判定（口径详见 docs/review/P1-commonmark-conformance.md §2）：
+//! - Suite A：Veil 自有块解析器的顶层「Markdown 生成块」骨架 vs 期望 HTML 的同类骨架
+//!   （原始 HTML 块两侧都不计：源码原样输出，输出侧无法可靠区分；渲染由 Suite B 覆盖）。
 //! - Suite B：产品导出路径复刻（块分段 + pulldown-cmark）的 HTML vs 规范 HTML。
-//! - Suite C：Veil 自有行内节点计数 vs 规范 HTML 行内标签计数（弱判定，视为上限）。
-//! - Suite D（0c P1 行内强调前置门禁）：行内前序森林签名 (kind, depth) 逐例比对，
-//!   覆盖 C 的「计数抵消」盲区（如并列 vs 嵌套 strong 计数相同）。另按 26 节设
-//!   C 分段基线：强调改动只允许目标节改善、任何节不得退化。
+//! - Suite C：Veil 自有行内节点计数 vs pulldown-cmark 源码行内事件计数
+//!   （弱判定；原始 HTML 不产生语义节点，图片子树按 alt 纯文本模型视为叶子）。
+//! - Suite D：行内前序森林签名 (kind, depth) 逐例比对，覆盖 C 的「计数抵消」盲区
+//!   （如并列 vs 嵌套 strong 计数相同）。另按 26 节设 C 分段基线：改动只允许
+//!   目标节改善、任何节不得退化。
 //!
 //! 门禁方向：四套指标只允许改善、不允许退化（`>=` 基线）。修复提升通过率后，
-//! 应同步上调基线常量。已知 A 存在少量工具误判（规范 HTML 为裸行内标签时
-//! 期望序列扫描为空），此类由基线吸收，不计产品缺陷。
+//! 应同步上调基线常量。
 
 use std::collections::BTreeMap;
 use std::fs;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::Path;
 
-use pulldown_cmark::{html, Options, Parser};
+use pulldown_cmark::{html, Event, Options, Parser, Tag, TagEnd};
 use veil_core::{BlockKind, InlineKind, InlineNode, Range, Session};
 
-/// 一致性基线（0c P1 链接目标/图片 alt/引用可见性/括号配对落地后，2026-10-28）。
-/// 本轮收益：C 609→630、D 610→631、条件 C/D 596→617。Links 节 77→90（满分：
-/// 括号栈配对 + 目标/title 解析 + case folding + 容器内定义），Images 16→22
-/// （满分），Link reference definitions 26→27（满分），Entity 15→16。
-const BASELINE_A: usize = 637;
-const BASELINE_B_EXACT: usize = 628;
-const BASELINE_B_CANON: usize = 629;
-const BASELINE_C: usize = 630;
+/// 一致性基线（0d harness 校正后，2026-10-28 实测；只允许改善）。
+/// 本轮变更：
+/// - A 口径改为「Markdown 生成块骨架」，原始 HTML 块两侧都不计（原先按标签深度
+///   扫描期望 HTML，未闭合/嵌套原始标签会把后续生成块误记为嵌套而漏数）。
+/// - C/D 参照改为 pulldown-cmark 源码行内事件（原先从期望 HTML 数标签，会把源码
+///   原样输出的 `<a>`/`<img>`/`<del>` 误计为语义节点），图片子树按 Veil 的
+///   「alt 为纯文本」模型视为叶子。
+/// - 产品侧同步修正：类型 6 块级标签表补齐 table/td/tbody 等 18 个规范标签
+///   （Example 148/160 此前把 `<table>` 行解析成段落）。
+const BASELINE_A: usize = 652;
+const BASELINE_B_EXACT: usize = 629;
+const BASELINE_B_CANON: usize = 630;
+const BASELINE_C: usize = 652;
 /// 条件基线（仅 A 通过时统计）。
-const BASELINE_B_EXACT_WHEN_A: usize = 614;
-const BASELINE_C_WHEN_A: usize = 617;
-/// Suite D 基线（行内结构签名；P2 HTML 块落地后实测）。
-const BASELINE_D: usize = 631;
-const BASELINE_D_WHEN_A: usize = 617;
-/// 分节 C 基线（2026-10-28 链接/图片/引用落地后实测）：任何一节只允许改善。
+const BASELINE_B_EXACT_WHEN_A: usize = 629;
+const BASELINE_C_WHEN_A: usize = 652;
+/// Suite D 基线（行内结构签名；与 C 同源参照）。
+const BASELINE_D: usize = 652;
+const BASELINE_D_WHEN_A: usize = 652;
+/// 分节 C 基线（0d 参照校正后实测，等于各节总例数）：任何一节只允许改善。
 /// 与 SECTIONS 打印同序（BTreeMap 字典序）。
 const BASELINE_C_SECTION: &[(&str, usize)] = &[
     ("ATX headings", 18),
     ("Autolinks", 19),
-    ("Backslash escapes", 12),
+    ("Backslash escapes", 13),
     ("Blank lines", 1),
     ("Block quotes", 25),
-    ("Code spans", 21),
-    ("Emphasis and strong emphasis", 129),
-    ("Entity and numeric character references", 16),
+    ("Code spans", 22),
+    ("Emphasis and strong emphasis", 132),
+    ("Entity and numeric character references", 17),
     ("Fenced code blocks", 29),
-    ("HTML blocks", 36),
-    ("Hard line breaks", 13),
+    ("HTML blocks", 44),
+    ("Hard line breaks", 15),
     ("Images", 22),
     ("Indented code blocks", 12),
     ("Inlines", 1),
@@ -57,7 +63,7 @@ const BASELINE_C_SECTION: &[(&str, usize)] = &[
     ("Lists", 26),
     ("Paragraphs", 8),
     ("Precedence", 1),
-    ("Raw HTML", 14),
+    ("Raw HTML", 20),
     ("Setext headings", 27),
     ("Soft line breaks", 2),
     ("Tabs", 11),
@@ -76,84 +82,93 @@ enum B {
     List,
     Table,
     Rule,
-    Html,
     Other,
 }
 
-fn base_name(tag: &str) -> String {
-    tag.trim_start_matches('/')
-        .split(|c: char| c.is_whitespace() || c == '/')
-        .next()
-        .unwrap_or("")
-        .to_ascii_lowercase()
-}
-
-fn is_void(name: &str) -> bool {
-    matches!(name, "br" | "img" | "hr" | "input" | "meta" | "link")
-}
-
-/// 规范期望 HTML 的顶层块序列（只取块容器，不进入嵌套）。
+/// 期望 HTML 的顶层「Markdown 生成块」序列。
+///
+/// 口径：只看 Markdown 生成块，原始 HTML 块不计——源码原样输出，从输出侧无法与
+/// 生成标签可靠区分（`<div>` 未闭合、`<pre>` 无 `<code>` 等）；其渲染正确性由
+/// Suite B 导出比对覆盖。扫描按行，生成块总是在行首开始标签：
+/// `<p>` / `<hN>` / `<pre><code`（原始 `<pre>` 不算）/ `<blockquote>` /
+/// `<ul>` / `<ol>` / `<hr />`。引用与列表整体折叠为一个顶层块，内部块不进入序列
+/// （与实际块序列口径一致）。
 fn expected_blocks(html: &str) -> Vec<B> {
+    let lines: Vec<&str> = html.split('\n').collect();
     let mut out = Vec::new();
-    let mut depth = 0usize;
-    let mut i = 0usize;
-    while i < html.len() {
-        let Some(off) = html[i..].find('<') else {
-            break;
+    let mut i = 0;
+    while i < lines.len() {
+        let l = lines[i];
+        if l.trim_end() == "<hr />" {
+            out.push(B::Rule);
+            i += 1;
+            continue;
+        }
+        let (b, close): (B, String) = if l.starts_with("<pre><code") {
+            (B::Pre, "</pre>".to_string())
+        } else if l.starts_with("<p>") {
+            (B::P, "</p>".to_string())
+        } else if l.starts_with("<blockquote>") {
+            (B::Quote, "</blockquote>".to_string())
+        } else if l.starts_with("<ul>") || l.starts_with("<ul ") {
+            (B::List, "</ul>".to_string())
+        } else if l.starts_with("<ol>") || l.starts_with("<ol ") {
+            (B::List, "</ol>".to_string())
+        } else if let Some(level) = heading_level(l) {
+            (B::H(level), format!("</h{level}>"))
+        } else {
+            i += 1;
+            continue;
         };
-        i += off;
-        if html[i..].starts_with("<!--") {
-            if depth == 0 {
-                out.push(B::Html);
-            }
-            match html[i..].find("-->") {
-                Some(end) => i += end + 3,
-                None => break,
-            }
-            continue;
-        }
-        let Some(end) = html[i..].find('>') else {
-            break;
+        out.push(b);
+        i = if matches!(b, B::Quote | B::List) {
+            skip_container(&lines, i, &close)
+        } else {
+            skip_until(&lines, i, &close)
         };
-        let tag = &html[i + 1..i + end];
-        let name = base_name(tag);
-        let closing = tag.starts_with('/');
-        let self_closing = tag.ends_with('/');
-        i += end + 1;
-        if closing {
-            depth = depth.saturating_sub(1);
-            continue;
-        }
-        if self_closing || is_void(&name) {
-            if depth == 0 && name == "hr" {
-                out.push(B::Rule);
-            }
-            continue;
-        }
-        if depth == 0 {
-            let b = match name.as_str() {
-                "p" => Some(B::P),
-                "h1" => Some(B::H(1)),
-                "h2" => Some(B::H(2)),
-                "h3" => Some(B::H(3)),
-                "h4" => Some(B::H(4)),
-                "h5" => Some(B::H(5)),
-                "h6" => Some(B::H(6)),
-                "pre" => Some(B::Pre),
-                "blockquote" => Some(B::Quote),
-                "ul" | "ol" => Some(B::List),
-                // CommonMark 规范不含 GFM 表格：<table> 只会来自原始 HTML 块
-                "table" | "div" | "section" | "article" | "script" | "style" | "details"
-                | "summary" => Some(B::Html),
-                _ => None,
-            };
-            if let Some(b) = b {
-                out.push(b);
-            }
-        }
-        depth += 1;
     }
     out
+}
+
+/// 行首生成标题 `<h1>`–`<h6>`（排除 `<hr`、`<html`）。
+fn heading_level(l: &str) -> Option<u8> {
+    let rest = l.strip_prefix("<h")?.as_bytes();
+    match (rest.first(), rest.get(1)) {
+        (Some(d), Some(b'>')) if (b'1'..=b'6').contains(d) => Some(d - b'0'),
+        _ => None,
+    }
+}
+
+/// 单行容器（p/pre/hN）：跳至首个含闭合标签的行。
+fn skip_until(lines: &[&str], mut i: usize, close: &str) -> usize {
+    while i < lines.len() {
+        let hit = lines[i].contains(close);
+        i += 1;
+        if hit {
+            break;
+        }
+    }
+    i
+}
+
+/// 引用/列表容器：按开关标签计深度，跳过整个容器（嵌套块不进入顶层序列）。
+fn skip_container(lines: &[&str], mut i: usize, close: &str) -> usize {
+    let mut depth = 0i32;
+    while i < lines.len() {
+        let l = lines[i];
+        if close == "</blockquote>" {
+            depth += l.matches("<blockquote").count() as i32;
+            depth -= l.matches("</blockquote").count() as i32;
+        } else {
+            depth += l.matches("<ul").count() as i32 + l.matches("<ol").count() as i32;
+            depth -= l.matches("</ul>").count() as i32 + l.matches("</ol>").count() as i32;
+        }
+        i += 1;
+        if depth <= 0 {
+            break;
+        }
+    }
+    i
 }
 
 /// Veil 自有块解析器的顶层块序列；同签名的连续列表项折叠为一个 List（与规范
@@ -187,31 +202,8 @@ fn actual_blocks(s: &Session) -> Vec<B> {
             BlockKind::BlockQuote => B::Quote,
             BlockKind::ThematicBreak => B::Rule,
             BlockKind::LinkRefDef => continue,
-            BlockKind::HtmlBlock => {
-                // 按首行首标签映射：<pre → Pre；<script/style/div/table/section/
-                // article/details/summary 或注释 → Html；其余（<a>、</div>、
-                // <!DOCTYPE、<Warning> 等）跳过（与 LinkRefDef 同，规范期望序列
-                // 中此类不对应顶层块）。
-                let text = s.text_slice(range).unwrap_or_default();
-                let first = text.split_inclusive('\n').next().unwrap_or(&text);
-                let t = first.trim_start();
-                if t.starts_with("<pre") {
-                    B::Pre
-                } else if t.starts_with("<!--")
-                    || t.starts_with("<script")
-                    || t.starts_with("<style")
-                    || t.starts_with("<div")
-                    || t.starts_with("<table")
-                    || t.starts_with("<section")
-                    || t.starts_with("<article")
-                    || t.starts_with("<details")
-                    || t.starts_with("<summary")
-                {
-                    B::Html
-                } else {
-                    continue;
-                }
-            }
+            // 原始 HTML 块与期望侧口径一致：整体不计入顶层生成块序列（Suite B 覆盖渲染）。
+            BlockKind::HtmlBlock => continue,
             BlockKind::ListItem { .. } => unreachable!("列表项已在上方处理"),
         };
         out.push(b);
@@ -319,51 +311,80 @@ struct Counts {
     del: usize,
 }
 
-fn expected_inline(html: &str) -> Counts {
+/// 行内参照：pulldown-cmark（CommonMark 参考实现）在源码上的行内事件。
+/// 原始 HTML 以 `Event::Html` 透传，不产生 Link/Image/Del 事件，因此天然避开
+/// 「期望 HTML 中源码原样输出的 `<a>`/`<img>`/`<del>` 被误计」的问题。
+/// 返回 (计数, 前序签名)；Math 不计（与 Veil 口径一致）。
+fn reference_inline(md: &str) -> (Counts, Vec<(&'static str, usize)>) {
+    fn start_kind(tag: &Tag) -> Option<&'static str> {
+        match tag {
+            Tag::Emphasis => Some("em"),
+            Tag::Strong => Some("strong"),
+            Tag::Link { .. } => Some("link"),
+            Tag::Image { .. } => Some("image"),
+            Tag::Strikethrough => Some("del"),
+            _ => None,
+        }
+    }
+    fn end_kind(end: &TagEnd) -> Option<&'static str> {
+        match end {
+            TagEnd::Emphasis => Some("em"),
+            TagEnd::Strong => Some("strong"),
+            TagEnd::Link => Some("link"),
+            TagEnd::Image => Some("image"),
+            TagEnd::Strikethrough => Some("del"),
+            _ => None,
+        }
+    }
+    let opts = Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
     let mut c = Counts::default();
-    let mut pre = 0i32;
-    let mut i = 0usize;
-    while i < html.len() {
-        let Some(off) = html[i..].find('<') else {
-            break;
-        };
-        i += off;
-        if html[i..].starts_with("<!--") {
-            match html[i..].find("-->") {
-                Some(e) => i += e + 3,
-                None => break,
+    let mut sig = Vec::new();
+    let mut stack: Vec<&'static str> = Vec::new();
+    // Veil 模型：图片 alt 为纯文本、不产生子节点（CommonMark 描述内可含行内标记，
+    // 渲染时并入 alt 文本）。参照侧同口径：图片子树整体视为叶子。
+    let mut image_depth = 0usize;
+    for ev in Parser::new_ext(md, opts) {
+        if image_depth > 0 {
+            match ev {
+                Event::Start(Tag::Image { .. }) => image_depth += 1,
+                Event::End(TagEnd::Image) => image_depth -= 1,
+                _ => {}
             }
             continue;
         }
-        let Some(end) = html[i..].find('>') else {
-            break;
-        };
-        let tag = &html[i + 1..i + end];
-        let name = base_name(tag);
-        let closing = tag.starts_with('/');
-        let self_closing = tag.ends_with('/');
-        i += end + 1;
-        if closing {
-            if name == "pre" {
-                pre -= 1;
+        match ev {
+            Event::Start(Tag::Image { .. }) => {
+                c.image += 1;
+                sig.push(("image", stack.len()));
+                image_depth = 1;
             }
-            continue;
-        }
-        match name.as_str() {
-            "strong" => c.strong += 1,
-            "em" => c.emph += 1,
-            "code" if pre == 0 => c.code += 1,
-            "a" => c.link += 1,
-            "img" => c.image += 1,
-            "del" => c.del += 1,
+            Event::Start(tag) => {
+                if let Some(k) = start_kind(&tag) {
+                    match k {
+                        "em" => c.emph += 1,
+                        "strong" => c.strong += 1,
+                        "link" => c.link += 1,
+                        _ => c.del += 1,
+                    }
+                    sig.push((k, stack.len()));
+                    stack.push(k);
+                }
+            }
+            Event::End(end) => {
+                if let Some(k) = end_kind(&end) {
+                    if stack.last() == Some(&k) {
+                        stack.pop();
+                    }
+                }
+            }
+            Event::Code(_) => {
+                c.code += 1;
+                sig.push(("code", stack.len()));
+            }
             _ => {}
         }
-        if name == "pre" {
-            pre += 1;
-        }
-        let _ = self_closing;
     }
-    c
+    (c, sig)
 }
 
 fn actual_inline(s: &Session) -> Counts {
@@ -392,63 +413,7 @@ fn actual_inline(s: &Session) -> Counts {
 
 // ===== Suite D：行内前序森林签名 (kind, depth) =====
 
-/// 规范 HTML 的行内标签前序签名。标签栈给出深度；`<img>` 为 void 不入栈；
-/// `<pre>` 内的 `<code>` 是块级代码，整段忽略。栈失配（语料中不会出现）静默忽略，
-/// 避免单点工具问题级联成大量噪声失败。
-fn expected_inline_structure(html: &str) -> Vec<(&'static str, usize)> {
-    let mut out = Vec::new();
-    let mut stack: Vec<&'static str> = Vec::new();
-    let mut pre = 0i32;
-    let mut i = 0usize;
-    while i < html.len() {
-        let Some(off) = html[i..].find('<') else {
-            break;
-        };
-        i += off;
-        if html[i..].starts_with("<!--") {
-            match html[i..].find("-->") {
-                Some(e) => i += e + 3,
-                None => break,
-            }
-            continue;
-        }
-        let Some(end) = html[i..].find('>') else {
-            break;
-        };
-        let tag = &html[i + 1..i + end];
-        let name = base_name(tag);
-        let closing = tag.starts_with('/');
-        let self_closing = tag.ends_with('/');
-        i += end + 1;
-        if name == "pre" {
-            pre += if closing { -1 } else { 1 };
-            continue;
-        }
-        if pre > 0 {
-            continue;
-        }
-        let kind = match name.as_str() {
-            "strong" => "strong",
-            "em" => "em",
-            "code" => "code",
-            "a" => "link",
-            "img" => "image",
-            "del" => "del",
-            _ => continue,
-        };
-        if closing {
-            if stack.last() == Some(&kind) {
-                stack.pop();
-            }
-            continue;
-        }
-        out.push((kind, stack.len()));
-        if !self_closing && kind != "image" {
-            stack.push(kind);
-        }
-    }
-    out
-}
+// 期望侧签名由 `reference_inline` 一并产出（与 Suite C 同源），见上方。
 
 /// Veil 行内树的前序签名；Math 不产生标签（与 C 口径一致）。
 fn actual_inline_structure(s: &Session) -> Vec<(&'static str, usize)> {
@@ -559,7 +524,7 @@ fn commonmark_0_31_2_conformance() {
                 let body_html = body.replace("\r\n", "\n");
                 let be_ok = exp_html == body_html;
                 let bc_ok = canonical(&exp_html) == canonical(&body_html);
-                let ec = expected_inline(&expected);
+                let (ec, esig) = reference_inline(&md);
                 let c_ok = ec == counts;
                 if be_ok {
                     b_exact += 1;
@@ -575,7 +540,6 @@ fn commonmark_0_31_2_conformance() {
                 } else if c_fail.len() < 60 {
                     c_fail.push(format!("#{id} {section}: expected={ec:?} actual={counts:?}"));
                 }
-                let esig = expected_inline_structure(&expected);
                 let d_ok = esig == asig;
                 if d_ok {
                     d_pass += 1;

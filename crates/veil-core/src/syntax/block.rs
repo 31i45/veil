@@ -1140,11 +1140,13 @@ enum HtmlStart {
 /// 块级标签名（CommonMark §4.6 类型 6 列表，全部小写）。
 const BLOCK_LEVEL_TAGS: &[&str] = &[
     "address", "article", "aside", "base", "basefont", "blockquote", "body", "caption",
-    "center", "col", "colgroup", "dd", "details", "dialog", "dir", "div", "dl", "dt",
+    "center", "col", "colgroup", "dd", "details", "dialog", "dir", "div", "dl", "dt", "embed",
     "fieldset", "figcaption", "figure", "footer", "form", "frame", "frameset", "h1", "h2",
     "h3", "h4", "h5", "h6", "head", "header", "hr", "html", "iframe", "legend", "li", "link",
-    "main", "menu", "menuitem", "nav", "noframes", "ol", "optgroup", "option", "p", "param",
-    "section", "source", "title", "tr", "track", "ul",
+    "main", "menu", "menuitem", "nav", "noframes", "ol", "optgroup", "option", "output", "p",
+    "param", "picture", "progress", "rb", "rp", "rt", "rtc", "ruby", "section", "source",
+    "summary", "table", "tbody", "td", "template", "textarea", "tfoot", "th", "thead", "title",
+    "tr", "track", "ul", "video",
 ];
 
 /// 判定行首是否为 HTML 块起始；返回起始类型（含终止方式）。

@@ -27,3 +27,34 @@ pub trait ImageLoader {
 pub trait AssetStore {
     fn save_pasted_image(&mut self, doc: &Path, image: &ImageData) -> Result<String, String>;
 }
+
+/// 图片扩展名判定（拖拽分流，阶段 1）：按小写扩展名认 PNG/JPEG/WebP 等常见位图。
+/// 只做「像不像图片」，不承诺可解码——真正能否解码由 `ImageLoader` 实现决定，
+/// 解码失败时调用方提示并保持文档不变。
+pub(crate) fn is_image_path(path: &Path) -> bool {
+    let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
+        return false;
+    };
+    matches!(
+        ext.to_ascii_lowercase().as_str(),
+        "png" | "jpg" | "jpeg" | "jfif" | "bmp" | "gif" | "webp" | "tif" | "tiff" | "ico"
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_image_path;
+    use std::path::Path;
+
+    #[test]
+    fn image_extensions_are_case_insensitive() {
+        for p in [
+            "a.png", "a.PNG", "a.jpg", "a.JPEG", "a.bmp", "a.gif", "a.webp", "a.TiFf", "a.ico",
+        ] {
+            assert!(is_image_path(Path::new(p)), "{p} 应识别为图片");
+        }
+        for p in ["a.md", "a.txt", "a", "a.png.txt", "a.js"] {
+            assert!(!is_image_path(Path::new(p)), "{p} 不应识别为图片");
+        }
+    }
+}

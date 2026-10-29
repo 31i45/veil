@@ -178,17 +178,51 @@ impl App {
         let Some(img) = self.ports.clipboard.get_image() else {
             return;
         };
+        self.insert_image_data(&img);
+    }
+
+    /// 位图插入（切片 14 / 阶段 1 拖拽共用）：落盘 `<doc>.assets/` 并插入 `![](相对路径)`。
+    /// 草稿（无关联文件）拒绝（无写入基准），文档不变、不置脏；落盘失败同样保持原样并提示。
+    pub(crate) fn insert_image_data(&mut self, img: &crate::image::ImageData) {
         let Some(doc) = self.doc.path.clone() else {
             self.ui_state.chrome.notice = "图片粘贴需要关联文件（草稿无落盘目录）".into();
             eprintln!("图片粘贴需要关联文件（草稿无落盘目录）");
             self.request_redraw();
             return;
         };
-        match self.ports.assets.save_pasted_image(&doc, &img) {
+        match self.ports.assets.save_pasted_image(&doc, img) {
             Ok(rel) => self.insert_paste(&format!("![]({rel})")),
             Err(e) => {
                 self.ui_state.chrome.notice = format!("图片落盘失败: {e}");
                 eprintln!("图片落盘失败（文档未改动）: {e}");
+                self.request_redraw();
+            }
+        }
+    }
+
+    /// 拖拽悬停（阶段 1）：记录文件名供绘制落点提示；离开窗口（None）清空。
+    pub(crate) fn hover_file(&mut self, path: Option<std::path::PathBuf>) {
+        self.input_state.drop_file = path;
+        self.request_redraw();
+    }
+
+    /// 拖放文件（阶段 1）：图片解码后插入落点；其余文件按文档打开。
+    /// 落点 = 拖拽期间的鼠标位置（未命中正文时沿用当前光标）。
+    pub(crate) fn drop_file(&mut self, path: std::path::PathBuf) {
+        self.input_state.drop_file = None;
+        // 拖放是文档级动作：先收起浮层/菜单，避免编辑与浮层共存
+        self.close_quick();
+        self.ui_state.chrome.close();
+        if !crate::image::is_image_path(&path) {
+            self.open_path(path);
+            return;
+        }
+        self.point_caret(false); // 图片插入点 = 鼠标落点
+        match self.ports.images.load(&path) {
+            Ok(img) => self.insert_image_data(&img),
+            Err(e) => {
+                self.ui_state.chrome.notice = format!("图片读取失败: {e}");
+                eprintln!("图片读取失败（文档未改动）{}: {e}", path.display());
                 self.request_redraw();
             }
         }

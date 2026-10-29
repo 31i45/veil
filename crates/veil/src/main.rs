@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use veil_egui::{decode, Doc, FileStore, ImageData, MathImage};
 
 /// 无 CLI 参数时的示例文档，覆盖全部渲染路径：标题/粗体/斜体/代码/链接/行内公式/展示公式/代码块/中文。
-const SAMPLE: &str = "# Veil 切片 8\n\n支持 **粗体**、*斜体*、`行内代码`、[链接](https://example.com) 与行内公式 $x^2 + y^2 = z^2$（光标移出渲染为图、移入显示源码）。\n\n块级公式（同规则，渲染图居中）：\n\n$$\n\\frac{a + b}{\\sqrt{c^2 + 1}} = \\sum_{k=0}^{n} k^2\n$$\n\n```\nfn main() { /* 代码块等宽 */ }\n```\n\n中文混排与 IME 输入：请用中文输入法在此段尾部打字验证候选框跟随。\n\n本页为无路径草稿：可拖入 .md 文件打开；Ctrl+S 保存与 Ctrl+E 导出 HTML 仅对关联文件生效。\n";
+const SAMPLE: &str = "# Veil 切片 8\n\n支持 **粗体**、*斜体*、`行内代码`、[链接](https://example.com) 与行内公式 $x^2 + y^2 = z^2$（光标移出渲染为图、移入显示源码）。\n\n块级公式（同规则，渲染图居中）：\n\n$$\n\\frac{a + b}{\\sqrt{c^2 + 1}} = \\sum_{k=0}^{n} k^2\n$$\n\n```\nfn main() { /* 代码块等宽 */ }\n```\n\n中文混排与 IME 输入：请用中文输入法在此段尾部打字验证候选框跟随。\n\n本页为无路径草稿：可拖入 .md 文件打开；关联文件后可直接拖入 PNG/JPEG 等图片插入正文（Ctrl+S 保存与 Ctrl+E 导出 HTML 仅对关联文件生效）。\n";
 
 fn main() {
     let doc = match std::env::args().nth(1) {
@@ -199,13 +199,19 @@ fn decode_png_rgba(png: &[u8]) -> Result<ImageData, String> {
     })
 }
 
-/// 文档内图片加载器（切片 13）：std 读文件 + png 解码。v0 仅 PNG；其余格式经
-/// Err 降级 alt 文本（视图侧失败记忆，不每帧重试）。
+/// 文档内图片加载器（切片 13 + 阶段 1）：std 读文件；PNG 走 png 解码，
+/// 其余位图格式经 WIC。失败返回 Err 由视图降级 alt 文本（不每帧重试）。
 struct FsImages;
 impl veil_egui::ImageLoader for FsImages {
     fn load(&mut self, path: &Path) -> Result<ImageData, String> {
         let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
-        decode_png_rgba(&bytes)
+        // PNG 走既有 png 解码（调色板/灰度/16-bit 经 png 变换展开）；
+        // 其余格式（JPEG/WebP/BMP/GIF/TIFF）经 WIC，系统缺编解码器时返回可读错误
+        if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+            decode_png_rgba(&bytes)
+        } else {
+            platform::decode_image(path)
+        }
     }
 }
 
@@ -513,6 +519,32 @@ mod tests {
             decode_png_rgba(b"not a png").is_err(),
             "非 PNG → Err（视图降级 alt）"
         );
+    }
+
+    /// 阶段 1：JPEG 经 WIC 解码（系统内建编解码器）——1×1 红像素夹具。
+    #[cfg(windows)]
+    #[test]
+    fn image_loader_decodes_jpeg_via_wic() {
+        let path = std::env::temp_dir().join(format!("veil-img-{}.jpg", std::process::id()));
+        std::fs::write(&path, include_bytes!("../tests/fixtures/red.jpg")).unwrap();
+        let got = FsImages.load(&path);
+        std::fs::remove_file(&path).ok();
+        let img = got.expect("JPEG 应经 WIC 解码");
+        assert_eq!((img.width, img.height), (1, 1));
+        assert_eq!(img.pixels.len(), 4, "RGBA8 单像素");
+        assert!(img.pixels[0] > 200, "红色通道保留: {:?}", img.pixels);
+        assert!(img.pixels[3] > 0, "alpha 不透明");
+    }
+
+    /// 阶段 1：损坏的非 PNG 文件返回可读错误而非 panic（视图降级 alt）。
+    #[cfg(windows)]
+    #[test]
+    fn image_loader_reports_wic_failure() {
+        let path = std::env::temp_dir().join(format!("veil-bad-{}.jpg", std::process::id()));
+        std::fs::write(&path, b"not an image").unwrap();
+        let got = FsImages.load(&path);
+        std::fs::remove_file(&path).ok();
+        assert!(got.is_err(), "垃圾字节应解码失败");
     }
 
     // ---- 图片粘贴资产（切片 14）：safe_stem 防穿越、目录命名、递增避让、PNG 往返 ----

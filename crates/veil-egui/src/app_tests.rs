@@ -872,6 +872,149 @@ fn paste_image_asset_failure_keeps_document_unchanged() {
     assert_eq!(f.calls.borrow().len(), 1);
 }
 
+// ---- 拖放（阶段 1）：图片插入落点；非图片按文档打开 ----
+
+struct DropFixture {
+    app: App,
+    images: Rc<RefCell<Vec<PathBuf>>>,
+    assets: Rc<RefCell<Vec<(PathBuf, u32, u32)>>>,
+}
+
+fn app_drop(
+    text: &str,
+    path: Option<&str>,
+    files: &[(&str, u32, u32)],
+    assets: Result<String, String>,
+) -> DropFixture {
+    let images = Rc::new(RefCell::new(Vec::new()));
+    let asset_calls = Rc::new(RefCell::new(Vec::new()));
+    let map = files
+        .iter()
+        .map(|(p, w, h)| (PathBuf::from(*p), (*w, *h)))
+        .collect();
+    let doc = Doc {
+        text: text.into(),
+        path: path.map(PathBuf::from),
+        bom: false,
+        resume: false,
+    };
+    let m = FakeMath {
+        fail: false,
+        calls: Rc::new(RefCell::new(Vec::new())),
+    };
+    let app = App::new(
+        doc,
+        Box::new(NoClip),
+        Box::new(MemStore::default()),
+        Box::new(m),
+        Box::new(FakeImages {
+            files: map,
+            calls: images.clone(),
+        }),
+        Box::new(FakeAssets {
+            result: assets,
+            calls: asset_calls.clone(),
+        }),
+        Box::new(NoExport),
+        Box::new(NoDialogs),
+        Box::new(NoWatcher),
+        theme::test_support::env(),
+        persist_env(),
+    );
+    DropFixture {
+        app,
+        images,
+        assets: asset_calls,
+    }
+}
+
+#[test]
+fn drop_image_inserts_link_at_drop_point() {
+    let mut f = app_drop(
+        "ab",
+        Some("dir/notes.md"),
+        &[("pic.png", 4, 2)],
+        Ok("notes.assets/image-1.png".into()),
+    );
+    f.app.drop_file(PathBuf::from("pic.png"));
+    assert_eq!(doc_text(&f.app), "![](notes.assets/image-1.png)ab");
+    assert!(f.app.editor.is_dirty(), "插入图片须置脏");
+    assert_eq!(f.images.borrow().as_slice(), &[PathBuf::from("pic.png")]);
+    assert_eq!(
+        *f.assets.borrow(),
+        vec![(PathBuf::from("dir/notes.md"), 4, 2)],
+        "解码位图原样交给资产层"
+    );
+    assert!(f.app.input_state.drop_file.is_none(), "松开后提示清空");
+}
+
+#[test]
+fn drop_image_requires_document_path() {
+    let mut f = app_drop(
+        "ab",
+        None,
+        &[("pic.png", 2, 2)],
+        Ok("x.assets/i.png".into()),
+    );
+    f.app.drop_file(PathBuf::from("pic.png"));
+    assert_eq!(doc_text(&f.app), "ab");
+    assert!(!f.app.editor.is_dirty());
+    assert!(f.assets.borrow().is_empty(), "草稿不得落盘资产");
+    assert!(f.app.ui_state.chrome.notice.contains("草稿"));
+}
+
+#[test]
+fn drop_image_decode_failure_keeps_document() {
+    let mut f = app_drop(
+        "ab",
+        Some("dir/notes.md"),
+        &[],
+        Ok("notes.assets/image-1.png".into()),
+    );
+    f.app.drop_file(PathBuf::from("bad.jpg"));
+    assert_eq!(doc_text(&f.app), "ab");
+    assert!(!f.app.editor.is_dirty());
+    assert!(f.assets.borrow().is_empty());
+    assert!(f.app.ui_state.chrome.notice.contains("图片读取失败"));
+}
+
+#[test]
+fn drop_image_asset_failure_keeps_document() {
+    let mut f = app_drop(
+        "ab",
+        Some("dir/notes.md"),
+        &[("pic.png", 2, 2)],
+        Err("磁盘只读".into()),
+    );
+    f.app.drop_file(PathBuf::from("pic.png"));
+    assert_eq!(doc_text(&f.app), "ab");
+    assert!(!f.app.editor.is_dirty());
+    assert_eq!(f.assets.borrow().len(), 1, "已尝试落盘");
+    assert!(f.app.ui_state.chrome.notice.contains("落盘失败"));
+}
+
+#[test]
+fn drop_non_image_opens_document() {
+    let store = MemStore::default();
+    store
+        .files
+        .borrow_mut()
+        .insert(PathBuf::from("b.md"), b"B".to_vec());
+    let mut a = app("a", None, false, &store);
+    a.drop_file(PathBuf::from("b.md"));
+    assert_eq!(doc_text(&a), "B");
+    assert_eq!(a.doc.path, Some(PathBuf::from("b.md")));
+}
+
+#[test]
+fn hover_file_tracks_indicator_until_cancelled() {
+    let mut f = app_drop("ab", Some("dir/notes.md"), &[], Ok(String::new()));
+    f.app.hover_file(Some(PathBuf::from("pic.webp")));
+    assert_eq!(f.app.input_state.drop_file, Some(PathBuf::from("pic.webp")));
+    f.app.hover_file(None);
+    assert!(f.app.input_state.drop_file.is_none());
+}
+
 // ---- 表格只读渲染（切片 9）：网格/源码双态、命中落点、缓存失效 ----
 
 // 「p\n\n| a | b |\n| --- | --- |\n| c | d |\n」：表格为块 1（bytes 3..37），

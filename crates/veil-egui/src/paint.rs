@@ -17,6 +17,9 @@ const FOCUS_DIM_ALPHA: u8 = 160;
 /// 打字机模式锚点：视口高比例（0.42 ≈ 上四成处），光标行中心恒定位于此处。
 const TYPEWRITER_ANCHOR: f32 = 0.42;
 
+/// 拖放悬停压暗强度（阶段 1）：内容区背景覆盖，突出居中提示条。
+const DROP_DIM_ALPHA: u8 = 120;
+
 impl App {
     /// 补齐缺失布局（键命中则零开销）。Reveal 激活已并入布局键，光标移动后
     /// 指纹失配即自动重排，无需另设失效调用（ADR-009 决策四）。
@@ -556,6 +559,8 @@ impl App {
         self.paint_search(&mut frame);
         // 快速打开（阶段 1）：浮在查找栏之上
         self.paint_quick(&mut frame);
+        // 拖放悬停提示（阶段 1）：浮在最上层内容装饰
+        self.paint_drop_hint(&mut frame);
         // chrome 最后绘制（不透明覆盖内容；滚动条区保留给状态栏行列）
         let recent = self.recent_labels();
         self.ui_state.chrome.paint(
@@ -1168,6 +1173,63 @@ impl App {
                 }
             }
         }
+    }
+
+    /// 拖放落点提示（阶段 1）：内容区压暗 + 居中提示条。
+    /// 图片与文档给不同文案；草稿拖图片明确说明「无法插入」而不是静默失败。
+    /// 只读视觉：不触碰文档真值与缓存；悬停文件名来自 winit HoveredFile。
+    pub(crate) fn paint_drop_hint(&mut self, frame: &mut Frame) {
+        let Some(path) = self.input_state.drop_file.clone() else {
+            return;
+        };
+        let scale = self.input_state.scale;
+        let theme = self.input_state.theme;
+        let vp = self.viewport();
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.display().to_string());
+        let text = if crate::image::is_image_path(&path) {
+            if self.doc.path.is_none() {
+                format!("「{name}」无法插入：草稿没有落盘目录")
+            } else {
+                format!("松开以插入图片：{name}")
+            }
+        } else {
+            format!("松开以打开文档：{name}")
+        };
+        frame.fill_rect(
+            vp.x.round() as i32,
+            vp.y.round() as i32,
+            vp.w.ceil() as u32,
+            vp.h.ceil() as u32,
+            [theme.bg[0], theme.bg[1], theme.bg[2], DROP_DIM_ALPHA],
+        );
+        let pad = (12.0 * scale).round() as u32;
+        let Some(lab) =
+            self.ui_state
+                .chrome
+                .labels
+                .get_or_insert(&mut self.engine, &text, theme.text, scale)
+        else {
+            return;
+        };
+        let bw = lab.w + pad * 2;
+        let bh = lab.h + pad * 2;
+        let bx = (vp.x + (vp.w - bw as f32) / 2.0).round() as i32;
+        let by = (vp.y + (vp.h - bh as f32) / 2.0).round() as i32;
+        frame.fill_rect(bx, by, bw, bh, theme.popup_bg);
+        frame.fill_rect(bx, by, bw, 1, theme.chrome_border);
+        frame.fill_rect(bx, by + bh as i32 - 1, bw, 1, theme.chrome_border);
+        frame.fill_rect(bx, by, 1, bh, theme.chrome_border);
+        frame.fill_rect(bx + bw as i32 - 1, by, 1, bh, theme.chrome_border);
+        frame.blit(
+            &lab.pixels,
+            lab.w,
+            lab.h,
+            bx + pad as i32,
+            (by + pad as i32) + ((bh - pad * 2 - lab.h) / 2) as i32,
+        );
     }
 
     /// 绘制表格网格：表头底色 → 单元格文本 → 网格线（先底后字，线压边）。

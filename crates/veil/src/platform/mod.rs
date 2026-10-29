@@ -6,6 +6,8 @@
 mod theme;
 mod watch;
 #[cfg(windows)]
+mod wic;
+#[cfg(windows)]
 mod windows;
 
 use std::path::PathBuf;
@@ -13,9 +15,21 @@ use std::path::PathBuf;
 #[cfg(not(windows))]
 use veil_egui::NativeWindow;
 use veil_egui::{
-    ConfigStore, FileDialog, FileWatcher, PersistEnv, RecoveryStore, SessionStore, SystemTheme,
-    ThemeEnv, WindowEffects,
+    ConfigStore, FileDialog, FileWatcher, ImageData, PersistEnv, RecoveryStore, SessionStore,
+    SystemTheme, ThemeEnv, WindowEffects,
 };
+
+/// 非 PNG 图片解码（阶段 1）：Windows 走 WIC（系统编解码器，覆盖 JPEG/WebP/BMP/GIF/TIFF）；
+/// 其他平台返回可读错误，PNG 路径仍由产品层 png 解码器承担。
+#[cfg(windows)]
+pub fn decode_image(path: &std::path::Path) -> Result<ImageData, String> {
+    wic::decode_image(path)
+}
+
+#[cfg(not(windows))]
+pub fn decode_image(_path: &std::path::Path) -> Result<ImageData, String> {
+    Err("当前平台仅支持 PNG 图片".into())
+}
 
 /// 系统文件对话框。非 Windows 平台为「总是取消」的兜底实现。
 pub fn dialogs() -> Box<dyn FileDialog> {

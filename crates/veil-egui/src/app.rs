@@ -210,6 +210,8 @@ pub(crate) struct InputState {
     pub(crate) theme: Theme,
     pub(crate) system_dark: bool,
     pub(crate) last_theme_check: Option<Instant>,
+    /// 拖拽悬停文件（阶段 1）：仅驱动落点提示叠层；松开/离开窗口即清空。
+    pub(crate) drop_file: Option<PathBuf>,
 }
 
 /// 持久化策略状态（ADR-009 S6 C3）：外部变更事实 + 自动保存调度 + 恢复/会话。
@@ -480,6 +482,7 @@ impl App {
                 theme,
                 system_dark,
                 last_theme_check: None,
+                drop_file: None,
             },
             ports,
             persist_state: PersistState {
@@ -747,7 +750,10 @@ impl ApplicationHandler for App {
             WindowEvent::Ime(Ime::Preedit(text, cursor)) => self.ime_preedit(text, cursor),
             WindowEvent::Ime(Ime::Commit(text)) => self.ime_commit(text),
             WindowEvent::Ime(Ime::Disabled) => self.ime_disabled(),
-            WindowEvent::DroppedFile(path) => self.open_path(path), // 拖放打开
+            // 拖放（阶段 1）：图片插入光标处；其余文件按文档打开
+            WindowEvent::DroppedFile(path) => self.drop_file(path),
+            WindowEvent::HoveredFile(path) => self.hover_file(Some(path)),
+            WindowEvent::HoveredFileCancelled => self.hover_file(None),
             WindowEvent::KeyboardInput { event, .. } => self.on_key(&event),
             WindowEvent::ModifiersChanged(m) => {
                 let s = m.state();

@@ -11,6 +11,46 @@
 use pulldown_cmark::{html, Event, Options, Parser, Tag, TagEnd};
 use veil_core::{BlockKind, InlineKind, InlineNode, Range, Session};
 
+/// pulldown-cmark 解析器产出的顶层块序列（与 Veil `actual_blocks` 同口径的参照）。
+///
+/// 关键点：pulldown-cmark 的 Tag::Paragraph 既可以是顶层块，也可以是 Quote/List 内部的
+/// 行内容器。Veil 的 actual_blocks 只产顶层块，所以这里必须**跟踪容器深度**——只有
+/// 顶层（depth==0）才 push Paragraph/Rule/Heading/CodeBlock。
+/// 容器 = BlockQuote / List / Table（List 内部的 ListItem 不增加顶层深度；pulldown
+/// 把 List 作为整体容器）。
+pub fn pulldown_blocks(md: &str) -> Vec<B> {
+    use pulldown_cmark::TagEnd;
+    let opts = Options::ENABLE_TABLES
+        | Options::ENABLE_STRIKETHROUGH
+        | Options::ENABLE_TASKLISTS
+        | Options::ENABLE_GFM;
+    let mut out = Vec::new();
+    let mut depth = 0i32;
+    for ev in Parser::new_ext(md, opts) {
+        match ev {
+            Event::Start(tag) => {
+                match tag {
+                    Tag::Paragraph if depth == 0 => out.push(B::P),
+                    Tag::Heading { level, .. } if depth == 0 => out.push(B::H(level as u8)),
+                    Tag::CodeBlock(_) if depth == 0 => out.push(B::Pre),
+                    // 容器：只有 depth==0 才作为顶层块 push；嵌套容器（Quote 内部的 List、
+                    // List 内部的嵌套 List 等）不应出现在顶层序列里。depth 自增在外层。
+                    Tag::BlockQuote(_) => { if depth == 0 { out.push(B::Quote); } depth += 1; }
+                    Tag::List(_) => { if depth == 0 { out.push(B::List); } depth += 1; }
+                    Tag::Table(_) => { if depth == 0 { out.push(B::Table); } depth += 1; }
+                    Tag::HtmlBlock => {} // 原始 HTML 块两侧都不计
+                    _ => {}
+                }
+            }
+            Event::Rule if depth == 0 => out.push(B::Rule),
+            Event::End(TagEnd::BlockQuote(_) | TagEnd::List(_) | TagEnd::Table) => depth -= 1,
+            Event::End(_) => {}
+            _ => {}
+        }
+    }
+    out
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum B {
     P,
@@ -142,7 +182,6 @@ pub fn actual_blocks(s: &Session) -> Vec<B> {
             BlockKind::BlockQuote => B::Quote,
             BlockKind::ThematicBreak => B::Rule,
             BlockKind::LinkRefDef => continue,
-            // 原始 HTML 块与期望侧口径一致：整体不计入顶层生成块序列（Suite B 覆盖渲染）。
             BlockKind::HtmlBlock => continue,
             BlockKind::ListItem { .. } => unreachable!("列表项已在上方处理"),
         };

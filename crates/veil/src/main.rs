@@ -328,6 +328,16 @@ impl FileStore for Fs {
             .and_then(|()| std::fs::rename(&tmp, path))
             .map_err(|e| format!("{e}（写入 {}）", path.display()))
     }
+    fn list_files(&mut self, dir: &Path) -> Result<Vec<PathBuf>, String> {
+        let mut out = Vec::new();
+        for entry in std::fs::read_dir(dir).map_err(|e| e.to_string())? {
+            let entry = entry.map_err(|e| e.to_string())?;
+            if entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
+                out.push(entry.path());
+            }
+        }
+        Ok(out)
+    }
 }
 
 /// 系统剪贴板（arboard 属产品层依赖，veil-egui 仅见 Clipboard trait，INSTANCE §6）。

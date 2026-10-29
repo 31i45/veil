@@ -52,6 +52,8 @@ pub enum MenuAction {
     /// 新建空白草稿（Ctrl+N）。
     New,
     Open,
+    /// 快速打开浮层（Ctrl+P）。
+    QuickOpen,
     Save,
     SaveAs,
     Export,
@@ -92,6 +94,7 @@ pub const MENUS: [MenuDef; 3] = [
         items: &[
             ("新建", "Ctrl+N", MenuAction::New),
             ("打开…", "Ctrl+O", MenuAction::Open),
+            ("快速打开…", "Ctrl+P", MenuAction::QuickOpen),
             ("保存", "Ctrl+S", MenuAction::Save),
             ("另存为…", "Ctrl+Shift+S", MenuAction::SaveAs),
             ("导出 HTML…", "Ctrl+E", MenuAction::Export),

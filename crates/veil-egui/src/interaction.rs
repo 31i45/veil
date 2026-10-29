@@ -10,7 +10,7 @@ use crate::html::html_to_markdown;
 use crate::input::{Action, Key};
 use crate::mode::{route, Cmd, Mode, TextSink};
 use crate::theme::ThemeMode;
-use crate::view::{outline, search};
+use crate::view::{outline, quick_open, search};
 use std::time::{Duration, Instant};
 use veil_core::{task_span, BlockId, BlockKind};
 use winit::event::ElementState;
@@ -71,10 +71,17 @@ impl App {
         );
         match cmd {
             Cmd::Ignore => {}
+            Cmd::OpenQuick => self.open_quick(),
             Cmd::CloseMenu => {
                 self.ui_state.chrome.close();
                 self.request_redraw();
             }
+            // 快速打开浮层动作自带重绘与 IME 区域刷新
+            Cmd::QuickClose => self.close_quick(),
+            Cmd::QuickAccept => self.quick_accept(),
+            Cmd::QuickMove(d) => self.quick_step(d),
+            Cmd::QuickBackspace => self.quick_backspace(),
+            Cmd::QuickInput(t) => self.quick_input(&t),
             // 查找栏动作自带重绘与 IME 区域刷新
             Cmd::CloseSearch => self.close_search(),
             Cmd::SearchInput(t) => self.search_input(&t),
@@ -99,6 +106,10 @@ impl App {
     /// IME 提交：按落点分流——菜单打开时吞掉，查找栏进查询串，否则进文档。
     pub(crate) fn ime_commit(&mut self, text: String) {
         match self.text_sink() {
+            TextSink::Quick => {
+                self.editor.clear_preedit();
+                self.quick_input(&text);
+            }
             TextSink::Query => {
                 self.editor.clear_preedit();
                 self.search_input(&text);
@@ -141,6 +152,7 @@ impl App {
             Action::SaveAs => self.save_as(),
             Action::Open => self.open_via_dialog(),
             Action::New => self.new_draft(),
+            Action::QuickOpen => self.open_quick(),
             Action::CloseMenu => self.ui_state.chrome.close(),
             Action::ToggleOutline => self.toggle_outline(),
             Action::Export => self.export_now(),
@@ -449,6 +461,7 @@ impl App {
             MenuAction::Find => self.open_search(),
             MenuAction::Replace => self.open_replace(),
             MenuAction::OpenRecent(i) => self.open_recent(i),
+            MenuAction::QuickOpen => self.open_quick(),
             MenuAction::Quit => return true,
         }
         self.request_redraw();
@@ -504,6 +517,19 @@ impl App {
         if let Some(m) = chrome::hit_menu_bar(mx, my, scale) {
             self.ui_state.chrome.toggle(m);
             self.request_redraw();
+            return false;
+        }
+        // 快速打开浮层（阶段 1）：浮在内容与查找栏之上
+        if let Some(l) = self.quick_rect() {
+            let count = self.ui_state.quick.filtered.len();
+            match quick_open::hit(&l, self.ui_state.quick.top, count, mx, my) {
+                Some(i) => {
+                    self.ui_state.quick.selected = i;
+                    self.quick_accept();
+                }
+                None if l.panel.contains(mx, my) => {} // 面板内空白：吞掉点击
+                None => self.close_quick(),            // 面板外：关闭浮层
+            }
             return false;
         }
         // 查找栏（P3-3）：浮在内容之上，先于滚动条/大纲/正文命中
@@ -688,6 +714,20 @@ impl App {
             self.ui_state.search.hover = sh;
             self.request_redraw();
         }
+        // 快速打开候选项悬停
+        let qrow = self.quick_rect().and_then(|l| {
+            quick_open::hit(
+                &l,
+                self.ui_state.quick.top,
+                self.ui_state.quick.filtered.len(),
+                x,
+                y,
+            )
+        });
+        if self.ui_state.quick.hover != qrow {
+            self.ui_state.quick.hover = qrow;
+            self.request_redraw();
+        }
     }
 
     /// 切换大纲面板：版心宽变化等价一次 resize，布局/表格键随宽度量化值失配。
@@ -798,8 +838,19 @@ impl App {
         self.request_redraw();
     }
 
-    /// 滚轮：指针在大纲面板内时滚动面板，否则滚动正文。
+    /// 滚轮：快速打开浮层内滚动候选，指针在大纲面板内时滚动面板，否则滚动正文。
     pub(crate) fn on_wheel(&mut self, d: f32) {
+        if self.ui_state.quick.open {
+            let n = self.ui_state.quick.filtered.len();
+            let max = n.saturating_sub(quick_open::MAX_VISIBLE);
+            let step = if d > 0.0 { -3 } else { 3 };
+            let top = (self.ui_state.quick.top as i32 + step).clamp(0, max as i32) as usize;
+            if top != self.ui_state.quick.top {
+                self.ui_state.quick.top = top;
+                self.request_redraw();
+            }
+            return;
+        }
         if let Some(panel) = self.outline_rect() {
             let (x, y) = (
                 self.input_state.mouse.x as f32,
@@ -821,6 +872,111 @@ impl App {
         self.window_state.scroll_y = (self.window_state.scroll_y - d).clamp(0.0, max);
         self.set_ime_area();
         self.request_redraw();
+    }
+
+    // ── 快速打开（阶段 1）：浮层候选、只读过滤与打开 ───────────────────────────
+
+    /// 浮层矩形（关闭时 None）：内容视口内水平居中。
+    pub(crate) fn quick_rect(&self) -> Option<quick_open::Layout> {
+        if !self.ui_state.quick.open {
+            return None;
+        }
+        let vp = self.viewport();
+        Some(quick_open::layout(
+            vp.x,
+            vp.y,
+            vp.w,
+            vp.h,
+            self.input_state.scale,
+            self.ui_state.quick.filtered.len(),
+        ))
+    }
+
+    /// 打开浮层（Ctrl+P / 菜单）：关闭菜单与查找栏，重建候选（最近文件 + 当前目录）。
+    pub(crate) fn open_quick(&mut self) {
+        self.ui_state.chrome.close();
+        if self.ui_state.search.open {
+            self.ui_state.search.open = false;
+            self.ui_state.search.replace_open = false;
+            self.ui_state.search.clear();
+        }
+        self.editor.clear_preedit();
+        self.ui_state.quick.open = true;
+        self.refresh_quick();
+    }
+
+    /// 重建候选：最近文件（去重）在前，当前文档所在目录的 Markdown 文件其后。
+    /// 无关联路径的草稿只有最近文件；目录读取失败按空处理（浮层仍可用）。
+    pub(crate) fn refresh_quick(&mut self) {
+        let dir = self
+            .doc
+            .path
+            .as_ref()
+            .and_then(|p| p.parent())
+            .map(|d| d.to_path_buf());
+        let files = dir
+            .as_ref()
+            .and_then(|d| self.ports.store.list_files(d).ok())
+            .unwrap_or_default();
+        self.ui_state.quick.items = quick_open::candidates(
+            &self.persist_state.recent,
+            &files,
+            quick_open::CANDIDATE_CAP,
+        );
+        self.ui_state.quick.refilter();
+        self.set_ime_area();
+        self.request_redraw();
+    }
+
+    /// 关闭浮层（Esc / 点击面板外）：清空查询与候选。
+    pub(crate) fn close_quick(&mut self) {
+        if !self.ui_state.quick.open {
+            return;
+        }
+        self.ui_state.quick.open = false;
+        self.ui_state.quick.clear();
+        self.editor.clear_preedit();
+        self.set_ime_area();
+        self.request_redraw();
+    }
+
+    /// 过滤串追加（含 IME 提交）：重算候选并回到首项。
+    pub(crate) fn quick_input(&mut self, text: &str) {
+        if !self.ui_state.quick.open || text.is_empty() {
+            return;
+        }
+        self.ui_state.quick.query.push_str(text);
+        self.ui_state.quick.refilter();
+        self.set_ime_area();
+        self.request_redraw();
+    }
+
+    pub(crate) fn quick_backspace(&mut self) {
+        if !self.ui_state.quick.open {
+            return;
+        }
+        if self.ui_state.quick.query.pop().is_some() {
+            self.ui_state.quick.refilter();
+            self.set_ime_area();
+            self.request_redraw();
+        }
+    }
+
+    pub(crate) fn quick_step(&mut self, delta: i32) {
+        if !self.ui_state.quick.open {
+            return;
+        }
+        self.ui_state.quick.step(delta);
+        self.request_redraw();
+    }
+
+    /// 回车/点击：打开选中项；脏文档由 open_path 拒绝并在状态栏提示。
+    pub(crate) fn quick_accept(&mut self) {
+        let Some(path) = self.ui_state.quick.current().map(|it| it.path.clone()) else {
+            return;
+        };
+        self.close_quick();
+        self.open_path(path);
     }
 
     // ── 文档内查找（P3-3）：浮栏状态、只读输入与命中跳转 ─────────────────────
@@ -848,6 +1004,7 @@ impl App {
             self.request_redraw();
             return;
         }
+        self.close_quick();
         self.ui_state.chrome.close();
         self.editor.clear_preedit();
         self.ui_state.search.open = true;
@@ -859,6 +1016,7 @@ impl App {
 
     /// 打开查找替换栏（Ctrl+H / 菜单）：未打开时先开栏；查询保留，焦点给替换串。
     pub(crate) fn open_replace(&mut self) {
+        self.close_quick();
         self.ui_state.chrome.close();
         self.ui_state.search.open = true;
         self.ui_state.search.replace_open = true;
@@ -1035,6 +1193,7 @@ pub(crate) fn map_key(event: &winit::event::KeyEvent) -> Option<Key> {
         WKey::Character(c) if c.as_str().eq_ignore_ascii_case("h") => Some(Key::H),
         WKey::Character(c) if c.as_str().eq_ignore_ascii_case("a") => Some(Key::A),
         WKey::Character(c) if c.as_str().eq_ignore_ascii_case("n") => Some(Key::N),
+        WKey::Character(c) if c.as_str().eq_ignore_ascii_case("p") => Some(Key::P),
         _ => None,
     }
 }

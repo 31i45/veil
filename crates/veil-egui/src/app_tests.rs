@@ -1038,6 +1038,16 @@ impl FileStore for MemStore {
             .insert(path.to_path_buf(), data.to_vec());
         Ok(())
     }
+    fn list_files(&mut self, dir: &Path) -> Result<Vec<PathBuf>, String> {
+        // 内存实现：目录内容即已登记文件的父目录匹配（打开时必然可 load）
+        Ok(self
+            .files
+            .borrow()
+            .keys()
+            .filter(|p| p.parent() == Some(dir))
+            .cloned()
+            .collect())
+    }
 }
 
 fn app(text: &str, path: Option<&str>, bom: bool, store: &MemStore) -> App {
@@ -1627,7 +1637,7 @@ fn menu_title_click_toggles_and_item_click_runs_save() {
     let (tx, ty) = menu_title_center(0);
     click_at(&mut a, tx, ty);
     assert_eq!(a.ui_state.chrome.open, Some(0), "点菜单标题打开文件菜单");
-    let (x, y) = popup_item_center(0, 2); // 保存
+    let (x, y) = popup_item_center(0, 3); // 保存（新建/打开/快速打开/保存）
     click_at(&mut a, x, y);
     assert_eq!(a.ui_state.chrome.open, None, "执行动作后菜单关闭");
     assert!(!a.editor.is_dirty());
@@ -3558,7 +3568,11 @@ fn recovery_written_after_idle_and_restored_on_restart() {
         .borrow_mut()
         .insert(PathBuf::from("a.md"), b"ab".to_vec());
     let b = app_persist("默认样例", None, &store, &rec, &ses, true);
-    assert_eq!(b.editor.session().serialize(), "改ab", "重启后内容 = 恢复快照");
+    assert_eq!(
+        b.editor.session().serialize(),
+        "改ab",
+        "重启后内容 = 恢复快照"
+    );
     assert_eq!(b.doc.path, Some(PathBuf::from("a.md")));
     assert!(b.editor.is_dirty(), "恢复内容相对磁盘基线是未保存修改");
     assert_eq!(b.doc.baseline, b"ab".to_vec(), "基线 = 磁盘当前内容");
@@ -3717,7 +3731,11 @@ fn corrupted_recovery_ignored_and_cleared() {
     *rec.slot.borrow_mut() = Some(b"not-a-recovery-file".to_vec());
     let ses = FakeSession::default();
     let b = app_persist("默认样例", None, &store, &rec, &ses, true);
-    assert_eq!(b.editor.session().serialize(), "默认样例", "损坏快照不影响正常打开");
+    assert_eq!(
+        b.editor.session().serialize(),
+        "默认样例",
+        "损坏快照不影响正常打开"
+    );
     assert!(!b.editor.is_dirty());
     assert!(rec.slot.borrow().is_none(), "损坏快照已清除");
     assert!(rec.calls.borrow().iter().any(|c| c == "clear"));
@@ -3748,7 +3766,11 @@ fn recovery_with_external_disk_change_saves_with_backup() {
         .insert(PathBuf::from("a.md"), b"disk-v2".to_vec());
     b.save_now();
     let files = store.files.borrow();
-    assert_eq!(files[Path::new("a.md")], "编辑版".as_bytes(), "手工保存覆盖");
+    assert_eq!(
+        files[Path::new("a.md")],
+        "编辑版".as_bytes(),
+        "手工保存覆盖"
+    );
     assert_eq!(
         files[Path::new("a.conflict-1.md")],
         b"disk-v2".to_vec(),
@@ -3855,7 +3877,11 @@ fn menu_click_opens_recent_file() {
     let ses = FakeSession::default();
     *ses.text.borrow_mut() = Some("recent=x.md\n".into());
     let mut a = app_persist("默认样例", None, &store, &rec, &ses, false);
-    assert_eq!(a.recent_labels(), vec!["x.md".to_string()], "启动加载最近列表");
+    assert_eq!(
+        a.recent_labels(),
+        vec!["x.md".to_string()],
+        "启动加载最近列表"
+    );
     let labels = a.recent_labels();
     let (tx, ty) = menu_title_center(0);
     click_at(&mut a, tx, ty);
@@ -3888,6 +3914,155 @@ fn open_recent_ignored_when_dirty_or_out_of_range() {
         "改旧",
         "脏文档拒绝打开最近文件"
     );
+}
+
+/// 阶段 1 快速打开：最近文件 + 当前目录 Markdown（去重、扩展名过滤）→ 过滤 → 打开。
+#[test]
+fn quick_open_lists_recent_and_directory_then_opens() {
+    let store = MemStore::default();
+    for (p, b) in [
+        ("dir/cur.md", "cur"),
+        ("dir/a.md", "aaa"),
+        ("dir/README.md", "readme"),
+        ("dir/skip.txt", "txt"),
+    ] {
+        store
+            .files
+            .borrow_mut()
+            .insert(PathBuf::from(p), b.as_bytes().to_vec());
+    }
+    let mut a = app("cur", Some("dir/cur.md"), false, &store);
+    a.persist_state.recent = vec![PathBuf::from("dir/README.md")];
+    a.input_state.mods.ctrl = true;
+    a.route_key(Key::P);
+    a.input_state.mods.ctrl = false;
+
+    assert!(a.ui_state.quick.open, "Ctrl+P 打开浮层");
+    assert_eq!(a.mode(), Mode::QuickOpen, "浮层期间文档只读");
+    let labels: Vec<_> = a
+        .ui_state
+        .quick
+        .items
+        .iter()
+        .map(|i| i.label.as_str())
+        .collect();
+    assert_eq!(
+        labels,
+        vec!["README.md", "a.md", "cur.md"],
+        "最近在前，目录按名排序，txt 被过滤"
+    );
+    assert_eq!(a.ui_state.quick.filtered.len(), 3);
+    assert!(a.ui_state.quick.items[0].recent);
+
+    // 过滤：文件名子序列命中
+    a.route_key(Key::Text("read".into()));
+    assert_eq!(a.ui_state.quick.query, "read");
+    assert_eq!(a.ui_state.quick.filtered.len(), 1);
+    assert_eq!(
+        a.ui_state.quick.current().unwrap().path,
+        PathBuf::from("dir/README.md")
+    );
+
+    // 回车打开：内容整体替换、最近文件置顶
+    a.route_key(Key::Enter);
+    assert!(!a.ui_state.quick.open, "打开后浮层关闭");
+    assert_eq!(doc_text(&a), "readme");
+    assert_eq!(a.doc.path, Some(PathBuf::from("dir/README.md")));
+    assert_eq!(a.persist_state.recent[0], PathBuf::from("dir/README.md"));
+}
+
+#[test]
+fn quick_open_refuses_dirty_document_and_esc_closes() {
+    let store = MemStore::default();
+    store
+        .files
+        .borrow_mut()
+        .insert(PathBuf::from("dir/a.md"), b"a".to_vec());
+    let mut a = app("x", Some("dir/x.md"), false, &store);
+    a.route_key(Key::Text("y".into()));
+    assert!(a.editor.is_dirty());
+    let before = doc_text(&a);
+
+    a.input_state.mods.ctrl = true;
+    a.route_key(Key::P);
+    a.input_state.mods.ctrl = false;
+    assert!(a.ui_state.quick.open);
+    a.route_key(Key::Enter);
+    assert!(!a.ui_state.quick.open, "尝试打开后浮层关闭");
+    assert_eq!(doc_text(&a), before, "脏文档拒绝替换");
+    assert!(
+        a.ui_state.chrome.notice.contains("未保存"),
+        "状态栏提示拒绝原因: {}",
+        a.ui_state.chrome.notice
+    );
+
+    // Esc：关闭且不动文档
+    a.input_state.mods.ctrl = true;
+    a.route_key(Key::P);
+    a.input_state.mods.ctrl = false;
+    a.route_key(Key::Escape);
+    assert!(!a.ui_state.quick.open);
+    assert_eq!(doc_text(&a), before);
+}
+
+#[test]
+fn quick_open_step_and_backspace_requery() {
+    let store = MemStore::default();
+    for p in ["dir/a.md", "dir/b.md"] {
+        store
+            .files
+            .borrow_mut()
+            .insert(PathBuf::from(p), b"x".to_vec());
+    }
+    let mut a = app("cur", Some("dir/cur.md"), false, &store);
+    a.input_state.mods.ctrl = true;
+    a.route_key(Key::P);
+    a.input_state.mods.ctrl = false;
+    // 启动即打开的文件已登记为最近文件：候选 = 当前文件 + 目录内 a.md/b.md
+    let labels: Vec<_> = a
+        .ui_state
+        .quick
+        .items
+        .iter()
+        .map(|i| i.label.clone())
+        .collect();
+    assert_eq!(labels, vec!["cur.md", "a.md", "b.md"]);
+    assert_eq!(a.ui_state.quick.selected, 0);
+
+    a.route_key(Key::Down);
+    assert_eq!(a.ui_state.quick.selected, 1);
+    a.route_key(Key::Up);
+    assert_eq!(a.ui_state.quick.selected, 0);
+
+    a.route_key(Key::Text("b".into()));
+    assert_eq!(a.ui_state.quick.filtered.len(), 1);
+    assert_eq!(
+        a.ui_state.quick.current().unwrap().path,
+        PathBuf::from("dir/b.md")
+    );
+
+    a.route_key(Key::Backspace);
+    assert_eq!(a.ui_state.quick.query, "");
+    assert_eq!(a.ui_state.quick.filtered.len(), 3, "退格后恢复全量候选");
+}
+
+#[test]
+fn quick_open_takes_ime_text_and_preempts_search() {
+    let store = MemStore::default();
+    let mut a = app("x", None, false, &store);
+    a.open_search();
+    assert!(a.ui_state.search.open);
+    a.input_state.mods.ctrl = true;
+    a.route_key(Key::P);
+    a.input_state.mods.ctrl = false;
+    assert!(a.ui_state.quick.open);
+    assert!(!a.ui_state.search.open, "快速打开抢占查找栏");
+    assert_eq!(a.mode(), Mode::QuickOpen);
+    assert_eq!(a.text_sink(), TextSink::Quick);
+
+    a.ime_commit("m".into());
+    assert_eq!(a.ui_state.quick.query, "m", "IME 提交进入过滤串");
+    assert_eq!(doc_text(&a), "x", "文档内容不受输入影响");
 }
 
 /// 10k+ 块大文档击键探针（默认忽略）：验证编辑到上屏 p95 ≤16ms 预算。

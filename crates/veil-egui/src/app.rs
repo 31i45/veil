@@ -25,7 +25,9 @@ use crate::math::MathRenderer;
 use crate::theme::{
     self, Config, ConfigStore, SystemTheme, Theme, ThemeEnv, ThemeMode, WindowEffects,
 };
-use crate::view::{search, Cache, Frame, LayoutEngine, Outline, Revs, Search};
+use crate::view::{
+    quick_open, search, Cache, Frame, LayoutEngine, Outline, QuickOpen, Revs, Search,
+};
 
 // 各域 impl App 的注册由 lib.rs 的模块声明承担（同 crate 内 impl 自动链接）。
 
@@ -59,6 +61,11 @@ pub trait Clipboard {
 pub trait FileStore {
     fn load(&mut self, path: &Path) -> Result<Vec<u8>, String>;
     fn save(&mut self, path: &Path, data: &[u8]) -> Result<(), String>;
+    /// 列出目录内的普通文件（快速打开，阶段 1）：只做 IO，不排序/不按扩展名过滤
+    /// （候选语义在视图层）。默认空实现：测试与不关心文件树的实现无需改动。
+    fn list_files(&mut self, _dir: &Path) -> Result<Vec<PathBuf>, String> {
+        Ok(Vec::new())
+    }
 }
 
 /// 文件对话框抽象（切片 15）：实现由产品层（veil）注入，本层不依赖具体 GUI 框架。
@@ -149,7 +156,16 @@ pub fn run(
     let event_loop = EventLoop::new().map_err(|e| format!("创建事件循环失败: {e}"))?;
     event_loop.set_control_flow(ControlFlow::Wait);
     let mut app = App::new(
-        doc, clipboard, store, math, images, assets, exporter, dialogs, watcher, theme_env,
+        doc,
+        clipboard,
+        store,
+        math,
+        images,
+        assets,
+        exporter,
+        dialogs,
+        watcher,
+        theme_env,
         persist_env,
     );
     event_loop
@@ -166,6 +182,8 @@ pub(crate) struct UIState {
     pub(crate) outline: Outline,
     /// 文档内查找栏（P3-3）：查询、命中缓存与当前下标。
     pub(crate) search: Search,
+    /// 快速打开浮层（阶段 1）：最近文件 + 当前目录候选。
+    pub(crate) quick: QuickOpen,
     /// 写作模式与全文统计（阶段 1）。
     pub(crate) writing: WritingState,
 }
@@ -475,6 +493,7 @@ impl App {
                 chrome: Chrome::default(),
                 outline: Outline::default(),
                 search: Search::default(),
+                quick: QuickOpen::default(),
                 writing: WritingState::default(),
             },
         };
@@ -612,23 +631,33 @@ impl App {
         let Some(w) = self.window_state.window.clone() else {
             return; // 无窗口（测试）：不触发按需排版
         };
-        let (x, y, h) = match self.search_rect() {
-            // 查找栏：候选框贴当前焦点框文本末端（文档光标被栏覆盖，不参与定位）
-            Some(l)
-                if self.ui_state.search.replace_open
-                    && self.ui_state.search.focus == search::Field::Replace =>
-            {
-                let r = search::replace_layout(&l, self.input_state.scale);
-                let w = search::text_width(&self.ui_state.search.replace, self.input_state.scale)
-                    .min(r.text.w);
-                (r.text.x + w, r.row.y + r.row.h * 0.5, r.row.h)
+        let (x, y, h) = if let Some(l) = self.quick_rect() {
+            // 快速打开：候选框贴过滤串末端
+            let pad = quick_open::PAD * self.input_state.scale;
+            let qw = quick_open::text_width(&self.ui_state.quick.query, self.input_state.scale)
+                .min((l.input.w - 2.0 * pad).max(0.0));
+            (l.input.x + pad + qw, l.input.y + l.input.h * 0.5, l.input.h)
+        } else {
+            match self.search_rect() {
+                // 查找栏：候选框贴当前焦点框文本末端（文档光标被栏覆盖，不参与定位）
+                Some(l)
+                    if self.ui_state.search.replace_open
+                        && self.ui_state.search.focus == search::Field::Replace =>
+                {
+                    let r = search::replace_layout(&l, self.input_state.scale);
+                    let w =
+                        search::text_width(&self.ui_state.search.replace, self.input_state.scale)
+                            .min(r.text.w);
+                    (r.text.x + w, r.row.y + r.row.h * 0.5, r.row.h)
+                }
+                Some(l) => {
+                    let qw =
+                        search::text_width(&self.ui_state.search.query, self.input_state.scale)
+                            .min(l.text.w);
+                    (l.text.x + qw, l.bar.y + l.bar.h * 0.5, l.bar.h)
+                }
+                None => self.caret_screen(),
             }
-            Some(l) => {
-                let qw = search::text_width(&self.ui_state.search.query, self.input_state.scale)
-                    .min(l.text.w);
-                (l.text.x + qw, l.bar.y + l.bar.h * 0.5, l.bar.h)
-            }
-            None => self.caret_screen(),
         };
         w.set_ime_cursor_area(
             PhysicalPosition::new(x as f64, y as f64),

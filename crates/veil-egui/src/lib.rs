@@ -24,6 +24,7 @@ mod interaction;
 mod math;
 mod mode;
 mod paint;
+mod stats;
 mod theme;
 mod view;
 

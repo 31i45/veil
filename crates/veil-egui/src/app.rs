@@ -157,8 +157,8 @@ pub fn run(
         .map_err(|e| format!("事件循环错误: {e}"))
 }
 
-/// 文档视图 UI 组件状态（ADR-009 S6 C6）：chrome/大纲/查找栏。
-/// 三者是 UI 交互态，无数据互借，合并减少顶层字段。
+/// 文档视图 UI 组件状态（ADR-009 S6 C6）：chrome/大纲/查找栏/写作模式。
+/// 四者是 UI 交互态，无数据互借，合并减少顶层字段。
 pub(crate) struct UIState {
     /// 自绘 chrome（切片 15）：菜单/状态栏/滚动条交互态与标签缓存。
     pub(crate) chrome: Chrome,
@@ -166,6 +166,19 @@ pub(crate) struct UIState {
     pub(crate) outline: Outline,
     /// 文档内查找栏（P3-3）：查询、命中缓存与当前下标。
     pub(crate) search: Search,
+    /// 写作模式与全文统计（阶段 1）。
+    pub(crate) writing: WritingState,
+}
+
+/// 写作模式与全文统计（阶段 1）：纯视图开关 + 状态栏派生数字。
+#[derive(Default)]
+pub(crate) struct WritingState {
+    /// 专注模式：非光标所在块整体压暗，仅视觉，不改真值。
+    pub(crate) focus: bool,
+    /// 打字机模式：光标行固定在视口上部锚点。
+    pub(crate) typewriter: bool,
+    /// 全文字数（中文口径），随 `refresh_index` 重算。
+    pub(crate) words: usize,
 }
 
 /// 外部输入状态（ADR-009 S6 C4）：全部从系统/用户注入的输入信号。
@@ -462,6 +475,7 @@ impl App {
                 chrome: Chrome::default(),
                 outline: Outline::default(),
                 search: Search::default(),
+                writing: WritingState::default(),
             },
         };
         app.ui_state.chrome.notice = if start.notice.is_empty() {

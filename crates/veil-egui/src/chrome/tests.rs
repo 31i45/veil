@@ -189,21 +189,22 @@ fn scrollbar_hit_requires_overflow_and_right_edge() {
 #[test]
 fn status_line_variants() {
     assert_eq!(
-        status_line(None, false, ExternalState::None, 1, 1),
-        ("未命名草稿".into(), "行 1，列 1".into())
+        status_line(None, false, ExternalState::None, 0, 1, 1),
+        ("未命名草稿".into(), "0 字 · 行 1，列 1".into())
     );
     assert_eq!(
         status_line(
             Some(Path::new("dir/a.md")),
             true,
             ExternalState::BackedUp,
+            1234,
             12,
             3
         ),
-        ("dir/a.md *（外部修改已备份）".into(), "行 12，列 3".into())
+        ("dir/a.md *（外部修改已备份）".into(), "1234 字 · 行 12，列 3".into())
     );
     assert_eq!(
-        status_line(Some(Path::new("b.md")), false, ExternalState::None, 2, 7).0,
+        status_line(Some(Path::new("b.md")), false, ExternalState::None, 0, 2, 7).0,
         "b.md"
     );
 }
@@ -212,11 +213,11 @@ fn status_line_variants() {
 fn status_line_marks_external_states() {
     let p = Some(Path::new("a.md"));
     assert_eq!(
-        status_line(p, false, ExternalState::Changed, 1, 1).0,
+        status_line(p, false, ExternalState::Changed, 0, 1, 1).0,
         "a.md（外部修改）"
     );
     assert_eq!(
-        status_line(p, true, ExternalState::Missing, 1, 1).0,
+        status_line(p, true, ExternalState::Missing, 0, 1, 1).0,
         "a.md *（文件缺失）"
     );
 }
@@ -240,6 +241,7 @@ fn paint_draws_menu_status_and_popup() {
         None,
         false,
         ExternalState::None,
+        0,
         1,
         1,
         2000.0,
@@ -271,6 +273,7 @@ fn paint_draws_menu_status_and_popup() {
         None,
         false,
         ExternalState::None,
+        0,
         1,
         1,
         2000.0,
@@ -295,6 +298,7 @@ fn paint_uses_dark_palette() {
         None,
         false,
         ExternalState::None,
+        0,
         1,
         1,
         10.0,
@@ -312,6 +316,8 @@ fn theme_menu_marks_current_mode() {
     assert_eq!(action_at(2, 1, &[]), Some(MenuAction::ThemeSystem));
     assert_eq!(action_at(2, 2, &[]), Some(MenuAction::ThemeLight));
     assert_eq!(action_at(2, 3, &[]), Some(MenuAction::ThemeDark));
+    assert_eq!(action_at(2, 4, &[]), Some(MenuAction::ToggleFocus));
+    assert_eq!(action_at(2, 5, &[]), Some(MenuAction::ToggleTypewriter));
     assert!(theme_action_matches(
         MenuAction::ThemeSystem,
         ThemeMode::System
@@ -340,6 +346,7 @@ fn scrollbar_thumb_painted_when_overflowing() {
         None,
         false,
         ExternalState::None,
+        0,
         1,
         1,
         3000.0,

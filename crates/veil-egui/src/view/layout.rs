@@ -823,7 +823,7 @@ fn collect_node_ranges(nodes: &[InlineNode], out: &mut Vec<Range>) {
 }
 
 /// 块级替换（切片 12）：任务列表复选框 `☐`/`☑`、无序列表符号 `•`、
-/// 引用行首 `>` → 空格、分隔线整行消隐。
+/// 引用行首 `>` → 空格、分隔线整行消隐；标题 `#` 与围栏 ` ``` ` 同规则消隐（B7）。
 /// 激活判据沿用块区间闭区间；引用块逐行判定（光标所在行显源码，其余行隐标记）。
 fn block_subs(kind: BlockKind, body: &str, block: Range, caret: usize) -> Vec<Sub> {
     match kind {
@@ -858,8 +858,97 @@ fn block_subs(kind: BlockKind, body: &str, block: Range, caret: usize) -> Vec<Su
                 vec![Sub::elide(0, body.len())]
             }
         }
+        // 标题/围栏：非激活时隐源码标记（与列表/引用/分隔线同一 WYSIWYM 规则）。
+        BlockKind::AtxHeading(_) => heading_subs(body, block, caret),
+        BlockKind::SetextHeading(_) => setext_subs(body, block, caret),
+        BlockKind::FencedCode(_) => fenced_subs(body, block, caret),
         _ => Vec::new(),
     }
+}
+
+/// ATX 标题：非激活时消隐缩进(≤3) + `#`×1..=6 + 其后空白。
+/// 行内文本与行高不变（只去掉前缀字形），光标进入块即还原源码。
+fn heading_subs(body: &str, block: Range, caret: usize) -> Vec<Sub> {
+    if node_active(block, caret) {
+        return Vec::new();
+    }
+    atx_marker_end(body)
+        .filter(|&end| end > 0)
+        .map(|end| vec![Sub::elide(0, end)])
+        .unwrap_or_default()
+}
+
+/// Setext 标题：非激活时把下划线行（`===` / `---`）换成等长空格。
+/// 不用消隐：末行纯空时排版会丢行高（光标进出会跳），空格占位保持行高与行宽。
+fn setext_subs(body: &str, block: Range, caret: usize) -> Vec<Sub> {
+    if node_active(block, caret) {
+        return Vec::new();
+    }
+    body.find('\n')
+        .map(|nl| nl + 1)
+        .filter(|&start| start < body.len())
+        .map(|start| {
+            let n = body[start..].chars().count().max(1);
+            vec![Sub::fill(start, body.len(), " ".repeat(n))]
+        })
+        .unwrap_or_default()
+}
+
+/// ATX 标记结束位置（块相对）：CommonMark 允许 ≤3 空格缩进、`#` 后接空白或行尾。
+fn atx_marker_end(body: &str) -> Option<usize> {
+    let indent = body.len() - body.trim_start_matches([' ', '\t']).len();
+    if indent > 3 {
+        return None;
+    }
+    let bytes = body.as_bytes();
+    let hashes = bytes[indent..].iter().take_while(|&&b| b == b'#').count();
+    if hashes == 0 || hashes > 6 {
+        return None;
+    }
+    let after = indent + hashes;
+    if after < bytes.len() && !matches!(bytes[after], b' ' | b'\t') {
+        return None;
+    }
+    let mut end = after;
+    while end < bytes.len() && matches!(bytes[end], b' ' | b'\t') {
+        end += 1;
+    }
+    Some(end)
+}
+
+/// 围栏代码：非激活时消隐开围栏行（含语言标记）与闭合围栏行，保留换行（行高不变）。
+/// 未闭合围栏只有开围栏行需要消隐。
+fn fenced_subs(body: &str, block: Range, caret: usize) -> Vec<Sub> {
+    if node_active(block, caret) {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    let first_end = body.find('\n').unwrap_or(body.len());
+    if first_end > 0 {
+        out.push(Sub::elide(0, first_end));
+    }
+    if let Some(nl) = body.rfind('\n') {
+        let last_start = nl + 1;
+        if last_start > first_end && fence_line(&body[last_start..]) {
+            // 闭合围栏在末行：消隐会让纯空末行丢行高，用等长空格占位
+            let n = body[last_start..].chars().count().max(1);
+            out.push(Sub::fill(last_start, body.len(), " ".repeat(n)));
+        }
+    }
+    out
+}
+
+/// 是否围栏行：≤3 空格缩进后至少 3 个同种 ``` 或 ~~~。
+fn fence_line(line: &str) -> bool {
+    let rest = line.trim_start_matches([' ', '\t']);
+    if line.len() - rest.len() > 3 {
+        return false;
+    }
+    let Some(&ch) = rest.as_bytes().first() else {
+        return false;
+    };
+    (ch == b'`' || ch == b'~')
+        && rest.as_bytes().iter().take_while(|&&b| b == ch).count() >= 3
 }
 
 /// 无序列表符号位置（块相对字节）：缩进后首个 `-` / `*` / `+`。
@@ -1145,6 +1234,65 @@ mod tests {
             let (x, y, _) = eng.caret_xy(&l, doc);
             assert_eq!(eng.hit(&l, x + 0.1, y + 1.0), doc, "doc={doc}");
         }
+    }
+
+    // ---- B7：标题/围栏源码标记与列表/引用同一显隐规则（非激活消隐） ----
+
+    #[test]
+    fn atx_heading_marker_hidden_when_inactive_and_height_stable() {
+        let (_, hidden) = layout_with_caret("## title", usize::MAX, 400.0);
+        assert_eq!(hidden.layout_text(), "title", "非激活：`## ` 消隐");
+        let (_, shown) = layout_with_caret("## title", 3, 400.0);
+        assert_eq!(shown.layout_text(), "## title", "光标进入块：还原源码");
+        assert!(
+            (hidden.height - shown.height).abs() < 0.01,
+            "显隐切换不得改变行高: {} vs {}",
+            hidden.height,
+            shown.height
+        );
+        // 缩进 ≤3 的标题同样消隐；`#` 后无空白不算标题标记（内核不会给出该 kind）
+        let (_, l) = layout_with_caret("   ###  x", usize::MAX, 400.0);
+        assert_eq!(l.layout_text(), "x");
+    }
+
+    #[test]
+    fn setext_heading_underline_hidden_when_inactive() {
+        let (_, hidden) = layout_with_caret("Title\n===", usize::MAX, 400.0);
+        assert_eq!(
+            hidden.layout_text().trim_end(),
+            "Title",
+            "下划线行字符替换为空格（保留行高）"
+        );
+        let (_, shown) = layout_with_caret("Title\n===", 0, 400.0);
+        assert_eq!(shown.layout_text(), "Title\n===");
+        assert!(
+            (hidden.height - shown.height).abs() < 0.01,
+            "下划线消隐后空行仍占高"
+        );
+    }
+
+    #[test]
+    fn fenced_code_fences_hidden_when_inactive_revealed_inside() {
+        let src = "```rust\nlet x = 1;\n```";
+        let (_, hidden) = layout_with_caret(src, usize::MAX, 400.0);
+        assert_eq!(
+            hidden.layout_text().trim_end(),
+            "\nlet x = 1;",
+            "围栏行不显示、内容保留（闭合行空格占位保行高）"
+        );
+        assert!(!hidden.layout_text().contains("```"));
+        // 光标在代码内容内 → 整块激活，围栏还原
+        let (_, shown) = layout_with_caret(src, 10, 400.0);
+        assert_eq!(shown.layout_text(), src);
+        assert!(
+            (hidden.height - shown.height).abs() < 0.01,
+            "围栏消隐不得塌缩行数: {} vs {}",
+            hidden.height,
+            shown.height
+        );
+        // 未闭合围栏：只隐开围栏行，末行内容不能被误删
+        let (_, open) = layout_with_caret("```\na\nb", usize::MAX, 400.0);
+        assert_eq!(open.layout_text(), "\na\nb");
     }
 
     #[test]

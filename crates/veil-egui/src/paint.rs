@@ -5,8 +5,8 @@ use crate::app::App;
 use crate::chrome;
 use crate::geometry::{BASE_LINE_HEIGHT, MARGIN};
 use crate::view::{
-    node_active, outline, oversize_notice, search, BlockLayout, Frame, InlineAsset, InlineImg,
-    LayoutKey, Memo,
+    node_active, outline, oversize_notice, quick_open, search, BlockLayout, Frame, InlineAsset,
+    InlineImg, LayoutKey, Memo,
 };
 use std::path::{Path, PathBuf};
 use veil_core::{BlockId, BlockKind, InlineKind, InlineNode, Range};
@@ -513,12 +513,7 @@ impl App {
         // 只读视觉，不动真值与派生缓存；当前块保持原样，光标随后绘制仍清晰。
         if self.ui_state.writing.focus {
             let focused = self.caret_block_index().map(|i| self.index.blocks[i].id);
-            let dim = [
-                theme.bg[0],
-                theme.bg[1],
-                theme.bg[2],
-                FOCUS_DIM_ALPHA,
-            ];
+            let dim = [theme.bg[0], theme.bg[1], theme.bg[2], FOCUS_DIM_ALPHA];
             for g in &self.index.blocks[vis_focus] {
                 if focused == Some(g.id) {
                     continue;
@@ -532,12 +527,12 @@ impl App {
         for (sy, bh, full) in oversize {
             let notice = oversize_notice(full);
             let mid = sy as f32 + bh - BASE_LINE_HEIGHT * scale / 2.0;
-            if let Some(l) = self
-                .ui_state
-                .chrome
-                .labels
-                .get_or_insert(&mut self.engine, &notice, theme.muted, scale)
-            {
+            if let Some(l) = self.ui_state.chrome.labels.get_or_insert(
+                &mut self.engine,
+                &notice,
+                theme.muted,
+                scale,
+            ) {
                 frame.blit(
                     &l.pixels,
                     l.w,
@@ -559,6 +554,8 @@ impl App {
         self.paint_outline(&mut frame);
         // 查找栏（P3-3）：浮在内容/大纲之上、chrome 之前的最后一层内容装饰
         self.paint_search(&mut frame);
+        // 快速打开（阶段 1）：浮在查找栏之上
+        self.paint_quick(&mut frame);
         // chrome 最后绘制（不透明覆盖内容；滚动条区保留给状态栏行列）
         let recent = self.recent_labels();
         self.ui_state.chrome.paint(
@@ -989,6 +986,186 @@ impl App {
                     x.round() as i32,
                     y.round() as i32,
                 );
+            }
+        }
+    }
+
+    /// 快速打开浮层（阶段 1）：面板边框 → 输入行 → 候选行（选中/悬停底色、
+    /// 文件名与来源提示）。面板不透明覆盖内容与查找栏；标签复用 chrome 位图缓存。
+    pub(crate) fn paint_quick(&mut self, frame: &mut Frame) {
+        let Some(l) = self.quick_rect() else {
+            return;
+        };
+        let scale = self.input_state.scale;
+        let theme = self.input_state.theme;
+        let pad = quick_open::PAD * scale;
+        let px = l.panel.x.round() as i32;
+        let py = l.panel.y.round() as i32;
+        let pw = l.panel.w.ceil() as u32;
+        let ph = l.panel.h.ceil() as u32;
+        frame.fill_rect(px, py, pw, ph, theme.popup_bg);
+        frame.fill_rect(px, py, pw, 1, theme.chrome_border);
+        frame.fill_rect(px, py + ph as i32 - 1, pw, 1, theme.chrome_border);
+        frame.fill_rect(px, py, 1, ph, theme.chrome_border);
+        frame.fill_rect(px + pw as i32 - 1, py, 1, ph, theme.chrome_border);
+        // 输入行与候选行的分隔线
+        frame.fill_rect(
+            px,
+            (l.input.y + l.input.h).round() as i32,
+            pw,
+            1,
+            theme.chrome_border,
+        );
+
+        let query = self.ui_state.quick.query.clone();
+        let top = self.ui_state.quick.top;
+        let selected = self.ui_state.quick.selected;
+        let hover = self.ui_state.quick.hover;
+        let empty = self.ui_state.quick.filtered.is_empty();
+        let visible: Vec<(usize, String, String, bool)> = self
+            .ui_state
+            .quick
+            .visible()
+            .map(|slot| {
+                self.ui_state
+                    .quick
+                    .filtered
+                    .get(slot)
+                    .and_then(|&i| self.ui_state.quick.items.get(i))
+                    .map(|it| (slot, it.label.clone(), it.hint.clone(), it.recent))
+                    .unwrap_or((slot, String::new(), String::new(), false))
+            })
+            .collect();
+
+        // 输入行：占位提示 / 过滤串（保留尾部，正在输入的一端）+ IME 组合串
+        let imid = l.input.y + l.input.h * 0.5;
+        let input_y = |h: u32| (imid - h as f32 / 2.0).round() as i32;
+        let mut qw = 0.0;
+        if query.is_empty() {
+            if self.editor.preedit().is_none() {
+                if let Some(lab) = self.ui_state.chrome.labels.get_or_insert(
+                    &mut self.engine,
+                    "快速打开：输入文件名，回车打开",
+                    theme.muted,
+                    scale,
+                ) {
+                    qw = lab.w as f32;
+                    frame.blit(
+                        &lab.pixels,
+                        lab.w,
+                        lab.h,
+                        (l.input.x + pad).round() as i32,
+                        input_y(lab.h),
+                    );
+                }
+            }
+        } else {
+            let shown = search::fit_query(&query, l.input.w - 2.0 * pad, scale);
+            if let Some(lab) = self.ui_state.chrome.labels.get_or_insert(
+                &mut self.engine,
+                &shown,
+                theme.text,
+                scale,
+            ) {
+                qw = lab.w as f32;
+                frame.blit(
+                    &lab.pixels,
+                    lab.w,
+                    lab.h,
+                    (l.input.x + pad).round() as i32,
+                    input_y(lab.h),
+                );
+            }
+        }
+        if let Some(pre) = self.editor.preedit() {
+            let text = pre.text.clone();
+            let pl = self.engine.layout_preedit(&text);
+            let (pxs, w, h) = self.engine.rasterize(&pl, theme.fg);
+            let x0 = (l.input.x + pad + qw)
+                .min((l.input.x + l.input.w - pad - w as f32).max(l.input.x + pad));
+            let y0 = imid - h as f32 / 2.0;
+            frame.blit(&pxs, w, h, x0.round() as i32, y0.round() as i32);
+            frame.fill_rect(
+                x0.round() as i32,
+                (y0 + h as f32) as i32 - 1,
+                w,
+                1,
+                [theme.fg[0], theme.fg[1], theme.fg[2], 255],
+            );
+        }
+
+        // 候选行：底色 → 来源提示（右对齐）→ 文件名（左对齐，避让提示后截断）
+        for (slot, label, hint, recent) in visible {
+            let Some(row) = l.rows.get(slot - top) else {
+                continue;
+            };
+            if slot == selected || hover == Some(slot) {
+                frame.fill_rect(
+                    row.x.round() as i32 + 1,
+                    row.y.round() as i32,
+                    row.w.ceil() as u32 - 2,
+                    row.h.ceil() as u32,
+                    theme.hover,
+                );
+            }
+            if label.is_empty() {
+                continue;
+            }
+            let mid = row.y + row.h / 2.0;
+            let ty = |h: u32| (mid - h as f32 / 2.0).round() as i32;
+            let hint = if recent { "最近".to_string() } else { hint };
+            let hint_shown = quick_open::fit_label(&hint, row.w * 0.45, scale);
+            let hint_w = if hint_shown.is_empty() {
+                0.0
+            } else {
+                quick_open::text_width(&hint_shown, scale)
+            };
+            if hint_w > 0.0 {
+                if let Some(lab) = self.ui_state.chrome.labels.get_or_insert(
+                    &mut self.engine,
+                    &hint_shown,
+                    theme.muted,
+                    scale,
+                ) {
+                    frame.blit(
+                        &lab.pixels,
+                        lab.w,
+                        lab.h,
+                        (row.x + row.w - pad - lab.w as f32).round() as i32,
+                        ty(lab.h),
+                    );
+                }
+            }
+            let label_w =
+                (row.w - 2.0 * pad - hint_w - if hint_w > 0.0 { pad } else { 0.0 }).max(0.0);
+            let shown = quick_open::fit_label(&label, label_w, scale);
+            if let Some(lab) = self.ui_state.chrome.labels.get_or_insert(
+                &mut self.engine,
+                &shown,
+                theme.text,
+                scale,
+            ) {
+                frame.blit(
+                    &lab.pixels,
+                    lab.w,
+                    lab.h,
+                    (row.x + pad).round() as i32,
+                    ty(lab.h),
+                );
+            }
+        }
+        // 空态提示：占首行
+        if empty {
+            if let Some(row) = l.rows.first() {
+                if let Some(lab) = self.ui_state.chrome.labels.get_or_insert(
+                    &mut self.engine,
+                    "无匹配文件",
+                    theme.muted,
+                    scale,
+                ) {
+                    let y = (row.y + row.h / 2.0 - lab.h as f32 / 2.0).round() as i32;
+                    frame.blit(&lab.pixels, lab.w, lab.h, (row.x + pad).round() as i32, y);
+                }
             }
         }
     }

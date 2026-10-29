@@ -75,8 +75,14 @@ fn file_menu_injects_recent_before_quit() {
     assert_eq!(rows[static_len].2, MenuAction::OpenRecent(1));
     assert_eq!(rows[static_len + 1].2, MenuAction::Quit, "退出仍在最后");
     // 分发与布局同源
-    assert_eq!(action_at(0, static_len - 1, &recent), Some(MenuAction::OpenRecent(0)));
-    assert_eq!(action_at(0, static_len + 1, &recent), Some(MenuAction::Quit));
+    assert_eq!(
+        action_at(0, static_len - 1, &recent),
+        Some(MenuAction::OpenRecent(0))
+    );
+    assert_eq!(
+        action_at(0, static_len + 1, &recent),
+        Some(MenuAction::Quit)
+    );
     assert_eq!(action_at(0, static_len + 2, &recent), None);
     // 高度随项数增长；项命中与下标一致
     let p0 = popup_layout(0, 1.0, &[]);
@@ -102,6 +108,7 @@ fn menu_definitions_cover_shortcuts() {
         vec![
             MenuAction::New,
             MenuAction::Open,
+            MenuAction::QuickOpen,
             MenuAction::Save,
             MenuAction::SaveAs,
             MenuAction::Export,
@@ -201,7 +208,10 @@ fn status_line_variants() {
             12,
             3
         ),
-        ("dir/a.md *（外部修改已备份）".into(), "1234 字 · 行 12，列 3".into())
+        (
+            "dir/a.md *（外部修改已备份）".into(),
+            "1234 字 · 行 12，列 3".into()
+        )
     );
     assert_eq!(
         status_line(Some(Path::new("b.md")), false, ExternalState::None, 0, 2, 7).0,

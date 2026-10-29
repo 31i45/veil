@@ -35,6 +35,8 @@ pub enum Key {
     A,
     /// 逻辑键 n（无论是否带 ctrl；用于 Ctrl+N 新建与文本分流）。
     N,
+    /// 逻辑键 p（无论是否带 ctrl；用于 Ctrl+P 快速打开与文本分流）。
+    P,
     /// Escape：关闭菜单（切片 15）。
     Escape,
     Left,
@@ -75,6 +77,8 @@ pub enum Action {
     Open,
     /// 新建（Ctrl+N）：以空白草稿替换当前文档（脏文档拒绝）。
     New,
+    /// 快速打开（Ctrl+P）：浮层过滤最近文件与当前目录 Markdown 文件。
+    QuickOpen,
     /// 关闭菜单（Esc）：纯视图动作。
     CloseMenu,
     /// 切换大纲面板（Ctrl+Shift+O）：纯视图动作。
@@ -121,6 +125,8 @@ pub fn translate(key: Key, mods: Mods) -> Option<Action> {
         Key::A => None, // 无 ctrl 的 a 文本由 Text 变体承载
         Key::N if mods.ctrl => Some(Action::New),
         Key::N => None, // 无 ctrl 的 n 文本由 Text 变体承载
+        Key::P if mods.ctrl => Some(Action::QuickOpen),
+        Key::P => None, // 无 ctrl 的 p 文本由 Text 变体承载
         // Ctrl+Shift+←/→ 按词扩选；Ctrl+←/→ 按词移动；Shift+方向为字符级扩选。
         Key::Left if mods.ctrl && mods.shift => Some(Action::Doc(Intent::SelectWordLeft)),
         Key::Right if mods.ctrl && mods.shift => Some(Action::Doc(Intent::SelectWordRight)),
@@ -386,6 +392,12 @@ mod tests {
     fn new_binding() {
         assert_eq!(translate(Key::N, CTRL), Some(Action::New));
         assert_eq!(translate(Key::N, NONE), None); // 无 ctrl 的 n 由 Text 变体承载
+    }
+
+    #[test]
+    fn quick_open_binding() {
+        assert_eq!(translate(Key::P, CTRL), Some(Action::QuickOpen));
+        assert_eq!(translate(Key::P, NONE), None); // 无 ctrl 的 p 由 Text 变体承载
     }
 
     #[test]

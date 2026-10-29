@@ -71,6 +71,8 @@ impl App {
         // 索引重建后 top/height 归零：立即按估算高度累计一次，可见区间/滚动条
         // 才有有效几何；排版后用 recompute_geometry 以真实高度覆盖。
         self.recompute_geometry();
+        // 全文统计与块结构同源重建：状态栏字数不可能落后于真值
+        self.refresh_stats();
     }
 
     /// 按当前布局/公式/表格缓存重算高度与累计 top（不再枚举块）。

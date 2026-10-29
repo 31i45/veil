@@ -63,6 +63,7 @@ impl Chrome {
         path: Option<&Path>,
         dirty: bool,
         external: ExternalState,
+        words: usize,
         line: usize,
         col: usize,
         doc_h: f32,
@@ -109,7 +110,7 @@ impl Chrome {
         );
         frame.fill_rect(0, status_y as i32, frame.width, 1, theme.chrome_border);
         let mid = status_y + status_h / 2.0;
-        let (left, right) = status_line(path, dirty, external, line, col);
+        let (left, right) = status_line(path, dirty, external, words, line, col);
         self.draw_left(frame, engine, &left, 12.0 * scale, mid, theme.muted, scale);
         self.draw_right(
             frame,

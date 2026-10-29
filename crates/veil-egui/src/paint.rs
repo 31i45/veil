@@ -11,6 +11,12 @@ use crate::view::{
 use std::path::{Path, PathBuf};
 use veil_core::{BlockId, BlockKind, InlineKind, InlineNode, Range};
 
+/// 专注模式压暗强度：背景色以该 alpha 覆盖非光标块（越大越暗，255 = 全遮）。
+const FOCUS_DIM_ALPHA: u8 = 160;
+
+/// 打字机模式锚点：视口高比例（0.42 ≈ 上四成处），光标行中心恒定位于此处。
+const TYPEWRITER_ANCHOR: f32 = 0.42;
+
 impl App {
     /// 补齐缺失布局（键命中则零开销）。Reveal 激活已并入布局键，光标移动后
     /// 指纹失配即自动重排，无需另设失效调用（ADR-009 决策四）。
@@ -362,6 +368,8 @@ impl App {
         let sel = self.editor.selection();
         // 只遍历视口覆盖的块（含 overscan），不再逐块判定后 continue
         let vis = self.visible_index_range();
+        // 专注模式压暗需要二次遍历同一区间（主循环按值消费区间）
+        let vis_focus = vis.clone();
         let inline_key = self.inline_key();
         let image_base = self.input_state.revs.image_base;
         // 超限块降级提示：内容画完后再画，避免与文本光栅/选区叠加顺序冲突
@@ -501,6 +509,25 @@ impl App {
                 oversize.push((sy, l.height, l.full_len));
             }
         }
+        // 专注模式（阶段 1）：非光标块整体压暗（背景色半透明覆盖，内容与装饰一并变淡）。
+        // 只读视觉，不动真值与派生缓存；当前块保持原样，光标随后绘制仍清晰。
+        if self.ui_state.writing.focus {
+            let focused = self.caret_block_index().map(|i| self.index.blocks[i].id);
+            let dim = [
+                theme.bg[0],
+                theme.bg[1],
+                theme.bg[2],
+                FOCUS_DIM_ALPHA,
+            ];
+            for g in &self.index.blocks[vis_focus] {
+                if focused == Some(g.id) {
+                    continue;
+                }
+                let sy = (vp.y + g.top - self.window_state.scroll_y) as i32;
+                let h = self.block_height(g).ceil() as u32;
+                frame.fill_rect(0, sy, vp.w.ceil() as u32, h.max(1), dim);
+            }
+        }
         // 超限块降级提示：块高已含提示行，画在文本之后、光标/选区之上
         for (sy, bh, full) in oversize {
             let notice = oversize_notice(full);
@@ -543,6 +570,7 @@ impl App {
             self.doc.path.as_deref(),
             dirty,
             external,
+            self.ui_state.writing.words,
             line,
             col,
             doc_h,
@@ -1042,7 +1070,12 @@ impl App {
     pub(crate) fn scroll_to_caret(&mut self) {
         let vp = self.viewport();
         let (_, cy, ch) = self.caret_screen();
-        if cy < vp.y {
+        if self.ui_state.writing.typewriter {
+            // 打字机模式（阶段 1）：光标行固定在视口上部锚点，行中心对齐锚点；
+            // 文档首尾处仍由下方钳位兜底（无法再居中时贴边）
+            let target = vp.y + vp.h * TYPEWRITER_ANCHOR;
+            self.window_state.scroll_y += cy + ch / 2.0 - target;
+        } else if cy < vp.y {
             self.window_state.scroll_y += cy - vp.y - MARGIN * self.input_state.scale;
         } else if cy + ch > vp.y + vp.h {
             self.window_state.scroll_y += cy + ch - (vp.y + vp.h) + MARGIN * self.input_state.scale;

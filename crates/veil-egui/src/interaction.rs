@@ -443,6 +443,8 @@ impl App {
             MenuAction::ThemeSystem => self.set_theme_mode(ThemeMode::System),
             MenuAction::ThemeLight => self.set_theme_mode(ThemeMode::Light),
             MenuAction::ThemeDark => self.set_theme_mode(ThemeMode::Dark),
+            MenuAction::ToggleFocus => self.toggle_focus(),
+            MenuAction::ToggleTypewriter => self.toggle_typewriter(),
             MenuAction::ToggleOutline => self.toggle_outline(),
             MenuAction::Find => self.open_search(),
             MenuAction::Replace => self.open_replace(),
@@ -703,6 +705,27 @@ impl App {
         self.ensure_tables_visible();
         self.recompute_geometry();
         self.set_ime_area();
+        self.request_redraw();
+    }
+
+    /// 切换专注模式（阶段 1）：只改视觉开关，不动真值/派生缓存；重绘即生效。
+    pub(crate) fn toggle_focus(&mut self) {
+        let on = !self.ui_state.writing.focus;
+        self.ui_state.writing.focus = on;
+        self.ui_state.chrome.notice = format!("专注模式：{}", if on { "开" } else { "关" });
+        self.request_redraw();
+    }
+
+    /// 切换打字机模式（阶段 1）：开启即刻把光标行移到视口锚点；之后每次
+    /// `scroll_to_caret`（编辑/垂直移动）都保持该锚点。
+    pub(crate) fn toggle_typewriter(&mut self) {
+        let on = !self.ui_state.writing.typewriter;
+        self.ui_state.writing.typewriter = on;
+        if on {
+            self.scroll_to_caret();
+            self.set_ime_area();
+        }
+        self.ui_state.chrome.notice = format!("打字机模式：{}", if on { "开" } else { "关" });
         self.request_redraw();
     }
 

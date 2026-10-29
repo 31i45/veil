@@ -1837,11 +1837,12 @@ fn status_line_reports_caret_line_col() {
         a.doc.path.as_deref(),
         a.editor.is_dirty(),
         a.external_state(),
+        a.ui_state.writing.words,
         2,
         2,
     );
     assert_eq!(left, "a.md");
-    assert_eq!(right, "行 2，列 2");
+    assert_eq!(right, "3 字 · 行 2，列 2");
 }
 
 #[test]
@@ -4542,4 +4543,90 @@ fn perf_after_edit_breakdown() {
     println!("p95_refresh_index_ms={:.3}", p95(&refresh));
     println!("p95_ensure_layouts_visible_ms={:.3}", p95(&ensure_vis));
     println!("p95_recompute_geometry_ms={:.3}", p95(&recompute));
+}
+
+// ---- 阶段 1：中文口径字数 + 专注/打字机模式 ----
+
+/// 在帧的 [y0, y1) 行内找首个非背景像素（文本/光标/装饰）。
+fn first_non_bg(f: &Frame, y0: i32, y1: i32, bg: [u8; 4]) -> Option<(u32, u32, [u8; 4])> {
+    for y in y0.max(0) as u32..y1.max(0) as u32 {
+        for x in 0..f.width {
+            let p = f.get(x, y);
+            if p != bg {
+                return Some((x, y, p));
+            }
+        }
+    }
+    None
+}
+
+#[test]
+fn word_count_tracks_edits_and_undo() {
+    let store = MemStore::default();
+    let mut a = app("你好世界", None, false, &store);
+    assert_eq!(a.ui_state.writing.words, 4, "启动即按中文口径统计");
+    a.perform_action(Action::Doc(Intent::InsertText(" hello".into())));
+    assert_eq!(a.ui_state.writing.words, 5, "编辑后与文本同源重算");
+    a.perform_menu(MenuAction::Undo);
+    assert_eq!(a.ui_state.writing.words, 4, "撤销后回到旧值");
+}
+
+#[test]
+fn word_count_skips_markdown_markers() {
+    let store = MemStore::default();
+    let a = app("# 标题\n\n正文 **加粗** `code`\n", None, false, &store);
+    // 标题(2) + 正文(2) + 加粗(2) + code(1)
+    assert_eq!(a.ui_state.writing.words, 7);
+}
+
+#[test]
+fn focus_mode_dims_only_non_caret_blocks() {
+    let store = MemStore::default();
+    let mut a = app("第一段\n\n第二段\n", None, false, &store);
+    a.render(); // 先完成排版，几何才稳定
+    let vp = a.viewport();
+    let bg = a.input_state.theme.bg;
+    let scroll = a.window_state.scroll_y;
+    let (top0, h0) = {
+        let g = &a.index.blocks[0];
+        (g.top, g.height)
+    };
+    let (top1, h1) = {
+        let g = &a.index.blocks[1];
+        (g.top, g.height)
+    };
+    let (y0, y1) = (vp.y + top0 - scroll, vp.y + top1 - scroll);
+    let frame = a.render();
+    let p0 = first_non_bg(frame, y0 as i32, (y0 + h0) as i32, bg).expect("首段有内容");
+    let p1 = first_non_bg(frame, y1 as i32, (y1 + h1) as i32, bg).expect("次段有内容");
+
+    a.toggle_focus();
+    assert!(a.ui_state.writing.focus);
+    let frame = a.render();
+    assert_eq!(frame.get(p0.0, p0.1), p0.2, "光标所在块不压暗");
+    let dimmed = frame.get(p1.0, p1.1);
+    assert_ne!(dimmed, p1.2, "非光标块被压暗");
+    let lum = |p: [u8; 4]| p[0] as i32 + p[1] as i32 + p[2] as i32;
+    assert!(lum(dimmed) > lum(p1.2), "压暗即向背景色靠拢");
+    // 纯视觉开关：源码一个字节都不变
+    assert_eq!(doc_text(&a), "第一段\n\n第二段\n");
+}
+
+#[test]
+fn typewriter_mode_pins_caret_line_to_anchor() {
+    let store = MemStore::default();
+    let text = "line\n\n".repeat(100);
+    let mut a = app(&text, None, false, &store);
+    a.editor.set_caret(360); // 第 61 块起点（每块 6 字节）
+    a.toggle_typewriter();
+    assert!(a.ui_state.writing.typewriter);
+    let vp = a.viewport();
+    let target = vp.y + vp.h * 0.42;
+    let (_, cy, ch) = a.caret_screen();
+    assert!(a.window_state.scroll_y > 0.0, "开启即滚动到锚点");
+    assert!(
+        (cy + ch / 2.0 - target).abs() <= ch,
+        "光标行中心贴合锚点：cy={cy} target={target}"
+    );
+    assert_eq!(doc_text(&a), text, "只改视口，不动文本");
 }

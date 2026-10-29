@@ -71,6 +71,10 @@ pub enum MenuAction {
     ThemeSystem,
     ThemeLight,
     ThemeDark,
+    /// 切换专注模式（阶段 1）。
+    ToggleFocus,
+    /// 切换打字机模式（阶段 1）。
+    ToggleTypewriter,
     Quit,
     /// 打开最近文件（0b）：下标为最近列表位置（0 = 最近一次）。
     OpenRecent(usize),
@@ -114,6 +118,8 @@ pub const MENUS: [MenuDef; 3] = [
             ("跟随系统", "", MenuAction::ThemeSystem),
             ("浅色", "", MenuAction::ThemeLight),
             ("深色", "", MenuAction::ThemeDark),
+            ("专注模式", "", MenuAction::ToggleFocus),
+            ("打字机模式", "", MenuAction::ToggleTypewriter),
         ],
     },
 ];
@@ -299,11 +305,13 @@ pub fn scrollbar_hit(vp: Viewport, doc_h: f32, x: f32, y: f32, scale: f32) -> bo
         && x < vp.x + vp.w
 }
 
-/// 状态栏文本：(左, 右)。左 = 路径或「未命名草稿」+ 脏标 + 外部变更提示；右 = 行列。
+/// 状态栏文本：(左, 右)。左 = 路径或「未命名草稿」+ 脏标 + 外部变更提示；
+/// 右 = 全文字数 + 行列。
 pub fn status_line(
     path: Option<&Path>,
     dirty: bool,
     external: ExternalState,
+    words: usize,
     line: usize,
     col: usize,
 ) -> (String, String) {
@@ -320,7 +328,7 @@ pub fn status_line(
         ExternalState::BackedUp => left.push_str("（外部修改已备份）"),
         ExternalState::Missing => left.push_str("（文件缺失）"),
     }
-    (left, format!("行 {line}，列 {col}"))
+    (left, format!("{words} 字 · 行 {line}，列 {col}"))
 }
 
 /// chrome 交互态与标签缓存。`notice` 为状态栏临时提示（动作失败/成功）。

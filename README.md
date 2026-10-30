@@ -48,7 +48,7 @@ cargo test --workspace      # 运行全部单元/集成测试
 cargo run -p veil -- <file.md>   # 运行并打开指定 Markdown 文件
 ```
 
-当前 769 项测试全绿（`cargo test --workspace` 769 passed / 0 failed / 10 ignored），`cargo clippy --workspace --all-targets -- -D warnings` 零警告。
+当前 772 项测试全绿（`cargo test --workspace` 772 passed / 0 failed / 10 ignored），`cargo clippy --workspace --all-targets -- -D warnings` 零警告。
 
 ## 数字红线（目标值与实测）
 
@@ -62,7 +62,7 @@ cargo run -p veil -- <file.md>   # 运行并打开指定 Markdown 文件
 | 10 万字文档常驻内存（私有工作集） | ≤ 150 MB | 21.55 MB |
 | 安装产物体积（`veil.exe` 单文件） | ≤ 15 MiB | 5,729,280 B ≈ 5.46 MiB |
 | `veil-core` 单元+属性测试数 | ≥ 80 | 185 |
-| e2e 断言数 | ≥ 20 | 未达：产品层仅有 1 个单测，端到端断言待建 |
+| e2e 断言数 | ≥ 20 | 41（3 个 e2e_ 场景测试：写作闭环打开→保存→重开、表格+图片粘贴落盘、查找替换→崩溃恢复→自清）✅ |
 | Markdown 往返一致率（无编辑时输出 == 输入字节） | 100% | 100% |
 | `veil-core` 的 GUI/异步运行时依赖数 | 0 | 0 |
 | `veil-egui`+`veil` 直接依赖总数 | ≤ 8 | 8 |

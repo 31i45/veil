@@ -5525,3 +5525,190 @@ fn typewriter_mode_pins_caret_line_to_anchor() {
     );
     assert_eq!(doc_text(&a), text, "只改视口，不动文本");
 }
+
+// ---- 2e 端到端场景：打开→编辑→表格→图片→查找→保存→重开→恢复（红线 e2e 断言 ≥20）----
+
+#[test]
+fn e2e_writing_loop_open_edit_save_reopen() {
+    // 打开既有文件 → 文末追加写作 → 保存落盘 → 重开验证字节一致
+    let store = MemStore::default();
+    store
+        .files
+        .borrow_mut()
+        .insert(PathBuf::from("doc/a.md"), "# 标题\n\n第一段。\n".as_bytes().to_vec());
+    let rec = FakeRecovery::default();
+    let ses = FakeSession::default();
+    let mut a = app_persist("默认样例", None, &store, &rec, &ses, false);
+    a.open_path(PathBuf::from("doc/a.md"));
+    assert_eq!(doc_text(&a), "# 标题\n\n第一段。\n");
+    assert_eq!(a.doc.path, Some(PathBuf::from("doc/a.md")));
+    assert!(!a.editor.is_dirty(), "打开即干净态");
+    assert_eq!(
+        a.persist_state.recent,
+        vec![PathBuf::from("doc/a.md")],
+        "打开即进最近列表"
+    );
+
+    a.perform_action(Action::Doc(Intent::MoveDocEnd));
+    a.route_key(Key::Text("第二段，中文写作。\n".into()));
+    assert!(a.editor.is_dirty(), "编辑置脏");
+    assert_eq!(doc_text(&a), "# 标题\n\n第一段。\n第二段，中文写作。\n");
+
+    a.save_now();
+    assert!(!a.editor.is_dirty(), "保存清脏");
+    assert_eq!(
+        store.files.borrow()[&PathBuf::from("doc/a.md")],
+        "# 标题\n\n第一段。\n第二段，中文写作。\n".as_bytes(),
+        "磁盘字节 == 文档真值（无隐式规范化）"
+    );
+
+    // 重开同一文件：内容与会话基线都来自磁盘
+    a.open_path(PathBuf::from("doc/a.md"));
+    assert_eq!(doc_text(&a), "# 标题\n\n第一段。\n第二段，中文写作。\n");
+    assert!(!a.editor.is_dirty(), "重开干净");
+}
+
+#[test]
+fn e2e_table_edit_and_image_paste() {
+    // 表格网格渲染 → Tab 格间导航 → 格内编辑重建网格 → 截图粘贴插相对路径 → 保存落盘
+    let text = "说明\n\n| 名称 | 数量 |\n| --- | --- |\n| 苹果 | 1 |\n";
+    let store = MemStore::default();
+    store
+        .files
+        .borrow_mut()
+        .insert(PathBuf::from("doc/t.md"), text.as_bytes().to_vec());
+    let calls: Rc<RefCell<Vec<(PathBuf, u32, u32)>>> = Rc::new(RefCell::new(Vec::new()));
+    let mut a = App::new(
+        Doc {
+            text: text.into(),
+            path: Some(PathBuf::from("doc/t.md")),
+            bom: false,
+            resume: false,
+        },
+        Box::new(ClipImage {
+            text: None,
+            html: None,
+            image: Some(solid(4, 2)),
+        }),
+        Box::new(store.clone()),
+        Box::new(FakeMath {
+            fail: false,
+            calls: Rc::new(RefCell::new(Vec::new())),
+        }),
+        Box::new(NoImages),
+        Box::new(FakeAssets {
+            result: Ok("t.assets/image-1.png".into()),
+            calls: calls.clone(),
+        }),
+        Box::new(NoExport),
+        Box::new(NoDialogs),
+        Box::new(NoWatcher),
+        theme::test_support::env(),
+        persist_env(),
+    );
+
+    a.ensure_layouts_all();
+    a.ensure_tables();
+    let (id, kind, range) = a.editor.session().blocks()[1].clone();
+    assert_eq!(kind, BlockKind::Table);
+    assert!(a.table_shows_grid(id, &range), "光标在表外 → 网格渲染");
+    let tbl = a.editor.session().table(id).unwrap();
+    let first = tbl.header[0].range.start;
+    let second = tbl.header[1].range.start;
+    let old_w = a.cache.tables[&id].width;
+
+    // Tab：表头首格 → 次格；格内编辑 → 网格重建变宽
+    assert!(a.editor.set_caret(first));
+    a.route_key(Key::Tab);
+    assert_eq!(a.editor.caret(), second, "Tab 前进到下一格内容起点");
+    assert!(a.editor.set_caret(first));
+    let dirty = a.editor.apply(Intent::InsertText("长长长".into())).unwrap();
+    a.after_edit(dirty);
+    a.ensure_tables();
+    let new_id = a.editor.session().blocks()[1].0;
+    assert!(a.cache.tables.contains_key(&new_id), "格内编辑 → 网格重建");
+    assert!(a.cache.tables[&new_id].width > old_w, "内容变宽 → 列宽变大");
+
+    // 截图粘贴：资产落盘 + 插入相对路径链接
+    a.perform_action(Action::Doc(Intent::MoveDocEnd));
+    a.paste_clipboard();
+    assert!(
+        doc_text(&a).contains("![](t.assets/image-1.png)"),
+        "粘贴插入相对路径图片链接"
+    );
+    assert!(a.editor.is_dirty());
+    assert_eq!(calls.borrow().len(), 1, "资产保存调用一次");
+    assert_eq!(
+        (calls.borrow()[0].1, calls.borrow()[0].2),
+        (4, 2),
+        "位图原样交给资产层"
+    );
+
+    a.save_now();
+    let disk = String::from_utf8(store.files.borrow()[&PathBuf::from("doc/t.md")].clone())
+        .expect("落盘内容恒为 UTF-8");
+    assert!(disk.contains("| 长长长名称 | 数量 |"), "格内编辑后的表格源码完整落盘");
+    assert!(disk.contains("![](t.assets/image-1.png)"));
+}
+
+#[test]
+fn e2e_search_replace_and_crash_recovery() {
+    // 查找→替换全部→崩溃（杀进程）→重启恢复→保存收口
+    let store = MemStore::default();
+    let rec = FakeRecovery::default();
+    let ses = FakeSession::default();
+    let mut a = app_persist("alpha beta alpha\n", Some("r.md"), &store, &rec, &ses, false);
+    a.ensure_layouts_all();
+    a.perform_action(Action::Replace);
+    assert!(a.ui_state.search.open && a.ui_state.search.replace_open);
+    a.search_toggle_field();
+    a.search_input("alpha");
+    assert_eq!(a.ui_state.search.matches.len(), 2, "全文档命中 2 处");
+    assert_eq!(a.ui_state.search.label(), "1/2");
+    a.search_next();
+    assert_eq!(a.ui_state.search.current, 1, "下一处命中推进游标");
+    a.search_toggle_field();
+    a.search_input("gamma");
+    a.replace_all();
+    assert_eq!(doc_text(&a), "gamma beta gamma\n");
+    assert!(a.ui_state.search.matches.is_empty(), "替换后命中清空");
+    assert!(a.editor.is_dirty());
+    a.close_search();
+    assert!(!a.ui_state.search.open);
+
+    // 静默 2s 落恢复快照 → 模拟杀进程（磁盘仍是旧内容）
+    let t0 = Instant::now();
+    a.persist_state.persist.note_activity(t0);
+    a.maybe_recovery_write(t0 + Duration::from_secs(2));
+    assert_eq!(
+        slot_content(&rec),
+        (Some(PathBuf::from("r.md")), "gamma beta gamma\n".to_string()),
+        "恢复快照 = 路径 + 未保存内容"
+    );
+    store
+        .files
+        .borrow_mut()
+        .insert(PathBuf::from("r.md"), b"alpha beta alpha\n".to_vec());
+
+    // 重启：崩溃恢复优先，内容与路径都来自快照
+    let mut b = app_persist("默认样例", None, &store, &rec, &ses, true);
+    assert_eq!(doc_text(&b), "gamma beta gamma\n", "重启后恢复未保存内容");
+    assert_eq!(b.doc.path, Some(PathBuf::from("r.md")));
+    assert!(b.editor.is_dirty(), "恢复内容相对磁盘是未保存修改");
+    assert_eq!(b.doc.baseline, b"alpha beta alpha\n".to_vec(), "基线 = 磁盘");
+
+    // 恢复后保存：磁盘更新、脏标清除（本 session 未重写快照，槽留待下次启动比对自清）
+    b.save_now();
+    assert!(!b.editor.is_dirty());
+    assert_eq!(
+        store.files.borrow()[&PathBuf::from("r.md")],
+        b"gamma beta gamma\n".to_vec(),
+        "恢复后保存落盘"
+    );
+
+    // 第三次启动：槽内快照 == 磁盘 → 干净打开 + 残留自清，全流程收口
+    let c = app_persist("默认样例", None, &store, &rec, &ses, true);
+    assert_eq!(doc_text(&c), "gamma beta gamma\n");
+    assert!(!c.editor.is_dirty(), "快照与磁盘一致：干净打开");
+    assert!(rec.slot.borrow().is_none(), "残留快照启动自清");
+}

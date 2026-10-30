@@ -299,20 +299,27 @@ impl Syntax {
                 line += 1;
                 continue;
             }
+            let (mut v, consumed) = scan_next(buf, line, total);
+            // 先把块扫出来再比对，避免为校验额外扫一遍（旧写法在此处再调
+            // scan_next 会退化为 O(n²)）。起始行 + 种类 + **结束行**三者都平移
+            // 对齐才算「干净块」；只比起始行与种类时，块边界变化（内容已改，
+            // 但首行恰好对齐）仍会复用旧 BlockId，派生缓存于是命中陈旧布局。
             if line > new_end_line {
-                let aligned = (bi..self.blocks.len()).find(|&k| {
+                if let Some(k) = (bi..self.blocks.len()).find(|&k| {
                     let shifted = self.blocks[k].start_line as isize + delta;
                     shifted >= 0 && shifted as usize == line
-                });
-                if let Some(k) = aligned {
-                    let (first, _) = scan_next(buf, line, total);
-                    if first[0].0 == self.blocks[k].kind {
+                }) {
+                    let (nk, _, ne) = &v[0];
+                    let shifted_end = self.blocks[k].end_line as isize + delta;
+                    if *nk == self.blocks[k].kind
+                        && shifted_end >= 0
+                        && shifted_end as usize == *ne
+                    {
                         suffix_start = Some(k);
-                        break;
+                        break; // 此后旧块整体平移保留，不再追加刚扫出的 v
                     }
                 }
             }
-            let (mut v, consumed) = scan_next(buf, line, total);
             produced.append(&mut v);
             line += consumed;
         }

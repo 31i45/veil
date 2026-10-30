@@ -245,6 +245,38 @@ fn gap_fill_with_remaining_blank_forms_new_paragraph() {
 }
 
 #[test]
+fn suffix_ids_preserved_across_block_kinds_after_edit() {
+    // 「干净块不动」在各块型（列表区域/引用/围栏/表格）上都成立：
+    // 首段内插换行，其后的每类块 id 都必须保留（含结束行一并平移对齐）
+    let doc = "aaa\n\n- x\n- y\n\n> q1\n> q2\n\n```\nc\n```\n\n| a | b |\n|---|---|\n| 1 | 2 |\n";
+    let mut s = Session::open(doc);
+    let before: Vec<_> = s.blocks().iter().map(|b| b.0).collect();
+    s.apply(insert(3, "\nzz")).unwrap(); // 首段变 3 行
+    let after = s.blocks();
+    assert_eq!(after.len(), before.len());
+    for i in 1..before.len() {
+        assert_eq!(after[i].0, before[i], "第 {i} 类块 id 须保留");
+    }
+    // 结束行也平移对齐：列表区域整体后移 2 行
+    assert_eq!(after[1].2.start, s.serialize().find("- x").unwrap());
+}
+
+#[test]
+fn suffix_not_reused_when_block_boundary_changed() {
+    // 反例回归：首行与种类恰好平移对齐、但块边界已变（引用块 2 行 → 1 行）时
+    // 不得复用旧 BlockId（否则派生缓存会命中陈旧布局）
+    let mut s = Session::open("aaa\n\n> q1\n> q2\n\nzzz\n");
+    let before: Vec<_> = s.blocks().iter().map(|b| b.0).collect();
+    // 删除第二个引用行（含其后换行）：旧引用块 2 行 → 1 行
+    let q2 = s.serialize().find("> q2").unwrap();
+    s.apply(replace(q2, q2 + 5, "")).unwrap();
+    let after = s.blocks();
+    assert_eq!(after.len(), 3);
+    assert_ne!(after[1].0, before[1], "边界变化后引用块须换新 id");
+    assert_eq!(after[2].0, before[2], "未受影响的末块 id 仍保留");
+}
+
+#[test]
 fn insert_newline_in_first_para_preserves_later_block_ids() {
     // 局部性不变量（含行平移）：首段内插换行，后块平移但 id 保留
     let mut s = Session::open("aaa\n\nb\n\nc\n");

@@ -268,7 +268,102 @@ impl App {
             && self.cache.math(id, self.math_key(id)).is_some()
     }
 
-    /// 表格按需网格排版（光标在表格内为源码态，不排版网格；离开后首次绘制时补齐）。
+    /// 判定 caret 是否落在指定 Table 的任一单元格内容区间内（不含管道符/分隔行等结构字符）。
+    pub(crate) fn caret_in_table_cell(&self, id: BlockId) -> bool {
+        let caret = self.editor.caret();
+        self.editor
+            .session()
+            .table(id)
+            .map(|t| {
+                t.header.iter().any(|c| cell_contains(&c.range, caret))
+                    || t.rows
+                        .iter()
+                        .any(|row| row.iter().any(|c| cell_contains(&c.range, caret)))
+            })
+            .unwrap_or(false)
+    }
+
+    /// 找到 caret 所在的表格与单元格（flat 索引 = header.len() + rows 累积）。
+    fn caret_table_and_cell(&self, caret: usize) -> Option<(BlockId, veil_core::Table)> {
+        let blocks = &self.index.blocks;
+        // 从后往前找最近的包含 caret 的 Table block（先到先得：上方的 Table 先遍历到）
+        for g in blocks.iter().rev() {
+            if g.kind != BlockKind::Table {
+                continue;
+            }
+            if !(g.range.start <= caret && caret <= g.range.end) {
+                continue;
+            }
+            let tbl = self.editor.session().table(g.id)?;
+            return Some((g.id, tbl));
+        }
+        None
+    }
+
+    /// Tab 前进一格：caret 跳到下一个单元格的内容起点。最后一格时回到首格起点。
+    /// 返回 true 表示已处理（不应再走 Indent/Dedent）。
+    pub(crate) fn tab_next_cell(&mut self) -> bool {
+        self.tab_step(1)
+    }
+
+    /// Shift+Tab 后退一格：caret 跳到上一个单元格的内容起点。首格时不移动。
+    pub(crate) fn tab_prev_cell(&mut self) -> bool {
+        self.tab_step(-1)
+    }
+
+    fn tab_step(&mut self, dir: i32) -> bool {
+        let caret = self.editor.caret();
+        let Some((_, tbl)) = self.caret_table_and_cell(caret) else {
+            return false;
+        };
+        let total = tbl.header.len() + tbl.rows.iter().map(|r| r.len()).sum::<usize>();
+        if total == 0 {
+            return false;
+        }
+        // 找到当前 cell 在 flat 数组中的索引
+        let mut cur: Option<usize> = None;
+        let mut idx = 0usize;
+        for c in tbl.header.iter() {
+            if cell_contains(&c.range, caret) {
+                cur = Some(idx);
+                break;
+            }
+            idx += 1;
+        }
+        if cur.is_none() {
+            for row in tbl.rows.iter() {
+                for c in row.iter() {
+                    if cell_contains(&c.range, caret) {
+                        cur = Some(idx);
+                        break;
+                    }
+                    idx += 1;
+                }
+                if cur.is_some() {
+                    break;
+                }
+            }
+        }
+        let Some(cur_idx) = cur else {
+            return false; // caret 不在任何 cell 内
+        };
+        let next = if dir > 0 {
+            (cur_idx + 1) % total
+        } else if cur_idx == 0 {
+            return true; // 首格 Shift+Tab：不动，吞掉按键
+        } else {
+            cur_idx - 1
+        };
+        let target = flat_cell_start(&tbl, next);
+        self.editor.set_caret(target);
+        self.scroll_to_caret();
+        self.request_redraw();
+        true
+    }
+
+    /// 表格按需网格排版：caret 在结构字符上（管道/分隔行）或表外 → 排版网格；
+    /// caret 在单元格内容区间内 → 同样排版网格（活动单元格高亮）；
+    /// 仅 caret 在表内但不落在任何单元格时跳过（源码态）。
     /// 网格缓存与文本布局缓存独立：网格仅供渲染/命中，源码态仍走既有块排版。
     pub(crate) fn ensure_tables_range(&mut self, indices: std::ops::Range<usize>) {
         let width = self.content_width();
@@ -281,10 +376,12 @@ impl App {
         let mut pending = Vec::new();
         for g in blocks {
             let (id, kind, range) = (g.id, g.kind.clone(), g.range);
-            if kind != BlockKind::Table
-                || self.cache.table(id, base).is_some()
-                || (range.start <= caret && caret <= range.end)
-            {
+            if kind != BlockKind::Table || self.cache.table(id, base).is_some() {
+                continue;
+            }
+            let inside_block = range.start <= caret && caret <= range.end;
+            if inside_block && !self.caret_in_table_cell(id) {
+                // caret 落在管道符/分隔行等结构字符上 → 源码态，不排版网格
                 continue;
             }
             if let Some(t) = self.editor.session().table(id) {
@@ -315,11 +412,17 @@ impl App {
         self.ensure_tables_range(0..self.index.blocks.len());
     }
 
-    /// 表格当前是否按网格显示：光标在表格内（Reveal 同语义）或未排版时显示源码。
+    /// 表格当前是否按网格显示：
+    /// - caret 在表外 → 显示网格
+    /// - caret 在单元格内容区间内 → 显示网格（活动单元格高亮，源码编辑同路径）
+    /// - caret 在表内但落在结构字符上（管道/分隔行）→ 源码态
     pub(crate) fn table_shows_grid(&self, id: BlockId, range: &veil_core::Range) -> bool {
         let caret = self.editor.caret();
-        !(range.start <= caret && caret <= range.end)
-            && self.cache.table(id, self.base_key()).is_some()
+        let inside_block = range.start <= caret && caret <= range.end;
+        if inside_block && !self.caret_in_table_cell(id) {
+            return false;
+        }
+        self.cache.table(id, self.base_key()).is_some()
     }
 
     /// 渲染纯化（ADR-009 决策五）：产出完整帧缓冲，只读真值、只填派生缓存。
@@ -1232,7 +1335,8 @@ impl App {
         );
     }
 
-    /// 绘制表格网格：表头底色 → 单元格文本 → 网格线（先底后字，线压边）。
+    /// 绘制表格网格：活动单元格底色 → 表头底色 → 单元格文本 → 网格线（先底后字，线压边）。
+    /// 活动单元格由 `caret_in_table_cell` 判定，光标绘制复用既有 `paint_caret_and_preedit` 路径。
     /// 选区跨网格态表格时不画高亮（同数学块 v0 已知简化）。
     pub(crate) fn paint_table(&self, frame: &mut Frame, id: BlockId, top: i32) {
         let Some(t) = self.cache.table(id, self.base_key()) else {
@@ -1240,6 +1344,46 @@ impl App {
         };
         let x0 = (MARGIN * self.input_state.scale) as i32;
         let theme = self.input_state.theme;
+        let caret = self.editor.caret();
+
+        // 活动单元格：caret 落在 cell.range 内 → 画选中色底色
+        if self.caret_in_table_cell(id) {
+            if let Some(src) = self.editor.session().table(id) {
+                let mut idx = 0usize;
+                let mut active = None;
+                for c in src.header.iter() {
+                    if cell_contains(&c.range, caret) {
+                        active = Some(idx);
+                        break;
+                    }
+                    idx += 1;
+                }
+                if active.is_none() {
+                    for row in src.rows.iter() {
+                        for c in row.iter() {
+                            if cell_contains(&c.range, caret) {
+                                active = Some(idx);
+                                break;
+                            }
+                            idx += 1;
+                        }
+                        if active.is_some() {
+                            break;
+                        }
+                    }
+                }
+                if let Some(active_idx) = active {
+                    if let Some(cell_layout) = t.cells.get(active_idx) {
+                        let cx = x0 + cell_layout.x.round() as i32;
+                        let cy = top + cell_layout.y.round() as i32;
+                        let cw = cell_layout.w.round().max(1.0) as u32;
+                        let ch = cell_layout.h.round().max(1.0) as u32;
+                        frame.fill_rect(cx, cy, cw, ch, theme.sel);
+                    }
+                }
+            }
+        }
+
         if let Some(first) = t.rows.first() {
             frame.fill_rect(
                 x0,
@@ -1324,6 +1468,192 @@ impl App {
             .scroll_y
             .clamp(0.0, chrome::max_scroll(vp, self.doc_height()));
     }
+
+    /// Ctrl+Enter：在 caret 所在表格末尾追加一个空 body 行。返回 true 表示已处理。
+    pub(crate) fn table_ctrl_enter(&mut self) -> bool {
+        let caret = self.editor.caret();
+        let Some((_tid, _tbl)) = self.caret_table_and_cell(caret) else {
+            return false;
+        };
+        let Some(block_range) = self.index.blocks.iter()
+            .find(|g| g.kind == BlockKind::Table && g.range.start <= caret && caret <= g.range.end)
+            .map(|g| g.range) else {
+            return false;
+        };
+        let src = self.editor.session().text_slice(block_range).unwrap_or_default();
+        let new_src = table_append_row(&src);
+        if new_src == src {
+            return false;
+        }
+        let edit = veil_core::Edit::Replace { range: block_range, text: new_src };
+        let Ok(events) = self.editor.session_mut().apply(edit) else {
+            return false;
+        };
+        self.after_edit(events.dirty_blocks);
+        self.request_redraw();
+        true
+    }
+}
+
+/// 单元格 range 是否包含 caret（含 start/end，与 block range 判定同口径）。
+fn cell_contains(r: &Range, caret: usize) -> bool {
+    r.start <= caret && caret <= r.end
+}
+
+/// 按 flat 索引（header 先，rows 后）取第 idx 个单元格的 range.start。
+fn flat_cell_start(tbl: &veil_core::Table, idx: usize) -> usize {
+    if let Some(c) = tbl.header.get(idx) {
+        return c.range.start;
+    }
+    let offset = tbl.header.len();
+    let mut remaining = idx - offset;
+    for row in &tbl.rows {
+        if remaining < row.len() {
+            return row[remaining].range.start;
+        }
+        remaining -= row.len();
+    }
+    0
+}
+
+// ---- GFM 表格行/列 Markdown 变换（T3：纯字符串，零核心依赖） ----
+#[allow(dead_code)]
+fn split_row(row: &str) -> Vec<String> {
+    // 去掉首尾空白和首/尾管道符
+    let trimmed = row.trim();
+    let trimmed = trimmed.trim_start_matches('|').trim_end_matches('|');
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+    trimmed
+        .split('|')
+        .map(|s| s.trim().to_string())
+        .collect()
+}
+
+#[allow(dead_code)]
+fn join_row(cells: &[String]) -> String {
+    let parts: Vec<String> = cells.iter().map(|s| format!(" {} ", s)).collect();
+    format!("|{}|", parts.join("|"))
+}
+
+#[allow(dead_code)]
+fn sep_cell_for(align: veil_core::CellAlign) -> String {
+    match align {
+        veil_core::CellAlign::None => "---".into(),
+        veil_core::CellAlign::Left => ":--".into(),
+        veil_core::CellAlign::Center => ":-:".into(),
+        veil_core::CellAlign::Right => "--:".into(),
+    }
+}
+
+#[allow(dead_code)]
+fn parse_aligns(sep_line: &str) -> Vec<veil_core::CellAlign> {
+    let cells = split_row(sep_line);
+    let mut out = Vec::with_capacity(cells.len());
+    for c in cells {
+        let l = c.starts_with(':');
+        let r = c.ends_with(':');
+        out.push(match (l, r) {
+            (true, true) => veil_core::CellAlign::Center,
+            (true, false) => veil_core::CellAlign::Left,
+            (false, true) => veil_core::CellAlign::Right,
+            (false, false) => veil_core::CellAlign::None,
+        });
+    }
+    out
+}
+
+#[allow(dead_code)]
+pub(crate) fn table_append_row(src: &str) -> String {
+    let lines: Vec<&str> = src.trim_end().split('\n').collect();
+    if lines.len() < 3 {
+        return src.to_string();
+    }
+    let ncols = split_row(lines[0]).len();
+    let empty = vec!["".to_string(); ncols];
+    let empty_row = join_row(&empty);
+    let mut new_lines = lines.clone();
+    new_lines.push(empty_row.as_str());
+    format!("{}\n", new_lines.join("\n"))
+}
+
+/// 删除指定 body 行（body_index 0-based；0 = 第一行 body，不是 header）。
+/// 保留表格至少 1 行 body（只有 header + 分隔行时退化为仅 header 行）。
+#[allow(dead_code)]
+pub(crate) fn table_delete_row(src: &str, body_index: usize) -> String {
+    let lines: Vec<&str> = src.trim_end().split('\n').collect();
+    if lines.len() < 3 {
+        return src.to_string();
+    }
+    // body 行在 lines[2..]
+    if body_index + 2 >= lines.len() {
+        return src.to_string();
+    }
+    if lines.len() - 1 <= 3 {
+        // 只剩 header + 分隔行 + 1 body → 删除 body，留 header + 分隔行
+        let keep: Vec<&str> = lines[..2].to_vec();
+        return format!("{}\n", keep.join("\n"));
+    }
+    let mut new_lines: Vec<&str> = lines.clone();
+    new_lines.remove(body_index + 2);
+    format!("{}\n", new_lines.join("\n"))
+}
+
+/// 在指定列 index 前插入空列（col_index 0-based；包含 header 和 separator）。
+#[allow(dead_code)]
+pub(crate) fn table_insert_column(src: &str, col_index: usize) -> String {
+    let lines: Vec<&str> = src.trim_end().split('\n').collect();
+    if lines.len() < 3 {
+        return src.to_string();
+    }
+    let ncols = split_row(lines[0]).len();
+    let col_index = col_index.min(ncols);
+    let mut new_lines = Vec::with_capacity(lines.len());
+    for (i, line) in lines.iter().enumerate() {
+        let cells = split_row(line);
+        let mut new_cells = cells.clone();
+        // 处理列数不足的行（表格结构异常时）
+        if new_cells.len() < ncols {
+            new_cells.resize(ncols, String::new());
+        }
+        let insert = if i == 1 {
+            // 分隔行：生成 None 对齐
+            sep_cell_for(veil_core::CellAlign::None)
+        } else {
+            String::new()
+        };
+        new_cells.insert(col_index, insert);
+        new_lines.push(join_row(&new_cells));
+    }
+    format!("{}\n", new_lines.join("\n"))
+}
+
+/// 删除指定列（col_index 0-based）。
+/// 保留至少 1 列（只有 header 时删除后仍有 1 列）。
+#[allow(dead_code)]
+pub(crate) fn table_delete_column(src: &str, col_index: usize) -> String {
+    let lines: Vec<&str> = src.trim_end().split('\n').collect();
+    if lines.len() < 3 {
+        return src.to_string();
+    }
+    let ncols = split_row(lines[0]).len();
+    if ncols <= 1 || col_index > ncols {
+        return src.to_string();
+    }
+    let mut new_lines = Vec::with_capacity(lines.len());
+    for line in lines.iter() {
+        let cells = split_row(line);
+        let mut new_cells = cells.clone();
+        if new_cells.len() > col_index {
+            new_cells.remove(col_index);
+        }
+        if new_cells.is_empty() {
+            new_cells.push(String::new());
+        }
+        new_lines.push(join_row(&new_cells));
+    }
+    format!("{}\n", new_lines.join("\n"))
 }
 
 /// 图片 URL → 本地路径（切片 13）。相对 URL 相对文档所在目录；草稿（无路径）的

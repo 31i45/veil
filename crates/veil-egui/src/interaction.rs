@@ -5,14 +5,14 @@ use crate::app::App;
 use crate::chrome::{self, MenuAction};
 use crate::document::block_index::BlockGeom;
 use crate::editor::Intent;
-use crate::geometry::{BASE_FONT_SIZE, BASE_LINE_HEIGHT, MARGIN};
+use crate::geometry::{BASE_FONT_SIZE, BASE_LINE_HEIGHT, MARGIN, PARA_GAP};
 use crate::html::html_to_markdown;
 use crate::input::{Action, Key};
 use crate::mode::{route, Cmd, Mode, TextSink};
 use crate::theme::ThemeMode;
 use crate::view::{outline, quick_open, search};
 use std::time::{Duration, Instant};
-use veil_core::{task_span, BlockId, BlockKind};
+use veil_core::{task_span, BlockId, BlockKind, Range};
 use winit::event::ElementState;
 use winit::keyboard::{Key as WKey, NamedKey};
 
@@ -89,6 +89,24 @@ impl App {
             Cmd::SearchToggleField => self.search_toggle_field(),
             Cmd::SearchNext => self.search_next(),
             Cmd::SearchPrev => self.search_prev(),
+            Cmd::Edit(Action::Doc(Intent::Indent)) if !self.editor.preedit().is_some() => {
+                if !self.tab_next_cell() {
+                    self.perform_action(Action::Doc(Intent::Indent));
+                }
+                self.set_ime_area();
+            }
+            Cmd::Edit(Action::Doc(Intent::Dedent)) if !self.editor.preedit().is_some() => {
+                if !self.tab_prev_cell() {
+                    self.perform_action(Action::Doc(Intent::Dedent));
+                }
+                self.set_ime_area();
+            }
+            Cmd::Edit(Action::Doc(Intent::Newline)) if self.input_state.mods.ctrl => {
+                if !self.table_ctrl_enter() {
+                    self.perform_action(Action::Doc(Intent::Newline));
+                }
+                self.set_ime_area();
+            }
             Cmd::Edit(action) => {
                 self.perform_action(action);
                 self.set_ime_area();
@@ -1299,30 +1317,77 @@ impl App {
             })
     }
 
+    /// 光标前紧邻的尾换行个数（0/1/≥2，按字素回退，多字节字符安全）。
+    /// 1 = 同段软换行；≥2 = 段落分隔（markdown 折叠多余空行）。
+    fn trailing_newlines(&self, caret: usize) -> usize {
+        let mut n = 0;
+        let mut c = caret;
+        while n < 2 {
+            let Some(p) = self.editor.session().prev_grapheme(c) else {
+                break;
+            };
+            if self.editor.session().text_slice(Range::new(p, c)).as_deref() == Some("\n") {
+                n += 1;
+                c = p;
+            } else {
+                break;
+            }
+        }
+        n
+    }
+
     /// 光标屏幕矩形（物理像素，含菜单栏偏移）。(x, y, h)；找不到所在块（空文档）时落视口原点。
     pub(crate) fn caret_screen(&mut self) -> (f32, f32, f32) {
         let caret = self.editor.caret();
         let vp = self.viewport();
-        if let Some(i) = self.caret_block_index() {
-            let (id, start, top) = {
+        let scale = self.input_state.scale;
+        let margin = MARGIN * scale;
+        let line_h = BASE_LINE_HEIGHT * scale;
+        let scroll = self.window_state.scroll_y;
+        // 严格包含（不用文末回退），先分流「光标在块尾换行之后」的情形
+        if let Some(i) = self
+            .index
+            .blocks
+            .iter()
+            .position(|g| g.range.start <= caret && caret <= g.range.end)
+        {
+            let (id, start, end, top) = {
                 let g = &self.index.blocks[i];
-                (g.id, g.range.start, g.top)
+                (g.id, g.range.start, g.range.end, g.top)
             };
+            // Enter 后新行尚未成块：布局里没有对应视觉行，钳回末字形会让光标/preedit/
+            // IME 候选框贴在上一段末尾（真机缺陷 ①③）。改为锚到文本将出现的位置：
+            // 1 个尾换行 = 同段下一视觉行；≥2 = 新段顶边（块底 + 段距）。
+            if caret == end && caret > start && self.trailing_newlines(caret) > 0 {
+                let nl = self.trailing_newlines(caret);
+                self.ensure_block(id);
+                if let Some(l) = self.cache.layouts.get(&id) {
+                    let y = if nl == 1 {
+                        top + l.height
+                    } else {
+                        top + l.height + PARA_GAP * scale
+                    };
+                    return (margin, vp.y + y - scroll, line_h);
+                }
+            }
             // 视口外块可能尚未布局：光标路径按需补齐
             self.ensure_block(id);
             if let Some(l) = self.cache.layouts.get(&id) {
                 let (x, y, h) = self.engine.caret_xy(l, caret - start);
-                return (
-                    MARGIN * self.input_state.scale + x,
-                    vp.y + top + y - self.window_state.scroll_y,
-                    h,
-                );
+                return (margin + x, vp.y + top + y - scroll, h);
             }
         }
-        (
-            MARGIN * self.input_state.scale,
-            vp.y + MARGIN * self.input_state.scale - self.window_state.scroll_y,
-            BASE_LINE_HEIGHT * self.input_state.scale,
-        )
+        // 块间空隙（Enter 产生的空段尚未成块）：锚到下一块顶边 = 新段将出现的位置；
+        // 文末无下一块时锚到末块底 + 段距。旧行为落视口原点，IME 候选框停在左上角。
+        if let Some(next) = self.index.blocks.iter().find(|g| g.range.start >= caret) {
+            let top = next.top;
+            return (margin, vp.y + top - scroll, line_h);
+        }
+        if let Some(last) = self.index.blocks.last() {
+            let top = last.top;
+            let h = self.block_height(last);
+            return (margin, vp.y + top + h + PARA_GAP * scale - scroll, line_h);
+        }
+        (margin, vp.y + margin - scroll, line_h)
     }
 }

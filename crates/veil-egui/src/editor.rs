@@ -54,6 +54,9 @@ pub struct Editor {
     /// 自上次 mark_saved 以来文档内容是否被修改（v0：光标移动不置脏；
     /// 撤销/重做总置脏，即使内容回到保存点——记事本同语义）。
     dirty: bool,
+    /// 文档换行风格（首个换行序列决定）。编辑插入新行时沿用，避免在 CRLF
+    /// 文档里混入 LF 而构成隐式规范化（阶段 2 源码真值不变量）。
+    line_ending: &'static str,
 }
 
 impl Editor {
@@ -71,6 +74,7 @@ impl Editor {
             anchor,
             preedit: None,
             dirty: false,
+            line_ending: detect_line_ending(text),
         }
     }
 
@@ -92,6 +96,10 @@ impl Editor {
 
     pub fn session(&self) -> &Session {
         &self.session
+    }
+
+    pub fn session_mut(&mut self) -> &mut Session {
+        &mut self.session
     }
 
     pub fn caret(&self) -> usize {
@@ -178,6 +186,13 @@ impl Editor {
     fn full_text(&self) -> Option<String> {
         self.session
             .text_slice(Range::new(0, self.session.text_len()))
+    }
+
+    /// 单字节文本（CRLF 判定的 1 字节比较）；越界返回 None。
+    fn byte_at(&self, i: usize) -> Option<u8> {
+        self.session
+            .text_slice(Range::new(i, i + 1))
+            .and_then(|s| s.as_bytes().first().copied())
     }
 
     pub fn preedit(&self) -> Option<&Preedit> {
@@ -325,14 +340,15 @@ impl Editor {
                     return Some(self.collapse_and_return(ev.dirty_blocks, at));
                 }
                 Intent::Newline => {
+                    let text = self.line_ending;
                     let ev = self
                         .session
                         .apply(Edit::Replace {
                             range: sel,
-                            text: "\n".into(),
+                            text: text.into(),
                         })
                         .expect("选区恒合法");
-                    return Some(self.collapse_and_return(ev.dirty_blocks, sel.start + 1));
+                    return Some(self.collapse_and_return(ev.dirty_blocks, sel.start + text.len()));
                 }
                 Intent::DeleteBackward | Intent::DeleteForward => {
                     let ev = self
@@ -375,18 +391,32 @@ impl Editor {
             }
             Intent::DeleteBackward => {
                 let prev = self.session.prev_grapheme(c)?;
+                // CRLF 视为一个换行单位：删到行尾 `\n` 时连同前面的 `\r` 一起删，
+                // 否则会留下孤立 `\r`（破坏源码真值与后续行级判定）
+                let mut start = prev;
+                if prev > 0
+                    && self.byte_at(prev) == Some(b'\n')
+                    && self.byte_at(prev - 1) == Some(b'\r')
+                {
+                    start -= 1;
+                }
                 self.session
                     .apply(Edit::Delete {
-                        range: Range::new(prev, c),
+                        range: Range::new(start, c),
                     })
                     .ok()
                     .map(|e| e.dirty_blocks)
             }
             Intent::DeleteForward => {
                 let next = self.session.next_grapheme(c)?;
+                // 同理：正向删到 `\r` 时把紧随的 `\n` 一并删掉
+                let mut end = next;
+                if self.byte_at(c) == Some(b'\r') && self.byte_at(next) == Some(b'\n') {
+                    end += 1;
+                }
                 self.session
                     .apply(Edit::Delete {
-                        range: Range::new(c, next),
+                        range: Range::new(c, end),
                     })
                     .ok()
                     .map(|e| e.dirty_blocks)
@@ -512,7 +542,13 @@ impl Editor {
     fn newline(&mut self, caret: usize) -> Vec<BlockId> {
         let at_line_end = match self.session.next_grapheme(caret) {
             None => true,
-            Some(next) => self.session.text_slice(Range::new(caret, next)).as_deref() == Some("\n"),
+            // `\r\n` 按 UAX#29 是一个字素簇；单独 `\r` 或 `\n` 也属行尾
+            Some(next) => matches!(
+                self.session
+                    .text_slice(Range::new(caret, next))
+                    .as_deref(),
+                Some("\n" | "\r" | "\r\n")
+            ),
         };
         let marker = if at_line_end {
             let line = self.line_bounds(caret);
@@ -539,7 +575,7 @@ impl Editor {
                     .session
                     .apply(Edit::Insert {
                         at: caret,
-                        text: format!("\n{}", m.next),
+                        text: format!("{}{}", self.line_ending, m.next),
                     })
                     .expect("caret 恒合法")
                     .dirty_blocks;
@@ -551,7 +587,7 @@ impl Editor {
                     .session
                     .apply(Edit::Insert {
                         at: caret,
-                        text: "\n".into(),
+                        text: self.line_ending.into(),
                     })
                     .expect("caret 恒合法")
                     .dirty_blocks;
@@ -561,7 +597,7 @@ impl Editor {
         }
     }
 
-    /// 光标所在行的字节区间（不含行尾换行）。
+    /// 光标所在行的字节区间（不含行尾换行；CRLF 的 `\r` 一并剥除）。
     fn line_bounds(&self, offset: usize) -> Range {
         let len = self.session.text_len();
         let text = self
@@ -570,7 +606,12 @@ impl Editor {
             .unwrap_or_default();
         let starts = line_starts(&text);
         let i = line_index(&starts, offset);
-        let end = starts.get(i + 1).map(|&s| s - 1).unwrap_or(len);
+        let mut end = starts.get(i + 1).map(|&s| s - 1).unwrap_or(len);
+        // 行尾 `\n` 前还挂着 `\r` 时再剥一字节：行内容不含 `\r`，list_marker/缩进
+        // 与选中语义才不会把 CRLF 的 `\r` 当成正文
+        if end > starts[i] && text.as_bytes().get(end - 1) == Some(&b'\r') {
+            end -= 1;
+        }
         Range::new(starts[i], end)
     }
 
@@ -776,6 +817,15 @@ fn line_index(starts: &[usize], offset: usize) -> usize {
     starts.partition_point(|&s| s <= offset) - 1
 }
 
+/// 文档换行风格：首个 `\n` 前紧邻 `\r` 即 CRLF；无换行或首个即 LF 则为 LF。
+/// 只检测一次，编辑插入新行沿用该风格，保证不引入混合换行。
+fn detect_line_ending(text: &str) -> &'static str {
+    match text.find('\n') {
+        Some(i) if i > 0 && text.as_bytes()[i - 1] == b'\r' => "\r\n",
+        _ => "\n",
+    }
+}
+
 /// 反缩进要删除的行首长度：一个制表符，或至多 4 个空格；非空白字符绝不动。
 fn dedent_prefix_len(content: &str) -> usize {
     if content.starts_with('\t') {
@@ -849,6 +899,72 @@ mod tests {
         let mut e = Editor::new(text);
         assert!(e.set_caret(caret));
         e
+    }
+
+    // ---- CRLF 编辑一致性（阶段 2 源码真值：不引入隐式规范化）----
+
+    #[test]
+    fn newline_uses_crlf_in_crlf_document() {
+        // 行尾回车：沿用文档 CRLF，不在 `\r` 前插入 LF 造出空行或混合换行
+        let mut e = ed("a\r\nb", 1); // a 之后、`\r` 之前（视觉行尾）
+        e.apply(Intent::Newline).unwrap();
+        assert_eq!(e.session().serialize(), "a\r\n\r\nb");
+        // 下一行行首回车同样给出 CRLF
+        let mut e = ed("a\r\nb", 3);
+        e.apply(Intent::Newline).unwrap();
+        assert_eq!(e.session().serialize(), "a\r\n\r\nb");
+    }
+
+    #[test]
+    fn newline_keeps_lf_in_lf_document() {
+        let mut e = ed("a\nb", 1);
+        e.apply(Intent::Newline).unwrap();
+        assert_eq!(e.session().serialize(), "a\n\nb");
+    }
+
+    #[test]
+    fn newline_replaces_selection_with_document_line_ending() {
+        let mut e = ed("a\r\nb", 0);
+        e.apply(Intent::SelectRight).unwrap(); // 选中 "a"
+        e.apply(Intent::Newline).unwrap();
+        assert_eq!(e.session().serialize(), "\r\n\r\nb");
+    }
+
+    #[test]
+    fn newline_continues_crlf_list() {
+        let mut e = ed("- a", 3);
+        e.apply(Intent::Newline).unwrap();
+        assert_eq!(e.session().serialize(), "- a\n- "); // LF 文档照旧
+        let mut e = ed("- a\r\n", 3);
+        e.apply(Intent::Newline).unwrap();
+        assert_eq!(e.session().serialize(), "- a\r\n- \r\n");
+    }
+
+    #[test]
+    fn backspace_at_crlf_line_start_removes_whole_break() {
+        // 行首退格必须吃掉整个 `\r\n`，否则留下孤立 `\r`
+        let mut e = ed("a\r\nb", 3);
+        e.apply(Intent::DeleteBackward).unwrap();
+        assert_eq!(e.session().serialize(), "ab");
+    }
+
+    #[test]
+    fn delete_forward_at_crlf_removes_whole_break() {
+        let mut e = ed("a\r\nb", 1);
+        e.apply(Intent::DeleteForward).unwrap();
+        assert_eq!(e.session().serialize(), "ab");
+    }
+
+    #[test]
+    fn line_bounds_excludes_crlf() {
+        // 行内容不含 `\r`：三击选行只含正文
+        let mut e = ed("ab\r\ncd", 0);
+        assert!(e.select_line_at(0));
+        assert_eq!(
+            e.session().text_slice(Range::new(0, 2)).as_deref(),
+            Some("ab")
+        );
+        assert_eq!(e.selection(), Some(Range::new(0, 2)));
     }
 
     #[test]

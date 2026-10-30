@@ -10,7 +10,7 @@ use crate::document::ExternalState;
 use crate::editor::Intent;
 use crate::geometry::{BASE_LINE_HEIGHT, MARGIN, PARA_GAP};
 use crate::image::{AssetStore, ImageData, ImageLoader};
-use crate::input::{Action, Key};
+use crate::input::{Action, Key, Mods};
 use crate::math::{MathImage, MathRenderer};
 use crate::mode::{Mode, TextSink};
 use crate::paint::{fit_size, local_image_path};
@@ -1033,15 +1033,25 @@ fn table_renders_grid_when_caret_outside() {
 }
 
 #[test]
-fn table_shows_source_when_caret_inside() {
+fn table_shows_source_when_caret_on_pipe() {
     let (mut a, _) = app_math(TABLE_DOC, false);
-    assert!(a.editor.set_caret(5)); // 表头单元格内
+    assert!(a.editor.set_caret(3)); // 管道符 `|`（block 内但不在任何 cell.range）
     a.ensure_layouts_all();
     a.ensure_tables();
     let (id, _, range) = a.editor.session().blocks()[1].clone();
-    assert!(!a.cache.tables.contains_key(&id), "源码态不排版网格");
+    assert!(!a.cache.tables.contains_key(&id), "管道符位置 → 源码态不排版网格");
     assert!(!a.table_shows_grid(id, &range));
-    assert_eq!(a.block_height(geom(&a, id)), a.cache.layouts[&id].height);
+}
+
+#[test]
+fn table_shows_grid_when_caret_inside_cell() {
+    let (mut a, _) = app_math(TABLE_DOC, false);
+    assert!(a.editor.set_caret(5)); // 表头单元格内（cell.range 内）
+    a.ensure_layouts_all();
+    a.ensure_tables();
+    let (id, _, range) = a.editor.session().blocks()[1].clone();
+    assert!(a.cache.tables.contains_key(&id), "活动单元格 → 网格继续显示");
+    assert!(a.table_shows_grid(id, &range));
 }
 
 #[test]
@@ -1059,27 +1069,93 @@ fn table_grid_hit_maps_to_cell_content_start() {
 }
 
 #[test]
-fn dirty_edit_invalidates_table_grid() {
+fn table_grid_rebuilds_when_editing_inside_active_cell() {
     let (mut a, _) = app_math(TABLE_DOC, false);
     a.ensure_layouts_all();
     a.ensure_tables();
-    let (id, _, _) = a.editor.session().blocks()[1].clone();
-    let old_w = a.cache.tables[&id].width;
-    // 表头「a」变宽（xxxxa）→ 块脏；光标仍在表内故不重建网格
+    let old_id = a.editor.session().blocks()[1].0;
+    let old_w = a.cache.tables[&old_id].width;
+    // 表头「a」变宽（xxxxa）→ 块脏 → BlockId 重建 → after_edit 重建网格
     assert!(a.editor.set_caret(5));
     let dirty = a.editor.apply(Intent::InsertText("xxxx".into())).unwrap();
     assert_eq!(dirty.len(), 1);
     a.after_edit(dirty);
-    let id = a.editor.session().blocks()[1].0;
+    let new_id = a.editor.session().blocks()[1].0;
+    // 活动单元格内编辑 → 网格继续排版且重建（列宽变大）
+    assert!(a.cache.tables.contains_key(&new_id), "活动单元格内 → 网格重建");
     assert!(
-        !a.cache.tables.contains_key(&id),
-        "表格光标内 → 脏后不建网格"
+        a.cache.tables[&new_id].width > old_w,
+        "内容变宽 → 新网格列宽变大"
     );
-    // 光标离开表格 → 按新内容重建（列宽变大）
-    assert!(a.editor.set_caret(0));
+}
+
+// ---- Tab / Shift+Tab 单元格导航（T2） ----
+
+const TABLE_2X3: &str = "p\n\n| a | b | c |\n| --- | --- | --- |\n| d | e | f |\n";
+
+#[test]
+fn tab_advances_to_next_cell_start() {
+    let (mut a, _) = app_math(TABLE_2X3, false);
+    a.ensure_layouts_all();
     a.ensure_tables();
-    assert!(a.cache.tables.contains_key(&id));
-    assert!(a.cache.tables[&id].width > old_w, "内容变宽 → 网格重建");
+    let (id, _, _) = a.editor.session().blocks()[1].clone();
+    let tbl = a.editor.session().table(id).unwrap();
+    // caret 在表头首格 "a" 的内容起点
+    let first = tbl.header[0].range.start;
+    a.editor.set_caret(first);
+    // Tab → 表头第二格 "b"
+    a.route_key(Key::Tab);
+    assert_eq!(a.editor.caret(), tbl.header[1].range.start);
+    // Tab → 表头第三格 "c"
+    a.route_key(Key::Tab);
+    assert_eq!(a.editor.caret(), tbl.header[2].range.start);
+    // Tab → 表体首格 "d"
+    a.route_key(Key::Tab);
+    assert_eq!(a.editor.caret(), tbl.rows[0][0].range.start);
+}
+
+#[test]
+fn tab_wraps_from_last_to_first_cell() {
+    let (mut a, _) = app_math(TABLE_2X3, false);
+    a.ensure_layouts_all();
+    a.ensure_tables();
+    let (id, _, _) = a.editor.session().blocks()[1].clone();
+    let tbl = a.editor.session().table(id).unwrap();
+    // caret 在末格 "f" 内容起点
+    a.editor.set_caret(tbl.rows[0][2].range.start);
+    a.route_key(Key::Tab);
+    // 循环回到首格 "a" 起点
+    assert_eq!(a.editor.caret(), tbl.header[0].range.start);
+}
+
+#[test]
+fn shift_tab_goes_back() {
+    let (mut a, _) = app_math(TABLE_2X3, false);
+    a.ensure_layouts_all();
+    a.ensure_tables();
+    let (id, _, _) = a.editor.session().blocks()[1].clone();
+    let tbl = a.editor.session().table(id).unwrap();
+    // caret 在表体第二格 "e"
+    a.editor.set_caret(tbl.rows[0][1].range.start);
+    // Shift+Tab → 表体首格 "d"
+    a.input_state.mods = Mods { ctrl: false, shift: true };
+    a.route_key(Key::Tab);
+    assert_eq!(a.editor.caret(), tbl.rows[0][0].range.start);
+    a.input_state.mods = Mods { ctrl: false, shift: false };
+}
+
+#[test]
+fn tab_outside_table_is_normal_indent() {
+    // caret 在段落文本中 → Tab 仍是缩进（InsertText("    ") 或类似）
+    let (mut a, _) = app_math("hello\n", false);
+    a.editor.set_caret(0);
+    let before = a.editor.caret();
+    a.route_key(Key::Tab);
+    // 缩进至少让光标右移（插 4 空格）
+    assert!(
+        a.editor.caret() >= before,
+        "表外 Tab 不应回退 caret"
+    );
 }
 
 // ---- 列表 / 引用 / 分隔线 Reveal（切片 12）：块级重排与块高 ----
@@ -2845,6 +2921,331 @@ fn oversized_block_tail_is_painted_after_scroll() {
     assert!(notice_px > 100, "块尾降级提示须可见，实际 {notice_px} 像素");
 }
 
+/// 端到端源码真值（阶段 2）：CRLF + BOM 文档回车、输入、保存后，磁盘字节仍是
+/// CRLF + BOM，不混入 LF、不产生孤立 `\r`——无隐式规范化。
+#[test]
+fn crlf_bom_edit_save_preserves_bytes() {
+    let store = MemStore::default();
+    let mut a = app("甲\r\n\r\n乙\r\n", Some("doc/a.md"), true, &store);
+    a.paint();
+    a.perform_action(Action::Doc(Intent::MoveDocEnd));
+    a.route_key(Key::Enter);
+    a.route_key(Key::Text("新".into()));
+    a.save_now();
+    let bytes = store.files.borrow()[&PathBuf::from("doc/a.md")].clone();
+    assert_eq!(&bytes[..3], &[0xEF, 0xBB, 0xBF], "BOM 须保留");
+    let text = String::from_utf8(bytes[3..].to_vec()).expect("UTF-8");
+    assert_eq!(text, "甲\r\n\r\n乙\r\n\r\n新", "换行风格须保持 CRLF");
+    // 结构校验：每个 `\n` 前必是 `\r`、每个 `\r` 后必是 `\n`（无孤立回车/LF 混入）
+    let b = text.as_bytes();
+    for (i, &c) in b.iter().enumerate() {
+        if c == b'\n' {
+            assert_eq!(b.get(i - 1), Some(&b'\r'), "第 {i} 字节的 \\n 前缺 \\r（混入 LF）");
+        }
+        if c == b'\r' {
+            assert_eq!(b.get(i + 1), Some(&b'\n'), "第 {i} 字节的 \\r 后缺 \\n（孤立回车）");
+        }
+    }
+}
+
+/// 真机缺陷回归（2026-10-30 ①③ + IME 候选框停在左上角）：
+/// Enter 产生的新行/新段在提交前不成块，光标/preedit/IME 候选框必须锚在
+/// 文本将出现的位置——软换行锚同段下一视觉行，段落分隔锚新段顶边；
+/// 提交前后光标 y 不得跳变。旧行为：钳回上一段末尾 / 落视口原点。
+#[test]
+fn caret_before_commit_anchors_where_text_will_land() {
+    let store = MemStore::default();
+    let mut a = app("段一内容\n\n段二内容", None, false, &store);
+    a.paint();
+    a.perform_action(Action::Doc(Intent::MoveDocEnd));
+    let margin = MARGIN * a.input_state.scale;
+    let vp_y = a.viewport().y;
+
+    // 软换行（Enter×1）：同段下一视觉行（块底），x 回行首
+    a.route_key(Key::Enter);
+    let (cx1, cy1, _) = a.caret_screen();
+    let (top1, h1) = {
+        let g = &a.index.blocks[1];
+        (g.top, a.block_height(g))
+    };
+    assert_eq!(
+        (cx1, cy1),
+        (margin, vp_y + top1 + h1),
+        "软换行光标须在同段下一行起始"
+    );
+
+    // 段落分隔（Enter×2）：新段顶边 = 块底 + 段距
+    a.route_key(Key::Enter);
+    let (cx2, cy2, _) = a.caret_screen();
+    assert_eq!(
+        (cx2, cy2),
+        (margin, vp_y + top1 + h1 + PARA_GAP * a.input_state.scale),
+        "新段光标须在段落将出现的位置"
+    );
+
+    // 提交「nihao」：落字行与 Enter2 光标同 y，preedit 所见即所得（无跳变）
+    a.route_key(Key::Text("nihao".into()));
+    let (_, cy3, _) = a.caret_screen();
+    assert_eq!(cy2, cy3, "提交前后光标 y 不得跳变");
+}
+
+/// 文档中部块间空隙：Enter×2 后光标锚到下一块顶边（新段将出现的位置），
+/// 不得落到视口原点（旧兜底把 IME 候选框扔到左上角）。
+#[test]
+fn caret_in_mid_doc_gap_anchors_to_next_block_top() {
+    let store = MemStore::default();
+    let mut a = app("甲\n\n乙\n\n丙", None, false, &store);
+    a.paint();
+    // 光标移到「乙」末尾，Enter×2 产生尚未成块的空段
+    let end_yi = a.index.blocks[1].range.end;
+    assert!(a.editor.set_caret(end_yi));
+    a.route_key(Key::Enter);
+    a.route_key(Key::Enter);
+    a.paint();
+    let margin = MARGIN * a.input_state.scale;
+    let (cx, cy, _) = a.caret_screen();
+    let next_top = a.index.blocks[2].top; // 「丙」当前顶边 = 新段将出现的位置
+    let vp_y = a.viewport().y;
+    assert_eq!(
+        (cx, cy),
+        (margin, vp_y + next_top - a.window_state.scroll_y),
+        "空隙光标须锚在下一块顶边"
+    );
+}
+
+/// 真机缺陷复现（2026-10-30）：新段落光标定位与段落实际位置严重不一致。
+/// 不变量：光标块 = 末块；光标屏幕 y 落在该块纵向跨度内；可见区间无未排版块（paint 不留空洞）。
+#[test]
+fn new_paragraph_caret_matches_block_position() {
+    let store = MemStore::default();
+    let mut a = app("段一内容\n\n段二内容", None, false, &store);
+    a.paint();
+    a.perform_action(Action::Doc(Intent::MoveDocEnd));
+    a.route_key(Key::Enter);
+    a.route_key(Key::Enter);
+    a.route_key(Key::Text("n".into()));
+    a.paint();
+    let ci = a.caret_block_index().expect("光标须落在某块");
+    let last = a.index.blocks.len() - 1;
+    let (_, cy, ch) = a.caret_screen();
+    let (top, bh) = {
+        let g = &a.index.blocks[ci];
+        (g.top, a.block_height(g))
+    };
+    let vp = a.viewport();
+    let (sy0, sy1) = (vp.y + top - a.window_state.scroll_y, vp.y + top + bh - a.window_state.scroll_y);
+    println!(
+        "blocks={} ci={ci} last={last} caret={} cy={cy} ch={ch} 块屏幕区间={sy0}..{sy1} scroll={}",
+        a.index.blocks.len(),
+        a.editor.caret(),
+        a.window_state.scroll_y
+    );
+    assert_eq!(ci, last, "文末新段光标须在末块");
+    assert!(
+        cy >= sy0 - 1.0 && cy + ch <= sy1 + 1.0,
+        "光标须在所属块纵向跨度内：cy={cy} ch={ch} 块区间={sy0}..{sy1}"
+    );
+}
+
+/// 真机缺陷复现（冷启动链路）：中高图片块从未排版（est 22px 欠估 23×），
+/// 打开后直接跳文末回车新段——scroll_to_caret 依赖的 total_h 欠估，
+/// 光标/新段位置必须与收敛后几何一致，可见区间无空洞。
+#[test]
+fn new_paragraph_caret_with_cold_images_below() {
+    let para = "这是一段足够长的中文段落，用来产生多行折行的真实排版效果。".repeat(6);
+    let mut parts: Vec<String> = Vec::new();
+    for i in 0..10 {
+        parts.push(para.clone());
+        parts.push(format!("![p{i}](p{i}.png)"));
+    }
+    let text = parts.join("\n\n");
+    let files: Vec<(String, u32, u32)> =
+        (0..10).map(|i| (format!("doc/p{i}.png"), 600, 500)).collect();
+    let files_ref: Vec<(&str, u32, u32)> =
+        files.iter().map(|(p, w, h)| (p.as_str(), *w, *h)).collect();
+    let (mut a, _calls) = app_with_images(&text, Some("doc/note.md"), &files_ref);
+    // 不预热：直接跳文末（复刻用户打开文档后 Ctrl+End/点击末尾）
+    a.perform_action(Action::Doc(Intent::MoveDocEnd));
+    a.paint();
+    a.route_key(Key::Enter);
+    a.route_key(Key::Enter);
+    a.route_key(Key::Text("n".into()));
+    a.paint();
+    let vp = a.viewport();
+    let ci = a.caret_block_index().expect("光标须落在某块");
+    let last = a.index.blocks.len() - 1;
+    let (_, cy, ch) = a.caret_screen();
+    let (top, bh) = {
+        let g = &a.index.blocks[ci];
+        (g.top, a.block_height(g))
+    };
+    let scroll = a.window_state.scroll_y;
+    let (sy0, sy1) = (vp.y + top - scroll, vp.y + top + bh - scroll);
+    let base = a.base_key();
+    let caret = a.editor.caret();
+    let vr = a.visible_index_range();
+    let missing: Vec<usize> = a
+        .index
+        .blocks
+        .get(vr.clone())
+        .unwrap_or(&[])
+        .iter()
+        .enumerate()
+        .filter(|(_, g)| {
+            a.cache.layout(g.id, &g.kind, g.range, base, caret).is_none()
+                && g.kind != BlockKind::Math
+                && !(g.kind == BlockKind::Table && a.cache.table(g.id, base).is_some())
+        })
+        .map(|(i, _)| vr.start + i)
+        .collect();
+    println!(
+        "blocks={} ci={ci} last={last} cy={cy} ch={ch} 块屏幕区间={sy0}..{sy1} scroll={scroll} missing={missing:?} vr={vr:?} total_h={} vp={}..{}",
+        a.index.blocks.len(),
+        a.index.total_h,
+        vp.y,
+        vp.y + vp.h
+    );
+    assert_eq!(ci, last, "文末新段光标须在末块");
+    assert!(missing.is_empty(), "可见区间存在未排版块（绘制为空洞）: {missing:?}");
+    assert!(
+        cy >= sy0 - 1.0 && cy + ch <= sy1 + 1.0,
+        "光标须在所属块纵向跨度内：cy={cy} ch={ch} 块区间={sy0}..{sy1}"
+    );
+    assert!(
+        cy >= vp.y - 1.0 && cy + ch <= vp.y + vp.h + 1.0,
+        "光标须在视口内可见：cy={cy} ch={ch} 视口={}..{}",
+        vp.y,
+        vp.y + vp.h
+    );
+}
+
+/// 同缺陷的富文档变体：大图片块（est 22px vs 实高数百 px）+ CJK 段落，
+/// 估算与真实高度大散度下 paint 两遍收敛仍须无空洞、光标贴块。
+#[test]
+fn new_paragraph_caret_matches_block_position_with_images() {
+    let para = "这是一段足够长的中文段落，用来产生多行折行的真实排版效果。".repeat(6);
+    let mut parts: Vec<String> = Vec::new();
+    for i in 0..10 {
+        parts.push(para.clone());
+        if i % 2 == 0 {
+            parts.push(format!("![p{i}](p{i}.png)"));
+        }
+    }
+    let text = parts.join("\n\n");
+    let files: Vec<(String, u32, u32)> =
+        (0..5).map(|i| (format!("doc/p{}.png", i * 2), 600, 500)).collect();
+    let files_ref: Vec<(&str, u32, u32)> = files.iter().map(|(p, w, h)| (p.as_str(), *w, *h)).collect();
+    let (mut a, _calls) = app_with_images(&text, Some("doc/note.md"), &files_ref);
+    a.paint();
+    a.perform_action(Action::Doc(Intent::MoveDocEnd));
+    a.route_key(Key::Enter);
+    a.route_key(Key::Enter);
+    a.route_key(Key::Text("n".into()));
+    a.paint();
+    let vp = a.viewport();
+    let ci = a.caret_block_index().expect("光标须落在某块");
+    let last = a.index.blocks.len() - 1;
+    let (_, cy, ch) = a.caret_screen();
+    let (top, bh) = {
+        let g = &a.index.blocks[ci];
+        (g.top, a.block_height(g))
+    };
+    let scroll = a.window_state.scroll_y;
+    let (sy0, sy1) = (vp.y + top - scroll, vp.y + top + bh - scroll);
+    let base = a.base_key();
+    let caret = a.editor.caret();
+    let vr = a.visible_index_range();
+    let missing: Vec<usize> = a
+        .index
+        .blocks
+        .get(vr.clone())
+        .unwrap_or(&[])
+        .iter()
+        .enumerate()
+        .filter(|(_, g)| {
+            a.cache.layout(g.id, &g.kind, g.range, base, caret).is_none()
+                && g.kind != BlockKind::Math
+                && !(g.kind == BlockKind::Table && a.cache.table(g.id, base).is_some())
+        })
+        .map(|(i, _)| vr.start + i)
+        .collect();
+    println!(
+        "blocks={} ci={ci} last={last} cy={cy} ch={ch} 块屏幕区间={sy0}..{sy1} scroll={scroll} missing={missing:?} vr={vr:?} total_h={}",
+        a.index.blocks.len(),
+        a.index.total_h
+    );
+    assert!(missing.is_empty(), "可见区间存在未排版块（绘制为空洞）: {missing:?}");
+    assert_eq!(ci, last, "文末新段光标须在末块");
+    assert!(
+        cy >= sy0 - 1.0 && cy + ch <= sy1 + 1.0,
+        "光标须在所属块纵向跨度内：cy={cy} ch={ch} 块区间={sy0}..{sy1}"
+    );
+}
+
+/// 同缺陷的高文档变体：CJK 长段（估算高度高估）+ 滚动态下末尾新段，
+/// 验证 paint 两遍收敛后可见区间无空洞、几何单调、光标贴块。
+#[test]
+fn new_paragraph_caret_matches_block_position_tall_cjk() {
+    let para = "这是一段足够长的中文段落，用来产生多行折行的真实排版效果。".repeat(8);
+    let text = (0..12).map(|_| para.clone()).collect::<Vec<_>>().join("\n\n");
+    let store = MemStore::default();
+    let mut a = app(&text, None, false, &store);
+    a.paint();
+    a.perform_action(Action::Doc(Intent::MoveDocEnd));
+    a.route_key(Key::Enter);
+    a.route_key(Key::Enter);
+    a.route_key(Key::Text("n".into()));
+    a.paint();
+    let vp = a.viewport();
+    let ci = a.caret_block_index().expect("光标须落在某块");
+    let last = a.index.blocks.len() - 1;
+    let (_, cy, ch) = a.caret_screen();
+    let (top, bh) = {
+        let g = &a.index.blocks[ci];
+        (g.top, a.block_height(g))
+    };
+    let scroll = a.window_state.scroll_y;
+    let (sy0, sy1) = (vp.y + top - scroll, vp.y + top + bh - scroll);
+    // 可见区间空洞检查：paint 已跑过两遍收敛，可见块必须全部有命中布局
+    let base = a.base_key();
+    let caret = a.editor.caret();
+    let vr = a.visible_index_range();
+    let missing: Vec<usize> = a
+        .index
+        .blocks
+        .get(vr.clone())
+        .unwrap_or(&[])
+        .iter()
+        .enumerate()
+        .filter(|(_, g)| {
+            a.cache.layout(g.id, &g.kind, g.range, base, caret).is_none()
+                && g.kind != BlockKind::Math
+                && !(g.kind == BlockKind::Table
+                    && a.cache.table(g.id, base).is_some())
+        })
+        .map(|(i, _)| vr.start + i)
+        .collect();
+    // 几何单调性：top 单调不减
+    let mut tops_ok = true;
+    for w in a.index.blocks.windows(2) {
+        if w[1].top < w[0].top {
+            tops_ok = false;
+        }
+    }
+    println!(
+        "blocks={} ci={ci} last={last} cy={cy} ch={ch} 块屏幕区间={sy0}..{sy1} scroll={scroll} missing={missing:?} vr={vr:?} total_h={}",
+        a.index.blocks.len(),
+        a.index.total_h
+    );
+    assert!(tops_ok, "块 top 必须单调不减");
+    assert!(missing.is_empty(), "可见区间存在未排版块（绘制为空洞）: {missing:?}");
+    assert_eq!(ci, last, "文末新段光标须在末块");
+    assert!(
+        cy >= sy0 - 1.0 && cy + ch <= sy1 + 1.0,
+        "光标须在所属块纵向跨度内：cy={cy} ch={ch} 块区间={sy0}..{sy1}"
+    );
+}
+
 #[test]
 fn oversize_area_cap_keeps_height_and_raster_in_sync() {
     let text = "a".repeat(100_000);
@@ -3052,6 +3453,78 @@ fn present_is_noop_without_surface_and_isolated_from_render() {
 // 发现边界 bug 后自动缩减为可钉死的永久单元测试。
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// 性质测试最小反例的确定性回归（2026-10-29 修复）：
+/// `edits = [Newline, MoveDocStart]` 曾使标题块命中旧布局残留 `#` 标记。
+/// 根因两处：指纹输入存文档绝对坐标（块整体平移后与块内 caret 误配）；
+/// 指纹未折叠标题/围栏的块级激活位（caret 进出块不失效）。
+fn memo_matches_forced_after(a: &mut crate::app::App) -> Vec<(BlockId, String)> {
+    a.ensure_layouts_all();
+    let before: Vec<(BlockId, String)> = a
+        .index
+        .blocks
+        .iter()
+        .filter_map(|g| {
+            a.cache
+                .layouts
+                .get(&g.id)
+                .map(|m| (g.id, m.layout_text().to_string()))
+        })
+        .collect();
+    a.cache.layouts.clear();
+    a.cache.rasters.clear();
+    a.ensure_layouts_all();
+    let after: Vec<(BlockId, String)> = a
+        .index
+        .blocks
+        .iter()
+        .filter_map(|g| {
+            a.cache
+                .layouts
+                .get(&g.id)
+                .map(|m| (g.id, m.layout_text().to_string()))
+        })
+        .collect();
+    before
+        .into_iter()
+        .zip(after)
+        .filter_map(|((id, memo), (_, forced))| (memo != forced).then_some((id, memo)))
+        .collect()
+}
+
+#[test]
+fn heading_reveal_invalidates_after_block_shift_and_caret_leave() {
+    let store = MemStore::default();
+    let mut a = app("# 标题\n\n尾\n", None, false, &store);
+    // caret 0 在标题块内 → 显示源码 `# 标题`
+    let dirty = a.editor.apply(Intent::Newline).unwrap_or_default();
+    a.after_edit(dirty); // 块整体下移，id 保留
+    let dirty = a.editor.apply(Intent::MoveDocStart).unwrap_or_default();
+    a.after_edit(dirty); // caret 回到块外 → 标记应消隐
+    let stale = memo_matches_forced_after(&mut a);
+    assert!(stale.is_empty(), "标题块迁移后不得残留旧 Reveal 布局: {stale:?}");
+    // caret 在块外（0）→ 隐藏 `#`
+    let heading = a
+        .index
+        .blocks
+        .iter()
+        .find(|g| matches!(g.kind, BlockKind::AtxHeading(_)))
+        .map(|g| g.id)
+        .expect("文档含标题块");
+    assert_eq!(a.cache.layouts[&heading].layout_text(), "标题");
+}
+
+#[test]
+fn fenced_reveal_invalidates_after_block_shift_and_caret_leave() {
+    let store = MemStore::default();
+    let mut a = app("```\nx\n```\n\n尾\n", None, false, &store);
+    let dirty = a.editor.apply(Intent::Newline).unwrap_or_default();
+    a.after_edit(dirty);
+    let dirty = a.editor.apply(Intent::MoveDocStart).unwrap_or_default();
+    a.after_edit(dirty);
+    let stale = memo_matches_forced_after(&mut a);
+    assert!(stale.is_empty(), "围栏块迁移后不得残留旧 Reveal 布局: {stale:?}");
+}
+
 /// 快照函数：收集 alive BlockId 集合后，按 id 从 cache.layouts 逐块取 (height, reveal, layout_text)。
 /// 用 HashMap 按 BlockId 索引，避免 BlockId 动态变化导致位置错位。
 fn snapshot_layouts(a: &App) -> std::collections::HashMap<BlockId, (f32, u64, String)> {
@@ -3118,40 +3591,37 @@ proptest::proptest! {
         edits in proptest::collection::vec(arbitrary_intent(), 0..=50),
         toggles in proptest::collection::vec(0u8..=4, 0..=20),
     ) {
-        // 性质一：两份独立 App 走相同编辑 + 切换序列，
-        // 一份保留 memo（ensure_layouts_all 让失配键自动重排回填），
-        // 一份清空派生缓存后 ensure_layouts_all 强制重排，
-        // 两边 alive BlockId 集合与逐块 (height, reveal, layout_text) 必须完全一致。
+        // 性质一：同一 App 上先让 memo 自然命中并取快照，再清空派生缓存强制重排取第二份，
+        // 两次的 alive BlockId 集合与逐块 (height, reveal, layout_text) 必须完全一致。
+        // 用单 App 而非双 App 对比：撤销分组按真实时钟 500ms 静默窗合并（History::record），
+        // 两份实例的耗时差会让「连续单字符删除」有时合并有时不合并，Undo 后文本分叉——
+        // 那是测试对时钟的依赖，不是产品不变量。
         let base_doc = "# 标题\n\n段落 **粗** 与 `code` 和 [链接](https://e.com)\n\n- 列表一\n- 列表二\n\n> 引用一\n> 引用二\n\n```rust\nfn f() -> u32 { 42 }\n```\n\n| a | b |\n|---|---|\n| 1 | 2 |\n";
         let store = MemStore::default();
-        let mut a_memo = app(base_doc, None, false, &store);
-        let mut a_forced = app(base_doc, None, false, &store);
+        let mut a = app(base_doc, None, false, &store);
 
         for intent in &edits {
-            let dirty = a_memo.editor.apply(intent.clone()).unwrap_or_default();
-            a_memo.after_edit(dirty);
-            let dirty2 = a_forced.editor.apply(intent.clone()).unwrap_or_default();
-            a_forced.after_edit(dirty2);
+            let dirty = a.editor.apply(intent.clone()).unwrap_or_default();
+            a.after_edit(dirty);
         }
         for t in &toggles {
-            apply_toggle(&mut a_memo, *t);
-            apply_toggle(&mut a_forced, *t);
+            apply_toggle(&mut a, *t);
         }
 
-        a_memo.ensure_layouts_all();
-        let snap_memo = snapshot_layouts(&a_memo);
+        a.ensure_layouts_all();
+        let snap_memo = snapshot_layouts(&a);
 
-        a_forced.cache.layouts.clear();
-        a_forced.cache.rasters.clear();
-        a_forced.cache.math_imgs.clear();
-        a_forced.cache.math_failed.clear();
-        a_forced.cache.inline_math.clear();
-        a_forced.cache.inline_failed.clear();
-        a_forced.cache.inline_images.clear();
-        a_forced.cache.image_failed.clear();
-        a_forced.cache.tables.clear();
-        a_forced.ensure_layouts_all();
-        let snap_forced = snapshot_layouts(&a_forced);
+        a.cache.layouts.clear();
+        a.cache.rasters.clear();
+        a.cache.math_imgs.clear();
+        a.cache.math_failed.clear();
+        a.cache.inline_math.clear();
+        a.cache.inline_failed.clear();
+        a.cache.inline_images.clear();
+        a.cache.image_failed.clear();
+        a.cache.tables.clear();
+        a.ensure_layouts_all();
+        let snap_forced = snapshot_layouts(&a);
 
         let mut ids_memo: Vec<BlockId> = snap_memo.keys().copied().collect();
         let mut ids_forced: Vec<BlockId> = snap_forced.keys().copied().collect();
@@ -3163,12 +3633,37 @@ proptest::proptest! {
         );
 
         for id in snap_memo.keys() {
-            proptest::prop_assert_eq!(
-                snap_memo.get(id),
-                snap_forced.get(id),
-                "block_id={:?}: memo 命中值 ≠ 强制重算值",
-                id
-            );
+            if snap_memo.get(id) != snap_forced.get(id) {
+                let g = a.index.blocks.iter().find(|g| g.id == *id);
+                let src = g.map(|g| {
+                    a
+                        .editor
+                        .session()
+                        .text_slice(g.range)
+                        .unwrap_or_default()
+                });
+                let g2 = a.index.blocks.iter().find(|g| g.id == *id);
+                let src2 = g2.map(|g| {
+                    a
+                        .editor
+                        .session()
+                        .text_slice(g.range)
+                        .unwrap_or_default()
+                });
+                let info = format!(
+                    "id={id:?} memo:kind={:?} range={:?} 源文本={src:?} | forced:kind={:?} range={:?} 源文本={src2:?}",
+                    g.map(|g| g.kind.clone()),
+                    g.map(|g| g.range),
+                    g2.map(|g| g.kind.clone()),
+                    g2.map(|g| g.range)
+                );
+                proptest::prop_assert_eq!(
+                    snap_memo.get(id),
+                    snap_forced.get(id),
+                    "memo 命中值 ≠ 强制重算值: {}",
+                    info
+                );
+            }
         }
     }
 

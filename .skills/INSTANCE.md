@@ -2,7 +2,7 @@
 
 > 本文件是 ai-dev-skills 通用方法论在本项目的全部实例化：项目专有事实（命令、红线、工具名、平台名、专有清单）只存在于此，skills 本体不内嵌。
 > 有效期：下列任一事实变更时需更新
-> 最后验证：2026-10-26（架构重构 S0~S5 落地：veil-core syntax/ 四分；veil-egui 三域分离——document/{doc_state,block_index,persist}、view/{cache,layout,frame,style,table}、chrome/{mod,paint,cache}，app.rs/interaction.rs/paint.rs/mode.rs 归位根级，shell/ 消解；ADR-009 S1~S5 落地——mode.rs 路由、persist.rs 单结构、Memo 因果键取消手工失效、render/present 分离、Ports 聚合 + 公共导出收敛 49→25 项；workspace 523 测试全绿、clippy 零警告、红线复测见 §2）
+> 最后验证：2026-10-30（**G2 门禁条件性通过**，报告 `docs/review/G2-gate.md`：自动化证据全达标——765 测试全绿、clippy 零警告、病态 10 类通过、p95 6.25/12.05ms、内存 21.55MB、体积 5.47MiB；**冷启动墙钟 483–529ms 未达标**但分段证明 440–470ms 在 `main` 之前、应用内仅 145–190ms，口径待决策；3 项 P4 待真人。阶段 1 全量落地；阶段 2 源码真值编辑层 + CJK 中西文间距落地）
 
 ## 0. 项目骨架事实
 
@@ -37,22 +37,26 @@
 
 ## 2. 数字红线（Skill 03 A2）
 
-| 数字 | 红线/目标 | 实测 |
+| 数字 | 红线/目标 | 实测（2026-10-30 G2 门禁） |
 |---|---|---|
-| 冷启动（发布构建，进程创建→首帧可交互，本机） | ≤ 300 ms | **超标**：进程创建→主窗口句柄 5 次中位 771 ms（最小 414 ms；进程内初始化实测 ~150 ms，其余为进程加载与 Defender 实时扫描）。2026-10-25 决策：如实记录，标注为 Windows 平台成本，不设缓解项 |
-| 10 万字文档击键→提交上屏延迟 p95（`cargo test -p veil-egui --release -- --ignored --nocapture perf_keystroke_path`） | ≤ 16 ms | 5.67 ms ✓（5005 块 ≈16 万字，apply+after_edit+paint 真实 render→present 端到端 300 次；p50 5.23 ms；S4 口径修正：原手动模拟 4.73ms，真实路径包含 chrome 绘制与两遍收敛）；10.5k 块探针 p95 10.87 ms ✓ |
-| 10 万字文档常驻内存（任务管理器私有工作集） | ≤ 150 MB | 17.3 MB ✓（100,480 字符文档，启动后 2 s 采样，5 次一致） |
-| 安装产物体积（`veil.exe` 单文件发布构建） | ≤ 15 MiB | 5,489,152 B ≈ 5.23 MiB ✓（2026-10-26 S5 后实测；含 latex-rust 内嵌 STIX 字体 838,652 B） |
-| `veil-core` 单元+属性测试数 | ≥ 80 | 162（2026-10-26：98 单测 + 64 集成；S1 syntax 四分纯搬移零增减） |
-| e2e 断言数 | ≥ 20 | 0 |
-| Markdown 往返一致率（无编辑时 serialize 输出 == 输入字节） | == 100% | 100%（`roundtrip_identity_without_edits` + `prop_random_edits_roundtrip_and_undo` 随机语料属性测试） |
-| `veil-core` 的 GUI/异步运行时依赖数（`cargo tree -p veil-core` grep egui/winit/tokio） | == 0 | 0 ✓（2026-10-24 实测） |
-| `veil-egui`+`veil` 直接依赖总数（`cargo tree -p veil-egui -p veil --depth 1` 去重） | ≤ 8 | 8 ✓（winit/softbuffer/cosmic-text/arboard/pulldown-cmark/latex-rust/png/notify；切片 16 新增 notify 即达预算上限，后续不得再加直接依赖） |
-| workspace 传递依赖总数（`cargo tree --prefix none --depth 100 | sort -u` 去重） | ≤ 200 | 121 ✓（2026-10-26 S6 复测；重构零依赖变更。2026-10-25 升级后口径：cosmic-text 0.19 + latex-rust 3.0.1；ttf-parser 与 rustybuzz 已消除，新增 skrifa/read-fonts/font-types 各三版本，全部上游锁定） |
+| 冷启动（发布构建，`main`→首帧完成；**验收口径**，2026-10-30 用户裁定） | ≤ 300 ms | **145–190 ms** ✅（分段探针：事件循环 6–9 / 建窗 29–31 / Surface 49–88 / 首帧 61–69+12–13 ms） |
+| 冷启动（墙钟，进程创建→首帧可交互；**环境观察项，不参与验收**） | — | 450–529 ms；分段实测 440–470 ms 发生在 `main` 之前（C/D 盘一致、Defender 关闭、盘读 5ms、`cmd.exe` 地板 71ms），属本机进程创建段开销；G1 的 220ms 本机不可复现（见 `docs/review/G2-gate.md`） |
+| 10 万字文档击键→提交上屏延迟 p95（release 探针串行） | ≤ 16 ms | 6.25 ms（5,005 块）✅；12.05 ms（10,500 块）✅ |
+| 10 万字文档常驻内存（任务管理器私有工作集） | ≤ 150 MB | 21.55 MB ✅ |
+| 安装产物体积（`veil.exe` 单文件发布构建） | ≤ 15 MiB | 5,729,280 B ≈ 5.46 MiB ✅ |
+| workspace 测试数（含 veil-core + veil-egui + veil） | ≥ 80 | **765 passed / 0 failed / 10 ignored** ✅（2026-10-30 全量实测；口径为所有测试二进制之和，此前 449 仅统计 `veil-egui --lib` 一个二进制，属口径漂移已修正） |
+| e2e 断言数 | ≥ 20 | 0（待建） |
+| Markdown 往返一致率（无编辑时 serialize 输出 == 输入字节） | == 100% | 100% ✅ |
+| `veil-core` 的 GUI/异步运行时依赖数 | == 0 | 0 ✅ |
+| `veil-egui`+`veil` 直接依赖总数 | ≤ 8 | 8 ✅（winit/softbuffer/cosmic-text/arboard/pulldown-cmark/latex-rust/png/notify；WIC 走平台 FFI 零新增依赖） |
+| workspace 传递依赖总数 | ≤ 200 | 121 ✅ |
+| CommonMark 0.31.2 一致性 | A≥85% / C≥90% | A=652/652、C=652/652、D=652/652 ✅ |
+| GFM 扩展一致性（Tables/TaskList/Strikethrough） | A/C/D≥95% | A=23/23、C=23/23、D=23/23 ✅ |
+| 3 分钟 soak 内存漂移 | ≤ 0 | -0.17 MB ✅（G1 实测；G2 未复跑，阶段 1 未触碰长驻资源路径） |
 
 - 版本号一致性：git tag == workspace `Cargo.toml` version == 产物元数据（`veil.exe` 文件属性版本）
 - 版本失配处置记录：无
-- 测量方法注记：冷启动 = PowerShell `Start-Process` 后按进程 `StartTime` 计到主窗口句柄就绪，5 次取中位（含启动器与 Defender 扫描开销，方差大，故同时记录最小值）；击键 p95 = 进程内端到端探针 `perf_keystroke_path`（release 构建，300 次样本）；内存 = 启动后 2 s 的 `PrivateMemorySize64`；体积 = `target/release/veil.exe` 字节数。
+- 测量方法注记：冷启动 = PowerShell `Start-Process` 后按进程 `StartTime` 计到主窗口句柄就绪，5 次取中位（含启动器与本机进程创建开销，方差大，故同时记录最小值）；2026-10-30 起**同时记录分段值**——`VEIL_BOOT_LOG` 门控探针输出 `main` / `event_loop` / `surface_ready` / `redraw_done` 各 epoch 毫秒，可把墙钟拆成「进程创建→main」与「main→首帧」两段（分段探针为临时诊断代码，测毕已回退）。击键 p95 = 进程内端到端探针 `perf_keystroke_path`（release 构建，**必须串行** `--test-threads=1`，并行会假性劣化）；内存 = 启动后 2 s 的 `PrivateMemorySize64`；体积 = `target/release/veil.exe` 字节数。
 
 ## 3. 核心不变量断言（Skill 03 A4）
 

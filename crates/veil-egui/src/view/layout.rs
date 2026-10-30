@@ -285,8 +285,11 @@ pub struct BlockLayout {
     pub imgs: Vec<PlacedImg>,
     /// 删除线区间（块相对 doc 坐标，含标记；paint 层经 selection_rects 取可视矩形）。
     pub strikes: Vec<(usize, usize)>,
-    /// 全部行内节点区间（doc 绝对坐标，先序遍历）：Reveal 激活指纹的输入。
+    /// 全部行内节点区间（**块相对坐标**，先序遍历）：Reveal 激活指纹的输入。
+    /// 用相对坐标而非文档绝对坐标，保证块整体平移（增量重解析保留 id）后指纹仍平移不变。
     node_ranges: Vec<Range>,
+    /// 行内图片区间（**块相对坐标**，按起点排序）：激活位决定占位/显源码，同属排版输入。
+    img_ranges: Vec<Range>,
     /// 源文本换行符的块相对偏移（不含尾 `\n`）：引用块按行激活判定的输入。
     source_newlines: Vec<usize>,
     /// 原块正文字节数（不含尾换行）；大于排版覆盖范围时说明只排了前缀。
@@ -305,23 +308,42 @@ impl BlockLayout {
     /// 指纹相等 ⇔ 排版依赖的激活状态相同（64 位 FNV 折叠；碰撞概率忽略不计）。
     pub(crate) fn reveal_state(&self, kind: &BlockKind, block: Range, caret: usize) -> u64 {
         let mut h = 0xcbf2_9ce4_8422_2325u64;
+        // caret 在块外 → 任何节点都不可能激活。必须显式守卫：块未参与重解析（id 保留）
+        // 但整体平移后，旧布局的指纹输入仍会与块内 caret 误配。
+        let inside = block.start <= caret && caret <= block.end;
+        let rel = if inside { caret - block.start } else { 0 };
         match kind {
             BlockKind::BlockQuote => {
-                let line = if block.start <= caret && caret <= block.end {
-                    let rel = caret - block.start;
+                // 引用按行：line=0 即块外，天然区分「块外」与「块内任意行」。
+                let line = if inside {
                     self.source_newlines.partition_point(|&o| o < rel) as u64 + 1
                 } else {
                     0
                 };
                 fnv(&mut h, line);
             }
-            BlockKind::ListItem { .. } | BlockKind::ThematicBreak => {
-                fnv(&mut h, node_active(block, caret) as u64);
+            // 块级标记显隐按整块 caret 判定（`block_subs`）：标题 `#`/Setext 下划线/围栏
+            // ```` ``` ````/列表符号/分隔线。漏折任一种 → caret 进出块时缓存不变，残留旧态。
+            BlockKind::ListItem { .. }
+            | BlockKind::ThematicBreak
+            | BlockKind::AtxHeading(_)
+            | BlockKind::SetextHeading(_)
+            | BlockKind::FencedCode(_) => {
+                fnv(&mut h, inside as u64);
             }
             _ => {}
         }
         for (i, r) in self.node_ranges.iter().enumerate() {
-            fnv(&mut h, (i as u64) << 1 | node_active(*r, caret) as u64);
+            let active = inside && node_active(*r, rel);
+            fnv(&mut h, (i as u64) << 1 | active as u64);
+        }
+        // 图片激活位：与节点分域折叠（前置 u64::MAX 作域分隔），避免与节点索引位混淆。
+        if !self.img_ranges.is_empty() {
+            fnv(&mut h, u64::MAX);
+            for (i, r) in self.img_ranges.iter().enumerate() {
+                let active = inside && node_active(*r, rel);
+                fnv(&mut h, (i as u64) << 1 | active as u64);
+            }
         }
         h
     }
@@ -396,6 +418,7 @@ impl LayoutEngine {
             imgs: Vec::new(),
             strikes: Vec::new(),
             node_ranges: Vec::new(),
+            img_ranges: Vec::new(),
             source_newlines: Vec::new(),
             full_len: text.len(),
             truncated: false,
@@ -447,10 +470,34 @@ impl LayoutEngine {
             subs.push(Sub::fill(rs, re, "\u{A0}".repeat(nbsp)));
             kept.push(im);
         }
+        let apply_cjk = !matches!(
+            kind,
+            BlockKind::FencedCode(_)
+                | BlockKind::IndentedCode
+                | BlockKind::Math
+                | BlockKind::Table
+        );
         let (layout_text, map, line_bases, source_newlines) =
-            build_layout_text(body, block, inlines, caret, &subs);
+            build_layout_text(body, block, inlines, caret, &subs, apply_cjk);
         let mut node_ranges = Vec::new();
         collect_node_ranges(inlines, &mut node_ranges);
+        // 指纹输入一律存块相对坐标：增量重解析保留 BlockId 而块 range 可能整体平移，
+        // 绝对坐标会在命中校验时把新 caret 误判为落在旧区间内（基线 memo 性质测试反例）。
+        for r in node_ranges.iter_mut() {
+            *r = Range {
+                start: r.start.saturating_sub(block.start),
+                end: r.end.saturating_sub(block.start),
+            };
+        }
+        // 行内图片同理：激活位决定是否用 NBSP 占位（显源码），也是排版输入。
+        let mut img_ranges: Vec<Range> = imgs
+            .iter()
+            .map(|im| Range {
+                start: im.range.start.saturating_sub(block.start),
+                end: im.range.end.saturating_sub(block.start),
+            })
+            .collect();
+        img_ranges.sort_by_key(|r| (r.start, r.end));
         let mut buffer = Buffer::new(&mut self.font_system, metrics);
         let default_attrs = attrs_of(kind.clone(), Style::default());
         // style_spans 产出文档坐标，经映射转 layout 坐标；整体落入消隐/占位区的 span 零宽丢弃。
@@ -564,6 +611,7 @@ impl LayoutEngine {
                 .map(|&(s, e, _)| (s, e))
                 .collect(),
             node_ranges,
+            img_ranges,
             source_newlines,
             full_len: full.len(),
             truncated,
@@ -769,6 +817,55 @@ fn collect_elide(nodes: &[InlineNode], block: Range, caret: usize, out: &mut Vec
     }
 }
 
+/// CJK 字符判定：覆盖中日韩统一表意文字、韩文音节、平假名/片假名、
+/// 全角标点/字母（Halfwidth & Fullwidth Forms）及 CJK 符号与标点。
+/// v0 近似（不覆盖 Extension B-F 等生僻区；命中不到只是不加间距，不会崩）。
+fn is_cjk(ch: char) -> bool {
+    let cp = ch as u32;
+    (0x4E00..=0x9FFF).contains(&cp)
+        || (0x3400..=0x4DBF).contains(&cp)
+        || (0xAC00..=0xD7AF).contains(&cp)
+        || (0x3040..=0x309F).contains(&cp)
+        || (0x30A0..=0x30FF).contains(&cp)
+        || (0xF900..=0xFAFF).contains(&cp)
+        || (0x3000..=0x303F).contains(&cp)
+        || (0xFF00..=0xFFEF).contains(&cp)
+}
+
+/// 边界跳过：已存在空白/换行/全角空格 → 不再加间距。
+fn cjk_boundary_skip(prev: char, next: char) -> bool {
+    prev.is_whitespace() || next.is_whitespace()
+        || prev == '\n' || next == '\n'
+        || prev == '\r' || next == '\r'
+        || (prev as u32) == 0x3000
+        || (next as u32) == 0x3000
+}
+
+/// 为 CJK↔ASCII 边界生成间距 subs：把「ASCII 一侧的首字符」替换为「空格+原字符」，
+/// 让 OffsetMap 自动吸收新增字节。被包含在 elide/占位区的 sub 会被 from_spans 丢弃，
+/// 无需显式过滤（代码块、图片占位、行内公式标记都已在前一步进替换表）。
+fn build_cjk_subs(body: &str) -> Vec<Sub> {
+    let mut subs = Vec::new();
+    let mut it = body.char_indices().peekable();
+    while let Some((_i, ch)) = it.next() {
+        let Some(&(j, next)) = it.peek() else { break };
+        if cjk_boundary_skip(ch, next) { continue; }
+        let a = is_cjk(ch);
+        let b = is_cjk(next);
+        if a == b { continue; }
+        if !b {
+            // CJK → 非 CJK（不一定是 ASCII，emoji/全角已在 is_cjk 覆盖，此处多半是拉丁字母/数字）
+            let nl = next.len_utf8();
+            subs.push(Sub::fill(j, j + nl, format!(" {}", next)));
+        } else {
+            // 非 CJK → CJK：CJK 字符 UTF-8 长度不定
+            let nl = next.len_utf8();
+            subs.push(Sub::fill(j, j + nl, format!(" {}", next)));
+        }
+    }
+    subs
+}
+
 /// 构造排版文本与坐标映射：行尾 `\r`、非激活节点标记、块级替换统一进替换表。
 /// 返回 (排版文本, OffsetMap, 每逻辑行布局起始偏移, 源换行符的块相对偏移)。
 /// 调用方已剥唯一尾 `\n`。
@@ -778,6 +875,7 @@ fn build_layout_text(
     inlines: &[InlineNode],
     caret: usize,
     subs: &[Sub],
+    apply_cjk: bool,
 ) -> (String, OffsetMap, Vec<usize>, Vec<usize>) {
     let mut all: Vec<Sub> = Vec::new();
     // 行尾 \r：仅剥「后继为 \n 或文末」的 \r（行内孤 \r 保持原样，与切片 1 行为一致）
@@ -791,6 +889,9 @@ fn build_layout_text(
     collect_elide(inlines, block, caret, &mut elide);
     all.extend(elide.into_iter().map(|(s, e)| Sub::elide(s, e)));
     all.extend_from_slice(subs);
+    if apply_cjk {
+        all.extend(build_cjk_subs(body));
+    }
     let (map, accepted) = OffsetMap::from_spans(body.len(), &all);
     // 保留段取源文本并记行基；替换段写 fill（调用方保证不含换行）
     let mut layout_text = String::with_capacity(map.layout_len);
@@ -814,7 +915,7 @@ fn build_layout_text(
     (layout_text, map, line_bases, source_newlines)
 }
 
-/// 先序收集全部行内节点区间（doc 绝对坐标）：激活指纹按固定顺序折叠。
+/// 先序收集全部行内节点区间（doc 绝对坐标；调用方随即转块相对）：激活指纹按固定顺序折叠。
 fn collect_node_ranges(nodes: &[InlineNode], out: &mut Vec<Range>) {
     for n in nodes {
         out.push(n.range);
@@ -1755,5 +1856,70 @@ mod tests {
             assert!(y > prev_y, "视觉行 y 严格递增");
             prev_y = y;
         }
+    }
+
+    // ---- 中西文自动间距（v0 切片） ----
+
+    #[test]
+    fn cjk_to_ascii_adds_space() {
+        // 「中文text」→ 「中文 text」
+        let (_, l) = layout_of("中文text", 400.0);
+        assert_eq!(l.layout_text(), "中文 text");
+    }
+
+    #[test]
+    fn ascii_to_cjk_adds_space() {
+        // 「text中文」→ 「text 中文」
+        let (_, l) = layout_of("text中文", 400.0);
+        assert_eq!(l.layout_text(), "text 中文");
+    }
+
+    #[test]
+    fn both_boundaries_add_spaces() {
+        // 「中text文」→ 「中 text 文」
+        let (_, l) = layout_of("中text文", 400.0);
+        assert_eq!(l.layout_text(), "中 text 文");
+    }
+
+    #[test]
+    fn no_double_space_when_already_whitespace() {
+        // 已有空白时不再加（边界跳过）
+        let (_, l) = layout_of("中 text 文", 400.0);
+        assert_eq!(l.layout_text(), "中 text 文");
+    }
+
+    #[test]
+    fn fenced_code_skips_cjk_spacing() {
+        // 代码块里的 CJK↔ASCII 不插入空格（layout_text 含围栏消隐痕迹，但不含「中 text」）
+        let (_, l) = layout_of("```\n中text\n```\n", 400.0);
+        assert!(
+            !l.layout_text().contains("中 text"),
+            "代码块不应加 CJK 间距: {:?}",
+            l.layout_text()
+        );
+    }
+
+    #[test]
+    fn hit_roundtrip_works_with_cjk_spacing() {
+        // 插入空格后 OffsetMap 仍正确：doc 偏移 3（中结束、t 开始）→ layout 应落到空格之后
+        let (eng, l) = layout_of("中t", 400.0);
+        // doc 文本：中=0..3, t=3..4；layout_text 应为 "中 t"
+        let doc_t = 3; // 文档中 t 的位置
+        let (x_before, _, _) = eng.caret_xy(&l, 0); // 中之前
+        let (x_after, _, _) = eng.caret_xy(&l, doc_t); // t 之前（layout 里空格之后）
+        assert!(x_after > x_before, "CJK 间距后光标 x 应递增");
+        // hit 逆映射：layout 末尾 → 文档末尾
+        let (x_last, y, h) = eng.caret_xy(&l, 4);
+        assert_eq!(eng.hit(&l, x_last + 0.5, y + h / 2.0), 4);
+    }
+
+    #[test]
+    fn is_cjk_classifies_correctly() {
+        assert!(is_cjk('中'));
+        assert!(is_cjk('あ'));
+        assert!(is_cjk('한'));
+        assert!(!is_cjk('A'));
+        assert!(!is_cjk('1'));
+        assert!(!is_cjk('.'));
     }
 }

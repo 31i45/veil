@@ -2948,6 +2948,62 @@ fn crlf_bom_edit_save_preserves_bytes() {
     }
 }
 
+/// 2c 源码真值 · 全角/半角：编辑与保存绝不转换全角/半角字符。
+/// 全角拉丁/数字/标点（ＡＢＣ １２３ ！）与半角片假名（ｱｲｳ）必须原样往返。
+#[test]
+fn fullwidth_halfwidth_preserved_through_edit_save() {
+    let store = MemStore::default();
+    let doc = "全角 ＡＢＣ １２３ ！\n\n半角 ｱｲｳ abc\n";
+    let mut a = app(doc, Some("doc/fw.md"), false, &store);
+    a.paint();
+    a.perform_action(Action::Doc(Intent::MoveDocEnd));
+    a.route_key(Key::Text("尾".into()));
+    a.perform_action(Action::Doc(Intent::MoveDocStart));
+    a.route_key(Key::Text("首".into()));
+    a.save_now();
+    let bytes = store.files.borrow()[&PathBuf::from("doc/fw.md")].clone();
+    let text = String::from_utf8(bytes).expect("UTF-8");
+    assert_eq!(text, format!("首{doc}尾"), "全角/半角字符不得被转换");
+    assert!(text.contains("ＡＢＣ １２３ ！"));
+    assert!(text.contains("ｱｲｳ"));
+}
+
+/// 2c 源码真值 · 尾随空格：行尾两空格（Markdown 硬换行）与行尾 tab 是语义字节，
+/// 编辑与保存不得修剪。
+#[test]
+fn trailing_whitespace_preserved_through_edit_save() {
+    let store = MemStore::default();
+    let doc = "硬换行  \n次行\ttab 尾\t\n\n末段  \n";
+    let mut a = app(doc, Some("doc/ts.md"), false, &store);
+    a.paint();
+    a.perform_action(Action::Doc(Intent::MoveDocEnd));
+    a.route_key(Key::Text("x".into()));
+    a.save_now();
+    let bytes = store.files.borrow()[&PathBuf::from("doc/ts.md")].clone();
+    let text = String::from_utf8(bytes).expect("UTF-8");
+    assert_eq!(text, format!("{doc}x"), "尾随空格/tab 不得被修剪");
+}
+
+/// 2c 源码真值 · 列表标记重排：有序列表回车只给新行递增标记，
+/// 既有项编号（含故意乱序的 1./1./3.）绝不重排。
+#[test]
+fn ordered_list_markers_not_renumbered() {
+    let store = MemStore::default();
+    let doc = "1. a\n1. b\n3. c"; // 无尾换行：MoveDocEnd 落在「3. c」行尾
+    let mut a = app(doc, Some("doc/ol.md"), false, &store);
+    a.paint();
+    a.perform_action(Action::Doc(Intent::MoveDocEnd));
+    a.route_key(Key::Enter); // 3. c 行尾回车 → 新行 4.
+    a.route_key(Key::Text("d".into()));
+    a.save_now();
+    let bytes = store.files.borrow()[&PathBuf::from("doc/ol.md")].clone();
+    let text = String::from_utf8(bytes).expect("UTF-8");
+    assert_eq!(
+        text, "1. a\n1. b\n3. c\n4. d",
+        "新行递增为 4.，既有 1./1./3. 标记不得重排"
+    );
+}
+
 /// 真机缺陷回归（2026-10-30 ①③ + IME 候选框停在左上角）：
 /// Enter 产生的新行/新段在提交前不成块，光标/preedit/IME 候选框必须锚在
 /// 文本将出现的位置——软换行锚同段下一视觉行，段落分隔锚新段顶边；
@@ -3689,6 +3745,32 @@ proptest::proptest! {
         proptest::prop_assert_eq!(
             first, second,
             "render 幂等性被破坏"
+        );
+    }
+
+    #[test]
+    fn undo_to_initial_is_byte_identical_after_any_sequence(
+        edits in proptest::collection::vec(arbitrary_intent(), 0..=50),
+    ) {
+        // 源码真值往返 fuzz（2c 切片）：任何编辑序列后逐步撤销到底，
+        // 必须字节级回到初始文档。任何隐式规范化（全角/半角转换、尾随空格
+        // 修剪、列表编号重排、换行风格改写）都不会进入撤销栈——一旦发生，
+        // 撤销到底必残留差异而被本性质捕获。
+        let seed = "首段 ＡＢＣ １２３ ！ ｱｲｳ  \n\n1. 甲\n1. 乙\n3. 丙\n\n> 引用  \n\n```\ncode 行  \n```\n\n末段 tab\t\n";
+        let store = MemStore::default();
+        let mut a = app(seed, None, false, &store);
+
+        for intent in &edits {
+            let dirty = a.editor.apply(intent.clone()).unwrap_or_default();
+            a.after_edit(dirty);
+        }
+        // 逐步撤销到底（空栈 Undo 返回 None，循环必然终止）
+        while a.editor.apply(Intent::Undo).is_some() {}
+        let restored = a.editor.session().serialize();
+        proptest::prop_assert_eq!(
+            restored.as_str(),
+            seed,
+            "撤销到底后须字节级还原初始文档（隐式规范化检测）"
         );
     }
 }

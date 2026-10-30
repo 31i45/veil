@@ -48,7 +48,7 @@ cargo test --workspace      # 运行全部单元/集成测试
 cargo run -p veil -- <file.md>   # 运行并打开指定 Markdown 文件
 ```
 
-当前 765 项测试全绿（`cargo test --workspace` 765 passed / 0 failed / 10 ignored），`cargo clippy --workspace --all-targets -- -D warnings` 零警告。
+当前 769 项测试全绿（`cargo test --workspace` 769 passed / 0 failed / 10 ignored），`cargo clippy --workspace --all-targets -- -D warnings` 零警告。
 
 ## 数字红线（目标值与实测）
 

@@ -281,6 +281,8 @@ pub(crate) struct WindowState {
     pub(crate) last_click: Option<(Instant, PhysicalPosition<f64>, u8)>,
     /// 打印会话态（3b）：Some 期间 win_size/viewport/绘制全部切换到打印页帧语义。
     pub(crate) print: Option<PrintState>,
+    /// 无边框全屏（3c-3）：F11/视图菜单切换；Esc 不退出（Esc 只关菜单）。
+    pub(crate) fullscreen: bool,
 }
 impl Default for WindowState {
     fn default() -> Self {
@@ -293,6 +295,7 @@ impl Default for WindowState {
             dragging: false,
             last_click: None,
             print: None,
+            fullscreen: false,
         }
     }
 }

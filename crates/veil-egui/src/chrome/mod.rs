@@ -89,6 +89,8 @@ pub enum MenuAction {
     ZoomIn,
     ZoomOut,
     ZoomReset,
+    /// 全屏切换（3c-3，F11）：无边框全屏。
+    ToggleFullscreen,
     Quit,
     /// 打开最近文件（0b）：下标为最近列表位置（0 = 最近一次）。
     OpenRecent(usize),
@@ -138,6 +140,7 @@ pub const MENUS: [MenuDef; 3] = [
             ("放大", "Ctrl+=", MenuAction::ZoomIn),
             ("缩小", "Ctrl+-", MenuAction::ZoomOut),
             ("还原缩放", "Ctrl+0", MenuAction::ZoomReset),
+            ("全屏", "F11", MenuAction::ToggleFullscreen),
             ("跟随系统", "", MenuAction::ThemeSystem),
             ("浅色", "", MenuAction::ThemeLight),
             ("深色", "", MenuAction::ThemeDark),

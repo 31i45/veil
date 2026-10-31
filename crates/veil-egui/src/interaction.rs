@@ -193,7 +193,27 @@ impl App {
             Action::ZoomIn => self.zoom_step(1),
             Action::ZoomOut => self.zoom_step(-1),
             Action::ZoomReset => self.zoom_reset(),
+            Action::ToggleFullscreen => self.toggle_fullscreen(),
         }
+    }
+
+    /// 全屏切换（3c-3）：F11 / 视图菜单；无边框全屏（Borderless，保留任务栏快速切出）。
+    /// Esc 不退出全屏（Esc 只关菜单——避免与「关掉手上面板」的肌肉记忆冲突）。
+    /// 窗口尺寸随系统 Resized 事件变化，重排/滚动钳位走既有路径，此处只翻转状态。
+    pub(crate) fn toggle_fullscreen(&mut self) {
+        let Some(w) = &self.window_state.window else {
+            return; // headless / 窗口未创建：无操作
+        };
+        let on = !self.window_state.fullscreen;
+        w.set_fullscreen(on.then_some(winit::window::Fullscreen::Borderless(None)));
+        self.window_state.fullscreen = on;
+        self.ui_state.chrome.notice = if on {
+            "全屏（F11 退出）"
+        } else {
+            "已退出全屏"
+        }
+        .into();
+        self.request_redraw();
     }
 
     // ── 用户缩放（3c-2）：effective scale = DPI × user_zoom ──────────────────
@@ -604,6 +624,7 @@ impl App {
             MenuAction::ZoomIn => self.zoom_step(1),
             MenuAction::ZoomOut => self.zoom_step(-1),
             MenuAction::ZoomReset => self.zoom_reset(),
+            MenuAction::ToggleFullscreen => self.toggle_fullscreen(),
             MenuAction::ToggleOutline => self.toggle_outline(),
             MenuAction::Find => self.open_search(),
             MenuAction::Replace => self.open_replace(),
@@ -1463,6 +1484,7 @@ pub(crate) fn map_key(event: &winit::event::KeyEvent) -> Option<Key> {
         WKey::Named(NamedKey::Enter) => Some(Key::Enter),
         WKey::Named(NamedKey::Tab) => Some(Key::Tab),
         WKey::Named(NamedKey::Escape) => Some(Key::Escape),
+        WKey::Named(NamedKey::F11) => Some(Key::F11),
         WKey::Named(NamedKey::Space) => Some(Key::Text(" ".into())),
         WKey::Character(c) if c.as_str().eq_ignore_ascii_case("z") => Some(Key::Z),
         WKey::Character(c) if c.as_str().eq_ignore_ascii_case("y") => Some(Key::Y),

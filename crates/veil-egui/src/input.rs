@@ -47,6 +47,8 @@ pub enum Key {
     Equal,
     /// Escape：关闭菜单（切片 15）。
     Escape,
+    /// F11：全屏切换（3c-3；不需要修饰键）。
+    F11,
     Left,
     Right,
     Up,
@@ -101,6 +103,8 @@ pub enum Action {
     ZoomIn,
     ZoomOut,
     ZoomReset,
+    /// 全屏切换（3c-3，F11）：无边框全屏；窗口操作由 shell 完成。纯视图动作。
+    ToggleFullscreen,
 }
 
 pub fn translate(key: Key, mods: Mods) -> Option<Action> {
@@ -127,6 +131,7 @@ pub fn translate(key: Key, mods: Mods) -> Option<Action> {
         Key::O if mods.ctrl => Some(Action::Open),
         Key::O => None, // 无 ctrl 的 o 文本由 Text 变体承载
         Key::Escape => Some(Action::CloseMenu),
+        Key::F11 => Some(Action::ToggleFullscreen), // 全屏切换不需要修饰键（3c-3）
         Key::E if mods.ctrl => Some(Action::Export),
         Key::E => None, // 无 ctrl 的 e 文本由 Text 变体承载
         Key::F if mods.ctrl => Some(Action::Find),
@@ -228,6 +233,14 @@ mod tests {
         assert_eq!(translate(Key::Digit0, NONE), None);
         // Ctrl+Shift+=（部分键盘「+」的主键 =）仍按放大处理：shift 不影响
         assert_eq!(translate(Key::Equal, CTRL_SHIFT), Some(Action::ZoomIn));
+    }
+
+    #[test]
+    fn fullscreen_binding_needs_no_mods() {
+        // 3c-3：F11 全屏切换不依赖修饰键；Esc 仍是关菜单而非退全屏
+        assert_eq!(translate(Key::F11, NONE), Some(Action::ToggleFullscreen));
+        assert_eq!(translate(Key::F11, CTRL), Some(Action::ToggleFullscreen));
+        assert_eq!(translate(Key::Escape, NONE), Some(Action::CloseMenu));
     }
 
     #[test]

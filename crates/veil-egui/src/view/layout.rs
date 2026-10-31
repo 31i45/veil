@@ -399,10 +399,18 @@ impl LayoutEngine {
     }
 
     /// IME preedit 小串布局（不换行、默认样式、无消隐）。
+    /// 与正文同套排版规则：kinsoku 胶水 + 中西文间距经 build_layout_text 注入，
+    /// OffsetMap 保证组合串内光标偏移（IME 报告的原文档坐标）正确映射。
     pub fn layout_preedit(&mut self, text: &str) -> BlockLayout {
         let metrics = Metrics::new(BASE_FONT_SIZE * self.scale, BASE_LINE_HEIGHT * self.scale);
+        let block = Range {
+            start: 0,
+            end: text.len(),
+        };
+        let (layout_text, map, line_bases, source_newlines) =
+            build_layout_text(text, block, &[], usize::MAX, &[], true);
         let mut buffer = Buffer::new(&mut self.font_system, metrics);
-        buffer.set_text(text, &Attrs::new(), Shaping::Advanced, None);
+        buffer.set_text(&layout_text, &Attrs::new(), Shaping::Advanced, None);
         buffer.set_size(None, None);
         buffer.shape_until_scroll(&mut self.font_system, false);
         let height = buffer
@@ -411,15 +419,15 @@ impl LayoutEngine {
             .fold(metrics.line_height, f32::max);
         BlockLayout {
             buffer,
-            map: OffsetMap::from_spans(text.len(), &[]).0,
-            line_bases: vec![0],
-            layout_text: text.to_string(),
+            map,
+            line_bases,
+            layout_text,
             height,
             imgs: Vec::new(),
             strikes: Vec::new(),
             node_ranges: Vec::new(),
             img_ranges: Vec::new(),
-            source_newlines: Vec::new(),
+            source_newlines,
             full_len: text.len(),
             truncated: false,
         }
@@ -529,7 +537,9 @@ impl LayoutEngine {
         }
         spans.sort_by_key(|(s, _)| s.as_ptr() as usize);
         buffer.set_rich_text(spans, &default_attrs, Shaping::Advanced, None);
-        buffer.set_wrap(Wrap::Glyph);
+        // WordOrGlyph：按 UAX #14 断行机会折行（CJK 逐字可断 + 行首/行尾禁则
+        // 由 CL/OP 类天然生效），单个超宽词（长 URL 等）回退逐字形断行。
+        buffer.set_wrap(Wrap::WordOrGlyph);
         buffer.set_size(Some(width), None);
         buffer.shape_until_scroll(&mut self.font_system, false);
         let mut height = buffer
@@ -740,16 +750,21 @@ impl LayoutEngine {
     }
 
     /// 光栅化任意已排版 buffer（表格单元格复用同一 path）；`height` 为排版高（物理像素）。
+    /// 悬挂标点 v0 在此生效：满行末字为闭标点时光栅右移半字宽（排版几何不变，
+    /// caret/命中/选区仍按未位移坐标——光标落在标点之后恰与位移后墨缘对齐）。
     pub(crate) fn rasterize_buffer(
         &mut self,
         buffer: &Buffer,
         height: f32,
         color: [u8; 3],
     ) -> (Vec<u8>, u32, u32) {
+        let width_opt = buffer.size().0;
         let mut max_w: f32 = 0.0;
         for run in buffer.layout_runs() {
-            for g in run.glyphs {
-                max_w = max_w.max(g.x + g.w);
+            let (dx, hi) = hang_shift(&run, width_opt);
+            for (i, g) in run.glyphs.iter().enumerate() {
+                let shift = if Some(i) == hi { dx } else { 0.0 };
+                max_w = max_w.max(g.x + shift + g.w);
             }
         }
         let (w, h) = (
@@ -765,9 +780,11 @@ impl LayoutEngine {
         };
         let mut px = vec![0u8; w * h * 4];
         for run in buffer.layout_runs() {
-            for g in run.glyphs {
+            let (dx, hi) = hang_shift(&run, width_opt);
+            for (i, g) in run.glyphs.iter().enumerate() {
+                let shift = if Some(i) == hi { dx } else { 0.0 };
                 let base = g.color_opt.map(|c| [c.r(), c.g(), c.b()]).unwrap_or(color);
-                let physical = g.physical((0.0, run.line_y), 1.0);
+                let physical = g.physical((shift, run.line_y), 1.0);
                 let fs = &mut self.font_system;
                 let key_color = Color::rgb(base[0], base[1], base[2]);
                 self.swash
@@ -788,6 +805,50 @@ impl LayoutEngine {
         }
         (px, w as u32, h as u32)
     }
+}
+
+/// 行尾可悬挂标点（闭标点，墨形偏全角框左半）：满行时光栅右移半字宽，
+/// 墨缘对齐版心右缘、标点凸出（悬挂式 v0）。居中墨形的省略号/破折号不在此列。
+fn hangable_end(ch: char) -> bool {
+    matches!(
+        ch,
+        '\u{3002}' | '\u{3001}' | '\u{FF0C}' | '\u{FF0E}' | '\u{FF1B}' | '\u{FF1A}'
+            | '\u{FF1F}' | '\u{FF01}' | '\u{FF09}' | '\u{3011}' | '\u{300B}' | '\u{300D}'
+            | '\u{300F}' | '\u{201D}' | '\u{2019}'
+    )
+}
+
+/// 满行末字悬挂判定：返回 (右移量, 目标字形下标)。
+/// 仅当行基本排满（行宽与版心差 ≤ 0.25 字号）、最右字形恰为单个可悬挂闭标点、
+/// 且其 advance 右缘即行宽时生效；RTL 行与无定宽 buffer（preedit）不悬挂。
+fn hang_shift(run: &cosmic_text::LayoutRun, width_opt: Option<f32>) -> (f32, Option<usize>) {
+    let Some(width) = width_opt else {
+        return (0.0, None);
+    };
+    if run.rtl {
+        return (0.0, None);
+    }
+    let Some((i, g)) = run
+        .glyphs
+        .iter()
+        .enumerate()
+        .max_by(|a, b| (a.1.x + a.1.w).total_cmp(&(b.1.x + b.1.w)))
+    else {
+        return (0.0, None);
+    };
+    let tol = g.font_size * 0.25;
+    if (width - run.line_w).abs() > tol || (g.x + g.w - run.line_w).abs() > tol {
+        return (0.0, None); // 未排满/超宽词/末字形右缘异常：不悬挂
+    }
+    let cluster = &run.text[g.start..g.end];
+    let mut it = cluster.chars();
+    let (Some(c), None) = (it.next(), it.next()) else {
+        return (0.0, None);
+    };
+    if !hangable_end(c) {
+        return (0.0, None);
+    }
+    (g.w * 0.5, Some(i))
 }
 
 /// 激活规则 v0（Reveal）：caret 落在节点闭区间内即激活（显示标记）。
@@ -841,27 +902,103 @@ fn cjk_boundary_skip(prev: char, next: char) -> bool {
         || (next as u32) == 0x3000
 }
 
-/// 为 CJK↔ASCII 边界生成间距 subs：把「ASCII 一侧的首字符」替换为「空格+原字符」，
-/// 让 OffsetMap 自动吸收新增字节。被包含在 elide/占位区的 sub 会被 from_spans 丢弃，
+/// 行首禁则标点表（GB/T 15834 通行集，回归测试的判定基准）：
+/// 这些字符不允许出现在视觉行行首。UAX #14 的 CL/CP/EX/NS 类已覆盖主体
+/// （Wrap::WordOrGlyph 天然遵守）；……/——/·/～ 属中文特有补集，由 WJ 胶水段兜底。
+/// 注意：`…`/`—`/`·`/`～` 同时是 kinsoku 胶水字符（见 is_glue_punct）。
+#[cfg(test)]
+const LINE_START_FORBIDDEN: &[char] = &[
+    '\u{3002}', '\u{3001}', '\u{FF0C}', '\u{FF0E}', '\u{FF1B}', '\u{FF1A}', '\u{FF1F}',
+    '\u{FF01}', '\u{2026}', '\u{2025}', '\u{2014}', '\u{00B7}', '\u{FF5E}', '\u{FF09}',
+    '\u{3011}', '\u{300B}', '\u{300D}', '\u{300F}', '\u{3015}', '\u{3009}', '\u{FF3D}',
+    '\u{FF5D}', '\u{201D}', '\u{2019}',
+];
+
+/// 行尾禁则标点表（开括号/开引号）：不允许出现在视觉行行尾。
+/// UAX #14 的 OP 类（× 后断）全覆盖，无需额外机制。
+#[cfg(test)]
+const LINE_END_FORBIDDEN: &[char] = &[
+    '\u{FF08}', '\u{3010}', '\u{300A}', '\u{300C}', '\u{300E}', '\u{3014}', '\u{3008}',
+    '\u{FF3B}', '\u{FF5B}', '\u{201C}', '\u{2018}',
+];
+
+/// 左粘胶水字符（行首禁则补集）：省略号/破折号/间隔号/闭引号——UAX #14 默认
+/// 允许在其前断开（…… IN、—— B-A、·/～ ID、”’ QU），中文排版不允许。
+fn is_glue_left(ch: char) -> bool {
+    matches!(
+        ch,
+        '\u{2025}' | '\u{2026}' | '\u{2014}' | '\u{00B7}' | '\u{FF5E}' | '\u{201D}' | '\u{2019}'
+    )
+}
+
+/// 右粘胶水字符（行尾禁则补集）：开引号——UAX #14 的 QU 类允许在其后断开。
+fn is_glue_right(ch: char) -> bool {
+    matches!(ch, '\u{201C}' | '\u{2018}')
+}
+
+/// kinsoku 胶水字符 = 左粘 ∪ 右粘。排版层把含这些字符的连续 run 替换为
+/// 「粘连侧加 WJ(U+2060)」的等价文本，与相邻字粘成不可分单元
+/// （源码零改动，与 CJK 间距同属排版层 Sub 替换）。
+/// 已知简化：fallback 字体链中 WJ 有约 1.3px 的零墨 advance（非 tofu），
+/// 每个粘连点带来发丝级缝隙；`word_joiner_adds_no_advance` 守住 tofu 退化。
+fn is_glue_punct(ch: char) -> bool {
+    is_glue_left(ch) || is_glue_right(ch)
+}
+
+/// 中文排版替换表 v0 = kinsoku 胶水段 + 中西文自动间距。
+/// 两趟产出互不重叠（间距在胶水字符两侧一律不注入），from_spans 可直接归并。
+/// 被包含在 elide/占位区的 sub 会被 from_spans 丢弃，
 /// 无需显式过滤（代码块、图片占位、行内公式标记都已在前一步进替换表）。
-fn build_cjk_subs(body: &str) -> Vec<Sub> {
+fn build_typo_subs(body: &str) -> Vec<Sub> {
     let mut subs = Vec::new();
+    // 第一趟：kinsoku 胶水段。左粘字符前插 WJ（文首/硬行首无需，与换行粘连本就无断点）、
+    // 右粘字符后插 WJ（行尾同理）；WJ×/×WJ 禁断使 run 内不断、与相邻字不断。
+    let chars: Vec<(usize, char)> = body.char_indices().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        if !is_glue_punct(chars[i].1) {
+            i += 1;
+            continue;
+        }
+        let start = chars[i].0;
+        let mut j = i;
+        while j < chars.len() && is_glue_punct(chars[j].1) {
+            j += 1;
+        }
+        let end = chars.get(j).map(|&(p, _)| p).unwrap_or(body.len());
+        let mut fill = String::with_capacity(end - start + 6 * (j - i));
+        for (k, &(p, c)) in chars[i..j].iter().enumerate() {
+            let idx = i + k;
+            let prev_nl = idx > 0 && matches!(chars[idx - 1].1, '\n' | '\r');
+            if is_glue_left(c) && p > 0 && !prev_nl {
+                fill.push('\u{2060}');
+            }
+            fill.push(c);
+            let next_nl = matches!(chars.get(idx + 1).map(|&(_, c)| c), Some('\n' | '\r'));
+            if is_glue_right(c) && !next_nl {
+                fill.push('\u{2060}');
+            }
+        }
+        subs.push(Sub::fill(start, end, fill));
+        i = j;
+    }
+    // 第二趟：CJK↔ASCII 边界间距——把「另一侧的首字符」替换为「空格+原字符」，
+    // 让 OffsetMap 自动吸收新增字节。胶水字符两侧跳过（省略号/破折号是中文标点，
+    // 不加间距；也避免与第一趟的 sub 撞区间）。
     let mut it = body.char_indices().peekable();
     while let Some((_i, ch)) = it.next() {
         let Some(&(j, next)) = it.peek() else { break };
-        if cjk_boundary_skip(ch, next) { continue; }
-        let a = is_cjk(ch);
-        let b = is_cjk(next);
-        if a == b { continue; }
-        if !b {
-            // CJK → 非 CJK（不一定是 ASCII，emoji/全角已在 is_cjk 覆盖，此处多半是拉丁字母/数字）
-            let nl = next.len_utf8();
-            subs.push(Sub::fill(j, j + nl, format!(" {}", next)));
-        } else {
-            // 非 CJK → CJK：CJK 字符 UTF-8 长度不定
-            let nl = next.len_utf8();
-            subs.push(Sub::fill(j, j + nl, format!(" {}", next)));
+        if is_glue_punct(ch) || is_glue_punct(next) {
+            continue;
         }
+        if cjk_boundary_skip(ch, next) {
+            continue;
+        }
+        if is_cjk(ch) == is_cjk(next) {
+            continue;
+        }
+        let nl = next.len_utf8();
+        subs.push(Sub::fill(j, j + nl, format!(" {next}")));
     }
     subs
 }
@@ -890,7 +1027,7 @@ fn build_layout_text(
     all.extend(elide.into_iter().map(|(s, e)| Sub::elide(s, e)));
     all.extend_from_slice(subs);
     if apply_cjk {
-        all.extend(build_cjk_subs(body));
+        all.extend(build_typo_subs(body));
     }
     let (map, accepted) = OffsetMap::from_spans(body.len(), &all);
     // 保留段取源文本并记行基；替换段写 fill（调用方保证不含换行）
@@ -1921,5 +2058,188 @@ mod tests {
         assert!(!is_cjk('A'));
         assert!(!is_cjk('1'));
         assert!(!is_cjk('.'));
+    }
+
+    /// 每条视觉行的（首簇字符, 尾簇字符）：禁则测试的观测量。
+    fn visual_line_edges(l: &BlockLayout) -> Vec<(char, char)> {
+        l.buffer
+            .layout_runs()
+            .filter_map(|r| {
+                let f = r.glyphs.first()?;
+                let g = r.glyphs.last()?;
+                Some((
+                    r.text[f.start..f.end].chars().next()?,
+                    r.text[g.start..g.end].chars().next()?,
+                ))
+            })
+            .collect()
+    }
+
+    /// 排版单行文本的实测行宽（禁则/悬挂测试的版心宽度来源）。
+    fn single_line_width(eng: &mut LayoutEngine, text: &str) -> f32 {
+        let block = Range {
+            start: 0,
+            end: text.len(),
+        };
+        let l = eng.layout_block(BlockKind::Paragraph, text, block, &[], 4000.0, usize::MAX, &[]);
+        l.buffer
+            .layout_runs()
+            .map(|r| r.line_w)
+            .fold(0.0, f32::max)
+    }
+
+    fn layout_paragraph(eng: &mut LayoutEngine, text: &str, width: f32) -> BlockLayout {
+        let block = Range {
+            start: 0,
+            end: text.len(),
+        };
+        eng.layout_block(BlockKind::Paragraph, text, block, &[], width, usize::MAX, &[])
+    }
+
+    #[test]
+    fn kinsoku_forbidden_chars_never_start_a_visual_line() {
+        let mut eng = LayoutEngine::new();
+        let prefix: String = "中".repeat(10);
+        let w10 = single_line_width(&mut eng, &prefix);
+        for &p in LINE_START_FORBIDDEN {
+            let text = format!("{prefix}{p}{}{}", "中".repeat(4), "文".repeat(8));
+            // 版心恰好容纳 10 字：无禁则时第 11 位标点必顶到下一行行首
+            let l = layout_paragraph(&mut eng, &text, w10 + 1.0);
+            let edges = visual_line_edges(&l);
+            assert!(edges.len() >= 2, "{p:?} 处应折行: {edges:?}");
+            for (fc, _) in &edges {
+                assert!(
+                    !LINE_START_FORBIDDEN.contains(fc),
+                    "行首禁则违反: {fc:?} 出现在行首（测试标点 {p:?}）"
+                );
+            }
+            for (_, lc) in &edges {
+                assert!(
+                    !LINE_END_FORBIDDEN.contains(lc),
+                    "行尾禁则违反: {lc:?} 出现在行尾（测试标点 {p:?}）"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn kinsoku_open_brackets_never_end_a_visual_line() {
+        let mut eng = LayoutEngine::new();
+        let w10 = single_line_width(&mut eng, &"中".repeat(10));
+        // 括号在第 11 位（自然折行点）与第 10 位（无禁则时恰好滞留行尾）都要守住
+        for prefix_len in [10usize, 9] {
+            let prefix: String = "中".repeat(prefix_len);
+            for &p in LINE_END_FORBIDDEN {
+                let text = format!("{prefix}{p}{}{}", "中".repeat(4), "文".repeat(8));
+                let l = layout_paragraph(&mut eng, &text, w10 + 1.0);
+                let edges = visual_line_edges(&l);
+                assert!(edges.len() >= 2, "{p:?} 处应折行: {edges:?}");
+                for (_, lc) in &edges {
+                    assert!(
+                        !LINE_END_FORBIDDEN.contains(lc),
+                        "行尾禁则违反: {lc:?} 出现在行尾（括号 {p:?}，prefix={prefix_len}）"
+                    );
+                }
+                for (fc, _) in &edges {
+                    assert!(
+                        !LINE_START_FORBIDDEN.contains(fc),
+                        "行首禁则违反: {fc:?} 出现在行首（括号 {p:?}，prefix={prefix_len}）"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn kinsoku_glue_keeps_ellipsis_attached_to_previous_char() {
+        // 版心满到省略号前一字：…… 必须整体随前字下沉，不得出现在行首，
+        // 也不得内部断开（WJ × WJ 链）
+        let mut eng = LayoutEngine::new();
+        let w10 = single_line_width(&mut eng, &"中".repeat(10));
+        let text = format!("{}……{}", "中".repeat(10), "文".repeat(6));
+        let l = layout_paragraph(&mut eng, &text, w10 + 1.0);
+        let edges = visual_line_edges(&l);
+        assert!(edges.len() >= 2, "应折行: {edges:?}");
+        assert!(
+            edges.iter().all(|(fc, _)| *fc != '…'),
+            "…… 不得在行首（内部断开必致后半在行首）: {edges:?}"
+        );
+    }
+
+    #[test]
+    fn hanging_punctuation_shifts_full_line_end_glyph() {
+        let mut eng = LayoutEngine::new();
+        let w10 = single_line_width(&mut eng, &"中".repeat(10));
+        let width = w10 + 1.0;
+        // 9 字 + 句号恰满一行：末字应悬挂
+        let full = format!("{}。{}", "中".repeat(9), "文".repeat(6));
+        let l = layout_paragraph(&mut eng, &full, width);
+        let runs: Vec<_> = l.buffer.layout_runs().collect();
+        assert!(runs.len() >= 2, "满行句号文本应折行");
+        let (dx, hi) = hang_shift(&runs[0], Some(width));
+        assert!(dx > 0.0 && hi.is_some(), "满行末字句号应悬挂: dx={dx}");
+        // 非满行（行尾同句号但行宽差很多）不悬挂
+        let short = format!("{}。{}", "中".repeat(5), "文".repeat(2));
+        let l2 = layout_paragraph(&mut eng, &short, width);
+        let run2 = l2.buffer.layout_runs().next().unwrap();
+        assert_eq!(
+            hang_shift(&run2, Some(width)),
+            (0.0, None),
+            "非满行不悬挂"
+        );
+        // 末字非闭标点不悬挂
+        let plain = "中".repeat(12);
+        let l3 = layout_paragraph(&mut eng, &plain, width);
+        let run3 = l3.buffer.layout_runs().next().unwrap();
+        assert_eq!(
+            hang_shift(&run3, Some(width)),
+            (0.0, None),
+            "末字非闭标点不悬挂"
+        );
+    }
+
+    #[test]
+    fn hanging_punctuation_widens_raster_beyond_text_edge() {
+        let mut eng = LayoutEngine::new();
+        let w10 = single_line_width(&mut eng, &"中".repeat(10));
+        let hung = format!("{}。{}", "中".repeat(9), "文".repeat(6));
+        let l = layout_paragraph(&mut eng, &hung, w10 + 1.0);
+        let (_px, w_hung, _h) = eng.rasterize(&l, [0, 0, 0]);
+        assert!(
+            w_hung as f32 > w10,
+            "悬挂后位图应宽于 10 字版心: w_hung={w_hung} w10={w10}"
+        );
+    }
+
+    #[test]
+    fn preedit_applies_body_typography_rules() {
+        let mut eng = LayoutEngine::new();
+        // 中西文间距：与正文同规则注入
+        let l = eng.layout_preedit("ni好a");
+        assert_eq!(l.layout_text(), "ni 好 a");
+        // 组合串内光标（IME 报告原串字节偏移）经 OffsetMap 映射后单调
+        let (x_hao, _, _) = eng.caret_xy(&l, 2); // 「好」前
+        let (x_a, _, _) = eng.caret_xy(&l, 5); // 「a」前
+        assert!(x_a > x_hao, "preedit 光标映射应单调: {x_hao} -> {x_a}");
+        // kinsoku 胶水：省略号 run 注入 WJ
+        let l2 = eng.layout_preedit("中……");
+        assert!(
+            l2.layout_text().contains('\u{2060}'),
+            "胶水段应注入 WJ: {:?}",
+            l2.layout_text()
+        );
+    }
+
+    #[test]
+    fn word_joiner_adds_no_advance() {
+        // tofu 守卫：fallback 字体链中 WJ 必须近零宽（实测 1.29px 零墨字形）。
+        // 若某天字体链退化把 WJ 渲染成缺字形盒（advance ≥ 半字宽），此测试先红。
+        let mut eng = LayoutEngine::new();
+        let plain = single_line_width(&mut eng, "中A");
+        let glued = single_line_width(&mut eng, "中\u{2060}A");
+        assert!(
+            (glued - plain).abs() < 2.0,
+            "WJ advance 不可见级（<2px）: plain={plain} glued={glued}"
+        );
     }
 }

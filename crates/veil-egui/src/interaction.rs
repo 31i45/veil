@@ -540,6 +540,9 @@ impl App {
             MenuAction::Find => self.open_search(),
             MenuAction::Replace => self.open_replace(),
             MenuAction::InsertImage => self.insert_image_via_dialog(),
+            MenuAction::ToggleBold => self.perform_action(Action::Doc(Intent::ToggleWrap("**"))),
+            MenuAction::ToggleItalic => self.perform_action(Action::Doc(Intent::ToggleWrap("*"))),
+            MenuAction::InsertLink => self.perform_action(Action::Doc(Intent::InsertLink)),
             MenuAction::OpenRecent(i) => self.open_recent(i),
             MenuAction::QuickOpen => self.open_quick(),
             MenuAction::Quit => return true,
@@ -1406,6 +1409,9 @@ pub(crate) fn map_key(event: &winit::event::KeyEvent) -> Option<Key> {
         WKey::Character(c) if c.as_str().eq_ignore_ascii_case("a") => Some(Key::A),
         WKey::Character(c) if c.as_str().eq_ignore_ascii_case("n") => Some(Key::N),
         WKey::Character(c) if c.as_str().eq_ignore_ascii_case("p") => Some(Key::P),
+        WKey::Character(c) if c.as_str().eq_ignore_ascii_case("b") => Some(Key::B),
+        WKey::Character(c) if c.as_str().eq_ignore_ascii_case("i") => Some(Key::I),
+        WKey::Character(c) if c.as_str().eq_ignore_ascii_case("k") => Some(Key::K),
         _ => None,
     }
 }

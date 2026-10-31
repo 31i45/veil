@@ -126,6 +126,9 @@ fn menu_definitions_cover_shortcuts() {
             MenuAction::Copy,
             MenuAction::Paste,
             MenuAction::SelectAll,
+            MenuAction::ToggleBold,
+            MenuAction::ToggleItalic,
+            MenuAction::InsertLink,
             MenuAction::Find,
             MenuAction::Replace,
             MenuAction::InsertImage

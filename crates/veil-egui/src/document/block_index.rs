@@ -37,7 +37,7 @@ impl App {
         let scale = self.input_state.scale;
         let chars_per_line = self.chars_per_line();
         let base = self.base_key();
-        let caret = self.editor.caret();
+        let caret = self.effective_caret();
         let mut alive: HashSet<BlockId> = HashSet::with_capacity(blocks.len());
         self.index.blocks.clear();
         self.index.blocks.reserve(blocks.len());

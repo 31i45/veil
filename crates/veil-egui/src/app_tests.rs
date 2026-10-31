@@ -14,6 +14,7 @@ use crate::input::{Action, Key, Mods};
 use crate::math::{MathImage, MathRenderer};
 use crate::mode::{Mode, TextSink};
 use crate::paint::{fit_size, local_image_path};
+use crate::print::{NoPrint, Print, PrintSession};
 use crate::theme::{self, ConfigStore, SystemTheme, ThemeEnv, ThemeMode};
 use crate::view::outline;
 use crate::view::search;
@@ -300,6 +301,7 @@ fn app_clip(html: Option<&str>, plain: Option<&str>) -> App {
         Box::new(NoWatcher),
         theme::test_support::env(),
         persist_env(),
+        Box::new(NoPrint),
     )
 }
 
@@ -407,6 +409,7 @@ fn app_math(text: &str, fail: bool) -> (App, MathCalls) {
         Box::new(NoWatcher),
         theme::test_support::env(),
         persist_env(),
+        Box::new(NoPrint),
     );
     (a, calls)
 }
@@ -624,6 +627,7 @@ fn app_with_images(
         Box::new(NoWatcher),
         theme::test_support::env(),
         persist_env(),
+        Box::new(NoPrint),
     );
     (a, calls)
 }
@@ -806,6 +810,7 @@ fn app_paste_image(
         Box::new(NoWatcher),
         theme::test_support::env(),
         persist_env(),
+        Box::new(NoPrint),
     );
     PasteFixture { app, calls }
 }
@@ -925,6 +930,7 @@ fn app_drop(
         Box::new(NoWatcher),
         theme::test_support::env(),
         persist_env(),
+        Box::new(NoPrint),
     );
     DropFixture {
         app,
@@ -1297,6 +1303,7 @@ fn app(text: &str, path: Option<&str>, bom: bool, store: &MemStore) -> App {
         Box::new(NoWatcher),
         theme::test_support::env(),
         persist_env(),
+        Box::new(NoPrint),
     )
 }
 
@@ -1351,6 +1358,7 @@ fn app_export(text: &str, path: Option<&str>, fail: bool) -> (App, AssetCalls) {
         Box::new(NoWatcher),
         theme::test_support::env(),
         persist_env(),
+        Box::new(NoPrint),
     );
     (a, calls)
 }
@@ -1702,6 +1710,7 @@ fn app_dialogs(
         Box::new(NoWatcher),
         theme::test_support::env(),
         persist_env(),
+        Box::new(NoPrint),
     );
     (a, calls)
 }
@@ -2192,6 +2201,7 @@ fn app_watch(text: &str, path: Option<&str>, store: &MemStore, watch: &FakeWatch
         Box::new(watch.clone()),
         theme::test_support::env(),
         persist_env(),
+        Box::new(NoPrint),
     )
 }
 
@@ -2628,6 +2638,7 @@ fn save_as_rebinds_watcher() {
         Box::new(watch.clone()),
         theme::test_support::env(),
         persist_env(),
+        Box::new(NoPrint),
     );
     a.save_as();
     assert_eq!(a.doc.path.as_deref(), Some(Path::new("b.md")));
@@ -2702,6 +2713,7 @@ fn app_theme(config: Box<dyn ConfigStore>, system: Rc<Cell<Option<bool>>>) -> Ap
             effects: Box::new(theme::test_support::NoEffects),
         },
         persist_env(),
+        Box::new(NoPrint),
     )
 }
 
@@ -4260,6 +4272,7 @@ fn app_persist(
         Box::new(NoWatcher),
         theme::test_support::env(),
         persist_env_with(recovery.clone(), session.clone()),
+        Box::new(NoPrint),
     )
 }
 
@@ -5612,6 +5625,7 @@ fn e2e_table_edit_and_image_paste() {
         Box::new(NoWatcher),
         theme::test_support::env(),
         persist_env(),
+        Box::new(NoPrint),
     );
 
     a.ensure_layouts_all();
@@ -5718,4 +5732,282 @@ fn e2e_search_replace_and_crash_recovery() {
     assert_eq!(doc_text(&c), "gamma beta gamma\n");
     assert!(!c.editor.is_dirty(), "快照与磁盘一致：干净打开");
     assert!(rec.slot.borrow().is_none(), "残留快照启动自清");
+}
+
+// ---- 打印（3b）：分页引擎 + 干净帧 + 状态复原 ----
+
+/// 打印几何采样：begin 后各块 (top, 行顶序列)，断点合法性（不劈行）的判定依据。
+type PrintGeoms = Rc<RefCell<Vec<(f32, Vec<f32>)>>>;
+/// 页帧采样：逐页 (宽, 高, 四角像素)，无 chrome 的直接证据。
+type PrintFrames = Rc<RefCell<Vec<(u32, u32, [[u8; 4]; 4])>>>;
+
+/// 打印端口 mock：按注入页帧跑完整 begin→逐页→end 流程，采样页数/断点/
+/// 各块行顶/页帧尺寸与四角像素，供测试断言（真实 Win32 粘合在产品层）。
+#[derive(Clone, Default)]
+struct FakePrint {
+    w: u32,
+    h: u32,
+    scale: f32,
+    pages: Rc<Cell<usize>>,
+    breaks: Rc<RefCell<Vec<f32>>>,
+    geoms: PrintGeoms,
+    frames: PrintFrames,
+    ended: Rc<Cell<bool>>,
+}
+impl Print for FakePrint {
+    fn print(&mut self, s: &mut PrintSession) {
+        let pages = s.begin(self.w.max(1), self.h.max(1), self.scale.max(0.1));
+        self.pages.set(pages);
+        *self.breaks.borrow_mut() = s.page_breaks().to_vec();
+        // 打印几何采样：块 top + 各视觉行行顶（有效光标 = usize::MAX，与分页同源）
+        let base = s.app.base_key();
+        let mut gs = Vec::new();
+        for g in &s.app.index.blocks {
+            let tops = s
+                .app
+                .cache
+                .layout(g.id, &g.kind, g.range, base, usize::MAX)
+                .map(|l| s.app.engine.line_tops(l))
+                .unwrap_or_default();
+            gs.push((g.top, tops));
+        }
+        *self.geoms.borrow_mut() = gs;
+        for i in 0..pages {
+            let f = s.render_page(i);
+            self.frames.borrow_mut().push((
+                f.width,
+                f.height,
+                [
+                    f.get(0, 0),
+                    f.get(f.width - 1, 0),
+                    f.get(0, f.height - 1),
+                    f.get(f.width - 1, f.height - 1),
+                ],
+            ));
+        }
+        s.end();
+        self.ended.set(true);
+    }
+}
+
+/// 打印 fixture：注入打印端口，其余与默认 fixture 一致。
+fn app_print(text: &str, print: Box<dyn Print>) -> App {
+    let doc = Doc {
+        text: text.into(),
+        path: None,
+        bom: false,
+        resume: false,
+    };
+    let m = FakeMath {
+        fail: false,
+        calls: Rc::new(RefCell::new(Vec::new())),
+    };
+    App::new(
+        doc,
+        Box::new(NoClip),
+        Box::new(MemStore::default()),
+        Box::new(m),
+        Box::new(NoImages),
+        Box::new(NoAssets),
+        Box::new(NoExport),
+        Box::new(NoDialogs),
+        Box::new(NoWatcher),
+        theme::test_support::env(),
+        persist_env(),
+        print,
+    )
+}
+
+/// 断点合法性：除 0.0 外每个断点落在某块 top 或块内行顶（不劈行）。
+fn assert_breaks_on_boundaries(bs: &[f32], gs: &[(f32, Vec<f32>)]) {
+    for &b in &bs[1..] {
+        let on = gs
+            .iter()
+            .any(|(top, lines)| (top - b).abs() < 0.5 || lines.iter().any(|&t| (top + t - b).abs() < 0.5));
+        assert!(on, "断点 {b} 应落在块顶或行顶: {gs:?}");
+    }
+}
+
+#[test]
+fn print_paginates_clean_frames_and_restores_state() {
+    let text: String = (1..=30).map(|i| format!("段落{i:02}\n\n")).collect();
+    let p = FakePrint {
+        w: 300,
+        h: 120,
+        scale: 1.0,
+        ..Default::default()
+    };
+    let (pages, breaks, geoms, frames, ended) = (
+        p.pages.clone(),
+        p.breaks.clone(),
+        p.geoms.clone(),
+        p.frames.clone(),
+        p.ended.clone(),
+    );
+    let mut a = app_print(&text, Box::new(p));
+    a.input_state.scale = 1.5; // 非默认屏幕缩放：验证 end 复原
+    a.window_state.scroll_y = 42.0;
+    assert!(!a.perform_menu(MenuAction::Print), "打印不退出应用");
+    assert!(ended.get(), "begin 之后必调 end");
+    let pages = pages.get();
+    assert!(pages >= 2, "30 段在 120px 页帧应多页: {pages}");
+    let bs = breaks.borrow();
+    assert_eq!(bs.len(), pages, "页数 = 断点数");
+    assert_eq!(bs[0], 0.0, "首页从文档顶开始");
+    assert!(bs.windows(2).all(|w| w[0] < w[1]), "断点严格递增: {bs:?}");
+    assert_breaks_on_boundaries(&bs, &geoms.borrow());
+    // 页帧 = 注入尺寸；四角 = 文档底色（无菜单栏/状态栏/光标覆盖）
+    let bg = a.input_state.theme.bg;
+    for (w, h, corners) in frames.borrow().iter() {
+        assert_eq!((*w, *h), (300, 120), "页帧尺寸 = 注入尺寸");
+        assert_eq!(corners, &[bg, bg, bg, bg], "页帧四角为文档底色（无 chrome）");
+    }
+    // 屏幕态复原（尺寸/缩放/滚动），文档真值未动
+    assert_eq!(a.win_size(), (800, 600), "headless 窗口尺寸复原");
+    assert_eq!(a.input_state.scale, 1.5, "DPI 缩放复原");
+    assert_eq!(a.window_state.scroll_y, 42.0, "滚动位置复原");
+    assert!(a.window_state.print.is_none(), "打印态已退出");
+    assert_eq!(doc_text(&a), text, "打印只读，不动真值");
+}
+
+#[test]
+fn print_breaks_inside_tall_block_at_line_tops() {
+    // 单块（围栏代码 50 行）超页高：断点落在块内行顶（不劈行）
+    let code: String = (1..=50).map(|i| format!("l{i:02}\n")).collect();
+    let text = format!("```\n{code}```\n");
+    let p = FakePrint {
+        w: 300,
+        h: 100,
+        scale: 1.0,
+        ..Default::default()
+    };
+    let (pages, breaks, geoms) = (p.pages.clone(), p.breaks.clone(), p.geoms.clone());
+    let mut a = app_print(&text, Box::new(p));
+    a.perform_menu(MenuAction::Print);
+    assert!(pages.get() >= 2, "50 行代码块应多页: {}", pages.get());
+    assert_breaks_on_boundaries(&breaks.borrow(), &geoms.borrow());
+}
+
+/// Reveal 探针：begin 后采样全部块排版文本（打印中 Reveal 全收的观测口）。
+struct RevealProbe {
+    texts: Rc<RefCell<Vec<String>>>,
+}
+impl Print for RevealProbe {
+    fn print(&mut self, s: &mut PrintSession) {
+        s.begin(300, 600, 1.0);
+        let mut out = Vec::new();
+        for g in &s.app.index.blocks {
+            if let Some(m) = s.app.cache.layouts.get(&g.id) {
+                out.push(m.value.layout_text().to_string());
+            }
+        }
+        *self.texts.borrow_mut() = out;
+        s.end();
+    }
+}
+
+#[test]
+fn print_collapses_all_reveal_markup() {
+    // 光标停在 **粗体** 内：屏幕态该块显源码（含 **）；打印必须收拢为纯文本
+    let text = "a **b** c\n";
+    let probe = RevealProbe {
+        texts: Rc::new(RefCell::new(Vec::new())),
+    };
+    let texts = probe.texts.clone();
+    let mut a = app_print(text, Box::new(probe));
+    let bold = text.find('b').unwrap();
+    a.editor.set_caret(bold); // 光标进入行内节点 → 屏幕态显 ** 源码
+    a.render();
+    let id = a.index.blocks[0].id;
+    let screen = a.cache.layouts[&id].value.layout_text().to_string();
+    assert!(screen.contains("**"), "屏幕态光标在节点内显源码: {screen:?}");
+    a.perform_menu(MenuAction::Print);
+    let printed = texts.borrow();
+    assert_eq!(printed.len(), 1, "单块文档");
+    assert!(!printed[0].contains("**"), "打印态标记收拢: {:?}", printed[0]);
+    assert!(printed[0].contains('b'), "内容保留: {:?}", printed[0]);
+    assert_eq!(a.editor.caret(), bold, "打印不动真实光标");
+}
+
+/// 超高数学图渲染器（3b 硬切测试）：500px 图超 100px 页帧。
+struct TallMath;
+impl MathRenderer for TallMath {
+    fn render(
+        &mut self,
+        _tex: &str,
+        _display: bool,
+        _scale: f32,
+        _color: [u8; 3],
+    ) -> Result<MathImage, String> {
+        Ok(MathImage {
+            pixels: vec![255; 10 * 500 * 4],
+            width: 10,
+            height: 500,
+            baseline: 0,
+        })
+    }
+}
+
+#[test]
+fn print_hard_cuts_atomic_block_taller_than_page() {
+    // 原子块（500px 数学图）超页高：无合法断点 → 硬切，不 panic、页数 > 1
+    let p = FakePrint {
+        w: 300,
+        h: 100,
+        scale: 1.0,
+        ..Default::default()
+    };
+    let (pages, breaks, geoms, ended) = (
+        p.pages.clone(),
+        p.breaks.clone(),
+        p.geoms.clone(),
+        p.ended.clone(),
+    );
+    let doc = Doc {
+        text: "$$\nx\n$$\n".into(),
+        path: None,
+        bom: false,
+        resume: false,
+    };
+    let mut a = App::new(
+        doc,
+        Box::new(NoClip),
+        Box::new(MemStore::default()),
+        Box::new(TallMath),
+        Box::new(NoImages),
+        Box::new(NoAssets),
+        Box::new(NoExport),
+        Box::new(NoDialogs),
+        Box::new(NoWatcher),
+        theme::test_support::env(),
+        persist_env(),
+        Box::new(p),
+    );
+    a.perform_menu(MenuAction::Print);
+    assert!(ended.get());
+    assert!(
+        pages.get() >= 2,
+        "500px 原子块在 100px 页帧应多页: {}",
+        pages.get()
+    );
+    let bs = breaks.borrow();
+    let gs = geoms.borrow();
+    // 至少一个硬切断点（不在任何块顶/行顶）：块顶那次合法，其余页首都是硬切
+    let hard = bs[1..]
+        .iter()
+        .filter(|&&b| {
+            !gs
+                .iter()
+                .any(|(top, lines)| (top - b).abs() < 0.5 || lines.iter().any(|&t| (top + t - b).abs() < 0.5))
+        })
+        .count();
+    assert!(hard >= 1, "超页原子块应产生硬切断点: {bs:?} vs {gs:?}");
+}
+
+#[test]
+fn print_stub_notices_when_platform_missing() {
+    let mut a = app_print("x\n", Box::new(NoPrint));
+    a.perform_menu(MenuAction::Print);
+    assert_eq!(a.ui_state.chrome.notice, "当前平台暂不支持打印");
+    assert!(a.window_state.print.is_none(), "NoPrint 不进入打印态");
 }

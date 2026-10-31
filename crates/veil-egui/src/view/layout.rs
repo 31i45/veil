@@ -643,6 +643,11 @@ impl LayoutEngine {
         (w / 8.0).max(1.0)
     }
 
+    /// 各视觉行行顶（块内物理像素，升序）：打印分页的行级候选断点（3b）。
+    pub fn line_tops(&self, layout: &BlockLayout) -> Vec<f32> {
+        layout.buffer.layout_runs().map(|r| r.line_top).collect()
+    }
+
     /// 像素点 → 块内字节偏移（文档坐标）。y 越界钳到首/末行（hit 内建行为）。
     pub fn hit(&self, layout: &BlockLayout, x: f32, y: f32) -> usize {
         match layout.buffer.hit(x, y) {

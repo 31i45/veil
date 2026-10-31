@@ -47,6 +47,7 @@ fn main() {
         platform::watcher(),
         platform::theme_env(),
         platform::persist_env(),
+        Box::new(veil_egui::NoPrint),
     ) {
         eprintln!("{e}");
         std::process::exit(1);

@@ -29,7 +29,7 @@ impl App {
     /// 加载自然尺寸位图；宽超版心等比缩放后占位；失败/远程 URL 降级 alt 文本。
     pub(crate) fn ensure_layouts_range(&mut self, indices: std::ops::Range<usize>) {
         let width = self.content_width();
-        let caret = self.editor.caret();
+        let caret = self.effective_caret();
         let base = self.base_key();
         self.engine.set_scale(self.input_state.scale);
         let Some(blocks) = self.index.blocks.get(indices) else {
@@ -207,7 +207,7 @@ impl App {
 
     /// 光标在块内为源码态不渲染；失败记入 math_failed 不再每帧重试（降级源码显示）。
     pub(crate) fn ensure_math_range(&mut self, indices: std::ops::Range<usize>) {
-        let caret = self.editor.caret();
+        let caret = self.effective_caret();
         let scale = self.input_state.scale;
         let fg = self.input_state.theme.fg;
         let Some(blocks) = self.index.blocks.get(indices) else {
@@ -263,14 +263,14 @@ impl App {
 
     /// 数学块当前是否按渲染图显示：光标在块内（Reveal 同语义）或未渲染时显示源码。
     pub(crate) fn math_shows_image(&self, id: BlockId, range: &veil_core::Range) -> bool {
-        let caret = self.editor.caret();
+        let caret = self.effective_caret();
         !(range.start <= caret && caret <= range.end)
             && self.cache.math(id, self.math_key(id)).is_some()
     }
 
     /// 判定 caret 是否落在指定 Table 的任一单元格内容区间内（不含管道符/分隔行等结构字符）。
     pub(crate) fn caret_in_table_cell(&self, id: BlockId) -> bool {
-        let caret = self.editor.caret();
+        let caret = self.effective_caret();
         self.editor
             .session()
             .table(id)
@@ -367,7 +367,7 @@ impl App {
     /// 网格缓存与文本布局缓存独立：网格仅供渲染/命中，源码态仍走既有块排版。
     pub(crate) fn ensure_tables_range(&mut self, indices: std::ops::Range<usize>) {
         let width = self.content_width();
-        let caret = self.editor.caret();
+        let caret = self.effective_caret();
         let fg = self.input_state.theme.fg;
         let base = self.base_key();
         let Some(blocks) = self.index.blocks.get(indices) else {
@@ -417,7 +417,7 @@ impl App {
     /// - caret 在单元格内容区间内 → 显示网格（活动单元格高亮，源码编辑同路径）
     /// - caret 在表内但落在结构字符上（管道/分隔行）→ 源码态
     pub(crate) fn table_shows_grid(&self, id: BlockId, range: &veil_core::Range) -> bool {
-        let caret = self.editor.caret();
+        let caret = self.effective_caret();
         let inside_block = range.start <= caret && caret <= range.end;
         if inside_block && !self.caret_in_table_cell(id) {
             return false;
@@ -443,7 +443,7 @@ impl App {
         self.recompute_geometry();
         let range = self.visible_index_range();
         let base = self.base_key();
-        let caret = self.editor.caret();
+        let caret = self.effective_caret();
         if self.index.blocks.get(range).is_some_and(|bs| {
             bs.iter().any(|g| {
                 self.cache
@@ -466,12 +466,20 @@ impl App {
         let scale = self.input_state.scale;
         let theme = self.input_state.theme;
         let vp = self.viewport();
-        // 窗口缩放/文档变短后滚动量可能越界：绘制前统一钳位（滚动条与内容同源）
-        self.window_state.scroll_y = self
-            .window_state
-            .scroll_y
-            .clamp(0.0, chrome::max_scroll(vp, self.doc_height()));
-        let sel = self.editor.selection();
+        // 窗口缩放/文档变短后滚动量可能越界：绘制前统一钳位（滚动条与内容同源）。
+        // 打印中跳过：滚动即分页断点，末页可越过 max_scroll（页尾留空由帧底色承担）。
+        if self.window_state.print.is_none() {
+            self.window_state.scroll_y = self
+                .window_state
+                .scroll_y
+                .clamp(0.0, chrome::max_scroll(vp, self.doc_height()));
+        }
+        // 打印中不画选区：输出为文档最终形态，不含任何交互态
+        let sel = if self.window_state.print.is_none() {
+            self.editor.selection()
+        } else {
+            None
+        };
         // 只遍历视口覆盖的块（含 overscan），不再逐块判定后 continue
         let vis = self.visible_index_range();
         // 专注模式压暗需要二次遍历同一区间（主循环按值消费区间）
@@ -525,8 +533,10 @@ impl App {
                     theme.code_bg,
                 );
             }
-            // 查找命中高亮（P3-3）：全部命中用 hover 色，当前命中用选区色
-            self.paint_match_highlights(&mut frame, l, &range, sy);
+            // 查找命中高亮（P3-3）：全部命中用 hover 色，当前命中用选区色；打印不画
+            if self.window_state.print.is_none() {
+                self.paint_match_highlights(&mut frame, l, &range, sy);
+            }
             // 选区高亮：先画底色再 blit 字形，文本保持可读
             if let Some(sel) = sel {
                 let (s, e) = (sel.start.max(range.start), sel.end.min(range.end));
@@ -616,8 +626,8 @@ impl App {
             }
         }
         // 专注模式（阶段 1）：非光标块整体压暗（背景色半透明覆盖，内容与装饰一并变淡）。
-        // 只读视觉，不动真值与派生缓存；当前块保持原样，光标随后绘制仍清晰。
-        if self.ui_state.writing.focus {
+        // 只读视觉，不动真值与派生缓存；当前块保持原样，光标随后绘制仍清晰。打印不压暗。
+        if self.window_state.print.is_none() && self.ui_state.writing.focus {
             let focused = self.caret_block_index().map(|i| self.index.blocks[i].id);
             let dim = [theme.bg[0], theme.bg[1], theme.bg[2], FOCUS_DIM_ALPHA];
             for g in &self.index.blocks[vis_focus] {
@@ -648,42 +658,45 @@ impl App {
                 );
             }
         }
-        let (line, col) = self.editor.session().line_col(caret).unwrap_or((1, 1));
-        let dirty = self.editor.is_dirty();
-        let external = self.external_state();
-        let doc_h = self.doc_height();
-        // 查找栏打开时文档只读：光标与 preedit 均由浮栏承接，不画在正文
-        if !self.ui_state.search.open {
-            self.paint_caret_and_preedit(&mut frame);
+        // 光标/浮层/chrome 只在屏幕语义下绘制；打印帧 = 纯文档内容（3b）
+        if self.window_state.print.is_none() {
+            let (line, col) = self.editor.session().line_col(caret).unwrap_or((1, 1));
+            let dirty = self.editor.is_dirty();
+            let external = self.external_state();
+            let doc_h = self.doc_height();
+            // 查找栏打开时文档只读：光标与 preedit 均由浮栏承接，不画在正文
+            if !self.ui_state.search.open {
+                self.paint_caret_and_preedit(&mut frame);
+            }
+            // 大纲面板（P3-2）：内容之后、chrome 之前（标题区/状态栏覆盖上溢行）
+            self.paint_outline(&mut frame);
+            // 查找栏（P3-3）：浮在内容/大纲之上、chrome 之前的最后一层内容装饰
+            self.paint_search(&mut frame);
+            // 快速打开（阶段 1）：浮在查找栏之上
+            self.paint_quick(&mut frame);
+            // 右键菜单（2f）：浮在全部内容浮层之上、chrome 之前
+            self.paint_ctx_menu(&mut frame);
+            // 拖放悬停提示（阶段 1）：浮在最上层内容装饰
+            self.paint_drop_hint(&mut frame);
+            // chrome 最后绘制（不透明覆盖内容；滚动条区保留给状态栏行列）
+            let recent = self.recent_labels();
+            self.ui_state.chrome.paint(
+                &mut frame,
+                &mut self.engine,
+                vp,
+                scale,
+                &theme,
+                self.doc.path.as_deref(),
+                dirty,
+                external,
+                self.ui_state.writing.words,
+                line,
+                col,
+                doc_h,
+                self.window_state.scroll_y,
+                &recent,
+            );
         }
-        // 大纲面板（P3-2）：内容之后、chrome 之前（标题区/状态栏覆盖上溢行）
-        self.paint_outline(&mut frame);
-        // 查找栏（P3-3）：浮在内容/大纲之上、chrome 之前的最后一层内容装饰
-        self.paint_search(&mut frame);
-        // 快速打开（阶段 1）：浮在查找栏之上
-        self.paint_quick(&mut frame);
-        // 右键菜单（2f）：浮在全部内容浮层之上、chrome 之前
-        self.paint_ctx_menu(&mut frame);
-        // 拖放悬停提示（阶段 1）：浮在最上层内容装饰
-        self.paint_drop_hint(&mut frame);
-        // chrome 最后绘制（不透明覆盖内容；滚动条区保留给状态栏行列）
-        let recent = self.recent_labels();
-        self.ui_state.chrome.paint(
-            &mut frame,
-            &mut self.engine,
-            vp,
-            scale,
-            &theme,
-            self.doc.path.as_deref(),
-            dirty,
-            external,
-            self.ui_state.writing.words,
-            line,
-            col,
-            doc_h,
-            self.window_state.scroll_y,
-            &recent,
-        );
         // 归还缓冲供下一帧复用；返回 &mut Frame 供产品层 present() 与测试断言
         self.window_state.frame = Some(frame);
         self.window_state.frame.as_mut().unwrap()

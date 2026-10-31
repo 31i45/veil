@@ -22,6 +22,7 @@ use crate::geometry::BASE_LINE_HEIGHT;
 use crate::image::{AssetStore, ImageData, ImageLoader};
 use crate::input::Mods;
 use crate::math::MathRenderer;
+use crate::print::{Print, PrintState};
 use crate::theme::{
     self, Config, ConfigStore, SystemTheme, Theme, ThemeEnv, ThemeMode, WindowEffects,
 };
@@ -156,6 +157,7 @@ pub fn run(
     watcher: Box<dyn FileWatcher>,
     theme_env: ThemeEnv,
     persist_env: PersistEnv,
+    print: Box<dyn Print>,
 ) -> Result<(), String> {
     let event_loop = EventLoop::new().map_err(|e| format!("创建事件循环失败: {e}"))?;
     event_loop.set_control_flow(ControlFlow::Wait);
@@ -171,6 +173,7 @@ pub fn run(
         watcher,
         theme_env,
         persist_env,
+        print,
     );
     event_loop
         .run_app(&mut app)
@@ -258,6 +261,8 @@ pub(crate) struct WindowState {
     pub(crate) dragging: bool,
     /// 最近一次正文左键：(时刻, 位置, 连续点击数 1..=3)，双击/三击判定依据。
     pub(crate) last_click: Option<(Instant, PhysicalPosition<f64>, u8)>,
+    /// 打印会话态（3b）：Some 期间 win_size/viewport/绘制全部切换到打印页帧语义。
+    pub(crate) print: Option<PrintState>,
 }
 impl Default for WindowState {
     fn default() -> Self {
@@ -269,6 +274,7 @@ impl Default for WindowState {
             goal_x: None,
             dragging: false,
             last_click: None,
+            print: None,
         }
     }
 }
@@ -301,7 +307,7 @@ pub(crate) struct App {
     pub(crate) ui_state: UIState,
 }
 
-/// 13 个平台端口聚合结构：能力集合，不携带状态语义（ADR-009 决策六）。
+/// 14 个平台端口聚合结构：能力集合，不携带状态语义（ADR-009 决策六）。
 /// 全部为 Box<dyn Trait>，由产品层注入（veil/main.rs 各 impl 对应 trait）。
 pub(crate) struct Ports {
     pub(crate) clipboard: Box<dyn Clipboard>,
@@ -317,6 +323,7 @@ pub(crate) struct Ports {
     pub(crate) effects: Box<dyn WindowEffects>,
     pub(crate) recovery: Box<dyn RecoveryStore>,
     pub(crate) session: Box<dyn SessionStore>,
+    pub(crate) print: Box<dyn Print>,
 }
 
 /// 启动文档决议（0b）：resume 模式下按「崩溃恢复 > 会话恢复 > 传入文档」重建。
@@ -418,6 +425,7 @@ impl App {
         watcher: Box<dyn FileWatcher>,
         theme_env: ThemeEnv,
         persist_env: PersistEnv,
+        print: Box<dyn Print>,
     ) -> Self {
         let ThemeEnv {
             mut config,
@@ -457,6 +465,7 @@ impl App {
             effects,
             recovery,
             session,
+            print,
         };
         let start = startup_doc(&mut ports, doc);
         let mut editor = Editor::new(&start.doc.text);
@@ -616,6 +625,10 @@ impl App {
     }
 
     pub(crate) fn win_size(&self) -> (u32, u32) {
+        // 打印中：「窗口」即打印页帧（无菜单栏/状态栏），render() 产出整页帧
+        if let Some(p) = &self.window_state.print {
+            return (p.w.max(1), p.h.max(1));
+        }
         self.window_state
             .window
             .as_ref()
@@ -628,6 +641,15 @@ impl App {
 
     pub(crate) fn viewport(&self) -> Viewport {
         let (w, h) = self.win_size();
+        // 打印中：内容视口 = 整帧（chrome 不绘制，无菜单栏/状态栏扣减）
+        if self.window_state.print.is_some() {
+            return Viewport {
+                x: 0.0,
+                y: 0.0,
+                w: w as f32,
+                h: h as f32,
+            };
+        }
         chrome::viewport(w, h, self.input_state.scale)
     }
 

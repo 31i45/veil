@@ -107,7 +107,7 @@ v1 无网络输入点（无同步、无更新检查、无遥测）。
 
 - 语言：Rust（stable，edition 2021）。机制：条件编译 + 同名同签名模块；落点 `crates/veil/src/platform/`。
 - `veil-core` 无任何平台代码（纯逻辑， WASM 可编译性作为副产物验证项 ⏳）。
-- 接缝项（上层零平台分支）：主题（`ThemeEnv`：`ConfigStore` 配置原子读写、`SystemTheme` 注册表 `AppsUseLightTheme`、`WindowEffects` DWM 深色标题栏 + Mica；非 Windows 分别退化为无配置/浅色/空实现）、窗口材质（Windows Mica）、系统主题跟随、剪贴板（文本/HTML/位图）、图片资产落盘（`AssetStore`）、文件对话框（`FileDialog`：Windows 手写 `GetOpenFileNameW/GetSaveFileNameW` FFI，其余平台恒取消）、文件监听（`FileWatcher`：产品层 notify 事件线程 + 非阻塞通道，监听父目录并按文件名过滤；非 Windows 若 notify 初始化失败则 watch 返回 Err 降级为提示）、IME（winit 事件透传，自绘编辑器不经 egui 输入抽象）。
+- 接缝项（上层零平台分支）：主题（`ThemeEnv`：`ConfigStore` 配置原子读写、`SystemTheme` 注册表 `AppsUseLightTheme`、`WindowEffects` DWM 深色标题栏 + Mica；非 Windows 分别退化为无配置/浅色/空实现）、窗口材质（Windows Mica）、系统主题跟随、剪贴板（文本/HTML/位图）、图片资产落盘（`AssetStore`）、文件对话框（`FileDialog`：Windows 手写 `GetOpenFileNameW/GetSaveFileNameW` FFI，其余平台恒取消）、文件监听（`FileWatcher`：产品层 notify 事件线程 + 非阻塞通道，监听父目录并按文件名过滤；非 Windows 若 notify 初始化失败则 watch 返回 Err 降级为提示）、IME（winit 事件透传，自绘编辑器不经 egui 输入抽象）、打印（`Print`：veil-egui 分页引擎出干净帧，Windows 手写 `PrintDlgW`/GDI `SetDIBitsToDevice` FFI 贴打印机 DC，帧像素 XRGB 直接作 32bpp 顶向下 DIB 零转换；PDF 走系统 Microsoft Print to PDF 同码路；非 Windows 退化为提示不支持）。
 - 决策记录：
   - [ADR-001](../docs/adr/ADR-001-rope-selection.md)：rope 选型 lapce-xi-rope；mark 语义自封装；初版有序 Vec + 全量 delta transform，sum-tree 留作性能退路
   - [ADR-002](../docs/adr/ADR-002-math-rendering.md)：公式渲染走 `latex-rust` 纯 Rust 路径（KaTeX/rquickjs 否决：HTML 输出无法在无 webview 管线下光栅化）；Mermaid 降级为非目标
@@ -139,7 +139,7 @@ reveil
 ## 9. 环境维度实例（Skill 03 A5）
 
 - OS：Windows 11 23H2+（基线）；Windows 10 22H2（次要，标「半」）；macOS/Linux（不承诺，标「半」）
-- 运行时/引擎：无外部运行时（静态链接 MSVC）；softbuffer 软件呈现 + 自绘 chrome，无需 GPU/OpenGL；系统文件对话框由 comdlg32/user32 提供（Win32 系统组件，随 Windows 存在）
+- 运行时/引擎：无外部运行时（静态链接 MSVC）；softbuffer 软件呈现 + 自绘 chrome，无需 GPU/OpenGL；系统文件对话框由 comdlg32/user32 提供、打印对话框与打印后台由 comdlg32/gdi32/spoolss 提供（Win32 系统组件，随 Windows 存在）
 - 配置：区域=中文(简体)/英文(美国) 双测；DPI 100%/150%/200%（Per-Monitor V2 必须声明，否则高分屏模糊视为缺陷）；系统深色/浅色双测
 - 安全软件：Defender 受控文件夹访问可能拦截文档目录写入——保存失败须给可读错误而非崩溃
 - 权限：普通用户运行，禁止要求管理员

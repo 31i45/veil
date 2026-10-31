@@ -2,6 +2,7 @@
 //! 全部 headless 可测；交互策略与窗口胶合在 shell/app，不进入本域。
 
 pub(crate) mod cache;
+pub(crate) mod ctx_menu;
 mod frame;
 mod highlight;
 mod layout;

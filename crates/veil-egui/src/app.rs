@@ -73,6 +73,10 @@ pub trait FileStore {
 pub trait FileDialog {
     fn open_markdown(&mut self) -> Option<PathBuf>;
     fn save_markdown(&mut self, suggested: &str) -> Option<PathBuf>;
+    /// 选择图片文件（2f 插入图片入口）。默认 None：不关心图片的实现无需改动。
+    fn open_image(&mut self) -> Option<PathBuf> {
+        None
+    }
 }
 
 /// 外部文件变更事件（切片 16）：只关心当前关联文件，不携带路径。
@@ -184,6 +188,8 @@ pub(crate) struct UIState {
     pub(crate) search: Search,
     /// 快速打开浮层（阶段 1）：最近文件 + 当前目录候选。
     pub(crate) quick: QuickOpen,
+    /// 右键上下文菜单（2f）：选区/链接/块三类上下文的瞬态菜单。
+    pub(crate) ctx: crate::view::ctx_menu::CtxMenu,
     /// 写作模式与全文统计（阶段 1）。
     pub(crate) writing: WritingState,
 }
@@ -497,6 +503,7 @@ impl App {
                 outline: Outline::default(),
                 search: Search::default(),
                 quick: QuickOpen::default(),
+                ctx: crate::view::ctx_menu::CtxMenu::default(),
                 writing: WritingState::default(),
             },
         };
@@ -790,6 +797,13 @@ impl ApplicationHandler for App {
                 if self.on_left_click() {
                     event_loop.exit();
                 }
+            }
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                button: MouseButton::Right,
+                ..
+            } => {
+                self.on_right_click();
             }
             WindowEvent::MouseInput {
                 state: ElementState::Released,

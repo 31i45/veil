@@ -196,6 +196,7 @@ impl FileWatcher for FakeWatch {
 struct FakeDialogs {
     open: Option<PathBuf>,
     save: Option<PathBuf>,
+    image: Option<PathBuf>,
     calls: Rc<RefCell<Vec<String>>>,
 }
 impl FileDialog for FakeDialogs {
@@ -206,6 +207,10 @@ impl FileDialog for FakeDialogs {
     fn save_markdown(&mut self, suggested: &str) -> Option<PathBuf> {
         self.calls.borrow_mut().push(format!("save:{suggested}"));
         self.save.clone()
+    }
+    fn open_image(&mut self) -> Option<PathBuf> {
+        self.calls.borrow_mut().push("open_image".into());
+        self.image.clone()
     }
 }
 
@@ -1672,6 +1677,7 @@ fn app_dialogs(
     let d = FakeDialogs {
         open: open.map(PathBuf::from),
         save: save.map(PathBuf::from),
+        image: None,
         calls: calls.clone(),
     };
     let doc = Doc {
@@ -2607,6 +2613,7 @@ fn save_as_rebinds_watcher() {
     let d = FakeDialogs {
         open: None,
         save: Some(PathBuf::from("b.md")),
+        image: None,
         calls,
     };
     let mut a = App::new(

@@ -70,6 +70,8 @@ pub enum MenuAction {
     Find,
     /// 打开查找替换栏（Ctrl+H）。
     Replace,
+    /// 插入图片（2f）：系统对话框选图，插入相对路径链接。
+    InsertImage,
     ThemeSystem,
     ThemeLight,
     ThemeDark,
@@ -112,6 +114,7 @@ pub const MENUS: [MenuDef; 3] = [
             ("全选", "Ctrl+A", MenuAction::SelectAll),
             ("查找…", "Ctrl+F", MenuAction::Find),
             ("替换…", "Ctrl+H", MenuAction::Replace),
+            ("插入图片…", "", MenuAction::InsertImage),
         ],
     },
     MenuDef {

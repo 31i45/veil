@@ -10,9 +10,11 @@ use crate::html::html_to_markdown;
 use crate::input::{Action, Key};
 use crate::mode::{route, Cmd, Mode, TextSink};
 use crate::theme::ThemeMode;
-use crate::view::{outline, quick_open, search};
+use crate::view::{ctx_menu, outline, quick_open, search};
+use crate::view::ctx_menu::{CtxAction, CtxKind};
+use std::path::Path;
 use std::time::{Duration, Instant};
-use veil_core::{task_span, BlockId, BlockKind, Range};
+use veil_core::{task_span, BlockId, BlockKind, InlineKind, InlineNode, Range};
 use winit::event::ElementState;
 use winit::keyboard::{Key as WKey, NamedKey};
 
@@ -74,6 +76,7 @@ impl App {
             Cmd::OpenQuick => self.open_quick(),
             Cmd::CloseMenu => {
                 self.ui_state.chrome.close();
+                self.ui_state.ctx.close();
                 self.request_redraw();
             }
             // 快速打开浮层动作自带重绘与 IME 区域刷新
@@ -171,7 +174,10 @@ impl App {
             Action::Open => self.open_via_dialog(),
             Action::New => self.new_draft(),
             Action::QuickOpen => self.open_quick(),
-            Action::CloseMenu => self.ui_state.chrome.close(),
+            Action::CloseMenu => {
+                self.ui_state.chrome.close();
+                self.ui_state.ctx.close();
+            }
             Action::ToggleOutline => self.toggle_outline(),
             Action::Export => self.export_now(),
             Action::Find => self.open_search(),
@@ -216,6 +222,26 @@ impl App {
                 self.request_redraw();
             }
         }
+    }
+
+    /// 插入图片入口（2f）：菜单「插入图片…」→ 系统对话框选图 → 插入相对路径链接。
+    /// 草稿（无关联文件）拒绝（无相对路径基准）；非图片扩展名拒绝；取消无副作用。
+    pub(crate) fn insert_image_via_dialog(&mut self) {
+        let Some(doc) = self.doc.path.clone() else {
+            self.ui_state.chrome.notice = "插入图片需要关联文件（草稿无相对路径基准）".into();
+            self.request_redraw();
+            return;
+        };
+        let Some(img) = self.ports.dialogs.open_image() else {
+            return;
+        };
+        if !crate::image::is_image_path(&img) {
+            self.ui_state.chrome.notice = "所选文件不是支持的图片格式".into();
+            self.request_redraw();
+            return;
+        }
+        let target = image_link_target(&doc, &img);
+        self.insert_paste(&format!("![]({target})"));
     }
 
     /// 拖拽悬停（阶段 1）：记录文件名供绘制落点提示；离开窗口（None）清空。
@@ -512,6 +538,7 @@ impl App {
             MenuAction::ToggleOutline => self.toggle_outline(),
             MenuAction::Find => self.open_search(),
             MenuAction::Replace => self.open_replace(),
+            MenuAction::InsertImage => self.insert_image_via_dialog(),
             MenuAction::OpenRecent(i) => self.open_recent(i),
             MenuAction::QuickOpen => self.open_quick(),
             MenuAction::Quit => return true,
@@ -534,7 +561,100 @@ impl App {
         }
     }
 
-    /// 左键按下路由（菜单 > 菜单栏 > 滚动条 > 状态栏 > 正文光标）。
+    // ── 右键上下文菜单（2f）：选区/链接/块三类上下文 ─────────────────────────
+
+    /// 当前右键菜单布局（关闭时仍有意义但调用方只在 open 时使用）：钳位进内容视口。
+    fn ctx_layout(&self) -> ctx_menu::Layout {
+        let vp = self.viewport();
+        ctx_menu::layout(
+            self.ui_state.ctx.items(),
+            self.ui_state.ctx.x,
+            self.ui_state.ctx.y,
+            vp.x + vp.w,
+            vp.y + vp.h,
+            self.input_state.scale,
+        )
+    }
+
+    /// 右键按下：落点在选区内保留选区，否则移动光标；链接上给出「复制链接地址」。
+    /// 查找/快速打开浮层期间与 chrome 区域不弹；已打开时按新位置重开。
+    pub(crate) fn on_right_click(&mut self) {
+        let (mx, my) = (
+            self.input_state.mouse.x as f32,
+            self.input_state.mouse.y as f32,
+        );
+        let vp = self.viewport();
+        if self.ui_state.quick.open || self.ui_state.search.open {
+            return; // 模态浮层优先：不叠加右键菜单
+        }
+        if my < vp.y || my >= vp.y + vp.h {
+            return; // 菜单栏/状态栏区域无右键菜单
+        }
+        self.ui_state.chrome.close();
+        let Some(off) = self.hit_offset() else {
+            return;
+        };
+        let in_sel = self
+            .editor
+            .selection()
+            .is_some_and(|s| s.start <= off && off < s.end);
+        let (kind, link) = if in_sel {
+            (CtxKind::Selection, None)
+        } else {
+            self.editor.set_caret(off);
+            self.window_state.goal_x = None;
+            match self.link_at(off) {
+                Some(url) => (CtxKind::Link, Some(url)),
+                None => (CtxKind::Block, None),
+            }
+        };
+        self.ui_state.ctx.open_at(mx, my, kind, link);
+        self.set_ime_area();
+        self.request_redraw();
+    }
+
+    /// 命中偏移处的 inline 链接 URL（含标记区命中；引用式链接无 url 区间不识别）。
+    fn link_at(&self, offset: usize) -> Option<String> {
+        let g = self
+            .index
+            .blocks
+            .iter()
+            .find(|g| g.range.start <= offset && offset < g.range.end)?;
+        let nodes = self.editor.session().block_inlines(g.id)?;
+        fn find(nodes: &[InlineNode], off: usize) -> Option<&InlineNode> {
+            nodes.iter().find_map(|n| {
+                if n.range.start <= off && off < n.range.end {
+                    if n.kind == InlineKind::Link && n.url.is_some() {
+                        return Some(n);
+                    }
+                    find(&n.children, off)
+                } else {
+                    None
+                }
+            })
+        }
+        let url = find(&nodes, offset)?.url?;
+        self.editor.session().text_slice(url)
+    }
+
+    /// 执行右键菜单动作（菜单随后由调用方关闭；CopyLink 载荷读自 ctx.link）。
+    fn ctx_exec(&mut self, action: CtxAction) {
+        match action {
+            CtxAction::Cut => self.cut_selection(),
+            CtxAction::Copy => self.copy_selection(),
+            CtxAction::Paste => self.paste_clipboard(),
+            CtxAction::SelectAll => self.perform_action(Action::Doc(Intent::SelectAll)),
+            CtxAction::CopyLink => {
+                if let Some(u) = self.ui_state.ctx.link.clone() {
+                    self.ports.clipboard.set(&u);
+                }
+            }
+            CtxAction::InsertImage => self.insert_image_via_dialog(),
+        }
+        self.request_redraw();
+    }
+
+    /// 左键按下路由（右键菜单 > 菜单 > 菜单栏 > 滚动条 > 状态栏 > 正文光标）。
     /// 返回 true = 退出应用。菜单打开时点击外部只关菜单、不移动光标。
     pub(crate) fn on_left_click(&mut self) -> bool {
         let (mx, my) = (
@@ -543,6 +663,19 @@ impl App {
         );
         let scale = self.input_state.scale;
         let vp = self.viewport();
+        // 右键菜单打开中：命中项执行；其余位置（含面板内空白）关闭并吞掉
+        if self.ui_state.ctx.open {
+            let l = self.ctx_layout();
+            let hit = ctx_menu::hit(&l, self.ui_state.ctx.items().len(), mx, my);
+            if let Some(i) = hit {
+                if let Some(a) = self.ui_state.ctx.action(i) {
+                    self.ctx_exec(a);
+                }
+            }
+            self.ui_state.ctx.close();
+            self.request_redraw();
+            return false;
+        }
         if let Some(open) = self.ui_state.chrome.open {
             let recent = self.recent_labels();
             if let Some(item) = chrome::hit_popup_item(mx, my, open, scale, &recent) {
@@ -722,12 +855,21 @@ impl App {
         self.request_redraw();
     }
 
-    /// 悬停高亮（菜单标题 / 弹出菜单项 / 大纲条目）。
+    /// 悬停高亮（右键菜单项 / 菜单标题 / 弹出菜单项 / 大纲条目）。
     pub(crate) fn update_hover(&mut self) {
         let (x, y) = (
             self.input_state.mouse.x as f32,
             self.input_state.mouse.y as f32,
         );
+        if self.ui_state.ctx.open {
+            let l = self.ctx_layout();
+            let h = ctx_menu::hit(&l, self.ui_state.ctx.items().len(), x, y);
+            if self.ui_state.ctx.hover != h {
+                self.ui_state.ctx.hover = h;
+                self.request_redraw();
+            }
+            return; // 右键菜单打开时其余悬停不更新
+        }
         let menu = chrome::hit_menu_bar(x, y, self.input_state.scale);
         let item = self.ui_state.chrome.open.and_then(|open| {
             let recent = self.recent_labels();
@@ -890,8 +1032,12 @@ impl App {
         self.request_redraw();
     }
 
-    /// 滚轮：快速打开浮层内滚动候选，指针在大纲面板内时滚动面板，否则滚动正文。
+    /// 滚轮：右键菜单打开时吞掉（瞬态菜单不滚动正文）；快速打开浮层内滚动候选，
+    /// 指针在大纲面板内时滚动面板，否则滚动正文。
     pub(crate) fn on_wheel(&mut self, d: f32) {
+        if self.ui_state.ctx.open {
+            return;
+        }
         if self.ui_state.quick.open {
             let n = self.ui_state.quick.filtered.len();
             let max = n.saturating_sub(quick_open::MAX_VISIBLE);
@@ -1210,6 +1356,19 @@ impl App {
         self.window_state.goal_x = None;
         self.after_edit(Vec::new()); // 补齐可见/光标块布局并滚动入视口
         self.set_ime_area();
+    }
+}
+
+/// 图片链接目标（2f）：文档目录内取相对路径，目录外取绝对路径；
+/// 统一 / 分隔符（Markdown 链接语义），含空格加 <> 定界。
+fn image_link_target(doc: &Path, img: &Path) -> String {
+    let base = doc.parent().unwrap_or_else(|| Path::new(""));
+    let rel = img.strip_prefix(base).unwrap_or(img);
+    let s = rel.to_string_lossy().replace('\\', "/");
+    if s.contains(' ') {
+        format!("<{s}>")
+    } else {
+        s
     }
 }
 

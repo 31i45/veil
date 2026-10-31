@@ -6165,3 +6165,27 @@ fn zoom_menu_and_key_paths() {
     assert_eq!(a.input_state.user_zoom, 1.0);
     assert!(!a.editor.is_dirty(), "菜单/键盘缩放均不置脏");
 }
+
+// ── 3c-3：F11 全屏切换 ───────────────────────────────────────────────────────
+
+#[test]
+fn fullscreen_headless_noop_and_menu_path() {
+    let store = MemStore::default();
+    let mut a = app("x\n", Some("a.md"), false, &store);
+    // headless 无窗口：切换是无害 no-op（真机翻转由 winit set_fullscreen 承担）
+    a.perform_action(Action::ToggleFullscreen);
+    assert!(!a.window_state.fullscreen, "无窗口不翻状态");
+    assert!(!a.editor.is_dirty(), "全屏切换不动文档");
+    let notice = a.ui_state.chrome.notice.clone();
+    assert!(!a.perform_menu(MenuAction::ToggleFullscreen), "全屏不退出应用");
+    assert!(!a.window_state.fullscreen);
+    assert_eq!(a.ui_state.chrome.notice, notice, "no-op 不刷提示");
+    // 路由：Document 模式 F11 直达动作；Esc 语义不变（关菜单，不退全屏）
+    assert_eq!(
+        crate::input::translate(Key::F11, Mods {
+            ctrl: false,
+            shift: false
+        }),
+        Some(Action::ToggleFullscreen)
+    );
+}

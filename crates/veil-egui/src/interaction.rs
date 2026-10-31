@@ -514,6 +514,7 @@ impl App {
             MenuAction::Save => self.save_now(),
             MenuAction::SaveAs => self.save_as(),
             MenuAction::Export => self.export_now(),
+            MenuAction::Print => self.print_document(),
             MenuAction::Undo => {
                 if let Some(dirty) = self.editor.apply(Intent::Undo) {
                     self.window_state.goal_x = None;
@@ -1414,6 +1415,10 @@ pub(crate) fn map_key(event: &winit::event::KeyEvent) -> Option<Key> {
 impl App {
     pub(crate) fn content_width(&self) -> f32 {
         let (w, _) = self.win_size();
+        // 打印：无滚动条/大纲面板，版心 = 页宽 - 两侧页边距（3b）
+        if self.window_state.print.is_some() {
+            return (w as f32 - 2.0 * MARGIN * self.input_state.scale).max(32.0);
+        }
         let panel = if self.ui_state.outline.open {
             outline::PANEL_W * self.input_state.scale
         } else {
@@ -1451,7 +1456,13 @@ impl App {
                 .map_or(g.est_h, |t| t.height);
         }
         self.cache
-            .layout(g.id, &g.kind, g.range, self.base_key(), self.editor.caret())
+            .layout(
+                g.id,
+                &g.kind,
+                g.range,
+                self.base_key(),
+                self.effective_caret(),
+            )
             .map_or(g.est_h, |l| l.height)
     }
 

@@ -24,6 +24,7 @@ mod interaction;
 mod math;
 mod mode;
 mod paint;
+mod print;
 mod stats;
 mod theme;
 mod view;
@@ -38,6 +39,7 @@ pub use app::{
 pub use docio::decode;
 pub use image::{AssetStore, ImageData, ImageLoader};
 pub use math::{MathImage, MathRenderer};
+pub use print::{NoPrint, Print, PrintSession};
 pub use theme::{
     config_path, data_dir, ConfigStore, NativeWindow, SystemTheme, ThemeEnv, WindowEffects,
 };

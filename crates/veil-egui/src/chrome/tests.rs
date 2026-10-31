@@ -112,6 +112,7 @@ fn menu_definitions_cover_shortcuts() {
             MenuAction::Save,
             MenuAction::SaveAs,
             MenuAction::Export,
+            MenuAction::Print,
             MenuAction::Quit
         ]
     );

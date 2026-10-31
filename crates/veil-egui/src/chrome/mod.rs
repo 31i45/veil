@@ -57,6 +57,8 @@ pub enum MenuAction {
     Save,
     SaveAs,
     Export,
+    /// 打印 / 导出 PDF（3b）：系统打印对话框，PDF 走「Microsoft Print to PDF」。
+    Print,
     Undo,
     Redo,
     Cut,
@@ -100,6 +102,7 @@ pub const MENUS: [MenuDef; 3] = [
             ("保存", "Ctrl+S", MenuAction::Save),
             ("另存为…", "Ctrl+Shift+S", MenuAction::SaveAs),
             ("导出 HTML…", "Ctrl+E", MenuAction::Export),
+            ("打印 / 导出 PDF…", "", MenuAction::Print),
             ("退出", "", MenuAction::Quit),
         ],
     },

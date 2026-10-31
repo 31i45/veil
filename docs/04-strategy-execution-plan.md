@@ -385,7 +385,16 @@ B 用 `gfm_canonical` 抹平 cmark-gfm 与 pulldown 的序列化差异（align/s
   以真人走查清单驱动，逐项销号。
 - 继承的真机人工项（G2/G3 转出）：P4 启发式预审三项、IME 候选框跟随复核
   （微软拼音连续输入 200 字不漂移）、外部用户盲测方案与语料。
-- 打印/PDF 导出（优先于 docx/ePub）。
+- ~~打印/PDF 导出（优先于 docx/ePub）。~~
+  **✅ 切片 3b（2026-10-31）已落地**：分页引擎（候选断点=块顶+文本块各视觉行行顶，
+  贪心取页内最深候选，原子块超页高硬切）+ 干净帧渲染（打印态 Reveal 全收、无光标/
+  选区/查找高亮/浮层/chrome，末页可越过 max_scroll）+ Win32 GDI 粘合（PRINTDLGW
+  系统对话框 → 按打印机 DPI 重排 → 逐页 SetDIBitsToDevice 贴帧，帧像素 XRGB
+  little-endian 直接作 32bpp BI_RGB 顶向下 DIB 零转换）。PDF 导出走系统
+  「Microsoft Print to PDF」同一码路。手写 FFI 零新增依赖，预算维持 8/8；
+  787 测试绿 + clippy 零警告（commit 5a516eb / b078e8c）。
+  **真机走查项（人工）**：Microsoft Print to PDF 出 PDF 目检（多页文档分页不截字、
+  数学图/表格跨页硬切、页码范围打印）；物理打印机抽验一份。
 - 安装包与分发：单文件便携 ✅ 已有；补 MSIX/NSIS 安装器与更新策略。
 - ~~性能再压榨：冷启动环境段（进程创建段 440–470ms）做预热/延迟加载，争取墙钟进 300ms。~~
   **✅ 切片 3a（2026-10-31）已解决**：根因非产品代码——本机火绒 HIPS 对「路径+哈希未入

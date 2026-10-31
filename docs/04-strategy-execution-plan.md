@@ -422,8 +422,11 @@ B 用 `gfm_canonical` 抹平 cmark-gfm 与 pulldown 的序列化差异（align/s
     SDK 缺失时降级跳过并给 cargo warning，不阻断构建）。实测文件属性：
     FileVersion/ProductVersion 0.1.0、FileDescription「Veil Markdown 编辑器」；
     至此 INSTANCE §2「版本号一致性」红线（git tag == version == 产物元数据）可验证。
+  - 应用图标（ICON 资源）同由 build.rs 生成（16/32/48/64 四档 BMP-DIB 帧，圆角蓝底
+    + 白色 V，代码绘制抗锯齿，不入库二进制资产、不引 zlib）：Explorer/任务栏/标题栏
+    均显示品牌图标（winit 无显式 set_icon 时取 exe 资源）。
   - PE 校验：subsystem=2（GUI），冷启动冒烟 pid 就绪、Responding=True，体积
-    5,773,312 B ≈ 5.51 MiB（≤15 MiB 红线内）。
+    5,805,568 B ≈ 5.54 MiB（≤15 MiB 红线内）；`ExtractAssociatedIcon` 取回 32×32 图标正常。
   - **更新策略**：单文件手动替换（下载新版 exe 覆盖），无自动更新检查（无网络输入点，
     与「不上传用户文本」一致）。
   - 门禁：workspace 805 测试绿 + clippy 零警告。

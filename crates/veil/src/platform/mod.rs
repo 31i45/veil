@@ -3,6 +3,8 @@
 //! 文件监听：notify 事件线程（切片 16），跨平台同一实现。配置读写：std 原子写（切片 17）。
 
 #[cfg(windows)]
+mod print;
+#[cfg(windows)]
 mod theme;
 mod watch;
 #[cfg(windows)]
@@ -40,6 +42,18 @@ pub fn dialogs() -> Box<dyn FileDialog> {
     #[cfg(not(windows))]
     {
         Box::new(NoDialogs)
+    }
+}
+
+/// 打印能力装配（3b）：Windows 手写 Win32 GDI 打印；其他平台为「提示不支持」兜底。
+pub fn print() -> Box<dyn veil_egui::Print> {
+    #[cfg(windows)]
+    {
+        Box::new(print::WinPrint)
+    }
+    #[cfg(not(windows))]
+    {
+        Box::new(veil_egui::NoPrint)
     }
 }
 

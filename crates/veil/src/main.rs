@@ -1,4 +1,6 @@
 //! veil 产品层入口（切片 6 公式渲染 latex-rust 位图，ADR-002；切片 7 HTML 导出 pulldown-cmark + 内嵌 SVG）。
+//! 发布构建不带控制台窗口（GUI 子系统）；debug 构建保留控制台以便读诊断输出。
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 #![allow(clippy::chunks_exact_to_as_chunks)] // 通道展开用 chunks_exact(4/3/2) 更直观
 
 mod export;

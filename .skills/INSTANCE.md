@@ -2,7 +2,7 @@
 
 > 本文件是 ai-dev-skills 通用方法论在本项目的全部实例化：项目专有事实（命令、红线、工具名、平台名、专有清单）只存在于此，skills 本体不内嵌。
 > 有效期：下列任一事实变更时需更新
-> 最后验证：2026-10-31（**G3 门禁通过·自动化口径**：阶段 2 切片 2a–2f 全部收口，自动化红线全灭——782 测试全绿、clippy 零警告、e2e 41 断言、p95 6.65/12.93ms、体积 5.48MiB、传递依赖 141/200、CommonMark A/C/D 652、GFM 23/23；2d 落地 CJK 标点禁则（UAX #14 + WJ 胶水段补中文特有禁则）+ 满行悬挂标点 + IME preedit 同套排版规则。真机 P4 三项、IME 候选框跟随复核、盲测为人工项，转阶段 3 走查清单）；**阶段 3 切片 3a ✅**：冷启动环境段根因定位为火绒 HIPS 信誉拦截（非产品代码），稳定路径实测墙钟 33–79ms + 首帧段 ≈155–203ms，进 300ms，零代码改动；**阶段 3 切片 3b ✅**：打印/PDF（分页引擎 + 干净帧 + Win32 GDI 手写 FFI 零新增依赖，PDF 走 Microsoft Print to PDF 同码路）；**阶段 3 切片 3c ✅**：UX 打磨三项——Ctrl+B/I/K 行内格式、用户缩放（dpi_scale × user_zoom 0.1 量化 [0.5,3.0]，Ctrl+滚轮/捏合/±/0 + 视图菜单，打印不随用户缩放）、F11 无边框全屏（Esc 不退）；打印快捷键决策：Ctrl+P 归快速打开（VS Code/Typora 同），打印菜单可达不另占键；workspace 805 测试绿、clippy 零警告；真机打印走查与 3c 交互目检转 3e 人工项
+> 最后验证：2026-10-31（**G3 门禁通过·自动化口径**：阶段 2 切片 2a–2f 全部收口，自动化红线全灭——782 测试全绿、clippy 零警告、e2e 41 断言、p95 6.65/12.93ms、体积 5.48MiB、传递依赖 141/200、CommonMark A/C/D 652、GFM 23/23；2d 落地 CJK 标点禁则（UAX #14 + WJ 胶水段补中文特有禁则）+ 满行悬挂标点 + IME preedit 同套排版规则。真机 P4 三项、IME 候选框跟随复核、盲测为人工项，转阶段 3 走查清单）；**阶段 3 切片 3a ✅**：冷启动环境段根因定位为火绒 HIPS 信誉拦截（非产品代码），稳定路径实测墙钟 33–79ms + 首帧段 ≈155–203ms，进 300ms，零代码改动；**阶段 3 切片 3b ✅**：打印/PDF（分页引擎 + 干净帧 + Win32 GDI 手写 FFI 零新增依赖，PDF 走 Microsoft Print to PDF 同码路）；**阶段 3 切片 3c ✅**：UX 打磨三项——Ctrl+B/I/K 行内格式、用户缩放（dpi_scale × user_zoom 0.1 量化 [0.5,3.0]，Ctrl+滚轮/捏合/±/0 + 视图菜单，打印不随用户缩放）、F11 无边框全屏（Esc 不退）；打印快捷键决策：Ctrl+P 归快速打开（VS Code/Typora 同），打印菜单可达不另占键；**阶段 3 切片 3d ✅**：原生单文件分发（用户决策不用 NSIS/MSIX/任何安装器外部工具链）——发布构建 GUI 子系统无控制台窗口，`crates/veil/build.rs` 由 workspace version 注入 VERSIONINFO（SDK rc.exe，零新增 crate 依赖，缺失降级跳过），PE subsystem=2、体积 5.51 MiB，版本号三方一致性红线可验证；workspace 805 测试绿、clippy 零警告；真机打印走查与 3c 交互目检转 3e 人工项
 
 ## 0. 项目骨架事实
 
@@ -43,7 +43,7 @@
 | 冷启动（墙钟，进程创建→首帧可交互；**环境观察项，不参与验收**） | — | **2026-10-31 切片 3a 复测：start→主窗口句柄 33–79 ms，加应用内首帧段后真墙钟 ≈155–203 ms，进 300 ms** ✅。G2 期 450–529 ms 根因已定位：本机火绒 HIPS 对「路径+哈希未入信誉缓存」的二进制做进程创建拦截扫描（探针：%TEMP% 未签名空二进制 start→exit 中位 1366ms、微软签名 cmd 副本 541ms，而 veil.exe 稳定路径下 33ms）；每次重编译产出新哈希即触发重扫，属开发期现象，终端用户固定路径安装不受影响。复现：`tools/bench/diag-premain.ps1` |
 | 10 万字文档击键→提交上屏延迟 p95（release 探针串行） | ≤ 16 ms | 6.65 ms（5,005 块）✅；12.93 ms（10,500 块）✅（2026-10-31 G3 复测，Wrap::WordOrGlyph 断行分析成本 ≈0.4ms 已计入） |
 | 10 万字文档常驻内存（任务管理器私有工作集） | ≤ 150 MB | 21.55 MB ✅ |
-| 安装产物体积（`veil.exe` 单文件发布构建） | ≤ 15 MiB | 5,745,664 B ≈ 5.48 MiB ✅（2026-10-31 G3 复测） |
+| 安装产物体积（`veil.exe` 单文件发布构建） | ≤ 15 MiB | 5,773,312 B ≈ 5.51 MiB ✅（2026-10-31 切片 3d：VERSIONINFO 资源后体积 +26KB；无安装器，单文件即分发产物） |
 | workspace 测试数（含 veil-core + veil-egui + veil） | ≥ 80 | **805 passed / 0 failed / 9 ignored** ✅（2026-10-31 阶段 3 切片 3c 后全量实测；口径为所有测试二进制之和，此前 449 仅统计 `veil-egui --lib` 一个二进制，属口径漂移已修正；G3 时 782 → 3b +5 → 3c +18） |
 | e2e 断言数 | ≥ 20 | **41** ✅（2026-10-30 切片 2e：`app_tests.rs` 3 个 e2e_ 场景测试——写作闭环打开→编辑→保存→重开 / 表格导航+格内编辑+图片粘贴落盘 / 查找替换→崩溃恢复→保存→三次启动自清） |
 | Markdown 往返一致率（无编辑时 serialize 输出 == 输入字节） | == 100% | 100% ✅ |
@@ -54,7 +54,7 @@
 | GFM 扩展一致性（Tables/TaskList/Strikethrough） | A/C/D≥95% | A=23/23、C=23/23、D=23/23 ✅ |
 | 3 分钟 soak 内存漂移 | ≤ 0 | -0.17 MB ✅（G1 实测；G2 未复跑，阶段 1 未触碰长驻资源路径） |
 
-- 版本号一致性：git tag == workspace `Cargo.toml` version == 产物元数据（`veil.exe` 文件属性版本）
+- 版本号一致性：git tag == workspace `Cargo.toml` version == 产物元数据（`veil.exe` 文件属性版本）——✅ 2026-10-31 切片 3d 起可验证：`crates/veil/build.rs` 由 workspace version 生成 VERSIONINFO 并经 SDK rc.exe 编译链接（零新增 crate 依赖，rc.exe 缺失时降级跳过并告警）；实测 FileVersion/ProductVersion=0.1.0。发布构建 GUI 子系统（无控制台窗口），debug 保留控制台
 - 版本失配处置记录：无
 - 测量方法注记：冷启动 = PowerShell `Start-Process` 后按进程 `StartTime` 计到主窗口句柄就绪，5 次取中位（含启动器与本机进程创建开销，方差大，故同时记录最小值）；2026-10-30 起**同时记录分段值**——`VEIL_BOOT_LOG` 门控探针输出 `main` / `event_loop` / `surface_ready` / `redraw_done` 各 epoch 毫秒，可把墙钟拆成「进程创建→main」与「main→首帧」两段（分段探针为临时诊断代码，测毕已回退）。击键 p95 = 进程内端到端探针 `perf_keystroke_path`（release 构建，**必须串行** `--test-threads=1`，并行会假性劣化）；内存 = 启动后 2 s 的 `PrivateMemorySize64`；体积 = `target/release/veil.exe` 字节数。
 

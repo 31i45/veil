@@ -1,7 +1,7 @@
 # 阶段 04：B 战略 + A 质量门槛执行计划
 
 > 依据：[P0 功能对标](review/P0-feature-parity.md)、[P1 一致性报告](review/P1-commonmark-conformance.md)、[G0 基线报告](review/G0-baseline.md)
-> 状态：**G0 ✅ → 0a ✅ → 0b ✅ → 0c ✅ → 0d ✅ → G1 ✅ → 阶段 1 ✅ → G2 ✅ → 阶段 2 ✅ → G3 ✅（自动化口径，真机人工项转阶段 3 走查）→ 阶段 3（Windows 完美化，已放弃 macOS）🟡（3a 冷启动 ✅ / 3b 打印·PDF ✅ / 3c UX 打磨 ✅，剩 3d 安装包 + 3e 人工项）**
+> 状态：**G0 ✅ → 0a ✅ → 0b ✅ → 0c ✅ → 0d ✅ → G1 ✅ → 阶段 1 ✅ → G2 ✅ → 阶段 2 ✅ → G3 ✅（自动化口径，真机人工项转阶段 3 走查）→ 阶段 3（Windows 完美化，已放弃 macOS）🟡（3a 冷启动 ✅ / 3b 打印·PDF ✅ / 3c UX 打磨 ✅ / 3d 原生单文件分发 ✅，剩 3e 人工项）**
 > 节奏：一个门禁一次交付，每步都有可复现命令与退出条件
 
 ## 1. 战略命题
@@ -411,7 +411,22 @@ B 用 `gfm_canonical` 抹平 cmark-gfm 与 pulldown 的序列化差异（align/s
   787 测试绿 + clippy 零警告（commit 5a516eb / b078e8c）。
   **真机走查项（人工）**：Microsoft Print to PDF 出 PDF 目检（多页文档分页不截字、
   数学图/表格跨页硬切、页码范围打印）；物理打印机抽验一份。
-- 安装包与分发：单文件便携 ✅ 已有；补 MSIX/NSIS 安装器与更新策略。
+- ~~安装包与分发：单文件便携 ✅ 已有；补 MSIX/NSIS 安装器与更新策略。~~
+  **✅ 切片 3d（2026-10-31）已落地：Rust 原生单文件分发，不引入任何安装器外部工具链**
+  （用户决策：不用 NSIS/MSIX，`cargo build --release` 产出的 `veil.exe` 即分发产物）。
+  - 发布构建切 GUI 子系统（`#![cfg_attr(all(windows, not(debug_assertions)),
+    windows_subsystem = "windows")]`）：无控制台窗口，双击即纯 GUI；debug 构建保留控制台
+    便于读诊断输出。
+  - `crates/veil/build.rs` 注入 Windows VERSIONINFO（零新增 crate 依赖）：版本取自
+    workspace `Cargo.toml`，rc.exe 取本机 Windows SDK（`RC_EXE` 环境变量可覆盖；
+    SDK 缺失时降级跳过并给 cargo warning，不阻断构建）。实测文件属性：
+    FileVersion/ProductVersion 0.1.0、FileDescription「Veil Markdown 编辑器」；
+    至此 INSTANCE §2「版本号一致性」红线（git tag == version == 产物元数据）可验证。
+  - PE 校验：subsystem=2（GUI），冷启动冒烟 pid 就绪、Responding=True，体积
+    5,773,312 B ≈ 5.51 MiB（≤15 MiB 红线内）。
+  - **更新策略**：单文件手动替换（下载新版 exe 覆盖），无自动更新检查（无网络输入点，
+    与「不上传用户文本」一致）。
+  - 门禁：workspace 805 测试绿 + clippy 零警告。
 - ~~性能再压榨：冷启动环境段（进程创建段 440–470ms）做预热/延迟加载，争取墙钟进 300ms。~~
   **✅ 切片 3a（2026-10-31）已解决**：根因非产品代码——本机火绒 HIPS 对「路径+哈希未入
   信誉缓存」的二进制做进程创建拦截扫描（探针证据：%TEMP% 下 124KB 未签名空二进制

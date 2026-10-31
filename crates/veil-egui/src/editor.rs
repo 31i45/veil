@@ -32,6 +32,11 @@ pub enum Intent {
     Indent,
     /// 反缩进（Shift+Tab）：删除行首至多 4 个空格或 1 个制表符，绝不删非空白字符。
     Dedent,
+    /// 行内格式切换（3c-1）：有选区包裹/解包裹 marker（`**`/`*` 等）；空选区插入
+    /// 标记对、光标居中，光标恰在标记对中时删除标记对（连按两次取消）。
+    ToggleWrap(&'static str),
+    /// 插入链接（3c-1）：选区作链接文本 `[sel]()`、光标入括号；空选区 `[]()`、光标入方括号。
+    InsertLink,
     Undo,
     Redo,
 }
@@ -251,6 +256,8 @@ impl Editor {
                 | Intent::Newline
                 | Intent::Indent
                 | Intent::Dedent
+                | Intent::ToggleWrap(_)
+                | Intent::InsertLink
                 | Intent::Undo
                 | Intent::Redo
         );
@@ -328,6 +335,12 @@ impl Editor {
         if self.preedit.is_some() {
             return None; // 组合期按键归 IME（Windows 下 IME 消费组合键，此乃兜底）
         }
+        // 行内格式意图自带选区语义，先于此处分流（下方两个 match 的同名臂仅为穷尽性）
+        match intent {
+            Intent::ToggleWrap(marker) => return self.apply_wrap(marker),
+            Intent::InsertLink => return self.apply_link(),
+            _ => {}
+        }
         let c = self.caret();
         if let Some(sel) = self.selection() {
             match intent {
@@ -375,6 +388,8 @@ impl Editor {
                 | Intent::SelectAll => {}
                 // 缩进选中行：选区保留（落点随行首前缀平移），在主 match 中统一处理
                 Intent::Indent | Intent::Dedent => {}
+                // 已于入口分流（穷尽性占位）
+                Intent::ToggleWrap(_) | Intent::InsertLink => {}
             }
         }
         match intent {
@@ -462,7 +477,85 @@ impl Editor {
                 }
                 r
             }
+            // 已于入口分流（穷尽性占位）
+            Intent::ToggleWrap(_) | Intent::InsertLink => unreachable!("入口已分流"),
         }
+    }
+
+    /// 行内格式切换（3c-1）：有选区包裹/解包裹 marker；空选区插标记对、光标居中，
+    /// 光标恰在标记对中时删标记对。整段一次 Replace/Delete——单撤销步。
+    /// 单字符 marker 遇到 `**...**` 双标记包裹时不误判解包裹，再包一层（加粗上叠斜体）。
+    fn apply_wrap(&mut self, marker: &str) -> Option<Vec<BlockId>> {
+        let m = marker.len();
+        if let Some(sel) = self.selection() {
+            let text = self.session.text_slice(sel)?;
+            let double_wrapped = m == 1
+                && text.len() >= 4
+                && text[1..].starts_with(marker)
+                && text[..text.len() - 1].ends_with(marker);
+            let wrapped = text.len() > 2 * m
+                && text.starts_with(marker)
+                && text.ends_with(marker)
+                && !double_wrapped;
+            let (new, at) = if wrapped {
+                let inner = &text[m..text.len() - m];
+                (inner.to_string(), sel.start + inner.len())
+            } else {
+                (format!("{marker}{text}{marker}"), sel.start + text.len() + 2 * m)
+            };
+            let ev = self
+                .session
+                .apply(Edit::Replace { range: sel, text: new })
+                .expect("选区恒合法");
+            return Some(self.collapse_and_return(ev.dirty_blocks, at));
+        }
+        let c = self.caret();
+        // 光标恰在标记对中（两侧各 m 字节均为 marker）→ 删除标记对
+        if c >= m
+            && self.session.text_slice(Range::new(c - m, c)).as_deref() == Some(marker)
+            && self.session.text_slice(Range::new(c, c + m)).as_deref() == Some(marker)
+        {
+            let ev = self
+                .session
+                .apply(Edit::Delete {
+                    range: Range::new(c - m, c + m),
+                })
+                .ok()?;
+            return Some(self.collapse_and_return(ev.dirty_blocks, c - m));
+        }
+        let ev = self
+            .session
+            .apply(Edit::Insert {
+                at: c,
+                text: format!("{marker}{marker}"),
+            })
+            .expect("caret 恒合法");
+        Some(self.collapse_and_return(ev.dirty_blocks, c + m))
+    }
+
+    /// 插入链接（3c-1）：选区作链接文本、光标入 `()`；空选区插 `[]()`、光标入 `[]`。单撤销步。
+    fn apply_link(&mut self) -> Option<Vec<BlockId>> {
+        if let Some(sel) = self.selection() {
+            let text = self.session.text_slice(sel)?;
+            let at = sel.start + text.len() + 3; // `[` + 文本 + `](` 之后，光标落在 `()` 内
+            let ev = self
+                .session
+                .apply(Edit::Replace {
+                    range: sel,
+                    text: format!("[{text}]()"),
+                })
+                .expect("选区恒合法");
+            return Some(self.collapse_and_return(ev.dirty_blocks, at));
+        }
+        let c = self.caret();
+        let ev = self
+            .session
+            .apply(Edit::Insert {
+                at: c,
+                text: "[]()".into(),
+            })
+            .expect("caret 恒合法");
+        Some(self.collapse_and_return(ev.dirty_blocks, c + 1))
     }
 
     /// 光标纯移动：同时坍缩选区（anchor 追齐 caret），不产脏块。
@@ -1675,5 +1768,73 @@ mod tests {
         e.apply(Intent::Newline).unwrap();
         assert_eq!(e.session().serialize(), "abc\n");
         assert_eq!(e.caret(), 4);
+    }
+
+    // ---- 行内格式（3c-1）：ToggleWrap 包裹切换 + InsertLink ----
+
+    /// 造带选区的编辑器：anchor 定锚、caret 扩选到 caret。
+    fn sel_ed(text: &str, anchor: usize, caret: usize) -> Editor {
+        let mut e = Editor::new(text);
+        assert!(e.set_caret(anchor));
+        assert!(e.set_caret_extend(caret));
+        e
+    }
+
+    #[test]
+    fn bold_wraps_selection_single_undo_step() {
+        let mut e = sel_ed("hello world", 0, 5);
+        e.apply(Intent::ToggleWrap("**")).unwrap();
+        assert_eq!(e.session().serialize(), "**hello** world");
+        assert_eq!(e.caret(), 9, "光标停在包裹文本之后");
+        assert!(e.selection().is_none());
+        assert!(e.is_dirty());
+        e.apply(Intent::Undo).unwrap();
+        assert_eq!(e.session().serialize(), "hello world", "包裹是单撤销步");
+    }
+
+    #[test]
+    fn bold_unwraps_already_wrapped_selection() {
+        let mut e = sel_ed("**hello** rest", 0, 9);
+        e.apply(Intent::ToggleWrap("**")).unwrap();
+        assert_eq!(e.session().serialize(), "hello rest");
+        assert_eq!(e.caret(), 5);
+    }
+
+    #[test]
+    fn italic_on_bold_stacks_instead_of_unwrapping() {
+        // 选区恰为 `**b**`：单星 marker 不得误拆双星包裹，再包一层成加粗斜体
+        let mut e = sel_ed("**b**", 0, 5);
+        e.apply(Intent::ToggleWrap("*")).unwrap();
+        assert_eq!(e.session().serialize(), "***b***");
+    }
+
+    #[test]
+    fn empty_selection_inserts_pair_second_press_removes() {
+        let mut e = ed("ab", 1);
+        e.apply(Intent::ToggleWrap("**")).unwrap();
+        assert_eq!(e.session().serialize(), "a****b");
+        assert_eq!(e.caret(), 3, "光标居中于标记对");
+        e.apply(Intent::ToggleWrap("**")).unwrap();
+        assert_eq!(e.session().serialize(), "ab", "光标在标记对中再按一次删除标记对");
+        assert_eq!(e.caret(), 1);
+    }
+
+    #[test]
+    fn link_wraps_selection_caret_in_parens() {
+        let mut e = sel_ed("see here", 4, 8);
+        e.apply(Intent::InsertLink).unwrap();
+        assert_eq!(e.session().serialize(), "see [here]()");
+        assert_eq!(e.caret(), 11, "光标入 `()` 便于直接输 URL");
+        assert!(e.is_dirty());
+        e.apply(Intent::Undo).unwrap();
+        assert_eq!(e.session().serialize(), "see here", "插链接是单撤销步");
+    }
+
+    #[test]
+    fn link_empty_selection_inserts_skeleton_caret_in_brackets() {
+        let mut e = ed("ab", 1);
+        e.apply(Intent::InsertLink).unwrap();
+        assert_eq!(e.session().serialize(), "a[]()b");
+        assert_eq!(e.caret(), 2, "光标入 `[]` 便于直接输链接文本");
     }
 }

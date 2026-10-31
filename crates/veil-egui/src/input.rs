@@ -37,6 +37,10 @@ pub enum Key {
     N,
     /// 逻辑键 p（无论是否带 ctrl；用于 Ctrl+P 快速打开与文本分流）。
     P,
+    /// 逻辑键 b/i/k（无论是否带 ctrl；用于 Ctrl+B/I/K 行内格式与文本分流，3c-1）。
+    B,
+    I,
+    K,
     /// Escape：关闭菜单（切片 15）。
     Escape,
     Left,
@@ -127,6 +131,12 @@ pub fn translate(key: Key, mods: Mods) -> Option<Action> {
         Key::N => None, // 无 ctrl 的 n 文本由 Text 变体承载
         Key::P if mods.ctrl => Some(Action::QuickOpen),
         Key::P => None, // 无 ctrl 的 p 文本由 Text 变体承载
+        Key::B if mods.ctrl => Some(Action::Doc(Intent::ToggleWrap("**"))),
+        Key::B => None, // 无 ctrl 的 b 文本由 Text 变体承载
+        Key::I if mods.ctrl => Some(Action::Doc(Intent::ToggleWrap("*"))),
+        Key::I => None, // 无 ctrl 的 i 文本由 Text 变体承载
+        Key::K if mods.ctrl => Some(Action::Doc(Intent::InsertLink)),
+        Key::K => None, // 无 ctrl 的 k 文本由 Text 变体承载
         // Ctrl+Shift+←/→ 按词扩选；Ctrl+←/→ 按词移动；Shift+方向为字符级扩选。
         Key::Left if mods.ctrl && mods.shift => Some(Action::Doc(Intent::SelectWordLeft)),
         Key::Right if mods.ctrl && mods.shift => Some(Action::Doc(Intent::SelectWordRight)),
@@ -398,6 +408,26 @@ mod tests {
     fn quick_open_binding() {
         assert_eq!(translate(Key::P, CTRL), Some(Action::QuickOpen));
         assert_eq!(translate(Key::P, NONE), None); // 无 ctrl 的 p 由 Text 变体承载
+    }
+
+    #[test]
+    fn inline_format_bindings() {
+        // 3c-1：Ctrl+B/I/K → 加粗/斜体切换、插入链接
+        assert_eq!(
+            translate(Key::B, CTRL),
+            Some(Action::Doc(Intent::ToggleWrap("**")))
+        );
+        assert_eq!(
+            translate(Key::I, CTRL),
+            Some(Action::Doc(Intent::ToggleWrap("*")))
+        );
+        assert_eq!(
+            translate(Key::K, CTRL),
+            Some(Action::Doc(Intent::InsertLink))
+        );
+        assert_eq!(translate(Key::B, NONE), None); // 无 ctrl 的 b/i/k 由 Text 变体承载
+        assert_eq!(translate(Key::I, NONE), None);
+        assert_eq!(translate(Key::K, NONE), None);
     }
 
     #[test]

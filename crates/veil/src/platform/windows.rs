@@ -76,10 +76,26 @@ fn filter() -> Vec<u16> {
         .collect()
 }
 
+/// 图片过滤器（2f 插入图片）：与 image::is_image_path 同一族扩展名。
+fn image_filter() -> Vec<u16> {
+    "图片 (*.png;*.jpg;*.jpeg;*.jfif;*.bmp;*.gif;*.webp;*.tif;*.tiff;*.ico)\0*.png;*.jpg;*.jpeg;*.jfif;*.bmp;*.gif;*.webp;*.tif;*.tiff;*.ico\0所有文件 (*.*)\0*.*\0\0"
+        .encode_utf16()
+        .collect()
+}
+
 fn run(flags: u32, title: &str, suggested: Option<&str>) -> Option<PathBuf> {
-    let filter = filter();
+    run_with(flags, title, suggested, filter(), "md")
+}
+
+fn run_with(
+    flags: u32,
+    title: &str,
+    suggested: Option<&str>,
+    filter: Vec<u16>,
+    def_ext: &str,
+) -> Option<PathBuf> {
     let title = wide(title);
-    let def_ext = wide("md");
+    let def_ext = wide(def_ext);
     let mut buf = [0u16; MAX_PATH_U16];
     if let Some(name) = suggested {
         for (dst, src) in buf.iter_mut().zip(name.encode_utf16()) {
@@ -150,6 +166,17 @@ impl FileDialog for WinDialogs {
             OFN_EXPLORER | OFN_OVERWRITEPROMPT | OFN_HIDEREADONLY | OFN_NOCHANGEDIR,
             "另存为 Markdown",
             Some(suggested),
+        )
+    }
+
+    fn open_image(&mut self) -> Option<PathBuf> {
+        run_with(
+            OFN_EXPLORER | OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_HIDEREADONLY
+                | OFN_NOCHANGEDIR,
+            "插入图片",
+            None,
+            image_filter(),
+            "png",
         )
     }
 }

@@ -5,8 +5,8 @@ use crate::app::App;
 use crate::chrome;
 use crate::geometry::{BASE_LINE_HEIGHT, MARGIN};
 use crate::view::{
-    node_active, outline, oversize_notice, quick_open, search, BlockLayout, Frame, InlineAsset,
-    InlineImg, LayoutKey, Memo,
+    ctx_menu, node_active, outline, oversize_notice, quick_open, search, BlockLayout, Frame,
+    InlineAsset, InlineImg, LayoutKey, Memo,
 };
 use std::path::{Path, PathBuf};
 use veil_core::{BlockId, BlockKind, InlineKind, InlineNode, Range};
@@ -662,6 +662,8 @@ impl App {
         self.paint_search(&mut frame);
         // 快速打开（阶段 1）：浮在查找栏之上
         self.paint_quick(&mut frame);
+        // 右键菜单（2f）：浮在全部内容浮层之上、chrome 之前
+        self.paint_ctx_menu(&mut frame);
         // 拖放悬停提示（阶段 1）：浮在最上层内容装饰
         self.paint_drop_hint(&mut frame);
         // chrome 最后绘制（不透明覆盖内容；滚动条区保留给状态栏行列）
@@ -1274,6 +1276,57 @@ impl App {
                     let y = (row.y + row.h / 2.0 - lab.h as f32 / 2.0).round() as i32;
                     frame.blit(&lab.pixels, lab.w, lab.h, (row.x + pad).round() as i32, y);
                 }
+            }
+        }
+    }
+
+    /// 右键上下文菜单（2f）：面板 → 悬停底色 → 项标签。瞬态浮层：
+    /// 只读视觉，不触碰文档真值与缓存；标签位图复用 chrome 缓存。
+    pub(crate) fn paint_ctx_menu(&mut self, frame: &mut Frame) {
+        if !self.ui_state.ctx.open {
+            return;
+        }
+        let scale = self.input_state.scale;
+        let theme = self.input_state.theme;
+        let items: Vec<(&'static str, ctx_menu::CtxAction)> = self.ui_state.ctx.items().to_vec();
+        let vp = self.viewport();
+        let l = ctx_menu::layout(
+            &items,
+            self.ui_state.ctx.x,
+            self.ui_state.ctx.y,
+            vp.x + vp.w,
+            vp.y + vp.h,
+            scale,
+        );
+        let px = l.x.round() as i32;
+        let py = l.y.round() as i32;
+        let pw = l.w.ceil() as u32;
+        let ph = l.h.ceil() as u32;
+        frame.fill_rect(px, py, pw, ph, theme.popup_bg);
+        frame.fill_rect(px, py, pw, 1, theme.chrome_border);
+        frame.fill_rect(px, py + ph as i32 - 1, pw, 1, theme.chrome_border);
+        frame.fill_rect(px, py, 1, ph, theme.chrome_border);
+        frame.fill_rect(px + pw as i32 - 1, py, 1, ph, theme.chrome_border);
+        let hover = self.ui_state.ctx.hover;
+        for (i, (label, _)) in items.iter().enumerate() {
+            let iy = l.y + l.top_pad + l.item_h * i as f32;
+            if hover == Some(i) {
+                frame.fill_rect(
+                    px + 1,
+                    iy.round() as i32,
+                    pw.saturating_sub(2),
+                    l.item_h.ceil() as u32,
+                    theme.hover,
+                );
+            }
+            if let Some(lab) = self.ui_state.chrome.labels.get_or_insert(
+                &mut self.engine,
+                label,
+                theme.text,
+                scale,
+            ) {
+                let y = (iy + l.item_h / 2.0 - lab.h as f32 / 2.0).round() as i32;
+                frame.blit(&lab.pixels, lab.w, lab.h, (l.x + l.pad).round() as i32, y);
             }
         }
     }

@@ -102,9 +102,9 @@ pub(crate) fn route(mode: Mode, key: Key, mods: Mods, composing: bool) -> Cmd {
 }
 
 impl App {
-    /// 当前模式：唯一优先级实现（菜单 > 快速打开 > 查找栏 > 文档）。
+    /// 当前模式：唯一优先级实现（菜单/右键菜单 > 快速打开 > 查找栏 > 文档）。
     pub(crate) fn mode(&self) -> Mode {
-        if self.ui_state.chrome.is_open() {
+        if self.ui_state.chrome.is_open() || self.ui_state.ctx.open {
             Mode::Menu
         } else if self.ui_state.quick.open {
             Mode::QuickOpen

@@ -126,7 +126,8 @@ fn menu_definitions_cover_shortcuts() {
             MenuAction::Paste,
             MenuAction::SelectAll,
             MenuAction::Find,
-            MenuAction::Replace
+            MenuAction::Replace,
+            MenuAction::InsertImage
         ]
     );
 }

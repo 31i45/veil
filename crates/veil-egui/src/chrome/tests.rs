@@ -328,11 +328,15 @@ fn paint_uses_dark_palette() {
 fn theme_menu_marks_current_mode() {
     assert_eq!(MENUS.len(), 3);
     assert_eq!(action_at(2, 0, &[]), Some(MenuAction::ToggleOutline));
-    assert_eq!(action_at(2, 1, &[]), Some(MenuAction::ThemeSystem));
-    assert_eq!(action_at(2, 2, &[]), Some(MenuAction::ThemeLight));
-    assert_eq!(action_at(2, 3, &[]), Some(MenuAction::ThemeDark));
-    assert_eq!(action_at(2, 4, &[]), Some(MenuAction::ToggleFocus));
-    assert_eq!(action_at(2, 5, &[]), Some(MenuAction::ToggleTypewriter));
+    // 3c-2：视图缩放进视图菜单（大纲面板之后、主题之前）
+    assert_eq!(action_at(2, 1, &[]), Some(MenuAction::ZoomIn));
+    assert_eq!(action_at(2, 2, &[]), Some(MenuAction::ZoomOut));
+    assert_eq!(action_at(2, 3, &[]), Some(MenuAction::ZoomReset));
+    assert_eq!(action_at(2, 4, &[]), Some(MenuAction::ThemeSystem));
+    assert_eq!(action_at(2, 5, &[]), Some(MenuAction::ThemeLight));
+    assert_eq!(action_at(2, 6, &[]), Some(MenuAction::ThemeDark));
+    assert_eq!(action_at(2, 7, &[]), Some(MenuAction::ToggleFocus));
+    assert_eq!(action_at(2, 8, &[]), Some(MenuAction::ToggleTypewriter));
     assert!(theme_action_matches(
         MenuAction::ThemeSystem,
         ThemeMode::System

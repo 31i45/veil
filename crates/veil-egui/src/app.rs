@@ -21,6 +21,7 @@ use crate::editor::Editor;
 use crate::geometry::BASE_LINE_HEIGHT;
 use crate::image::{AssetStore, ImageData, ImageLoader};
 use crate::input::Mods;
+use crate::interaction::ZOOM_WHEEL_PX;
 use crate::math::MathRenderer;
 use crate::print::{Print, PrintState};
 use crate::theme::{
@@ -215,12 +216,29 @@ pub(crate) struct InputState {
     pub(crate) revs: Revs,
     pub(crate) mouse: PhysicalPosition<f64>,
     pub(crate) mods: Mods,
+    /// 有效缩放 = dpi_scale × user_zoom（一切排版/命中/光栅的唯一基准）。
+    /// 打印期间被页帧 DPI 整体覆写（PrintState 保存/恢复）。
     pub(crate) scale: f32,
+    /// winit 报告的 DPI 缩放原值；用户缩放不改变它，二者乘积写入 scale。
+    pub(crate) dpi_scale: f32,
+    /// 用户缩放因子（3c-2）：Ctrl+滚轮/捏合、Ctrl+=/-/0 与视图菜单；0.1 步进。
+    /// 纸张打印不随它变（打印按页帧 DPI 覆写 scale）。
+    pub(crate) user_zoom: f32,
+    /// 高精度滚轮/触控板捏合的缩放累积量（像素）：每满一档阈值触发一次 0.1 步进。
+    pub(crate) zoom_accum: f32,
     pub(crate) theme: Theme,
     pub(crate) system_dark: bool,
     pub(crate) last_theme_check: Option<Instant>,
     /// 拖拽悬停文件（阶段 1）：仅驱动落点提示叠层；松开/离开窗口即清空。
     pub(crate) drop_file: Option<PathBuf>,
+}
+
+impl InputState {
+    /// DPI 输入（窗口创建 / ScaleFactorChanged）：有效缩放随用户因子重算。
+    pub(crate) fn set_dpi(&mut self, dpi: f32) {
+        self.dpi_scale = dpi;
+        self.scale = dpi * self.user_zoom;
+    }
 }
 
 /// 持久化策略状态（ADR-009 S6 C3）：外部变更事实 + 自动保存调度 + 恢复/会话。
@@ -494,6 +512,9 @@ impl App {
                 mouse: PhysicalPosition::new(0.0, 0.0),
                 mods: Mods::default(),
                 scale: 1.0,
+                dpi_scale: 1.0,
+                user_zoom: 1.0,
+                zoom_accum: 0.0,
                 theme,
                 system_dark,
                 last_theme_check: None,
@@ -726,7 +747,7 @@ impl ApplicationHandler for App {
             }
         };
         window.set_ime_allowed(true);
-        self.input_state.scale = window.scale_factor() as f32;
+        self.input_state.set_dpi(window.scale_factor() as f32);
         let context = match Context::new(window.clone()) {
             Ok(c) => c,
             Err(e) => {
@@ -763,7 +784,7 @@ impl ApplicationHandler for App {
             }
             WindowEvent::ScaleFactorChanged { .. } => {
                 if let Some(w) = &self.window_state.window {
-                    self.input_state.scale = w.scale_factor() as f32;
+                    self.input_state.set_dpi(w.scale_factor() as f32);
                 }
                 // DPI 变化：键中的 scale 量化值变化使全部按 scale 生成的缓存失配；
                 // chrome 标签按旧 scale 光栅化，仍需显式作废
@@ -836,6 +857,16 @@ impl ApplicationHandler for App {
                 self.ui_state.chrome.scroll_drag = None;
             }
             WindowEvent::MouseWheel { delta, .. } => {
+                if self.input_state.mods.ctrl {
+                    // Ctrl+滚轮 / 触控板捏合（Windows 捏合上报为带 Ctrl 的滚轮事件）：
+                    // 用户缩放（3c-2），不滚动。LineDelta 一格折一档像素阈值。
+                    let px = match delta {
+                        MouseScrollDelta::LineDelta(_, y) => y * ZOOM_WHEEL_PX,
+                        MouseScrollDelta::PixelDelta(p) => p.y as f32,
+                    };
+                    self.zoom_by(px);
+                    return;
+                }
                 let d = match delta {
                     MouseScrollDelta::LineDelta(_, y) => {
                         y * 3.0 * BASE_LINE_HEIGHT * self.input_state.scale

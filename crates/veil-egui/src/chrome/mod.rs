@@ -85,6 +85,10 @@ pub enum MenuAction {
     ToggleFocus,
     /// 切换打字机模式（阶段 1）。
     ToggleTypewriter,
+    /// 视图缩放（3c-2）：放大/缩小一档、还原 100%。
+    ZoomIn,
+    ZoomOut,
+    ZoomReset,
     Quit,
     /// 打开最近文件（0b）：下标为最近列表位置（0 = 最近一次）。
     OpenRecent(usize),
@@ -131,6 +135,9 @@ pub const MENUS: [MenuDef; 3] = [
         title: "视图",
         items: &[
             ("大纲面板", "Ctrl+Shift+O", MenuAction::ToggleOutline),
+            ("放大", "Ctrl+=", MenuAction::ZoomIn),
+            ("缩小", "Ctrl+-", MenuAction::ZoomOut),
+            ("还原缩放", "Ctrl+0", MenuAction::ZoomReset),
             ("跟随系统", "", MenuAction::ThemeSystem),
             ("浅色", "", MenuAction::ThemeLight),
             ("深色", "", MenuAction::ThemeDark),

@@ -41,6 +41,10 @@ pub enum Key {
     B,
     I,
     K,
+    /// 逻辑键 0/-/=（无论是否带 ctrl；用于 Ctrl+0/± 视图缩放与文本分流，3c-2）。
+    Digit0,
+    Minus,
+    Equal,
     /// Escape：关闭菜单（切片 15）。
     Escape,
     Left,
@@ -93,6 +97,10 @@ pub enum Action {
     Find,
     /// 打开查找栏并展开替换行（Ctrl+H）：纯视图动作。
     Replace,
+    /// 视图缩放（3c-2）：放大/缩小一档（0.1）、还原 100%。纯视图动作，不动文档。
+    ZoomIn,
+    ZoomOut,
+    ZoomReset,
 }
 
 pub fn translate(key: Key, mods: Mods) -> Option<Action> {
@@ -137,6 +145,10 @@ pub fn translate(key: Key, mods: Mods) -> Option<Action> {
         Key::I => None, // 无 ctrl 的 i 文本由 Text 变体承载
         Key::K if mods.ctrl => Some(Action::Doc(Intent::InsertLink)),
         Key::K => None, // 无 ctrl 的 k 文本由 Text 变体承载
+        Key::Equal if mods.ctrl => Some(Action::ZoomIn),
+        Key::Minus if mods.ctrl => Some(Action::ZoomOut),
+        Key::Digit0 if mods.ctrl => Some(Action::ZoomReset),
+        Key::Digit0 | Key::Minus | Key::Equal => None, // 无 ctrl 的符号文本由 Text 变体承载
         // Ctrl+Shift+←/→ 按词扩选；Ctrl+←/→ 按词移动；Shift+方向为字符级扩选。
         Key::Left if mods.ctrl && mods.shift => Some(Action::Doc(Intent::SelectWordLeft)),
         Key::Right if mods.ctrl && mods.shift => Some(Action::Doc(Intent::SelectWordRight)),
@@ -203,6 +215,19 @@ mod tests {
     fn ctrl_text_is_swallowed_not_inserted() {
         // 未知快捷键不得降级为文本插入（防 Ctrl+V 等入文档，粘贴属后续切片）
         assert_eq!(translate(text("v"), CTRL), None);
+    }
+
+    #[test]
+    fn zoom_bindings() {
+        // 3c-2：Ctrl+=/- 缩放档位、Ctrl+0 还原；无 ctrl 时不吞键（文本走 Text 变体）
+        assert_eq!(translate(Key::Equal, CTRL), Some(Action::ZoomIn));
+        assert_eq!(translate(Key::Minus, CTRL), Some(Action::ZoomOut));
+        assert_eq!(translate(Key::Digit0, CTRL), Some(Action::ZoomReset));
+        assert_eq!(translate(Key::Equal, NONE), None);
+        assert_eq!(translate(Key::Minus, NONE), None);
+        assert_eq!(translate(Key::Digit0, NONE), None);
+        // Ctrl+Shift+=（部分键盘「+」的主键 =）仍按放大处理：shift 不影响
+        assert_eq!(translate(Key::Equal, CTRL_SHIFT), Some(Action::ZoomIn));
     }
 
     #[test]

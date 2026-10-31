@@ -6011,3 +6011,157 @@ fn print_stub_notices_when_platform_missing() {
     assert_eq!(a.ui_state.chrome.notice, "当前平台暂不支持打印");
     assert!(a.window_state.print.is_none(), "NoPrint 不进入打印态");
 }
+
+// ── 3c-2：用户缩放（Ctrl+滚轮/捏合、Ctrl+=/-/0、视图菜单）────────────────────
+
+#[test]
+fn zoom_step_scales_effective_dpi_and_reflows() {
+    let store = MemStore::default();
+    let mut a = app("第一段\n\n第二段\n", Some("a.md"), false, &store);
+    a.input_state.set_dpi(2.0); // 模拟 200% DPI：effective = dpi × zoom
+    let before = a.base_key();
+    a.ensure_layouts_all();
+    let h0 = a.doc_height();
+    a.zoom_step(1);
+    assert_eq!(a.input_state.user_zoom, 1.1);
+    assert!(
+        (a.input_state.scale - 2.2).abs() < 1e-6,
+        "effective scale = 2.0 × 1.1: {}",
+        a.input_state.scale
+    );
+    assert_ne!(a.base_key(), before, "scale 量化入键 → 布局整体失配重排");
+    a.ensure_layouts_all();
+    assert!(
+        a.doc_height() > h0,
+        "放大后行高变大 → 文档变高: {h0} → {}",
+        a.doc_height()
+    );
+    assert_eq!(a.ui_state.chrome.notice, "缩放 110%");
+}
+
+#[test]
+fn zoom_quantizes_to_tenth_and_clamps() {
+    let store = MemStore::default();
+    let mut a = app("x\n", Some("a.md"), false, &store);
+    a.set_user_zoom(1.04);
+    assert_eq!(a.input_state.user_zoom, 1.0, "0.1 量化：1.04 → 1.0");
+    a.set_user_zoom(1.06);
+    assert_eq!(a.input_state.user_zoom, 1.1, "0.1 量化：1.06 → 1.1");
+    for _ in 0..30 {
+        a.zoom_step(1);
+    }
+    assert_eq!(a.input_state.user_zoom, 3.0, "放大封顶 3.0");
+    let notice = a.ui_state.chrome.notice.clone();
+    a.zoom_step(1);
+    assert_eq!(a.input_state.user_zoom, 3.0, "到顶不再变化");
+    assert_eq!(a.ui_state.chrome.notice, notice, "无变化不刷提示");
+    for _ in 0..40 {
+        a.zoom_step(-1);
+    }
+    assert_eq!(a.input_state.user_zoom, 0.5, "缩小封底 0.5");
+}
+
+#[test]
+fn zoom_step_roundtrips_exactly_and_reset_restores() {
+    let store = MemStore::default();
+    let mut a = app("x\n", Some("a.md"), false, &store);
+    a.zoom_step(1);
+    a.zoom_step(-1);
+    assert_eq!(a.input_state.user_zoom, 1.0, "0.1 加减量化保证精确往返");
+    a.zoom_step(1);
+    a.zoom_step(1);
+    a.zoom_reset();
+    assert_eq!(a.input_state.user_zoom, 1.0, "Ctrl+0 还原 100%");
+    assert_eq!(a.input_state.scale, a.input_state.dpi_scale);
+    assert_eq!(a.ui_state.chrome.notice, "缩放 100%");
+}
+
+#[test]
+fn zoom_by_accumulates_trackpad_pixels() {
+    let store = MemStore::default();
+    let mut a = app("x\n", Some("a.md"), false, &store);
+    // 高精度触控板小增量：不满一档（50px）不触发
+    a.zoom_by(20.0);
+    a.zoom_by(20.0);
+    assert_eq!(a.input_state.user_zoom, 1.0, "40px 未满一档");
+    a.zoom_by(20.0);
+    assert_eq!(a.input_state.user_zoom, 1.1, "60px 触发一档");
+    assert_eq!(a.input_state.zoom_accum, 10.0, "余量保留到下一次");
+    // 反向一次大增量：10 - 120 = -110 → 两档缩小，余 -10
+    a.zoom_by(-120.0);
+    assert_eq!(a.input_state.user_zoom, 0.9, "-110px 触发两档");
+    assert_eq!(a.input_state.zoom_accum, -10.0);
+}
+
+#[test]
+fn zoom_shrink_clamps_scroll_into_new_max() {
+    let store = MemStore::default();
+    let text: String = (1..=100).map(|i| format!("段落{i:03}\n\n")).collect();
+    let mut a = app(&text, Some("a.md"), false, &store);
+    a.ensure_layouts_all();
+    let max0 = chrome::max_scroll(a.viewport(), a.doc_height());
+    assert!(max0 > 0.0, "长文档可滚动");
+    a.window_state.scroll_y = max0;
+    for _ in 0..5 {
+        a.zoom_step(-1); // 1.0 → 0.5：文档变矮，最大滚动量收缩
+    }
+    let max1 = chrome::max_scroll(a.viewport(), a.doc_height());
+    assert!(max1 < max0, "缩小后文档更矮: {max0} → {max1}");
+    assert!(
+        a.window_state.scroll_y <= max1,
+        "滚动位置钳入新上界: {} ≤ {max1}",
+        a.window_state.scroll_y
+    );
+}
+
+#[test]
+fn zoom_is_view_only_keeps_doc_and_dirty() {
+    let store = MemStore::default();
+    let mut a = app("正文 abc\n", Some("a.md"), false, &store);
+    a.zoom_step(1);
+    assert!(!a.editor.is_dirty(), "纯视图缩放不置脏");
+    let dirty = a.editor.apply(Intent::InsertText("z".into())).unwrap();
+    a.after_edit(dirty);
+    assert!(a.editor.is_dirty());
+    a.zoom_reset();
+    assert!(a.editor.is_dirty(), "缩放不清已有脏标");
+    assert_eq!(doc_text(&a), "z正文 abc\n", "缩放不动文档真值");
+}
+
+#[test]
+fn zoom_ignored_during_print() {
+    let store = MemStore::default();
+    let mut a = app("x\n", Some("a.md"), false, &store);
+    a.window_state.print = Some(crate::print::PrintState {
+        w: 300,
+        h: 120,
+        saved_scale: 1.0,
+        saved_scroll: 0.0,
+        breaks: vec![0.0],
+    });
+    a.set_user_zoom(1.5);
+    assert_eq!(a.input_state.user_zoom, 1.0, "打印页帧语义独占 scale");
+    a.window_state.print = None;
+}
+
+#[test]
+fn zoom_menu_and_key_paths() {
+    let store = MemStore::default();
+    let mut a = app("x\n", Some("a.md"), false, &store);
+    assert!(!a.perform_menu(MenuAction::ZoomIn), "缩放不退出应用");
+    assert_eq!(a.input_state.user_zoom, 1.1, "菜单放大");
+    // 键盘链路：map_key（Ctrl+= 的 winit 形态）→ translate → Action
+    assert_eq!(
+        crate::input::translate(Key::Equal, Mods {
+            ctrl: true,
+            shift: false
+        }),
+        Some(Action::ZoomIn)
+    );
+    a.perform_action(Action::ZoomOut);
+    a.perform_action(Action::ZoomOut);
+    assert_eq!(a.input_state.user_zoom, 0.9, "键盘动作两档缩小");
+    a.perform_action(Action::ZoomReset);
+    assert_eq!(a.input_state.user_zoom, 1.0);
+    assert!(!a.editor.is_dirty(), "菜单/键盘缩放均不置脏");
+}

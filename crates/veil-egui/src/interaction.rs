@@ -24,6 +24,14 @@ const CLICK_GAP: Duration = Duration::from_millis(500);
 /// 连续点击允许的位置漂移（逻辑像素）。
 const CLICK_SLOP: f64 = 4.0;
 
+/// 用户缩放一档对应的滚轮/捏合像素量（3c-2）：LineDelta 一格折算此值，
+/// 高精度触控板（PixelDelta，Windows 捏合手势）按累积量满一档触发一次步进。
+pub(crate) const ZOOM_WHEEL_PX: f32 = 50.0;
+/// 用户缩放步进与量化的最小单位：加减法保证 ±档可精确往返 1.0。
+const ZOOM_STEP: f32 = 0.1;
+const ZOOM_MIN: f32 = 0.5;
+const ZOOM_MAX: f32 = 3.0;
+
 impl App {
     /// 编辑后统一入口：重建索引、视口跟随光标、请求重绘。
     /// 仅内容编辑重启自动保存静默期；纯光标移动不推迟落盘。
@@ -182,7 +190,64 @@ impl App {
             Action::Export => self.export_now(),
             Action::Find => self.open_search(),
             Action::Replace => self.open_replace(),
+            Action::ZoomIn => self.zoom_step(1),
+            Action::ZoomOut => self.zoom_step(-1),
+            Action::ZoomReset => self.zoom_reset(),
         }
+    }
+
+    // ── 用户缩放（3c-2）：effective scale = DPI × user_zoom ──────────────────
+
+    /// 滚轮/捏合增量入口（像素）：累积满一档阈值触发一次步进，余量保留
+    /// （高精度触控板一次捏合是数十个小增量事件，逐事件步进会过度敏感）。
+    pub(crate) fn zoom_by(&mut self, px: f32) {
+        self.input_state.zoom_accum += px;
+        while self.input_state.zoom_accum >= ZOOM_WHEEL_PX {
+            self.input_state.zoom_accum -= ZOOM_WHEEL_PX;
+            self.zoom_step(1);
+        }
+        while self.input_state.zoom_accum <= -ZOOM_WHEEL_PX {
+            self.input_state.zoom_accum += ZOOM_WHEEL_PX;
+            self.zoom_step(-1);
+        }
+    }
+
+    /// 缩放一档（+1 放大 / -1 缩小）。
+    pub(crate) fn zoom_step(&mut self, dir: i32) {
+        let z = self.input_state.user_zoom + ZOOM_STEP * dir as f32;
+        self.set_user_zoom(z);
+    }
+
+    /// 还原 100%（Ctrl+0 / 视图菜单）。
+    pub(crate) fn zoom_reset(&mut self) {
+        self.set_user_zoom(1.0);
+    }
+
+    /// 设置用户缩放因子：0.1 量化 + [0.5, 3.0] 钳位；有效缩放 = DPI × 用户因子。
+    /// base_key 含 scale 量化值 → 布局/光栅/表格整体失配自然重排；
+    /// chrome 标签按旧 scale 光栅化，与 ScaleFactorChanged 同路显式作废。
+    pub(crate) fn set_user_zoom(&mut self, zoom: f32) {
+        if self.window_state.print.is_some() {
+            return; // 打印页帧语义独占 scale（模态同步流程，防御性拒绝）
+        }
+        let zoom = ((zoom * 10.0).round() / 10.0).clamp(ZOOM_MIN, ZOOM_MAX);
+        if zoom == self.input_state.user_zoom {
+            return;
+        }
+        self.input_state.user_zoom = zoom;
+        self.input_state.scale = self.input_state.dpi_scale * zoom;
+        self.ui_state.chrome.clear_label_cache();
+        self.refresh_index();
+        self.ensure_layouts_visible();
+        self.ensure_math_visible();
+        self.ensure_tables_visible();
+        self.recompute_geometry();
+        // 文档高度随缩放变化：滚动位置可能越出新的最大滚动量，钳位
+        let max = chrome::max_scroll(self.viewport(), self.doc_height());
+        self.window_state.scroll_y = self.window_state.scroll_y.clamp(0.0, max);
+        self.set_ime_area();
+        self.ui_state.chrome.notice = format!("缩放 {}%", (zoom * 100.0).round() as u32);
+        self.request_redraw();
     }
 
     /// 粘贴（切片 11/14）：HTML 优先转 Markdown，转换无内容（纯图片/空结构）回退纯文本；
@@ -536,6 +601,9 @@ impl App {
             MenuAction::ThemeDark => self.set_theme_mode(ThemeMode::Dark),
             MenuAction::ToggleFocus => self.toggle_focus(),
             MenuAction::ToggleTypewriter => self.toggle_typewriter(),
+            MenuAction::ZoomIn => self.zoom_step(1),
+            MenuAction::ZoomOut => self.zoom_step(-1),
+            MenuAction::ZoomReset => self.zoom_reset(),
             MenuAction::ToggleOutline => self.toggle_outline(),
             MenuAction::Find => self.open_search(),
             MenuAction::Replace => self.open_replace(),
@@ -1412,6 +1480,10 @@ pub(crate) fn map_key(event: &winit::event::KeyEvent) -> Option<Key> {
         WKey::Character(c) if c.as_str().eq_ignore_ascii_case("b") => Some(Key::B),
         WKey::Character(c) if c.as_str().eq_ignore_ascii_case("i") => Some(Key::I),
         WKey::Character(c) if c.as_str().eq_ignore_ascii_case("k") => Some(Key::K),
+        // Ctrl+0/-/= 缩放（3c-2）：无 ctrl 时这些字符的文本由上方 Text 分支承载
+        WKey::Character(c) if c.as_str() == "0" => Some(Key::Digit0),
+        WKey::Character(c) if c.as_str() == "-" => Some(Key::Minus),
+        WKey::Character(c) if c.as_str() == "=" => Some(Key::Equal),
         _ => None,
     }
 }

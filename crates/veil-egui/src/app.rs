@@ -11,7 +11,7 @@ use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, Ime, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
-use winit::window::{Window, WindowId};
+use winit::window::{Icon, Window, WindowId};
 
 use crate::autosave::Autosave;
 use crate::chrome::{self, Chrome, Viewport};
@@ -740,7 +740,11 @@ impl ApplicationHandler for App {
         }
         let attrs = Window::default_attributes()
             .with_title(self.title_text())
-            .with_inner_size(LogicalSize::new(900.0, 700.0));
+            .with_inner_size(LogicalSize::new(900.0, 700.0))
+            // 3e 修 A1：exe 内嵌 ICO 只喂任务栏/文件管理器，标题栏图标须显式设置
+            .with_window_icon(Some(
+                Icon::from_rgba(crate::icon::icon_rgba(32), 32, 32).expect("32×32 RGBA 尺寸恒合法"),
+            ));
         let window = match event_loop.create_window(attrs) {
             Ok(w) => Arc::new(w),
             Err(e) => {

@@ -25,6 +25,10 @@ New-Item -ItemType Directory -Force -Path $outDir | Out-Null
 $rows = @()
 
 foreach ($s in $suites) {
+    if (-not (Test-Path $s.File)) {
+        Write-Host ("跳过 {0}：缺少 {1}（先运行 python tools/bench/gen_corpus.py --out bench/corpus）" -f $s.Label, $s.File)
+        continue
+    }
     foreach ($a in $apps) {
         if (-not (Test-Path $a.Exe)) { continue }
         $dir = Split-Path $a.Exe -Parent

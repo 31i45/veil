@@ -2,4 +2,6 @@ target/
 .skills/
 # 基准测量结果为本机产物，不入库（语料与脚本入库）
 bench/results/
+# 10MB 病态语料体积大且可完全复现，由 tools/bench/gen_corpus.py 生成，不入库
+bench/corpus/pathological-10mb.md
 

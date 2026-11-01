@@ -1149,10 +1149,10 @@ fn shift_tab_goes_back() {
     // caret 在表体第二格 "e"
     a.editor.set_caret(tbl.rows[0][1].range.start);
     // Shift+Tab → 表体首格 "d"
-    a.input_state.mods = Mods { ctrl: false, shift: true };
+    a.input_state.mods = Mods { ctrl: false, shift: true, alt: false };
     a.route_key(Key::Tab);
     assert_eq!(a.editor.caret(), tbl.rows[0][0].range.start);
-    a.input_state.mods = Mods { ctrl: false, shift: false };
+    a.input_state.mods = Mods { ctrl: false, shift: false, alt: false };
 }
 
 #[test]
@@ -6154,7 +6154,8 @@ fn zoom_menu_and_key_paths() {
     assert_eq!(
         crate::input::translate(Key::Equal, Mods {
             ctrl: true,
-            shift: false
+            shift: false,
+            alt: false,
         }),
         Some(Action::ZoomIn)
     );
@@ -6184,7 +6185,8 @@ fn fullscreen_headless_noop_and_menu_path() {
     assert_eq!(
         crate::input::translate(Key::F11, Mods {
             ctrl: false,
-            shift: false
+            shift: false,
+            alt: false,
         }),
         Some(Action::ToggleFullscreen)
     );

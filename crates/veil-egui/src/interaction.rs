@@ -17,6 +17,7 @@ use std::time::{Duration, Instant};
 use veil_core::{task_span, BlockId, BlockKind, InlineKind, InlineNode, Range};
 use winit::event::ElementState;
 use winit::keyboard::{Key as WKey, NamedKey};
+use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
 
 /// 连续点击（双击/三击）的最大间隔。
 const CLICK_GAP: Duration = Duration::from_millis(500);
@@ -1465,14 +1466,16 @@ fn image_link_target(doc: &Path, img: &Path) -> String {
     }
 }
 
-/// winit 键 → 内部 `Key`。ctrl 按住时 text 为空，字母键退化为 Z/Y 供快捷键判定。
+/// winit 键 → 内部 `Key`。可打印文本优先走 `event.text`；Ctrl 按住时 Windows 把
+/// logical_key/text 污染为控制字符（0x01–0x1A），快捷键判定改对
+/// `key_without_modifiers()`（剥离修饰键还原字母）匹配，否则 Ctrl 组合全失效（K1）。
 pub(crate) fn map_key(event: &winit::event::KeyEvent) -> Option<Key> {
     if let Some(t) = &event.text {
         if !t.is_empty() && !t.chars().any(|c| c.is_control()) {
             return Some(Key::Text(t.to_string()));
         }
     }
-    match &event.logical_key {
+    match event.key_without_modifiers() {
         WKey::Named(NamedKey::ArrowLeft) => Some(Key::Left),
         WKey::Named(NamedKey::ArrowRight) => Some(Key::Right),
         WKey::Named(NamedKey::ArrowUp) => Some(Key::Up),

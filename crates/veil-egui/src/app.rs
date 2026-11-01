@@ -813,6 +813,7 @@ impl ApplicationHandler for App {
                 self.input_state.mods = Mods {
                     ctrl: s.control_key(),
                     shift: s.shift_key(),
+                    alt: s.alt_key(),
                 };
             }
             WindowEvent::CursorMoved { position, .. } => {

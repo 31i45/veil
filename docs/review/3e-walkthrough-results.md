@@ -1,19 +1,32 @@
 # 3e 真机走查结果记录
 
 > 对照清单：[3e 真机走查清单与预期效果](3e-manual-walkthrough.md)
-> 产物：`target\release\veil.exe`（2026-10-31 从头编译：`cargo clean -p veil` + `cargo build --release -p veil`，耗时 71.7s）
+> 产物：`target\release\veil.exe`（2026-11-01 重打包：K1/S1/A1/U1/R1 修复后重编译，5,815,808B ≈ 5.55MiB）
 > 测试期间不改代码；所有问题记录后统一修复。
 
 ## 环境
 
-- 记录时填写：Windows 版本、显示器 DPI、输入法版本、是否有安全软件
+- OS：Microsoft Windows 11 企业版 10.0.26300
+- 显示器 DPI：待填
+- 输入法：待填（已测英文键盘布局 + 中文拼音）
+- 安全软件：待填
+
+## 交接（新上下文继续点，2026-11-01）
+
+- **进度**：清单 65 项，已走查 12 项（A 区 6 / B 区 B1–B6），**下一项 B7**（选区直接输入 / 粘贴）。
+- **走查规则**：每项由用户实测 → 用户反馈 → 回填本文件 → 再下一项；**走查期间不改代码**。
+- **待决策**：T1 倾向方案 1（上下文感知缩进：段落不整行缩进、列表项改嵌套、代码块内插空格、引用加 `> `），需用户在走查收官后拍板。
+- **挂起**：I1 光标偶发错行（一次观察，未复现）。
+- **已修复验点**：A1 标题栏图标、S1 长路径状态栏、K1 Ctrl 组合键、U1 撤销粒度、R1 恢复草稿——建议在 B7 一轮顺带确认。
+- **基线**：`cargo test --workspace` 810 passed / 0 failed / 10 ignored；clippy 零警告；release 5,815,808B ≈ 5.55MiB。
+- **产物与素材**：`target\release\veil.exe`；`%TEMP%\veil-walkthrough\`（4 个测试文档）。
 
 ## 自动化项（我测，无需人工）
 
 | # | 项目 | 实测 | 判定 |
 |---|---|---|---|
 | A2 | 冷启动墙钟（5 次，no args） | 201 / 78 / 77 / 80 / 77 ms，中位 **78ms** | ✅ ≤300ms（首次 201ms 为磁盘冷读） |
-| A5 | exe 文件属性 | FileVersion=ProductVersion=0.1.0；描述「Veil Markdown 编辑器」；`ExtractAssociatedIcon` 取回 32×32 图标；体积 5,805,568B≈5.54MiB | ✅ |
+| A5 | exe 文件属性 | FileVersion=ProductVersion=0.1.0；描述「Veil Markdown 编辑器」；`ExtractAssociatedIcon` 取回 32×32 图标；体积 5,815,808B≈5.55MiB | ✅ |
 | A1（机检部分） | PE subsystem | =2（GUI，无控制台窗口） | ✅ |
 
 ## 人工项（用户观察后逐条回填）
@@ -75,7 +88,7 @@
   3. 维持现状（视为 markdown 源码真相），仅在文档中说明。
 - 倾向方案 1：与 Typora/Obsidian 的直觉一致，且不牺牲列表缩进这一真实高频场景。
 
-修复后已重打包：`target\release\veil.exe`（2026-11-01 从头编译，5,815,296B≈5.55MiB，FileVersion=0.1.0）。
+修复后已重打包：`target\release\veil.exe`（2026-11-01 重打包，5,815,808B≈5.55MiB，FileVersion=0.1.0）。
 从 B5 恢复走查时顺带复验上表四项。
 
 ## 素材

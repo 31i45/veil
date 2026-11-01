@@ -4283,6 +4283,80 @@ fn slot_content(recovery: &FakeRecovery) -> (Option<PathBuf>, String) {
     (r.path, r.text)
 }
 
+/// 0b 装配 + 文件对话框：用于「恢复草稿后另存为」这类需要对话框的持久化场景。
+fn app_persist_dialogs(
+    text: &str,
+    path: Option<&str>,
+    store: &MemStore,
+    recovery: &FakeRecovery,
+    session: &FakeSession,
+    resume: bool,
+    save: Option<&str>,
+) -> App {
+    let draft = Doc {
+        text: text.into(),
+        path: path.map(PathBuf::from),
+        bom: false,
+        resume,
+    };
+    let m = FakeMath {
+        fail: false,
+        calls: Rc::new(RefCell::new(Vec::new())),
+    };
+    let d = FakeDialogs {
+        open: None,
+        save: save.map(PathBuf::from),
+        image: None,
+        calls: Rc::new(RefCell::new(Vec::new())),
+    };
+    App::new(
+        draft,
+        Box::new(NoClip),
+        Box::new(store.clone()),
+        Box::new(m),
+        Box::new(NoImages),
+        Box::new(NoAssets),
+        Box::new(NoExport),
+        Box::new(d),
+        Box::new(NoWatcher),
+        theme::test_support::env(),
+        persist_env_with(recovery.clone(), session.clone()),
+        Box::new(NoPrint),
+    )
+}
+
+#[test]
+fn restored_draft_save_as_clears_recovery_snapshot() {
+    // R1 回归：恢复草稿后直接另存为必须作废磁盘上的快照；否则下次启动再次恢复旧草稿，
+    // 用户每次都要另存为（自循环）。
+    let store = MemStore::default();
+    let rec = FakeRecovery::default();
+    *rec.slot.borrow_mut() = Some(recovery::encode_recovery(None, false, "草稿内容"));
+    let ses = FakeSession::default();
+    let mut a = app_persist_dialogs("默认样例", None, &store, &rec, &ses, true, Some("saved.md"));
+    assert!(a.editor.is_dirty(), "恢复草稿打开即脏");
+    a.save_as();
+    assert_eq!(a.doc.path.as_deref(), Some(Path::new("saved.md")));
+    assert!(rec.slot.borrow().is_none(), "另存为成功后恢复快照必须作废");
+}
+
+#[test]
+fn cli_open_save_keeps_foreign_recovery_snapshot() {
+    // 保留语义：resume=false（CLI 显式打开）时磁盘上的快照属于别的草稿，
+    // 本会话保存不得超过清除它（否则会丢别处未保存内容）。
+    let store = MemStore::default();
+    store
+        .files
+        .borrow_mut()
+        .insert(PathBuf::from("a.md"), b"ab".to_vec());
+    let rec = FakeRecovery::default();
+    *rec.slot.borrow_mut() = Some(recovery::encode_recovery(None, false, "别的草稿"));
+    let ses = FakeSession::default();
+    let mut a = app_persist_dialogs("ab", Some("a.md"), &store, &rec, &ses, false, None);
+    a.save(crate::document::doc_state::SaveKind::Manual);
+    assert!(rec.slot.borrow().is_some(), "外部打开的保存不动他人恢复快照");
+}
+
 #[test]
 fn recovery_written_after_idle_and_restored_on_restart() {
     // 第一次会话：编辑后静默 2s 落恢复快照（内容含路径与脏文本）

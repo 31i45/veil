@@ -361,6 +361,7 @@ fn startup_doc(ports: &mut Ports, doc: Doc) -> StartupDoc {
         recovered: false,
         missing: false,
         notice: String::new(),
+        recovery_hash: None,
         recent,
     };
     if !out.doc.resume {
@@ -388,6 +389,10 @@ fn startup_doc(ports: &mut Ports, doc: Doc) -> StartupDoc {
                         out.doc.bom = r.bom;
                         out.recovered = true;
                         out.notice = "已从崩溃恢复未保存的内容；确认后请保存".into();
+                        // 快照仍在磁盘上且已被本会话消费：记下它的指纹，保存成功时才能
+                        // 正确作废。否则 clear_recovery 会误判「本会话没写过」而跳过清除，
+                        // 导致旧草稿每次启动都被恢复、每次都要另存为（3e 修 R1）。
+                        out.recovery_hash = Some(recovery::fnv64(&bytes));
                     }
                 }
             }
@@ -430,6 +435,9 @@ struct StartupDoc {
     /// 恢复目标磁盘缺失/不可读：置 missing 提示态。
     missing: bool,
     notice: String,
+    /// 启动时从恢复文件消费到的快照指纹（R1）：非 None 表示磁盘上尚存属于本会话文档的
+    /// 恢复副本，保存成功后须清除；None 表示磁盘上无本会话副本（不得误清他处快照）。
+    recovery_hash: Option<u64>,
     recent: Vec<PathBuf>,
 }
 
@@ -527,7 +535,7 @@ impl App {
             persist_state: PersistState {
                 persist,
                 autosave: Autosave::default(),
-                recovery_hash: None,
+                recovery_hash: start.recovery_hash,
                 recovery_failed_at: None,
                 recent: start.recent,
             },

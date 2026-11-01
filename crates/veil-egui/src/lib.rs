@@ -18,6 +18,7 @@ mod document;
 mod editor;
 mod geometry;
 mod html;
+mod icon;
 mod image;
 mod input;
 mod interaction;

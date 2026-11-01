@@ -8,6 +8,9 @@ use crate::editor::Intent;
 pub struct Mods {
     pub ctrl: bool,
     pub shift: bool,
+    /// Alt 状态：AltGr（右 Alt）= Ctrl+Alt，欧洲键盘布局用它输入字符，
+    /// 快捷键判定必须以 `ctrl && !alt` 为准，否则 AltGr 输入被误判/吞字。
+    pub alt: bool,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -108,57 +111,59 @@ pub enum Action {
 }
 
 pub fn translate(key: Key, mods: Mods) -> Option<Action> {
+    // AltGr 防护：Ctrl+Alt 组合（欧洲布局输入字符）不算快捷键（K1 修复附带）。
+    let ctrl = mods.ctrl && !mods.alt;
     match key {
         Key::Text(t) => {
-            if mods.ctrl {
+            if ctrl {
                 None // Ctrl+可打印键：未绑定的快捷键，不插入文本
             } else {
                 Some(Action::Doc(Intent::InsertText(t)))
             }
         }
-        Key::Z if mods.ctrl && mods.shift => Some(Action::Doc(Intent::Redo)),
-        Key::Z if mods.ctrl => Some(Action::Doc(Intent::Undo)),
-        Key::Y if mods.ctrl => Some(Action::Doc(Intent::Redo)),
+        Key::Z if ctrl && mods.shift => Some(Action::Doc(Intent::Redo)),
+        Key::Z if ctrl => Some(Action::Doc(Intent::Undo)),
+        Key::Y if ctrl => Some(Action::Doc(Intent::Redo)),
         Key::Z | Key::Y => None, // 无 ctrl 的 z/y 文本由 Text 变体承载
-        Key::C if mods.ctrl => Some(Action::Copy),
-        Key::X if mods.ctrl => Some(Action::Cut),
-        Key::V if mods.ctrl => Some(Action::Paste),
+        Key::C if ctrl => Some(Action::Copy),
+        Key::X if ctrl => Some(Action::Cut),
+        Key::V if ctrl => Some(Action::Paste),
         Key::C | Key::X | Key::V => None, // 无 ctrl 的 c/x/v 文本由 Text 变体承载
-        Key::S if mods.ctrl && mods.shift => Some(Action::SaveAs),
-        Key::S if mods.ctrl => Some(Action::Save),
+        Key::S if ctrl && mods.shift => Some(Action::SaveAs),
+        Key::S if ctrl => Some(Action::Save),
         Key::S => None, // 无 ctrl 的 s 文本由 Text 变体承载
-        Key::O if mods.ctrl && mods.shift => Some(Action::ToggleOutline),
-        Key::O if mods.ctrl => Some(Action::Open),
+        Key::O if ctrl && mods.shift => Some(Action::ToggleOutline),
+        Key::O if ctrl => Some(Action::Open),
         Key::O => None, // 无 ctrl 的 o 文本由 Text 变体承载
         Key::Escape => Some(Action::CloseMenu),
         Key::F11 => Some(Action::ToggleFullscreen), // 全屏切换不需要修饰键（3c-3）
-        Key::E if mods.ctrl => Some(Action::Export),
+        Key::E if ctrl => Some(Action::Export),
         Key::E => None, // 无 ctrl 的 e 文本由 Text 变体承载
-        Key::F if mods.ctrl => Some(Action::Find),
+        Key::F if ctrl => Some(Action::Find),
         Key::F => None, // 无 ctrl 的 f 文本由 Text 变体承载
-        Key::H if mods.ctrl => Some(Action::Replace),
+        Key::H if ctrl => Some(Action::Replace),
         Key::H => None, // 无 ctrl 的 h 文本由 Text 变体承载
-        Key::A if mods.ctrl => Some(Action::Doc(Intent::SelectAll)),
+        Key::A if ctrl => Some(Action::Doc(Intent::SelectAll)),
         Key::A => None, // 无 ctrl 的 a 文本由 Text 变体承载
-        Key::N if mods.ctrl => Some(Action::New),
+        Key::N if ctrl => Some(Action::New),
         Key::N => None, // 无 ctrl 的 n 文本由 Text 变体承载
-        Key::P if mods.ctrl => Some(Action::QuickOpen),
+        Key::P if ctrl => Some(Action::QuickOpen),
         Key::P => None, // 无 ctrl 的 p 文本由 Text 变体承载
-        Key::B if mods.ctrl => Some(Action::Doc(Intent::ToggleWrap("**"))),
+        Key::B if ctrl => Some(Action::Doc(Intent::ToggleWrap("**"))),
         Key::B => None, // 无 ctrl 的 b 文本由 Text 变体承载
-        Key::I if mods.ctrl => Some(Action::Doc(Intent::ToggleWrap("*"))),
+        Key::I if ctrl => Some(Action::Doc(Intent::ToggleWrap("*"))),
         Key::I => None, // 无 ctrl 的 i 文本由 Text 变体承载
-        Key::K if mods.ctrl => Some(Action::Doc(Intent::InsertLink)),
+        Key::K if ctrl => Some(Action::Doc(Intent::InsertLink)),
         Key::K => None, // 无 ctrl 的 k 文本由 Text 变体承载
-        Key::Equal if mods.ctrl => Some(Action::ZoomIn),
-        Key::Minus if mods.ctrl => Some(Action::ZoomOut),
-        Key::Digit0 if mods.ctrl => Some(Action::ZoomReset),
+        Key::Equal if ctrl => Some(Action::ZoomIn),
+        Key::Minus if ctrl => Some(Action::ZoomOut),
+        Key::Digit0 if ctrl => Some(Action::ZoomReset),
         Key::Digit0 | Key::Minus | Key::Equal => None, // 无 ctrl 的符号文本由 Text 变体承载
         // Ctrl+Shift+←/→ 按词扩选；Ctrl+←/→ 按词移动；Shift+方向为字符级扩选。
-        Key::Left if mods.ctrl && mods.shift => Some(Action::Doc(Intent::SelectWordLeft)),
-        Key::Right if mods.ctrl && mods.shift => Some(Action::Doc(Intent::SelectWordRight)),
-        Key::Left if mods.ctrl => Some(Action::Doc(Intent::WordLeft)),
-        Key::Right if mods.ctrl => Some(Action::Doc(Intent::WordRight)),
+        Key::Left if ctrl && mods.shift => Some(Action::Doc(Intent::SelectWordLeft)),
+        Key::Right if ctrl && mods.shift => Some(Action::Doc(Intent::SelectWordRight)),
+        Key::Left if ctrl => Some(Action::Doc(Intent::WordLeft)),
+        Key::Right if ctrl => Some(Action::Doc(Intent::WordRight)),
         Key::Left if mods.shift => Some(Action::Doc(Intent::SelectLeft)),
         Key::Right if mods.shift => Some(Action::Doc(Intent::SelectRight)),
         Key::Left => Some(Action::Doc(Intent::MoveLeft)),
@@ -167,10 +172,10 @@ pub fn translate(key: Key, mods: Mods) -> Option<Action> {
         Key::Down if mods.shift => Some(Action::SelectVertical(1)),
         Key::Up => Some(Action::MoveVertical(-1)),
         Key::Down => Some(Action::MoveVertical(1)),
-        Key::Home if mods.ctrl && mods.shift => Some(Action::Doc(Intent::SelectDocStart)),
-        Key::End if mods.ctrl && mods.shift => Some(Action::Doc(Intent::SelectDocEnd)),
-        Key::Home if mods.ctrl => Some(Action::Doc(Intent::MoveDocStart)),
-        Key::End if mods.ctrl => Some(Action::Doc(Intent::MoveDocEnd)),
+        Key::Home if ctrl && mods.shift => Some(Action::Doc(Intent::SelectDocStart)),
+        Key::End if ctrl && mods.shift => Some(Action::Doc(Intent::SelectDocEnd)),
+        Key::Home if ctrl => Some(Action::Doc(Intent::MoveDocStart)),
+        Key::End if ctrl => Some(Action::Doc(Intent::MoveDocEnd)),
         Key::Home if mods.shift => Some(Action::SelectLineStart),
         Key::End if mods.shift => Some(Action::SelectLineEnd),
         Key::Home => Some(Action::MoveLineStart),
@@ -190,14 +195,23 @@ mod tests {
     const NONE: Mods = Mods {
         ctrl: false,
         shift: false,
+        alt: false,
     };
     const CTRL: Mods = Mods {
         ctrl: true,
         shift: false,
+        alt: false,
     };
     const CTRL_SHIFT: Mods = Mods {
         ctrl: true,
         shift: true,
+        alt: false,
+    };
+    /// AltGr = Ctrl+Alt：欧洲布局输入字符的修饰组合，不得触发任何快捷键。
+    const ALT_GR: Mods = Mods {
+        ctrl: true,
+        shift: false,
+        alt: true,
     };
 
     fn text(s: &str) -> Key {
@@ -220,6 +234,19 @@ mod tests {
     fn ctrl_text_is_swallowed_not_inserted() {
         // 未知快捷键不得降级为文本插入（防 Ctrl+V 等入文档，粘贴属后续切片）
         assert_eq!(translate(text("v"), CTRL), None);
+    }
+
+    #[test]
+    fn alt_gr_never_triggers_shortcuts() {
+        // AltGr（Ctrl+Alt）是欧洲布局的字符输入组合：带字符时正常插入，
+        // 落在快捷键字母上时也不得触发撤销/保存等动作（K1 修复附带防护）。
+        assert_eq!(
+            translate(text("@"), ALT_GR),
+            Some(Action::Doc(Intent::InsertText("@".into())))
+        );
+        assert_eq!(translate(Key::Z, ALT_GR), None);
+        assert_eq!(translate(Key::S, ALT_GR), None);
+        assert_eq!(translate(Key::Equal, ALT_GR), None);
     }
 
     #[test]
@@ -300,6 +327,7 @@ mod tests {
         let shift = Mods {
             ctrl: false,
             shift: true,
+            alt: false,
         };
         assert_eq!(
             translate(Key::Left, shift),
@@ -335,7 +363,8 @@ mod tests {
                 Key::Left,
                 Mods {
                     ctrl: false,
-                    shift: true
+                    shift: true,
+                    alt: false,
                 }
             ),
             Some(Action::Doc(Intent::SelectLeft))
@@ -347,6 +376,7 @@ mod tests {
         let shift = Mods {
             ctrl: false,
             shift: true,
+            alt: false,
         };
         assert_eq!(translate(Key::Up, shift), Some(Action::SelectVertical(-1)));
         assert_eq!(translate(Key::Down, shift), Some(Action::SelectVertical(1)));
@@ -357,6 +387,7 @@ mod tests {
         let cs = Mods {
             ctrl: true,
             shift: true,
+            alt: false,
         };
         assert_eq!(
             translate(Key::Home, cs),
@@ -373,6 +404,7 @@ mod tests {
         let shift = Mods {
             ctrl: false,
             shift: true,
+            alt: false,
         };
         assert_eq!(translate(Key::Home, shift), Some(Action::SelectLineStart));
         assert_eq!(translate(Key::End, shift), Some(Action::SelectLineEnd));
@@ -473,6 +505,7 @@ mod tests {
         let shift = Mods {
             ctrl: false,
             shift: true,
+            alt: false,
         };
         assert_eq!(translate(Key::Tab, NONE), Some(Action::Doc(Intent::Indent)));
         assert_eq!(

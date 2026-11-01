@@ -132,18 +132,22 @@ mod tests {
     const NONE: Mods = Mods {
         ctrl: false,
         shift: false,
+        alt: false,
     };
     const CTRL: Mods = Mods {
         ctrl: true,
         shift: false,
+        alt: false,
     };
     const SHIFT: Mods = Mods {
         ctrl: false,
         shift: true,
+        alt: false,
     };
     const CTRL_SHIFT: Mods = Mods {
         ctrl: true,
         shift: true,
+        alt: false,
     };
 
     fn text(s: &str) -> Key {

@@ -11,7 +11,53 @@ use crate::document::ExternalState;
 use crate::theme::Theme;
 use crate::view::{Frame, LayoutEngine};
 
+/// 文本排版宽度：preedit 排版后取文末光标的 x（单行 = 总宽）。
+/// 纯测量路径，不经标签缓存（S1）。
+pub(super) fn measure_w(engine: &mut LayoutEngine, text: &str) -> f32 {
+    let layout = engine.layout_preedit(text);
+    engine.caret_xy(&layout, layout.layout_text().len()).0
+}
+
+/// 中段省略（S1）：放不下时二分保留字符数，拼 `头…尾`。
+/// head/tail 随保留数单调扩增、候选宽度单调不减，二分收敛；
+/// keep = 全长时候选为「全文插省略号」必超宽，上界不变量成立。
+pub(super) fn ellipsize_middle(engine: &mut LayoutEngine, text: &str, avail: f32) -> String {
+    if measure_w(engine, text) <= avail {
+        return text.to_string();
+    }
+    let offs: Vec<usize> = text.char_indices().map(|(i, _)| i).collect();
+    let n = offs.len();
+    let build = |keep: usize| -> String {
+        let head = keep / 2;
+        let tail = keep - head; // 尾 >= 头：文件名/扩展名优先可见
+        let tail_start = if tail == 0 { text.len() } else { offs[n - tail] };
+        format!("{}…{}", &text[..offs[head]], &text[tail_start..])
+    };
+    let (mut lo, mut hi) = (0usize, n); // build(lo) 可放下、build(hi) 放不下
+    while hi - lo > 1 {
+        let mid = (lo + hi) / 2;
+        if measure_w(engine, &build(mid)) <= avail {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    build(lo)
+}
+
 impl Chrome {
+    /// 状态栏左文适配（S1）：超宽时中段省略为 head…tail（尾多留，路径文件名优先可见）。
+    /// 结果按 (原文, 可用宽, scale) 缓存；测量走 layout_preedit，不污染标签缓存。
+    fn fit_middle(&mut self, engine: &mut LayoutEngine, text: &str, avail: f32, scale: f32) -> String {
+        let key = (text.to_string(), avail.to_bits(), scale.to_bits());
+        if let Some(hit) = self.status_fit.get(&key) {
+            return hit.clone();
+        }
+        let fitted = ellipsize_middle(engine, text, avail);
+        self.status_fit.insert(key, fitted.clone());
+        fitted
+    }
+
     fn draw_left(
         &mut self,
         frame: &mut Frame,
@@ -111,16 +157,13 @@ impl Chrome {
         frame.fill_rect(0, status_y as i32, frame.width, 1, theme.chrome_border);
         let mid = status_y + status_h / 2.0;
         let (left, right) = status_line(path, dirty, external, words, line, col);
-        self.draw_left(frame, engine, &left, 12.0 * scale, mid, theme.muted, scale);
-        self.draw_right(
-            frame,
-            engine,
-            &right,
-            win_w - SCROLL_W * scale - 12.0 * scale,
-            mid,
-            theme.muted,
-            scale,
-        );
+        // S1：右侧字数行列优先完整固定，左文超宽时中段省略（head…tail），杜绝左右重叠。
+        let right_edge = win_w - SCROLL_W * scale - 12.0 * scale;
+        let left_x = 12.0 * scale;
+        let avail = right_edge - measure_w(engine, &right) - left_x - 12.0 * scale;
+        let left = self.fit_middle(engine, &left, avail, scale);
+        self.draw_left(frame, engine, &left, left_x, mid, theme.muted, scale);
+        self.draw_right(frame, engine, &right, right_edge, mid, theme.muted, scale);
         if !self.notice.is_empty() {
             let notice = self.notice.clone();
             if let Some(l) = self

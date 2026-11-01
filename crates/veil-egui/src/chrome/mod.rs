@@ -368,6 +368,9 @@ pub struct Chrome {
     /// 拖动滚动条时鼠标相对滑块顶边的偏移。
     pub scroll_drag: Option<f32>,
     pub(crate) labels: LabelCache,
+    /// 状态栏左文中段省略结果缓存（S1）：键 = (原文, 可用宽 bits, scale bits)。
+    /// 打字期右文变而左文/窗口不变，命中避免每帧二分重排。
+    pub(crate) status_fit: std::collections::HashMap<(String, u32, u32), String>,
 }
 
 impl Chrome {
@@ -392,6 +395,7 @@ impl Chrome {
     /// DPI 变化：标签缓存的像素尺寸按旧 scale 生成，必须整体作废。
     pub fn clear_label_cache(&mut self) {
         self.labels.clear();
+        self.status_fit.clear();
     }
 }
 

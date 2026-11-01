@@ -238,6 +238,80 @@ fn status_line_marks_external_states() {
 }
 
 #[test]
+fn ellipsize_middle_fits_and_keeps_head_tail() {
+    // S1：长路径左文超窄可用宽 → 中段省略、头尾保留、宽度达标；宽余充足原样返回
+    let mut engine = LayoutEngine::new();
+    let long = format!("D:/{}", "很长的目录名/".repeat(12)) + "最终文档名.md *";
+    let avail = 200.0;
+    let fitted = super::paint::ellipsize_middle(&mut engine, &long, avail);
+    assert!(fitted.contains('…'), "超宽应中段省略: {fitted}");
+    assert!(fitted.len() < long.len());
+    assert!(
+        super::paint::measure_w(&mut engine, &fitted) <= avail + 1.0,
+        "省略后必须放下"
+    );
+    // 结构不变量：省略号前后分别是原文前缀与后缀（头尾保留，不依赖具体字宽）
+    let head_part = fitted.split('…').next().unwrap();
+    let tail_part = fitted.rsplit('…').next().unwrap();
+    assert!(long.starts_with(head_part), "头段必须是原文前缀: {fitted}");
+    assert!(long.ends_with(tail_part), "尾段必须是原文后缀: {fitted}");
+    let short = "a.md";
+    assert_eq!(
+        super::paint::ellipsize_middle(&mut engine, short, 100_000.0),
+        short,
+        "宽余充足不省略"
+    );
+}
+
+#[test]
+fn paint_caches_status_fit_across_frames() {
+    // S1：超宽场景产生省略缓存；同参数重绘命中缓存不增长（避免每帧二分重排）
+    let mut engine = LayoutEngine::new();
+    let mut frame = Frame::new(320, 200, [255, 255, 255, 255]);
+    let theme = Theme::light();
+    let mut chrome = Chrome::default();
+    let long_path = Path::new("D:/").join("很长的目录名".repeat(20)).join("文件.md");
+    let v = viewport(320, 200, 1.0);
+    for _ in 0..2 {
+        chrome.paint(
+            &mut frame,
+            &mut engine,
+            v,
+            1.0,
+            &theme,
+            Some(&long_path),
+            true,
+            ExternalState::None,
+            0,
+            1,
+            1,
+            2000.0,
+            0.0,
+            &[],
+        );
+    }
+    let n = chrome.status_fit.len();
+    assert!(n >= 1, "超宽场景应产生省略缓存");
+    chrome.paint(
+        &mut frame,
+        &mut engine,
+        v,
+        1.0,
+        &theme,
+        Some(&long_path),
+        true,
+        ExternalState::None,
+        0,
+        1,
+        1,
+        2000.0,
+        0.0,
+        &[],
+    );
+    assert_eq!(chrome.status_fit.len(), n, "同参数重绘命中缓存不增长");
+}
+
+#[test]
 fn paint_draws_menu_status_and_popup() {
     let mut engine = LayoutEngine::new();
     let mut frame = Frame::new(300, 200, [255, 255, 255, 255]);

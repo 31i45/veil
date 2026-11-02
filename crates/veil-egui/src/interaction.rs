@@ -7,7 +7,7 @@ use crate::document::block_index::BlockGeom;
 use crate::editor::Intent;
 use crate::geometry::{BASE_FONT_SIZE, BASE_LINE_HEIGHT, MARGIN, PARA_GAP};
 use crate::html::html_to_markdown;
-use crate::input::{Action, Key};
+use crate::input::{Action, Key, Mods};
 use crate::mode::{route, Cmd, Mode, TextSink};
 use crate::theme::ThemeMode;
 use crate::view::{ctx_menu, outline, quick_open, search};
@@ -65,7 +65,7 @@ impl App {
         if event.state != ElementState::Pressed {
             return;
         }
-        let Some(key) = map_key(event) else {
+        let Some(key) = map_key(event, self.input_state.mods) else {
             return;
         };
         self.route_key(key);
@@ -1466,16 +1466,28 @@ fn image_link_target(doc: &Path, img: &Path) -> String {
     }
 }
 
-/// winit 键 → 内部 `Key`。可打印文本优先走 `event.text`；Ctrl 按住时 Windows 把
-/// logical_key/text 污染为控制字符（0x01–0x1A），快捷键判定改对
-/// `key_without_modifiers()`（剥离修饰键还原字母）匹配，否则 Ctrl 组合全失效（K1）。
-pub(crate) fn map_key(event: &winit::event::KeyEvent) -> Option<Key> {
-    if let Some(t) = &event.text {
-        if !t.is_empty() && !t.chars().any(|c| c.is_control()) {
-            return Some(Key::Text(t.to_string()));
+/// winit 键 → 内部 `Key`。
+///
+/// 关键约束（K1 二次修复）：Windows 上 `event.text` 是**剥离 Ctrl 后**的文本
+/// （Ctrl+S 的 text 就是 `"s"`），所以 Ctrl 按下时绝不能走文本分支，否则全部
+/// Ctrl 组合都会变成 `Key::Text("s")` → `translate` 返回 None → 快捷键静默失效。
+/// Ctrl 组合一律交给 `key_without_modifiers()`（还原字母）；AltGr（Ctrl+Alt）
+/// 仍需走文本，否则欧洲布局字符无法上屏。
+pub(crate) fn map_key(event: &winit::event::KeyEvent, mods: Mods) -> Option<Key> {
+    map_key_parts(event.text.as_deref(), event.key_without_modifiers(), mods)
+}
+
+/// `map_key` 的纯函数内核：文本 / 无修饰键 / 修饰键三份输入，可穷举测试。
+pub(crate) fn map_key_parts(text: Option<&str>, wom: WKey, mods: Mods) -> Option<Key> {
+    let ctrl = mods.ctrl && !mods.alt;
+    if !ctrl {
+        if let Some(t) = text {
+            if !t.is_empty() && !t.chars().any(|c| c.is_control()) {
+                return Some(Key::Text(t.to_string()));
+            }
         }
     }
-    match event.key_without_modifiers() {
+    match wom {
         WKey::Named(NamedKey::ArrowLeft) => Some(Key::Left),
         WKey::Named(NamedKey::ArrowRight) => Some(Key::Right),
         WKey::Named(NamedKey::ArrowUp) => Some(Key::Up),

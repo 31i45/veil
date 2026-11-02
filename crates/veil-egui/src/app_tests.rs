@@ -318,7 +318,7 @@ fn doc_text(a: &App) -> String {
 fn paste_prefers_html_over_plain() {
     let mut a = app_clip(Some("<p>a <strong>b</strong></p>"), Some("纯文本"));
     a.paste_clipboard();
-    assert_eq!(doc_text(&a), "a **b**\n");
+    assert_eq!(doc_text(&a), "a **b**", "末尾单换行必须剥掉，避免行中粘贴凭空断行");
     assert!(a.editor.is_dirty());
 }
 

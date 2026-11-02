@@ -92,6 +92,8 @@ pub enum Action {
     New,
     /// 快速打开（Ctrl+Shift+P）：浮层过滤最近文件与当前目录 Markdown 文件。
     QuickOpen,
+    /// 插入图片（Ctrl+Shift+I）：弹系统文件对话框选图并以 Typora 独占段落插入。
+    InsertImage,
     /// 关闭菜单（Esc）：纯视图动作。
     CloseMenu,
     /// 切换大纲面板（Ctrl+Shift+O）：纯视图动作。
@@ -154,6 +156,7 @@ pub fn translate(key: Key, mods: Mods) -> Option<Action> {
         Key::P => None, // 无 ctrl 的 p 文本由 Text 变体承载
         Key::B if ctrl => Some(Action::Doc(Intent::ToggleWrap("**"))),
         Key::B => None, // 无 ctrl 的 b 文本由 Text 变体承载
+        Key::I if ctrl && mods.shift => Some(Action::InsertImage),
         Key::I if ctrl => Some(Action::Doc(Intent::ToggleWrap("*"))),
         Key::I => None, // 无 ctrl 的 i 文本由 Text 变体承载
         Key::K if ctrl => Some(Action::Doc(Intent::InsertLink)),
@@ -483,6 +486,21 @@ mod tests {
         assert_eq!(translate(Key::P, CTRL), Some(Action::Print));
         assert_eq!(translate(Key::P, CTRL_SHIFT), Some(Action::QuickOpen));
         assert_eq!(translate(Key::P, NONE), None); // 无 ctrl 的 p 由 Text 变体承载
+    }
+
+    #[test]
+    fn insert_image_and_italic_are_separate() {
+        // Ctrl+I = 斜体包裹；Ctrl+Shift+I = 插入图片（Ctrl+Shift+I 优先匹配）
+        assert_eq!(
+            translate(Key::I, CTRL),
+            Some(Action::Doc(Intent::ToggleWrap("*"))),
+            "Ctrl+I 仍是斜体"
+        );
+        assert_eq!(
+            translate(Key::I, CTRL_SHIFT),
+            Some(Action::InsertImage),
+            "Ctrl+Shift+I 弹插入图片对话框"
+        );
     }
 
     #[test]

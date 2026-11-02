@@ -38,7 +38,7 @@ pub enum Key {
     A,
     /// 逻辑键 n（无论是否带 ctrl；用于 Ctrl+N 新建与文本分流）。
     N,
-    /// 逻辑键 p（无论是否带 ctrl；用于 Ctrl+P 快速打开与文本分流）。
+    /// 逻辑键 p（无论是否带 ctrl；用于 Ctrl+P 打印、Ctrl+Shift+P 快速打开与文本分流）。
     P,
     /// 逻辑键 b/i/k（无论是否带 ctrl；用于 Ctrl+B/I/K 行内格式与文本分流，3c-1）。
     B,
@@ -90,7 +90,7 @@ pub enum Action {
     Open,
     /// 新建（Ctrl+N）：以空白草稿替换当前文档（脏文档拒绝）。
     New,
-    /// 快速打开（Ctrl+P）：浮层过滤最近文件与当前目录 Markdown 文件。
+    /// 快速打开（Ctrl+Shift+P）：浮层过滤最近文件与当前目录 Markdown 文件。
     QuickOpen,
     /// 关闭菜单（Esc）：纯视图动作。
     CloseMenu,
@@ -98,6 +98,8 @@ pub enum Action {
     ToggleOutline,
     /// 导出 HTML（Ctrl+E）：由 shell 经 `Exporter` trait 完成（此处不产文档意图）。
     Export,
+    /// 打印（Ctrl+P）：系统打印对话框（含预览），由 shell 经 `Print` trait 完成。
+    Print,
     /// 打开文档内查找栏（Ctrl+F）：纯视图动作。
     Find,
     /// 打开查找栏并展开替换行（Ctrl+H）：纯视图动作。
@@ -147,7 +149,8 @@ pub fn translate(key: Key, mods: Mods) -> Option<Action> {
         Key::A => None, // 无 ctrl 的 a 文本由 Text 变体承载
         Key::N if ctrl => Some(Action::New),
         Key::N => None, // 无 ctrl 的 n 文本由 Text 变体承载
-        Key::P if ctrl => Some(Action::QuickOpen),
+        Key::P if ctrl && mods.shift => Some(Action::QuickOpen),
+        Key::P if ctrl => Some(Action::Print),
         Key::P => None, // 无 ctrl 的 p 文本由 Text 变体承载
         Key::B if ctrl => Some(Action::Doc(Intent::ToggleWrap("**"))),
         Key::B => None, // 无 ctrl 的 b 文本由 Text 变体承载
@@ -475,8 +478,10 @@ mod tests {
     }
 
     #[test]
-    fn quick_open_binding() {
-        assert_eq!(translate(Key::P, CTRL), Some(Action::QuickOpen));
+    fn quick_open_and_print_bindings() {
+        // Ctrl+P = 打印（写作应用惯例）；快速打开让位到 Ctrl+Shift+P
+        assert_eq!(translate(Key::P, CTRL), Some(Action::Print));
+        assert_eq!(translate(Key::P, CTRL_SHIFT), Some(Action::QuickOpen));
         assert_eq!(translate(Key::P, NONE), None); // 无 ctrl 的 p 由 Text 变体承载
     }
 

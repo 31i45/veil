@@ -32,7 +32,7 @@ pub(crate) enum TextSink {
 pub(crate) enum Cmd {
     /// 本模式下该键无效：不产生任何副作用。
     Ignore,
-    /// 打开快速打开浮层（查找栏打开时也允许 Ctrl+P 抢占）。
+    /// 打开快速打开浮层（Ctrl+Shift+P；查找栏打开时也允许抢占）。
     OpenQuick,
     CloseMenu,
     CloseSearch,
@@ -89,7 +89,7 @@ pub(crate) fn route(mode: Mode, key: Key, mods: Mods, composing: bool) -> Cmd {
                 Key::Enter => Cmd::SearchNext,
                 Key::Backspace => Cmd::SearchBackspace,
                 Key::Tab => Cmd::SearchToggleField,
-                Key::P if mods.ctrl => Cmd::OpenQuick,
+                Key::P if mods.ctrl && mods.shift => Cmd::OpenQuick,
                 Key::Text(t) if !mods.ctrl => Cmd::SearchInput(t),
                 _ => Cmd::Ignore,
             }
@@ -221,6 +221,12 @@ mod tests {
         assert_eq!(route(Mode::Search, text("f"), CTRL, false), Cmd::Ignore);
         assert_eq!(route(Mode::Search, Key::F, CTRL, false), Cmd::Ignore);
         assert_eq!(route(Mode::Search, Key::Left, NONE, false), Cmd::Ignore);
+        // Ctrl+Shift+P 抢占为快速打开；Ctrl+P 在查找栏内也不得触发（K2）
+        assert_eq!(
+            route(Mode::Search, Key::P, CTRL_SHIFT, false),
+            Cmd::OpenQuick
+        );
+        assert_eq!(route(Mode::Search, Key::P, CTRL, false), Cmd::Ignore);
     }
 
     #[test]

@@ -24,9 +24,6 @@ pub const STATUS_H: f32 = 26.0;
 pub const SCROLL_W: f32 = 12.0;
 /// 菜单项行高（基准值）。
 pub const ITEM_H: f32 = 28.0;
-/// 菜单勾选槽基准宽（乘 DPI scale）：开关项左侧对勾位，全部标签统一右移，
-/// 保证有无勾选的行文字左缘对齐。
-pub const CHECK_W: f32 = 16.0;
 /// 滚动条滑块最小高度（基准值）。
 pub const THUMB_MIN_H: f32 = 24.0;
 
@@ -133,7 +130,7 @@ pub const MENUS: [MenuDef; 3] = [
             ("链接", "Ctrl+K", MenuAction::InsertLink),
             ("查找…", "Ctrl+F", MenuAction::Find),
             ("替换…", "Ctrl+H", MenuAction::Replace),
-            ("插入图片…", "", MenuAction::InsertImage),
+            ("插入图片…", "Ctrl+Shift+I", MenuAction::InsertImage),
         ],
     },
     MenuDef {
@@ -257,8 +254,7 @@ pub fn popup_layout(open: usize, scale: f32, recent: &[String]) -> PopupLayout {
                 }
         })
         .fold(0.0_f32, f32::max);
-    // 勾选槽与标签左内边距并列保留：有无勾选的行文字左缘一致
-    let w = (widest + 2.0 * pad + CHECK_W * scale).max(150.0 * scale);
+    let w = (widest + 2.0 * pad).max(150.0 * scale);
     let item_h = ITEM_H * scale;
     let top_pad = 4.0 * scale;
     let y = MENU_H * scale;
@@ -413,19 +409,18 @@ pub(super) fn theme_action_matches(action: MenuAction, mode: ThemeMode) -> bool 
     )
 }
 
-/// 菜单开关项的当前开启状态（左侧对勾的唯一数据源）。
+/// 菜单开关项的当前开启状态（「当前」提示的唯一数据源）。
+/// 不包含大纲面板（用户要求：大纲是面板开关而非写作模式，不显示任何状态标识）。
 #[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
 pub(crate) struct MenuFlags {
-    pub(crate) outline: bool,
     pub(crate) fullscreen: bool,
     pub(crate) focus: bool,
     pub(crate) typewriter: bool,
 }
 
-/// 开关项是否处于开启态（非开关项恒 false）：决定弹出菜单该行左侧是否画对勾。
+/// 开关项是否处于开启态（非开关项恒 false）：决定弹出菜单该行右侧是否显示「当前」。
 pub(crate) fn action_checked(action: MenuAction, flags: MenuFlags) -> bool {
     match action {
-        MenuAction::ToggleOutline => flags.outline,
         MenuAction::ToggleFullscreen => flags.fullscreen,
         MenuAction::ToggleFocus => flags.focus,
         MenuAction::ToggleTypewriter => flags.typewriter,

@@ -681,7 +681,6 @@ impl App {
             // chrome 最后绘制（不透明覆盖内容；滚动条区保留给状态栏行列）
             let recent = self.recent_labels();
             let flags = chrome::MenuFlags {
-                outline: self.ui_state.outline.open,
                 fullscreen: self.window_state.fullscreen,
                 focus: self.ui_state.writing.focus,
                 typewriter: self.ui_state.writing.typewriter,

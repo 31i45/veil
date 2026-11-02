@@ -98,6 +98,7 @@ impl App {
             Cmd::CloseSearch => self.close_search(),
             Cmd::SearchInput(t) => self.search_input(&t),
             Cmd::SearchBackspace => self.search_backspace(),
+            Cmd::SearchPaste => self.search_paste(),
             Cmd::SearchToggleField => self.search_toggle_field(),
             Cmd::SearchNext => self.search_next(),
             Cmd::SearchPrev => self.search_prev(),
@@ -1111,6 +1112,10 @@ impl App {
     pub(crate) fn toggle_focus(&mut self) {
         let on = !self.ui_state.writing.focus;
         self.ui_state.writing.focus = on;
+        if on {
+            // 专注 / 打字机互斥（同为「写作模式」，同开语义混乱）
+            self.ui_state.writing.typewriter = false;
+        }
         self.ui_state.chrome.notice = format!("专注模式：{}", if on { "开" } else { "关" });
         self.request_redraw();
     }
@@ -1121,6 +1126,8 @@ impl App {
         let on = !self.ui_state.writing.typewriter;
         self.ui_state.writing.typewriter = on;
         if on {
+            // 专注 / 打字机互斥
+            self.ui_state.writing.focus = false;
             self.scroll_to_caret();
             self.set_ime_area();
         }
@@ -1456,6 +1463,40 @@ impl App {
                 if self.ui_state.search.replace.pop().is_some() {
                     self.request_redraw();
                 }
+            }
+        }
+    }
+
+    /// 查找栏内粘贴（Ctrl+V）：只取剪贴板纯文本，剥掉换行变成单行，
+    /// 文件列表/图片在查找栏语境下一律当作无效（查询框不接受 markdown）。
+    pub(crate) fn search_paste(&mut self) {
+        if !self.ui_state.search.open {
+            return;
+        }
+        let Some(raw) = self.ports.clipboard.get() else {
+            return;
+        };
+        if raw.is_empty() {
+            return;
+        }
+        // 单行化：\r\n / \n / \r 统一换成空格；过长直接丢弃后半段（查询框几百字够用）
+        const MAX: usize = 500;
+        let single: String = raw
+            .chars()
+            .map(|c| if c == '\n' || c == '\r' { ' ' } else { c })
+            .take(MAX)
+            .collect();
+        if single.is_empty() {
+            return;
+        }
+        match self.ui_state.search.focus {
+            search::Field::Query => {
+                self.ui_state.search.query.push_str(&single);
+                self.search_rescan();
+            }
+            search::Field::Replace => {
+                self.ui_state.search.replace.push_str(&single);
+                self.request_redraw();
             }
         }
     }

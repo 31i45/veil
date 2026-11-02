@@ -384,14 +384,11 @@ fn toggle_rows_report_and_paint_checked_state() {
     };
     assert!(action_checked(MenuAction::ToggleFocus, flags));
     assert!(!action_checked(MenuAction::ToggleTypewriter, flags));
-    assert!(!action_checked(MenuAction::Save, flags), "非开关项无勾选态");
-    assert!(action_checked(
+    assert!(!action_checked(MenuAction::Save, flags), "非开关项无「当前」");
+    assert!(!action_checked(
         MenuAction::ToggleOutline,
-        MenuFlags {
-            outline: true,
-            ..Default::default()
-        }
-    ));
+        MenuFlags::default()
+    ), "大纲面板不显示任何状态标识");
     assert!(action_checked(
         MenuAction::ToggleFullscreen,
         MenuFlags {
@@ -400,7 +397,7 @@ fn toggle_rows_report_and_paint_checked_state() {
         }
     ));
 
-    // 像素级：视图菜单「专注模式」行开启后多出左侧对勾像素
+    // 像素级：视图菜单「专注模式」行开启后多出右侧「当前」像素
     let theme = Theme::light();
     let v = viewport(300, 300, 1.0);
     let p = popup_layout(2, 1.0, &[]);
@@ -440,7 +437,7 @@ fn toggle_rows_report_and_paint_checked_state() {
         }
         px
     };
-    assert_ne!(shot(false), shot(true), "开启态须在行左侧画出对勾");
+    assert_ne!(shot(false), shot(true), "开启态须在行右侧画出「当前」提示");
 }
 
 #[test]

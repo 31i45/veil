@@ -160,7 +160,11 @@ impl App {
     }
 
     /// 文档级动作执行：文档意图、视图移动、剪贴板、文件与菜单动作的唯一分支点。
+    /// 入口统一关闭 chrome 菜单与右键菜单——任何 app 级动作都不应在模态覆盖层下执行。
+    /// （点击路径先于 perform_action 手动 close，这里是兜底幂等，不冲突）
     pub(crate) fn perform_action(&mut self, action: Action) {
+        self.ui_state.chrome.close();
+        self.ui_state.ctx.close();
         match action {
             Action::Doc(intent) => {
                 self.window_state.goal_x = None; // 非垂直移动：重置目标列

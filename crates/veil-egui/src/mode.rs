@@ -63,6 +63,13 @@ pub(crate) fn route(mode: Mode, key: Key, mods: Mods, composing: bool) -> Cmd {
         Mode::Menu => {
             if key == Key::Escape {
                 Cmd::CloseMenu
+            } else if ctrl {
+                // Ctrl 组合键一律放行：全局快捷键（Ctrl+F/H/P/Ctrl+Shift+P 等）
+                // 必须穿透菜单覆盖层；执行层各 open_* 会先关 chrome/ctx 菜单。
+                match translate(key, mods) {
+                    Some(action) => Cmd::Edit(action),
+                    None => Cmd::Ignore,
+                }
             } else {
                 Cmd::Ignore
             }
@@ -181,19 +188,31 @@ mod tests {
     }
 
     #[test]
-    fn menu_mode_swallows_everything_but_escape() {
+    fn menu_mode_swallows_non_ctrl_but_passes_ctrl_through() {
+        // 非 ctrl 组合：仍被吞（Esc 除外）
         assert_eq!(route(Mode::Menu, Key::Escape, NONE, false), Cmd::CloseMenu);
-        for key in [
-            Key::Enter,
-            Key::Backspace,
-            Key::Left,
-            Key::F,
-            text("a"),
-            text("中"),
-        ] {
+        for key in [Key::Enter, Key::Backspace, Key::Left, text("a"), text("中")] {
             assert_eq!(route(Mode::Menu, key.clone(), NONE, false), Cmd::Ignore);
-            assert_eq!(route(Mode::Menu, key, CTRL_SHIFT, false), Cmd::Ignore);
+            assert_eq!(route(Mode::Menu, key, SHIFT, false), Cmd::Ignore);
         }
+        // ctrl 组合：放行，translate 决定最终动作
+        assert_eq!(
+            route(Mode::Menu, Key::F, CTRL, false),
+            Cmd::Edit(Action::Find)
+        );
+        assert_eq!(
+            route(Mode::Menu, Key::H, CTRL, false),
+            Cmd::Edit(Action::Replace)
+        );
+        assert_eq!(
+            route(Mode::Menu, Key::P, CTRL, false),
+            Cmd::Edit(Action::Print)
+        );
+        assert_eq!(
+            route(Mode::Menu, Key::P, CTRL_SHIFT, false),
+            Cmd::Edit(Action::QuickOpen)
+        );
+        assert_eq!(route(Mode::Menu, text("f"), CTRL, false), Cmd::Ignore, "ctrl+文本 不绑定则 Ignore");
     }
 
     #[test]

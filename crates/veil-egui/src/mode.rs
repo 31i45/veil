@@ -57,6 +57,8 @@ pub(crate) enum Cmd {
 /// `composing` = IME 组合期：查找栏的全部按键让给 IME，文档路径不受影响
 /// （winit 组合期的文本键不经 `commit_ime`，仍按既有路径处理）。
 pub(crate) fn route(mode: Mode, key: Key, mods: Mods, composing: bool) -> Cmd {
+    // AltGr（Ctrl+Alt）= 字符输入：不作快捷键，文本变体也不得被当作 Ctrl 组合吞掉
+    let ctrl = mods.ctrl && !mods.alt;
     match mode {
         Mode::Menu => {
             if key == Key::Escape {
@@ -75,7 +77,7 @@ pub(crate) fn route(mode: Mode, key: Key, mods: Mods, composing: bool) -> Cmd {
                 Key::Up => Cmd::QuickMove(-1),
                 Key::Down => Cmd::QuickMove(1),
                 Key::Backspace => Cmd::QuickBackspace,
-                Key::Text(t) if !mods.ctrl => Cmd::QuickInput(t),
+                Key::Text(t) if !ctrl => Cmd::QuickInput(t),
                 _ => Cmd::Ignore,
             }
         }
@@ -89,8 +91,12 @@ pub(crate) fn route(mode: Mode, key: Key, mods: Mods, composing: bool) -> Cmd {
                 Key::Enter => Cmd::SearchNext,
                 Key::Backspace => Cmd::SearchBackspace,
                 Key::Tab => Cmd::SearchToggleField,
-                Key::P if mods.ctrl && mods.shift => Cmd::OpenQuick,
-                Key::Text(t) if !mods.ctrl => Cmd::SearchInput(t),
+                // 查找栏已开时 Ctrl+F/Ctrl+H 仍须生效：重申查询焦点 / 展开替换行。
+                // 缺这两条时按键被吞，栏可见却「按了没反应」，只能先 Esc 再重按。
+                Key::F if ctrl => Cmd::Edit(Action::Find),
+                Key::H if ctrl => Cmd::Edit(Action::Replace),
+                Key::P if ctrl && mods.shift => Cmd::OpenQuick,
+                Key::Text(t) if !ctrl => Cmd::SearchInput(t),
                 _ => Cmd::Ignore,
             }
         }
@@ -219,7 +225,6 @@ mod tests {
         );
         // Ctrl+文本 / 未绑定键：吞掉，不得落进查询串
         assert_eq!(route(Mode::Search, text("f"), CTRL, false), Cmd::Ignore);
-        assert_eq!(route(Mode::Search, Key::F, CTRL, false), Cmd::Ignore);
         assert_eq!(route(Mode::Search, Key::Left, NONE, false), Cmd::Ignore);
         // Ctrl+Shift+P 抢占为快速打开；Ctrl+P 在查找栏内也不得触发（K2）
         assert_eq!(
@@ -227,6 +232,34 @@ mod tests {
             Cmd::OpenQuick
         );
         assert_eq!(route(Mode::Search, Key::P, CTRL, false), Cmd::Ignore);
+        // 栏已开时 Ctrl+F/Ctrl+H 仍生效：重申查询焦点 / 展开替换行
+        assert_eq!(
+            route(Mode::Search, Key::F, CTRL, false),
+            Cmd::Edit(Action::Find)
+        );
+        assert_eq!(
+            route(Mode::Search, Key::H, CTRL, false),
+            Cmd::Edit(Action::Replace)
+        );
+    }
+
+    #[test]
+    fn alt_gr_text_is_input_not_shortcut_in_overlays() {
+        // AltGr（Ctrl+Alt）字符输入：既不得触发快捷键，也不得被 !ctrl 守卫吞掉
+        let alt_gr = Mods {
+            ctrl: true,
+            shift: false,
+            alt: true,
+        };
+        assert_eq!(
+            route(Mode::Search, text("@"), alt_gr, false),
+            Cmd::SearchInput("@".into())
+        );
+        assert_eq!(
+            route(Mode::QuickOpen, text("@"), alt_gr, false),
+            Cmd::QuickInput("@".into())
+        );
+        assert_eq!(route(Mode::Search, Key::F, alt_gr, false), Cmd::Ignore);
     }
 
     #[test]

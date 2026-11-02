@@ -11,11 +11,13 @@ use crate::editor::Intent;
 use crate::geometry::{BASE_LINE_HEIGHT, MARGIN, PARA_GAP};
 use crate::image::{AssetStore, ImageData, ImageLoader};
 use crate::input::{Action, Key, Mods};
+use crate::interaction::map_key_parts;
 use crate::math::{MathImage, MathRenderer};
 use crate::mode::{Mode, TextSink};
 use crate::paint::{fit_size, local_image_path};
 use crate::print::{NoPrint, Print, PrintSession};
 use crate::theme::{self, ConfigStore, SystemTheme, ThemeEnv, ThemeMode};
+use crate::view::ctx_menu;
 use crate::view::outline;
 use crate::view::search;
 use crate::view::{Frame, InlineAsset, Memo, MAX_BLOCK_BYTES};
@@ -2650,10 +2652,9 @@ fn replace_one_replaces_current_then_rebuilds_matches() {
     assert!(a.ui_state.search.open && a.ui_state.search.replace_open);
     assert_eq!(
         a.ui_state.search.focus,
-        search::Field::Replace,
-        "替换模式焦点落在替换串"
+        search::Field::Query,
+        "Ctrl+H 首次打开先聚焦查询，首字不得落进替换框"
     );
-    a.search_toggle_field(); // Tab → 查询
     a.search_input("a");
     assert_eq!(a.ui_state.search.matches.len(), 2);
     a.search_toggle_field(); // Tab → 替换
@@ -2684,7 +2685,6 @@ fn replace_all_is_one_transaction_and_clears_matches() {
     let mut a = app("a a a", None, false, &store);
     a.ensure_layouts_all();
     a.perform_action(Action::Replace);
-    a.search_toggle_field();
     a.search_input("a");
     a.search_toggle_field();
     a.search_input("b");
@@ -2703,7 +2703,6 @@ fn replace_all_without_matches_does_not_dirty() {
     let store = MemStore::default();
     let mut a = app("abc", None, false, &store);
     a.perform_action(Action::Replace);
-    a.search_toggle_field();
     a.search_input("zzz");
     a.replace_all();
     assert_eq!(doc_text(&a), "abc");
@@ -2716,7 +2715,6 @@ fn replace_row_clicks_run_replace_buttons() {
     let mut a = app("a a", None, false, &store);
     a.ensure_layouts_all();
     a.perform_action(Action::Replace);
-    a.search_toggle_field();
     a.search_input("a");
     a.search_toggle_field();
     a.search_input("b");
@@ -5554,6 +5552,88 @@ fn search_bar_clicks_run_buttons_and_swallow_text_area() {
 }
 
 #[test]
+fn winit_key_chain_opens_search_and_types_into_query() {
+    let store = MemStore::default();
+    let mut a = app("alpha beta alpha\n", None, false, &store);
+    a.ensure_layouts_all();
+
+    // Ctrl+F：Windows 的 event.text 是剥离 Ctrl 的 "f"，必须落到无修饰键分支
+    let key = map_key_parts(
+        Some("f"),
+        WKey::Character("f".into()),
+        Mods {
+            ctrl: true,
+            shift: false,
+            alt: false,
+        },
+    )
+    .expect("Ctrl+F 恒可映射");
+    assert_eq!(key, Key::F, "Ctrl 组合不得走文本分支");
+    a.input_state.mods.ctrl = true;
+    a.route_key(key);
+    a.input_state.mods.ctrl = false;
+    assert!(a.ui_state.search.open, "Ctrl+F 打开查找栏");
+    assert_eq!(a.mode(), Mode::Search);
+
+    // 普通字母：winit 文本路径 → 进查询串，文档保持只读
+    let key = map_key_parts(Some("a"), WKey::Character("a".into()), Mods::default())
+        .expect("字母恒可映射");
+    assert_eq!(key, Key::Text("a".into()));
+    a.route_key(key);
+    assert_eq!(a.ui_state.search.query, "a");
+    assert_eq!(doc_text(&a), "alpha beta alpha\n", "查找期间文档只读");
+}
+
+#[test]
+fn ctrl_h_first_open_focuses_query_then_repeat_focuses_replace() {
+    let store = MemStore::default();
+    let mut a = app("a x a\n", None, false, &store);
+    a.ensure_layouts_all();
+
+    a.input_state.mods.ctrl = true;
+    a.route_key(Key::H);
+    a.input_state.mods.ctrl = false;
+    assert!(a.ui_state.search.open && a.ui_state.search.replace_open);
+    assert_eq!(
+        a.ui_state.search.focus,
+        search::Field::Query,
+        "首次 Ctrl+H 先聚焦查询，首字不得落进替换框"
+    );
+    a.route_key(Key::Text("a".into()));
+    assert_eq!(a.ui_state.search.matches.len(), 2, "查询即时出命中");
+
+    // 栏已开时再按 Ctrl+H：焦点给替换串，可直接输入替换词
+    a.input_state.mods.ctrl = true;
+    a.route_key(Key::H);
+    a.input_state.mods.ctrl = false;
+    assert_eq!(a.ui_state.search.focus, search::Field::Replace);
+    a.route_key(Key::Text("b".into()));
+    assert_eq!(a.ui_state.search.replace, "b");
+
+    // Ctrl+F 在栏内仍可回到查询焦点，且不丢已有查询词
+    a.input_state.mods.ctrl = true;
+    a.route_key(Key::F);
+    a.input_state.mods.ctrl = false;
+    assert_eq!(a.ui_state.search.focus, search::Field::Query);
+    assert_eq!(a.ui_state.search.query, "a");
+}
+
+#[test]
+fn opening_search_closes_context_menu_so_keys_are_not_swallowed() {
+    let store = MemStore::default();
+    let mut a = app("abc\n", None, false, &store);
+    a.ui_state
+        .ctx
+        .open_at(10.0, 20.0, ctx_menu::CtxKind::Block, None);
+    assert_eq!(a.mode(), Mode::Menu, "右键菜单打开时按键归菜单");
+    a.open_search();
+    assert!(!a.ui_state.ctx.open, "查找栏打开必须关掉右键菜单");
+    assert_eq!(a.mode(), Mode::Search, "否则栏可见但按键被 Menu 模式吞掉");
+    a.route_key(Key::Text("a".into()));
+    assert_eq!(a.ui_state.search.query, "a");
+}
+
+#[test]
 fn search_hover_targets_buttons_only() {
     let store = MemStore::default();
     let mut a = app("x\n", None, false, &store);
@@ -6103,7 +6183,6 @@ fn e2e_search_replace_and_crash_recovery() {
     a.ensure_layouts_all();
     a.perform_action(Action::Replace);
     assert!(a.ui_state.search.open && a.ui_state.search.replace_open);
-    a.search_toggle_field();
     a.search_input("alpha");
     assert_eq!(a.ui_state.search.matches.len(), 2, "全文档命中 2 处");
     assert_eq!(a.ui_state.search.label(), "1/2");

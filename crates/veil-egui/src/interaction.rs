@@ -196,6 +196,7 @@ impl App {
             Action::Print => self.print_document(),
             Action::Find => self.open_search(),
             Action::Replace => self.open_replace(),
+            Action::InsertImage => self.insert_image_via_dialog(),
             Action::ZoomIn => self.zoom_step(1),
             Action::ZoomOut => self.zoom_step(-1),
             Action::ZoomReset => self.zoom_reset(),
@@ -313,7 +314,7 @@ impl App {
             return;
         };
         match self.ports.assets.save_pasted_image(&doc, img) {
-            Ok(rel) => self.insert_paste(&format!("![]({rel})")),
+            Ok(rel) => self.insert_paste(&self.image_paragraph_markup(&rel)),
             Err(e) => {
                 self.ui_state.chrome.notice = format!("图片落盘失败: {e}");
                 eprintln!("图片落盘失败（文档未改动）: {e}");
@@ -339,7 +340,7 @@ impl App {
             return;
         }
         let target = image_link_target(&doc, &img);
-        self.insert_paste(&format!("![]({target})"));
+        self.insert_paste(&self.image_paragraph_markup(&target));
     }
 
     /// 拖拽悬停（阶段 1）：记录文件名供绘制落点提示；离开窗口（None）清空。
@@ -376,6 +377,36 @@ impl App {
             self.window_state.goal_x = None;
             self.after_edit(dirty);
         }
+    }
+
+    /// Typora 式「图片独占一段」：根据光标/选区起点与周围文本的关系，
+    /// 构建 `![](path)` 前后的换行，让图片 markdown 自成段落。
+    /// - 光标在行首/文档头：前缀空
+    /// - 光标在行尾/文档尾：后缀空
+    /// - 有选区：以选区起点为插入基准（选区整体被替换）
+    fn image_paragraph_markup(&self, path: &str) -> String {
+        let session = self.editor.session();
+        let text_len = session.text_len();
+        let caret = self.editor.caret();
+        let start = self.editor.selection().map(|s| s.start).unwrap_or(caret);
+
+        // 行首判定：光标前一字节是 \n，或就在文档开头
+        let at_line_start = start == 0
+            || session
+                .text_slice(Range::new(start - 1, start))
+                .map(|s| s == "\n")
+                .unwrap_or(false);
+        let prefix = if at_line_start { "" } else { "\n" };
+
+        // 行尾判定：光标后一字节是 \n，或就在文档末尾
+        let at_line_end = start >= text_len
+            || session
+                .text_slice(Range::new(start, (start + 1).min(text_len)))
+                .map(|s| s == "\n")
+                .unwrap_or(false);
+        let suffix = if at_line_end { "" } else { "\n" };
+
+        format!("{prefix}![]({path}){suffix}")
     }
 
     /// Home/End（及 Shift 扩选）：光标落到当前视觉行首/尾（`visual_line_edges` 语义）。

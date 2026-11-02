@@ -39,7 +39,8 @@ impl App {
         self.persist_state.persist.status()
     }
 
-    /// 窗口标题：路径派生。脏标 ` *` 与冲突提示后缀是 chrome UI 落地前的最小可见载体。
+    /// 窗口标题：路径派生。脏标 `*` 前置与冲突提示后缀是 chrome UI 落地前的最小可见载体。
+    /// 脏标必须前置：长路径标题在 Windows 标题栏从右侧截断，末尾标记会被吃掉。
     pub(crate) fn title_text(&self) -> String {
         let base = match &self.doc.path {
             Some(p) => format!("veil — {}", p.display()),
@@ -47,7 +48,7 @@ impl App {
         };
         let mut t = base;
         if self.editor.is_dirty() {
-            t.push_str(" *");
+            t.insert_str(0, "* ");
         }
         match self.external_state() {
             ExternalState::None => {}

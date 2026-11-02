@@ -1565,7 +1565,7 @@ fn autosave_conflict_backs_up_and_never_overwrites() {
         !a.autosave_due(t0 + Duration::from_secs(60)),
         "挂起后不再自动落盘"
     );
-    assert_eq!(a.title_text(), "veil — a.md * (外部修改已备份)");
+    assert_eq!(a.title_text(), "* veil — a.md (外部修改已备份)");
 }
 
 #[test]
@@ -2466,7 +2466,7 @@ fn external_change_notifies_holds_autosave_and_keeps_document() {
     );
     assert!(a.persist_state.persist.hold(), "外部修改必须挂起自动保存");
     assert!(a.ui_state.chrome.notice.contains("外部修改"));
-    assert_eq!(a.title_text(), "veil — a.md * (外部修改)");
+    assert_eq!(a.title_text(), "* veil — a.md (外部修改)");
     assert_eq!(a.external_state(), ExternalState::Changed);
     assert_eq!(a.editor.session().serialize(), "改ab", "不改写文档内容");
     a.maybe_autosave(t0 + Duration::from_secs(2));

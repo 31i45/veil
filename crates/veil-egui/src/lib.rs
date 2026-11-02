@@ -34,8 +34,8 @@ mod view;
 mod app_tests;
 
 pub use app::{
-    run, Clipboard, Doc, Exporter, FileDialog, FileEvent, FileStore, FileWatcher, PersistEnv,
-    RecoveryStore, SessionStore,
+    run, Clipboard, Confirmer, Doc, Exporter, FileDialog, FileEvent, FileStore, FileWatcher,
+    PersistEnv, RecoveryStore, SessionStore, UnsavedChoice,
 };
 pub use docio::decode;
 pub use image::{AssetStore, ImageData, ImageLoader};

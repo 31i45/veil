@@ -107,6 +107,44 @@ fn persist_env_with(recovery: FakeRecovery, session: FakeSession) -> PersistEnv 
     }
 }
 
+/// 既有测试的默认确认端口：恒「取消」（等同旧行为：脏文档拒绝操作、内容不丢）。
+struct NoConfirm;
+impl Confirmer for NoConfirm {
+    fn confirm_unsaved(&mut self, _file: Option<&Path>) -> UnsavedChoice {
+        UnsavedChoice::Cancel
+    }
+}
+
+fn no_confirm() -> Box<dyn Confirmer> {
+    Box::new(NoConfirm)
+}
+
+/// 可编排的确认端口：按队列依次给出选择，并记录每次调用时的关联路径。
+#[derive(Clone, Default)]
+struct FakeConfirm {
+    choices: Rc<RefCell<Vec<UnsavedChoice>>>,
+    calls: Rc<RefCell<Vec<Option<PathBuf>>>>,
+}
+impl FakeConfirm {
+    fn new(choices: &[UnsavedChoice]) -> Self {
+        FakeConfirm {
+            choices: Rc::new(RefCell::new(choices.to_vec())),
+            calls: Rc::new(RefCell::new(Vec::new())),
+        }
+    }
+}
+impl Confirmer for FakeConfirm {
+    fn confirm_unsaved(&mut self, file: Option<&Path>) -> UnsavedChoice {
+        self.calls.borrow_mut().push(file.map(Path::to_path_buf));
+        let mut q = self.choices.borrow_mut();
+        if q.is_empty() {
+            UnsavedChoice::Cancel
+        } else {
+            q.remove(0)
+        }
+    }
+}
+
 /// 不加载任何图片（既有测试的默认注入）：所有图片降级 alt 文本。
 struct NoImages;
 impl ImageLoader for NoImages {
@@ -303,6 +341,7 @@ fn app_clip(html: Option<&str>, plain: Option<&str>) -> App {
         theme::test_support::env(),
         persist_env(),
         Box::new(NoPrint),
+        no_confirm(),
     )
 }
 
@@ -411,6 +450,7 @@ fn app_math(text: &str, fail: bool) -> (App, MathCalls) {
         theme::test_support::env(),
         persist_env(),
         Box::new(NoPrint),
+        no_confirm(),
     );
     (a, calls)
 }
@@ -629,6 +669,7 @@ fn app_with_images(
         theme::test_support::env(),
         persist_env(),
         Box::new(NoPrint),
+        no_confirm(),
     );
     (a, calls)
 }
@@ -812,6 +853,7 @@ fn app_paste_image(
         theme::test_support::env(),
         persist_env(),
         Box::new(NoPrint),
+        no_confirm(),
     );
     PasteFixture { app, calls }
 }
@@ -932,6 +974,7 @@ fn app_drop(
         theme::test_support::env(),
         persist_env(),
         Box::new(NoPrint),
+        no_confirm(),
     );
     DropFixture {
         app,
@@ -1305,6 +1348,7 @@ fn app(text: &str, path: Option<&str>, bom: bool, store: &MemStore) -> App {
         theme::test_support::env(),
         persist_env(),
         Box::new(NoPrint),
+        no_confirm(),
     )
 }
 
@@ -1360,6 +1404,7 @@ fn app_export(text: &str, path: Option<&str>, fail: bool) -> (App, AssetCalls) {
         theme::test_support::env(),
         persist_env(),
         Box::new(NoPrint),
+        no_confirm(),
     );
     (a, calls)
 }
@@ -1712,6 +1757,7 @@ fn app_dialogs(
         theme::test_support::env(),
         persist_env(),
         Box::new(NoPrint),
+        no_confirm(),
     );
     (a, calls)
 }
@@ -2203,6 +2249,7 @@ fn app_watch(text: &str, path: Option<&str>, store: &MemStore, watch: &FakeWatch
         theme::test_support::env(),
         persist_env(),
         Box::new(NoPrint),
+        no_confirm(),
     )
 }
 
@@ -2279,6 +2326,290 @@ fn new_draft_refuses_when_dirty() {
     assert_eq!(a.doc.path.as_deref(), Some(Path::new("a.md")));
     assert!(a.editor.is_dirty());
     assert!(a.ui_state.chrome.notice.contains("未保存"));
+}
+
+// ---- 3e 修 B：未保存内容三选一（关闭/新建/打开） ----
+
+/// 装配：可控确认端口 + 指定对话框 + 恢复槽/会话；其余端口无副作用。
+#[allow(clippy::too_many_arguments)]
+fn app_confirm(
+    text: &str,
+    path: Option<&str>,
+    store: &MemStore,
+    recovery: FakeRecovery,
+    session: &FakeSession,
+    dialogs: Box<dyn FileDialog>,
+    confirmer: Box<dyn Confirmer>,
+) -> App {
+    let doc = Doc {
+        text: text.into(),
+        path: path.map(PathBuf::from),
+        bom: false,
+        resume: false,
+    };
+    let m = FakeMath {
+        fail: false,
+        calls: Rc::new(RefCell::new(Vec::new())),
+    };
+    App::new(
+        doc,
+        Box::new(NoClip),
+        Box::new(store.clone()),
+        Box::new(m),
+        Box::new(NoImages),
+        Box::new(NoAssets),
+        Box::new(NoExport),
+        dialogs,
+        Box::new(NoWatcher),
+        theme::test_support::env(),
+        persist_env_with(recovery, session.clone()),
+        Box::new(NoPrint),
+        confirmer,
+    )
+}
+
+/// 写一份当前内容的恢复快照（模拟编辑中的崩溃兜底已落盘）。
+fn seed_recovery(a: &mut App, recovery: &FakeRecovery) {
+    let t0 = Instant::now();
+    a.persist_state.persist.note_activity(t0);
+    a.maybe_recovery_write(t0 + Duration::from_secs(2));
+    assert!(recovery.slot.borrow().is_some(), "快照应已写入");
+}
+
+#[test]
+fn dirty_open_save_choice_writes_disk_before_opening() {
+    let store = MemStore::default();
+    disk(&store, "a.md", b"old");
+    disk(&store, "b.md", b"new");
+    let calls = Rc::new(RefCell::new(Vec::new()));
+    let d = FakeDialogs {
+        open: Some(PathBuf::from("b.md")),
+        save: None,
+        image: None,
+        calls: calls.clone(),
+    };
+    let c = FakeConfirm::new(&[UnsavedChoice::Save]);
+    let c_calls = c.calls.clone();
+    let mut a = app_confirm(
+        "old",
+        Some("a.md"),
+        &store,
+        FakeRecovery::default(),
+        &FakeSession::default(),
+        Box::new(d),
+        Box::new(c),
+    );
+    a.editor.apply(Intent::InsertText("改".into())).unwrap();
+
+    a.open_via_dialog();
+    assert_eq!(
+        c_calls.borrow().as_slice(),
+        &[Some(PathBuf::from("a.md"))],
+        "确认端口拿到当前关联路径"
+    );
+    assert_eq!(
+        store.files.borrow()[Path::new("a.md")],
+        "改old".as_bytes(),
+        "选择保存：先写盘再弹打开对话框"
+    );
+    assert_eq!(
+        calls.borrow().as_slice(),
+        &["open".to_string()],
+        "确认保存后才选文件"
+    );
+    assert_eq!(doc_text(&a), "new", "随后正常打开目标文件");
+    assert_eq!(a.doc.path.as_deref(), Some(Path::new("b.md")));
+    assert!(!a.editor.is_dirty());
+}
+
+#[test]
+fn dirty_open_discard_clears_snapshot_without_writing_disk() {
+    let store = MemStore::default();
+    disk(&store, "a.md", b"old");
+    disk(&store, "b.md", b"new");
+    let rec = FakeRecovery::default();
+    let c = FakeConfirm::new(&[UnsavedChoice::Discard]);
+    let mut a = app_confirm(
+        "old",
+        Some("a.md"),
+        &store,
+        rec.clone(),
+        &FakeSession::default(),
+        Box::new(NoDialogs),
+        Box::new(c),
+    );
+    a.editor.apply(Intent::InsertText("改".into())).unwrap();
+    seed_recovery(&mut a, &rec);
+
+    a.open_path(PathBuf::from("b.md"));
+    assert!(
+        rec.slot.borrow().is_none(),
+        "明确放弃：恢复快照必须作废，下次启动不得复活"
+    );
+    assert_eq!(
+        store.files.borrow()[Path::new("a.md")],
+        "old".as_bytes(),
+        "放弃不得写盘"
+    );
+    assert_eq!(doc_text(&a), "new");
+    assert_eq!(a.doc.path.as_deref(), Some(Path::new("b.md")));
+}
+
+#[test]
+fn dirty_open_cancel_keeps_document_and_notice() {
+    let store = MemStore::default();
+    disk(&store, "b.md", b"new");
+    let c = FakeConfirm::new(&[UnsavedChoice::Cancel]);
+    let c_calls = c.calls.clone();
+    let mut a = app_confirm(
+        "old",
+        Some("a.md"),
+        &store,
+        FakeRecovery::default(),
+        &FakeSession::default(),
+        Box::new(NoDialogs),
+        Box::new(c),
+    );
+    a.editor.apply(Intent::InsertText("改".into())).unwrap();
+
+    a.open_path(PathBuf::from("b.md"));
+    assert_eq!(c_calls.borrow().len(), 1, "脏文档必须确认一次");
+    assert_eq!(doc_text(&a), "改old", "取消：文档保持原样");
+    assert_eq!(a.doc.path.as_deref(), Some(Path::new("a.md")));
+    assert!(a.editor.is_dirty(), "取消不清脏");
+    assert!(a.ui_state.chrome.notice.contains("未保存"));
+}
+
+#[test]
+fn untitled_save_choice_cancelled_aborts_new_draft() {
+    let store = MemStore::default();
+    let mut a = app_confirm(
+        "草稿",
+        None,
+        &store,
+        FakeRecovery::default(),
+        &FakeSession::default(),
+        Box::new(NoDialogs),
+        Box::new(FakeConfirm::new(&[UnsavedChoice::Save])),
+    );
+    a.editor.apply(Intent::InsertText("改".into())).unwrap();
+
+    a.new_draft();
+    assert_eq!(doc_text(&a), "改草稿", "另存为被取消 → 不新建");
+    assert_eq!(a.doc.path, None);
+    assert!(a.editor.is_dirty());
+    assert!(a.ui_state.chrome.notice.contains("保存未完成"));
+}
+
+#[test]
+fn untitled_save_choice_saves_as_then_creates_new_draft() {
+    let store = MemStore::default();
+    let d = FakeDialogs {
+        open: None,
+        save: Some(PathBuf::from("draft.md")),
+        image: None,
+        calls: Rc::new(RefCell::new(Vec::new())),
+    };
+    let mut a = app_confirm(
+        "草稿",
+        None,
+        &store,
+        FakeRecovery::default(),
+        &FakeSession::default(),
+        Box::new(d),
+        Box::new(FakeConfirm::new(&[UnsavedChoice::Save])),
+    );
+    a.editor.apply(Intent::InsertText("改".into())).unwrap();
+
+    a.new_draft();
+    assert_eq!(
+        store.files.borrow()[Path::new("draft.md")],
+        "改草稿".as_bytes(),
+        "无路径草稿：保存走另存为"
+    );
+    assert_eq!(doc_text(&a), "", "随后新建空白草稿");
+    assert_eq!(a.doc.path, None);
+    assert!(!a.editor.is_dirty());
+}
+
+#[test]
+fn close_confirmation_saves_discards_or_cancels() {
+    let store = MemStore::default();
+    disk(&store, "a.md", b"old");
+
+    // 取消：不退出、不清脏、快照保留
+    let rec = FakeRecovery::default();
+    let mut a = app_confirm(
+        "old",
+        Some("a.md"),
+        &store,
+        rec.clone(),
+        &FakeSession::default(),
+        Box::new(NoDialogs),
+        Box::new(FakeConfirm::new(&[UnsavedChoice::Cancel])),
+    );
+    a.editor.apply(Intent::InsertText("改".into())).unwrap();
+    seed_recovery(&mut a, &rec);
+    assert!(!a.confirm_close(), "取消必须阻止退出");
+    assert!(a.editor.is_dirty());
+    assert!(rec.slot.borrow().is_some(), "取消不动作废快照");
+
+    // 放弃：允许退出且快照作废
+    let rec = FakeRecovery::default();
+    let mut b = app_confirm(
+        "old",
+        Some("a.md"),
+        &store,
+        rec.clone(),
+        &FakeSession::default(),
+        Box::new(NoDialogs),
+        Box::new(FakeConfirm::new(&[UnsavedChoice::Discard])),
+    );
+    b.editor.apply(Intent::InsertText("改".into())).unwrap();
+    seed_recovery(&mut b, &rec);
+    assert!(b.confirm_close(), "放弃允许退出");
+    assert!(rec.slot.borrow().is_none(), "放弃即清快照");
+
+    // 保存：写盘后允许退出，快照作废
+    let rec = FakeRecovery::default();
+    let mut c = app_confirm(
+        "old",
+        Some("a.md"),
+        &store,
+        rec.clone(),
+        &FakeSession::default(),
+        Box::new(NoDialogs),
+        Box::new(FakeConfirm::new(&[UnsavedChoice::Save])),
+    );
+    c.editor.apply(Intent::InsertText("改".into())).unwrap();
+    seed_recovery(&mut c, &rec);
+    assert!(c.confirm_close(), "保存成功允许退出");
+    assert_eq!(store.files.borrow()[Path::new("a.md")], "改old".as_bytes());
+    assert!(rec.slot.borrow().is_none());
+}
+
+#[test]
+fn clean_close_skips_confirmation_and_clears_stale_snapshot() {
+    // 干净文档：不弹确认；若磁盘上仍残留本会话快照（保存后清理失败的兜底），退出时清掉
+    let store = MemStore::default();
+    let rec = FakeRecovery::default();
+    let c = FakeConfirm::new(&[]);
+    let c_calls = c.calls.clone();
+    let mut a = app_confirm(
+        "old",
+        Some("a.md"),
+        &store,
+        rec.clone(),
+        &FakeSession::default(),
+        Box::new(NoDialogs),
+        Box::new(c),
+    );
+    a.editor.apply(Intent::InsertText("改".into())).unwrap();
+    seed_recovery(&mut a, &rec);
+    a.editor.mark_saved(); // 模拟「内容已与磁盘一致」的干净态，快照仍残留
+    assert!(a.confirm_close());
+    assert!(c_calls.borrow().is_empty(), "干净文档不得弹确认");
+    assert!(rec.slot.borrow().is_none(), "干净退出清残稿");
 }
 
 #[test]
@@ -2640,6 +2971,7 @@ fn save_as_rebinds_watcher() {
         theme::test_support::env(),
         persist_env(),
         Box::new(NoPrint),
+        no_confirm(),
     );
     a.save_as();
     assert_eq!(a.doc.path.as_deref(), Some(Path::new("b.md")));
@@ -2715,6 +3047,7 @@ fn app_theme(config: Box<dyn ConfigStore>, system: Rc<Cell<Option<bool>>>) -> Ap
         },
         persist_env(),
         Box::new(NoPrint),
+        no_confirm(),
     )
 }
 
@@ -4274,6 +4607,7 @@ fn app_persist(
         theme::test_support::env(),
         persist_env_with(recovery.clone(), session.clone()),
         Box::new(NoPrint),
+        no_confirm(),
     )
 }
 
@@ -4323,6 +4657,7 @@ fn app_persist_dialogs(
         theme::test_support::env(),
         persist_env_with(recovery.clone(), session.clone()),
         Box::new(NoPrint),
+        no_confirm(),
     )
 }
 
@@ -5711,6 +6046,7 @@ fn e2e_table_edit_and_image_paste() {
         theme::test_support::env(),
         persist_env(),
         Box::new(NoPrint),
+        no_confirm(),
     );
 
     a.ensure_layouts_all();
@@ -5900,6 +6236,7 @@ fn app_print(text: &str, print: Box<dyn Print>) -> App {
         theme::test_support::env(),
         persist_env(),
         print,
+        no_confirm(),
     )
 }
 
@@ -6093,6 +6430,7 @@ fn print_hard_cuts_atomic_block_taller_than_page() {
         theme::test_support::env(),
         persist_env(),
         Box::new(p),
+        no_confirm(),
     );
     a.perform_menu(MenuAction::Print);
     assert!(ended.get());

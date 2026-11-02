@@ -361,28 +361,72 @@ impl App {
         self.request_redraw();
     }
 
-    /// Ctrl+O / 菜单打开：脏文档先拒绝（v0 无确认对话框，宁丢操作不丢数据），
-    /// 拒绝时不弹对话框（避免选完文件才发现无法打开）。
-    pub(crate) fn open_via_dialog(&mut self) {
-        if self.editor.is_dirty() {
-            self.ui_state.chrome.notice = "当前文档未保存，已取消打开".into();
-            self.request_redraw();
-            return;
+    /// 未保存内容的统一处置（3e 修 B）：脏文档弹三选一，返回「是否继续」。
+    /// - 保存：有路径走保存，无路径草稿必须另存为；未完成（失败或取消）→ 取消继续；
+    /// - 放弃：立即作废恢复快照，避免下次启动复活已放弃的内容；
+    /// - 取消：保持编辑状态（状态栏提示，不静默）。
+    pub(crate) fn resolve_unsaved(&mut self) -> bool {
+        if !self.editor.is_dirty() {
+            return true; // 干净文档：无需确认
         }
-        if let Some(path) = self.ports.dialogs.open_markdown() {
-            self.open_path(path);
+        let path = self.doc.path.clone();
+        match self.ports.confirmer.confirm_unsaved(path.as_deref()) {
+            crate::app::UnsavedChoice::Cancel => {
+                self.ui_state.chrome.notice = "已取消：当前文档仍有未保存的修改".into();
+                self.request_redraw();
+                false
+            }
+            crate::app::UnsavedChoice::Discard => {
+                self.clear_recovery();
+                true
+            }
+            crate::app::UnsavedChoice::Save => {
+                if self.doc.path.is_some() {
+                    self.save_now();
+                } else {
+                    self.save_as(); // 无路径草稿：保存的唯一出路
+                }
+                if !self.editor.is_dirty() {
+                    return true;
+                }
+                self.ui_state.chrome.notice = "保存未完成（失败或取消），操作已取消".into();
+                self.request_redraw();
+                false
+            }
         }
     }
 
-    /// 拖放打开：脏文档拒绝替换（v0 无确认对话框，宁丢操作不丢数据）；
-    /// 成功后整体替换编辑器（新文档新撤销栈）、会话代次递增、复位滚动。
-    pub(crate) fn open_path(&mut self, path: PathBuf) {
-        if self.editor.is_dirty() {
-            self.ui_state.chrome.notice = "当前文档未保存，已拒绝打开".into();
-            eprintln!("当前文档未保存，拒绝打开 {}", path.display());
-            self.request_redraw();
+    /// 关窗/退出：脏文档先三选一；确认退出后清恢复快照（干净退出不留残稿）。
+    /// 返回 false = 留在编辑器继续（用户取消）；仅当返回 true 才允许事件循环退出。
+    pub(crate) fn confirm_close(&mut self) -> bool {
+        if !self.resolve_unsaved() {
+            return false;
+        }
+        self.clear_recovery();
+        true
+    }
+
+    /// Ctrl+O / 菜单打开：先处置未保存内容（保存/放弃/取消），再弹文件对话框。
+    /// 选择「保存」后才选文件：避免选完文件才发现保存失败。
+    pub(crate) fn open_via_dialog(&mut self) {
+        if !self.resolve_unsaved() {
             return;
         }
+        if let Some(path) = self.ports.dialogs.open_markdown() {
+            self.open_path_now(path);
+        }
+    }
+
+    /// 拖放/最近文件/快速打开：先处置未保存内容，再整体替换编辑器。
+    pub(crate) fn open_path(&mut self, path: PathBuf) {
+        if !self.resolve_unsaved() {
+            return;
+        }
+        self.open_path_now(path);
+    }
+
+    /// 已完成未保存处置后的打开（不再确认）：加载失败保留当前文档与编辑内容。
+    fn open_path_now(&mut self, path: PathBuf) {
         let bytes = match self.ports.store.load(&path) {
             Ok(b) => b,
             Err(e) => {
@@ -407,6 +451,7 @@ impl App {
         self.doc.baseline = bytes; // 新文件：磁盘内容即基线
         self.persist_state.persist.reset();
         self.note_opened(path.clone()); // 登记最近文件（0b）
+        self.clear_recovery(); // 旧文档的恢复快照已随打开失效（0b / 3e 修 B）
         // 新文档：会话与图片基准代次递增，块相关缓存按因果键失配；
         // 行内公式按 tex 内容寻址，跨文档保留
         self.input_state.revs.session += 1;
@@ -434,13 +479,10 @@ impl App {
         self.request_redraw();
     }
 
-    /// Ctrl+N / 菜单新建：以空白草稿替换当前文档。
-    /// 脏文档拒绝（v0 无确认对话框，宁丢操作不丢数据，与打开一致）。
+    /// Ctrl+N / 菜单新建：先处置未保存内容，再以空白草稿替换当前文档。
     /// 成功即换新编辑器（新撤销栈、脏标清除）、文件监听解除、派生缓存按会话代次失效。
     pub(crate) fn new_draft(&mut self) {
-        if self.editor.is_dirty() {
-            self.ui_state.chrome.notice = "当前文档未保存，已取消新建".into();
-            self.request_redraw();
+        if !self.resolve_unsaved() {
             return;
         }
         self.editor = Editor::new("");
@@ -448,6 +490,7 @@ impl App {
         self.doc.bom = false;
         self.doc.baseline = encode("", false); // 空白草稿：基线为空字节
         self.persist_state.persist.reset();
+        self.clear_recovery(); // 旧文档的恢复快照已随新建失效（0b / 3e 修 B）
         // 新文档：会话与图片基准代次递增，块相关缓存按因果键失配；
         // 行内公式按 tex 内容寻址，跨文档保留
         self.input_state.revs.session += 1;

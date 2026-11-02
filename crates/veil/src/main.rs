@@ -50,6 +50,7 @@ fn main() {
         platform::theme_env(),
         platform::persist_env(),
         platform::print(),
+        platform::confirmer(),
     ) {
         eprintln!("{e}");
         std::process::exit(1);

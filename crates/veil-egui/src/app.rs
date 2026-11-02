@@ -109,6 +109,23 @@ pub trait Exporter {
     ) -> Result<PathBuf, String>;
 }
 
+/// 未保存内容的处置选择（3e 修 B）：关闭/新建/打开前统一三选一。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum UnsavedChoice {
+    /// 保存后继续（有路径直接保存；无路径草稿走另存为）。
+    Save,
+    /// 放弃修改（随后清恢复快照，避免下次启动复活已放弃内容）。
+    Discard,
+    /// 取消当前操作，保持编辑状态。
+    Cancel,
+}
+
+/// 未保存内容确认（3e 修 B）：系统模态框由产品层注入（Windows MessageBoxW），
+/// 本层只消费选择，不依赖任何 GUI 框架。`file` 为当前关联路径（None = 未命名草稿）。
+pub trait Confirmer {
+    fn confirm_unsaved(&mut self, file: Option<&Path>) -> UnsavedChoice;
+}
+
 /// 崩溃恢复草稿存储（0b）：单槽字节读写，实现由产品层注入（应用数据目录单文件）。
 /// `save` 须原子（tmp+rename）：恢复文件自身半截比没有更糟。
 /// `load` 在无恢复文件时返回 Err（正常状态）；`clear` 在文件不存在时视为成功。
@@ -159,6 +176,7 @@ pub fn run(
     theme_env: ThemeEnv,
     persist_env: PersistEnv,
     print: Box<dyn Print>,
+    confirmer: Box<dyn Confirmer>,
 ) -> Result<(), String> {
     let event_loop = EventLoop::new().map_err(|e| format!("创建事件循环失败: {e}"))?;
     event_loop.set_control_flow(ControlFlow::Wait);
@@ -175,6 +193,7 @@ pub fn run(
         theme_env,
         persist_env,
         print,
+        confirmer,
     );
     event_loop
         .run_app(&mut app)
@@ -328,7 +347,7 @@ pub(crate) struct App {
     pub(crate) ui_state: UIState,
 }
 
-/// 14 个平台端口聚合结构：能力集合，不携带状态语义（ADR-009 决策六）。
+/// 15 个平台端口聚合结构：能力集合，不携带状态语义（ADR-009 决策六）。
 /// 全部为 Box<dyn Trait>，由产品层注入（veil/main.rs 各 impl 对应 trait）。
 pub(crate) struct Ports {
     pub(crate) clipboard: Box<dyn Clipboard>,
@@ -345,6 +364,7 @@ pub(crate) struct Ports {
     pub(crate) recovery: Box<dyn RecoveryStore>,
     pub(crate) session: Box<dyn SessionStore>,
     pub(crate) print: Box<dyn Print>,
+    pub(crate) confirmer: Box<dyn Confirmer>,
 }
 
 /// 启动文档决议（0b）：resume 模式下按「崩溃恢复 > 会话恢复 > 传入文档」重建。
@@ -455,6 +475,7 @@ impl App {
         theme_env: ThemeEnv,
         persist_env: PersistEnv,
         print: Box<dyn Print>,
+        confirmer: Box<dyn Confirmer>,
     ) -> Self {
         let ThemeEnv {
             mut config,
@@ -495,6 +516,7 @@ impl App {
             recovery,
             session,
             print,
+            confirmer,
         };
         let start = startup_doc(&mut ports, doc);
         let mut editor = Editor::new(&start.doc.text);
@@ -780,7 +802,11 @@ impl ApplicationHandler for App {
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::CloseRequested => {
+                if self.confirm_close() {
+                    event_loop.exit();
+                }
+            }
             WindowEvent::Resized(size) => {
                 if let (Some(s), Some(w), Some(h)) = (
                     self.window_state.surface.as_mut(),
@@ -853,7 +879,7 @@ impl ApplicationHandler for App {
                 button: MouseButton::Left,
                 ..
             } => {
-                if self.on_left_click() {
+                if self.on_left_click() && self.confirm_close() {
                     event_loop.exit();
                 }
             }

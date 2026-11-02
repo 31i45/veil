@@ -489,14 +489,15 @@ impl Editor {
         let m = marker.len();
         if let Some(sel) = self.selection() {
             let text = self.session.text_slice(sel)?;
-            let double_wrapped = m == 1
-                && text.len() >= 4
-                && text[1..].starts_with(marker)
-                && text[..text.len() - 1].ends_with(marker);
-            let wrapped = text.len() > 2 * m
-                && text.starts_with(marker)
-                && text.ends_with(marker)
-                && !double_wrapped;
+            // 严格按字节切 UTF-8 会 panic（选区首/尾是 CJK 时 `text[1..]` 不在字符边界）：
+            // 先判定「已包裹」，再取内部切片判双包裹，全程用 starts/ends_with。
+            let enclosed =
+                text.len() >= 2 * m && text.starts_with(marker) && text.ends_with(marker);
+            let double_wrapped = enclosed && m == 1 && {
+                let inner = &text[m..text.len() - m];
+                inner.starts_with(marker) && inner.ends_with(marker)
+            };
+            let wrapped = enclosed && text.len() > 2 * m && !double_wrapped;
             let (new, at) = if wrapped {
                 let inner = &text[m..text.len() - m];
                 (inner.to_string(), sel.start + inner.len())
@@ -1806,6 +1807,25 @@ mod tests {
         let mut e = sel_ed("**b**", 0, 5);
         e.apply(Intent::ToggleWrap("*")).unwrap();
         assert_eq!(e.session().serialize(), "***b***");
+    }
+
+    #[test]
+    fn italic_on_cjk_selection_does_not_panic() {
+        // 回归：旧实现用 text[1..] / text[..len-1] 判双包裹，选区首尾是 CJK 时
+        // 字节下标不在字符边界 → panic。Ctrl+I 选中中文即崩溃。
+        let src = "混合元素";
+        let mut e = sel_ed(src, 0, src.len());
+        e.apply(Intent::ToggleWrap("*")).unwrap();
+        assert_eq!(e.session().serialize(), format!("*{src}*"));
+        assert_eq!(e.caret(), src.len() + 2);
+    }
+
+    #[test]
+    fn italic_on_cjk_bold_stacks_instead_of_unwrapping() {
+        let src = "**加粗**";
+        let mut e = sel_ed(src, 0, src.len());
+        e.apply(Intent::ToggleWrap("*")).unwrap();
+        assert_eq!(e.session().serialize(), format!("*{src}*"));
     }
 
     #[test]

@@ -189,6 +189,7 @@ impl App {
             }
             Action::ToggleOutline => self.toggle_outline(),
             Action::Export => self.export_now(),
+            Action::Print => self.print_document(),
             Action::Find => self.open_search(),
             Action::Replace => self.open_replace(),
             Action::ZoomIn => self.zoom_step(1),
@@ -1191,7 +1192,7 @@ impl App {
         ))
     }
 
-    /// 打开浮层（Ctrl+P / 菜单）：关闭菜单与查找栏，重建候选（最近文件 + 当前目录）。
+    /// 打开浮层（Ctrl+Shift+P / 菜单）：关闭菜单与查找栏，重建候选（最近文件 + 当前目录）。
     pub(crate) fn open_quick(&mut self) {
         self.ui_state.chrome.close();
         if self.ui_state.search.open {

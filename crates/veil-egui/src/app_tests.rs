@@ -4749,10 +4749,12 @@ fn quick_open_lists_recent_and_directory_then_opens() {
     let mut a = app("cur", Some("dir/cur.md"), false, &store);
     a.persist_state.recent = vec![PathBuf::from("dir/README.md")];
     a.input_state.mods.ctrl = true;
+    a.input_state.mods.shift = true;
     a.route_key(Key::P);
     a.input_state.mods.ctrl = false;
+    a.input_state.mods.shift = false;
 
-    assert!(a.ui_state.quick.open, "Ctrl+P 打开浮层");
+    assert!(a.ui_state.quick.open, "Ctrl+Shift+P 打开浮层");
     assert_eq!(a.mode(), Mode::QuickOpen, "浮层期间文档只读");
     let labels: Vec<_> = a
         .ui_state
@@ -4799,8 +4801,10 @@ fn quick_open_refuses_dirty_document_and_esc_closes() {
     let before = doc_text(&a);
 
     a.input_state.mods.ctrl = true;
+    a.input_state.mods.shift = true;
     a.route_key(Key::P);
     a.input_state.mods.ctrl = false;
+    a.input_state.mods.shift = false;
     assert!(a.ui_state.quick.open);
     a.route_key(Key::Enter);
     assert!(!a.ui_state.quick.open, "尝试打开后浮层关闭");
@@ -4813,8 +4817,10 @@ fn quick_open_refuses_dirty_document_and_esc_closes() {
 
     // Esc：关闭且不动文档
     a.input_state.mods.ctrl = true;
+    a.input_state.mods.shift = true;
     a.route_key(Key::P);
     a.input_state.mods.ctrl = false;
+    a.input_state.mods.shift = false;
     a.route_key(Key::Escape);
     assert!(!a.ui_state.quick.open);
     assert_eq!(doc_text(&a), before);
@@ -4831,8 +4837,10 @@ fn quick_open_step_and_backspace_requery() {
     }
     let mut a = app("cur", Some("dir/cur.md"), false, &store);
     a.input_state.mods.ctrl = true;
+    a.input_state.mods.shift = true;
     a.route_key(Key::P);
     a.input_state.mods.ctrl = false;
+    a.input_state.mods.shift = false;
     // 启动即打开的文件已登记为最近文件：候选 = 当前文件 + 目录内 a.md/b.md
     let labels: Vec<_> = a
         .ui_state
@@ -4868,8 +4876,10 @@ fn quick_open_takes_ime_text_and_preempts_search() {
     a.open_search();
     assert!(a.ui_state.search.open);
     a.input_state.mods.ctrl = true;
+    a.input_state.mods.shift = true;
     a.route_key(Key::P);
     a.input_state.mods.ctrl = false;
+    a.input_state.mods.shift = false;
     assert!(a.ui_state.quick.open);
     assert!(!a.ui_state.search.open, "快速打开抢占查找栏");
     assert_eq!(a.mode(), Mode::QuickOpen);
@@ -5943,6 +5953,32 @@ fn print_paginates_clean_frames_and_restores_state() {
     assert_eq!(a.window_state.scroll_y, 42.0, "滚动位置复原");
     assert!(a.window_state.print.is_none(), "打印态已退出");
     assert_eq!(doc_text(&a), text, "打印只读，不动真值");
+}
+
+/// K2：Ctrl+P = 打印（系统对话框，含预览）；快速打开改到 Ctrl+Shift+P，二者不串位。
+#[test]
+fn ctrl_p_prints_and_ctrl_shift_p_quick_opens() {
+    let p = FakePrint {
+        w: 300,
+        h: 600,
+        scale: 1.0,
+        ..Default::default()
+    };
+    let ended = p.ended.clone();
+    let mut a = app_print("x\n", Box::new(p));
+
+    a.input_state.mods.ctrl = true;
+    a.route_key(Key::P);
+    a.input_state.mods.ctrl = false;
+    assert!(ended.get(), "Ctrl+P 经路由到达打印端口");
+    assert!(!a.ui_state.quick.open, "Ctrl+P 不再打开快速打开浮层");
+
+    a.input_state.mods.ctrl = true;
+    a.input_state.mods.shift = true;
+    a.route_key(Key::P);
+    a.input_state.mods.ctrl = false;
+    a.input_state.mods.shift = false;
+    assert!(a.ui_state.quick.open, "Ctrl+Shift+P 仍是快速打开");
 }
 
 #[test]

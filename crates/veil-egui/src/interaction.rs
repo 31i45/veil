@@ -279,7 +279,14 @@ impl App {
             .ports
             .clipboard
             .get_html()
-            .map(|h| html_to_markdown(&h))
+            .map(|h| {
+                let mut md = html_to_markdown(&h);
+                // 转换结果恒以单个换行收尾；原样插入会在行中凭空断行（B7-3），剥掉这一个
+                if md.ends_with('\n') {
+                    md.pop();
+                }
+                md
+            })
             .filter(|m| !m.trim().is_empty());
         if let Some(text) = md.or_else(|| self.ports.clipboard.get()) {
             self.insert_paste(&text);

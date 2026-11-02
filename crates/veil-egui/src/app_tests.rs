@@ -293,6 +293,21 @@ impl Clipboard for ClipImage {
     }
 }
 
+/// 文件列表剪贴板 mock：模拟资源管理器 Ctrl+C（Windows 同时附带路径文本）。
+struct ClipFiles {
+    files: Vec<PathBuf>,
+    text: Option<String>,
+}
+impl Clipboard for ClipFiles {
+    fn get(&mut self) -> Option<String> {
+        self.text.clone()
+    }
+    fn set(&mut self, _text: &str) {}
+    fn get_files(&mut self) -> Vec<PathBuf> {
+        self.files.clone()
+    }
+}
+
 fn solid(w: u32, h: u32) -> ImageData {
     ImageData {
         pixels: vec![128; (w * h * 4) as usize],
@@ -894,6 +909,61 @@ fn paste_image_requires_document_path() {
     assert_eq!(doc_text(&f.app), "ab");
     assert!(!f.app.editor.is_dirty());
     assert!(f.calls.borrow().is_empty());
+}
+
+#[test]
+fn paste_image_files_prefer_file_list_over_path_text() {
+    // 资源管理器 Ctrl+C 一张图片：剪贴板同时给出文件列表与路径文本；
+    // 必须走落盘图片，不能把路径字符串粘进文档。
+    let saved = Rc::new(RefCell::new(Vec::new()));
+    let loads = Rc::new(RefCell::new(Vec::new()));
+    let doc = Doc {
+        text: "ab".into(),
+        path: Some(PathBuf::from("dir/notes.md")),
+        bom: false,
+        resume: false,
+    };
+    let mut files = HashMap::new();
+    files.insert(PathBuf::from("C:/pics/cat.png"), (8, 4));
+    let mut app = App::new(
+        doc,
+        Box::new(ClipFiles {
+            files: vec![
+                PathBuf::from("C:/pics/cat.png"),
+                PathBuf::from("C:/pics/readme.txt"),
+            ],
+            text: Some("C:/pics/cat.png".into()),
+        }),
+        Box::new(MemStore::default()),
+        Box::new(FakeMath {
+            fail: false,
+            calls: Rc::new(RefCell::new(Vec::new())),
+        }),
+        Box::new(FakeImages {
+            files,
+            calls: loads.clone(),
+        }),
+        Box::new(FakeAssets {
+            result: Ok("notes.assets/image-1.png".into()),
+            calls: saved.clone(),
+        }),
+        Box::new(NoExport),
+        Box::new(NoDialogs),
+        Box::new(NoWatcher),
+        theme::test_support::env(),
+        persist_env(),
+        Box::new(NoPrint),
+        no_confirm(),
+    );
+    app.paste_clipboard();
+    assert_eq!(doc_text(&app), "![](notes.assets/image-1.png)\nab");
+    assert_eq!(
+        loads.borrow().first(),
+        Some(&PathBuf::from("C:/pics/cat.png")),
+        "首个读取必须是文件列表中的图片（此后渲染管线会尝试加载插图 markdown）"
+    );
+    assert_eq!(saved.borrow().len(), 1, "位图按粘贴图片落盘");
+    assert_eq!((saved.borrow()[0].1, saved.borrow()[0].2), (8, 4));
 }
 
 #[test]

@@ -377,6 +377,10 @@ fn clipboard() -> Box<dyn veil_egui::Clipboard> {
                 height: img.height as u32,
             })
         }
+        /// 文件列表读取（资源管理器 Ctrl+C）：Windows 走 CF_HDROP；无文件列表时为空。
+        fn get_files(&mut self) -> Vec<std::path::PathBuf> {
+            self.0.get().file_list().unwrap_or_default()
+        }
     }
     struct Noop; // 剪贴板初始化失败（如无显示服务器）：Ctrl+C/X/V 静默无效
     impl veil_egui::Clipboard for Noop {

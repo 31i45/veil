@@ -1195,6 +1195,7 @@ impl App {
     /// 打开浮层（Ctrl+Shift+P / 菜单）：关闭菜单与查找栏，重建候选（最近文件 + 当前目录）。
     pub(crate) fn open_quick(&mut self) {
         self.ui_state.chrome.close();
+        self.ui_state.ctx.close();
         if self.ui_state.search.open {
             self.ui_state.search.open = false;
             self.ui_state.search.replace_open = false;
@@ -1306,6 +1307,7 @@ impl App {
         }
         self.close_quick();
         self.ui_state.chrome.close();
+        self.ui_state.ctx.close();
         self.editor.clear_preedit();
         self.ui_state.search.open = true;
         self.ui_state.search.replace_open = false;
@@ -1314,13 +1316,21 @@ impl App {
         self.request_redraw();
     }
 
-    /// 打开查找替换栏（Ctrl+H / 菜单）：未打开时先开栏；查询保留，焦点给替换串。
+    /// 打开查找替换栏（Ctrl+H / 菜单）：首次打开焦点落在查询串（先输词再 Tab 到替换，
+    /// 避免首字进替换框导致「无命中、看似无响应」）；栏已开时只展开替换行并聚焦替换串。
     pub(crate) fn open_replace(&mut self) {
         self.close_quick();
         self.ui_state.chrome.close();
-        self.ui_state.search.open = true;
-        self.ui_state.search.replace_open = true;
-        self.ui_state.search.focus = search::Field::Replace;
+        self.ui_state.ctx.close();
+        if self.ui_state.search.open {
+            self.ui_state.search.replace_open = true;
+            self.ui_state.search.focus = search::Field::Replace;
+        } else {
+            self.ui_state.search.open = true;
+            self.ui_state.search.replace_open = true;
+            self.ui_state.search.clear();
+            self.ui_state.search.focus = search::Field::Query;
+        }
         self.set_ime_area();
         self.request_redraw();
     }

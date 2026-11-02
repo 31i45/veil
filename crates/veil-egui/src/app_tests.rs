@@ -26,6 +26,7 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 use veil_core::{BlockId, BlockKind, Range};
 use winit::dpi::PhysicalPosition;
+use winit::keyboard::Key as WKey;
 
 struct NoClip;
 impl Clipboard for NoClip {
@@ -6242,6 +6243,30 @@ fn zoom_menu_and_key_paths() {
 }
 
 // ── 3c-3：F11 全屏切换 ───────────────────────────────────────────────────────
+
+#[test]
+fn ctrl_combo_ignores_winit_text_stripped_of_ctrl() {
+    // winit Windows：Ctrl+S 的 event.text 是「剥离 Ctrl 后」的 "s"。文本分支若先行，
+    // 全部 Ctrl 组合都会退化成 Key::Text("s") → translate 返回 None → 快捷键静默失效
+    let s = winit::keyboard::SmolStr::new("s");
+    let ctrl = Mods { ctrl: true, shift: false, alt: false };
+    assert_eq!(
+        crate::interaction::map_key_parts(Some("s"), WKey::Character(s.clone()), ctrl),
+        Some(Key::S),
+        "Ctrl+S 必须映射为 Key::S，而不是 Key::Text"
+    );
+    // 无 Ctrl：文本照常承载（s 作为字符插入，而非快捷键）
+    assert_eq!(
+        crate::interaction::map_key_parts(Some("s"), WKey::Character(s.clone()), Mods::default()),
+        Some(Key::Text("s".into()))
+    );
+    // AltGr（Ctrl+Alt）仍是输入字符，必须走文本
+    let altgr = Mods { ctrl: true, shift: false, alt: true };
+    assert_eq!(
+        crate::interaction::map_key_parts(Some("s"), WKey::Character(s), altgr),
+        Some(Key::Text("s".into()))
+    );
+}
 
 #[test]
 fn fullscreen_headless_noop_and_menu_path() {

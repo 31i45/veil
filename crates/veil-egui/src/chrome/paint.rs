@@ -4,8 +4,9 @@
 use std::path::Path;
 
 use super::{
-    menu_bar_rects, menu_rows, popup_layout, scroll_thumb, status_line, theme_action_matches,
-    Chrome, Viewport, MENUS, MENU_H, SCROLL_W, STATUS_H,
+    action_checked, menu_bar_rects, menu_rows, popup_layout, scroll_thumb, status_line,
+    theme_action_matches, Chrome, MenuFlags, Viewport, CHECK_W, MENUS, MENU_H, SCROLL_W,
+    STATUS_H,
 };
 use crate::document::ExternalState;
 use crate::theme::Theme;
@@ -115,6 +116,7 @@ impl Chrome {
         doc_h: f32,
         scroll: f32,
         recent: &[String],
+        flags: MenuFlags,
     ) {
         let win_w = frame.width as f32;
         let win_h = frame.height as f32;
@@ -252,11 +254,24 @@ impl Chrome {
                     continue;
                 };
                 let pad = 12.0 * scale;
+                let label_x = ix + pad + CHECK_W * scale;
+                // 开关项（专注/打字机/大纲/全屏）左侧勾选槽：开启态画对勾
+                if action_checked(*action, flags) {
+                    if let Some(l) = self.labels.get_or_insert(engine, "✓", theme.text, scale) {
+                        frame.blit(
+                            &l.pixels,
+                            l.w,
+                            l.h,
+                            (ix + pad).round() as i32,
+                            (iy + ih / 2.0 - l.h as f32 / 2.0).round() as i32,
+                        );
+                    }
+                }
                 self.draw_left(
                     frame,
                     engine,
                     label,
-                    ix + pad,
+                    label_x,
                     iy + ih / 2.0,
                     theme.text,
                     scale,

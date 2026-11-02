@@ -277,10 +277,23 @@ impl App {
         self.request_redraw();
     }
 
-    /// 粘贴（切片 11/14）：HTML 优先转 Markdown，转换无内容（纯图片/空结构）回退纯文本；
-    /// 文本皆空时尝试位图：落盘 `<doc>.assets/` 并插入 `![](相对路径)`。
+    /// 粘贴（切片 11/14）：文件列表中的图片优先（资源管理器 Ctrl+C），
+    /// 其次 HTML→Markdown，再纯文本；文本皆空时尝试位图：落盘 `<doc>.assets/` 并插入链接。
     /// 草稿（无关联文件）拒绝图片粘贴（无写入基准），文档不变、不置脏。
     pub(crate) fn paste_clipboard(&mut self) {
+        // 文件复制在 Windows 上同时附带路径文本，故文件判定必须先于文本分支，
+        // 否则粘出来的是路径字符串而不是图片。非图片文件不在此处理，仍走文本分支。
+        let images: Vec<_> = self
+            .ports
+            .clipboard
+            .get_files()
+            .into_iter()
+            .filter(|p| crate::image::is_image_path(p))
+            .collect();
+        if !images.is_empty() {
+            self.insert_image_files(&images);
+            return;
+        }
         let md = self
             .ports
             .clipboard
@@ -319,6 +332,21 @@ impl App {
                 self.ui_state.chrome.notice = format!("图片落盘失败: {e}");
                 eprintln!("图片落盘失败（文档未改动）: {e}");
                 self.request_redraw();
+            }
+        }
+    }
+
+    /// 图片文件插入（剪贴板文件列表）：与拖入同一条路径——解码 → 落盘 assets → 独占段插入。
+    /// 多个图片文件按顺序各成一段；草稿/落盘失败语义由 `insert_image_data` 统一处理。
+    fn insert_image_files(&mut self, paths: &[std::path::PathBuf]) {
+        for path in paths {
+            match self.ports.images.load(path) {
+                Ok(img) => self.insert_image_data(&img),
+                Err(e) => {
+                    self.ui_state.chrome.notice = format!("图片读取失败: {e}");
+                    eprintln!("图片读取失败（文档未改动）{}: {e}", path.display());
+                    self.request_redraw();
+                }
             }
         }
     }

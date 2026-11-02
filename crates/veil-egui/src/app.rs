@@ -55,6 +55,12 @@ pub trait Clipboard {
     fn get_image(&mut self) -> Option<ImageData> {
         None
     }
+    /// 文件列表读取（资源管理器 Ctrl+C 复制的文件）：默认空。
+    /// 系统剪贴板的文件复制同时会附带路径文本，故粘贴时须先于文本分支判定，
+    /// 否则粘出来的是路径字符串而不是图片。
+    fn get_files(&mut self) -> Vec<PathBuf> {
+        Vec::new()
+    }
 }
 
 /// 文件读写抽象：实现由产品层（veil）注入（同 Clipboard 模式，INSTANCE §6）。

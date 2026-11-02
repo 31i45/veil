@@ -45,6 +45,7 @@ pub(crate) enum Cmd {
     QuickInput(String),
     SearchInput(String),
     SearchBackspace,
+    SearchPaste,
     /// 替换模式下 Tab 在查询/替换输入框之间切换焦点。
     SearchToggleField,
     SearchNext,
@@ -98,11 +99,13 @@ pub(crate) fn route(mode: Mode, key: Key, mods: Mods, composing: bool) -> Cmd {
                 Key::Enter => Cmd::SearchNext,
                 Key::Backspace => Cmd::SearchBackspace,
                 Key::Tab => Cmd::SearchToggleField,
-                // 查找栏已开时 Ctrl+F/Ctrl+H 仍须生效：重申查询焦点 / 展开替换行。
-                // 缺这两条时按键被吞，栏可见却「按了没反应」，只能先 Esc 再重按。
+                // Ctrl+F/H/P 穿透：重申查询焦点 / 展开替换 / 打开快速打开
                 Key::F if ctrl => Cmd::Edit(Action::Find),
                 Key::H if ctrl => Cmd::Edit(Action::Replace),
                 Key::P if ctrl && mods.shift => Cmd::OpenQuick,
+                // 查找栏输入框自己的粘贴：Ctrl+V 不能让 Action::Paste 去改文档，
+                // 必须粘进查询/替换框；文件列表/图片在查找栏语境下一律当文本粘入。
+                Key::V if ctrl => Cmd::SearchPaste,
                 Key::Text(t) if !ctrl => Cmd::SearchInput(t),
                 _ => Cmd::Ignore,
             }

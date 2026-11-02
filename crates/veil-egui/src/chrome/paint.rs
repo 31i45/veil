@@ -5,8 +5,7 @@ use std::path::Path;
 
 use super::{
     action_checked, menu_bar_rects, menu_rows, popup_layout, scroll_thumb, status_line,
-    theme_action_matches, Chrome, MenuFlags, Viewport, CHECK_W, MENUS, MENU_H, SCROLL_W,
-    STATUS_H,
+    theme_action_matches, Chrome, MenuFlags, Viewport, MENUS, MENU_H, SCROLL_W, STATUS_H,
 };
 use crate::document::ExternalState;
 use crate::theme::Theme;
@@ -254,30 +253,19 @@ impl Chrome {
                     continue;
                 };
                 let pad = 12.0 * scale;
-                let label_x = ix + pad + CHECK_W * scale;
-                // 开关项（专注/打字机/大纲/全屏）左侧勾选槽：开启态画对勾
-                if action_checked(*action, flags) {
-                    if let Some(l) = self.labels.get_or_insert(engine, "✓", theme.text, scale) {
-                        frame.blit(
-                            &l.pixels,
-                            l.w,
-                            l.h,
-                            (ix + pad).round() as i32,
-                            (iy + ih / 2.0 - l.h as f32 / 2.0).round() as i32,
-                        );
-                    }
-                }
                 self.draw_left(
                     frame,
                     engine,
                     label,
-                    label_x,
+                    ix + pad,
                     iy + ih / 2.0,
                     theme.text,
                     scale,
                 );
-                // 主题项右侧显示「当前」标记（快捷键列复用；菜单最小宽度足以容纳）
-                let hint = if theme_action_matches(*action, theme.mode) {
+                // 主题项 / 开关项：开启态在右侧显示「当前」（快捷键列复用）
+                let hint = if theme_action_matches(*action, theme.mode)
+                    || action_checked(*action, flags)
+                {
                     "当前"
                 } else {
                     shortcut

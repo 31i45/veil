@@ -288,6 +288,7 @@ fn paint_caches_status_fit_across_frames() {
             2000.0,
             0.0,
             &[],
+            MenuFlags::default(),
         );
     }
     let n = chrome.status_fit.len();
@@ -307,6 +308,7 @@ fn paint_caches_status_fit_across_frames() {
         2000.0,
         0.0,
         &[],
+        MenuFlags::default(),
     );
     assert_eq!(chrome.status_fit.len(), n, "同参数重绘命中缓存不增长");
 }
@@ -336,6 +338,7 @@ fn paint_draws_menu_status_and_popup() {
         2000.0,
         0.0,
         &[],
+        MenuFlags::default(),
     );
     assert_eq!(frame.get(0, 0), theme.chrome_bg, "菜单栏底色");
     let status_y = 200 - STATUS_H as i32;
@@ -368,8 +371,76 @@ fn paint_draws_menu_status_and_popup() {
         2000.0,
         0.0,
         &[],
+        MenuFlags::default(),
     );
     assert_eq!(chrome.labels.len(), n);
+}
+
+#[test]
+fn toggle_rows_report_and_paint_checked_state() {
+    let flags = MenuFlags {
+        focus: true,
+        ..Default::default()
+    };
+    assert!(action_checked(MenuAction::ToggleFocus, flags));
+    assert!(!action_checked(MenuAction::ToggleTypewriter, flags));
+    assert!(!action_checked(MenuAction::Save, flags), "非开关项无勾选态");
+    assert!(action_checked(
+        MenuAction::ToggleOutline,
+        MenuFlags {
+            outline: true,
+            ..Default::default()
+        }
+    ));
+    assert!(action_checked(
+        MenuAction::ToggleFullscreen,
+        MenuFlags {
+            fullscreen: true,
+            ..Default::default()
+        }
+    ));
+
+    // 像素级：视图菜单「专注模式」行开启后多出左侧对勾像素
+    let theme = Theme::light();
+    let v = viewport(300, 300, 1.0);
+    let p = popup_layout(2, 1.0, &[]);
+    let (_, ix, iy, iw, ih) = p.items[8];
+    let shot = |on: bool| {
+        let mut engine = LayoutEngine::new();
+        let mut frame = Frame::new(300, 300, [255, 255, 255, 255]);
+        let mut chrome = Chrome {
+            open: Some(2),
+            ..Default::default()
+        };
+        chrome.paint(
+            &mut frame,
+            &mut engine,
+            v,
+            1.0,
+            &theme,
+            None,
+            false,
+            ExternalState::None,
+            0,
+            1,
+            1,
+            3000.0,
+            0.0,
+            &[],
+            MenuFlags {
+                focus: on,
+                ..Default::default()
+            },
+        );
+        let mut px = Vec::new();
+        for y in iy as u32..(iy + ih) as u32 {
+            for x in ix as u32..(ix + iw) as u32 {
+                px.push(frame.get(x, y));
+            }
+        }
+        px
+    };
+    assert_ne!(shot(false), shot(true), "开启态须在行左侧画出对勾");
 }
 
 #[test]
@@ -393,6 +464,7 @@ fn paint_uses_dark_palette() {
         10.0,
         0.0,
         &[],
+        MenuFlags::default(),
     );
     assert_eq!(frame.get(0, 0), theme.chrome_bg, "深色菜单栏");
     assert_eq!(theme.chrome_bg, [38, 38, 38, 255]);
@@ -446,6 +518,7 @@ fn scrollbar_thumb_painted_when_overflowing() {
         3000.0,
         0.0,
         &[],
+        MenuFlags::default(),
     );
     let x = (300.0 - SCROLL_W + 2.0) as u32;
     let y = (v.y + 2.0) as u32;

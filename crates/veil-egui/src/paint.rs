@@ -680,6 +680,12 @@ impl App {
             self.paint_drop_hint(&mut frame);
             // chrome 最后绘制（不透明覆盖内容；滚动条区保留给状态栏行列）
             let recent = self.recent_labels();
+            let flags = chrome::MenuFlags {
+                outline: self.ui_state.outline.open,
+                fullscreen: self.window_state.fullscreen,
+                focus: self.ui_state.writing.focus,
+                typewriter: self.ui_state.writing.typewriter,
+            };
             self.ui_state.chrome.paint(
                 &mut frame,
                 &mut self.engine,
@@ -695,6 +701,7 @@ impl App {
                 doc_h,
                 self.window_state.scroll_y,
                 &recent,
+                flags,
             );
         }
         // 归还缓冲供下一帧复用；返回 &mut Frame 供产品层 present() 与测试断言
@@ -925,6 +932,8 @@ impl App {
         let mid = bar.y + bar.h / 2.0;
         let text_y = |h: u32| (mid - h as f32 / 2.0).round() as i32;
         // 查询文本：空串显示占位提示；非空保留尾部（正在输入的一端）
+        // 光标 x 只跟随真实查询文本（占位提示不计入）：空串时落在输入区左端，
+        // 有文本时落在文本末端——两者共同表达「插入点」，占位文案不参与定位。
         let mut qw = 0.0;
         if search.query.is_empty() {
             if self.editor.preedit().is_none() {
@@ -934,7 +943,6 @@ impl App {
                     theme.muted,
                     scale,
                 ) {
-                    qw = lab.w as f32;
                     frame.blit(
                         &lab.pixels,
                         lab.w,
@@ -1002,7 +1010,6 @@ impl App {
                         theme.muted,
                         scale,
                     ) {
-                        rw = lab.w as f32;
                         frame.blit(
                             &lab.pixels,
                             lab.w,

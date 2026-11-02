@@ -962,9 +962,16 @@ impl App {
                 );
             }
         }
+        let focus = search.focus;
+        // 查询框光标：聚焦 + 无 IME preedit → 可见文本末端画 2×ch 竖线
+        if focus == search::Field::Query && self.editor.preedit().is_none() {
+            let cx = (l.text.x + qw).round() as i32;
+            let ch = 16.0 * scale;
+            let cy = (mid - ch / 2.0).round() as i32;
+            frame.fill_rect(cx, cy, 2, ch as u32, [theme.fg[0], theme.fg[1], theme.fg[2], 255]);
+        }
         // IME 组合串：贴在查询文本之后（贴右缘钳位），下划线同文档 preedit；
         // 替换模式下焦点在替换框时由替换行负责绘制
-        let focus = search.focus;
         if focus == search::Field::Query || !replace {
             if let Some(pre) = self.editor.preedit() {
                 let text = pre.text.clone();
@@ -1022,6 +1029,13 @@ impl App {
                         rtext_y(lab.h),
                     );
                 }
+            }
+            // 替换框光标：聚焦 + 无 IME preedit → 可见文本末端画 2×ch 竖线
+            if focus == search::Field::Replace && self.editor.preedit().is_none() {
+                let cx = (r.text.x + rw).round() as i32;
+                let ch = 16.0 * scale;
+                let cy = (rmid - ch / 2.0).round() as i32;
+                frame.fill_rect(cx, cy, 2, ch as u32, [theme.fg[0], theme.fg[1], theme.fg[2], 255]);
             }
             if focus == search::Field::Replace {
                 if let Some(pre) = self.editor.preedit() {

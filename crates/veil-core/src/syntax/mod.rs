@@ -188,13 +188,21 @@ impl Syntax {
     /// 表格派生数据：表头/表体单元格与列对齐。非表格块/未知 id 返回 None。
     /// 单元格文本为「剥除 inline 标记后的可见文本」；区间为 trim 后的内容区间
     /// （绝对字节偏移）。表体行按列数补空/截断（GFM 行为）。
+    /// 列数硬上限 128、总行数硬上限 512——超限截断降级不崩溃。
+    const MAX_TABLE_COLS: usize = 128;
+    const MAX_TABLE_ROWS: usize = 512;
+
     pub fn table(&self, buf: &Buffer, block: BlockId) -> Option<Table> {
         let b = self.blocks.iter().find(|b| b.id == block)?;
         if b.kind != BlockKind::Table {
             return None;
         }
         let delim = line_text(buf, b.start_line + 1);
-        let aligns = parse_delim_row(&delim)?;
+        let mut aligns = parse_delim_row(&delim)?;
+        // 列数硬上限截断
+        if aligns.len() > Self::MAX_TABLE_COLS {
+            aligns.truncate(Self::MAX_TABLE_COLS);
+        }
         let header_off = buf.offset_of_line(b.start_line);
         let header = parse_table_cells(
             &line_text(buf, b.start_line),
@@ -202,8 +210,10 @@ impl Syntax {
             aligns.len(),
             &self.refs,
         );
-        let mut rows = Vec::with_capacity(b.end_line.saturating_sub(b.start_line + 2));
-        for line in b.start_line + 2..b.end_line {
+        let total_body = b.end_line.saturating_sub(b.start_line + 2);
+        let capped_body = total_body.min(Self::MAX_TABLE_ROWS);
+        let mut rows = Vec::with_capacity(capped_body);
+        for line in b.start_line + 2..(b.start_line + 2 + capped_body) {
             let off = buf.offset_of_line(line);
             rows.push(parse_table_cells(&line_text(buf, line), off, aligns.len(), &self.refs));
         }

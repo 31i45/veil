@@ -988,6 +988,40 @@ fn table_none_for_non_table_or_unknown_id() {
     assert_eq!(s.table(BlockId(999)), None);
 }
 
+// ---- 批次 2-3：table() 硬上限截断回归 ----
+
+#[test]
+fn table_large_col_degrade() {
+    // 1000 列表格 → table() 返回 aligns.len() == 128，头/体列数 ≤ 128
+    let cols = 1000;
+    let header = (0..cols).map(|i| format!("h{i}")).collect::<Vec<_>>().join(" | ");
+    let delim = (0..cols).map(|_| "---").collect::<Vec<_>>().join(" | ");
+    let body = (0..cols).map(|i| format!("b{i}")).collect::<Vec<_>>().join(" | ");
+    let s = Session::open(&format!("| {} |\n| {} |\n| {} |\n", header, delim, body));
+    let (id, kind, _) = s.blocks()[0].clone();
+    assert_eq!(kind, BlockKind::Table);
+    let t = s.table(id).unwrap();
+    assert_eq!(t.aligns.len(), 128);
+    assert!(t.header.len() <= 128);
+    for row in &t.rows {
+        assert!(row.len() <= 128);
+    }
+}
+
+#[test]
+fn table_large_row_degrade() {
+    // 2000 行表体 → table() 返回 rows.len() ≤ 512
+    let mut md = String::from("| h |\n| --- |\n");
+    for _ in 0..2000 {
+        md.push_str("| c |\n");
+    }
+    let s = Session::open(&md);
+    let (id, kind, _) = s.blocks()[0].clone();
+    assert_eq!(kind, BlockKind::Table);
+    let t = s.table(id).unwrap();
+    assert!(t.rows.len() <= 512, "2000 行表体应该截断到 ≤ 512，实际 {}", t.rows.len());
+}
+
 // ---- 列表 / 引用 / 分隔线（切片 12）：Session 门面与增量重解析 ----
 
 #[test]

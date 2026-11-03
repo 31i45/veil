@@ -264,9 +264,12 @@ impl Syntax {
         // 向前扩展：编辑起点落在块间空白或全文末尾时，前块可能向下生长
         // （段落合并），且空白区新增内容本身必须进入重扫——否则新内容
         // 对块结构不可见（tests/core.rs「reparse 向前扩展边界」组钉死）。
+        // 同时：编辑起点正好落在当前块首行时，前块也可能向下生长合并进
+        // 当前块（删列表/引用标记、给段落首行加缩进）——旧条件 `<` 漏掉
+        // 这一族反例（Commit 1-3 钉住 A/B/C 三类）。
         if bi == self.blocks.len() {
             bi = bi.saturating_sub(1);
-        } else if edit_start_line < self.blocks[bi].start_line && bi > 0 {
+        } else if edit_start_line <= self.blocks[bi].start_line && bi > 0 {
             bi -= 1;
         }
         // 列表区域回走（0c P0-3）：编辑点落入列表区域（前块同为列表项且间隔全是

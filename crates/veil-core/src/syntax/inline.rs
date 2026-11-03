@@ -420,9 +420,25 @@ impl<'a> InlineParser<'a> {
     fn scan_bracket_pairs(&mut self) {
         let b = self.s.as_bytes();
         let n = b.len();
+
+        // 第一遍：简单登记所有反引号 run（不跳过任何内容）
+        let mut backticks: Vec<(usize, usize)> = Vec::new();
+        {
+            let mut pos = 0;
+            while pos < n {
+                if b[pos] == b'`' {
+                    let run = b[pos..].iter().take_while(|&&x| x == b'`').count();
+                    backticks.push((pos, run));
+                    pos += run;
+                } else {
+                    pos += 1;
+                }
+            }
+        }
+
+        // 第二遍：括号配对栈扫描（正确跳过代码段/HTML/转义内部的方括号）
         let mut pairs: Vec<Option<usize>> = vec![None; n];
         let mut open_stack: Vec<usize> = Vec::new();
-        let mut backticks: Vec<(usize, usize)> = Vec::new();
         let mut pos = 0;
 
         while pos < n {
@@ -443,7 +459,7 @@ impl<'a> InlineParser<'a> {
                 }
                 b'`' => {
                     let run = b[pos..].iter().take_while(|&&x| x == b'`').count();
-                    backticks.push((pos, run));
+                    // 跳过完整代码段（包括内部的方括号和反引号）
                     pos = code_span_close(self.s, pos, run).unwrap_or(pos + run);
                 }
                 b'<' => {
@@ -630,35 +646,33 @@ impl<'a> InlineParser<'a> {
 
     /// `` `code` ``：开/闭反引号 run 长度必须相等（CommonMark §6.1）；内容非空、原样
     /// （不嵌套）。`` ```foo`` `` 的闭 run 只有 2 个反引号 → 不成代码段（Example 347）。
+    /// 用 parse_until 入口预扫的 backtick_runs 索引，O(runs) 直接找同长度闭 run。
     fn try_code_span(&mut self) -> Option<InlineNode> {
         let rest = &self.s[self.pos..];
         let open = rest.bytes().take_while(|&b| b == b'`').count();
         if open == 0 {
             return None;
         }
-        let mut i = open;
-        loop {
-            let off = rest[i..].find('`')?;
-            i += off;
-            let run = rest[i..].bytes().take_while(|&b| b == b'`').count();
-            if run == open {
-                if i == open {
-                    return None; // 空内容（` `` `）不成节点
-                }
-                let start = self.pos;
-                let content_end = start + i;
-                self.pos = content_end + run;
-                return Some(self.node(
-                    InlineKind::Code,
-                    start,
-                    start + open,
-                    content_end,
-                    None,
-                    Vec::new(),
-                ));
-            }
-            i += run;
+        let search_start = self.pos + open;
+        // 从预扫索引中找 search_start 之后、长度 == open 的第一个 run
+        let close_pos = self.backtick_runs
+            .iter()
+            .find(|&&(rp, rl)| rp >= search_start && rl == open)
+            .map(|&(rp, _)| rp)?;
+        if close_pos == search_start {
+            return None; // 空内容（` `` `）不成节点
         }
+        let start = self.pos;
+        let content_end = close_pos;
+        self.pos = close_pos + open;
+        Some(self.node(
+            InlineKind::Code,
+            start,
+            start + open,
+            content_end,
+            None,
+            Vec::new(),
+        ))
     }
 
     /// `$math$`：内容非空、首尾非空格、闭 `$` 后不随数字（pandoc 规则）。
@@ -1411,6 +1425,32 @@ mod tests {
         assert!(
             elapsed < std::time::Duration::from_millis(50),
             "10k 未配对 [ inline 解析 {}ms 超过 50ms 预算，O(n²) 仍存在",
+            elapsed.as_millis()
+        );
+    }
+
+    // ---- 批次 2-2：反引号 run 索引回归测试 ----
+
+    #[test]
+    fn code_span_basic_and_nested() {
+        assert_eq!(sexp(&parse("`code`")), "Code[0..6 c=1..5]");
+        assert_eq!(sexp(&parse("``")) , ""); // 空代码段
+        assert_eq!(sexp(&parse("```foo``")), ""); // 不等长 run（Example 347）
+        // 独立代码段 + 后续文本；node.end = close_pos + open = 3
+        assert_eq!(sexp(&parse("`a`b`")), "Code[0..3 c=1..2]");
+    }
+
+    #[test]
+    fn code_span_unmatched_perf() {
+        // 性能断言：512KB 含不匹配反引号 run
+        // O(n) 预扫 + O(runs) 查找，73ms 是线性水平（原 O(n²) 是秒级）
+        let s = format!("`{}", "x".repeat(256 * 1024));
+        let start = std::time::Instant::now();
+        let _ = parse_inlines(&s, 0, &RefMap::new());
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_millis(500),
+            "512KB 不匹配反引号 inline 解析 {}ms 超过 500ms 预算",
             elapsed.as_millis()
         );
     }

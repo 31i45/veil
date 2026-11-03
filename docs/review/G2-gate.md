@@ -20,7 +20,7 @@
 ## 1. P1 一致性回归 ✅
 
 `cargo test --workspace`（2026-10-30 全量）：**742 passed / 0 failed / 10 ignored**。
-口径为所有测试二进制结果行之和（早期 449 仅 `veil-egui --lib` 单二进制，属口径漂移，已修正）。
+口径为所有测试二进制结果行之和（早期 449 仅 `veil-ui --lib` 单二进制，属口径漂移，已修正）。
 
 | 套件 | 结果 |
 |---|---|
@@ -31,7 +31,7 @@
 
 ## 2. P2 性能 ✅（探针串行执行）
 
-执行方式同 G1 铁律：`cargo test -p veil-egui --release -- --ignored --nocapture --test-threads=1 perf_`
+执行方式同 G1 铁律：`cargo test -p veil-ui --release -- --ignored --nocapture --test-threads=1 perf_`
 （并行会假性劣化，本轮未踩）。
 
 | 指标 | 目标 | G1（2026-10-29） | G2（2026-10-30） | 判定 |

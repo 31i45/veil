@@ -33,7 +33,7 @@ cargo build --release -p veil
 # 3. 跑基准（默认 5 轮）
 powershell -File tools/bench/measure.ps1 -Trials 5
 # 4. Veil 进程内击键探针（必须串行）
-cargo test -p veil-egui --release -- --ignored --nocapture --test-threads=1 perf_keystroke_path
+cargo test -p veil-ui --release -- --ignored --nocapture --test-threads=1 perf_keystroke_path
 ```
 
 测量定义：

@@ -1,4 +1,4 @@
-//! 平台能力注入（产品层）：系统对话框、文件监听、主题配置/系统外观适配为 veil-egui 的 trait。
+//! 平台能力注入（产品层）：系统对话框、文件监听、主题配置/系统外观适配为 veil-ui 的 trait。
 //! 对话框与系统外观：Windows 手写 Win32 FFI（零新增依赖），其他平台返回兜底实现。
 //! 文件监听：notify 事件线程（切片 16），跨平台同一实现。配置读写：std 原子写（切片 17）。
 
@@ -17,8 +17,8 @@ mod windows;
 use std::path::PathBuf;
 
 #[cfg(not(windows))]
-use veil_egui::NativeWindow;
-use veil_egui::{
+use veil_ui::NativeWindow;
+use veil_ui::{
     ConfigStore, FileDialog, FileWatcher, ImageData, PersistEnv, RecoveryStore, SessionStore,
     SystemTheme, ThemeEnv, WindowEffects,
 };
@@ -48,20 +48,20 @@ pub fn dialogs() -> Box<dyn FileDialog> {
 }
 
 /// 打印能力装配（3b）：Windows 手写 Win32 GDI 打印；其他平台为「提示不支持」兜底。
-pub fn print() -> Box<dyn veil_egui::Print> {
+pub fn print() -> Box<dyn veil_ui::Print> {
     #[cfg(windows)]
     {
         Box::new(print::WinPrint)
     }
     #[cfg(not(windows))]
     {
-        Box::new(veil_egui::NoPrint)
+        Box::new(veil_ui::NoPrint)
     }
 }
 
 /// 未保存内容确认（3e 修 B）：Windows 原生 MessageBoxW 三选一；
 /// 其他平台为「取消」兜底（宁可拒绝退出，也绝不静默丢内容）。
-pub fn confirmer() -> Box<dyn veil_egui::Confirmer> {
+pub fn confirmer() -> Box<dyn veil_ui::Confirmer> {
     #[cfg(windows)]
     {
         Box::new(confirm::WinConfirm)
@@ -93,9 +93,9 @@ impl FileDialog for NoDialogs {
 #[cfg(not(windows))]
 struct CancelAll;
 #[cfg(not(windows))]
-impl veil_egui::Confirmer for CancelAll {
-    fn confirm_unsaved(&mut self, _file: Option<&std::path::Path>) -> veil_egui::UnsavedChoice {
-        veil_egui::UnsavedChoice::Cancel
+impl veil_ui::Confirmer for CancelAll {
+    fn confirm_unsaved(&mut self, _file: Option<&std::path::Path>) -> veil_ui::UnsavedChoice {
+        veil_ui::UnsavedChoice::Cancel
     }
 }
 
@@ -131,7 +131,7 @@ impl ConfigStore for FsConfig {
 pub fn theme_env() -> ThemeEnv {
     ThemeEnv {
         config: Box::new(FsConfig {
-            path: veil_egui::config_path(),
+            path: veil_ui::config_path(),
         }),
         system: system_theme(),
         effects: window_effects(),
@@ -194,7 +194,7 @@ impl SessionStore for FsSession {
 
 /// 持久化能力装配（0b）：恢复草稿 + 会话/最近文件，同一数据目录下两个文件。
 pub fn persist_env() -> PersistEnv {
-    let dir = veil_egui::data_dir();
+    let dir = veil_ui::data_dir();
     PersistEnv {
         recovery: Box::new(FsRecovery {
             path: dir.as_ref().map(|d| d.join("recovery.dat")),

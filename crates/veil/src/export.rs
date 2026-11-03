@@ -6,7 +6,7 @@
 use std::path::{Path, PathBuf};
 
 use veil_core::{BlockKind, Range, Session};
-use veil_egui::{Exporter, FileStore};
+use veil_ui::{Exporter, FileStore};
 
 /// 文档外壳：最小自包含模板（无外部资源）。样式与编辑器视觉对齐（代码灰底、公式居中）。
 const HEAD: &str = "<!DOCTYPE html>\n<html lang=\"zh-CN\">\n<head>\n<meta charset=\"utf-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n<title>veil</title>\n<style>\nbody{max-width:44em;margin:2em auto;padding:0 1em;font:16px/1.6 system-ui,sans-serif;color:#1e1e1e}\ncode,pre{background:#f5f5f5;font-family:Consolas,Menlo,monospace}\ncode{padding:.1em .3em}\npre{padding:.8em;overflow-x:auto}\npre code{padding:0}\ndiv.math{text-align:center;margin:1em 0}\npre.math-source{color:#a00;background:#fdf5f5}\n</style>\n</head>\n<body>\n";

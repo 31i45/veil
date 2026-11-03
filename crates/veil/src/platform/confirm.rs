@@ -6,7 +6,7 @@
 use std::ffi::c_void;
 use std::path::Path;
 
-use veil_egui::{Confirmer, UnsavedChoice};
+use veil_ui::{Confirmer, UnsavedChoice};
 
 type Hwnd = *mut c_void;
 

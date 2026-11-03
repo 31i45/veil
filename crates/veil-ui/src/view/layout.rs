@@ -441,6 +441,7 @@ impl LayoutEngine {
     /// 已知 v0 简化：高超一行的行内公式/图片可能与同块下一视觉行重叠（块高已扩展
     /// 不溢出版心）；图片顶部钳在行顶（不上侵前一块），公式保留原基线；
     /// 标题内公式/图片不随标题字号放大（尺寸由渲染侧/图片自然尺寸决定）。
+    #[allow(clippy::too_many_arguments)] // 内部布局函数参数天然多
     pub fn layout_block(
         &mut self,
         kind: BlockKind,

@@ -1,5 +1,5 @@
 //! Win32 GDI 打印（3b，手写 FFI，零新增依赖）。
-//! PRINTDLGW 取打印机 DC → 按打印机 DPI 全量重排分页（veil-egui 分页引擎）→
+//! PRINTDLGW 取打印机 DC → 按打印机 DPI 全量重排分页（veil-ui 分页引擎）→
 //! 逐页 SetDIBitsToDevice 贴帧（帧像素 XRGB little-endian = 32bpp BI_RGB 顶向下 DIB，零转换）。
 //! PDF 导出走系统「Microsoft Print to PDF」虚拟打印机，同一码路。
 //! 页边距固定 1 英寸（取 LOGPIXELSX，在对话框返回的可打印区内再留边）。
@@ -8,7 +8,7 @@
 
 use std::ffi::c_void;
 
-use veil_egui::{Print, PrintSession};
+use veil_ui::{Print, PrintSession};
 
 type Hwnd = *mut c_void;
 type Hdc = *mut c_void;

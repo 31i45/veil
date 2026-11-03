@@ -1,6 +1,7 @@
 //! 跨域行为测试：以 headless App 驱动真实编辑/排版/绘制/持久化路径。
 
 use crate::app::*;
+use crate::Ports;
 use crate::chrome;
 use crate::chrome::MenuAction;
 use crate::docio::encode;
@@ -343,23 +344,25 @@ fn app_clip(html: Option<&str>, plain: Option<&str>) -> App {
         calls: Rc::new(RefCell::new(Vec::new())),
     };
     App::new(
-        doc,
-        Box::new(Clip {
+    doc,
+    Ports {
+        clipboard: Box::new(Clip {
             html: html.map(str::to_string),
             text: plain.map(str::to_string),
         }),
-        Box::new(MemStore::default()),
-        Box::new(m),
-        Box::new(NoImages),
-        Box::new(NoAssets),
-        Box::new(NoExport),
-        Box::new(NoDialogs),
-        Box::new(NoWatcher),
-        theme::test_support::env(),
-        persist_env(),
-        Box::new(NoPrint),
-        no_confirm(),
-    )
+        store: Box::new(MemStore::default()),
+        math: Box::new(m),
+        images: Box::new(NoImages),
+        assets: Box::new(NoAssets),
+        exporter: Box::new(NoExport),
+        dialogs: Box::new(NoDialogs),
+        watcher: Box::new(NoWatcher),
+        theme_env: theme::test_support::env(),
+        persist_env: persist_env(),
+        print: Box::new(NoPrint),
+        confirmer: no_confirm(),
+    }
+)
 }
 
 fn doc_text(a: &App) -> String {
@@ -455,20 +458,22 @@ fn app_math(text: &str, fail: bool) -> (App, MathCalls) {
         calls: calls.clone(),
     };
     let a = App::new(
-        doc,
-        Box::new(NoClip),
-        Box::new(MemStore::default()),
-        Box::new(m),
-        Box::new(NoImages),
-        Box::new(NoAssets),
-        Box::new(NoExport),
-        Box::new(NoDialogs),
-        Box::new(NoWatcher),
-        theme::test_support::env(),
-        persist_env(),
-        Box::new(NoPrint),
-        no_confirm(),
-    );
+    doc,
+    Ports {
+        clipboard: Box::new(NoClip),
+        store: Box::new(MemStore::default()),
+        math: Box::new(m),
+        images: Box::new(NoImages),
+        assets: Box::new(NoAssets),
+        exporter: Box::new(NoExport),
+        dialogs: Box::new(NoDialogs),
+        watcher: Box::new(NoWatcher),
+        theme_env: theme::test_support::env(),
+        persist_env: persist_env(),
+        print: Box::new(NoPrint),
+        confirmer: no_confirm(),
+    }
+);
     (a, calls)
 }
 
@@ -671,23 +676,25 @@ fn app_with_images(
         calls: Rc::new(RefCell::new(Vec::new())),
     };
     let a = App::new(
-        doc,
-        Box::new(NoClip),
-        Box::new(MemStore::default()),
-        Box::new(m),
-        Box::new(FakeImages {
+    doc,
+    Ports {
+        clipboard: Box::new(NoClip),
+        store: Box::new(MemStore::default()),
+        math: Box::new(m),
+        images: Box::new(FakeImages {
             files,
             calls: calls.clone(),
         }),
-        Box::new(NoAssets),
-        Box::new(NoExport),
-        Box::new(NoDialogs),
-        Box::new(NoWatcher),
-        theme::test_support::env(),
-        persist_env(),
-        Box::new(NoPrint),
-        no_confirm(),
-    );
+        assets: Box::new(NoAssets),
+        exporter: Box::new(NoExport),
+        dialogs: Box::new(NoDialogs),
+        watcher: Box::new(NoWatcher),
+        theme_env: theme::test_support::env(),
+        persist_env: persist_env(),
+        print: Box::new(NoPrint),
+        confirmer: no_confirm(),
+    }
+);
     (a, calls)
 }
 
@@ -851,27 +858,29 @@ fn app_paste_image(
         calls: Rc::new(RefCell::new(Vec::new())),
     };
     let app = App::new(
-        doc,
-        Box::new(ClipImage {
+    doc,
+    Ports {
+        clipboard: Box::new(ClipImage {
             text: plain.map(str::to_string),
             html: html.map(str::to_string),
             image,
         }),
-        Box::new(MemStore::default()),
-        Box::new(m),
-        Box::new(NoImages),
-        Box::new(FakeAssets {
+        store: Box::new(MemStore::default()),
+        math: Box::new(m),
+        images: Box::new(NoImages),
+        assets: Box::new(FakeAssets {
             result,
             calls: calls.clone(),
         }),
-        Box::new(NoExport),
-        Box::new(NoDialogs),
-        Box::new(NoWatcher),
-        theme::test_support::env(),
-        persist_env(),
-        Box::new(NoPrint),
-        no_confirm(),
-    );
+        exporter: Box::new(NoExport),
+        dialogs: Box::new(NoDialogs),
+        watcher: Box::new(NoWatcher),
+        theme_env: theme::test_support::env(),
+        persist_env: persist_env(),
+        print: Box::new(NoPrint),
+        confirmer: no_confirm(),
+    }
+);
     PasteFixture { app, calls }
 }
 
@@ -926,35 +935,37 @@ fn paste_image_files_prefer_file_list_over_path_text() {
     let mut files = HashMap::new();
     files.insert(PathBuf::from("C:/pics/cat.png"), (8, 4));
     let mut app = App::new(
-        doc,
-        Box::new(ClipFiles {
+    doc,
+    Ports {
+        clipboard: Box::new(ClipFiles {
             files: vec![
                 PathBuf::from("C:/pics/cat.png"),
                 PathBuf::from("C:/pics/readme.txt"),
             ],
             text: Some("C:/pics/cat.png".into()),
         }),
-        Box::new(MemStore::default()),
-        Box::new(FakeMath {
+        store: Box::new(MemStore::default()),
+        math: Box::new(FakeMath {
             fail: false,
             calls: Rc::new(RefCell::new(Vec::new())),
         }),
-        Box::new(FakeImages {
+        images: Box::new(FakeImages {
             files,
             calls: loads.clone(),
         }),
-        Box::new(FakeAssets {
+        assets: Box::new(FakeAssets {
             result: Ok("notes.assets/image-1.png".into()),
             calls: saved.clone(),
         }),
-        Box::new(NoExport),
-        Box::new(NoDialogs),
-        Box::new(NoWatcher),
-        theme::test_support::env(),
-        persist_env(),
-        Box::new(NoPrint),
-        no_confirm(),
-    );
+        exporter: Box::new(NoExport),
+        dialogs: Box::new(NoDialogs),
+        watcher: Box::new(NoWatcher),
+        theme_env: theme::test_support::env(),
+        persist_env: persist_env(),
+        print: Box::new(NoPrint),
+        confirmer: no_confirm(),
+    }
+);
     app.paste_clipboard();
     assert_eq!(doc_text(&app), "![](notes.assets/image-1.png)\nab");
     assert_eq!(
@@ -1028,26 +1039,28 @@ fn app_drop(
         calls: Rc::new(RefCell::new(Vec::new())),
     };
     let app = App::new(
-        doc,
-        Box::new(NoClip),
-        Box::new(MemStore::default()),
-        Box::new(m),
-        Box::new(FakeImages {
+    doc,
+    Ports {
+        clipboard: Box::new(NoClip),
+        store: Box::new(MemStore::default()),
+        math: Box::new(m),
+        images: Box::new(FakeImages {
             files: map,
             calls: images.clone(),
         }),
-        Box::new(FakeAssets {
+        assets: Box::new(FakeAssets {
             result: assets,
             calls: asset_calls.clone(),
         }),
-        Box::new(NoExport),
-        Box::new(NoDialogs),
-        Box::new(NoWatcher),
-        theme::test_support::env(),
-        persist_env(),
-        Box::new(NoPrint),
-        no_confirm(),
-    );
+        exporter: Box::new(NoExport),
+        dialogs: Box::new(NoDialogs),
+        watcher: Box::new(NoWatcher),
+        theme_env: theme::test_support::env(),
+        persist_env: persist_env(),
+        print: Box::new(NoPrint),
+        confirmer: no_confirm(),
+    }
+);
     DropFixture {
         app,
         images,
@@ -1413,20 +1426,22 @@ fn app(text: &str, path: Option<&str>, bom: bool, store: &MemStore) -> App {
         calls: Rc::new(RefCell::new(Vec::new())),
     };
     App::new(
-        doc,
-        Box::new(NoClip),
-        Box::new(store.clone()),
-        Box::new(m),
-        Box::new(NoImages),
-        Box::new(NoAssets),
-        Box::new(NoExport),
-        Box::new(NoDialogs),
-        Box::new(NoWatcher),
-        theme::test_support::env(),
-        persist_env(),
-        Box::new(NoPrint),
-        no_confirm(),
-    )
+    doc,
+    Ports {
+        clipboard: Box::new(NoClip),
+        store: Box::new(store.clone()),
+        math: Box::new(m),
+        images: Box::new(NoImages),
+        assets: Box::new(NoAssets),
+        exporter: Box::new(NoExport),
+        dialogs: Box::new(NoDialogs),
+        watcher: Box::new(NoWatcher),
+        theme_env: theme::test_support::env(),
+        persist_env: persist_env(),
+        print: Box::new(NoPrint),
+        confirmer: no_confirm(),
+    }
+)
 }
 
 /// 记录调用（会话序列化 + 源路径透传）的导出器；fail 时返回 Err。
@@ -1469,20 +1484,22 @@ fn app_export(text: &str, path: Option<&str>, fail: bool) -> (App, AssetCalls) {
         fail,
     };
     let a = App::new(
-        doc,
-        Box::new(NoClip),
-        Box::new(MemStore::default()),
-        Box::new(m),
-        Box::new(NoImages),
-        Box::new(NoAssets),
-        Box::new(e),
-        Box::new(NoDialogs),
-        Box::new(NoWatcher),
-        theme::test_support::env(),
-        persist_env(),
-        Box::new(NoPrint),
-        no_confirm(),
-    );
+    doc,
+    Ports {
+        clipboard: Box::new(NoClip),
+        store: Box::new(MemStore::default()),
+        math: Box::new(m),
+        images: Box::new(NoImages),
+        assets: Box::new(NoAssets),
+        exporter: Box::new(e),
+        dialogs: Box::new(NoDialogs),
+        watcher: Box::new(NoWatcher),
+        theme_env: theme::test_support::env(),
+        persist_env: persist_env(),
+        print: Box::new(NoPrint),
+        confirmer: no_confirm(),
+    }
+);
     (a, calls)
 }
 
@@ -1822,20 +1839,22 @@ fn app_dialogs(
         calls: Rc::new(RefCell::new(Vec::new())),
     };
     let a = App::new(
-        doc,
-        Box::new(NoClip),
-        Box::new(store.clone()),
-        Box::new(m),
-        Box::new(NoImages),
-        Box::new(NoAssets),
-        Box::new(NoExport),
-        Box::new(d),
-        Box::new(NoWatcher),
-        theme::test_support::env(),
-        persist_env(),
-        Box::new(NoPrint),
-        no_confirm(),
-    );
+    doc,
+    Ports {
+        clipboard: Box::new(NoClip),
+        store: Box::new(store.clone()),
+        math: Box::new(m),
+        images: Box::new(NoImages),
+        assets: Box::new(NoAssets),
+        exporter: Box::new(NoExport),
+        dialogs: Box::new(d),
+        watcher: Box::new(NoWatcher),
+        theme_env: theme::test_support::env(),
+        persist_env: persist_env(),
+        print: Box::new(NoPrint),
+        confirmer: no_confirm(),
+    }
+);
     (a, calls)
 }
 
@@ -2314,20 +2333,22 @@ fn app_watch(text: &str, path: Option<&str>, store: &MemStore, watch: &FakeWatch
         calls: Rc::new(RefCell::new(Vec::new())),
     };
     App::new(
-        doc,
-        Box::new(NoClip),
-        Box::new(store.clone()),
-        Box::new(m),
-        Box::new(NoImages),
-        Box::new(NoAssets),
-        Box::new(NoExport),
-        Box::new(NoDialogs),
-        Box::new(watch.clone()),
-        theme::test_support::env(),
-        persist_env(),
-        Box::new(NoPrint),
-        no_confirm(),
-    )
+    doc,
+    Ports {
+        clipboard: Box::new(NoClip),
+        store: Box::new(store.clone()),
+        math: Box::new(m),
+        images: Box::new(NoImages),
+        assets: Box::new(NoAssets),
+        exporter: Box::new(NoExport),
+        dialogs: Box::new(NoDialogs),
+        watcher: Box::new(watch.clone()),
+        theme_env: theme::test_support::env(),
+        persist_env: persist_env(),
+        print: Box::new(NoPrint),
+        confirmer: no_confirm(),
+    }
+)
 }
 
 fn disk(store: &MemStore, path: &str, bytes: &[u8]) {
@@ -2429,20 +2450,22 @@ fn app_confirm(
         calls: Rc::new(RefCell::new(Vec::new())),
     };
     App::new(
-        doc,
-        Box::new(NoClip),
-        Box::new(store.clone()),
-        Box::new(m),
-        Box::new(NoImages),
-        Box::new(NoAssets),
-        Box::new(NoExport),
+    doc,
+    Ports {
+        clipboard: Box::new(NoClip),
+        store: Box::new(store.clone()),
+        math: Box::new(m),
+        images: Box::new(NoImages),
+        assets: Box::new(NoAssets),
+        exporter: Box::new(NoExport),
         dialogs,
-        Box::new(NoWatcher),
-        theme::test_support::env(),
-        persist_env_with(recovery, session.clone()),
-        Box::new(NoPrint),
+        watcher: Box::new(NoWatcher),
+        theme_env: theme::test_support::env(),
+        persist_env: persist_env_with(recovery, session.clone()),
+        print: Box::new(NoPrint),
         confirmer,
-    )
+    }
+)
 }
 
 /// 写一份当前内容的恢复快照（模拟编辑中的崩溃兜底已落盘）。
@@ -3032,20 +3055,22 @@ fn save_as_rebinds_watcher() {
         calls,
     };
     let mut a = App::new(
-        doc,
-        Box::new(NoClip),
-        Box::new(store.clone()),
-        Box::new(m),
-        Box::new(NoImages),
-        Box::new(NoAssets),
-        Box::new(NoExport),
-        Box::new(d),
-        Box::new(watch.clone()),
-        theme::test_support::env(),
-        persist_env(),
-        Box::new(NoPrint),
-        no_confirm(),
-    );
+    doc,
+    Ports {
+        clipboard: Box::new(NoClip),
+        store: Box::new(store.clone()),
+        math: Box::new(m),
+        images: Box::new(NoImages),
+        assets: Box::new(NoAssets),
+        exporter: Box::new(NoExport),
+        dialogs: Box::new(d),
+        watcher: Box::new(watch.clone()),
+        theme_env: theme::test_support::env(),
+        persist_env: persist_env(),
+        print: Box::new(NoPrint),
+        confirmer: no_confirm(),
+    }
+);
     a.save_as();
     assert_eq!(a.doc.path.as_deref(), Some(Path::new("b.md")));
     assert_eq!(watch.calls.borrow().last().unwrap(), "watch:b.md");
@@ -3104,24 +3129,26 @@ fn app_theme(config: Box<dyn ConfigStore>, system: Rc<Cell<Option<bool>>>) -> Ap
         calls: Rc::new(RefCell::new(Vec::new())),
     };
     App::new(
-        doc,
-        Box::new(NoClip),
-        Box::new(MemStore::default()),
-        Box::new(m),
-        Box::new(NoImages),
-        Box::new(NoAssets),
-        Box::new(NoExport),
-        Box::new(NoDialogs),
-        Box::new(NoWatcher),
-        ThemeEnv {
+    doc,
+    Ports {
+        clipboard: Box::new(NoClip),
+        store: Box::new(MemStore::default()),
+        math: Box::new(m),
+        images: Box::new(NoImages),
+        assets: Box::new(NoAssets),
+        exporter: Box::new(NoExport),
+        dialogs: Box::new(NoDialogs),
+        watcher: Box::new(NoWatcher),
+        theme_env: ThemeEnv {
             config,
             system: Box::new(DynSystem(system)),
             effects: Box::new(theme::test_support::NoEffects),
         },
-        persist_env(),
-        Box::new(NoPrint),
-        no_confirm(),
-    )
+        persist_env: persist_env(),
+        print: Box::new(NoPrint),
+        confirmer: no_confirm(),
+    }
+)
 }
 
 #[test]
@@ -4668,20 +4695,22 @@ fn app_persist(
         calls: Rc::new(RefCell::new(Vec::new())),
     };
     App::new(
-        doc,
-        Box::new(NoClip),
-        Box::new(store.clone()),
-        Box::new(m),
-        Box::new(NoImages),
-        Box::new(NoAssets),
-        Box::new(NoExport),
-        Box::new(NoDialogs),
-        Box::new(NoWatcher),
-        theme::test_support::env(),
-        persist_env_with(recovery.clone(), session.clone()),
-        Box::new(NoPrint),
-        no_confirm(),
-    )
+    doc,
+    Ports {
+        clipboard: Box::new(NoClip),
+        store: Box::new(store.clone()),
+        math: Box::new(m),
+        images: Box::new(NoImages),
+        assets: Box::new(NoAssets),
+        exporter: Box::new(NoExport),
+        dialogs: Box::new(NoDialogs),
+        watcher: Box::new(NoWatcher),
+        theme_env: theme::test_support::env(),
+        persist_env: persist_env_with(recovery.clone(), session.clone()),
+        print: Box::new(NoPrint),
+        confirmer: no_confirm(),
+    }
+)
 }
 
 /// 恢复槽中解码出的（路径, 内容）。
@@ -4718,20 +4747,22 @@ fn app_persist_dialogs(
         calls: Rc::new(RefCell::new(Vec::new())),
     };
     App::new(
-        draft,
-        Box::new(NoClip),
-        Box::new(store.clone()),
-        Box::new(m),
-        Box::new(NoImages),
-        Box::new(NoAssets),
-        Box::new(NoExport),
-        Box::new(d),
-        Box::new(NoWatcher),
-        theme::test_support::env(),
-        persist_env_with(recovery.clone(), session.clone()),
-        Box::new(NoPrint),
-        no_confirm(),
-    )
+    draft,
+    Ports {
+        clipboard: Box::new(NoClip),
+        store: Box::new(store.clone()),
+        math: Box::new(m),
+        images: Box::new(NoImages),
+        assets: Box::new(NoAssets),
+        exporter: Box::new(NoExport),
+        dialogs: Box::new(d),
+        watcher: Box::new(NoWatcher),
+        theme_env: theme::test_support::env(),
+        persist_env: persist_env_with(recovery.clone(), session.clone()),
+        print: Box::new(NoPrint),
+        confirmer: no_confirm(),
+    }
+)
 }
 
 #[test]
@@ -6174,35 +6205,37 @@ fn e2e_table_edit_and_image_paste() {
         .insert(PathBuf::from("doc/t.md"), text.as_bytes().to_vec());
     let calls: Rc<RefCell<Vec<(PathBuf, u32, u32)>>> = Rc::new(RefCell::new(Vec::new()));
     let mut a = App::new(
-        Doc {
+    Doc {
             text: text.into(),
             path: Some(PathBuf::from("doc/t.md")),
             bom: false,
             resume: false,
         },
-        Box::new(ClipImage {
+    Ports {
+        clipboard: Box::new(ClipImage {
             text: None,
             html: None,
             image: Some(solid(4, 2)),
         }),
-        Box::new(store.clone()),
-        Box::new(FakeMath {
+        store: Box::new(store.clone()),
+        math: Box::new(FakeMath {
             fail: false,
             calls: Rc::new(RefCell::new(Vec::new())),
         }),
-        Box::new(NoImages),
-        Box::new(FakeAssets {
+        images: Box::new(NoImages),
+        assets: Box::new(FakeAssets {
             result: Ok("t.assets/image-1.png".into()),
             calls: calls.clone(),
         }),
-        Box::new(NoExport),
-        Box::new(NoDialogs),
-        Box::new(NoWatcher),
-        theme::test_support::env(),
-        persist_env(),
-        Box::new(NoPrint),
-        no_confirm(),
-    );
+        exporter: Box::new(NoExport),
+        dialogs: Box::new(NoDialogs),
+        watcher: Box::new(NoWatcher),
+        theme_env: theme::test_support::env(),
+        persist_env: persist_env(),
+        print: Box::new(NoPrint),
+        confirmer: no_confirm(),
+    }
+);
 
     a.ensure_layouts_all();
     a.ensure_tables();
@@ -6378,20 +6411,22 @@ fn app_print(text: &str, print: Box<dyn Print>) -> App {
         calls: Rc::new(RefCell::new(Vec::new())),
     };
     App::new(
-        doc,
-        Box::new(NoClip),
-        Box::new(MemStore::default()),
-        Box::new(m),
-        Box::new(NoImages),
-        Box::new(NoAssets),
-        Box::new(NoExport),
-        Box::new(NoDialogs),
-        Box::new(NoWatcher),
-        theme::test_support::env(),
-        persist_env(),
+    doc,
+    Ports {
+        clipboard: Box::new(NoClip),
+        store: Box::new(MemStore::default()),
+        math: Box::new(m),
+        images: Box::new(NoImages),
+        assets: Box::new(NoAssets),
+        exporter: Box::new(NoExport),
+        dialogs: Box::new(NoDialogs),
+        watcher: Box::new(NoWatcher),
+        theme_env: theme::test_support::env(),
+        persist_env: persist_env(),
         print,
-        no_confirm(),
-    )
+        confirmer: no_confirm(),
+    }
+)
 }
 
 /// 断点合法性：除 0.0 外每个断点落在某块 top 或块内行顶（不劈行）。
@@ -6572,20 +6607,22 @@ fn print_hard_cuts_atomic_block_taller_than_page() {
         resume: false,
     };
     let mut a = App::new(
-        doc,
-        Box::new(NoClip),
-        Box::new(MemStore::default()),
-        Box::new(TallMath),
-        Box::new(NoImages),
-        Box::new(NoAssets),
-        Box::new(NoExport),
-        Box::new(NoDialogs),
-        Box::new(NoWatcher),
-        theme::test_support::env(),
-        persist_env(),
-        Box::new(p),
-        no_confirm(),
-    );
+    doc,
+    Ports {
+        clipboard: Box::new(NoClip),
+        store: Box::new(MemStore::default()),
+        math: Box::new(TallMath),
+        images: Box::new(NoImages),
+        assets: Box::new(NoAssets),
+        exporter: Box::new(NoExport),
+        dialogs: Box::new(NoDialogs),
+        watcher: Box::new(NoWatcher),
+        theme_env: theme::test_support::env(),
+        persist_env: persist_env(),
+        print: Box::new(p),
+        confirmer: no_confirm(),
+    }
+);
     a.perform_menu(MenuAction::Print);
     assert!(ended.get());
     assert!(

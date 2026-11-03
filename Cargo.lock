@@ -2383,7 +2383,7 @@ dependencies = [
  "png 0.18.1",
  "pulldown-cmark",
  "veil-core",
- "veil-egui",
+ "veil-ui",
 ]
 
 [[package]]
@@ -2395,7 +2395,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "veil-egui"
+name = "veil-ui"
 version = "0.1.0"
 dependencies = [
  "cosmic-text",

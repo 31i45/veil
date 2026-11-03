@@ -12,7 +12,7 @@ use std::os::windows::ffi::OsStrExt;
 use std::path::Path;
 use std::ptr;
 
-use veil_egui::ImageData;
+use veil_ui::ImageData;
 
 /// COM GUID（16 字节，repr(C) 与 Windows ABI 一致）。
 #[repr(C)]

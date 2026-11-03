@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/veil-core", "crates/veil-egui", "crates/veil"]
+members = ["crates/veil-core", "crates/veil-ui", "crates/veil"]
 
 [workspace.package]
 edition = "2021"

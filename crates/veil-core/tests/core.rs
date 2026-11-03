@@ -1049,9 +1049,8 @@ fn id_index_synced_after_reparse() {
     assert!((ids_after.len() as i32 - ids_before.len() as i32).abs() <= 1);
     // 所有现存块通过派生 API 访问（get_block = id_index 查表）
     for (id, kind, _) in s.blocks() {
-        match kind {
-            BlockKind::Table => assert!(s.table(id).is_some()),
-            _ => {} // 其他块不走 table，跳过
+        if kind == BlockKind::Table {
+            assert!(s.table(id).is_some());
         }
     }
 }

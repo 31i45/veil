@@ -32,6 +32,9 @@ enum Group {
 
 /// 撤销栈上限：内存有界，远超人类回退需求。
 const MAX_UNDO: usize = 1000;
+/// 撤销栈字节预算：整篇替换 ×N 时不再 RSS 爆炸。
+/// 单步自身超 16MB 保留（保证完整撤销），后续编辑入栈后才字节裁剪。
+const MAX_UNDO_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Default)]
 pub(crate) struct History {
@@ -39,9 +42,18 @@ pub(crate) struct History {
     redo: VecDeque<Transaction>,
     /// 上一步编辑的分组类别；`None` 表示不参与合并（撤销后/不可合并编辑后）。
     last: Option<Group>,
+    /// undo 栈累计字节（deleted.len() + inserted.len()）。
+    undo_bytes: usize,
 }
 
 impl History {
+    fn tx_byte_size(tx: &Transaction) -> usize {
+        tx.prims
+            .iter()
+            .map(|p| p.deleted.len() + p.inserted.len())
+            .sum()
+    }
+
     /// 新编辑使 redo 栈失效（编辑器标准语义），并按分组规则合并/入栈。
     pub fn record(&mut self, tx: Transaction) {
         if tx.prims.is_empty() {
@@ -55,8 +67,21 @@ impl History {
             }
         }
         self.undo.push_back(tx);
-        if self.undo.len() > MAX_UNDO {
-            self.undo.pop_front();
+        let sz = Self::tx_byte_size(self.undo.back().unwrap());
+        self.undo_bytes = self.undo_bytes.saturating_add(sz);
+        // 步数裁剪（保留最旧步直到超出 MAX_UNDO）
+        while self.undo.len() > MAX_UNDO {
+            if let Some(old) = self.undo.pop_front() {
+                let old_sz = Self::tx_byte_size(&old);
+                self.undo_bytes = self.undo_bytes.saturating_sub(old_sz);
+            }
+        }
+        // 字节裁剪（单步超限保留——len > 1 时才进 while）
+        while self.undo.len() > 1 && self.undo_bytes > MAX_UNDO_BYTES {
+            if let Some(old) = self.undo.pop_front() {
+                let old_sz = Self::tx_byte_size(&old);
+                self.undo_bytes = self.undo_bytes.saturating_sub(old_sz);
+            }
         }
         self.last = group;
     }
@@ -93,7 +118,10 @@ impl History {
     /// 取一步撤销：分组随之断开（撤销后的新编辑另起一步）。
     pub fn pop_undo(&mut self) -> Option<Transaction> {
         self.last = None;
-        self.undo.pop_back()
+        let tx = self.undo.pop_back()?;
+        let sz = Self::tx_byte_size(&tx);
+        self.undo_bytes = self.undo_bytes.saturating_sub(sz);
+        Some(tx)
     }
 
     pub fn pop_redo(&mut self) -> Option<Transaction> {
@@ -103,9 +131,20 @@ impl History {
 
     pub fn push_undo(&mut self, tx: Transaction) {
         self.last = None;
+        let sz = Self::tx_byte_size(&tx);
         self.undo.push_back(tx);
-        if self.undo.len() > MAX_UNDO {
-            self.undo.pop_front();
+        self.undo_bytes = self.undo_bytes.saturating_add(sz);
+        while self.undo.len() > MAX_UNDO {
+            if let Some(old) = self.undo.pop_front() {
+                let old_sz = Self::tx_byte_size(&old);
+                self.undo_bytes = self.undo_bytes.saturating_sub(old_sz);
+            }
+        }
+        while self.undo.len() > 1 && self.undo_bytes > MAX_UNDO_BYTES {
+            if let Some(old) = self.undo.pop_front() {
+                let old_sz = Self::tx_byte_size(&old);
+                self.undo_bytes = self.undo_bytes.saturating_sub(old_sz);
+            }
         }
     }
 
@@ -258,5 +297,94 @@ mod tests {
             steps += 1;
         }
         assert_eq!(steps, MAX_UNDO, "上限裁剪最旧步");
+    }
+
+    // ---- 批次 2-4：字节预算回归测试 ----
+
+    #[test]
+    fn undo_budget_bytes_caps_stable_total() {
+        // 整篇替换 ×200，每步 deleted=1MB → 撤销栈字节稳定在 ~32MB（2步×16MB 区间）
+        let mut h = History::default();
+        for _ in 0..200 {
+            h.record(Transaction {
+                prims: vec![PrimEdit {
+                    start: 0,
+                    deleted: "x".repeat(1024 * 1024), // 1MB
+                    inserted: String::new(),
+                }],
+            });
+        }
+        let mut total: usize = 0;
+        let mut steps: usize = 0;
+        while let Some(tx) = h.pop_undo() {
+            total += History::tx_byte_size(&tx);
+            steps += 1;
+        }
+        // 字节预算 ~16MB，步数裁剪上限 1000 → 两者同时作用
+        // 最终栈应 ≤ ~32MB（单步 1MB + 一些 padding）
+        assert!(
+            total <= 32 * 1024 * 1024,
+            "200 × 1MB 撤销栈总字节 {}B 应 ≤ 32MB",
+            total
+        );
+        assert!(steps <= MAX_UNDO, "步数 {} 超过 {}", steps, MAX_UNDO);
+    }
+
+    #[test]
+    fn undo_max_steps_not_affected() {
+        // 连续 1001 次单字符插入 → undo.len() == 1000（原有步数裁剪语义不变）
+        let mut h = History::default();
+        for c in 'a'..='z' {
+            for _ in 0..40 {
+                h.record(ins(0, &c.to_string()));
+            }
+        }
+        // 撤销栈应该正好 MAX_UNDO 步
+        let mut steps = 0;
+        while h.pop_undo().is_some() {
+            steps += 1;
+        }
+        assert_eq!(steps, MAX_UNDO);
+    }
+
+    #[test]
+    fn undo_single_oversized_step_kept_alone() {
+        // 单个 20MB Transaction → 保留在栈里（单步超限不裁，len=1 不进 while）
+        let mut h = History::default();
+        h.record(Transaction {
+            prims: vec![PrimEdit {
+                start: 0,
+                deleted: "x".repeat(20 * 1024 * 1024), // 20MB
+                inserted: String::new(),
+            }],
+        });
+        let tx = h.pop_undo().expect("单步应保留");
+        assert_eq!(
+            tx.prims[0].deleted.len(),
+            20 * 1024 * 1024,
+            "20MB 单步不应被字节裁剪"
+        );
+    }
+
+    #[test]
+    fn undo_oversized_oldest_evicted_when_second_arrives() {
+        // 20MB 步 + 小步 → 总字节超预算 → 最旧的 20MB 步被裁掉，只剩小步
+        let mut h = History::default();
+        h.record(Transaction {
+            prims: vec![PrimEdit {
+                start: 0,
+                deleted: "x".repeat(20 * 1024 * 1024),
+                inserted: String::new(),
+            }],
+        });
+        h.record(ins(0, "a"));
+        // 推完小步后：undo_bytes ≈ 20MB+ → 进 while len>1 && undo_bytes>16MB
+        // pop_front 裁掉最旧的 20MB → 栈只剩小步
+        let only = h.pop_undo().expect("小步应保留");
+        assert_eq!(only.prims[0].inserted, "a");
+        assert!(
+            h.pop_undo().is_none(),
+            "旧的 20MB 步应被字节裁剪淘汰"
+        );
     }
 }

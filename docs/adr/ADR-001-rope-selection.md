@@ -21,7 +21,8 @@ veil-core 的 buffer 模块需要：① O(log N) 区间插入/删除；② delta
 
 1. 依赖 `lapce-xi-rope`。若其停更，退路是 vendor 进仓库自行维护（代码量小、许可兼容），不更换 rope 模型。
 2. mark 语义（bias、Range、注解挂载）在 veil-core 内自封装，不直接暴露 xi-rope 类型——rope 实现可替换性由这层隔离保证。
-3. mark 存储初版用有序 Vec + 每次编辑全量 delta transform，复杂度 O(#marks)/次击键。10 万字文档块边界 mark 约数千个，transform 为纯算术比较，预期微秒级。**不做** sum-tree 预优化；由 INSTANCE §2 的 p95 ≤16ms 红线兜底，超标再优化。
+3. mark 存储初版用 `Vec<Mark>`（按创建顺序，**不维护全局有序**——`offset_of`/`remove_mark`/`transform_marks` 均为全量扫描，无消费者依赖顺序；2026-11-03 复核发现同偏移不同 `Bias` 的 mark 在纯插入后会换序，故直接放弃该不变量而非加排序成本）+ 每次编辑全量 delta transform，复杂度 O(#marks)/次击键。**2026-11-03 复核修正**：实际常驻 mark 恒为 2（caret + anchor，移动光标峰值 4），全 workspace 无第二类消费者；原「块边界 mark 约数千个」的估计不成立。升级触发条件首次量化：常驻 mark ≥ 1,000（`create_mark` 内 `debug_assert` 兜底），或 mark 变换占帧预算 > 5%，或 mark 内存 > 1 MB（`Mark` = 24 B）。触发前**不做** sum-tree 预优化，由 INSTANCE §2 的 p95 ≤16ms 红线兜底；回归由 `mark_transform_matches_adr003_across_random_edits` 与 `mark_transform_scales_linearly_with_mark_count` 两条测试守住。
+4. 协作位置模型不在本 ADR 范围（v1 冻结、v2 立项）：见 ADR-010。sum-tree 是单机 rope 的内部索引，不用于承担并发收敛语义。
 
 ## 后果
 

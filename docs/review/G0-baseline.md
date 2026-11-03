@@ -105,7 +105,7 @@
 | 10MB 每段空行 | 13 万个小段落 | 695.4ms | 55.5MB | 正常 |
 | 1MB 围栏代码 | 一个巨型代码块 | 678.6ms | **2,087.9MB** | 正常（4s 后） |
 
-**根因定位**：块布局对整个块调用 `buffer.shape_until_scroll(..., false)`，一次性为块内全部字符生成字形；没有按可视行分片，也没有单块上限。[layout.rs](../../crates/veil-egui/src/view/layout.rs#L428-L431)
+**根因定位**：块布局对整个块调用 `buffer.shape_until_scroll(..., false)`，一次性为块内全部字符生成字形；没有按可视行分片，也没有单块上限。[layout.rs](../../crates/veil-ui/src/view/layout.rs#L428-L431)
 
 放大比约 **1.9GB / 1MB 文本**。在这台 31.7GB 机器上 10MB 单块已到 19GB；16GB 机器会直接触发系统级内存压力。**这比 panic 更危险**，因为用户可能丢失整个系统的工作。
 
@@ -142,7 +142,7 @@
 
 - 标题始终显示 `#` / `##`，围栏代码始终显示 ` ```rust ` 与闭合 ` ``` `。
 - 列表符号、引用 `>`、分隔线在非激活态会隐藏（`Sub` 占位）。
-- 结果：同一篇文档里，有的块是 WYSIWYM，有的块是「源码 + 样式」。[layout.rs](../../crates/veil-egui/src/view/layout.rs#L737-L771)
+- 结果：同一篇文档里，有的块是 WYSIWYM，有的块是「源码 + 样式」。[layout.rs](../../crates/veil-ui/src/view/layout.rs#L737-L771)
 
 这不是崩溃级问题，但与「一流编辑器」的视觉完成度冲突。需要产品决策：统一隐藏，或统一保留并明确为「源码真值」特征。建议阶段 1 处理，不在阶段 0 分心。
 
@@ -150,7 +150,7 @@
 下划线、围栏 ```（含语言标记）与列表/引用/分隔线同一规则；光标进入块（代码块含内容）
 即还原源码。为满足「光标进出标记行高不跳」（G1 第 4 条），末行标记不能纯消隐（末尾纯空
 行会丢行高），改用等长空格占位。实现见
-[layout.rs](../../crates/veil-egui/src/view/layout.rs) `block_subs` 与三组布局断言。
+[layout.rs](../../crates/veil-ui/src/view/layout.rs) `block_subs` 与三组布局断言。
 
 ## 6. 阻断项与优先级
 
@@ -190,7 +190,7 @@
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 
-cargo test -p veil-egui --release -- --ignored --nocapture
+cargo test -p veil-ui --release -- --ignored --nocapture
 cargo run --release -p veil --example bench_typing
 
 # 临时 P3 harness（不入库）

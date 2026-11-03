@@ -32,4 +32,4 @@ platform/
 
 ## 备注
 
-`veil-core` 不在接缝范围内——它零平台代码，纯逻辑（INSTANCE §7）。IME 的自绘 preedit 路径是 winit 事件直收，不属于平台差异（winit 已抽象跨平台 IME），故不进入 platform/ 模块，而是 veil-egui 的输入管线职责。
+`veil-core` 不在接缝范围内——它零平台代码，纯逻辑（INSTANCE §7）。IME 的自绘 preedit 路径是 winit 事件直收，不属于平台差异（winit 已抽象跨平台 IME），故不进入 platform/ 模块，而是 veil-ui 的输入管线职责。

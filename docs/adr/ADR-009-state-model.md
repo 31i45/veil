@@ -4,17 +4,17 @@
 
 ## 背景
 
-2026-10-26 架构审计对 `veil-egui` 状态层给出以下事实（均为当时代码实测，非估算）：
+2026-10-26 架构审计对 `veil-ui` 状态层给出以下事实（均为当时代码实测，非估算）：
 
 | 事实 | 证据 |
 |---|---|
-| `App` 为 40 个 `pub(crate)` 顶层字段的无结构聚合，真值 / 持久化布尔 / 派生缓存 / 交互瞬态 / 平台端口 / 窗口资源混在一起 | `crates/veil-egui/src/app.rs` L133–L197 |
+| `App` 为 40 个 `pub(crate)` 顶层字段的无结构聚合，真值 / 持久化布尔 / 派生缓存 / 交互瞬态 / 平台端口 / 窗口资源混在一起 | `crates/veil-ui/src/app.rs` L133–L197 |
 | `impl App` 分散在 6 个文件块中，任意字段可被任意域直接读写 | `app.rs:199`、`interaction.rs:18`、`interaction.rs:809`、`paint.rs:11`、`block_index.rs:30`、`doc_state.rs:33` |
-| 派生缓存 9 个字段、**7 个手工失效方法**，外部调用点 **30 处**；漏调即脏读，多调即白算 | `crates/veil-egui/src/view/cache.rs` L24–L107 与全 crate 调用点统计 |
-| 交互模式优先级隐含在分支书写顺序中（菜单 → 查找栏 → 正文 → 快捷键），新增模式须同时改多处 | `crates/veil-egui/src/interaction.rs` |
+| 派生缓存 9 个字段、**7 个手工失效方法**，外部调用点 **30 处**；漏调即脏读，多调即白算 | `crates/veil-ui/src/view/cache.rs` L24–L107 与全 crate 调用点统计 |
+| 交互模式优先级隐含在分支书写顺序中（菜单 → 查找栏 → 正文 → 快捷键），新增模式须同时改多处 | `crates/veil-ui/src/interaction.rs` |
 | 持久化用 5 个平铺字段（2 个布尔 + 3 个 `Option`）表达 2 个正交维度，交叉出大量非法组合，状态栏优先级靠手写 | `app.rs` 的 `autosave_hold`/`conflict`/`external_saved`/`external_changed`/`external_missing`（相邻的 `baseline` 属真值、`last_activity` 属时间输入） |
-| headless 测试路径下 `paint()` 不产生真实呈现，性能探针只覆盖 `apply + after_edit + paint` 的 CPU 部分 | `crates/veil-egui/src/app_tests.rs` 的 `perf_keystroke_path`、`perf_keystroke_10k_blocks` |
-| 公共导出 **49 项**，产品层 `veil` 实际只使用 **20 项** | `crates/veil-egui/src/lib.rs` L29–L45；`crates/veil/src` 引用统计 |
+| headless 测试路径下 `paint()` 不产生真实呈现，性能探针只覆盖 `apply + after_edit + paint` 的 CPU 部分 | `crates/veil-ui/src/app_tests.rs` 的 `perf_keystroke_path`、`perf_keystroke_10k_blocks` |
+| 公共导出 **49 项**，产品层 `veil` 实际只使用 **20 项** | `crates/veil-ui/src/lib.rs` L29–L45；`crates/veil/src` 引用统计 |
 
 这些事实的共同根因不是「代码不好看」，而是缺少一条可判定的状态纪律：
 
@@ -144,16 +144,16 @@ fn present(&mut self)                 // 唯一外部副作用出口：surface �
 ### 六、端口聚合与公共接口收敛
 
 1. 11 个平台端口字段聚合为单个 `Ports` 结构（能力聚合，不引入框架）；
-2. `veil-egui` 公共导出收敛到 ≤ 25 项：仅保留产品层实际使用的端口 trait、`run`、`Doc`、`decode`、端口关联类型（FileEvent / ImageData / MathImage）与 bench_typing 纯排版基准（LayoutEngine / Frame / BlockLayout / BASE_*）；内部类型（Editor / Chrome / Autosave / Viewport / MenuAction / Action / Key / Mods / Style / Table* / translate / html_to_markdown）不导出；
+2. `veil-ui` 公共导出收敛到 ≤ 25 项：仅保留产品层实际使用的端口 trait、`run`、`Doc`、`decode`、端口关联类型（FileEvent / ImageData / MathImage）与 bench_typing 纯排版基准（LayoutEngine / Frame / BlockLayout / BASE_*）；内部类型（Editor / Chrome / Autosave / Viewport / MenuAction / Action / Key / Mods / Style / Table* / translate / html_to_markdown）不导出；
 3. 导出面以「产品层需要什么」定义，不以「crate 里有什么」定义。
 
 落地校准（S5 实测，回写本决策）：
 
 - App 顶层字段数从 35（S2 后）降至 26：11 个 `Box<dyn Trait>` 端口并为 1 个 `Ports` 字段；终态目标 12（剩余字段分组为 doc / editor / ui / input / window 等子结构）为后续 S6，不在 S5 范围；
 - 公共导出实际数量 25 项，而非 ≤20：bench_typing（产品层纯度量 example）需要 LayoutEngine / Frame 做纯排版与帧分配基准，属"产品层实际需要"，因此纳入；主代码（main.rs / platform/* / export.rs）实际只用 20 项，bench 额外 5 项；
-- 产品层 veil 零改动：`run()` 与 `App::new()` 入参形态保持原 10 参数列表（产品层注入端口时无需感知内部 Ports 聚合），内部组装由 veil-egui 层完成；
+- 产品层 veil 零改动：`run()` 与 `App::new()` 入参形态保持原 10 参数列表（产品层注入端口时无需感知内部 Ports 聚合），内部组装由 veil-ui 层完成；
 - 跨 4 个文件（app.rs / interaction.rs / paint.rs / doc_state.rs）的 41 处端口引用统一改为 `self.ports.xxx`；Ports 为 `pub(crate)`，不向公共导出；
-- 导出收敛后 veil-egui 内部不再被外部类型引用的内部类型会产生 `dead_code` clippy 警告，属于收敛副产物而非新缺陷（4 条 lib + 3 条 lib test duplicate）。
+- 导出收敛后 veil-ui 内部不再被外部类型引用的内部类型会产生 `dead_code` clippy 警告，属于收敛副产物而非新缺陷（4 条 lib + 3 条 lib test duplicate）。
 
 ### 七、明确不做（负空间）
 
@@ -185,7 +185,7 @@ fn present(&mut self)                 // 唯一外部副作用出口：surface �
 | 交互模式转移覆盖 | 表驱动 100% 显式（S1 已达成） | 表驱动 100% 显式 |
 | 持久化状态 | 单结构 + 唯一 `status()`，写入只经语义方法（S2 已达成） | 同左 |
 | 渲染可测性 | headless 下真实跑像素、幂等可断言、真实路径可测 | 同左 |
-| `veil-egui` 公共导出 | 25 项（主代码用 20 项 + bench_typing 5 项纯排版基准） | ≤ 25 |
+| `veil-ui` 公共导出 | 25 项（主代码用 20 项 + bench_typing 5 项纯排版基准） | ≤ 25 |
 | 新增功能的改动面 | 五类登记 + 一张表 | 同左 |
 
 ## 后果

@@ -69,7 +69,7 @@ crate 级（单向无环）：
 
 ```
 veil（产品层：标签/文件/剪贴板/导出/设置/大纲）
-  → veil-egui（视图适配器：事件翻译、cosmic-text 布局、交互策略、虚拟滚动）
+  → veil-ui（视图适配器：事件翻译、cosmic-text 布局、交互策略、虚拟滚动）
     → veil-core（纯逻辑内核）
 ```
 
@@ -94,7 +94,7 @@ session（facade：Session::apply(Edit) -> Events）
 | 模块 | 调用方代码行数 | 深度 | 理由 |
 |---|---|---|---|
 | veil-core（Session facade） | ≤3 行/次交互 | 深 | `apply` 一次调用打包文本+注解变更，返回脏区事件；调用方不编排原语 |
-| veil-egui（对 veil 而言） | ≤5 行/事件 | 深 | 事件翻译→`apply`→按 events 失效重绘，三步固定模式 |
+| veil-ui（对 veil 而言） | ≤5 行/事件 | 深 | 事件翻译→`apply`→按 events 失效重绘，三步固定模式 |
 | veil-core 内部模块 | 不公开 | — | crate 公开项 == 1（session 模块），远低于 ≤10 红线 |
 
 浅模块检查：原设计中的 `offset_mapper`（并入 syntax 定位查询）、`Service Interface`（删除：渲染缓存句柄已走注解，内核无需异步接口）均不单列。

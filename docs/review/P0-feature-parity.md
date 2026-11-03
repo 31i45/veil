@@ -35,18 +35,18 @@
 
 | 能力 | Typora | Veil | 证据 |
 |---|---|---|---|
-| 新建 | ✅† | ✅ | [input.rs](../../crates/veil-egui/src/input.rs) `Action::New` |
-| 打开 | ✅† | ✅ | [app.rs](../../crates/veil-egui/src/app.rs) `open_path` |
-| 保存 / 另存为 | ✅† | ✅ | [chrome/mod.rs](../../crates/veil-egui/src/chrome/mod.rs) 文件菜单 |
-| 拖拽文件打开 | ✅† | ✅ | [app.rs](../../crates/veil-egui/src/app.rs) `DroppedFile` |
-| 自动保存 | ✅† | ✅ | [autosave.rs](../../crates/veil-egui/src/autosave.rs) |
+| 新建 | ✅† | ✅ | [input.rs](../../crates/veil-ui/src/input.rs) `Action::New` |
+| 打开 | ✅† | ✅ | [app.rs](../../crates/veil-ui/src/app.rs) `open_path` |
+| 保存 / 另存为 | ✅† | ✅ | [chrome/mod.rs](../../crates/veil-ui/src/chrome/mod.rs) 文件菜单 |
+| 拖拽文件打开 | ✅† | ✅ | [app.rs](../../crates/veil-ui/src/app.rs) `DroppedFile` |
+| 自动保存 | ✅† | ✅ | [autosave.rs](../../crates/veil-ui/src/autosave.rs) |
 | 外部修改检测/提示 | ✅† | ✅ | `ExternalState::{Changed,BackedUp,Missing}` |
 | 覆盖前备份 | ✅† | ◐ | 有「已备份」状态与原子写，未验证备份文件落盘策略 |
 | 崩溃恢复 | ◐? | ✗ | 无恢复会话/草稿日志 |
 | 最近文件 | ✅† | ✗ | 无 |
 | 多窗口 | ✅† | ✗ | 单窗口单文档 |
 | 会话恢复 | ? | ✗ | 无 |
-| 编码/BOM 保留 | ✅† | ✅ | [docio](../../crates/veil-egui/src/docio.rs) 解码与 BOM 记录 |
+| 编码/BOM 保留 | ✅† | ✅ | [docio](../../crates/veil-ui/src/docio.rs) 解码与 BOM 记录 |
 | 原子写入 | ✅† | ✅ | [main.rs](../../crates/veil/src/main.rs) 临时文件 + rename |
 
 ### B. 编辑与输入（13：10 / 1 / 2）
@@ -54,13 +54,13 @@
 | 能力 | Typora | Veil | 证据 |
 |---|---|---|---|
 | 撤销 / 重做 | ✅† | ✅ | [history.rs](../../crates/veil-core/src/history.rs)，上限 1000 步 |
-| 剪切 / 复制 / 粘贴 | ✅† | ✅ | [app.rs](../../crates/veil-egui/src/app.rs) 剪贴板路径 |
-| HTML 粘贴转 Markdown | ✅† | ✅ | [html.rs](../../crates/veil-egui/src/html.rs) |
+| 剪切 / 复制 / 粘贴 | ✅† | ✅ | [app.rs](../../crates/veil-ui/src/app.rs) 剪贴板路径 |
+| HTML 粘贴转 Markdown | ✅† | ✅ | [html.rs](../../crates/veil-ui/src/html.rs) |
 | 图片粘贴 | ✅† | ◐ | 有粘贴保存资产路径；解码仅 PNG（[main.rs](../../crates/veil/src/main.rs)） |
-| 查找（计数/上下） | ✅† | ✅ | [search.rs](../../crates/veil-egui/src/view/search.rs) |
+| 查找（计数/上下） | ✅† | ✅ | [search.rs](../../crates/veil-ui/src/view/search.rs) |
 | 替换（单个/全部） | ✅† | ✅ | 阶段 C5，单事务全部替换 |
-| 双击选词 / 三击选行 | ✅† | ✅ | [interaction.rs](../../crates/veil-egui/src/interaction.rs) `select_word_at_mouse` / `select_line_at_mouse` |
-| Ctrl+←/→ 按词移动 | ✅† | ✅ | [editor.rs](../../crates/veil-egui/src/editor.rs) `word_move`（阶段 C6） |
+| 双击选词 / 三击选行 | ✅† | ✅ | [interaction.rs](../../crates/veil-ui/src/interaction.rs) `select_word_at_mouse` / `select_line_at_mouse` |
+| Ctrl+←/→ 按词移动 | ✅† | ✅ | [editor.rs](../../crates/veil-ui/src/editor.rs) `word_move`（阶段 C6） |
 | 自动配对括号/引号 | ✅† | ✗ | 无 |
 | Markdown 快捷输入（Ctrl+B/I/K） | ✅† | ✗ | 无 |
 | Tab / Shift+Tab 缩进 | ✅† | ✅ | 阶段 C3 |
@@ -81,7 +81,7 @@
 | GFM 任务列表 | ✅† | ✅ | [block.rs](../../crates/veil-core/src/syntax/block.rs) checkbox |
 | 围栏代码块 | ✅† | ◐ | 信息串基础支持；边界例失败（A 17/29） |
 | 缩进代码块 | ✅† | ✗ | A 2/12；`    # foo` 被识别为 H1 |
-| 表格渲染 | ✅† | ✅ | [table.rs](../../crates/veil-egui/src/view/table.rs) |
+| 表格渲染 | ✅† | ✅ | [table.rs](../../crates/veil-ui/src/view/table.rs) |
 | 表格单元格编辑 / 行列操作 | ✅† | ✗ | 仅解析与渲染（README 与实现矛盾） |
 | 分隔线 | ✅† | ✅ | `ThematicBreak` |
 | 数学块 | ✅† | ✅ | latex-rust 渲染（[main.rs](../../crates/veil/src/main.rs)） |
@@ -119,7 +119,7 @@
 
 | 能力 | Typora | Veil | 证据 |
 |---|---|---|---|
-| 大纲面板 | ✅† | ✅ | [view/outline.rs](../../crates/veil-egui/src/view/outline.rs) |
+| 大纲面板 | ✅† | ✅ | [view/outline.rs](../../crates/veil-ui/src/view/outline.rs) |
 | 文件树 / 文章列表 | ✅† | ✗ | 无 |
 | 源码模式 | ✅† | ✗ | 始终源码为真值 + 光标展开，无独立源码视图 |
 | 专注模式 | ✅† | ✗ | 无 |
@@ -128,9 +128,9 @@
 | 行号 | ✅† | ✗ | 无 |
 | 自动换行 | ✅† | ✅ | 布局层换行 |
 | 字体缩放 | ✅† | ✗ | 无 zoom/font_scale |
-| 浅/深/跟随系统主题 | ✅† | ✅ | [theme.rs](../../crates/veil-egui/src/theme.rs) |
+| 浅/深/跟随系统主题 | ✅† | ✅ | [theme.rs](../../crates/veil-ui/src/theme.rs) |
 | 自定义 CSS 主题 | ✅† | ✗ | 无 |
-| Mica / 深色标题栏 | — | ✅ | Windows 专属（[app.rs](../../crates/veil-egui/src/app.rs)） |
+| Mica / 深色标题栏 | — | ✅ | Windows 专属（[app.rs](../../crates/veil-ui/src/app.rs)） |
 | 字数 / 字符数统计 | ✅† | ✗ | 无 |
 | 行列号 | ◐? | ✅ | 状态栏「行 x，列 y」 |
 | 编码显示 | ◐? | ✗ | 无 |
@@ -155,12 +155,12 @@
 
 | 能力 | Typora | Veil | 证据 |
 |---|---|---|---|
-| 文档内搜索计数/上下 | ✅† | ✅ | [search.rs](../../crates/veil-egui/src/view/search.rs) |
+| 文档内搜索计数/上下 | ✅† | ✅ | [search.rs](../../crates/veil-ui/src/view/search.rs) |
 | 大小写敏感开关 | ✅† | ✗ | 固定大小写不敏感 |
 | 正则搜索 | ✅† | ✗ | 无 |
 | 设置界面 | ✅† | ◐ | 仅主题切换 |
 | 快捷键自定义 | ✅† | ✗ | 无 |
-| 配置文件 | ✅† | ◐ | 仅顶层 `mode`（[theme.rs](../../crates/veil-egui/src/theme.rs)） |
+| 配置文件 | ✅† | ◐ | 仅顶层 `mode`（[theme.rs](../../crates/veil-ui/src/theme.rs)） |
 | CLI 打开文件 | ✅† | ✅ | [main.rs](../../crates/veil/src/main.rs) |
 | 多平台（Win/mac/Linux） | ✅† | ◐ | 仅 Windows 有平台实现 |
 

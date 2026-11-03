@@ -4,15 +4,15 @@ Veil 是一款 Windows 桌面 Markdown 所见即所得编辑器：纯 Rust 实�
 
 ## 架构
 
-Workspace 由三个 crate 组成，依赖方向单向（`veil` → `veil-egui` → `veil-core`，禁止反向）：
+Workspace 由三个 crate 组成，依赖方向单向（`veil` → `veil-ui` → `veil-core`，禁止反向）：
 
 | Crate | 职责 |
 |---|---|
 | `veil-core` | 纯逻辑内核：文档模型、增量解析、编辑事务。零 GUI、零异步运行时依赖 |
-| `veil-egui` | 视图适配器：winit + softbuffer 软件呈现 + cosmic-text 排版，chrome（菜单/状态栏/滚动条）自绘，不引入 egui/GL（ADR-005） |
+| `veil-ui` | 视图适配器：winit + softbuffer 软件呈现 + cosmic-text 排版，chrome（菜单/状态栏/滚动条）自绘，不引入 egui/GL（ADR-005） |
 | `veil` | 产品层二进制：平台接缝（Windows FFI、配置、剪贴板、文件监听）与功能装配 |
 
-> crate 名 `veil-egui` 为历史遗留，当前并无 egui 依赖；v1 不更名，v2 再评估。
+> 2026-11-03 v1 发布前将 `veil-egui` 更名为 `veil-ui`：该 crate 自 ADR-005 起已零 egui 依赖，旧名与事实不符。crate 边界与职责未变。
 
 ## 已实现功能
 
@@ -48,7 +48,7 @@ cargo test --workspace      # 运行全部单元/集成测试
 cargo run -p veil -- <file.md>   # 运行并打开指定 Markdown 文件
 ```
 
-当前 810 项测试全绿（`cargo test --workspace` 810 passed / 0 failed / 10 ignored），`cargo clippy --workspace --all-targets -- -D warnings` 零警告。
+当前 852 项测试全绿（`cargo test --workspace` 852 passed / 0 failed / 10 ignored，2026-11-03 实测），`cargo clippy --workspace --all-targets -- -D warnings` 零警告。
 
 ## 数字红线（目标值与实测）
 
@@ -65,8 +65,8 @@ cargo run -p veil -- <file.md>   # 运行并打开指定 Markdown 文件
 | e2e 断言数 | ≥ 20 | 41（3 个 e2e_ 场景测试：写作闭环打开→保存→重开、表格+图片粘贴落盘、查找替换→崩溃恢复→自清）✅ |
 | Markdown 往返一致率（无编辑时输出 == 输入字节） | 100% | 100% |
 | `veil-core` 的 GUI/异步运行时依赖数 | 0 | 0 |
-| `veil-egui`+`veil` 直接依赖总数 | ≤ 8 | 8 |
-| workspace 传递依赖总数 | ≤ 200 | 121 |
+| `veil-ui`+`veil` 直接依赖总数 | ≤ 8 | 8 |
+| workspace 传递依赖总数 | ≤ 200 | 141 |
 
 ## 同机对比（P2 公开基准，2026-10-30）
 

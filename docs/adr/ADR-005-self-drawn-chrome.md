@@ -8,8 +8,8 @@
 
 ## 决策
 
-1. **自绘 chrome**：菜单栏/弹出菜单/状态栏/滚动条在 `veil-egui/src/chrome.rs` 纯逻辑实现（几何、命中、滚动换算、状态文本为纯函数），绘制复用 `Frame` 原语，标签复用 `LayoutEngine` 的 preedit 排版 + 光栅化并缓存。
-2. **系统文件对话框**：`FileDialog` trait 定义在 `veil-egui`（与 `Clipboard`/`FileStore`/`MathRenderer` 同模式），产品层注入。Windows 实现手写 `GetOpenFileNameW/GetSaveFileNameW/GetActiveWindow` FFI（`crates/veil/src/platform/windows.rs`），**零新增依赖**；非 Windows 返回 None 兜底。
+1. **自绘 chrome**：菜单栏/弹出菜单/状态栏/滚动条在 `veil-ui/src/chrome.rs` 纯逻辑实现（几何、命中、滚动换算、状态文本为纯函数），绘制复用 `Frame` 原语，标签复用 `LayoutEngine` 的 preedit 排版 + 光栅化并缓存。
+2. **系统文件对话框**：`FileDialog` trait 定义在 `veil-ui`（与 `Clipboard`/`FileStore`/`MathRenderer` 同模式），产品层注入。Windows 实现手写 `GetOpenFileNameW/GetSaveFileNameW/GetActiveWindow` FFI（`crates/veil/src/platform/windows.rs`），**零新增依赖**；非 Windows 返回 None 兜底。
 3. **视口化**：内容区 = 窗口减去菜单栏与状态栏；滚动条占右侧 12px；滚轮与滚动条共用 `max_scroll` 钳位。chrome 最后绘制、不透明覆盖，保证内容不侵入 chrome。
 
 ## 后果

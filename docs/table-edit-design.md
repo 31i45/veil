@@ -3,7 +3,7 @@
 > 状态：**T1~T3 已落地（2026-10-29）**，行列右键菜单 UI 留待 G2 后按真实需求补 · 设计 2026-10-29
 > 阶段：阶段 1 最后一项（6.5）
 > 前置依赖：0a 超大块保护 ✅ · 0c CommonMark 一致性 ✅ · G1 门禁 ✅
-> 架构约束：veil-egui+veil 直接依赖 8/8 已满，零新增 crate
+> 架构约束：veil-ui+veil 直接依赖 8/8 已满，零新增 crate
 
 ---
 
@@ -11,7 +11,7 @@
 
 ### 1.1 现状
 
-当前表格是**只读渲染**（`veil-egui/src/view/table.rs` 切片 9）：
+当前表格是**只读渲染**（`veil-ui/src/view/table.rs` 切片 9）：
 
 - 点击网格 → caret 落到 `TableCell.range.start`（单元格内容起点，文档绝对偏移）
 - `table_shows_grid()` 判定：caret 在表格 range 内 → **隐藏网格、显示源码**；离开 → 恢复网格
@@ -129,8 +129,8 @@ fn cell_anchor(&self, table: &Table, row: usize, col: usize) -> usize {
 ### 切片 T1：活动单元格视觉 + 网格继续显示
 
 **改动范围**：
-- `veil-egui/src/paint.rs`：`table_shows_grid()` 新增「caret 在 cell.range 内」判定；`paint_table` 循环中活动单元格追加光标/边框绘制
-- `veil-egui/src/view/table.rs`：新增 helper `is_active_cell()`
+- `veil-ui/src/paint.rs`：`table_shows_grid()` 新增「caret 在 cell.range 内」判定；`paint_table` 循环中活动单元格追加光标/边框绘制
+- `veil-ui/src/view/table.rs`：新增 helper `is_active_cell()`
 
 **测试**：
 - headless：`caret_in_cell_range→grid_shown`（caret = `cell.range.start` → `table_shows_grid` 返回 true）
@@ -141,7 +141,7 @@ fn cell_anchor(&self, table: &Table, row: usize, col: usize) -> usize {
 ### 切片 T2：Tab / Shift+Tab 单元格导航
 
 **改动范围**：
-- `veil-egui/src/interaction.rs`：keypress 路由新增 Tab/Shift+Tab 分支
+- `veil-ui/src/interaction.rs`：keypress 路由新增 Tab/Shift+Tab 分支
 - 需访问当前 TableLayout 的 cells 数组，定位活动 cell 索引
 
 **测试**：
@@ -152,8 +152,8 @@ fn cell_anchor(&self, table: &Table, row: usize, col: usize) -> usize {
 ### 切片 T3：行/列操作（右键菜单）
 
 **改动范围**：
-- `veil-egui/src/chrome/mod.rs`：表格右键菜单行（`ctx_menu_rows` 新增表内上下文）
-- `veil-egui/src/interaction.rs`：右键命中单元格 → 弹出菜单
+- `veil-ui/src/chrome/mod.rs`：表格右键菜单行（`ctx_menu_rows` 新增表内上下文）
+- `veil-ui/src/interaction.rs`：右键命中单元格 → 弹出菜单
 - 实现：对表格 block range 做多行 `Replace` → `Session::apply`
 
 **列操作的 Markdown 变换（以两列表格为例）**：
@@ -190,7 +190,7 @@ fn cell_anchor(&self, table: &Table, row: usize, col: usize) -> usize {
 ### 切片 T4：右键菜单 UI（chrome 域）
 
 **改动范围**：
-- `veil-egui/src/chrome/mod.rs`：新增表格上下文菜单（6 项：插入行/删除行、插入列/删除列、「退出源码态」）
+- `veil-ui/src/chrome/mod.rs`：新增表格上下文菜单（6 项：插入行/删除行、插入列/删除列、「退出源码态」）
 - 命中：右键 → `hit_offset()` 得到 caret → 判定 caret 在 Table block → 弹出上下文菜单
 
 **不做**：独立的右键菜单组件，复用既有菜单框架（`chrome::menu_rows` 单一路由）。
@@ -247,7 +247,7 @@ GFM 允许 `| |`（空单元格）。此时 `TableCell.range` 是 `|` 和 `|` �
 - Table parse/reparse：已支持结构变更自动重对齐
 - Table.serialize：已支持
 
-### veil-egui
+### veil-ui
 
 | 文件 | 改动 |
 |---|---|
@@ -262,7 +262,7 @@ GFM 允许 `| |`（空单元格）。此时 `TableCell.range` 是 `|` 和 `|` �
 
 ## 6. 测试计划
 
-### headless（veil-egui）
+### headless（veil-ui）
 
 | ID | 断言 | 覆盖点 |
 |---|---|---|

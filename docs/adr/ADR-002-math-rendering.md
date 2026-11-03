@@ -34,7 +34,7 @@
 
 ## 决策
 
-1. 公式渲染：`latex-rust`（veil 产品层，锁定 2.1.1，feature `png`），渲染产物 PNG 位图直贴 softbuffer 帧。渲染器以 trait 定义在 veil-egui、实现注入自 veil（与 Clipboard/FileStore 同一注入模式），保持 veil-egui 依赖预算与 headless 可测性。首版采用同步渲染 + 块级缓存；不支持的构造返回 Error 时降级为源码显示，不崩溃。
+1. 公式渲染：`latex-rust`（veil 产品层，锁定 2.1.1，feature `png`），渲染产物 PNG 位图直贴 softbuffer 帧。渲染器以 trait 定义在 veil-ui、实现注入自 veil（与 Clipboard/FileStore 同一注入模式），保持 veil-ui 依赖预算与 headless 可测性。首版采用同步渲染 + 块级缓存；不支持的构造返回 Error 时降级为源码显示，不崩溃。
 2. Mermaid：v1 非目标。源码按代码块原样显示，不渲染图。
 3. ~~`rquickjs` + vendor katex.min.js~~：HTML 输出在无 webview 像素管线下无法光栅化，否决（本次修订核心）。
 4. ~~`katex` crate 主路径~~：windows-msvc 上不可编译 / 功能不成立（见 spike 表一），否决。

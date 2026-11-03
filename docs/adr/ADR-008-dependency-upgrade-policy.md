@@ -11,7 +11,7 @@
 1. **每切片完成后允许 `cargo update`（minor/patch）**：作为切片收尾的常规动作，随切片 commit 一起进入版本库。
 2. **major 升级单独立项**：独立 commit、不与功能改动混合，必须可 `git revert` 干净回滚；升级前先出迁移清单（API 变更点、受影响模块、测试预案），评审通过后执行。
 3. **数字同 commit 回写**：升级引起的一切数字变化（测试数、依赖数、产物体积等）必须与 `.skills/INSTANCE.md` 的更新同 commit 提交，禁止数字与代码分离漂移。
-4. **既有约束不变**：依赖黑名单（`tokio`、`wasmtime`、`webview2-com`/`wry` 等一切 webview）与 `veil-egui`+`veil` 直接依赖预算 8/8 不因升级而放宽。
+4. **既有约束不变**：依赖黑名单（`tokio`、`wasmtime`、`webview2-com`/`wry` 等一切 webview）与 `veil-ui`+`veil` 直接依赖预算 8/8 不因升级而放宽。
 
 ## 后果
 

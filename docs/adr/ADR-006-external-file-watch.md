@@ -8,7 +8,7 @@ INSTANCE §5 输入点 ⑤：当前文档可能被外部编辑器改写或删除
 
 ## 决策
 
-1. **监听接缝**：`FileWatcher` trait 定义在 `veil-egui`（`watch`/`unwatch`/非阻塞 `poll`，事件只有 `Changed`/`Removed`），产品层注入 notify 8 实现。实现监听**父目录（非递归）**并按文件名过滤：tmp+rename 式原子保存与外部编辑器替换都能感知，直接监听文件会在 rename 后失效。
+1. **监听接缝**：`FileWatcher` trait 定义在 `veil-ui`（`watch`/`unwatch`/非阻塞 `poll`，事件只有 `Changed`/`Removed`），产品层注入 notify 8 实现。实现监听**父目录（非递归）**并按文件名过滤：tmp+rename 式原子保存与外部编辑器替换都能感知，直接监听文件会在 rename 后失效。
 2. **线程模型**：notify 事件线程只把事件写入 `std::sync::mpsc` 通道；主线程在 winit `about_to_wait` 中轮询。有路径时以 300ms `WaitUntil` 唤醒（约 3.3 次/秒），草稿无路径则完全休眠。不引入 `EventLoopProxy` 与自定义用户事件，事件循环保持泛型无关。
 3. **检测只改状态，不碰内容与磁盘**：读盘后与基线/已备份版本比较。磁盘内容 == 基线（含自身保存触发的事件）忽略；同一外部版本只提示一次；「已备份」与「待备份」分开呈现（`ExternalState::Changed/BackedUp/Missing`，标题与状态栏共用）。
 4. **备份仍在覆盖前一刻执行**：检测阶段不落副本，避免外部程序每次保存都在文档旁积一份备份；脏文档一旦检测到外部修改即挂起自动保存，手动/自动保存沿用既有「先备份再覆盖」路径。

@@ -166,7 +166,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 # P2 性能（release，必须串行）
 cargo build --release -p veil
-cargo test -p veil-egui --release -- --ignored --nocapture --test-threads=1 perf_
+cargo test -p veil-ui --release -- --ignored --nocapture --test-threads=1 perf_
 
 # P3 病态输入
 cargo test -p veil-core --release --test pathological -- --ignored --nocapture

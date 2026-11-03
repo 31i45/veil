@@ -67,9 +67,9 @@
 - **现象**（用户报障 + 截图确认）：把草稿另存为到桌面后，每次启动仍打开同一份无路径草稿，
   状态栏显示「已从崩溃恢复未保存的内容；确认后请保存」，标题 `veil *`；
   必须再执行一次另存为，之后才能打开/新建文件。
-- **根因**：[doc_state.rs](../../crates/veil-egui/src/document/doc_state.rs) 的
+- **根因**：[doc_state.rs](../../crates/veil-ui/src/document/doc_state.rs) 的
   `clear_recovery` 以 `recovery_hash.is_none()` 作为「本会话没写过恢复文件」的判据提前返回；
-  但启动时 [app.rs](../../crates/veil-egui/src/app.rs) 把 `recovery_hash` 初始化为 `None`，
+  但启动时 [app.rs](../../crates/veil-ui/src/app.rs) 把 `recovery_hash` 初始化为 `None`，
   尽管磁盘上存在一份刚被消费的快照。于是「恢复草稿 → 直接另存为」时清除被跳过，
   旧快照留存 → 下次启动再次恢复 → 又需另存为，形成自循环。
 - **修法**：启动消费快照时记录其指纹（`StartupDoc.recovery_hash = fnv64(快照字节)`），
@@ -84,7 +84,7 @@
 - **复现**：选中普通段落行（含 `**粗体**`、`~~删除线~~`、反引号、`[]()` 等标记），按 Tab。
 - **现象**：行首被加 4 空格 → CommonMark 判为 indented code block，整段切换为灰底等宽、
   所有标记字面显示，原先的粗体/链接/行内代码全部失效；视觉上像「正文被打回源码」。
-- **根因**（读码定位）：[editor.rs](../../crates/veil-egui/src/editor.rs) `indent_plan` 对
+- **根因**（读码定位）：[editor.rs](../../crates/veil-ui/src/editor.rs) `indent_plan` 对
   触及的每一非空行**无条件**加 4 空格前缀，无块上下文判定——列表项、代码块、段落一律同等对待。
 - **候选方案**（需拍板）：
   1. 上下文感知：列表项 → 改嵌套层级（保持列表结构）；围栏代码块内 → 插 4 空格；

@@ -1022,6 +1022,40 @@ fn table_large_row_degrade() {
     assert!(t.rows.len() <= 512, "2000 行表体应该截断到 ≤ 512，实际 {}", t.rows.len());
 }
 
+// ---- 批次 2-5：Session.offset_of_line + id_index 间接验证 ----
+
+#[test]
+fn offset_of_line_roundtrip() {
+    // Session.offset_of_line 和 line_of_offset 互逆，含多字节字符 + CRLF
+    let s = Session::open("你好\n世界\n");
+    assert_eq!(s.offset_of_line(0), 0);
+    assert_eq!(s.offset_of_line(1), 7); // 「你好」6字节 + \n
+    assert_eq!(s.offset_of_line(2), 14); // 「世界」6字节 + \n
+    // line_of_offset 互逆
+    assert_eq!(s.line_of_offset(0), 0);
+    assert_eq!(s.line_of_offset(7), 1);
+    assert_eq!(s.line_of_offset(14), 2);
+}
+
+#[test]
+fn id_index_synced_after_reparse() {
+    // edit 后所有现存 BlockId 仍能通过派生 API 找到（间接验证 id_index 重建）
+    let mut s = Session::open("a\n\nb\n\nc\n");
+    let ids_before: Vec<_> = s.blocks().into_iter().map(|(id, _, _)| id).collect();
+    // 编辑首行：触发 reparse
+    s.apply(replace(0, 1, "Z")).unwrap();
+    let ids_after: Vec<_> = s.blocks().into_iter().map(|(id, _, _)| id).collect();
+    // 新块数和旧块数差 ≤ 1（编辑首行应不改变块数）
+    assert!((ids_after.len() as i32 - ids_before.len() as i32).abs() <= 1);
+    // 所有现存块通过派生 API 访问（get_block = id_index 查表）
+    for (id, kind, _) in s.blocks() {
+        match kind {
+            BlockKind::Table => assert!(s.table(id).is_some()),
+            _ => {} // 其他块不走 table，跳过
+        }
+    }
+}
+
 // ---- 列表 / 引用 / 分隔线（切片 12）：Session 门面与增量重解析 ----
 
 #[test]

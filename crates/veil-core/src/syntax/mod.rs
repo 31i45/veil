@@ -32,6 +32,8 @@ pub(crate) struct Syntax {
     /// 文档级链接引用表（0c P0-1）：规范化 label → (dest, title) 绝对区间。
     /// 派生数据：new/reparse 后由 LinkRefDef 块全量重建，不持久化、不进撤销栈。
     refs: RefMap,
+    /// BlockId → blocks 内索引（new/reparse 后重建，O(1) 查表替代 iter().find）。
+    id_index: std::collections::HashMap<BlockId, usize>,
 }
 
 impl Syntax {
@@ -40,6 +42,7 @@ impl Syntax {
             blocks: Vec::new(),
             next_id: 0,
             refs: RefMap::new(),
+            id_index: std::collections::HashMap::new(),
         };
         let raw = scan_blocks(buf, 0, buf.line_count());
         syntax.blocks = raw
@@ -47,6 +50,7 @@ impl Syntax {
             .map(|(kind, s, e)| syntax.fresh_block(kind, s, e))
             .collect();
         syntax.build_refs(buf);
+        syntax.rebuild_id_index();
         syntax
     }
 
@@ -80,6 +84,20 @@ impl Syntax {
         }
     }
 
+    /// 重建 BlockId → blocks 索引 HashMap（每次 new/reparse 后调用）。
+    fn rebuild_id_index(&mut self) {
+        self.id_index.clear();
+        for (i, b) in self.blocks.iter().enumerate() {
+            self.id_index.insert(b.id, i);
+        }
+    }
+
+    /// O(1) 按 BlockId 查块引用（内部 helper，替代 iter().find）。
+    fn get_block(&self, id: BlockId) -> Option<&Block> {
+        let idx = self.id_index.get(&id)?;
+        self.blocks.get(*idx)
+    }
+
     pub fn blocks(&self) -> &[Block] {
         &self.blocks
     }
@@ -89,7 +107,7 @@ impl Syntax {
     /// FencedCode/IndentedCode/Math/Table/ThematicBreak 恒为空（无 inline）；未知 id 返回 None。
     /// 列表/引用仅解析标记（`- ` / `> `）之后的内容，标记本身不得被 inline 误认。
     pub fn inlines(&self, buf: &Buffer, block: BlockId) -> Option<Vec<InlineNode>> {
-        let b = self.blocks.iter().find(|b| b.id == block)?;
+        let b = self.get_block(block)?;
         if matches!(
             b.kind,
             BlockKind::FencedCode(_)
@@ -160,7 +178,7 @@ impl Syntax {
     /// 数学块的 TeX 源码（视图渲染/导出的输入）：多行剥开闭标记行，单行剥两侧 `$$`；
     /// 中间行原样保留（含空行，`\r` 随 lines() 剥除）。非数学块/未知 id 返回 None。
     pub fn math_source(&self, buf: &Buffer, block: BlockId) -> Option<String> {
-        let b = self.blocks.iter().find(|b| b.id == block)?;
+        let b = self.get_block(block)?;
         if b.kind != BlockKind::Math {
             return None;
         }
@@ -193,7 +211,7 @@ impl Syntax {
     const MAX_TABLE_ROWS: usize = 512;
 
     pub fn table(&self, buf: &Buffer, block: BlockId) -> Option<Table> {
-        let b = self.blocks.iter().find(|b| b.id == block)?;
+        let b = self.get_block(block)?;
         if b.kind != BlockKind::Table {
             return None;
         }
@@ -228,7 +246,7 @@ impl Syntax {
     /// （`## **B**` → `B`）；Setext 取内容行（末行下划线除外）。非标题块/未知 id
     /// 返回 None（大纲面板的数据来源）。
     pub fn heading(&self, buf: &Buffer, block: BlockId) -> Option<(u8, String)> {
-        let b = self.blocks.iter().find(|b| b.id == block)?;
+        let b = self.get_block(block)?;
         match b.kind {
             BlockKind::AtxHeading(level) => {
                 let line = line_text(buf, b.start_line);
@@ -390,6 +408,7 @@ impl Syntax {
         }
         self.blocks = new_blocks;
         self.build_refs(buf);
+        self.rebuild_id_index();
         dirty
     }
 }

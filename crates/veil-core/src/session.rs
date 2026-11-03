@@ -104,6 +104,11 @@ impl Session {
         self.buf.line_of_offset(offset.min(self.buf.len()))
     }
 
+    /// 行首字节偏移（Buffer 直接转发）。供视图层快速定位行边界。
+    pub fn offset_of_line(&self, line: usize) -> usize {
+        self.buf.offset_of_line(line)
+    }
+
     /// 光标行列（1-based，列按字符计数而非字节）。offset 越界或非字符边界返回 None。
     pub fn line_col(&self, offset: usize) -> Option<(usize, usize)> {
         if offset > self.buf.len() || !self.buf.is_char_boundary(offset) {

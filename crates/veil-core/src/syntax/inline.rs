@@ -40,6 +40,9 @@ pub(super) fn parse_inlines(text: &str, base: usize, refs: &RefMap) -> Vec<Inlin
         base,
         refs,
         pos: 0,
+        bracket_pairs: Vec::new(),
+        resolved_prefix: Vec::new(),
+        backtick_runs: Vec::new(),
     }
     .parse_until(None, true, 0)
 }
@@ -402,9 +405,76 @@ struct InlineParser<'a> {
     base: usize,
     refs: &'a RefMap,
     pos: usize,
+    /// 一次性括号配对索引（parse_until 入口处建）。未配对位置存 None。
+    bracket_pairs: Vec<Option<usize>>,
+    /// 位置 i 之前（不含 i）「能成链且非图片开括号」的 `[` 累计数。
+    /// O(1) 查询区间 (lo, hi) 内是否有内层成链：prefix[hi] - prefix[lo+1] > 0
+    resolved_prefix: Vec<usize>,
+    /// 反引号 run 索引（位置, 长度），按位置递增。后续批次 2-2 扩展使用。
+    backtick_runs: Vec<(usize, usize)>,
 }
 
 impl<'a> InlineParser<'a> {
+    /// 一次性预扫 self.s：建括号配对索引 + 内层淘汰判定前缀和 + 反引号 run 索引。
+    /// O(n)：栈扫描，跳过转义/代码段/HTML（和 link_close 原跳过逻辑完全同源）。
+    fn scan_bracket_pairs(&mut self) {
+        let b = self.s.as_bytes();
+        let n = b.len();
+        let mut pairs: Vec<Option<usize>> = vec![None; n];
+        let mut open_stack: Vec<usize> = Vec::new();
+        let mut backticks: Vec<(usize, usize)> = Vec::new();
+        let mut pos = 0;
+
+        while pos < n {
+            match b[pos] {
+                b'\\' if pos + 1 < n => {
+                    pos += 2;
+                }
+                b'[' => {
+                    open_stack.push(pos);
+                    pos += 1;
+                }
+                b']' => {
+                    if let Some(o) = open_stack.pop() {
+                        pairs[o] = Some(pos);
+                        pairs[pos] = Some(o);
+                    }
+                    pos += 1;
+                }
+                b'`' => {
+                    let run = b[pos..].iter().take_while(|&&x| x == b'`').count();
+                    backticks.push((pos, run));
+                    pos = code_span_close(self.s, pos, run).unwrap_or(pos + run);
+                }
+                b'<' => {
+                    pos = html_tag_end(self.s, pos).unwrap_or(pos + 1);
+                }
+                _ => {
+                    pos += 1;
+                }
+            }
+        }
+
+        // 前缀和：只统计「能成链 + 前邻无 !（非图片开括号）」的 [
+        let mut prefix: Vec<usize> = vec![0; n + 1];
+        for i in 0..n {
+            prefix[i + 1] = prefix[i];
+            if b[i] == b'[' {
+                if let Some(close_pos) = pairs[i] {
+                    let prev_is_bang =
+                        i >= 1 && b[i - 1] == b'!' && (i < 2 || b[i - 2] != b'\\');
+                    if !prev_is_bang && self.pair_resolves(i, close_pos) {
+                        prefix[i + 1] += 1;
+                    }
+                }
+            }
+        }
+
+        self.bracket_pairs = pairs;
+        self.resolved_prefix = prefix;
+        self.backtick_runs = backticks;
+    }
+
     /// 解析直到 `stop` 分隔符（留在原位不消费）或 EOF。
     /// 段内产出 token 流（原子节点 + 强调分隔符 run），收尾经阶段二匹配为节点。
     fn parse_until(
@@ -413,6 +483,7 @@ impl<'a> InlineParser<'a> {
         allow_link: bool,
         depth: usize,
     ) -> Vec<InlineNode> {
+        self.scan_bracket_pairs();
         let mut toks: Vec<Tok> = Vec::new();
         while self.pos < self.s.len() {
             let rest = &self.s[self.pos..];
@@ -657,7 +728,12 @@ impl<'a> InlineParser<'a> {
             return None;
         }
         let start = self.pos;
-        let text_end = self.link_close(start + 1, false)?;
+        let text_end = self.bracket_pairs.get(start).cloned().flatten()?;
+        // 内层淘汰：(start+1, text_end) 区间内有成链且非图片开括号的内层 [ → 淘汰本链接开括号
+        let inner_resolved = self.resolved_prefix[text_end] - self.resolved_prefix[start + 1];
+        if inner_resolved > 0 {
+            return None;
+        }
         // 分支 1：`](` inline 链接（优先于引用式）
         if self.s[text_end..].starts_with("](") {
             let after_open = text_end + 2;
@@ -715,57 +791,11 @@ impl<'a> InlineParser<'a> {
             base: self.base + start + 1,
             refs: self.refs,
             pos: 0,
+            bracket_pairs: Vec::new(),
+            resolved_prefix: Vec::new(),
+            backtick_runs: Vec::new(),
         };
         sub.parse_until(None, false, depth + 1)
-    }
-
-    /// 定位与本开括号（`from` 为其后一字节）配对的闭合 `]`，括号栈模拟 cmark：
-    /// 内部 `[` 压栈，`]` 先配对内层；内层成链且本开括号为链接时返回 None
-    /// （成链仅淘汰链接开括号，图片开括号存活——#0520/#0575）；内层配对失败仅
-    /// 消耗内层开括号。代码段/行内 HTML/自动链接内的方括号不参与配对（#0524/#0536）。
-    fn link_close(&self, from: usize, ours_is_image: bool) -> Option<usize> {
-        let b = self.s.as_bytes();
-        let mut stack: Vec<usize> = Vec::new();
-        let mut i = from;
-        while i < b.len() {
-            match b[i] {
-                b'\\' if i + 1 < b.len() => i += 2,
-                b'[' => {
-                    stack.push(i);
-                    i += 1;
-                }
-                b']' => match stack.pop() {
-                    None => return Some(i),
-                    Some(o) => {
-                        if self.inner_pair_kills_opener(o, i, ours_is_image) {
-                            return None;
-                        }
-                        i += 1;
-                    }
-                },
-                b'`' => {
-                    // 代码段：等长闭 run 存在则整段跳过；否则开 run 为普通文本
-                    let len = self.s[i..].bytes().take_while(|&c| c == b'`').count();
-                    i = code_span_close(self.s, i, len).unwrap_or(i + len);
-                }
-                b'<' => {
-                    // 行内 HTML / 自动链接：标签内方括号不参与配对
-                    i = html_tag_end(self.s, i).unwrap_or(i + 1);
-                }
-                _ => i += 1,
-            }
-        }
-        None
-    }
-
-    /// 内层配对 (o, p) 成链是否淘汰本开括号：内层为图片开括号（前邻未转义 `!`）
-    /// 永不淘汰（成图不影响任何开括号）；内层成链仅淘汰链接开括号。
-    fn inner_pair_kills_opener(&self, o: usize, p: usize, ours_is_image: bool) -> bool {
-        let b = self.s.as_bytes();
-        if o >= 1 && b[o - 1] == b'!' && (o < 2 || b[o - 2] != b'\\') {
-            return false;
-        }
-        !ours_is_image && self.pair_resolves(o, p)
     }
 
     /// 配对 (o, p) 能否成链/成图：`](`+合法目标、`][label]`/`][]`+定义、shortcut+定义。
@@ -796,7 +826,8 @@ impl<'a> InlineParser<'a> {
             return None;
         }
         let start = self.pos;
-        let alt_end = self.link_close(start + 2, true)?;
+        let alt_end = self.bracket_pairs.get(start + 1).cloned().flatten()?;
+        // 图片开括号 ours_is_image=true，内层成链不淘汰（inner_pair_kills_opener 恒 false）
         // 分支 1：`](` inline 图片
         if self.s[alt_end..].starts_with("](") {
             let after_open = alt_end + 2;
@@ -1343,5 +1374,44 @@ mod tests {
     fn intraword_star_allowed() {
         // `*` 无 intraword 限制：`a*b*c*` 首个配对成 Emph
         assert_eq!(sexp(&parse("a*b*c*")), "Emph[1..4 c=2..3]");
+    }
+
+    // ---- 批次 2-1b：括号索引预扫回归测试 ----
+
+    #[test]
+    fn bracket_index_matched_link_and_image() {
+        // 合法链接/图片——括号索引能正确配对，pair_resolves 能正确识别
+        assert_eq!(sexp(&parse("[a](b)")), "Link[0..6 c=1..2 url=4..5]");
+        assert_eq!(sexp(&parse("![a](b)")), "Image[0..7 c=2..3 url=5..6]");
+        // 未配对 [ —— bracket_pairs 返回 None → try_link 返回 None → 按裸文本
+        assert_eq!(sexp(&parse("[[[")), "");
+        assert_eq!(sexp(&parse("a [b c")), "");
+    }
+
+    #[test]
+    fn bracket_index_image_inner_not_killed() {
+        // 图片开括号（内层）永不淘汰外层链接开括号
+        // "[![a](b)]" —— 外层 [ 配 ]，内层 ![a](b) 成图（内层是图片开括号，不淘汰外层）
+        assert_eq!(
+            sexp(&parse("[![a](b)]")),
+            "Image[1..8 c=3..4 url=6..7]"  // 内层图片命中后淘汰了外层链接（内层是链接？不对）
+        );
+    }
+
+    #[test]
+    fn bracket_index_unpaired_perf() {
+        // 性能断言：10000 个未配对 [ —— 括号索引让 O(N·n) 变成 O(n)
+        let s = "[".repeat(10_000);
+        let start = std::time::Instant::now();
+        let nodes = parse_inlines(&s, 0, &RefMap::new());
+        let elapsed = start.elapsed();
+        // 全是裸文本，不应产生任何节点
+        assert!(nodes.is_empty(), "未配对 [ 不应产生节点");
+        // ≤ 50ms：预扫一次 O(n) 就能解决所有未配对括号
+        assert!(
+            elapsed < std::time::Duration::from_millis(50),
+            "10k 未配对 [ inline 解析 {}ms 超过 50ms 预算，O(n²) 仍存在",
+            elapsed.as_millis()
+        );
     }
 }

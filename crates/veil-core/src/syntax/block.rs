@@ -1256,7 +1256,11 @@ fn html_block_start(line: &str) -> Option<HtmlStart> {
         while i < ab.len() && matches!(ab[i], b' ' | b'\t') {
             i += 1;
         }
-        if i < ab.len() && ab[i] == b'>' {
+        // 整行空白到了 EOF：这是合法的空属性区（类型 6/7 允许 `>EOF`）
+        if i >= ab.len() {
+            return None; // 不是合法类型 6/7（没有 > 闭合）
+        }
+        if ab[i] == b'>' {
             i += 1;
             // 行尾只允许空白
             if after_name[i..].trim_end_matches(['\r', '\n']).trim().is_empty() {
@@ -1264,7 +1268,7 @@ fn html_block_start(line: &str) -> Option<HtmlStart> {
             }
             return None;
         }
-        if i < ab.len() && ab[i] == b'/' && ab.get(i + 1) == Some(&b'>') {
+        if ab[i] == b'/' && ab.get(i + 1) == Some(&b'>') {
             i += 2;
             if after_name[i..].trim_end_matches(['\r', '\n']).trim().is_empty() {
                 return Some(HtmlStart::BlankLine { type6: false });

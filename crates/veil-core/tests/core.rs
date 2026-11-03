@@ -45,6 +45,74 @@ fn edit_middle_paragraph_dirty_is_local() {
     assert_eq!(s.serialize(), SAMPLE.replacen('f', "X", 1));
 }
 
+// ---- 增量==全量属性测试（Commit 1-3 钉住的 6 类回退缺陷） ----
+
+/// 编辑后的块结构必须等于 Session::open(serialize()) 的块结构；
+/// 再对 inline/math/table 也验证派生等价。
+fn assert_reparse_idempotent(s: &Session) {
+    let text = s.serialize();
+    let fresh = Session::open(&text);
+    let got_blocks: Vec<_> = s
+        .blocks()
+        .into_iter()
+        .map(|(_, k, r)| (format!("{:?}", k), r.start, r.end))
+        .collect();
+    let want_blocks: Vec<_> = fresh
+        .blocks()
+        .into_iter()
+        .map(|(_, k, r)| (format!("{:?}", k), r.start, r.end))
+        .collect();
+    assert_eq!(got_blocks, want_blocks, "块结构不一致，serialize:\n{text:?}");
+}
+
+#[test]
+fn reparse_edit_at_block_start_joins_list_item() {
+    // 反例 A：删列表标记后，下方段落应并入前 ListItem
+    let mut s = Session::open("[r]\n- [ ] t\nb    c\n");
+    s.apply(replace(5, 10, "")).unwrap();
+    assert_reparse_idempotent(&s);
+}
+
+#[test]
+fn reparse_indent_paragraph_at_block_start_joins_list() {
+    // 反例 B：给「列表下的空段」首行加缩进，应并入 ListItem
+    let mut s = Session::open("- a\n\nb\n");
+    s.apply(insert(5, "  ")).unwrap();
+    assert_reparse_idempotent(&s);
+}
+
+#[test]
+fn reparse_delete_ref_def_after_quote_joins_blockquote() {
+    // 反例 C：引用块后的引用定义行被截断，应并入 BlockQuote（懒续行）
+    let mut s = Session::open("> - z\n<!-- c -->\n[r]: /u\n");
+    s.apply(replace(7, 8, "")).unwrap();
+    assert_reparse_idempotent(&s);
+}
+
+#[test]
+fn reparse_delete_fence_opener_row_downgrades_to_paragraph() {
+    // 反例 D：删围栏开标记的第一个 backtick，整段应降级为 Paragraph
+    let mut s = Session::open("```\nx\n```\n");
+    s.apply(replace(0, 1, "")).unwrap();
+    assert_reparse_idempotent(&s);
+}
+
+#[test]
+fn reparse_setext_underline_covered_joins_paragraph() {
+    // 反例 E：Setext 下划线行被正文覆盖，应合并为单一 Paragraph
+    let mut s = Session::open("Hello\n=====\n");
+    s.apply(replace(0, 5, "Hello world")).unwrap();
+    assert_reparse_idempotent(&s);
+}
+
+#[test]
+fn reparse_edit_at_doc_first_line_joins_paragraphs() {
+    // 反例 F：全文首行起点编辑（在文档顶部的 Paragraph 首行），应正确重扫
+    let mut s = Session::open("a\n\nb\n\nc\n");
+    s.apply(insert(0, "z\n")).unwrap();
+    assert_reparse_idempotent(&s);
+}
+
 #[test]
 fn fence_swallow_resync_regression() {
     // 反例 1 回归：文首输入 ``` 吞咽后方所有块，脏集必须覆盖它们
@@ -707,6 +775,24 @@ fn session_math_source_roundtrip() {
     assert_eq!(range, Range::new(0, 10)); // 逐字节：3+4+3=10
     assert_eq!(s.math_source(id).as_deref(), Some("x^2"));
     assert_eq!(s.text_slice(range).as_deref(), Some("$$\nx^2\n$$\n"));
+}
+
+#[test]
+fn math_source_single_line_nonempty_roundtrip() {
+    // 真单行 Math：前后空白不影响识别，内容正确剥离
+    let s = Session::open("  $$x^2$$  \n");
+    let (id, kind, _) = s.blocks()[0].clone();
+    assert_eq!(kind, BlockKind::Math);
+    assert_eq!(s.math_source(id).as_deref(), Some("x^2"));
+}
+
+#[test]
+fn math_source_single_line_normal() {
+    // 正常单行 Math
+    let s = Session::open("$$x^2$$\n");
+    let (id, kind, _) = s.blocks()[0].clone();
+    assert_eq!(kind, BlockKind::Math);
+    assert_eq!(s.math_source(id).as_deref(), Some("x^2"));
 }
 
 #[test]

@@ -42,8 +42,8 @@ pub(crate) struct History {
     redo: VecDeque<Transaction>,
     /// 上一步编辑的分组类别；`None` 表示不参与合并（撤销后/不可合并编辑后）。
     last: Option<Group>,
-    /// undo 栈累计字节（deleted.len() + inserted.len()）。
-    undo_bytes: usize,
+    /// undo 栈累计字节（deleted.len() + inserted.len()）。pub(crate) 供测试断言。
+    pub(crate) undo_bytes: usize,
 }
 
 impl History {
@@ -62,8 +62,16 @@ impl History {
         self.redo.clear();
         let group = classify(&tx);
         if let (Some(group), Some(last_group)) = (group, self.last) {
-            if group == last_group && self.try_merge(&tx, group) {
-                return;
+            if group == last_group {
+                let old_top_sz = Self::tx_byte_size(self.undo.back().unwrap());
+                if self.try_merge(&tx, group) {
+                    let new_top_sz = Self::tx_byte_size(self.undo.back().unwrap());
+                    self.undo_bytes = self
+                        .undo_bytes
+                        .saturating_add(new_top_sz.saturating_sub(old_top_sz));
+                    // merge 路径栈长度不变，无需步数/字节裁剪
+                    return;
+                }
             }
         }
         self.undo.push_back(tx);
@@ -385,6 +393,28 @@ mod tests {
         assert!(
             h.pop_undo().is_none(),
             "旧的 20MB 步应被字节裁剪淘汰"
+        );
+    }
+
+    // ---- 对抗性审查 Step 1：undo_bytes merge 同步 bug 最小复现 ----
+
+    #[test]
+    fn undo_bytes_sync_after_merge() {
+        // 连续单字符插入触发 try_merge（连续性合并）
+        let mut h = History::default();
+        h.record(ins(3, "a"));           // push_back, undo_bytes 应 = 1
+        assert_eq!(h.undo_bytes, 1, "第一次 record（不合并）undo_bytes 应为 1");
+        h.record(ins(4, "b"));           // try_merge 成功 → return，undo_bytes 应 = 2（被合并了新字节）
+
+        // 计算栈顶 Transaction 的真实字节数（merged inserted="ab", 字节=2）
+        let top_tx = h.undo.back().unwrap();
+        let actual_top_sz = top_tx.prims[0].inserted.len();
+
+        // undo_bytes 应等于实际累计字节数
+        assert_eq!(
+            h.undo_bytes, actual_top_sz,
+            "merge 成功后 undo_bytes 应同步增加合并的字节：undo_bytes={} vs actual_top_sz={}",
+            h.undo_bytes, actual_top_sz
         );
     }
 }

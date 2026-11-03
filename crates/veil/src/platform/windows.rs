@@ -7,7 +7,7 @@ use std::ffi::{c_void, OsString};
 use std::os::windows::ffi::OsStringExt;
 use std::path::PathBuf;
 
-use veil_egui::FileDialog;
+use veil_ui::FileDialog;
 
 type Hwnd = *mut c_void;
 type Hinstance = *mut c_void;

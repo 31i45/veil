@@ -58,6 +58,7 @@ impl Chrome {
         fitted
     }
 
+    #[allow(clippy::too_many_arguments)] // 内部绘制函数参数天然多
     fn draw_left(
         &mut self,
         frame: &mut Frame,

@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use veil_core::{BlockKind, Edit, Session};
-use veil_egui::{Frame, LayoutEngine};
+use veil_ui::{Frame, LayoutEngine};
 
 // ---- 全局分配计数器：alloc/dealloc 次数与字节数，另记释放字节算存活堆 ----
 

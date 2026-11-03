@@ -167,40 +167,31 @@ pub struct Doc {
     pub resume: bool,
 }
 
-/// 运行编辑器窗口。公式渲染器、图片加载/资产存储与导出器由产品层注入
-/// （latex-rust / png / pulldown-cmark，ADR-002）；主题配置与系统外观同样注入（切片 17）。
-pub fn run(
-    doc: Doc,
-    clipboard: Box<dyn Clipboard>,
-    store: Box<dyn FileStore>,
-    math: Box<dyn MathRenderer>,
-    images: Box<dyn ImageLoader>,
-    assets: Box<dyn AssetStore>,
-    exporter: Box<dyn Exporter>,
-    dialogs: Box<dyn FileDialog>,
-    watcher: Box<dyn FileWatcher>,
-    theme_env: ThemeEnv,
-    persist_env: PersistEnv,
-    print: Box<dyn Print>,
-    confirmer: Box<dyn Confirmer>,
-) -> Result<(), String> {
+/// 外部依赖端口聚合（公共 API）：所有产品层注入的 trait/配置打包成一个 struct，
+/// 避免 run/App::new 参数列表继续膨胀。ThemeEnv / PersistEnv 在此保持分组，
+/// 内部 AppPorts 会拆平它们。
+pub struct Ports {
+    pub clipboard: Box<dyn Clipboard>,
+    pub store: Box<dyn FileStore>,
+    pub math: Box<dyn MathRenderer>,
+    pub images: Box<dyn ImageLoader>,
+    pub assets: Box<dyn AssetStore>,
+    pub exporter: Box<dyn Exporter>,
+    pub dialogs: Box<dyn FileDialog>,
+    pub watcher: Box<dyn FileWatcher>,
+    pub theme_env: ThemeEnv,
+    pub persist_env: PersistEnv,
+    pub print: Box<dyn Print>,
+    pub confirmer: Box<dyn Confirmer>,
+}
+
+/// 运行编辑器窗口。所有外部依赖经 Ports struct 注入；公式渲染器、图片加载/资产
+/// 存储与导出器由产品层实现（latex-rust / png / pulldown-cmark，ADR-002）；
+/// 主题配置与系统外观同样注入（切片 17）。
+pub fn run(doc: Doc, ports: Ports) -> Result<(), String> {
     let event_loop = EventLoop::new().map_err(|e| format!("创建事件循环失败: {e}"))?;
     event_loop.set_control_flow(ControlFlow::Wait);
-    let mut app = App::new(
-        doc,
-        clipboard,
-        store,
-        math,
-        images,
-        assets,
-        exporter,
-        dialogs,
-        watcher,
-        theme_env,
-        persist_env,
-        print,
-        confirmer,
-    );
+    let mut app = App::new(doc, ports);
     event_loop
         .run_app(&mut app)
         .map_err(|e| format!("事件循环错误: {e}"))
@@ -348,14 +339,14 @@ pub(crate) struct App {
     /// 11 个外部注入的端口（Clipboard / FileStore / MathRenderer / ImageLoader /
     /// AssetStore / Exporter / FileDialog / FileWatcher / ConfigStore / SystemTheme /
     /// WindowEffects）聚合为单结构（ADR-009 S5）。
-    pub(crate) ports: Ports,
+    pub(crate) ports: AppPorts,
     pub(crate) persist_state: PersistState,
     pub(crate) ui_state: UIState,
 }
 
 /// 15 个平台端口聚合结构：能力集合，不携带状态语义（ADR-009 决策六）。
 /// 全部为 Box<dyn Trait>，由产品层注入（veil/main.rs 各 impl 对应 trait）。
-pub(crate) struct Ports {
+pub(crate) struct AppPorts {
     pub(crate) clipboard: Box<dyn Clipboard>,
     pub(crate) store: Box<dyn FileStore>,
     pub(crate) math: Box<dyn MathRenderer>,
@@ -375,7 +366,7 @@ pub(crate) struct Ports {
 
 /// 启动文档决议（0b）：resume 模式下按「崩溃恢复 > 会话恢复 > 传入文档」重建。
 /// 非 resume（CLI 显式打开）只加载最近列表（菜单需要），恢复文件保留不动。
-fn startup_doc(ports: &mut Ports, doc: Doc) -> StartupDoc {
+fn startup_doc(ports: &mut AppPorts, doc: Doc) -> StartupDoc {
     let recent = ports
         .session
         .load()
@@ -468,27 +459,13 @@ struct StartupDoc {
 }
 
 impl App {
-    pub(crate) fn new(
-        doc: Doc,
-        clipboard: Box<dyn Clipboard>,
-        store: Box<dyn FileStore>,
-        math: Box<dyn MathRenderer>,
-        images: Box<dyn ImageLoader>,
-        assets: Box<dyn AssetStore>,
-        exporter: Box<dyn Exporter>,
-        dialogs: Box<dyn FileDialog>,
-        watcher: Box<dyn FileWatcher>,
-        theme_env: ThemeEnv,
-        persist_env: PersistEnv,
-        print: Box<dyn Print>,
-        confirmer: Box<dyn Confirmer>,
-    ) -> Self {
+    pub(crate) fn new(doc: Doc, ports: Ports) -> Self {
         let ThemeEnv {
             mut config,
             mut system,
             effects,
-        } = theme_env;
-        let PersistEnv { recovery, session } = persist_env;
+        } = ports.theme_env;
+        let PersistEnv { recovery, session } = ports.persist_env;
         // 系统外观读不到（非 Windows/注册表异常）按浅色处理：不影响其它功能
         let system_dark = system.is_dark().unwrap_or(false);
         let (mode, config_notice) = match config.load() {
@@ -507,22 +484,22 @@ impl App {
             Err(_) => (ThemeMode::System, String::new()),
         };
         let theme = Theme::of(mode, system_dark);
-        let mut ports = Ports {
-            clipboard,
-            store,
-            math,
-            images,
-            assets,
-            exporter,
-            dialogs,
-            watcher,
+        let mut ports = AppPorts {
+            clipboard: ports.clipboard,
+            store: ports.store,
+            math: ports.math,
+            images: ports.images,
+            assets: ports.assets,
+            exporter: ports.exporter,
+            dialogs: ports.dialogs,
+            watcher: ports.watcher,
             config,
             system,
             effects,
             recovery,
             session,
-            print,
-            confirmer,
+            print: ports.print,
+            confirmer: ports.confirmer,
         };
         let start = startup_doc(&mut ports, doc);
         let mut editor = Editor::new(&start.doc.text);

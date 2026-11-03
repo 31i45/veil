@@ -3,7 +3,7 @@
 
 use std::ffi::c_void;
 
-use veil_egui::{NativeWindow, SystemTheme, WindowEffects};
+use veil_ui::{NativeWindow, SystemTheme, WindowEffects};
 
 // 注册表值读取（advapi32）：`RegGetValueW` 一步完成打开/取值/关闭。
 #[link(name = "advapi32")]

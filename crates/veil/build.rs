@@ -8,17 +8,17 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// 图标像素与 ICO 编码的单一真源在 veil-egui/src/icon.rs（窗口图标与文件资源共用）；
+/// 图标像素与 ICO 编码的单一真源在 veil-ui/src/icon.rs（窗口图标与文件资源共用）；
 /// build script 不能依赖 workspace crate，故以 include! 复用同一份代码。
 #[allow(dead_code)] // icon_rgba 仅 GUI 侧使用
 mod icon {
-    include!("../veil-egui/src/icon.rs");
+    include!("../veil-ui/src/icon.rs");
 }
 use icon::icon_bytes;
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
-    println!("cargo:rerun-if-changed=../veil-egui/src/icon.rs");
+    println!("cargo:rerun-if-changed=../veil-ui/src/icon.rs");
     println!("cargo:rerun-if-env-changed=RC_EXE");
 
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows")

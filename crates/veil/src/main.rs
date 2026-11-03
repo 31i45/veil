@@ -8,7 +8,7 @@ mod platform;
 
 use std::path::{Path, PathBuf};
 
-use veil_egui::{decode, Doc, FileStore, ImageData, MathImage};
+use veil_ui::{decode, Doc, FileStore, ImageData, MathImage};
 
 /// 无 CLI 参数时的示例文档，覆盖全部渲染路径：标题/粗体/斜体/代码/链接/行内公式/展示公式/代码块/中文。
 const SAMPLE: &str = "# Veil 切片 8\n\n支持 **粗体**、*斜体*、`行内代码`、[链接](https://example.com) 与行内公式 $x^2 + y^2 = z^2$（光标移出渲染为图、移入显示源码）。\n\n块级公式（同规则，渲染图居中）：\n\n$$\n\\frac{a + b}{\\sqrt{c^2 + 1}} = \\sum_{k=0}^{n} k^2\n$$\n\n```\nfn main() { /* 代码块等宽 */ }\n```\n\n中文混排与 IME 输入：请用中文输入法在此段尾部打字验证候选框跟随。\n\n本页为无路径草稿：可拖入 .md 文件打开；关联文件后可直接拖入 PNG/JPEG 等图片插入正文（Ctrl+S 保存与 Ctrl+E 导出 HTML 仅对关联文件生效）。\n";
@@ -37,20 +37,22 @@ fn main() {
             resume: true,
         },
     };
-    if let Err(e) = veil_egui::run(
+    if let Err(e) = veil_ui::run(
         doc,
-        clipboard(),
-        Box::new(Fs),
-        math_renderer(),
-        image_loader(),
-        asset_store(),
-        exporter(),
-        platform::dialogs(),
-        platform::watcher(),
-        platform::theme_env(),
-        platform::persist_env(),
-        platform::print(),
-        platform::confirmer(),
+        veil_ui::Ports {
+            clipboard: clipboard(),
+            store: Box::new(Fs),
+            math: math_renderer(),
+            images: image_loader(),
+            assets: asset_store(),
+            exporter: exporter(),
+            dialogs: platform::dialogs(),
+            watcher: platform::watcher(),
+            theme_env: platform::theme_env(),
+            persist_env: platform::persist_env(),
+            print: platform::print(),
+            confirmer: platform::confirmer(),
+        },
     ) {
         eprintln!("{e}");
         std::process::exit(1);
@@ -59,7 +61,7 @@ fn main() {
 
 /// HTML 导出器：latex-rust 出 SVG（与编辑器共用字体）；落盘复用 Fs 原子写。
 /// 字体初始化失败时导出器拒绝工作（eprintln 可读错误），不影响编辑器其余功能。
-fn exporter() -> Box<dyn veil_egui::Exporter> {
+fn exporter() -> Box<dyn veil_ui::Exporter> {
     match latex_rust::MathFont::stix_two_math() {
         Ok(font) => Box::new(export::HtmlExporter {
             font,
@@ -74,7 +76,7 @@ fn exporter() -> Box<dyn veil_egui::Exporter> {
 
 /// 字体初始化失败的兜底导出器：恒 Err（同 NoMath 模式）。
 struct NoExport;
-impl veil_egui::Exporter for NoExport {
+impl veil_ui::Exporter for NoExport {
     fn export_html(
         &mut self,
         _s: &veil_core::Session,
@@ -93,7 +95,7 @@ impl veil_egui::Exporter for NoExport {
 struct LatexMath {
     font: latex_rust::MathFont,
 }
-impl veil_egui::MathRenderer for LatexMath {
+impl veil_ui::MathRenderer for LatexMath {
     fn render(
         &mut self,
         tex: &str,
@@ -131,7 +133,7 @@ impl veil_egui::MathRenderer for LatexMath {
     }
 }
 
-fn math_renderer() -> Box<dyn veil_egui::MathRenderer> {
+fn math_renderer() -> Box<dyn veil_ui::MathRenderer> {
     match latex_rust::MathFont::stix_two_math() {
         Ok(font) => Box::new(LatexMath { font }),
         Err(e) => {
@@ -143,7 +145,7 @@ fn math_renderer() -> Box<dyn veil_egui::MathRenderer> {
 
 /// 字体初始化失败的兜底：恒 Err → 全部数学块降级源码显示（ADR-002 降级策略）。
 struct NoMath;
-impl veil_egui::MathRenderer for NoMath {
+impl veil_ui::MathRenderer for NoMath {
     fn render(
         &mut self,
         _tex: &str,
@@ -206,7 +208,7 @@ fn decode_png_rgba(png: &[u8]) -> Result<ImageData, String> {
 /// 文档内图片加载器（切片 13 + 阶段 1）：std 读文件；PNG 走 png 解码，
 /// 其余位图格式经 WIC。失败返回 Err 由视图降级 alt 文本（不每帧重试）。
 struct FsImages;
-impl veil_egui::ImageLoader for FsImages {
+impl veil_ui::ImageLoader for FsImages {
     fn load(&mut self, path: &Path) -> Result<ImageData, String> {
         let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
         // PNG 走既有 png 解码（调色板/灰度/16-bit 经 png 变换展开）；
@@ -219,7 +221,7 @@ impl veil_egui::ImageLoader for FsImages {
     }
 }
 
-fn image_loader() -> Box<dyn veil_egui::ImageLoader> {
+fn image_loader() -> Box<dyn veil_ui::ImageLoader> {
     Box::new(FsImages)
 }
 
@@ -229,7 +231,7 @@ fn image_loader() -> Box<dyn veil_egui::ImageLoader> {
 struct FsAssets {
     next: u32,
 }
-impl veil_egui::AssetStore for FsAssets {
+impl veil_ui::AssetStore for FsAssets {
     fn save_pasted_image(&mut self, doc: &Path, image: &ImageData) -> Result<String, String> {
         let dir_name = asset_dir_name(doc);
         let dir = doc
@@ -250,7 +252,7 @@ impl veil_egui::AssetStore for FsAssets {
     }
 }
 
-fn asset_store() -> Box<dyn veil_egui::AssetStore> {
+fn asset_store() -> Box<dyn veil_ui::AssetStore> {
     Box::new(FsAssets { next: 0 })
 }
 
@@ -350,10 +352,10 @@ impl FileStore for Fs {
     }
 }
 
-/// 系统剪贴板（arboard 属产品层依赖，veil-egui 仅见 Clipboard trait，INSTANCE §6）。
-fn clipboard() -> Box<dyn veil_egui::Clipboard> {
+/// 系统剪贴板（arboard 属产品层依赖，veil-ui 仅见 Clipboard trait，INSTANCE §6）。
+fn clipboard() -> Box<dyn veil_ui::Clipboard> {
     struct Sys(arboard::Clipboard);
-    impl veil_egui::Clipboard for Sys {
+    impl veil_ui::Clipboard for Sys {
         fn get(&mut self) -> Option<String> {
             self.0.get_text().ok()
         }
@@ -383,7 +385,7 @@ fn clipboard() -> Box<dyn veil_egui::Clipboard> {
         }
     }
     struct Noop; // 剪贴板初始化失败（如无显示服务器）：Ctrl+C/X/V 静默无效
-    impl veil_egui::Clipboard for Noop {
+    impl veil_ui::Clipboard for Noop {
         fn get(&mut self) -> Option<String> {
             None
         }
@@ -401,7 +403,7 @@ fn clipboard() -> Box<dyn veil_egui::Clipboard> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use veil_egui::{AssetStore, ImageLoader};
+    use veil_ui::{AssetStore, ImageLoader};
 
     /// 真 latex-rust 渲染链（切片 8）：基线公式 baseline = height(em) × em_px，
     /// 与 crate 内 raster.rs 的图内基线一致。数值为 latex-rust 2.1.1 实测校准，

@@ -65,6 +65,7 @@ impl Frame {
 
     /// src-over 混合位图到 (dx, dy)，按目标尺寸 (dw, dh) 最近邻缩放，越界裁剪。
     /// 图片按版心宽等比缩放后绘制（不缓存缩放副本），src 为 straight alpha RGBA8。
+    #[allow(clippy::too_many_arguments)] // 内部位图操作参数天然多
     pub fn blit_scaled(
         &mut self,
         src: &[u8],

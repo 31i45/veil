@@ -1,8 +1,9 @@
-//! veil-egui：视图适配器（阶段二）。
+//! veil-ui：视图适配器（阶段二）。
 //! 切片 1 栈：winit 直收事件（IME 走 spike 验证路径）+ softbuffer 软件呈现 + cosmic-text 排版。
 //! egui/GL 栈引入前提已由切片 15 推翻：自绘 chrome + 系统对话框，保持零 GUI 框架依赖。
-#![allow(clippy::too_many_arguments)] // 布局/绘制/门面参数天然多，拆 struct 反而遮蔽语义
+//! 公共 API 已由 Ports struct 收敛（run/doc 2 参数），不再需要 too_many_arguments 豁免。
 #![allow(clippy::chunks_exact_to_as_chunks)] // 通道展开用 chunks_exact(4) 更直观
+// 内部绘制/布局函数参数天然多，在各自模块局部标注 #[allow]，不做全局豁免
 //!
 //! 分层：editor/input/style/frame 纯逻辑零 GUI（机制与策略分离，全部 headless 可测）；
 //! layout 依赖 cosmic-text（字体相关断言从宽）；app 为 winit/softbuffer 薄胶合。
@@ -35,7 +36,7 @@ mod app_tests;
 
 pub use app::{
     run, Clipboard, Confirmer, Doc, Exporter, FileDialog, FileEvent, FileStore, FileWatcher,
-    PersistEnv, RecoveryStore, SessionStore, UnsavedChoice,
+    PersistEnv, Ports, RecoveryStore, SessionStore, UnsavedChoice,
 };
 pub use docio::decode;
 pub use image::{AssetStore, ImageData, ImageLoader};

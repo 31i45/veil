@@ -2,14 +2,14 @@
 //!
 //! 监听目标文件的**父目录**（非递归）再按文件名过滤：这样 tmp+rename 式原子保存、
 //! 外部编辑器替换文件都能感知；直接监听文件会在 rename 后失效。
-//! 事件只描述「发生了什么」，是否需要提示/挂起自动保存由 veil-egui 的策略层决定。
+//! 事件只描述「发生了什么」，是否需要提示/挂起自动保存由 veil-ui 的策略层决定。
 
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver};
 
 use notify::event::{ModifyKind, RenameMode};
 use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
-use veil_egui::{FileEvent, FileWatcher};
+use veil_ui::{FileEvent, FileWatcher};
 
 pub struct NotifyWatcher {
     watcher: Option<RecommendedWatcher>,

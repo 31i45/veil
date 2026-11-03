@@ -1,5 +1,5 @@
 [package]
-name = "veil-egui"
+name = "veil-ui"
 edition.workspace = true
 version.workspace = true
 

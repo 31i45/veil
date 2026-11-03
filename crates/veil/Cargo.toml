@@ -5,7 +5,7 @@ version.workspace = true
 
 [dependencies]
 veil-core = { path = "../veil-core" }
-veil-egui = { path = "../veil-egui" }
+veil-ui = { path = "../veil-ui" }
 arboard = "3"
 # 公式渲染（ADR-002）：纯 Rust 排版+光栅化，字体内嵌；3.x 需 Rust 1.99（已满足）
 latex-rust = { version = "3.0", features = ["png"] }

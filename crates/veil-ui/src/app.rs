@@ -933,11 +933,6 @@ impl ApplicationHandler for App {
                 self.on_wheel(d);
             }
             WindowEvent::RedrawRequested => {
-                // 窗口不可见时跳过所有 render + paint。softbuffer 在最小化窗口上行为不可控，
-                // 且 scroll_thumb 等在 vp.h=1.0 时 panic；visible 守卫是最根本的防线。
-                if !self.window_state.visible {
-                    return;
-                }
                 // 先合并执行待处理尺寸变化，再绘制（一帧一次）
                 self.apply_pending_resize();
                 self.paint();
@@ -970,13 +965,13 @@ impl ApplicationHandler for App {
     /// 「恢复/自动保存静默期终点」「监听轮询」「系统外观轮询」的较早者
     /// （干净草稿且显式主题下完全休眠）。
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        let now = Instant::now();
-        self.tick(now);
-        // 窗口不可见时跳过所有定时唤醒——恢复路径已由 Resized/Focused/Occluded 主动 request_redraw
+        // 窗口不可见时跳过所有周期性工作——恢复路径由 Resized/Focused/Occluded 主动 request_redraw
         if !self.window_state.visible {
             event_loop.set_control_flow(ControlFlow::Wait);
             return;
         }
+        let now = Instant::now();
+        self.tick(now);
         // 恢复写盘（0b）：脏文档（含无路径草稿/冲突挂起）都按静默期调度——
         // 它是比自动保存更宽的最后防线
         let dirty_editing = self.editor.is_dirty() && self.editor.preedit().is_none();

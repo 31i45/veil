@@ -1990,6 +1990,46 @@ fn ctrl_arrow_moves_and_extends_by_word() {
     assert_eq!(a.editor.caret(), 7, "坍缩到选区起点");
 }
 
+// ===== 鼠标点击断组（撤销分组与键盘路径对齐） =====
+
+/// 单击正文落光标后输入须另起撤销步：首次撤销只回退点击后的输入，
+/// 再撤销才回退点击前的连续输入（与键盘移动断组语义一致）。
+#[test]
+fn mouse_click_breaks_undo_group() {
+    let store = MemStore::default();
+    let mut a = app("", None, false, &store);
+    a.route_key(Key::Text("a".into()));
+    a.route_key(Key::Text("b".into()));
+    let full = |a: &App| {
+        let n = a.editor.session().text_len();
+        a.editor.session().text_slice(Range::new(0, n)).unwrap()
+    };
+    assert_eq!(full(&a), "ab");
+
+    // 单击文本起点（走真实 on_left_click 路径）把光标落到偏移 0
+    a.ensure_layouts_all();
+    let vp = a.viewport();
+    let (id, _, _) = a.editor.session().blocks()[0].clone();
+    let l = &a.cache.layouts[&id];
+    let (cx, cy, ch) = a.engine.caret_xy(l, 0);
+    let top = a.index.blocks[0].top;
+    let (mx, my) = (
+        MARGIN * a.input_state.scale + cx + 1.0,
+        vp.y + top + cy + ch / 2.0,
+    );
+    click_at(&mut a, mx, my);
+    assert_eq!(a.editor.caret(), 0, "单击须落光标到文首");
+
+    a.route_key(Key::Text("c".into()));
+    assert_eq!(full(&a), "cab");
+
+    assert!(a.editor.apply(Intent::Undo).is_some());
+    assert_eq!(full(&a), "ab", "首次撤销只回退点击后输入的 c");
+    assert!(a.editor.apply(Intent::Undo).is_some());
+    assert_eq!(full(&a), "", "再次撤销才回退点击前的 ab");
+}
+
+
 fn menu_title_center(menu: usize) -> (f32, f32) {
     let (_, x, w) = chrome::menu_bar_rects(1.0)[menu];
     (x + w / 2.0, chrome::MENU_H / 2.0)

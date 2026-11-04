@@ -30,7 +30,7 @@ Workspace 由三个 crate 组成，依赖方向单向（`veil` → `veil-ui` →
 
 ## 非目标（v1 明确不做）
 
-- wgpu/GPU 渲染视图
+- wgpu/GPU 渲染视图（裁决见 ADR-011：v1 不做，仅在触发条件满足时立项）
 - 协作编辑 / CRDT
 - 插件系统
 - 移动端
@@ -48,20 +48,20 @@ cargo test --workspace      # 运行全部单元/集成测试
 cargo run -p veil -- <file.md>   # 运行并打开指定 Markdown 文件
 ```
 
-当前 852 项测试全绿（`cargo test --workspace` 852 passed / 0 failed / 10 ignored，2026-11-03 实测），`cargo clippy --workspace --all-targets -- -D warnings` 零警告。
+当前 867 项测试全绿（`cargo test --workspace` 867 passed / 0 failed / 11 ignored，2026-11-03 实测），`cargo clippy --workspace --all-targets -- -D warnings` 零警告。
 
 ## 数字红线（目标值与实测）
 
-下表为 v1 验收红线与 2026-10-30 G2 门禁复测值（发布构建、探针串行）。方法与明细见 `docs/review/G2-gate.md`。
+下表为 v1 验收红线与 2026-10-30 G2 门禁复测值（发布构建、探针串行）；击键延迟行已更新为 2026-11-03 最终复测。方法与明细见 `docs/review/G2-gate.md`。
 
 | 指标 | 目标值 | 实测 |
 |---|---|---|
 | 冷启动（发布构建，`main`→首帧完成；**验收口径**） | ≤ 300 ms | 145–190 ms ✅（2026-10-30 分段实测） |
 | 冷启动（墙钟，进程创建→首帧；环境观察项，不参与验收） | ≤ 300 ms | 450–529 ms（其中 440–470 ms 在 `main` 之前，属本机进程创建段开销） |
-| 10 万字文档击键→提交上屏延迟 p95 | ≤ 16 ms | 6.25 ms（5,005 块）；10,500 块 12.05 ms |
+| 10 万字文档击键→提交上屏延迟 p95 | ≤ 16 ms | 3.37 ms（5.0k 块）/ 5.20 ms（10.5k 块）/ 9.25 ms（20.0k 块）✅（2026-11-03 release headless 分项探针 p95 之和，详见 `docs/review/keystroke-attribution.md`） |
 | 10 万字文档常驻内存（私有工作集） | ≤ 150 MB | 21.55 MB |
-| 安装产物体积（`veil.exe` 单文件） | ≤ 15 MiB | 5,815,808 B ≈ 5.55 MiB |
-| `veil-core` 单元+属性测试数 | ≥ 80 | 185 |
+| 安装产物体积（`veil.exe` 单文件） | ≤ 15 MiB | 5,825,536 B ≈ 5.56 MiB |
+| `veil-core` 单元+属性测试数 | ≥ 80 | 207 |
 | e2e 断言数 | ≥ 20 | 41（3 个 e2e_ 场景测试：写作闭环打开→保存→重开、表格+图片粘贴落盘、查找替换→崩溃恢复→自清）✅ |
 | Markdown 往返一致率（无编辑时输出 == 输入字节） | 100% | 100% |
 | `veil-core` 的 GUI/异步运行时依赖数 | 0 | 0 |
@@ -94,6 +94,7 @@ cargo run -p veil -- <file.md>   # 运行并打开指定 Markdown 文件
   - ADR-006 外部文件监听
   - ADR-007 配置与主题
   - ADR-008 依赖升级策略
+  - ADR-011 wgpu 延迟引入（v1 不引入，触发式立项）
 
 ## 许可
 

@@ -19,6 +19,7 @@ pub(crate) use model::Block;
 pub use model::{BlockId, BlockKind, CellAlign, InlineKind, InlineNode, Table, TableCell};
 
 use crate::buffer::Buffer;
+use crate::range::Range;
 use block::{
     fence_close, fence_open, heading_content_span, is_thematic_break, line_text, list_mark,
     normalize_label, parse_delim_row, parse_link_ref_def, parse_table_cells, quote_def_lines,
@@ -47,7 +48,7 @@ impl Syntax {
         let raw = scan_blocks(buf, 0, buf.line_count());
         syntax.blocks = raw
             .into_iter()
-            .map(|(kind, s, e)| syntax.fresh_block(kind, s, e))
+            .map(|(kind, s, e)| syntax.fresh_block(buf, kind, s, e))
             .collect();
         syntax.build_refs(buf);
         syntax.rebuild_id_index();
@@ -164,7 +165,13 @@ impl Syntax {
         })
     }
 
-    fn fresh_block(&mut self, kind: BlockKind, start_line: usize, end_line: usize) -> Block {
+    fn fresh_block(
+        &mut self,
+        buf: &Buffer,
+        kind: BlockKind,
+        start_line: usize,
+        end_line: usize,
+    ) -> Block {
         let id = BlockId(self.next_id);
         self.next_id += 1;
         Block {
@@ -172,6 +179,7 @@ impl Syntax {
             kind,
             start_line,
             end_line,
+            range: block_byte_range(buf, start_line, end_line),
         }
     }
 
@@ -192,6 +200,10 @@ impl Syntax {
         if b.end_line == b.start_line + 1 {
             // 单行 `$$x$$`：trim 去行尾空白/换行后剥两侧标记
             let t = text.trim();
+            if t.len() <= 4 {
+                // 文末裸 `$$`（无尾随换行）被识别为单行 Math：无内容可剥，返回空公式
+                return Some(String::new());
+            }
             return Some(t[2..t.len() - 2].to_string());
         }
         let mut lines = text.lines();
@@ -386,9 +398,11 @@ impl Syntax {
                     kind,
                     start_line: s,
                     end_line: e,
+                    // 重扫区内的块按新行号一次性换算字节区间（代价只与脏块数相关）。
+                    range: block_byte_range(buf, s, e),
                 },
                 None => {
-                    let b = self.fresh_block(kind, s, e);
+                    let b = self.fresh_block(buf, kind, s, e);
                     dirty.push(b.id);
                     b
                 }
@@ -396,6 +410,12 @@ impl Syntax {
             new_blocks.push(block);
         }
         if let Some(k) = suffix_start {
+            // 编辑点之后整片平移：用首个保留块对齐出字节 delta（新首字节 - 旧首字节），
+            // 其后所有块只做一次算术加法，不逐块重新做行号换算。
+            let first = &self.blocks[k];
+            let shifted_start_line = (first.start_line as isize + delta) as usize;
+            let byte_delta =
+                buf.offset_of_line(shifted_start_line) as isize - first.range.start as isize;
             for b in &self.blocks[k..] {
                 // 已对齐块 shifted >= 0；其后块起始行更大，平移后必然非负
                 new_blocks.push(Block {
@@ -403,14 +423,55 @@ impl Syntax {
                     kind: b.kind.clone(),
                     start_line: (b.start_line as isize + delta) as usize,
                     end_line: (b.end_line as isize + delta) as usize,
+                    range: Range::new(
+                        (b.range.start as isize + byte_delta) as usize,
+                        (b.range.end as isize + byte_delta) as usize,
+                    ),
                 });
             }
         }
         self.blocks = new_blocks;
         self.build_refs(buf);
         self.rebuild_id_index();
+        debug_assert!(self
+            .blocks
+            .iter()
+            .all(|b| b.start_line <= b.end_line && b.range.end <= buf.len()));
+        #[cfg(test)]
+        self.debug_assert_ranges(buf);
         dirty
     }
+
+    /// 单元测试专用的 O(块数) 不变量校验：字节区间必须等于行号的换算结果。
+    /// 仅编译进 crate 单元测试（集成测试链接不带 `cfg(test)` 的库，生产/普通 debug 无成本）。
+    #[cfg(test)]
+    fn debug_assert_ranges(&self, buf: &Buffer) {
+        let total = buf.line_count();
+        for b in &self.blocks {
+            assert_eq!(
+                b.range.start,
+                buf.offset_of_line(b.start_line),
+                "Block.start 不匹配 start_line 首字节"
+            );
+            let end = if b.end_line >= total {
+                buf.len()
+            } else {
+                buf.offset_of_line(b.end_line)
+            };
+            assert_eq!(b.range.end, end, "Block.end 不匹配 end_line 首字节");
+        }
+    }
+}
+
+/// 行区间 → 字节区间：`start` 为 `start_line` 首字节，`end` 为 `end_line` 行首；
+/// `end_line` 越过末行时取文档长度。仅在新建/重扫块时调用。
+fn block_byte_range(buf: &Buffer, start_line: usize, end_line: usize) -> Range {
+    let end = if end_line >= buf.line_count() {
+        buf.len()
+    } else {
+        buf.offset_of_line(end_line)
+    };
+    Range::new(buf.offset_of_line(start_line), end)
 }
 
 /// 引用块 inline：逐行解析 `>` 与至多一个随行空白之后的内容（base 为行绝对起点）。
@@ -529,6 +590,33 @@ mod tests {
                 "doc={doc:?}"
             );
         }
+    }
+
+    #[test]
+    fn math_source_single_line_edge_cases() {
+        // 文末裸 `$$`（无尾随换行）：单行分支不得下溢 panic
+        let buf = Buffer::new("$$");
+        let s = Syntax::new(&buf);
+        assert_eq!(s.math_source(&buf, s.blocks()[0].id).as_deref(), Some(""));
+        // 有尾随换行：`$$` 走多行分支（空标记对），同为空公式
+        let buf = Buffer::new("$$\n");
+        let s = Syntax::new(&buf);
+        assert_eq!(s.math_source(&buf, s.blocks()[0].id).as_deref(), Some(""));
+        // `$$$$`：标记长 = 4，按段落（非 Math），故 None
+        let buf = Buffer::new("$$$$");
+        let s = Syntax::new(&buf);
+        assert_eq!(s.math_source(&buf, s.blocks()[0].id), None);
+        // 正常单行公式剥两侧标记
+        let buf = Buffer::new("$$x$$");
+        let s = Syntax::new(&buf);
+        assert_eq!(s.math_source(&buf, s.blocks()[0].id).as_deref(), Some("x"));
+        // 标记内空白：trim 只剥行首尾，内容空白原样保留
+        let buf = Buffer::new("$$  $$");
+        let s = Syntax::new(&buf);
+        assert_eq!(
+            s.math_source(&buf, s.blocks()[0].id).as_deref(),
+            Some("  ")
+        );
     }
 
     #[test]

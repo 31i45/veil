@@ -86,9 +86,14 @@ pub struct BlockId(pub u64);
 pub(crate) struct Block {
     pub id: BlockId,
     pub kind: BlockKind,
-    /// 行区间 `[start_line, end_line)`。
+    /// 行区间 `[start_line, end_line)`。仅解析内部（扫描/对齐/派生数据）使用；
+    /// 对外块快照一律走 `range`。
     pub start_line: usize,
     pub end_line: usize,
+    /// 字节区间 `[start, end)`：`start` 为 `start_line` 首字节，`end` 为
+    /// `end_line` 行首（`end_line` 越过末行时为文档长度）。由 reparse 增量维护，
+    /// `Session::blocks()` 直接拷贝，不做任何 rope 行号换算。
+    pub range: Range,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

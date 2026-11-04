@@ -107,6 +107,12 @@ impl Editor {
         &mut self.session
     }
 
+    /// 断开撤销分组（最小门面）：鼠标落光标/划选前由交互层调用，
+    /// 与键盘移动/扩选路径的断组对齐（VS Code 语义）。
+    pub(crate) fn break_undo_group(&mut self) {
+        self.session.break_undo_group();
+    }
+
     pub fn caret(&self) -> usize {
         // mark 在 Editor 生命周期内恒存在（仅 remove+create 瞬时不重叠）
         self.session
@@ -1888,6 +1894,33 @@ mod tests {
         e.apply(Intent::ToggleWrap("**")).unwrap();
         assert_eq!(e.session().serialize(), "ab", "光标在标记对中再按一次删除标记对");
         assert_eq!(e.caret(), 1);
+    }
+
+    /// I3 验证：表格单元格即普通源码字节区间（cell 特判仅影响渲染与 Tab 导航），
+    /// ToggleWrap 在 cell 内必须在源码层面生效且为单撤销步；「疑似无效」是渲染层
+    /// 不解析行内样式造成的视觉错觉，而非编辑路径失败。
+    #[test]
+    fn toggle_wrap_inside_table_cell_edits_source() {
+        let src = "| a | b |\n|---|---|\n| c | d |";
+        let c = src.find("| c |").unwrap() + 2; // 数据行 cell 文本 'c' 的字节起点
+
+        // 选中 cell 文本：包裹为 *c*，undo 一次还原
+        let mut e = sel_ed(src, c, c + 1);
+        assert!(
+            e.apply(Intent::ToggleWrap("*")).is_some(),
+            "cell 内 ToggleWrap 须在源码层面生效"
+        );
+        assert_eq!(e.session().serialize(), "| a | b |\n|---|---|\n| *c* | d |");
+        e.apply(Intent::Undo).unwrap();
+        assert_eq!(e.session().serialize(), src, "cell 内包裹是单撤销步");
+
+        // 空选区 caret 落在 cell 内（'c' 之后）：插入标记对、光标居中
+        let mut e = ed(src, c + 1);
+        assert!(e.apply(Intent::ToggleWrap("*")).is_some());
+        assert_eq!(e.session().serialize(), "| a | b |\n|---|---|\n| c** | d |");
+        assert_eq!(e.caret(), c + 2, "光标居中于标记对");
+        e.apply(Intent::Undo).unwrap();
+        assert_eq!(e.session().serialize(), src);
     }
 
     #[test]

@@ -963,6 +963,8 @@ impl App {
             self.window_state.dragging = false; // 方框切换：不进入拖选
             return false;
         }
+        // 与键盘移动/扩选断组对齐：鼠标单击/双击/三击落正文均开启新撤销步
+        self.editor.break_undo_group();
         match self.click_count() {
             2 => self.select_word_at_mouse(),
             3 => self.select_line_at_mouse(),

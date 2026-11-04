@@ -77,6 +77,11 @@ impl Session {
         self.revert(false)
     }
 
+    /// 显式断开撤销分组：光标移动/选区变化后，下一次编辑另起一步（VS Code 语义）。
+    pub fn break_undo_group(&mut self) {
+        self.history.break_group();
+    }
+
     pub fn create_mark(&mut self, offset: usize, bias: Bias) -> Result<MarkId, EditError> {
         if offset > self.buf.len() {
             return Err(EditError::OutOfRange);
@@ -146,21 +151,12 @@ impl Session {
         self.buf.next_grapheme(offset)
     }
 
-    /// 块结构快照：(id, 种类, 字节区间)。
+    /// 块结构快照：(id, 种类, 字节区间)。区间由语法层增量维护，此处只做结构拷贝。
     pub fn blocks(&self) -> Vec<(BlockId, BlockKind, Range)> {
-        let total = self.buf.line_count();
         self.syntax
             .blocks()
             .iter()
-            .map(|b: &Block| {
-                let start = self.buf.offset_of_line(b.start_line);
-                let end = if b.end_line >= total {
-                    self.buf.len()
-                } else {
-                    self.buf.offset_of_line(b.end_line)
-                };
-                (b.id, b.kind.clone(), Range::new(start, end))
-            })
+            .map(|b: &Block| (b.id, b.kind.clone(), b.range))
             .collect()
     }
 
@@ -205,43 +201,42 @@ impl Session {
             .syntax
             .reparse(&self.buf, old_start_line, old_end_line, new_end_line);
         self.history.record(Transaction {
-            prims: vec![PrimEdit {
+            prim: PrimEdit {
                 start,
                 deleted,
                 inserted: text.to_owned(),
-            }],
+            },
         });
         dirty
     }
 
-    /// 撤销/重做共享路径：逆序应用事务内各原语的逆操作，
-    /// 逆操作序列本身构成反向事务压入另一栈（互换 deleted/inserted 即自逆）。
+    /// 撤销/重做共享路径：应用事务的逆操作，
+    /// 逆操作本身构成反向事务压入另一栈（互换 deleted/inserted 即自逆）。
     fn revert(&mut self, undoing: bool) -> Option<Events> {
         let tx = if undoing {
             self.history.pop_undo()
         } else {
             self.history.pop_redo()
         }?;
-        let mut inverse = Transaction::default();
-        let mut dirty = Vec::new();
-        for prim in tx.prims.iter().rev() {
-            let end = prim.start + prim.inserted.len();
-            let old_start_line = self.buf.line_of_offset(prim.start);
-            let old_end_line = self.buf.line_of_offset(end);
-            let deleted_now = self.buf.edit(prim.start, end, &prim.deleted);
-            let new_end_line = self.buf.line_of_offset(prim.start + prim.deleted.len());
-            dirty.extend(self.syntax.reparse(
-                &self.buf,
-                old_start_line,
-                old_end_line,
-                new_end_line,
-            ));
-            inverse.prims.push(PrimEdit {
+        let prim = tx.prim;
+        let end = prim.start + prim.inserted.len();
+        let old_start_line = self.buf.line_of_offset(prim.start);
+        let old_end_line = self.buf.line_of_offset(end);
+        let deleted_now = self.buf.edit(prim.start, end, &prim.deleted);
+        let new_end_line = self.buf.line_of_offset(prim.start + prim.deleted.len());
+        let dirty = self.syntax.reparse(
+            &self.buf,
+            old_start_line,
+            old_end_line,
+            new_end_line,
+        );
+        let inverse = Transaction {
+            prim: PrimEdit {
                 start: prim.start,
                 deleted: deleted_now,
-                inserted: prim.deleted.clone(),
-            });
-        }
+                inserted: prim.deleted,
+            },
+        };
         if undoing {
             self.history.push_redo(inverse);
         } else {
@@ -250,5 +245,233 @@ impl Session {
         Some(Events {
             dirty_blocks: dirty,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn insert(at: usize, text: &str) -> Edit {
+        Edit::Insert {
+            at,
+            text: text.into(),
+        }
+    }
+
+    #[test]
+    fn break_undo_group_splits_typing() {
+        let mut s = Session::open("");
+        s.apply(insert(0, "a")).unwrap();
+        s.apply(insert(1, "b")).unwrap();
+        s.break_undo_group();
+        s.apply(insert(2, "c")).unwrap();
+        assert_eq!(s.serialize(), "abc");
+        s.undo().unwrap();
+        assert_eq!(s.serialize(), "ab", "断组后仅回退 c");
+        s.undo().unwrap();
+        assert_eq!(s.serialize(), "");
+        assert!(s.undo().is_none());
+    }
+
+    #[test]
+    fn typing_without_break_stays_single_step() {
+        let mut s = Session::open("");
+        for (i, ch) in "abc".chars().enumerate() {
+            s.apply(insert(i, &ch.to_string())).unwrap();
+        }
+        s.undo().unwrap();
+        assert_eq!(s.serialize(), "", "未断组时连续输入仍合并为一步");
+        assert!(s.undo().is_none());
+    }
+
+    // ===== 块字节区间：基本自洽 / 编辑序列 / 开头平移 =====
+
+    /// 含中文多字节、列表、引用、表格、公式、围栏代码的多块文档。
+    const RICH: &str = "# 标题\n\n中文 **粗体** 段落\n\n- 项目一\n  - 嵌套\n\n> 引用 *斜体*\n\n\
+                        | a | b |\n| --- | --- |\n| 中 | 文 |\n\n$$\nx + y\n$$\n\n\
+                        ```rust\nfn f() {}\n```\n\n末尾\n";
+
+    /// 全量校验：公开快照的 Range 与内部行号换算一致、边界是字符边界、
+    /// `text_slice` 可用、块间不重叠且除块间空行外覆盖全文。
+    fn assert_ranges_consistent(s: &Session) {
+        let text = s.serialize();
+        let total = s.buf.line_count();
+        let raw = s.syntax.blocks();
+        let public = s.blocks();
+        assert_eq!(raw.len(), public.len(), "公开块数与内部块数不一致");
+        let mut prev_end = 0usize;
+        for (b, (_, _, r)) in raw.iter().zip(public.iter()) {
+            assert_eq!(*r, b.range, "公开 Range 未直接取自 Block.range");
+            assert_eq!(
+                b.range.start,
+                s.buf.offset_of_line(b.start_line),
+                "Block.start 不是 start_line 首字节"
+            );
+            let want_end = if b.end_line >= total {
+                text.len()
+            } else {
+                s.buf.offset_of_line(b.end_line)
+            };
+            assert_eq!(b.range.end, want_end, "Block.end 不是 end_line 首字节");
+            assert!(b.range.start <= b.range.end && b.range.end <= text.len());
+            assert!(
+                text.is_char_boundary(b.range.start) && text.is_char_boundary(b.range.end),
+                "块边界不在字符边界上"
+            );
+            assert!(
+                s.text_slice(b.range).is_some(),
+                "text_slice 拒绝块区间 {:?}",
+                b.range
+            );
+            assert!(b.range.start >= prev_end, "块区间重叠：{b:?}");
+            assert!(
+                text[prev_end..b.range.start]
+                    .chars()
+                    .all(|c| c.is_whitespace()),
+                "块间空隙含非空白内容"
+            );
+            prev_end = b.range.end;
+        }
+        assert!(
+            text[prev_end..].chars().all(|c| c.is_whitespace()),
+            "文末空隙含非空白内容"
+        );
+    }
+
+    fn replace_first(s: &mut Session, needle: &str, repl: &str) {
+        let pos = s
+            .serialize()
+            .find(needle)
+            .unwrap_or_else(|| panic!("语料缺少 {needle:?}"));
+        s.apply(Edit::Replace {
+            range: Range::new(pos, pos + needle.len()),
+            text: repl.to_owned(),
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn blocks_ranges_self_consistent_across_multi_block_doc() {
+        let s = Session::open(RICH);
+        assert!(s.blocks().len() >= 6, "语料应产生多块");
+        assert_ranges_consistent(&s);
+    }
+
+    #[test]
+    fn blocks_ranges_stay_consistent_through_edit_sequence() {
+        for _round in 0..3 {
+            let mut s = Session::open(RICH);
+            assert_ranges_consistent(&s);
+
+            // 1 多字节插入
+            let pos = s.serialize().find("中文").unwrap();
+            s.apply(insert(pos, "字")).unwrap();
+            assert_ranges_consistent(&s);
+
+            // 2 多字节删除
+            let pos = s.serialize().find("字中文").unwrap();
+            s.apply(Edit::Delete {
+                range: Range::new(pos, pos + 3),
+            })
+            .unwrap();
+            assert_ranges_consistent(&s);
+
+            // 3 同长替换
+            replace_first(&mut s, "粗体", "斜体");
+            assert_ranges_consistent(&s);
+
+            // 4 段内插入换行
+            let pos = s.serialize().find("段落").unwrap() + "段落".len();
+            s.apply(insert(pos, "\n")).unwrap();
+            assert_ranges_consistent(&s);
+
+            // 5 删除换行（段落合回）
+            s.apply(Edit::Delete {
+                range: Range::new(pos, pos + 1),
+            })
+            .unwrap();
+            assert_ranges_consistent(&s);
+
+            // 6 段落 → 列表
+            let pos = s.serialize().find("中文").unwrap();
+            s.apply(insert(pos, "- ")).unwrap();
+            assert_ranges_consistent(&s);
+
+            // 7 列表 → 段落
+            let pos = s.serialize().find("- 中文").unwrap();
+            s.apply(Edit::Delete {
+                range: Range::new(pos, pos + 2),
+            })
+            .unwrap();
+            assert_ranges_consistent(&s);
+
+            // 8 列表缩进变化
+            replace_first(&mut s, "  - 嵌套", "- 嵌套");
+            assert_ranges_consistent(&s);
+
+            // 9 删列表与引用间空行（触发列表区域回走重扫）
+            replace_first(&mut s, "- 嵌套\n\n>", "- 嵌套\n>");
+            assert_ranges_consistent(&s);
+
+            // 10 引用内容编辑
+            replace_first(&mut s, "引用", "引用x");
+            assert_ranges_consistent(&s);
+
+            // 11 表格单元格
+            replace_first(&mut s, "| 中 |", "| 文 |");
+            assert_ranges_consistent(&s);
+
+            // 12 公式内容
+            replace_first(&mut s, "x + y", "x + y + z");
+            assert_ranges_consistent(&s);
+
+            // 13 围栏代码
+            replace_first(&mut s, "fn f() {}", "fn g() {}");
+            assert_ranges_consistent(&s);
+
+            // 14 整块删除
+            replace_first(&mut s, "> 引用x *斜体*\n\n", "");
+            assert_ranges_consistent(&s);
+        }
+    }
+
+    #[test]
+    fn blocks_ranges_shift_uniformly_on_prefix_insert() {
+        let mut s = Session::open(RICH);
+        let before: Vec<(usize, usize, String)> = s
+            .blocks()
+            .into_iter()
+            .map(|(_, _, r)| (r.start, r.end, s.text_slice(r).unwrap()))
+            .collect();
+
+        // 文档开头插 1 字节：插入点所在的第 0 块起点不变、终点 +1；
+        // 其后所有块的 start/end 必须整体 +1（它们完全在插入点之后）。
+        s.apply(insert(0, "X")).unwrap();
+        let after = s.blocks();
+        assert_eq!(after.len(), before.len(), "开头插 1 字节不应改变块数");
+        assert_eq!(
+            (after[0].2.start, after[0].2.end),
+            (before[0].0, before[0].1 + 1),
+            "含插入点的首块终点未按 delta=+1 平移"
+        );
+        assert_eq!(
+            s.text_slice(after[0].2).as_deref(),
+            Some(format!("X{}", before[0].2).as_str()),
+            "首块内容应等于插入物后接原文"
+        );
+        for (i, (_, _, r)) in after.iter().enumerate().skip(1) {
+            assert_eq!(
+                (r.start, r.end),
+                (before[i].0 + 1, before[i].1 + 1),
+                "第 {i} 块未按 delta=+1 整体平移"
+            );
+            assert_eq!(
+                s.text_slice(*r).as_deref(),
+                Some(before[i].2.as_str()),
+                "第 {i} 块平移后内容不一致"
+            );
+        }
+        assert_ranges_consistent(&s);
     }
 }

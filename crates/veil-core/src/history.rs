@@ -3,8 +3,8 @@
 //! 分组语义（VS Code 式纯连续性合并，3e 修 U1——去掉 500ms 时间窗）：
 //! - 连续单字符插入（位置紧邻向后延展）合并为一步，停顿再久也不断组；
 //! - 连续单字符删除同理：Backspace 向左延展、Delete 在原地向右延展；
-//! - 换行、多字符插入/删除（粘贴、选区替换）、多原语事务一律单独成步并断开分组；
-//! - 撤销/重做后分组断开，新编辑另起一步；
+//! - 换行、多字符插入/删除（粘贴、选区替换）一律单独成步并断开分组；
+//! - 撤销/重做、显式断组（光标移动/选区变化）后分组断开，新编辑另起一步；
 //! - 撤销栈上限 1000 步，超出丢弃最旧（Redo 栈随之只保留可达项）。
 
 use std::collections::VecDeque;
@@ -17,10 +17,11 @@ pub(crate) struct PrimEdit {
     pub inserted: String,
 }
 
-/// 一次 `Session::apply` 原语操作对应一个事务，原语按应用顺序排列。
-#[derive(Clone, Default, PartialEq, Eq, Debug)]
+/// 一次 `Session::apply` 原语操作对应一个事务。
+/// v1 全走单个 Replace，多原语事务无消费者。
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub(crate) struct Transaction {
-    pub prims: Vec<PrimEdit>,
+    pub prim: PrimEdit,
 }
 
 /// 可合并的编辑类别：只有「单字符、无换行、单原语」的编辑参与分组。
@@ -48,17 +49,16 @@ pub(crate) struct History {
 
 impl History {
     fn tx_byte_size(tx: &Transaction) -> usize {
-        tx.prims
-            .iter()
-            .map(|p| p.deleted.len() + p.inserted.len())
-            .sum()
+        tx.prim.deleted.len() + tx.prim.inserted.len()
+    }
+
+    /// 显式断开分组：下一次 `record` 不与栈顶事务合并（光标移动/选区变化时调用）。
+    pub(crate) fn break_group(&mut self) {
+        self.last = None;
     }
 
     /// 新编辑使 redo 栈失效（编辑器标准语义），并按分组规则合并/入栈。
     pub fn record(&mut self, tx: Transaction) {
-        if tx.prims.is_empty() {
-            return;
-        }
         self.redo.clear();
         let group = classify(&tx);
         if let (Some(group), Some(last_group)) = (group, self.last) {
@@ -96,11 +96,11 @@ impl History {
 
     /// 把新事务并入栈顶事务。返回 false 表示位置不连续，需单独成步。
     fn try_merge(&mut self, tx: &Transaction, group: Group) -> bool {
-        let np = &tx.prims[0];
+        let np = &tx.prim;
         let Some(last) = self.undo.back_mut() else {
             return false;
         };
-        let lp = &mut last.prims[0];
+        let lp = &mut last.prim;
         match group {
             Group::Insert if np.start == lp.start + lp.inserted.len() => {
                 lp.inserted.push_str(&np.inserted);
@@ -162,12 +162,9 @@ impl History {
     }
 }
 
-/// 单字符、无换行、单原语 → 可分组；其余一律单独成步。
+/// 单字符、无换行 → 可分组；其余一律单独成步。
 fn classify(tx: &Transaction) -> Option<Group> {
-    if tx.prims.len() != 1 {
-        return None;
-    }
-    let p = &tx.prims[0];
+    let p = &tx.prim;
     let one = |s: &str| s.chars().count() == 1 && !s.contains('\n');
     if p.deleted.is_empty() && one(&p.inserted) {
         Some(Group::Insert)
@@ -184,28 +181,26 @@ mod tests {
 
     fn ins(start: usize, text: &str) -> Transaction {
         Transaction {
-            prims: vec![PrimEdit {
+            prim: PrimEdit {
                 start,
                 deleted: String::new(),
                 inserted: text.into(),
-            }],
+            },
         }
     }
 
     fn del(start: usize, text: &str) -> Transaction {
         Transaction {
-            prims: vec![PrimEdit {
+            prim: PrimEdit {
                 start,
                 deleted: text.into(),
                 inserted: String::new(),
-            }],
+            },
         }
     }
 
     fn only(h: &mut History) -> PrimEdit {
-        let tx = h.pop_undo().expect("应有一步");
-        assert_eq!(tx.prims.len(), 1);
-        tx.prims.into_iter().next().unwrap()
+        h.pop_undo().expect("应有一步").prim
     }
 
     #[test]
@@ -315,11 +310,11 @@ mod tests {
         let mut h = History::default();
         for _ in 0..200 {
             h.record(Transaction {
-                prims: vec![PrimEdit {
+                prim: PrimEdit {
                     start: 0,
                     deleted: "x".repeat(1024 * 1024), // 1MB
                     inserted: String::new(),
-                }],
+                },
             });
         }
         let mut total: usize = 0;
@@ -360,15 +355,15 @@ mod tests {
         // 单个 20MB Transaction → 保留在栈里（单步超限不裁，len=1 不进 while）
         let mut h = History::default();
         h.record(Transaction {
-            prims: vec![PrimEdit {
+            prim: PrimEdit {
                 start: 0,
                 deleted: "x".repeat(20 * 1024 * 1024), // 20MB
                 inserted: String::new(),
-            }],
+            },
         });
         let tx = h.pop_undo().expect("单步应保留");
         assert_eq!(
-            tx.prims[0].deleted.len(),
+            tx.prim.deleted.len(),
             20 * 1024 * 1024,
             "20MB 单步不应被字节裁剪"
         );
@@ -379,17 +374,17 @@ mod tests {
         // 20MB 步 + 小步 → 总字节超预算 → 最旧的 20MB 步被裁掉，只剩小步
         let mut h = History::default();
         h.record(Transaction {
-            prims: vec![PrimEdit {
+            prim: PrimEdit {
                 start: 0,
                 deleted: "x".repeat(20 * 1024 * 1024),
                 inserted: String::new(),
-            }],
+            },
         });
         h.record(ins(0, "a"));
         // 推完小步后：undo_bytes ≈ 20MB+ → 进 while len>1 && undo_bytes>16MB
         // pop_front 裁掉最旧的 20MB → 栈只剩小步
         let only = h.pop_undo().expect("小步应保留");
-        assert_eq!(only.prims[0].inserted, "a");
+        assert_eq!(only.prim.inserted, "a");
         assert!(
             h.pop_undo().is_none(),
             "旧的 20MB 步应被字节裁剪淘汰"
@@ -408,7 +403,7 @@ mod tests {
 
         // 计算栈顶 Transaction 的真实字节数（merged inserted="ab", 字节=2）
         let top_tx = h.undo.back().unwrap();
-        let actual_top_sz = top_tx.prims[0].inserted.len();
+        let actual_top_sz = top_tx.prim.inserted.len();
 
         // undo_bytes 应等于实际累计字节数
         assert_eq!(

@@ -411,13 +411,17 @@ struct InlineParser<'a> {
     /// O(1) 查询区间 (lo, hi) 内是否有内层成链：prefix[hi] - prefix[lo+1] > 0
     resolved_prefix: Vec<usize>,
     /// 反引号 run 索引（位置, 长度），按位置递增。后续批次 2-2 扩展使用。
+    /// **不可按本层 stop 裁剪**：代码段优先级高于删除线（`` ~~a `b~~` c~~ `` 的首个
+    /// `~~` 属于代码段内容），裁剪后闭 run 找不到，会误判删除线闭标记。
     backtick_runs: Vec<(usize, usize)>,
 }
 
 impl<'a> InlineParser<'a> {
     /// 一次性预扫 self.s：建括号配对索引 + 内层淘汰判定前缀和 + 反引号 run 索引。
     /// O(n)：栈扫描，跳过转义/代码段/HTML（和 link_close 原跳过逻辑完全同源）。
-    fn scan_bracket_pairs(&mut self) {
+    /// `limit` 为本层上界（`layer_limit` 求得的 stop 起点）：只为 `pos < limit` 的
+    /// 位置建配对，越界的开/闭括号一律无配对，使 `try_link` 不会造出横跨 stop 的链接。
+    fn scan_bracket_pairs(&mut self, limit: usize) {
         let b = self.s.as_bytes();
         let n = b.len();
 
@@ -441,7 +445,7 @@ impl<'a> InlineParser<'a> {
         let mut open_stack: Vec<usize> = Vec::new();
         let mut pos = 0;
 
-        while pos < n {
+        while pos < limit {
             match b[pos] {
                 b'\\' if pos + 1 < n => {
                     pos += 2;
@@ -491,6 +495,44 @@ impl<'a> InlineParser<'a> {
         self.backtick_runs = backticks;
     }
 
+    /// 本层可控的 `stop` 起点（绝对索引）：从 `self.pos` 起按 parse_until 主循环同一套
+    /// 跳过规则（转义跳 2、代码段、行内 HTML）找第一个 loop 级 `~~`；无 stop 或找不到
+    /// 则为 `self.s.len()`。括号配对不得越过此界，否则 `[` 会与 stop 之后的 `]` 配对，
+    /// 造出横跨删除线闭标记的 Link。
+    fn layer_limit(&self, stop: Option<&'static str>) -> usize {
+        let Some(st) = stop else {
+            return self.s.len();
+        };
+        let n = self.s.len();
+        let mut pos = self.pos;
+        while pos < n {
+            if self.s[pos..].starts_with(st) {
+                return pos;
+            }
+            match self.s.as_bytes()[pos] {
+                b'\\' => {
+                    let adv = match self.s[pos + 1..].chars().next() {
+                        Some(c) if is_escapable(c) => 1 + c.len_utf8(),
+                        _ => 1,
+                    };
+                    pos += adv;
+                }
+                b'`' => {
+                    let run = self.s[pos..].bytes().take_while(|&x| x == b'`').count();
+                    // 与主循环 try_code_span 同源：完整代码段整段跳过，闭 run 不存在则跳过 run
+                    pos = code_span_close(self.s, pos, run).unwrap_or(pos + run);
+                }
+                b'<' => {
+                    pos = html_tag_end(self.s, pos).unwrap_or(pos + 1);
+                }
+                _ => {
+                    pos += self.s[pos..].chars().next().map_or(1, char::len_utf8);
+                }
+            }
+        }
+        n
+    }
+
     /// 解析直到 `stop` 分隔符（留在原位不消费）或 EOF。
     /// 段内产出 token 流（原子节点 + 强调分隔符 run），收尾经阶段二匹配为节点。
     fn parse_until(
@@ -499,7 +541,8 @@ impl<'a> InlineParser<'a> {
         allow_link: bool,
         depth: usize,
     ) -> Vec<InlineNode> {
-        self.scan_bracket_pairs();
+        let limit = self.layer_limit(stop);
+        self.scan_bracket_pairs(limit);
         let mut toks: Vec<Tok> = Vec::new();
         while self.pos < self.s.len() {
             let rest = &self.s[self.pos..];
@@ -715,7 +758,15 @@ impl<'a> InlineParser<'a> {
         }
         let start = self.pos;
         self.pos = start + 2;
+        // 内层 parse_until 会在本实例上重建（更小 limit 的）括号索引；先移出外层索引，
+        // 返回后恢复，否则本层 stop 之后的 `[...]` 会查不到配对而丢失链接。
+        let saved_pairs = std::mem::take(&mut self.bracket_pairs);
+        let saved_prefix = std::mem::take(&mut self.resolved_prefix);
+        let saved_runs = std::mem::take(&mut self.backtick_runs);
         let children = self.parse_until(Some("~~"), true, depth + 1);
+        self.bracket_pairs = saved_pairs;
+        self.resolved_prefix = saved_prefix;
+        self.backtick_runs = saved_runs;
         let content_end = self.pos;
         if !self.s[content_end..].starts_with("~~") || content_end == start + 2 {
             self.pos = start; // 未闭合或空内容：还原，开标记按纯文本
@@ -1258,6 +1309,43 @@ mod tests {
     fn strikethrough_multibyte_offsets_are_bytes() {
         // `中文 ` 7 字节；删 = 3 字节
         assert_eq!(sexp(&parse("中文 ~~删~~")), "Strikethrough[7..14 c=9..12]");
+    }
+
+    #[test]
+    fn strikethrough_stop_bounds_bracket_pairs() {
+        // 括号配对不得跨越本层 stop：`[b` 的 `]` 在 `~~` 之后 → 不成对、不成链，
+        // 删除线在第一个 `~~` 闭合（内容 "a [b c"），其后 ` d](url)~~` 全为纯文本
+        assert_eq!(
+            sexp(&parse("~~a [b c~~ d](url)~~")),
+            "Strikethrough[0..10 c=2..8]"
+        );
+    }
+
+    #[test]
+    fn strikethrough_still_allows_link_inside() {
+        // 现状不得回退：stop 之内的 `[x](u)` 仍正常成链
+        assert_eq!(
+            sexp(&parse("~~[x](u)~~")),
+            "Strikethrough[0..10 c=2..8 Link[2..8 c=3..4 url=6..7]]"
+        );
+    }
+
+    #[test]
+    fn code_span_wins_over_strikethrough_stop() {
+        // 代码段优先级高于删除线：首个 `~~` 是代码段内容，闭标记须取最后的 `~~`
+        assert_eq!(
+            sexp(&parse("~~a `b~~` c~~")),
+            "Strikethrough[0..13 c=2..11 Code[4..9 c=5..8]]"
+        );
+    }
+
+    #[test]
+    fn nested_strikethrough_limits_are_per_layer() {
+        // 每层各求 limit：外层先在自己的 stop 处闭合，其后 `[a](u)` 在顶层正常成链
+        assert_eq!(
+            sexp(&parse("~~x ~~y [a](u)~~")),
+            "Strikethrough[0..6 c=2..4] Link[8..14 c=9..10 url=12..13]"
+        );
     }
 
     // ===== CommonMark delimiter-run 语义（0c P1，语料 Emphasis 段锚点） =====

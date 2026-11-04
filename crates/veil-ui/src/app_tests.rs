@@ -15,7 +15,7 @@ use crate::input::{Action, Key, Mods};
 use crate::interaction::map_key_parts;
 use crate::math::{MathImage, MathRenderer};
 use crate::mode::{Mode, TextSink};
-use crate::paint::{fit_size, local_image_path};
+use crate::paint::{can_present, fit_size, local_image_path};
 use crate::print::{NoPrint, Print, PrintSession};
 use crate::theme::{self, ConfigStore, SystemTheme, ThemeEnv, ThemeMode};
 use crate::view::ctx_menu;
@@ -2719,12 +2719,63 @@ fn tab_indents_selection_and_shift_tab_reverts() {
     a.ensure_layouts_all();
     a.perform_action(Action::Doc(Intent::SelectAll));
     a.route_key(Key::Tab);
-    assert_eq!(doc_text(&a), "    a\n    b", "选中多行一次缩进");
+    assert_eq!(doc_text(&a), "  a\n  b", "选中多行一次缩进");
     a.input_state.mods.shift = true;
     a.route_key(Key::Tab);
     a.input_state.mods.shift = false;
     assert_eq!(doc_text(&a), "a\nb", "Shift+Tab 反缩进回原状");
     assert!(a.editor.is_dirty());
+}
+
+#[test]
+fn tab_whole_line_indent_keeps_paragraph_kind() {
+    // T1：整行缩进普通段落后仍是 Paragraph，不会因 4 空格变成 IndentedCode
+    let store = MemStore::default();
+    let mut a = app("第一段\n第二段", None, false, &store);
+    a.ensure_layouts_all();
+    a.perform_action(Action::Doc(Intent::SelectAll));
+    a.route_key(Key::Tab);
+    assert_eq!(doc_text(&a), "  第一段\n  第二段");
+    assert!(
+        matches!(a.index.blocks[0].kind, BlockKind::Paragraph),
+        "缩进后段落不得变成代码块"
+    );
+}
+
+#[test]
+fn tab_whole_line_indent_nests_list_item() {
+    // T1：列表项整行缩进改嵌套层级（本解析器 depth = 缩进字节 / 2），仍是 ListItem
+    let store = MemStore::default();
+    let mut a = app("- a", None, false, &store);
+    a.ensure_layouts_all();
+    a.perform_action(Action::Doc(Intent::SelectAll));
+    a.route_key(Key::Tab);
+    assert_eq!(doc_text(&a), "  - a");
+    let (_, kind, _) = a.editor.session().blocks()[0].clone();
+    assert_eq!(
+        kind,
+        BlockKind::ListItem {
+            ordered: false,
+            depth: 1,
+            task: None
+        },
+        "缩进后保持列表结构且层级 +1"
+    );
+}
+
+#[test]
+fn resize_rebuild_is_coalesced_into_one_frame() {
+    // R2：Resized 只置待处理位；同一帧内多次事件只重建一次
+    let store = MemStore::default();
+    let mut a = app("a\n\nb", None, false, &store);
+    a.ensure_layouts_all();
+    for _ in 0..5 {
+        a.window_state.resize_pending = true;
+    }
+    assert!(a.apply_pending_resize(), "首帧执行一次重建");
+    assert!(!a.apply_pending_resize(), "无新尺寸事件时不得重复重建");
+    assert_eq!(doc_text(&a), "a\n\nb");
+    assert_eq!(a.index.blocks.len(), 2, "合并后块索引仍完整");
 }
 
 #[test]
@@ -3264,8 +3315,13 @@ fn config_save_failure_keeps_theme_and_notices() {
 
 /// 5005 块压力文档（715 × 7 块），冷启动/击键探针与惰性排版测试共用。
 fn stress_doc() -> String {
-    let mut text = String::with_capacity(200_000);
-    for i in 0..715 {
+    stress_doc_n(715)
+}
+
+/// 参数化压力文档：`iters` 轮 × 7 块；715 → 5005 块，1500 → 10500 块，2857 → 19999 块。
+fn stress_doc_n(iters: usize) -> String {
+    let mut text = String::with_capacity(iters * 280);
+    for i in 0..iters {
         text.push_str(&format!(
             "## Section {i}\n\nParagraph {i} with **bold** text, `code`, and a [link](https://example.com/{i}).\n\n- item A {i}\n- item B {i}\n\n```rust\nfn f{i}() -> u32 {{ {i} }}\n```\n\n> quote {i}\n\n---\n\n"
         ));
@@ -3496,6 +3552,28 @@ fn caret_before_commit_anchors_where_text_will_land() {
     a.route_key(Key::Text("nihao".into()));
     let (_, cy3, _) = a.caret_screen();
     assert_eq!(cy2, cy3, "提交前后光标 y 不得跳变");
+}
+
+/// I1（CRLF 文档）：Enter 插入 `\r\n` 后光标必须锚到同段下一行；
+/// 旧实现只把单独 `\n` 计作尾换行，CRLF 落入 caret_xy 的行尾钳制 → 光标贴在上一行。
+#[test]
+fn crlf_enter_caret_anchors_next_line() {
+    let store = MemStore::default();
+    let mut a = app("段一内容\r\n\r\n段二内容", None, false, &store);
+    a.paint();
+    a.perform_action(Action::Doc(Intent::MoveDocEnd));
+    a.route_key(Key::Enter);
+    let (_, cy, _) = a.caret_screen();
+    let (top, h) = {
+        let g = &a.index.blocks[1];
+        (g.top, a.block_height(g))
+    };
+    let vp_y = a.viewport().y;
+    assert_eq!(
+        cy,
+        vp_y + top + h,
+        "CRLF 回车后光标须落在同段下一行，而非上一行行尾"
+    );
 }
 
 /// 文档中部块间空隙：Enter×2 后光标锚到下一块顶边（新段将出现的位置），
@@ -3949,6 +4027,15 @@ fn present_is_noop_without_surface_and_isolated_from_render() {
         frame_pixels_before, frame_pixels_after,
         "headless present 不得改变 frame 状态"
     );
+}
+
+#[test]
+fn present_requires_matching_lengths() {
+    // 真实失配路径（最小化后 1×1 帧 vs 旧 surface）依赖 winit/softbuffer 的真实窗口，
+    // headless 下无法构造 Surface，故只能测纯判定层；present 仅在该判定为真时拷贝。
+    assert!(can_present(100, 100), "长度相等应允许呈现");
+    assert!(!can_present(4, 100), "帧短于 surface 应丢帧");
+    assert!(!can_present(100, 4), "帧长于 surface 应丢帧");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -4540,6 +4627,206 @@ fn perf_keystroke_path() {
     println!("perf_keystroke_ms_p50={:.3}", pick(0.5));
     println!("perf_keystroke_ms_p95={:.3}", pick(0.95));
     println!("perf_keystroke_ms_max={:.3}", samples[samples.len() - 1]);
+}
+
+/// 分项归因探针（默认忽略）：三档文档规模下把每次击键拆成 5 段独立耗时。
+/// 全部走真实代码路径：Editor::apply → Session::apply；refresh_index；脏块
+/// ensure_block（真实缓存+排版路径）；LayoutEngine::rasterize；render 帧合成
+///（headless 亦可运行，present 无 surface 时为 no-op，不纳入计时）。
+/// cargo test -p veil-ui --release --lib -- --ignored --nocapture perf_keystroke_attribution
+#[test]
+#[ignore = "性能探针，不参与常规门禁"]
+fn perf_keystroke_attribution() {
+    const SAMPLES: usize = 300;
+    println!(
+        "# segments: core_apply_reparse=Editor::apply->Session::apply; \
+         index_rebuild=App::refresh_index（含 recompute_geometry + refresh_stats）; \
+         dirty_layout=App::ensure_block（真实缓存查询+排版）; \
+         rasterize=LayoutEngine::rasterize（脏块）; \
+         frame_compose=App::render（真实 headless 帧合成，present 无 surface 不测）"
+    );
+    println!(
+        "doc_blocks,core_apply_reparse_p50_us,core_apply_reparse_p95_us,\
+         index_rebuild_p50_us,index_rebuild_p95_us,\
+         dirty_layout_p50_us,dirty_layout_p95_us,\
+         rasterize_p50_us,rasterize_p95_us,\
+         frame_compose_p50_us,frame_compose_p95_us,\
+         total_p95_us,index_share_pct"
+    );
+
+    for iters in [715usize, 1500, 2857] {
+        let text = stress_doc_n(iters);
+        let store = MemStore::default();
+        let mut a = app(&text, None, false, &store);
+        a.editor.apply(Intent::MoveDocStart).unwrap();
+        for _ in 0..5 {
+            a.editor.apply(Intent::MoveRight).unwrap();
+        }
+        a.paint(); // 预热：首帧完成可见区布局与光栅，排除字体首次加载成本
+
+        let block_count = a.index.blocks.len();
+        let mut core = Vec::with_capacity(SAMPLES);
+        let mut index = Vec::with_capacity(SAMPLES);
+        let mut layout = Vec::with_capacity(SAMPLES);
+        let mut raster = Vec::with_capacity(SAMPLES);
+        let mut compose = Vec::with_capacity(SAMPLES);
+
+        for _ in 0..SAMPLES {
+            let t = Instant::now();
+            let dirty = a
+                .editor
+                .apply(Intent::InsertText("a".into()))
+                .expect("插入点恒合法");
+            core.push(t.elapsed().as_secs_f64() * 1e6);
+
+            let t = Instant::now();
+            a.refresh_index();
+            index.push(t.elapsed().as_secs_f64() * 1e6);
+
+            // 脏块排版：生产路径 ensure_block（命中则只比键，未命中才取词/行内并排版）
+            let t = Instant::now();
+            for &id in &dirty {
+                a.ensure_block(id);
+            }
+            layout.push(t.elapsed().as_secs_f64() * 1e6);
+
+            // 脏块光栅：与 paint.rs 的惰性光栅同一路径（布局键比对 + rasterize + 回填）
+            let base = a.base_key();
+            let caret = a.effective_caret();
+            let fg = a.input_state.theme.fg;
+            let t = Instant::now();
+            for &id in &dirty {
+                let Some(g) = a.index.blocks.iter().find(|g| g.id == id) else {
+                    continue;
+                };
+                let kind = g.kind.clone();
+                let range = g.range;
+                let Some(lk) = a.cache.raster_key(id, &kind, range, base, caret) else {
+                    continue;
+                };
+                if a.cache.raster(id, lk).is_none() {
+                    let r = a.engine.rasterize(&a.cache.layouts[&id].value, fg);
+                    a.cache.rasters.insert(id, Memo { key: lk, value: r });
+                }
+            }
+            raster.push(t.elapsed().as_secs_f64() * 1e6);
+
+            let t = Instant::now();
+            let _ = a.render();
+            compose.push(t.elapsed().as_secs_f64() * 1e6);
+        }
+
+        let pick = |v: &mut [f64], q: f64| {
+            v.sort_by(|x, y| x.partial_cmp(y).unwrap());
+            let i = ((v.len() as f64 * q).ceil() as usize)
+                .saturating_sub(1)
+                .min(v.len() - 1);
+            v[i]
+        };
+        let (core_p50, core_p95) = (pick(&mut core, 0.5), pick(&mut core, 0.95));
+        let (index_p50, index_p95) = (pick(&mut index, 0.5), pick(&mut index, 0.95));
+        let (layout_p50, layout_p95) = (pick(&mut layout, 0.5), pick(&mut layout, 0.95));
+        let (raster_p50, raster_p95) = (pick(&mut raster, 0.5), pick(&mut raster, 0.95));
+        let (compose_p50, compose_p95) = (pick(&mut compose, 0.5), pick(&mut compose, 0.95));
+        let total_p95 = core_p95 + index_p95 + layout_p95 + raster_p95 + compose_p95;
+        println!(
+            "{block_count},{core_p50:.2},{core_p95:.2},\
+             {index_p50:.2},{index_p95:.2},\
+             {layout_p50:.2},{layout_p95:.2},\
+             {raster_p50:.2},{raster_p95:.2},\
+             {compose_p50:.2},{compose_p95:.2},\
+             {total_p95:.2},{:.1}",
+            index_p95 / total_p95 * 100.0
+        );
+    }
+}
+
+/// `index_rebuild` 子段探针（默认忽略）：按生产顺序逐步调用 refresh_index 的 4 个真实步骤。
+/// 生产 `refresh_index` 自身不含任何 `Instant::now()`；探针在外部逐步计时，不重复实现逻辑。
+/// cargo test -p veil-ui --release --lib -- --ignored --nocapture perf_index_subsegments
+#[test]
+#[ignore = "性能探针，不参与常规门禁"]
+fn perf_index_subsegments() {
+    const SAMPLES: usize = 300;
+    println!(
+        "# index subsegments: blocks_enum=App::blocks_enum; geom_fill=App::geom_fill;\
+         recompute=App::recompute_geometry; stats=App::refresh_stats"
+    );
+    println!(
+        "doc_blocks,blocks_enum_p50_us,blocks_enum_p95_us,\
+         geom_fill_p50_us,geom_fill_p95_us,\
+         recompute_p50_us,recompute_p95_us,\
+         stats_p50_us,stats_p95_us,\
+         index_sum_p50_us,index_sum_p95_us,\
+         blocks_enum_share_pct,geom_fill_share_pct,recompute_share_pct,stats_share_pct"
+    );
+
+    for iters in [715usize, 1500, 2857] {
+        let text = stress_doc_n(iters);
+        let store = MemStore::default();
+        let mut a = app(&text, None, false, &store);
+        a.editor.apply(Intent::MoveDocStart).unwrap();
+        for _ in 0..5 {
+            a.editor.apply(Intent::MoveRight).unwrap();
+        }
+        a.paint();
+
+        let block_count = a.index.blocks.len();
+        let mut blocks_enum = Vec::with_capacity(SAMPLES);
+        let mut geom_fill = Vec::with_capacity(SAMPLES);
+        let mut recompute = Vec::with_capacity(SAMPLES);
+        let mut stats = Vec::with_capacity(SAMPLES);
+
+        for _ in 0..SAMPLES {
+            // 编辑本身不计入 index 子段，只为制造真实脏状态
+            let _dirty = a
+                .editor
+                .apply(Intent::InsertText("a".into()))
+                .expect("插入点恒合法");
+
+            let t = Instant::now();
+            let blocks = a.blocks_enum();
+            blocks_enum.push(t.elapsed().as_secs_f64() * 1e6);
+
+            let t = Instant::now();
+            a.geom_fill(blocks);
+            geom_fill.push(t.elapsed().as_secs_f64() * 1e6);
+
+            let t = Instant::now();
+            a.recompute_geometry();
+            recompute.push(t.elapsed().as_secs_f64() * 1e6);
+
+            let t = Instant::now();
+            a.refresh_stats();
+            stats.push(t.elapsed().as_secs_f64() * 1e6);
+        }
+
+        let pick = |v: &mut [f64], q: f64| {
+            v.sort_by(|x, y| x.partial_cmp(y).unwrap());
+            let i = ((v.len() as f64 * q).ceil() as usize)
+                .saturating_sub(1)
+                .min(v.len() - 1);
+            v[i]
+        };
+        let (be_p50, be_p95) = (pick(&mut blocks_enum, 0.5), pick(&mut blocks_enum, 0.95));
+        let (gf_p50, gf_p95) = (pick(&mut geom_fill, 0.5), pick(&mut geom_fill, 0.95));
+        let (rc_p50, rc_p95) = (pick(&mut recompute, 0.5), pick(&mut recompute, 0.95));
+        let (st_p50, st_p95) = (pick(&mut stats, 0.5), pick(&mut stats, 0.95));
+        let sum_p50 = be_p50 + gf_p50 + rc_p50 + st_p50;
+        let sum_p95 = be_p95 + gf_p95 + rc_p95 + st_p95;
+        println!(
+            "{block_count},{be_p50:.2},{be_p95:.2},\
+             {gf_p50:.2},{gf_p95:.2},\
+             {rc_p50:.2},{rc_p95:.2},\
+             {st_p50:.2},{st_p95:.2},\
+             {sum_p50:.2},{sum_p95:.2},\
+             {:.1},{:.1},{:.1},{:.1}",
+            be_p95 / sum_p95 * 100.0,
+            gf_p95 / sum_p95 * 100.0,
+            rc_p95 / sum_p95 * 100.0,
+            st_p95 / sum_p95 * 100.0
+        );
+    }
 }
 
 /// P1b 验收探针（默认忽略）：构造 5005 块文档 + 第一次编辑的端到端耗时。

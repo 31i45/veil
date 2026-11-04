@@ -143,6 +143,31 @@ fn scroll_thumb_none_without_overflow() {
 }
 
 #[test]
+fn scroll_thumb_returns_none_for_degenerate_viewport() {
+    // 退化视口（模拟最小化后 vp.h=1.0）应直接返回 None 而不是在 clamp(min>max) 处 panic
+    let tiny = Viewport {
+        x: 0.0,
+        y: 30.0,
+        w: 800.0,
+        h: 1.0,
+    };
+    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        scroll_thumb(tiny, 1000.0, 0.0, 1.5)
+    }));
+    assert!(res.is_ok(), "退化为视口不得 panic");
+    assert_eq!(res.unwrap(), None);
+
+    // 回归：正常视口仍能返回 Some
+    let normal = Viewport {
+        x: 0.0,
+        y: 30.0,
+        w: 800.0,
+        h: 600.0,
+    };
+    assert!(scroll_thumb(normal, 3000.0, 0.0, 1.5).is_some());
+}
+
+#[test]
 fn scroll_thumb_position_and_mapping_roundtrip() {
     let v = vp();
     let doc = 3000.0;

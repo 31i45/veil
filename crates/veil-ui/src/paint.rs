@@ -721,16 +721,22 @@ impl App {
         let Some(frame) = self.window_state.frame.as_ref() else {
             return;
         };
-        let Some(surface) = &mut self.window_state.surface else {
+        let Some(surface) = self.window_state.surface.as_mut() else {
             return;
         };
-        if let Ok(mut target) = surface.buffer_mut() {
-            if !can_present(frame.pixels.len(), target.len()) {
-                return; // 尺寸失配（最小化后 1×1 帧 vs 旧 surface）：丢帧不崩溃
+        // 兜底：softbuffer 在极小/非法尺寸下可能从 buffer_mut 或 present 内部 panic；
+        // 最小化期间的任何绘帧失败都应当静默丢弃，让窗口恢复时继续跑。
+        // 把 frame 像素提前拷到局部，避免闭包捕获整个 &mut self。
+        let pixels = frame.pixels.clone();
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            if let Ok(mut target) = surface.buffer_mut() {
+                if !can_present(pixels.len(), target.len()) {
+                    return; // 尺寸失配（最小化后 1×1 帧 vs 旧 surface）：丢帧不崩溃
+                }
+                target.copy_from_slice(&pixels);
+                let _ = target.present();
             }
-            target.copy_from_slice(&frame.pixels);
-            let _ = target.present();
-        }
+        }));
     }
 
     /// 帧合成完整路径：render → present。产品层事件循环 Redraw 分支唯一调用。

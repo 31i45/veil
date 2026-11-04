@@ -302,6 +302,8 @@ pub(crate) struct WindowState {
     /// 尺寸待处理（3e R2）：Resized 只置位，索引重建/重排合并到下一帧一次执行，
     /// 避免拖拽窗口时逐事件全量重建造成键盘输入积压。
     pub(crate) resize_pending: bool,
+    /// 窗口可见性（3g）：最小化/失焦/Occluded 时置 false，阻止 RedrawRequested → render → paint 路径。
+    pub(crate) visible: bool,
 }
 impl Default for WindowState {
     fn default() -> Self {
@@ -316,6 +318,7 @@ impl Default for WindowState {
             print: None,
             fullscreen: false,
             resize_pending: false,
+            visible: true,
         }
     }
 }
@@ -813,6 +816,16 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::Resized(size) => {
+                // 重建延迟到下一帧合并执行（见 `apply_pending_resize`）：
+                // 事件风暴期间只置位，避免逐事件全量重建。
+                // 0×0 尺寸（最小化）也要置位，但跳过 surface.resize 和 request_redraw，
+                // 避免让 softbuffer 处理非法尺寸、同时防止 RedrawRequested 驱动
+                // 一个仍沿用旧 frame 的 render → scroll_thumb 在 vp.h=1.0 时 panic。
+                self.window_state.resize_pending = true;
+                if size.width == 0 || size.height == 0 {
+                    self.window_state.visible = false;
+                    return;
+                }
                 if let (Some(s), Some(w), Some(h)) = (
                     self.window_state.surface.as_mut(),
                     NonZeroU32::new(size.width),
@@ -820,9 +833,9 @@ impl ApplicationHandler for App {
                 ) {
                     let _ = s.resize(w, h);
                 }
-                // 重建延迟到下一帧合并执行（见 `apply_pending_resize`）：
-                // 事件风暴期间只置位，避免逐事件全量重建。
-                self.window_state.resize_pending = true;
+                if !self.window_state.visible {
+                    self.window_state.visible = true;
+                }
                 self.request_redraw();
             }
             WindowEvent::ScaleFactorChanged { .. } => {
@@ -920,14 +933,34 @@ impl ApplicationHandler for App {
                 self.on_wheel(d);
             }
             WindowEvent::RedrawRequested => {
+                // 窗口不可见时跳过所有 render + paint。softbuffer 在最小化窗口上行为不可控，
+                // 且 scroll_thumb 等在 vp.h=1.0 时 panic；visible 守卫是最根本的防线。
+                if !self.window_state.visible {
+                    return;
+                }
                 // 先合并执行待处理尺寸变化，再绘制（一帧一次）
                 self.apply_pending_resize();
                 self.paint();
             }
             // 窗口重新获得焦点：立即校验系统外观（限频轮询最多滞后 1s，此处消除等待）
-            WindowEvent::Focused(true) => {
+            WindowEvent::Focused(focused) => {
+                if !focused {
+                    self.window_state.visible = false;
+                    return;
+                }
+                if !self.window_state.visible {
+                    self.window_state.visible = true;
+                    self.request_redraw();
+                }
                 self.input_state.last_theme_check = None;
                 self.poll_system_theme(Instant::now());
+            }
+            // 窗口被系统遮挡：同样视为不可见，防止 paint 在被遮挡窗口上渲染无效帧
+            WindowEvent::Occluded(occluded) => {
+                self.window_state.visible = !occluded;
+                if !occluded {
+                    self.request_redraw();
+                }
             }
             _ => {}
         }
@@ -939,6 +972,11 @@ impl ApplicationHandler for App {
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         let now = Instant::now();
         self.tick(now);
+        // 窗口不可见时跳过所有定时唤醒——恢复路径已由 Resized/Focused/Occluded 主动 request_redraw
+        if !self.window_state.visible {
+            event_loop.set_control_flow(ControlFlow::Wait);
+            return;
+        }
         // 恢复写盘（0b）：脏文档（含无路径草稿/冲突挂起）都按静默期调度——
         // 它是比自动保存更宽的最后防线
         let dirty_editing = self.editor.is_dirty() && self.editor.preedit().is_none();

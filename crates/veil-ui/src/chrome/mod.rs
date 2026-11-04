@@ -296,6 +296,11 @@ pub fn scroll_thumb(vp: Viewport, doc_h: f32, scroll: f32, scale: f32) -> Option
     if doc_h <= vp.h + 0.5 {
         return None;
     }
+    // 退化视口（如最小化后 vp.h=1.0）根本无法容纳最小滑块，直接放弃；
+    // 这也避免 clamp(THUMB_MIN_H*scale=36, vp.h=1) 时 min > max 的 panic。
+    if vp.h < THUMB_MIN_H * scale {
+        return None;
+    }
     let h = (vp.h * vp.h / doc_h).clamp(THUMB_MIN_H * scale, vp.h);
     let max = max_scroll(vp, doc_h);
     if max <= 0.0 {

@@ -1,6 +1,6 @@
 # 3e 真机走查清单与预期效果
 
-> 适用产物：`target\release\veil.exe`（单文件，5.54 MiB，含 VERSIONINFO 与图标，构建命令 `cargo build --release -p veil`）
+> 适用产物：`target\release\veil.exe`（单文件，5,825,536 B ≈ 5.56 MiB，含 VERSIONINFO 与图标，构建命令 `cargo build --release -p veil`）
 > 目的：完成阶段 3 的最后一批**人工验收项**（P4 专家清单、IME 复核、3b 打印、3c 交互、3d 分发外观、盲测前置）
 > 记录方式：每条勾 □通过 / □不通过；不通过时填「实际现象 + 复现步骤 + 严重度（阻断/高/中/低）」
 
@@ -25,6 +25,38 @@
 
 ---
 
+## 0.1 当前状态（2026-11-03 最终复测轮）
+
+**已修（代码与测试已落地，仍建议真机复验一次）**：
+
+| 编号 | 缺陷 | 状态 | 文件 / 测试 |
+|---|---|---|---|
+| R2 | 窗口 `Resized` 每事件同步重建索引/几何 | ✅ 已修 | `crates/veil-ui/src/app.rs`；`resize_rebuild_is_coalesced_into_one_frame` |
+| T1（B5②） | 整行缩进把段落变成代码块 | ✅ 已修（方案 1） | `crates/veil-ui/src/editor.rs`；`tab_whole_line_indent_keeps_paragraph_kind`、`tab_whole_line_indent_nests_list_item` |
+| I1（B1 偶发） | CRLF 文档 Enter 后光标错行 | ✅ 已修 | `crates/veil-ui/src/interaction.rs`；`crlf_enter_caret_anchors_next_line` |
+
+**剩余人工项**：C/D/E/F/G/H 共 50 条**全部为 `needs-user`**（未由真机验收），逐条状态、对应自动化覆盖与执行协议见 [`3e-walkthrough-results.md`](3e-walkthrough-results.md) 的「剩余人工项状态（2026-11-03）」一节。
+
+| 区域 | 条目 | 状态 |
+|---|---|---|
+| C 排版 | C1、C2、C3、C4、C5、C6、C7、C8、C9、C10、C11 | 全部 `needs-user` |
+| D 交互 | D1、D2、D3、D4、D5、D6、D7、D8、D9、D10、D11、D12、D13、D14 | 全部 `needs-user` |
+| E 打印 | E1、E2、E3、E4、E5、E6、E7、E8 | 全部 `needs-user` |
+| F 主题 | F1、F2、F3、F4 | 全部 `needs-user` |
+| G 数据安全 | G1、G2、G3、G4、G5、G6、G7、G8、G9 | 全部 `needs-user` |
+| H 菜单 | H1、H2、H3、H4 | 全部 `needs-user` |
+
+> I3（表格内 Ctrl+I 疑似无效）保持「按用户决定不处理」，不列入 needs-user。
+> **严禁**在未经真机观察时把任何条目填成「通过/已验证」；存在自动化用例只代表有单测触及，不等于真机验收通过。
+
+### 执行协议
+
+1. **启动**：`cargo build --release -p veil`，然后 `.\target\release\veil.exe "$env:TEMP\veil-walkthrough\02-混合元素.md"`；不要用 `cargo run`。跑前备份并清空 `%APPDATA%\Veil\`（`config.toml` / `session.txt` / `recovery.dat`）。
+2. **每区重点**：C 看中英间距、禁则/悬挂、各标记行高、表格/任务列表/图片/公式/超长单行；D 看缩放档位与落点、200% DPI、F11/Esc、行内格式、视图操作不置脏；E 看系统对话框、PDF 落盘、多页不截字、公式表格跨页、缩放版式、打印后遮罩；F 看即时切换/重启持久/跟随系统/Mica；G 看杀进程恢复、外部修改备份、外部删除重建、未保存三选一、快速打开；H 看菜单项数与灰显、键盘导航、点外部、右键三分类。
+3. **记录**：把结果文档对应条目的 `needs-user` 改为「通过 / 不通过 / 阻断」；不通过必填「实际现象 + 复现步骤 + 严重度」，截图放 `%TEMP%\veil-walkthrough\`。
+
+---
+
 ## A. 启动与外观（3a / 3d）
 
 | # | 操作 | 预期效果 |
@@ -40,7 +72,7 @@
 
 | # | 操作 | 预期效果 |
 |---|---|---|
-| B1 | 在 1 万字中文文档中连续输入 200 字 | 光标始终可见；无跳字、无吞字、无光标漂移；输入延迟无感知（自动化 p95 ≈13ms） |
+| B1 | 在 1 万字中文文档中连续输入 200 字 | 光标始终可见；无跳字、无吞字、无光标漂移；输入延迟无感知（release headless 探针合计 p95 5.20 ms @10.5k 块，见 `keystroke-attribution.md`） |
 | B2 | 中文输入法组合期打字 | 候选框跟随光标；组合串带下划线显示在正确位置；上屏后不残留、不丢首字 |
 | B3 | Enter / Backspace / Delete / ←→↑↓ / Home / End | 行为与 Windows 记事本一致；↑↓ 保持目标列（跨长短行不跑偏） |
 | B4 | Ctrl+Z / Ctrl+Shift+Z | 撤销/重做精确；连按 20 次不错乱；撤销后光标落在合理位置 |

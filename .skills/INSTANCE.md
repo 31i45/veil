@@ -2,7 +2,7 @@
 
 > 本文件是 ai-dev-skills 通用方法论在本项目的全部实例化：项目专有事实（命令、红线、工具名、平台名、专有清单）只存在于此，skills 本体不内嵌。
 > 有效期：下列任一事实变更时需更新
-> 最后验证：2026-10-31（**G3 门禁通过·自动化口径**：阶段 2 切片 2a–2f 全部收口，自动化红线全灭——782 测试全绿、clippy 零警告、e2e 41 断言、p95 6.65/12.93ms、体积 5.48MiB、传递依赖 141/200、CommonMark A/C/D 652、GFM 23/23；2d 落地 CJK 标点禁则（UAX #14 + WJ 胶水段补中文特有禁则）+ 满行悬挂标点 + IME preedit 同套排版规则。真机 P4 三项、IME 候选框跟随复核、盲测为人工项，转阶段 3 走查清单）；**阶段 3 切片 3a ✅**：冷启动环境段根因定位为火绒 HIPS 信誉拦截（非产品代码），稳定路径实测墙钟 33–79ms + 首帧段 ≈155–203ms，进 300ms，零代码改动；**阶段 3 切片 3b ✅**：打印/PDF（分页引擎 + 干净帧 + Win32 GDI 手写 FFI 零新增依赖，PDF 走 Microsoft Print to PDF 同码路）；**阶段 3 切片 3c ✅**：UX 打磨三项——Ctrl+B/I/K 行内格式、用户缩放（dpi_scale × user_zoom 0.1 量化 [0.5,3.0]，Ctrl+滚轮/捏合/±/0 + 视图菜单，打印不随用户缩放）、F11 无边框全屏（Esc 不退）；打印快捷键决策：Ctrl+P 归快速打开（VS Code/Typora 同），打印菜单可达不另占键；**阶段 3 切片 3d ✅**：原生单文件分发（用户决策不用 NSIS/MSIX/任何安装器外部工具链）——发布构建 GUI 子系统无控制台窗口，`crates/veil/build.rs` 由 workspace version 注入 VERSIONINFO（SDK rc.exe，零新增 crate 依赖，缺失降级跳过），PE subsystem=2、体积 5.51 MiB，版本号三方一致性红线可验证；workspace 805 测试绿、clippy 零警告；真机打印走查与 3c 交互目检转 3e 人工项
+> 最后验证：2026-11-03（**G3 门禁通过·自动化口径**：阶段 2 切片 2a–2f 全部收口，自动化红线全灭——782 测试全绿、clippy 零警告、e2e 41 断言、p95 3.37/5.20/9.25ms（2026-11-03 release headless 分项探针，5.0k/10.5k/20.0k 块）、体积 5.48MiB、传递依赖 141/200、CommonMark A/C/D 652、GFM 23/23；2d 落地 CJK 标点禁则（UAX #14 + WJ 胶水段补中文特有禁则）+ 满行悬挂标点 + IME preedit 同套排版规则。真机 P4 三项、IME 候选框跟随复核、盲测为人工项，转阶段 3 走查清单）；**阶段 3 切片 3a ✅**：冷启动环境段根因定位为火绒 HIPS 信誉拦截（非产品代码），稳定路径实测墙钟 33–79ms + 首帧段 ≈155–203ms，进 300ms，零代码改动；**阶段 3 切片 3b ✅**：打印/PDF（分页引擎 + 干净帧 + Win32 GDI 手写 FFI 零新增依赖，PDF 走 Microsoft Print to PDF 同码路）；**阶段 3 切片 3c ✅**：UX 打磨三项——Ctrl+B/I/K 行内格式、用户缩放（dpi_scale × user_zoom 0.1 量化 [0.5,3.0]，Ctrl+滚轮/捏合/±/0 + 视图菜单，打印不随用户缩放）、F11 无边框全屏（Esc 不退）；打印快捷键决策：Ctrl+P 归快速打开（VS Code/Typora 同），打印菜单可达不另占键；**阶段 3 切片 3d ✅**：原生单文件分发（用户决策不用 NSIS/MSIX/任何安装器外部工具链）——发布构建 GUI 子系统无控制台窗口，`crates/veil/build.rs` 由 workspace version 注入 VERSIONINFO（SDK rc.exe，零新增 crate 依赖，缺失降级跳过），PE subsystem=2、体积 5.51 MiB，版本号三方一致性红线可验证；workspace 805 测试绿、clippy 零警告；真机打印走查与 3c 交互目检转 3e 人工项；**2026-11-03 最终复测**：867 测试全绿（0 failed / 11 ignored）、clippy 零警告、体积 5,825,536 B、击键合计 p95 3.37/5.20/9.25 ms（5.0k/10.5k/20.0k 块，release headless 分项探针，见 `docs/review/keystroke-attribution.md`）、传递依赖未新增（141/200）
 
 ## 0. 项目骨架事实
 
@@ -14,7 +14,8 @@
   - Markdown 源码是唯一真值；Reveal 等注解不持久化。
   - 内核单线程主编辑模型；后台任务（公式渲染）经消息队列回主线程，禁止跨线程改内核。
   - 内核零 GUI、零异步运行时依赖。
-  - 非目标：wgpu 视图、协作/CRDT（位置模型见 ADR-010，v2 立项）、插件系统、移动端、表格可视化编辑（v1 仅渲染+源码编辑）、Mermaid 内嵌渲染。
+  - 非目标：wgpu 视图（裁决见 ADR-011：v1 不引入，触发式立项）、协作/CRDT（位置模型见 ADR-010，v2 立项）、插件系统、移动端、表格可视化编辑（v1 仅渲染+源码编辑）、Mermaid 内嵌渲染。
+  - veil-core 修复批次 3 不再是独立里程碑，改为按需触发清单（逐项标注现状，见 `.trae/documents/veil_core_remediation_plan_v2.md`）：已实施/已解决的只保留结论，待触发项仅在触发条件满足时立项。
 - 命名与事实对齐：`veil-egui` 于 2026-11-03（v1 发布前）更名为 `veil-ui`——该 crate 自 ADR-005 起已零 egui 依赖，旧名属历史遗留；改名只动 crate 名/路径/use 语句，分层与职责未变。
 
 ## 1. 真机验证实例（Skill 03 A1）
@@ -41,10 +42,10 @@
 |---|---|---|
 | 冷启动（发布构建，`main`→首帧完成；**验收口径**，2026-10-30 用户裁定） | ≤ 300 ms | **145–190 ms** ✅（分段探针：事件循环 6–9 / 建窗 29–31 / Surface 49–88 / 首帧 61–69+12–13 ms） |
 | 冷启动（墙钟，进程创建→首帧可交互；**环境观察项，不参与验收**） | — | **2026-10-31 切片 3a 复测：start→主窗口句柄 33–79 ms，加应用内首帧段后真墙钟 ≈155–203 ms，进 300 ms** ✅。G2 期 450–529 ms 根因已定位：本机火绒 HIPS 对「路径+哈希未入信誉缓存」的二进制做进程创建拦截扫描（探针：%TEMP% 未签名空二进制 start→exit 中位 1366ms、微软签名 cmd 副本 541ms，而 veil.exe 稳定路径下 33ms）；每次重编译产出新哈希即触发重扫，属开发期现象，终端用户固定路径安装不受影响。复现：`tools/bench/diag-premain.ps1` |
-| 10 万字文档击键→提交上屏延迟 p95（release 探针串行） | ≤ 16 ms | 6.65 ms（5,005 块）✅；12.93 ms（10,500 块）✅（2026-10-31 G3 复测，Wrap::WordOrGlyph 断行分析成本 ≈0.4ms 已计入） |
+| 10 万字文档击键→提交上屏延迟 p95（release 探针串行） | ≤ 16 ms | 3.37 ms（5.0k 块）✅；5.20 ms（10.5k 块）✅；9.25 ms（20.0k 块）✅（2026-11-03 最终复测，release headless 分项探针 p95 之和，见 `docs/review/keystroke-attribution.md`） |
 | 10 万字文档常驻内存（任务管理器私有工作集） | ≤ 150 MB | 21.55 MB ✅ |
 | 安装产物体积（`veil.exe` 单文件发布构建） | ≤ 15 MiB | 5,825,536 B ≈ 5.56 MiB ✅（2026-11-03 改名 + 批次 3 首批 mark 测试后重打包实测；无安装器，单文件即分发产物） |
-| workspace 测试数（含 veil-core + veil-ui + veil） | ≥ 80 | **852 passed / 0 failed / 10 ignored** ✅（2026-11-03 全量实测；口径为所有测试二进制之和；G3 时 782 → 3d 805 → 3e 812 → 改名+Ports 收敛后 849 → 批次 3 首批 mark 测试 +3 后 852） |
+| workspace 测试数（含 veil-core + veil-ui + veil） | ≥ 80 | **867 passed / 0 failed / 11 ignored** ✅（2026-11-03 最终复测；口径为所有测试二进制之和；G3 时 782 → 3d 805 → 3e 812 → 改名+Ports 收敛后 849 → 批次 3 首批 mark 测试 852 → 最终复测 867） |
 | e2e 断言数 | ≥ 20 | **41** ✅（2026-10-30 切片 2e：`app_tests.rs` 3 个 e2e_ 场景测试——写作闭环打开→编辑→保存→重开 / 表格导航+格内编辑+图片粘贴落盘 / 查找替换→崩溃恢复→保存→三次启动自清） |
 | Markdown 往返一致率（无编辑时 serialize 输出 == 输入字节） | == 100% | 100% ✅ |
 | `veil-core` 的 GUI/异步运行时依赖数 | == 0 | 0 ✅ |
@@ -119,6 +120,7 @@ v1 无网络输入点（无同步、无更新检查、无遥测）。
   - [ADR-008](../docs/adr/ADR-008-dependency-upgrade-policy.md)：依赖升级策略——切片完成后允许 minor/patch `cargo update`；major 单独立项、单一 commit、可回滚；升级引起的数字变化与 INSTANCE.md 同 commit 回写；黑名单与 8/8 预算不变
   - [ADR-009](../docs/adr/ADR-009-state-model.md)：状态模型与架构极致化——状态五分类（真值/输入/派生/端口/瞬态）与唯一派生公式；交互模式状态机；持久化二维正交 + 时间即输入；`BlockId` 新鲜度作内容因果键、取消手工失效；`render`/`present` 分离使渲染幂等可测；公共导出 49→≤20；迁移按 S1~S5 独立可回滚
   - [ADR-010](../docs/adr/ADR-010-collab-position-v2.md)：协作位置模型——v1 冻结（不扩 mark、不上 sum-tree、不提前 block-relative）；v2 立项时远程锚点必须走 CRDT anchored position（Yjs RelativePosition / Automerge Cursor 形态），明确否决 sum-tree 与 block-relative 充当跨端锚点
+  - [ADR-011](../docs/adr/ADR-011-wgpu-deferral.md)：GPU 渲染管线（wgpu）——v1 不引入、不纳入默认路线图；理由为体积 ≤15 MiB / 传递依赖 ≤200 两条硬约束会被挤压，且实测瓶颈在 CPU（索引层占击键 p95 优化前 65%~77%、优化后 28%~36%）；四条触发条件满足时先 `spikes/` 独立实测（体积/依赖/冷启动/p95）再立项，单 commit 可回滚（对齐 ADR-008）
 
 ## 8. 违禁项清单（Skill 03 A3）
 

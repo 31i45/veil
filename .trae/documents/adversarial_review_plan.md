@@ -149,11 +149,11 @@ commit 清单：
 
 ---
 
-## 6. 不在本次修复范围
+## 6. 原「不在本次修复范围」三项 —— 现状（2026-11-03 收尾轮）
 
-- P2 bracket_pairs 跨越强调 stop 边界（预存问题，需要改 try_strikethrough 把 allow_link=false 传给 parse_until——CommonMark 允许 strikethrough 内链接，但当前实现全局预扫括号后无法 stop 边界，需要把 stop 边界传进 scan_bracket_pairs）
-- 批次 3 架构模型（Events/Block 双轨/Transaction 简化/Mark 排序不变量/line_col 语义）——等走查收官后立项
-- 批次 2-5c build_refs 增量（reparse 没有明确脏区间时先保守）——留待后续
+- P2 bracket_pairs 跨越强调 stop 边界 —— **已修**：`layer_limit` 按主循环跳过规则求本层 stop 上界后传入 `scan_bracket_pairs(limit)`；同时修复递归复用同一 parser 实例导致外层括号索引被内层覆盖的问题（`try_strikethrough` 用 `mem::take` 暂存/恢复）。测试：`strikethrough_stop_bounds_bracket_pairs`、`strikethrough_still_allows_link_inside`、`code_span_wins_over_strikethrough_stop`、`nested_strikethrough_limits_are_per_layer`。
+- 批次 3 架构模型 —— **降级为按需触发清单**（见 `veil_core_remediation_plan_v2.md` 批次 3、`INSTANCE.md` 与 ADR-011）：#3/#4 本次落地，#5 已完成，#1 由数据否决（Events 只省可忽略的枚举），#6 仅文档口径。
+- 批次 2-5c build_refs 增量 —— **不做**（每击键仅 O(#blocks) 次 kind 比较，收益微秒级；增量化需维护引用定义 first-wins 全局序，属语义风险）。触发条件：探针显示该段 >5% 才重开。
 
 ---
 

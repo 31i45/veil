@@ -1,6 +1,6 @@
 # 3e 真机走查清单与预期效果
 
-> 适用产物：`target\release\veil.exe`（单文件，5,825,536 B ≈ 5.56 MiB，含 VERSIONINFO 与图标，构建命令 `cargo build --release -p veil`）
+> 适用产物：`target\release\veil.exe`（单文件，5,840,896 B ≈ 5.57 MiB，含 VERSIONINFO 与图标，构建命令 `cargo build --release -p veil`，2026-11-04 构建，commit `4deeca9`）
 > 目的：完成阶段 3 的最后一批**人工验收项**（P4 专家清单、IME 复核、3b 打印、3c 交互、3d 分发外观、盲测前置）
 > 记录方式：每条勾 □通过 / □不通过；不通过时填「实际现象 + 复现步骤 + 严重度（阻断/高/中/低）」
 

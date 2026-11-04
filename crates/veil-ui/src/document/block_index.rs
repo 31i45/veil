@@ -103,7 +103,7 @@ impl App {
         self.index.est_rev = rev;
         // 内存回收：与块真值同源，删掉已消失的块与过期代次条目（键校验不受影响）
         let revs = self.input_state.revs;
-        self.cache.prune(&alive, &revs, &base);
+        self.cache.prune_alive(&alive, &revs, &base);
     }
 
     /// 按当前布局/公式/表格缓存重算高度与累计 top（不再枚举块）。

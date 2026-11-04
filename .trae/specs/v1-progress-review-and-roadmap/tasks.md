@@ -70,7 +70,7 @@
 | D9 | Ctrl+B 包裹/解包裹/单撤销步 | P1 | 完全（2 条：bold_wraps / bold_unwraps） | 包裹逻辑测试，真机确认单撤销步 |
 | D10 | 空选区 Ctrl+B 标记对与连按取消 | P1 | 完全（1 条：empty_selection_inserts_pair） | 逻辑测试，真机确认光标位置 |
 | D11 | Ctrl+I / Ctrl+K 行内格式与光标落点 | P1 | 完全（2 条：italic_on_cjk / link_wraps_selection） | 逻辑测试，真机确认链接光标落点 |
-| D12 | `**粗体**` 内 Ctrl+I 不误拆 | P1 | 完全（2 条：italic_on_bold_stacks / italic_on_cjk_bold） | 嵌套逻辑测试，真机确认结构正确 |
+| D12 | `**粗体**` 内 Ctrl+I 不误拆 | P1 | 完全（2 条：italic_on_bold_stacks / italic_on_cjk_bold） | 嵌套逻辑测试，真机确认结构正确。**2026-11-04 复测：编辑路径正确但渲染仍异常 → 见 walkthrough-results D12-b（未解决）** |
 | D13 | 视图菜单缩放/全屏与快捷键提示 | P2 | 完全（2 条：zoom_menu / menu_definitions） | 菜单定义测试，D1-D7 通过则 D13 自动通过 |
 | D14 | 纯视图操作不改文档/不置脏 | P1 | 完全（2 条：zoom_is_view_only / fullscreen_headless） | 脏标不变测试，真机确认 |
 

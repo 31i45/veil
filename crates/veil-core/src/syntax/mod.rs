@@ -474,6 +474,49 @@ fn block_byte_range(buf: &Buffer, start_line: usize, end_line: usize) -> Range {
     Range::new(buf.offset_of_line(start_line), end)
 }
 
+/// 一个强调结构的标记/内容区间（`*` 系 Emph、`**` 系 Strong），半开区间。
+/// 供编辑层做结构感知的 toggle 判定；渲染层仍直接消费 [`InlineNode`]。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct EmphasisSpan {
+    /// `Emph` 或 `Strong`。
+    pub kind: InlineKind,
+    /// 开标记区间。
+    pub open: Range,
+    /// 内容区间（不含标记）。
+    pub content: Range,
+    /// 闭标记区间。
+    pub close: Range,
+}
+
+/// 解析一段文本的全部强调结构，按内容长度升序（最内层优先）。
+///
+/// 编辑层据此判定「光标是否落在某个已存在的强调结构内」「选区是否恰为某个
+/// 结构的整段或内容段」——比按单个字符奇偶配对可靠：`***b***`、`*a* *b*`
+/// 中间的空白、代码段内的 `*` 等歧义都交由解析器裁决（与渲染所见完全一致）。
+/// 无强调/空文本返回空。
+pub fn emphasis_spans(text: &str) -> Vec<EmphasisSpan> {
+    let refs = RefMap::new();
+    let nodes = parse_inlines(text, 0, &refs);
+    let mut out = Vec::new();
+    collect_emphasis(&nodes, &mut out);
+    out.sort_by_key(|s| s.content.len());
+    out
+}
+
+fn collect_emphasis(nodes: &[InlineNode], out: &mut Vec<EmphasisSpan>) {
+    for n in nodes {
+        if matches!(n.kind, InlineKind::Emph | InlineKind::Strong) {
+            out.push(EmphasisSpan {
+                kind: n.kind,
+                open: Range::new(n.range.start, n.content.start),
+                content: n.content,
+                close: Range::new(n.content.end, n.range.end),
+            });
+        }
+        collect_emphasis(&n.children, out);
+    }
+}
+
 /// 引用块 inline：逐行解析 `>` 与至多一个随行空白之后的内容（base 为行绝对起点）。
 /// 属链接引用定义的行跳过——定义被引用表消耗，不产生 inline（Example 218）。
 fn quote_inlines(text: &str, base: usize, refs: &RefMap) -> Vec<InlineNode> {
@@ -521,6 +564,33 @@ mod tests {
         let s2 = Syntax::new(&b2);
         let id2 = s2.blocks()[0].id;
         assert!(s2.inlines(&b2, id2).unwrap().is_empty());
+    }
+
+    #[test]
+    fn emphasis_spans_expose_triple_star_structure() {
+        // `***b***` → Emph 在外、Strong 在内；最内层优先（内容长度升序）
+        let spans = emphasis_spans("***b***");
+        assert_eq!(spans.len(), 2);
+        assert_eq!(spans[0].kind, InlineKind::Strong);
+        assert_eq!(spans[0].open, Range::new(1, 3));
+        assert_eq!(spans[0].content, Range::new(3, 4));
+        assert_eq!(spans[0].close, Range::new(4, 6));
+        assert_eq!(spans[1].kind, InlineKind::Emph);
+        assert_eq!(spans[1].open, Range::new(0, 1));
+        assert_eq!(spans[1].content, Range::new(1, 6));
+        assert_eq!(spans[1].close, Range::new(6, 7));
+    }
+
+    #[test]
+    fn emphasis_spans_skip_code_and_unmatched_markers() {
+        // 代码段内的 `*` 不产生强调；未闭合的 `**` 同理
+        assert!(emphasis_spans("`*a*`").is_empty());
+        assert!(emphasis_spans("**未闭合").is_empty());
+        // 两段独立斜体各为一对，中间的空白不属于任何结构
+        let spans = emphasis_spans("*a* *b*");
+        assert_eq!(spans.len(), 2);
+        assert_eq!(spans[0].content, Range::new(1, 2));
+        assert_eq!(spans[1].content, Range::new(5, 6));
     }
 
     #[test]

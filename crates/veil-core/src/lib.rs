@@ -12,6 +12,6 @@ mod syntax;
 pub use range::{Bias, MarkId, Range};
 pub use session::{Edit, EditError, Events, Session};
 pub use syntax::{
-    list_signature, task_span, BlockId, BlockKind, CellAlign, InlineKind, InlineNode, Table,
-    TableCell,
+    emphasis_spans, list_signature, task_span, BlockId, BlockKind, CellAlign, EmphasisSpan,
+    InlineKind, InlineNode, Table, TableCell,
 };

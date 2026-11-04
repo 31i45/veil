@@ -1,7 +1,7 @@
 //! 编辑器交互策略核心：光标（mark）、IME preedit 视图态、文档级意图应用。
 //! 纯逻辑、零 GUI 依赖；像素级命中与坐标换算属 layout 层（机制与策略分离，INSTANCE §0）。
 
-use veil_core::{Bias, BlockId, Edit, MarkId, Range, Session};
+use veil_core::{emphasis_spans, Bias, BlockId, Edit, InlineKind, MarkId, Range, Session};
 
 /// 文档级意图（input 层翻译产出；视觉行内移动/点击由 shell 经 layout 直接换算偏移，
 /// 不走这里）。preedit 激活期间一切意图被忽略——组合期按键归 IME 所有。
@@ -508,17 +508,191 @@ impl Editor {
         }
     }
 
+    /// 选区边界落在 marker 串内部时外扩到整串：绝不把 `**` 切出半个 `*` 当成
+    /// 完整标记（真机「粗体中部分字加斜 → 整行异常粗体与星号」的根因）。
+    fn expand_over_runs(text: &str, mut s: usize, mut e: usize, ch: u8) -> (usize, usize) {
+        let b = text.as_bytes();
+        if s < b.len() && b[s] == ch {
+            while s > 0 && b[s - 1] == ch {
+                s -= 1;
+            }
+        }
+        if e > 0 && e <= b.len() && b[e - 1] == ch {
+            while e < b.len() && b[e] == ch {
+                e += 1;
+            }
+        }
+        (s, e)
+    }
+
+    /// 从 `at` 向右的连续 marker 字符数（`text[at]` 不是 marker 时为 0）。
+    fn run_right(text: &str, at: usize, ch: u8) -> usize {
+        let b = text.as_bytes();
+        let mut i = at;
+        while i < b.len() && b[i] == ch {
+            i += 1;
+        }
+        i - at
+    }
+
+    /// 从 `at` 向左的连续 marker 字符数（`text[at-1]` 不是 marker 时为 0）。
+    fn run_left(text: &str, at: usize, ch: u8) -> usize {
+        let b = text.as_bytes();
+        let mut i = at;
+        while i > 0 && b[i - 1] == ch {
+            i -= 1;
+        }
+        at - i
+    }
+
+    /// 选区恰好压在一个强调结构上时，返回 `(含标记起点, 内容起点, 内容终点, 含标记终点)`
+    /// （文档偏移）。两种命中：
+    /// 1. 选区 = 结构内容段（标记贴在选区外侧）；
+    /// 2. 结构的开/闭标记段整体落在选区首/尾的 marker 串内（选整个 `***b***`
+    ///    再按 Ctrl+B，摘掉内层 `**`，而不是再包一层）。
+    ///
+    /// 只认单行选区（调用方保证）；结构裁决交给解析器，`*a* *b*` 中间空白这类
+    /// 「两侧都有星号但其实不是同一对」的形态因此不会被误判为已包裹。
+    fn span_at_selection(
+        doc: &str,
+        s: usize,
+        e: usize,
+        kind: InlineKind,
+        ch: u8,
+    ) -> Option<(usize, usize, usize, usize)> {
+        let line_start = doc[..s].rfind('\n').map_or(0, |i| i + 1);
+        let line_end = doc[s..].find('\n').map_or(doc.len(), |i| s + i);
+        let line = &doc[line_start..line_end];
+        let lead = Self::run_right(line, s - line_start, ch);
+        let trail = Self::run_left(line, e - line_start, ch);
+        for sp in emphasis_spans(line) {
+            if sp.kind != kind || !line[sp.open.start..sp.open.end].bytes().all(|b| b == ch) {
+                continue;
+            }
+            let (rs, cs, ce, re) = (
+                sp.open.start + line_start,
+                sp.content.start + line_start,
+                sp.content.end + line_start,
+                sp.close.end + line_start,
+            );
+            if cs == s && ce == e {
+                return Some((rs, cs, ce, re));
+            }
+            if rs >= s && cs <= s + lead && re <= e && ce >= e - trail {
+                return Some((rs, cs, ce, re));
+            }
+        }
+        None
+    }
+
+    /// 在 caret 周围查找 `[text](url)` inline link 结构，返回 `(lbracket_start, close_paren_end)`
+    /// 即整个 link 的半开字节范围。只认 inline link，不认 ref link `[text][ref]`。
+    /// 简化：不支持嵌套 `[]` 或含 `]` 的 URL（返回 None 则退化为插新骨架）。
+    fn find_link_pair(text: &str, caret: usize) -> Option<(usize, usize)> {
+        // 向左扫找最近的 `[`
+        for open_bracket in (0..caret).rev() {
+            if text.as_bytes()[open_bracket] != b'[' {
+                continue;
+            }
+            // 跳过 ref link 定义 `[ref]:`
+            if text.as_bytes().get(open_bracket + 1) == Some(&b']')
+                && text.as_bytes().get(open_bracket + 2) == Some(&b':')
+            {
+                continue;
+            }
+            // 向右找对应的 `]`
+            let mut close_bracket = None;
+            let mut i = open_bracket + 1;
+            while i < text.len() {
+                let b = text.as_bytes()[i];
+                if b == b']' {
+                    close_bracket = Some(i);
+                    break;
+                }
+                if b == b'\n' {
+                    break; // link 不跨多行
+                }
+                i += 1;
+            }
+            let cb = match close_bracket {
+                Some(x) => x,
+                None => continue, // 这个 `[` 没有闭合，试更早的
+            };
+            // 验证 `]` 后紧跟 `(`
+            if cb + 1 >= text.len() || text.as_bytes()[cb + 1] != b'(' {
+                continue;
+            }
+            // 找配对的 `)`（处理 URL 内嵌括号）
+            let mut depth = 1;
+            let mut j = cb + 2; // cb = close_bracket，从 `(` 之后第一个字符开始
+            let mut closed = false;
+            while j < text.len() {
+                match text.as_bytes()[j] {
+                    b'(' => depth += 1,
+                    b')' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            j += 1; // 跨过闭合 `)`，j = 闭合 `)` 之后的半开位置
+                            closed = true;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+                j += 1;
+            }
+            if !closed {
+                continue;
+            }
+            let link_end = j;
+            // 验证 caret 在 link 区间内
+            if caret >= open_bracket && caret <= link_end {
+                // 内部不含未配对 `[` 或 `]`
+                let inner = &text[open_bracket + 1..cb];
+                if !inner.contains('[') && !inner.contains(']') {
+                    return Some((open_bracket, link_end));
+                }
+            }
+            break; // 只看最近一个 `[`
+        }
+        None
+    }
+
     /// 行内格式切换（3c-1）：有选区包裹/解包裹 marker；空选区插标记对、光标居中，
-    /// 光标恰在标记对中时删标记对。整段一次 Replace/Delete——单撤销步。
-    /// 单字符 marker 遇到 `**...**` 双标记包裹时不误判解包裹，再包一层（加粗上叠斜体）。
+    /// 光标已在某个强调结构内时删该结构的标记。整段一次 Replace——单撤销步。
+    /// 判定全部交给 veil-core 的强调解析器（`emphasis_spans`）：`***` 嵌套、
+    /// 代码段/行内其他 `*`、选区切进标记串等歧义都不再由字符奇偶猜。
     fn apply_wrap(&mut self, marker: &str) -> Option<Vec<BlockId>> {
         let m = marker.len();
+        let ch = marker.as_bytes()[0];
+        let kind = if m == 1 {
+            InlineKind::Emph
+        } else {
+            InlineKind::Strong
+        };
         if let Some(sel) = self.selection() {
-            let text = self.session.text_slice(sel)?;
-            // 严格按字节切 UTF-8 会 panic（选区首/尾是 CJK 时 `text[1..]` 不在字符边界）：
-            // 先判定「已包裹」，再取内部切片判双包裹，全程用 starts/ends_with。
-            let enclosed =
-                text.len() >= 2 * m && text.starts_with(marker) && text.ends_with(marker);
+            let doc = self.full_text()?;
+            // 选区边界压在 marker 串内部时先外扩到整串，避免把 `**` 切出半个 `*`。
+            let (s, e) = Self::expand_over_runs(&doc, sel.start, sel.end, ch);
+            let text = doc.get(s..e)?;
+            let span = if text.contains('\n') {
+                None
+            } else {
+                Self::span_at_selection(&doc, s, e, kind, ch)
+            };
+            if let Some((rs, cs, ce, re)) = span {
+                // 选区恰为某强调结构：摘掉标记、保留内容
+                let ev = self
+                    .session
+                    .apply(Edit::Replace {
+                        range: Range::new(rs, re),
+                        text: doc[cs..ce].to_string(),
+                    })
+                    .ok()?;
+                return Some(self.collapse_and_return(ev.dirty_blocks, rs + (ce - cs)));
+            }
+            // 多行选区 / 无结构命中：沿用「首尾整串 marker」判定
+            let enclosed = text.len() >= 2 * m && text.starts_with(marker) && text.ends_with(marker);
             let double_wrapped = enclosed && m == 1 && {
                 let inner = &text[m..text.len() - m];
                 inner.starts_with(marker) && inner.ends_with(marker)
@@ -526,30 +700,68 @@ impl Editor {
             let wrapped = enclosed && text.len() > 2 * m && !double_wrapped;
             let (new, at) = if wrapped {
                 let inner = &text[m..text.len() - m];
-                (inner.to_string(), sel.start + inner.len())
+                (inner.to_string(), s + inner.len())
             } else {
-                (format!("{marker}{text}{marker}"), sel.start + text.len() + 2 * m)
+                (format!("{marker}{text}{marker}"), e + 2 * m)
             };
             let ev = self
                 .session
-                .apply(Edit::Replace { range: sel, text: new })
-                .expect("选区恒合法");
+                .apply(Edit::Replace {
+                    range: Range::new(s, e),
+                    text: new,
+                })
+                .ok()?;
             return Some(self.collapse_and_return(ev.dirty_blocks, at));
         }
         let c = self.caret();
-        // 光标恰在标记对中（两侧各 m 字节均为 marker）→ 删除标记对
-        if c >= m
-            && self.session.text_slice(Range::new(c - m, c)).as_deref() == Some(marker)
-            && self.session.text_slice(Range::new(c, c + m)).as_deref() == Some(marker)
-        {
+        let text = self.full_text().unwrap_or_default();
+        // 只解析 caret 所在行：跨行/跨块配对会把别处的另一个标记当成这一对
+        // （真机曾出现「删掉大段正文」）。
+        let line_start = text[..c].rfind('\n').map_or(0, |i| i + 1);
+        let line_end = text[c..].find('\n').map_or(text.len(), |i| c + i);
+        let line = &text[line_start..line_end];
+        let local = c - line_start;
+        // emphasis_spans 已按内容长度升序（最内层优先），首个命中即最内层结构。
+        // 光标取「内容起点..闭标记末尾」：包裹后光标坍缩在末尾时再按一次也能取消。
+        let hit = emphasis_spans(line).into_iter().find(|sp| {
+            sp.kind == kind
+                && line[sp.open.start..sp.open.end].bytes().all(|b| b == ch)
+                && local >= sp.content.start
+                && local <= sp.close.end
+        });
+        if let Some(sp) = hit {
             let ev = self
                 .session
-                .apply(Edit::Delete {
-                    range: Range::new(c - m, c + m),
+                .apply(Edit::Replace {
+                    range: Range::new(line_start + sp.open.start, line_start + sp.close.end),
+                    text: line[sp.content.start..sp.content.end].to_string(),
                 })
                 .ok()?;
-            return Some(self.collapse_and_return(ev.dirty_blocks, c - m));
+            return Some(self.collapse_and_return(
+                ev.dirty_blocks,
+                line_start + sp.open.start + sp.content.len(),
+            ));
         }
+        // 兜底：caret 恰在空标记对正中（连按两次取消），且两侧 marker 串各到
+        // run 边界——绝不从更长/残缺的串里抠出两个字符。
+        let b = text.as_bytes();
+        if m <= c && c + m <= b.len() {
+            let left_ok =
+                b[c - m..c].iter().all(|&x| x == ch) && (c == m || b[c - m - 1] != ch);
+            let right_ok =
+                b[c..c + m].iter().all(|&x| x == ch) && (c + m == b.len() || b[c + m] != ch);
+            if left_ok && right_ok {
+                let ev = self
+                    .session
+                    .apply(Edit::Replace {
+                        range: Range::new(c - m, c + m),
+                        text: String::new(),
+                    })
+                    .ok()?;
+                return Some(self.collapse_and_return(ev.dirty_blocks, c - m));
+            }
+        }
+        // 兜底：插新的标记对（空选区场景，光标居中）
         let ev = self
             .session
             .apply(Edit::Insert {
@@ -560,8 +772,27 @@ impl Editor {
         Some(self.collapse_and_return(ev.dirty_blocks, c + m))
     }
 
-    /// 插入链接（3c-1）：选区作链接文本、光标入 `()`；空选区插 `[]()`、光标入 `[]`。单撤销步。
+    /// 插入链接（3c-1）：选区作链接文本、光标入 `()`；空选区插 `[]()`、光标入 `[]`。
+    /// v1 新增：无选区时 toggle 检测——caret 已在 `[text](url)` 内部则解包裹成 `text`。
     fn apply_link(&mut self) -> Option<Vec<BlockId>> {
+        // toggle 检测只在无选区时生效（有选区直接走原有包裹逻辑，避免 URL 丢失边界）
+        if self.selection().is_none() {
+            let c = self.caret();
+            let text = self.full_text().unwrap_or_default();
+            if let Some((link_start, link_end)) = Self::find_link_pair(&text, c) {
+                // 解包裹：[text](url) → text，提取 `[..]` 内部文本
+                let close_bracket = text[link_start..].find(']').map(|i| link_start + i)?;
+                let inner = text[link_start + 1..close_bracket].to_string();
+                let ev = self
+                    .session
+                    .apply(Edit::Replace {
+                        range: Range::new(link_start, link_end),
+                        text: inner,
+                    })
+                    .ok()?;
+                return Some(self.collapse_and_return(ev.dirty_blocks, link_start));
+            }
+        }
         if let Some(sel) = self.selection() {
             let text = self.session.text_slice(sel)?;
             let at = sel.start + text.len() + 3; // `[` + 文本 + `](` 之后，光标落在 `()` 内
@@ -1940,5 +2171,200 @@ mod tests {
         e.apply(Intent::InsertLink).unwrap();
         assert_eq!(e.session().serialize(), "a[]()b");
         assert_eq!(e.caret(), 2, "光标入 `[]` 便于直接输链接文本");
+    }
+
+    // ---- toggle 扩展扫描回归（真机 D9/D11/Ctrl+K 缺陷修复）----
+
+    /// D9 直接复现：选中 → Ctrl+B 一次包裹（光标坍缩到末尾）→ Ctrl+B 二次应解包裹还原
+    #[test]
+    fn bold_wrap_then_toggle_unwraps_without_reselection() {
+        let mut e = sel_ed("hello world", 0, 5);
+        // 第一次 Ctrl+B：包裹成功，光标移到末尾（caret=9），选区坍缩
+        e.apply(Intent::ToggleWrap("**")).unwrap();
+        assert_eq!(e.session().serialize(), "**hello** world");
+        assert_eq!(e.caret(), 9);
+        assert!(e.selection().is_none());
+        // 第二次 Ctrl+B：应解包裹还原（光标虽在 marker 末尾，扩展扫描仍能匹配）
+        e.apply(Intent::ToggleWrap("**")).unwrap();
+        assert_eq!(e.session().serialize(), "hello world");
+        // caret 落在解包裹文本末尾 "hello" 末尾 = 5
+        assert_eq!(e.caret(), 5);
+    }
+
+    /// D11：同 D9 但 marker=`*`（斜体）
+    #[test]
+    fn italic_wrap_then_toggle_unwraps_without_reselection() {
+        let mut e = sel_ed("hello world", 0, 5);
+        e.apply(Intent::ToggleWrap("*")).unwrap();
+        assert_eq!(e.session().serialize(), "*hello* world");
+        assert_eq!(e.caret(), 7);
+        assert!(e.selection().is_none());
+        e.apply(Intent::ToggleWrap("*")).unwrap();
+        assert_eq!(e.session().serialize(), "hello world");
+        assert_eq!(e.caret(), 5);
+    }
+
+    /// 原有空选区二次 toggle 回归保护：caret 恰在 `****` 正中
+    #[test]
+    fn empty_bold_pair_toggle_still_works_after_wrap_then_wrap() {
+        let mut e = ed("ab", 1);
+        e.apply(Intent::ToggleWrap("**")).unwrap();
+        assert_eq!(e.session().serialize(), "a****b");
+        assert_eq!(e.caret(), 3);
+        // 二次 toggle：扩展扫描找到 marker 对 → 解包裹
+        e.apply(Intent::ToggleWrap("**")).unwrap();
+        assert_eq!(e.session().serialize(), "ab");
+        // 解包裹后 caret 落在原内容区间末尾——空内容区间 inner_start=2, inner_end=2
+        // collapse_and_return 用 inner_end=2
+        assert_eq!(e.caret(), 1);
+    }
+
+    /// Ctrl+K toggle：caret 在 `[text](url)` 的 `text` 内部 → 解包裹成 `text`
+    #[test]
+    fn link_toggle_removes_when_caret_inside_brackets() {
+        let src = "see [here](http://x) now";
+        // 验证 src 结构："see [here](http://x) now"
+        // "see " (0..4), "[here]" (4..9), "(http://x)" (9..20), " now" (20..24)
+        let here_start = src.find("here").unwrap(); // = 5
+        let mut e = ed(src, here_start + 1); // caret 在 "here" 中间
+        e.apply(Intent::InsertLink).unwrap();
+        assert_eq!(e.session().serialize(), "see here now");
+        // collapse_and_return 用 link_start = 4（原 `[` 位置），解包裹后 "see " 是 4 字节，caret=4 即 "h" 位置
+        assert_eq!(e.caret(), 4);
+    }
+
+    /// Ctrl+K toggle：caret 在 `(url)` 括号内 → 同样能解包裹
+    #[test]
+    fn link_toggle_removes_when_caret_inside_url_parens() {
+        let src = "see [here](http://x) now";
+        let close_paren = src.find(')').unwrap(); // = 19
+        let mut e = ed(src, close_paren - 1); // caret 在 URL 最后一个字符 'x' 位置（18）
+        e.apply(Intent::InsertLink).unwrap();
+        assert_eq!(e.session().serialize(), "see here now");
+        assert_eq!(e.caret(), 4);
+    }
+
+    /// Ctrl+K toggle：caret 在 link 外部 → 应插新 `[]()`（原有行为，不是 toggle）
+    #[test]
+    fn link_no_toggle_when_caret_outside_link() {
+        let src = "see [here](x) more";
+        // caret 在 "see " 之后、link 之前（位置 4）
+        let mut e = ed(src, 4);
+        e.apply(Intent::InsertLink).unwrap();
+        assert_eq!(e.session().serialize(), "see []()[here](x) more");
+        assert_eq!(e.caret(), 5);
+    }
+
+    /// 复现：文档里存在多个 `**` 时，选中包裹后二次 Ctrl+B 不得跨块误配对
+    #[test]
+    fn wrap_then_toggle_does_not_pair_across_other_markers() {
+        let src = "# 混合元素测试\n\n第二行有**粗体**\n";
+        // 选中 "混合"：'#'+' '=2 字节，混=2..5，合=5..8
+        let mut e = sel_ed(src, 2, 8);
+        e.apply(Intent::ToggleWrap("**")).unwrap();
+        let after_first = e.session().serialize();
+        assert_eq!(after_first, "# **混合**元素测试\n\n第二行有**粗体**\n");
+        // 二次 Ctrl+B：只能解掉刚插入的这一对，绝不能碰后面的 `**粗体**`
+        e.apply(Intent::ToggleWrap("**")).unwrap();
+        assert_eq!(e.session().serialize(), src);
+    }
+
+    /// 回归：孤立 marker 后接 CJK 时扫描不得触发 "not a char boundary" panic
+    #[test]
+    fn wrap_toggle_scan_across_cjk_does_not_panic() {
+        // 只有一个 `**`，右侧全是 CJK，扫描需跨过多字节字符
+        let src = "**混合元素测试：未闭合的标记";
+        let mut e = ed(src, 2);
+        // 不得 panic；找不到配对的 pair → 退化为插新标记对
+        e.apply(Intent::ToggleWrap("**")).unwrap();
+        assert_eq!(e.session().serialize(), "******混合元素测试：未闭合的标记");
+    }
+
+    /// Ctrl+K toggle：空 URL 的 link `[text]()` 也能解包裹
+    #[test]
+    fn link_toggle_with_empty_url() {
+        let src = "hello [world]() end";
+        // "hello " (0..6), "[world]" (6..13), "()" (13..15), " end" (15..19)
+        let world_mid = src.find("world").unwrap() + 2; // = 6+2 = 8，在 "world" 中间
+        let mut e = ed(src, world_mid);
+        e.apply(Intent::InsertLink).unwrap();
+        assert_eq!(e.session().serialize(), "hello world end");
+        // link_start = 6，解包裹后 "hello " 是 6 字节，caret=6 即 "w" 位置
+        assert_eq!(e.caret(), 6);
+    }
+
+    // ---- 选区切进标记串 / `***` 嵌套的结构感知回归 ----
+
+    /// 真机缺陷复现：粗体里只选部分文字加斜，返回的正文里不得残留孤立星号。
+    /// 选区完全落在内容段内，包裹只作用于选区字节。
+    #[test]
+    fn partial_italic_inside_bold_keeps_surrounding_bold_intact() {
+        // `**English**`：E=2 n=3 g=4 l=5 i=6 s=7 h=8，选 "gli" = [4,7)
+        let src = "**English**";
+        let mut e = sel_ed(src, 4, 7);
+        e.apply(Intent::ToggleWrap("*")).unwrap();
+        assert_eq!(e.session().serialize(), "**En*gli*sh**");
+        assert_eq!(e.caret(), 9);
+        // 再按一次只摘掉刚插入的斜体，粗体原样
+        e.apply(Intent::ToggleWrap("*")).unwrap();
+        assert_eq!(e.session().serialize(), src);
+        assert_eq!(e.caret(), 7);
+    }
+
+    /// 真机缺陷根因：选区边界压在 `**` 内部（选了 `*English*`）时，旧判定把它
+    /// 当成完整的 `*…*` 解包裹，两侧各吃掉一个星号，残留的孤立 `*` 与同行其他
+    /// 标记错配。现在先外扩到 run 边界，按「加粗上叠斜体」处理。
+    #[test]
+    fn selection_cutting_into_bold_run_stacks_instead_of_eating_stars() {
+        let src = "**English**";
+        let mut e = sel_ed(src, 1, 10); // 只选中 `*English*`
+        e.apply(Intent::ToggleWrap("*")).unwrap();
+        assert_eq!(e.session().serialize(), "***English***");
+        assert_eq!(e.caret(), 13);
+    }
+
+    /// `***b***` 全选后 Ctrl+B：摘内层 `**` 得到 `*b*`（而不是再包一层）
+    #[test]
+    fn bold_toggle_on_triple_stars_removes_inner_pair() {
+        let src = "***b***";
+        let mut e = sel_ed(src, 0, src.len());
+        e.apply(Intent::ToggleWrap("**")).unwrap();
+        assert_eq!(e.session().serialize(), "*b*");
+        assert_eq!(e.caret(), 2);
+    }
+
+    /// `***b***` 全选后 Ctrl+I：摘外层 `*` 得到 `**b**`
+    #[test]
+    fn italic_toggle_on_triple_stars_removes_outer_pair() {
+        let src = "***b***";
+        let mut e = sel_ed(src, 0, src.len());
+        e.apply(Intent::ToggleWrap("*")).unwrap();
+        assert_eq!(e.session().serialize(), "**b**");
+        assert_eq!(e.caret(), 5);
+    }
+
+    /// 空光标路径同样按结构裁决：`***b***` 内按 Ctrl+B → `*b*`，再按 Ctrl+I → `b`
+    #[test]
+    fn caret_toggle_inside_triple_stars_uses_structure() {
+        let mut e = ed("***b***", 3);
+        e.apply(Intent::ToggleWrap("**")).unwrap();
+        assert_eq!(e.session().serialize(), "*b*");
+        assert_eq!(e.caret(), 2);
+        e.apply(Intent::ToggleWrap("*")).unwrap();
+        assert_eq!(e.session().serialize(), "b");
+        assert_eq!(e.caret(), 1);
+    }
+
+    /// 两个斜体相邻时，选中中间空白不得被误判成「已包裹」而拆掉两侧标记
+    #[test]
+    fn space_between_two_italics_is_not_unwrapped() {
+        let src = "*a* *b*";
+        // "*a*" (0..3), " " (3..4), "*b*" (4..7)
+        let mut e = sel_ed(src, 3, 4);
+        e.apply(Intent::ToggleWrap("*")).unwrap();
+        assert_eq!(e.session().serialize(), "*a** **b*");
+        // 两侧斜体未被摘除
+        assert!(e.session().serialize().starts_with("*a*"));
+        assert!(e.session().serialize().ends_with("*b*"));
     }
 }

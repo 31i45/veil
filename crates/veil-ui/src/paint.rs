@@ -8,6 +8,7 @@ use crate::view::{
     ctx_menu, node_active, outline, oversize_notice, quick_open, search, BlockLayout, Frame,
     InlineAsset, InlineImg, LayoutKey, Memo,
 };
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use veil_core::{BlockId, BlockKind, InlineKind, InlineNode, Range};
 
@@ -709,6 +710,16 @@ impl App {
                 flags,
             );
         }
+        // 视口驱动缓存回收：paint 帧末尾把 rasters/layouts/tables 从"全部累积"剪到
+        // "可见区间 + caret 块 + 块级公式图"量级，防止滚动过程中内存持续增长。
+        // 滚动是纯 view-only 操作，不触发 refresh_index → prune_alive，光栅累积永不回收。
+        let vp_range = self.visible_index_range();
+        let mut keep: HashSet<BlockId> = self.index.blocks[vp_range].iter().map(|g| g.id).collect();
+        if let Some(i) = self.caret_block_index() {
+            keep.insert(self.index.blocks[i].id);
+        }
+        keep.extend(self.cache.math_imgs.keys().copied());
+        self.cache.prune_viewport(&keep, &base);
         // 归还缓冲供下一帧复用；返回 &mut Frame 供产品层 present() 与测试断言
         self.window_state.frame = Some(frame);
         self.window_state.frame.as_mut().unwrap()

@@ -231,9 +231,9 @@ impl Cache {
             .map(|m| &m.value)
     }
 
-    /// 内存回收（不承担正确性）：删除已消失的块或已过期代次的条目。
-    /// 调用点唯一：索引重建后（`refresh_index`），与块真值同源。
-    pub(crate) fn prune(&mut self, alive: &HashSet<BlockId>, revs: &Revs, base: &BaseKey) {
+    /// 索引重建驱动的全量回收（不承担正确性）：删除已消失块或过期代次的条目。
+    /// 调用点唯一：`refresh_index → geom_fill` 末尾，与块真值同源。
+    pub(crate) fn prune_alive(&mut self, alive: &HashSet<BlockId>, revs: &Revs, base: &BaseKey) {
         let inline_key = InlineKey {
             scale_q: base.scale_q,
             theme_rev: revs.theme,
@@ -261,6 +261,20 @@ impl Cache {
         self.inline_failed.retain(|_, m| m.key == base.scale_q);
         self.inline_images.retain(|_, m| m.key == revs.image_base);
         self.image_failed.retain(|_, m| m.key == revs.image_base);
+    }
+
+    /// 视口驱动回收（paint 帧末尾调用）：把 rasters/layouts/tables 从"全部累积"剪到
+    /// "窗口 + 一屏 overscan + caret 块 + 块级公式图"量级，防止滚动过程中内存持续增长。
+    /// 其他 6 个缓存（math_imgs 除外）不动：它们要么量小要么按内容寻址跨块共享。
+    /// base_key 不匹配的条目按 `m.key.base == *base` 双重保险剪（resize/DPI 风暴期间旧键残留）。
+    pub(crate) fn prune_viewport(
+        &mut self,
+        keep: &HashSet<BlockId>,
+        base: &BaseKey,
+    ) {
+        self.layouts.retain(|id, m| keep.contains(id) && m.key.base == *base);
+        self.rasters.retain(|id, m| keep.contains(id) && m.key.base == *base);
+        self.tables.retain(|id, m| keep.contains(id) && m.matches(base));
     }
 }
 
@@ -380,7 +394,7 @@ mod tests {
             },
         );
         let alive: HashSet<BlockId> = ids.iter().copied().collect();
-        c.prune(&alive, &revs, &base);
+        c.prune_alive(&alive, &revs, &base);
         assert!(c.math_failed.contains_key(&ids[0]), "同代次保留");
         assert!(
             c.inline_math.contains_key("x"),
@@ -392,7 +406,7 @@ mod tests {
         let mut c2 = c;
         let revs2 = Revs { theme: 1, ..revs };
         let base2 = revs2.base(800.0, 1.0);
-        c2.prune(&alive, &revs2, &base2);
+        c2.prune_alive(&alive, &revs2, &base2);
         assert!(c2.inline_math.is_empty(), "公式图随主题作废");
         assert!(
             c2.math_failed.contains_key(&ids[0]),
@@ -402,7 +416,7 @@ mod tests {
         // DPI 变化：失败记忆过期
         let revs3 = Revs { theme: 1, ..revs };
         let base3 = revs3.base(800.0, 2.0);
-        c2.prune(&alive, &revs3, &base3);
+        c2.prune_alive(&alive, &revs3, &base3);
         assert!(!c2.inline_failed.contains_key("y"), "失败记忆随 DPI 作废");
         // 新会话：块相关条目过期，行内公式与失败记忆跨文档保留
         let revs4 = Revs {
@@ -419,9 +433,101 @@ mod tests {
                 value: (),
             },
         );
-        c2.prune(&alive, &revs4, &base4);
+        c2.prune_alive(&alive, &revs4, &base4);
         assert!(c2.math_failed.is_empty(), "新会话：块失效记忆作废");
         assert!(c2.inline_images.is_empty(), "新图片基准：位图作废");
         assert!(c2.inline_failed.contains_key("y"), "行内失败记忆跨文档保留");
+    }
+
+    #[test]
+    fn prune_viewport_reclaims_non_visible_rasters() {
+        let ids = ids();
+        let mut c = Cache::default();
+        let revs = Revs::default();
+        let base = revs.base(800.0, 1.0);
+        let lk0 = LayoutKey { base, reveal: 0 };
+        let lk1 = LayoutKey { base, reveal: 0 };
+
+        // 为 ids[0] 和 ids[1] 填充 rasters（值 = (像素, 宽, 高) 易构造）
+        c.rasters.insert(
+            ids[0],
+            Memo { key: lk0, value: (vec![0u8; 4], 1, 1) },
+        );
+        c.rasters.insert(
+            ids[1],
+            Memo { key: lk1, value: (vec![0u8; 4], 1, 1) },
+        );
+        assert_eq!(c.rasters.len(), 2, "预填充成功");
+
+        // 剪完只保留 ids[0]（模拟 ids[1] 滚出视口）
+        let mut keep: HashSet<BlockId> = HashSet::new();
+        keep.insert(ids[0]);
+        c.prune_viewport(&keep, &base);
+
+        assert!(c.rasters.contains_key(&ids[0]), "可见块 raster 保留");
+        assert_eq!(c.rasters.len(), 1, "非可见块 raster 被剪");
+
+        // base_key 不匹配的条目也被剪（双重保险：resize/DPI 风暴期间旧键残留）
+        let revs2 = Revs { theme: 1, ..revs };
+        let base2 = revs2.base(800.0, 1.0);
+        // 用 ids[1] 插 base2 条目（ids[0] 已经被 prune_viewport 保留且还是 base 的条目）
+        c.rasters.insert(
+            ids[1],
+            Memo { key: LayoutKey { base: base2, reveal: 0 }, value: (vec![0u8; 4], 1, 1) },
+        );
+        assert_eq!(c.rasters.len(), 2, "ids[0] base 条目 + ids[1] base2 条目");
+        let keep2: HashSet<BlockId> = [ids[0], ids[1]].into_iter().collect();
+        c.prune_viewport(&keep2, &base); // 用旧 base 剪 → ids[1] base2 被剪；ids[0] base 保留
+        assert_eq!(c.rasters.len(), 1, "base_key 不匹配的条目被剪");
+        assert!(c.rasters.contains_key(&ids[0]), "base_key 匹配的保留");
+    }
+
+    #[test]
+    fn prune_viewport_leaves_content_addressed_caches_alone() {
+        let ids = ids();
+        let mut c = Cache::default();
+        let revs = Revs::default();
+        let base = revs.base(800.0, 1.0);
+
+        // math_imgs / inline_math / inline_images 是内容寻址（tex/path），不按 BlockId 累积
+        c.math_imgs.insert(
+            ids[0],
+            Memo {
+                key: MathKey {
+                    block: ids[0],
+                    scale_q: base.scale_q,
+                    theme_rev: revs.theme,
+                    session_rev: revs.session,
+                },
+                value: MathImage {
+                    pixels: vec![0; 4],
+                    width: 1,
+                    height: 1,
+                    baseline: 1,
+                },
+            },
+        );
+        c.inline_math.insert(
+            "x".into(),
+            Memo {
+                key: InlineKey {
+                    scale_q: base.scale_q,
+                    theme_rev: revs.theme,
+                },
+                value: MathImage {
+                    pixels: vec![0; 4],
+                    width: 1,
+                    height: 1,
+                    baseline: 1,
+                },
+            },
+        );
+
+        let keep: HashSet<BlockId> = HashSet::new();
+        c.prune_viewport(&keep, &base);
+
+        // prune_viewport 只剪 raster/layout/table，其他不动
+        assert!(c.math_imgs.contains_key(&ids[0]), "块级公式图（MathKey 索引）不被 viewport prune 剪");
+        assert!(c.inline_math.contains_key("x"), "行内公式（tex 内容寻址）不被 viewport prune 剪");
     }
 }

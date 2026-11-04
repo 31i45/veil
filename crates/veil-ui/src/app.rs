@@ -299,6 +299,9 @@ pub(crate) struct WindowState {
     pub(crate) print: Option<PrintState>,
     /// 无边框全屏（3c-3）：F11/视图菜单切换；Esc 不退出（Esc 只关菜单）。
     pub(crate) fullscreen: bool,
+    /// 尺寸待处理（3e R2）：Resized 只置位，索引重建/重排合并到下一帧一次执行，
+    /// 避免拖拽窗口时逐事件全量重建造成键盘输入积压。
+    pub(crate) resize_pending: bool,
 }
 impl Default for WindowState {
     fn default() -> Self {
@@ -312,6 +315,7 @@ impl Default for WindowState {
             last_click: None,
             print: None,
             fullscreen: false,
+            resize_pending: false,
         }
     }
 }
@@ -736,6 +740,24 @@ impl App {
 }
 
 impl App {
+    /// 合并执行待处理的窗口尺寸变化（3e R2）：拖拽改尺寸时系统会连发 Resized，
+    /// 逐事件 `refresh_index`（含全部块高度估算与全文统计）会让主线程积压，
+    /// 后续方向键等输入被推迟。这里一帧最多重建/重排一次。
+    /// 返回是否实际执行了重建。
+    pub(crate) fn apply_pending_resize(&mut self) -> bool {
+        if !self.window_state.resize_pending {
+            return false;
+        }
+        self.window_state.resize_pending = false;
+        // 宽度变化：换行/列宽依赖版心宽；键中的版心宽量化值随之变化，
+        // 布局/光栅/表格自然失配，无需显式清缓存
+        self.refresh_index();
+        self.ensure_layouts_visible();
+        self.ensure_tables_visible();
+        self.recompute_geometry();
+        true
+    }
+
     /// 时间输入的唯一入口：外部轮询、系统外观、自动保存、恢复写盘都只读调用方注入的
     /// `now`（ADR-009 决策三「时间作为输入」）。顺序不可交换：外部修改须先挂起自动保存。
     fn tick(&mut self, now: Instant) {
@@ -798,12 +820,9 @@ impl ApplicationHandler for App {
                 ) {
                     let _ = s.resize(w, h);
                 }
-                // 宽度变化：换行/列宽依赖版心宽；键中的版心宽量化值随之变化，
-                // 布局/光栅/表格自然失配，无需显式清缓存
-                self.refresh_index();
-                self.ensure_layouts_visible();
-                self.ensure_tables_visible();
-                self.recompute_geometry();
+                // 重建延迟到下一帧合并执行（见 `apply_pending_resize`）：
+                // 事件风暴期间只置位，避免逐事件全量重建。
+                self.window_state.resize_pending = true;
                 self.request_redraw();
             }
             WindowEvent::ScaleFactorChanged { .. } => {
@@ -900,7 +919,11 @@ impl ApplicationHandler for App {
                 };
                 self.on_wheel(d);
             }
-            WindowEvent::RedrawRequested => self.paint(),
+            WindowEvent::RedrawRequested => {
+                // 先合并执行待处理尺寸变化，再绘制（一帧一次）
+                self.apply_pending_resize();
+                self.paint();
+            }
             // 窗口重新获得焦点：立即校验系统外观（限频轮询最多滞后 1s，此处消除等待）
             WindowEvent::Focused(true) => {
                 self.input_state.last_theme_check = None;

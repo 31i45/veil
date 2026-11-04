@@ -20,6 +20,12 @@ const TYPEWRITER_ANCHOR: f32 = 0.42;
 /// 拖放悬停压暗强度（阶段 1）：内容区背景覆盖，突出居中提示条。
 const DROP_DIM_ALPHA: u8 = 120;
 
+/// present 前置条件：帧像素数与 surface 缓冲长度一致才可整块拷贝。
+/// 最小化时 Resized 宽/高为 0，surface 不 resize 而帧被钳成 1×1，长度失配即丢帧。
+pub(crate) fn can_present(frame_len: usize, target_len: usize) -> bool {
+    frame_len == target_len
+}
+
 impl App {
     /// 补齐缺失布局（键命中则零开销）。Reveal 激活已并入布局键，光标移动后
     /// 指纹失配即自动重排，无需另设失效调用（ADR-009 决策四）。
@@ -719,6 +725,9 @@ impl App {
             return;
         };
         if let Ok(mut target) = surface.buffer_mut() {
+            if !can_present(frame.pixels.len(), target.len()) {
+                return; // 尺寸失配（最小化后 1×1 帧 vs 旧 surface）：丢帧不崩溃
+            }
             target.copy_from_slice(&frame.pixels);
             let _ = target.present();
         }

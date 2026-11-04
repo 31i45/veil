@@ -335,6 +335,26 @@ impl Editor {
         if self.preedit.is_some() {
             return None; // 组合期按键归 IME（Windows 下 IME 消费组合键，此乃兜底）
         }
+        // 非编辑的光标移动/选区变化即断开撤销分组（VS Code 语义）。此处是 Intent 分派的
+        // 唯一入口，故单点接线；编辑意图不在此列，否则连续输入会被拆成单字符撤销。
+        if matches!(
+            intent,
+            Intent::MoveLeft
+                | Intent::MoveRight
+                | Intent::WordLeft
+                | Intent::WordRight
+                | Intent::MoveDocStart
+                | Intent::MoveDocEnd
+                | Intent::SelectLeft
+                | Intent::SelectRight
+                | Intent::SelectWordLeft
+                | Intent::SelectWordRight
+                | Intent::SelectDocStart
+                | Intent::SelectDocEnd
+                | Intent::SelectAll
+        ) {
+            self.session.break_undo_group();
+        }
         // 行内格式意图自带选区语义，先于此处分流（下方两个 match 的同名臂仅为穷尽性）
         match intent {
             Intent::ToggleWrap(marker) => return self.apply_wrap(marker),
@@ -718,6 +738,10 @@ impl Editor {
         let first = line_index(&starts, sel.start);
         let last = line_index(&starts, sel.end);
         let mut out = String::with_capacity(text.len() + INDENT.len());
+        // 行级缩进按上下文选前缀：列表项/段落用 2 空格，引用行加一层 `> `。
+        // 2 空格既能让本解析器的列表 depth 加一（depth = 缩进字节/2），
+        // 又低于 4 空格的缩进代码块阈值，不会把整段段落变成 IndentedCode。
+
         let mut lines = Vec::new();
         for i in first..=last {
             let s = starts[i];
@@ -735,9 +759,10 @@ impl Editor {
                     lines.push((s, -(cut as isize)));
                 }
             } else {
-                out.push_str(INDENT);
+                let prefix = indent_prefix(content);
+                out.push_str(prefix);
                 out.push_str(line);
-                lines.push((s, INDENT.len() as isize));
+                lines.push((s, prefix.len() as isize));
             }
         }
         if lines.is_empty() {
@@ -920,12 +945,34 @@ fn detect_line_ending(text: &str) -> &'static str {
     }
 }
 
-/// 反缩进要删除的行首长度：一个制表符，或至多 4 个空格；非空白字符绝不动。
+/// 行级缩进前缀（与 `dedent_prefix_len` 对称）：引用行加一层 `> `（保持引用结构），
+/// 其余行加 2 空格。2 空格是本解析器列表 depth 的单位，且 < 4 不触发缩进代码块。
+fn indent_prefix(content: &str) -> &'static str {
+    if content.trim_start_matches([' ', '\t']).starts_with('>') {
+        "> "
+    } else {
+        "  "
+    }
+}
+
+/// 反缩进要删除的行首长度：引用行移除一层 `>` 标记（含其后一个空格），
+/// 其余行删除一个制表符或至多 4 个空格；非空白字符绝不动。
 fn dedent_prefix_len(content: &str) -> usize {
     if content.starts_with('\t') {
         return 1;
     }
-    content.bytes().take(4).take_while(|&b| b == b' ').count()
+    let ws = content.bytes().take_while(|&b| b == b' ').count();
+    if let Some(rest) = content.get(ws..) {
+        if rest.starts_with('>') {
+            let marker = if rest.as_bytes().get(1) == Some(&b' ') {
+                2
+            } else {
+                1
+            };
+            return ws + marker;
+        }
+    }
+    ws.min(4)
 }
 
 /// 行首列表/引用标记：`next` 为续行前缀（含原缩进），`empty` 表示标记后无正文。
@@ -1642,11 +1689,15 @@ mod tests {
         let mut e = ed("ab\ncd", 0);
         e.apply(Intent::SelectAll).unwrap();
         assert!(e.apply(Intent::Indent).is_some());
-        assert_eq!(e.session().serialize(), "    ab\n    cd");
-        assert_eq!(e.caret(), 13, "caret 含行首缩进（Bias::Right）");
+        assert_eq!(
+            e.session().serialize(),
+            "  ab\n  cd",
+            "段落整行缩进用 2 空格，不触发 4 空格缩进代码块"
+        );
+        assert_eq!(e.caret(), 9, "caret 含行首缩进（Bias::Right）");
         assert_eq!(
             e.selection(),
-            Some(Range::new(0, 13)),
+            Some(Range::new(0, 9)),
             "anchor 留在新行首之前，缩进仍在选区内"
         );
         e.apply(Intent::Undo).unwrap();
@@ -1658,14 +1709,14 @@ mod tests {
         let mut e = ed("a\n\nb", 0);
         e.apply(Intent::SelectAll).unwrap();
         e.apply(Intent::Indent).unwrap();
-        assert_eq!(e.session().serialize(), "    a\n\n    b", "空行不缩进");
+        assert_eq!(e.session().serialize(), "  a\n\n  b", "空行不缩进");
 
         let mut e = ed("ab\n", 0);
         e.apply(Intent::SelectAll).unwrap();
         e.apply(Intent::Indent).unwrap();
         assert_eq!(
             e.session().serialize(),
-            "    ab\n",
+            "  ab\n",
             "文末换行后的幻影行不产生尾随空格"
         );
     }
@@ -1676,8 +1727,8 @@ mod tests {
         e.set_caret(3);
         assert!(e.set_caret_extend(5));
         assert!(e.apply(Intent::Indent).is_some());
-        assert_eq!(e.session().serialize(), "ab\n    cd");
-        assert_eq!(e.selection(), Some(Range::new(3, 9)));
+        assert_eq!(e.session().serialize(), "ab\n  cd");
+        assert_eq!(e.selection(), Some(Range::new(3, 7)));
     }
 
     #[test]

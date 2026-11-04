@@ -1733,7 +1733,15 @@ impl App {
             let Some(p) = self.editor.session().prev_grapheme(c) else {
                 break;
             };
-            if self.editor.session().text_slice(Range::new(p, c)).as_deref() == Some("\n") {
+            // `\r\n` 按 UAX#29 是单个字素簇：CRLF 文档的回车也必须计入尾换行，
+            // 否则光标会落入 caret_xy 的行尾钳制、贴在上一行（I1）。
+            if matches!(
+                self.editor
+                    .session()
+                    .text_slice(Range::new(p, c))
+                    .as_deref(),
+                Some("\n" | "\r\n")
+            ) {
                 n += 1;
                 c = p;
             } else {

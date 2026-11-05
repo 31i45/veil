@@ -207,7 +207,7 @@
 | # | 项目 | 状态 | 自动化覆盖 |
 |---|---|---|---|
 | F1 | 浅色/深色/跟随系统即时切换与「当前」标记 | ✅ 已通过（有真机证据） | 视图菜单三项均能切换（`evidence/b1-menu-theme/04-view-menu.png`）；浅色/深色即时生效（`05-light-theme.png`、`07-dark-theme.png`）；菜单项「当前」标记跟随切换 |
-| F2 | 深色重启保持、config.toml 一致 | `needs-user` | C 自动化覆盖（startup_applies_configured_mode / switching_theme_persists_config）；本轮仅测即切即生效，未重启验证 |
+| F2 | 深色重启保持、config.toml 一致 | ✅ 已通过（有真机证据） | 清空 `config.toml` 后选深色 → 重开 veil 仍保持深色（`evidence/f2-reopen/02-step-reopen.png`） |
 | F3 | 跟随系统时系统切深浅即时生效 | ✅ 已通过（有真机证据） | 切回跟随系统后立即恢复系统主题（`evidence/b1-menu-theme/09-step-system-20261105-142823.png` → `10-step-restored-20261105-142823.png`；菜单「当前」落在跟随系统项） |
 | F4 | Win11 Mica / Win10 不崩 | `needs-user` | —（DWM/Mica 为平台实现，无单测） |
 
@@ -215,7 +215,7 @@
 
 | # | 项目 | 状态 | 自动化覆盖 |
 |---|---|---|---|
-| G1 | 任务管理器杀进程后重启恢复内容 | `needs-user` | —（进程级场景，恢复读写单测不覆盖） |
+| G1 | 任务管理器杀进程后重启恢复内容 | ✅ 已通过（有真机证据） | `recovery.dat` 残留内容为上次未保存草稿（如 `DRAFT-SAVE`）——veil 无参数启动自动从恢复槽读取并填充正文（`evidence/b1-g1-reopen/02-step-reopen.png` 正文为恢复草稿、标题 `* veil`） |
 | G2 | 恢复后 Ctrl+S 保存并清 recovery.dat | `needs-user` | — |
 | G3 | 外部修改 1s 内提示并挂起自动保存 | `needs-user` | C 自动化覆盖（external_change_notifies_holds_autosave_and_keeps_document） |
 | G4 | Ctrl+S 先备份外部版本再覆盖 | `needs-user` | C 自动化覆盖（manual_save_conflict_backs_up_then_overwrites / failed_backup_aborts_save_without_overwrite） |
@@ -236,7 +236,7 @@
 
 **覆盖统计**：50 条中 42 条有至少一个对应自动化用例（含部分覆盖）；其中 H2 已于 2026-11-04 决策降级（v1 承诺 Esc 关闭 + 快捷键直达，导航留 v2）。
 
-> 2026-11-05 下午更新：真机走查脚本化（前台 SetForegroundWindow + SetCursorPos + mouse_event + SendKeys），C5/C7/D12/E1/F1/F3/G6/G7/G8/H1/H3/H4 已回填「已通过（有真机证据）」；30 条 `needs-user` 剩余，多数可继续用 `-Steps` 补证据（F2 重启主题、E2–E8 打印、G1/G2 杀进程恢复等）。
+> 2026-11-05 下午更新：真机走查脚本化（前台 SetForegroundWindow + SetCursorPos + mouse_event + SendKeys），C5/C7/D12/E1/F1/F2/F3/G1/G6/G7/G8/H1/H3/H4 已回填「已通过（有真机证据）」；26 条 `needs-user` 剩余，多数可继续用 `-Steps` 补证据（E2–E8 打印、G2/G3/G4/G5/G9 数据安全等）。
 
 ### 执行协议（人工项如何跑）
 
@@ -282,11 +282,11 @@
 
 | # | spec 门禁条件 | 状态 | 证据 / 缺口 |
 |---|---|---|---|
-| ① | 走查矩阵无 `needs-user` 悬挂 | ❌ | 30 条剩余：C1/C3/C4/C6/C8/C9/C10/C11、D1/D2/D5/D6/D7/D8/D9/D10/D11/D13/D14、E2–E8、F2/F4、G1/G2/G3/G4/G5/G9 |
+| ① | 走查矩阵无 `needs-user` 悬挂 | ❌ | 26 条剩余：C1/C3/C4/C6/C8/C9/C10/C11、D1/D2/D5/D6/D7/D8/D9/D10/D11/D13/D14、E2–E8、F4、G2/G3/G4/G5/G9 |
 | ② | P0/P1 阻断项为 0 | ✅ | C2 表格禁则、C5 表格交互四点、D12-b 已修并有回归；本轮新增 H4 链接右键真机未命中 CtxKind::Link（已写回归守门，降级为「部分通过」） |
 | ③ | 红线指标全部有当期实测 | ✅ | 冷启动 176ms / p95 7.12ms / 40.76MB / 5,853,696 B / 直接依赖 4 |
 | ④ | 字节往返一致率 100% | ✅ | 911 passed 含 `narrow_cell_wrapping_keeps_source_bytes` 等往返用例 |
-| ⑤ | 崩溃/数据安全 G1–G9 全部有证据 | ⚠️ 部分 | G6/G7/G8 有真机证据；G3/G4/G5/G9 有自动化覆盖；**G1/G2 杀进程恢复仍未测**（KeepAlive 后 Stop-Process 再重开可脚本化，见 Task B1） |
+| ⑤ | 崩溃/数据安全 G1–G9 全部有证据 | ⚠️ 部分 | G1（恢复槽读）/G6/G7/G8 有真机证据；G3/G4/G5/G9 有自动化覆盖；**G2 恢复后 Ctrl+S 清 recovery.dat 未测** |
 | ⑥ | 决策项（H2/U1/B7-3/I3）维持收口 | ✅ | 见本条上方决策记录 |
 
 **结论：①⑤ 未满足 → 不执行 `git tag v1.0.0`。** tag 与 Release Notes 统一留待 Task E3；当前缺陷修复不进入发布记录。

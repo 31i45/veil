@@ -7,10 +7,12 @@
 //! - 网格点击落点 = 所在单元格内容起点（进入源码态，随后由既有块排版显示源码）。
 //! - 已知简化（同数学块）：跨渲染态表格的选区无高亮。
 
-use cosmic_text::{Align, Attrs, Buffer, Metrics, Shaping, Weight, Wrap};
+use cosmic_text::{Align, Attrs, Buffer, FontSystem, Metrics, Shaping, Weight, Wrap};
+use std::collections::BTreeMap;
 use veil_core::{CellAlign, Table, TableCell};
 
 use super::layout::{probe_break_violations, LayoutEngine};
+use super::linebreak;
 use crate::geometry::{BASE_FONT_SIZE, BASE_LINE_HEIGHT};
 
 /// 单元格水平/垂直内边距（基准字号下），随 DPI 缩放。
@@ -163,7 +165,10 @@ impl LayoutEngine {
     }
 
     /// 排版单个单元格文本，返回 (buffer, 文本宽, 文本高)。
-    /// `wrap_w` 为 None 时求内在宽（用于列宽计算）；Some 时按字形折行。
+    /// `wrap_w` 为 None 时求内在宽（用于列宽计算，保留原文）；Some 时由本地显式换行
+    /// 生成硬行（禁则感知），再用 `Wrap::None` 排版。
+    /// 不用 cosmic 的 `Wrap::WordOrGlyph`：其超窄列宽会退化为逐字形断行，
+    /// 绕过 UAX#14 的 CL/OP 禁则（真机复现 `》` 行首违规）。
     fn shape_cell(
         &mut self,
         metrics: Metrics,
@@ -172,14 +177,18 @@ impl LayoutEngine {
         wrap_w: Option<f32>,
         align: CellAlign,
     ) -> (Buffer, f32, f32) {
-        let fs = self.font_system();
-        let mut buffer = Buffer::new(fs, metrics);
         let attrs = if bold {
             Attrs::new().weight(Weight::BOLD)
         } else {
             Attrs::new()
         };
-        buffer.set_text(text, &attrs, Shaping::Advanced, None);
+        let display = match wrap_w {
+            Some(width) => wrap_cell_text(self.font_system(), metrics, &attrs, text, width),
+            None => text.to_owned(),
+        };
+        let fs = self.font_system();
+        let mut buffer = Buffer::new(fs, metrics);
+        buffer.set_text(&display, &attrs, Shaping::Advanced, None);
         let align = match align {
             CellAlign::Center => Some(Align::Center),
             CellAlign::Right => Some(Align::Right),
@@ -188,14 +197,10 @@ impl LayoutEngine {
         for line in buffer.lines.iter_mut() {
             line.set_align(align);
         }
-        buffer.set_wrap(if wrap_w.is_some() {
-            Wrap::Glyph
-        } else {
-            Wrap::None
-        });
+        buffer.set_wrap(Wrap::None);
         buffer.set_size(wrap_w, None);
         buffer.shape_until_scroll(fs, false);
-        probe_break_violations(&buffer);
+        probe_break_violations(&buffer, true);
         let mut w = 0.0f32;
         let mut h = metrics.line_height;
         for run in buffer.layout_runs() {
@@ -205,6 +210,113 @@ impl LayoutEngine {
             h = h.max(run.line_top + run.line_height);
         }
         (buffer, w, h)
+    }
+}
+
+/// 对纯文本单元格做禁则感知的贪婪折行，返回插入 `\n` 的展示文本。
+/// 只处理换行机会与标点归属，不做 shaping/bidi，属于表格展示层局部策略。
+fn wrap_cell_text(
+    fs: &mut FontSystem,
+    metrics: Metrics,
+    attrs: &Attrs,
+    text: &str,
+    width: f32,
+) -> String {
+    let mut out = String::with_capacity(text.len());
+    for (i, line) in text.split('\n').enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        out.push_str(&wrap_one_line(fs, metrics, attrs, line, width));
+    }
+    out
+}
+
+fn wrap_one_line(
+    fs: &mut FontSystem,
+    metrics: Metrics,
+    attrs: &Attrs,
+    text: &str,
+    width: f32,
+) -> String {
+    if width <= 1.0 || text.is_empty() {
+        return text.to_owned();
+    }
+    let clusters = measure_clusters(fs, metrics, attrs, text);
+    if clusters.is_empty() {
+        return text.to_owned();
+    }
+    let mut out = String::with_capacity(text.len() + 8);
+    let mut last_byte = 0usize;
+    let mut line_start = 0usize;
+    let mut line_w = 0.0f32;
+    for i in 0..clusters.len() {
+        let cluster_w = clusters[i].2;
+        if line_w + cluster_w <= width || i == line_start {
+            line_w += cluster_w;
+            continue;
+        }
+        // 从当前溢出点向前找最近的允许断点；找不到就允许悬挂，
+        // 绝不在「行首禁则 / 行尾禁则」边界断开。
+        let mut j = i;
+        let mut found = false;
+        while j > line_start {
+            if boundary_allowed(text, &clusters[j - 1], &clusters[j]) {
+                found = true;
+                break;
+            }
+            j -= 1;
+        }
+        if !found {
+            line_w += cluster_w;
+            continue;
+        }
+        let brk = clusters[j].0;
+        if brk > last_byte {
+            out.push_str(&text[last_byte..brk]);
+            out.push('\n');
+            last_byte = brk;
+        }
+        line_start = j;
+        line_w = clusters[j..=i].iter().map(|c| c.2).sum();
+    }
+    out.push_str(&text[last_byte..]);
+    out
+}
+
+/// 按字形簇测量：(起始字节, 结束字节, 宽度)，按起始字节排序。
+fn measure_clusters(
+    fs: &mut FontSystem,
+    metrics: Metrics,
+    attrs: &Attrs,
+    text: &str,
+) -> Vec<(usize, usize, f32)> {
+    let mut buffer = Buffer::new(fs, metrics);
+    buffer.set_text(text, attrs, Shaping::Advanced, None);
+    buffer.set_wrap(Wrap::None);
+    buffer.set_size(None, None);
+    buffer.shape_until_scroll(fs, false);
+    let mut map: BTreeMap<usize, (usize, f32)> = BTreeMap::new();
+    for run in buffer.layout_runs() {
+        for g in run.glyphs {
+            let entry = map.entry(g.start).or_insert((g.end, 0.0));
+            entry.0 = entry.0.max(g.end);
+            entry.1 += g.w;
+        }
+    }
+    map.into_iter()
+        .map(|(start, (end, w))| (start, end, w))
+        .collect()
+}
+
+fn boundary_allowed(text: &str, left: &(usize, usize, f32), right: &(usize, usize, f32)) -> bool {
+    let prev = text.get(left.0..left.1).and_then(|s| s.chars().next_back());
+    let next = text.get(right.0..right.1).and_then(|s| s.chars().next());
+    match (prev, next) {
+        (Some(p), Some(n)) => {
+            !linebreak::forbidden_line_end(p) && !linebreak::forbidden_line_start(n)
+        }
+        _ => true,
     }
 }
 
@@ -296,5 +408,70 @@ mod tests {
             l.cells[2].pixels.len() as u32,
             l.cells[2].pixel_w * l.cells[2].pixel_h * 4
         );
+    }
+
+    /// 每个视觉行的首/尾可见字符（跳过 WJ 与空白）。
+    fn line_edges(buffer: &Buffer) -> Vec<(Option<char>, Option<char>)> {
+        let visible = |c: char| c != '\u{2060}' && !c.is_whitespace();
+        buffer
+            .layout_runs()
+            .map(|run| {
+                let first = run.glyphs.iter().find_map(|g| {
+                    run.text
+                        .get(g.start..g.end)?
+                        .chars()
+                        .find(|&c| visible(c))
+                });
+                let last = run.glyphs.iter().rev().find_map(|g| {
+                    run.text
+                        .get(g.start..g.end)?
+                        .chars()
+                        .rev()
+                        .find(|&c| visible(c))
+                });
+                (first, last)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn narrow_cell_wrapping_keeps_source_bytes() {
+        let doc = "| 列一 | 列二 | 列三 |\n| --- | --- | --- |\n| 中文中文中文中文中文中文中文中文》后文 | 中文中文中文中文中文中文中文中文》后文 | 中文中文中文中文中文中文中文中文》后文 |\n";
+        let s = Session::open(doc);
+        let (id, _, _) = s.blocks()[0];
+        let table = s.table(id).unwrap();
+        LayoutEngine::new().layout_table(&table, 180.0, [0, 0, 0]);
+        assert_eq!(s.serialize(), doc, "展示层折行不得改写 Markdown 源码");
+    }
+
+    #[test]
+    fn narrow_cell_wrap_avoids_kinsoku_boundaries() {
+        let mut engine = LayoutEngine::new();
+        let metrics = Metrics::new(BASE_FONT_SIZE, BASE_LINE_HEIGHT);
+        // 同时覆盖 UAX 承担的 》 与需要胶水的 ……，逐档收窄版心
+        let text = "中文中文中文中文中文中文中文中文中文中文中文中文》后文……结束";
+        for width in (24..=160).step_by(2) {
+            let (buffer, _, _) = engine.shape_cell(
+                metrics,
+                text,
+                false,
+                Some(width as f32),
+                CellAlign::None,
+            );
+            for (first, last) in line_edges(&buffer) {
+                if let Some(c) = first {
+                    assert!(
+                        !linebreak::forbidden_line_start(c),
+                        "宽度 {width}px：行首出现禁则标点 {c:?}"
+                    );
+                }
+                if let Some(c) = last {
+                    assert!(
+                        !linebreak::forbidden_line_end(c),
+                        "宽度 {width}px：行尾出现禁则标点 {c:?}"
+                    );
+                }
+            }
+        }
     }
 }

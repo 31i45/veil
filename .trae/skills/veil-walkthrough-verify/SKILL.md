@@ -20,11 +20,11 @@ cargo run --release -p veil --example bench_typing
 ```
 
 验收口径（以当前基线为准，变化时同步文档）：
-- 测试：900 passed / 12 ignored，0 failed；新增用例数如实登记。
+- 测试：911 passed / 12 ignored，0 failed（共 923 项用例，`cargo test --workspace`）；新增用例数如实登记。
 - clippy：零警告。
-- release exe ≤15 MiB（基线 5,844,480 B）。
-- `keystroke_core` p95 <16 ms。
-- `git status` 确认 `crates/veil-core/**` 零改动（若本次不涉及内核）。
+- release exe ≤15 MiB（基线 5,856,256 B）。
+- `keystroke_core` p95 <16 ms（2026-11-05 实测 7.12 ms）。
+- 冷启动（进程→稳定窗口）与内存用 `walkthrough.ps1 -Measure` 采集。
 
 ## 2. 探针插桩规则
 
@@ -64,7 +64,10 @@ public class VW {
 
 - 宽度扫描优先在同一进程内连续 `SetWindowPos`（每次等待 ≥350ms），避免反复启动。
 - 覆盖窄窗口（240–800px）与深滚动（≥20 次 PageDown）；只做单页截图不足以覆盖长文。
-- 截图：`Graphics.CopyFromScreen` 取窗口矩形，存 `%TEMP%\veil-shots\<场景>-<宽度>.png`，再用图片读取工具复核。
+- 截图：先用 `PrintWindow`（`PW_RENDERFULLCONTENT=2`）；自绘窗口常返回全黑，必须做空白检测，再临时置顶 + `CopyFromScreen`（不调用 `SetForegroundWindow`）。
+- 滚动：无焦点窗口收不到 `WM_KEYDOWN`，会用截图哈希发现「画面未变」，此时回退 `WM_MOUSEWHEEL`（`wParam` 高字为 delta）；仍未变化必须记 FAIL，不能当深滚动证据。
+- 现成脚本：`tools/walkthrough.ps1 -Doc <md> -Widths 240,320,480,800 -ScrollPages 20 -Probe -Measure`，产物在 `%TEMP%\veil-walkthrough\evidence\run-*`。
+- **鼠标交互**：后台注入无效（2026-11-05 实测：`PostMessage`/`SendMessage` 的 `WM_LBUTTONDOWN` 不触发 winit 命中测试；无焦点窗口的 `WM_KEYDOWN` 也无效）。**前台注入有效**：`-Steps "click:x,y;key:{TAB};shot:name"` 用 `SetForegroundWindow` + `SetCursorPos` + `mouse_event` + `SendKeys`，执行前后保存/恢复前台窗口与光标位置（会短暂抢焦点，需用户授权）。点击坐标是 client 坐标，但本应用窗口 chrome 约 70px，line 1 对应 client y≈60（先截一张图标定再写坐标）。滚轮 `WM_MOUSEWHEEL` 是唯一有效的后台注入。拖放与系统对话框仍需人工。
 - 断言优先用探针文本；截图用于确认视觉表现，不做像素级 golden（DPI/字体差异会误报）。
 - 自动化不得抢占用户工作窗口；测试结束必须 `Stop-Process -Id $p.Id -Force`。
 
@@ -79,7 +82,7 @@ public class VW {
 常见误判：
 - 单测通过≠真机正确（单测版心与真机宽度/字体不同）。
 - 硬行首/硬行尾的标点属用户原文，不是禁则违规。
-- 表格单元格与正文使用不同换行模式（`Wrap::Glyph` vs `Wrap::WordOrGlyph`），必须分开验证。
+- 表格单元格不使用 cosmic 断行：`shape_cell` 先按字形簇测宽 + 禁则边界选断点生成硬行，再 `Wrap::None` 排版；探针以 `include_hard=true` 检查所有视觉行边界。
 - 探针误报先修探针，不要据此改产品逻辑。
 
 ## 5. 台账回填规则

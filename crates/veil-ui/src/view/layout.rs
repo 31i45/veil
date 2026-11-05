@@ -334,8 +334,9 @@ impl BlockLayout {
             }
             _ => {}
         }
-        for (i, r) in self.node_ranges.iter().enumerate() {
-            let active = inside && node_active(*r, rel);
+        for i in 0..self.node_ranges.len() {
+            // 与 collect_elide 同源：深层节点优先（caret 落在后代内则祖先不显示标记）。
+            let active = inside && deep_active_flat(&self.node_ranges, i, rel);
             fnv(&mut h, (i as u64) << 1 | active as u64);
         }
         // 图片激活位：与节点分域折叠（前置 u64::MAX 作域分隔），避免与节点索引位混淆。
@@ -610,7 +611,7 @@ impl LayoutEngine {
                 height: im.height,
             });
         }
-        probe_break_violations(&buffer);
+        probe_break_violations(&buffer, false);
         BlockLayout {
             buffer,
             map,
@@ -860,9 +861,41 @@ fn hang_shift(run: &cosmic_text::LayoutRun, width_opt: Option<f32>) -> (f32, Opt
 }
 
 /// 激活规则 v0（Reveal）：caret 落在节点闭区间内即激活（显示标记）。
-/// 闭区间让光标贴标记边缘时即展开，与 Typora 行为对齐。逐节点独立判定，嵌套各自生效。
+/// 闭区间让光标贴标记边缘时即展开，与 Typora 行为对齐。嵌套由 `collect_elide`
+/// 的「深层优先」规则裁决（见 `deep_active`），本函数只回答「区间是否覆盖 caret」。
 pub(crate) fn node_active(range: Range, caret: usize) -> bool {
     range.start <= caret && caret <= range.end
+}
+
+/// 深层节点优先：caret 落在本节点内、但不落在任何后代节点内时，本节点才显示标记。
+/// 与 Typora 对齐：光标在 `**a *b* c**` 的 `b` 上只显示内层 `*b*`，外层 `**` 保持消隐；
+/// 否则祖先与后代同时展开会出现「整行星号」的观感（D12-b）。
+fn deep_active(node: &InlineNode, caret: usize) -> bool {
+    node_active(node.range, caret) && !descendant_covers(&node.children, caret)
+}
+
+fn descendant_covers(nodes: &[InlineNode], caret: usize) -> bool {
+    nodes
+        .iter()
+        .any(|n| node_active(n.range, caret) || descendant_covers(&n.children, caret))
+}
+
+/// 扁平（先序）区间列表上的同义判定：后代在 preorder 中紧随其后且起点落在本区间内。
+/// 用于缓存指纹——`node_ranges` 只存区间不存树，但先序顺序足以还原父子关系。
+fn deep_active_flat(ranges: &[Range], i: usize, caret: usize) -> bool {
+    let r = ranges[i];
+    if !node_active(r, caret) {
+        return false;
+    }
+    for d in &ranges[i + 1..] {
+        if d.start >= r.end {
+            break; // 子树结束：后续为同级或更外层节点
+        }
+        if node_active(*d, caret) {
+            return false;
+        }
+    }
+    true
 }
 
 /// 非激活节点的标记段加入消隐集合（块相对 doc 坐标）：
@@ -870,7 +903,7 @@ pub(crate) fn node_active(range: Range, caret: usize) -> bool {
 /// Link 的 content 为可见文本，故 `](url)` 整体消隐；Code/Math 的 children 恒空。
 fn collect_elide(nodes: &[InlineNode], block: Range, caret: usize, out: &mut Vec<(usize, usize)>) {
     for n in nodes {
-        if !node_active(n.range, caret) {
+        if !deep_active(n, caret) {
             let rs = n.range.start.saturating_sub(block.start);
             let cs = n.content.start.saturating_sub(block.start);
             let ce = n.content.end.saturating_sub(block.start);
@@ -952,7 +985,9 @@ fn build_typo_subs(body: &str) -> Vec<Sub> {
 /// 真机断行探针：仅在 `VEIL_BREAK_PROBE` 设置时输出行首/行尾禁则违规。
 /// 走 stderr（`2> probe.txt` 收集），默认路径只读一次环境变量，无逐块开销。
 /// 用途：C2 归因——区分「胶水集合不全」与「断行器绕过断点」。
-pub(crate) fn probe_break_violations(buffer: &Buffer) {
+/// `include_hard=true` 用于表格单元格：单元格折行由本地显式换行实现，
+/// 所有视觉行边界都应检查（仍排除首行首、末行尾）。
+pub(crate) fn probe_break_violations(buffer: &Buffer, include_hard: bool) {
     use std::sync::OnceLock;
     static ENABLED: OnceLock<bool> = OnceLock::new();
     if !*ENABLED.get_or_init(|| std::env::var_os("VEIL_BREAK_PROBE").is_some()) {
@@ -961,10 +996,18 @@ pub(crate) fn probe_break_violations(buffer: &Buffer) {
     let runs: Vec<_> = buffer.layout_runs().collect();
     for (i, run) in runs.iter().enumerate() {
         // `run.text` 是整条逻辑行（硬换行切分）的文本，字形 start/end 才是本视觉行片段。
-        // 只有「同一逻辑行内存在前/后视觉行」时，首/尾才由折行决定；
+        // 正文默认只有「同一逻辑行内存在前/后视觉行」时，首/尾才由折行决定；
         // 硬行首/硬行尾的标点属用户原文，不构成禁则违规。
-        let wrapped_start = i > 0 && runs[i - 1].line_i == run.line_i;
-        let wrapped_end = runs.get(i + 1).is_some_and(|next| next.line_i == run.line_i);
+        let wrapped_start = if include_hard {
+            i > 0
+        } else {
+            i > 0 && runs[i - 1].line_i == run.line_i
+        };
+        let wrapped_end = if include_hard {
+            i + 1 < runs.len()
+        } else {
+            runs.get(i + 1).is_some_and(|next| next.line_i == run.line_i)
+        };
         let visible = |c: char| c != '\u{2060}' && !c.is_whitespace() && c != '\n' && c != '\r';
         let first = run
             .glyphs
@@ -1376,6 +1419,19 @@ mod tests {
     }
 
     #[test]
+    fn nested_emphasis_reveals_only_innermost_markers() {
+        // D12-b 真机形态：`**Chi*n*ese**` 光标在 `n` 上时，`**` 不得同时显形
+        let (_, l) = layout_with_caret("**Chi*n*ese**", 6, 400.0);
+        assert_eq!(l.layout_text(), "Chi*n*ese");
+        // 光标在粗体正文（内层之外）→ 只显外层标记
+        let (_, l) = layout_with_caret("**Chi*n*ese**", 3, 400.0);
+        assert_eq!(l.layout_text(), "**Chinese**");
+        // 光标在块外 → 全部消隐
+        let (_, l) = layout_with_caret("**Chi*n*ese**", usize::MAX, 400.0);
+        assert_eq!(l.layout_text(), "Chinese");
+    }
+
+    #[test]
     fn reveal_boundary_offsets_count_as_inside() {
         // 激活规则为闭区间：caret 贴 range.start(2)/range.end(7) 均激活
         for caret in [2, 7] {
@@ -1397,12 +1453,12 @@ mod tests {
 
     #[test]
     fn reveal_nested_nodes_reveal_independently() {
-        // 「**a *b* c**」：caret=3 在外层内容、内层（[4,7)）外 → 仅内层标记消隐
+        // 「**a *b* c**」：caret=3 在外层内容、内层（[4,7)）外 → 仅外层显标记
         let (_, l) = layout_with_caret("**a *b* c**", 3, 300.0);
         assert_eq!(l.layout_text(), "**a b c**");
-        // caret=5 进内层：两层均激活，全显
+        // caret=5 进内层：深层优先，只显内层 `*b*`，外层 `**` 保持消隐（D12-b）
         let (_, l) = layout_with_caret("**a *b* c**", 5, 300.0);
-        assert_eq!(l.layout_text(), "**a *b* c**");
+        assert_eq!(l.layout_text(), "a *b* c");
     }
 
     #[test]

@@ -38,10 +38,10 @@
   - [x] SubTask 0.6.3: 击键延迟 bench 无回退：`keystroke_core` p95 1.07 ms <16 ms（bench_typing，5005 块）
   - [x] SubTask 0.6.4: 确认 `crates/veil-core/**` 零改动，`veil-ui` 外部依赖数仍为 4（未新增任何依赖）
 
-- [ ] Task 0.7: 修复表格单元格禁则（待用户确认后执行）
-  - [ ] SubTask 0.7.1: `shape_cell` 由 `Wrap::Glyph` 改为禁则感知断行，并对单元格文本施加 `linebreak::glue_spans` 同一策略
-  - [ ] SubTask 0.7.2: 新增回归：窄列宽长 CJK 单元格的行首/行尾不出现禁则标点（覆盖 `》` 复现场景）
-  - [ ] SubTask 0.7.3: 与 C5 表格交互一并真机复测；全量测试 / clippy / 体积门禁通过
+- [x] Task 0.7: 修复表格单元格禁则（待用户确认后执行）
+  - [x] SubTask 0.7.1: `shape_cell` 改为禁则感知断行：本地按字形簇测宽 + 禁则边界选断点生成硬行，再以 `Wrap::None` 排版；`Wrap::WordOrGlyph` 在超窄列宽会退化为逐字形断行，不可用
+  - [x] SubTask 0.7.2: 新增回归：窄列宽长 CJK 单元格的行首/行尾不出现禁则标点（覆盖 `》` 复现场景），并断言源码逐字节不变
+  - [x] SubTask 0.7.3: 与 C5 表格交互一并真机复测；全量测试 / clippy / 体积门禁通过（探针 0 违规，见 `drive-v1-excellence` Task C1）
 
 ## 阶段 1：行盒影子对拍（触发式，暂不批准）
 

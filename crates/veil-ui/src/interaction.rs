@@ -1768,10 +1768,26 @@ impl App {
             .iter()
             .position(|g| g.range.start <= caret && caret <= g.range.end)
         {
-            let (id, start, end, top) = {
+            let (id, start, end, top, is_table) = {
                 let g = &self.index.blocks[i];
-                (g.id, g.range.start, g.range.end, g.top)
+                (
+                    g.id,
+                    g.range.start,
+                    g.range.end,
+                    g.top,
+                    g.kind == BlockKind::Table,
+                )
             };
+            // 网格态表格：源码排版坐标与网格几何不一致，光标改画在活动单元格内容起点
+            // （与点击落点、Tab 落点同源，避免「悬空光标」）。
+            if is_table
+                && self.caret_in_table_cell(id)
+                && self.table_shows_grid(id, &Range::new(start, end))
+            {
+                if let Some((x, y, h)) = self.table_caret_xy(id, top, caret) {
+                    return (x, y, h);
+                }
+            }
             // Enter 后新行尚未成块：布局里没有对应视觉行，钳回末字形会让光标/preedit/
             // IME 候选框贴在上一段末尾（真机缺陷 ①③）。改为锚到文本将出现的位置：
             // 1 个尾换行 = 同段下一视觉行；≥2 = 新段顶边（块底 + 段距）。

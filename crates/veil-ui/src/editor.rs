@@ -103,10 +103,6 @@ impl Editor {
         &self.session
     }
 
-    pub fn session_mut(&mut self) -> &mut Session {
-        &mut self.session
-    }
-
     /// 断开撤销分组（最小门面）：鼠标落光标/划选前由交互层调用，
     /// 与键盘移动/扩选路径的断组对齐（VS Code 语义）。
     pub(crate) fn break_undo_group(&mut self) {
@@ -272,6 +268,28 @@ impl Editor {
             self.dirty = true;
         }
         r
+    }
+
+    /// 表格 Ctrl+Enter：整块替换追加空行，并把光标落到新行首单元格。
+    /// 所有表格结构编辑必须经此门面（脏标、撤销分组、光标位置同源），
+    /// 视图层不得再直接 `session_mut().apply`。
+    pub(crate) fn append_table_row(
+        &mut self,
+        block: Range,
+        new_src: String,
+        caret_in_block: usize,
+    ) -> Option<Vec<BlockId>> {
+        self.session.break_undo_group();
+        let ev = self
+            .session
+            .apply(Edit::Replace {
+                range: block,
+                text: new_src,
+            })
+            .ok()?;
+        self.dirty = true;
+        let _ = self.set_caret(block.start + caret_in_block);
+        Some(ev.dirty_blocks)
     }
 
     /// 切换任务列表复选框（P3-5，点击方框）。`state_range` 为状态字符（` `/`x`）的
@@ -2278,6 +2296,35 @@ mod tests {
         // 不得 panic；找不到配对的 pair → 退化为插新标记对
         e.apply(Intent::ToggleWrap("**")).unwrap();
         assert_eq!(e.session().serialize(), "******混合元素测试：未闭合的标记");
+    }
+
+    #[test]
+    fn append_table_row_sets_dirty_and_moves_caret_into_new_row() {
+        let src = "| a | b |\n|---|---|\n| c | d |\n";
+        let new_src = "| a | b |\n|---|---|\n| c | d |\n|  |  |\n";
+        let body = new_src.trim_end_matches(['\n', '\r']);
+        let row_start = body.rfind('\n').map(|i| i + 1).unwrap_or(0);
+        let caret_in_block = body[row_start..]
+            .find('|')
+            .map(|i| row_start + i + 2)
+            .unwrap_or(row_start);
+
+        let mut e = ed(src, 0);
+        let dirty = e
+            .append_table_row(Range::new(0, src.len()), new_src.to_string(), caret_in_block)
+            .expect("表格追加行应成功");
+
+        assert!(!dirty.is_empty(), "追加行必须返回脏块");
+        assert!(e.is_dirty(), "表格结构编辑必须置脏标（自动保存/崩溃恢复依赖）");
+        assert_eq!(e.session().serialize(), new_src);
+        assert_eq!(e.caret(), caret_in_block, "光标落在新行首单元格");
+        assert!(
+            new_src[caret_in_block..].starts_with(" |"),
+            "光标位置应位于空单元格内容处"
+        );
+
+        e.apply(Intent::Undo).expect("追加行可撤销");
+        assert_eq!(e.session().serialize(), src, "追加行是单撤销步");
     }
 
     /// Ctrl+K toggle：空 URL 的 link `[text]()` 也能解包裹

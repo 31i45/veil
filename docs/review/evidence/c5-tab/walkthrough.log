@@ -1,0 +1,42 @@
+[14:22:38.563] INFO  exe=target\release\veil.exe doc=C:\Users\31i45\AppData\Local\Temp\veil-walkthrough\13-表格交互.md probe=False shots=C:\Users\31i45\AppData\Local\Temp\veil-walkthrough\evidence\c5-tab
+[14:22:38.638] INFO  已启动 PID=14980
+[14:22:38.794] INFO  主窗口就绪：句柄=983156，启动到窗口 201 ms
+[14:22:40.317] INFO  宽度 640px 截图：C:\Users\31i45\AppData\Local\Temp\veil-walkthrough\evidence\c5-tab\01-w640-p0-20261105-142238.png（PrintWindow=True）
+[14:22:40.937] INFO  点击 100,60
+[14:22:40.965] INFO  步骤截图：C:\Users\31i45\AppData\Local\Temp\veil-walkthrough\evidence\c5-tab\02-step-t0-20261105-142238.png
+[14:22:41.411] INFO  按键 {TAB}
+[14:22:41.439] INFO  步骤截图：C:\Users\31i45\AppData\Local\Temp\veil-walkthrough\evidence\c5-tab\03-step-t1-20261105-142238.png
+[14:22:41.882] INFO  按键 {TAB}
+[14:22:41.907] INFO  步骤截图：C:\Users\31i45\AppData\Local\Temp\veil-walkthrough\evidence\c5-tab\04-step-t2-20261105-142238.png
+[14:22:42.336] INFO  按键 {TAB}
+[14:22:42.368] INFO  步骤截图：C:\Users\31i45\AppData\Local\Temp\veil-walkthrough\evidence\c5-tab\05-step-t3-20261105-142238.png
+[14:22:42.802] INFO  按键 {TAB}
+[14:22:42.827] INFO  步骤截图：C:\Users\31i45\AppData\Local\Temp\veil-walkthrough\evidence\c5-tab\06-step-t4-20261105-142238.png
+[14:22:43.252] INFO  按键 {TAB}
+[14:22:43.273] INFO  步骤截图：C:\Users\31i45\AppData\Local\Temp\veil-walkthrough\evidence\c5-tab\07-step-t5-20261105-142238.png
+[14:22:43.704] INFO  按键 {TAB}
+[14:22:43.735] INFO  步骤截图：C:\Users\31i45\AppData\Local\Temp\veil-walkthrough\evidence\c5-tab\08-step-t6-20261105-142238.png
+[14:22:43.743] INFO  交互步骤完成，前台与鼠标位置已还原
+[14:22:43.780] INFO  已结束 PID=14980
+[14:22:43.785] INFO  证据目录：C:\Users\31i45\AppData\Local\Temp\veil-walkthrough\evidence\c5-tab
+[14:22:47.135] INFO  exe=target\release\veil.exe doc=C:\Users\31i45\AppData\Local\Temp\veil-walkthrough\13-表格交互.md probe=False shots=C:\Users\31i45\AppData\Local\Temp\veil-walkthrough\evidence\c5-tab
+[14:22:47.178] INFO  已启动 PID=12412
+[14:22:47.329] INFO  主窗口就绪：句柄=2165464，启动到窗口 178 ms
+[14:22:48.865] INFO  宽度 640px 截图：C:\Users\31i45\AppData\Local\Temp\veil-walkthrough\evidence\c5-tab\01-w640-p0-20261105-142246.png（PrintWindow=True）
+[14:22:49.483] INFO  点击 100,60
+[14:22:49.512] INFO  步骤截图：C:\Users\31i45\AppData\Local\Temp\veil-walkthrough\evidence\c5-tab\02-step-t0-20261105-142246.png
+[14:22:49.953] INFO  按键 {TAB}
+[14:22:49.981] INFO  步骤截图：C:\Users\31i45\AppData\Local\Temp\veil-walkthrough\evidence\c5-tab\03-step-t1-20261105-142246.png
+[14:22:50.439] INFO  按键 {TAB}
+[14:22:50.464] INFO  步骤截图：C:\Users\31i45\AppData\Local\Temp\veil-walkthrough\evidence\c5-tab\04-step-t2-20261105-142246.png
+[14:22:50.906] INFO  按键 {TAB}
+[14:22:50.933] INFO  步骤截图：C:\Users\31i45\AppData\Local\Temp\veil-walkthrough\evidence\c5-tab\05-step-t3-20261105-142246.png
+[14:22:51.373] INFO  按键 {TAB}
+[14:22:51.396] INFO  步骤截图：C:\Users\31i45\AppData\Local\Temp\veil-walkthrough\evidence\c5-tab\06-step-t4-20261105-142246.png
+[14:22:51.826] INFO  按键 {TAB}
+[14:22:51.853] INFO  步骤截图：C:\Users\31i45\AppData\Local\Temp\veil-walkthrough\evidence\c5-tab\07-step-t5-20261105-142246.png
+[14:22:52.292] INFO  按键 {TAB}
+[14:22:52.320] INFO  步骤截图：C:\Users\31i45\AppData\Local\Temp\veil-walkthrough\evidence\c5-tab\08-step-t6-20261105-142246.png
+[14:22:52.327] INFO  交互步骤完成，前台与鼠标位置已还原
+[14:22:52.359] INFO  已结束 PID=12412
+[14:22:52.364] INFO  证据目录：C:\Users\31i45\AppData\Local\Temp\veil-walkthrough\evidence\c5-tab

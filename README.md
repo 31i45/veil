@@ -1,6 +1,14 @@
 # Veil
 
+![Veil](icons/veil.ico)
+
+[![Version](https://img.shields.io/badge/version-1.0.0-blue.svg)](https://github.com/veil/veil/releases)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Rust](https://img.shields.io/badge/rust-stable-orange.svg)](https://www.rust-lang.org/)
+
 Veil 是一款 Windows 桌面 Markdown 所见即所得编辑器：纯 Rust 实现，无 webview、无 Chromium/WebView2 进程、无外部运行时。
+
+**单机单用户 · 纯离线 · 永不协作** — 见 `CHANGELOG.md` 的 v1.0.0 版本记录。
 
 ## 架构
 

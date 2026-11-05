@@ -10,7 +10,7 @@
 use cosmic_text::{Align, Attrs, Buffer, Metrics, Shaping, Weight, Wrap};
 use veil_core::{CellAlign, Table, TableCell};
 
-use super::layout::LayoutEngine;
+use super::layout::{probe_break_violations, LayoutEngine};
 use crate::geometry::{BASE_FONT_SIZE, BASE_LINE_HEIGHT};
 
 /// 单元格水平/垂直内边距（基准字号下），随 DPI 缩放。
@@ -195,6 +195,7 @@ impl LayoutEngine {
         });
         buffer.set_size(wrap_w, None);
         buffer.shape_until_scroll(fs, false);
+        probe_break_violations(&buffer);
         let mut w = 0.0f32;
         let mut h = metrics.line_height;
         for run in buffer.layout_runs() {

@@ -13,6 +13,7 @@ use cosmic_text::{
 use veil_core::{task_span, BlockKind, InlineNode, Range};
 
 use super::highlight::{highlight, to_styles};
+use super::linebreak;
 use super::style::{style_spans, Style};
 use crate::geometry::{BASE_FONT_SIZE, BASE_LINE_HEIGHT};
 use crate::theme::SyntaxColors;
@@ -609,6 +610,7 @@ impl LayoutEngine {
                 height: im.height,
             });
         }
+        probe_break_violations(&buffer);
         BlockLayout {
             buffer,
             map,
@@ -908,47 +910,11 @@ fn cjk_boundary_skip(prev: char, next: char) -> bool {
         || (next as u32) == 0x3000
 }
 
-/// 行首禁则标点表（GB/T 15834 通行集，回归测试的判定基准）：
-/// 这些字符不允许出现在视觉行行首。UAX #14 的 CL/CP/EX/NS 类已覆盖主体
-/// （Wrap::WordOrGlyph 天然遵守）；……/——/·/～ 属中文特有补集，由 WJ 胶水段兜底。
-/// 注意：`…`/`—`/`·`/`～` 同时是 kinsoku 胶水字符（见 is_glue_punct）。
-#[cfg(test)]
-const LINE_START_FORBIDDEN: &[char] = &[
-    '\u{3002}', '\u{3001}', '\u{FF0C}', '\u{FF0E}', '\u{FF1B}', '\u{FF1A}', '\u{FF1F}',
-    '\u{FF01}', '\u{2026}', '\u{2025}', '\u{2014}', '\u{00B7}', '\u{FF5E}', '\u{FF09}',
-    '\u{3011}', '\u{300B}', '\u{300D}', '\u{300F}', '\u{3015}', '\u{3009}', '\u{FF3D}',
-    '\u{FF5D}', '\u{201D}', '\u{2019}',
-];
-
-/// 行尾禁则标点表（开括号/开引号）：不允许出现在视觉行行尾。
-/// UAX #14 的 OP 类（× 后断）全覆盖，无需额外机制。
-#[cfg(test)]
-const LINE_END_FORBIDDEN: &[char] = &[
-    '\u{FF08}', '\u{3010}', '\u{300A}', '\u{300C}', '\u{300E}', '\u{3014}', '\u{3008}',
-    '\u{FF3B}', '\u{FF5B}', '\u{201C}', '\u{2018}',
-];
-
-/// 左粘胶水字符（行首禁则补集）：省略号/破折号/间隔号/闭引号——UAX #14 默认
-/// 允许在其前断开（…… IN、—— B-A、·/～ ID、”’ QU），中文排版不允许。
-fn is_glue_left(ch: char) -> bool {
-    matches!(
-        ch,
-        '\u{2025}' | '\u{2026}' | '\u{2014}' | '\u{00B7}' | '\u{FF5E}' | '\u{201D}' | '\u{2019}'
-    )
-}
-
-/// 右粘胶水字符（行尾禁则补集）：开引号——UAX #14 的 QU 类允许在其后断开。
-fn is_glue_right(ch: char) -> bool {
-    matches!(ch, '\u{201C}' | '\u{2018}')
-}
-
-/// kinsoku 胶水字符 = 左粘 ∪ 右粘。排版层把含这些字符的连续 run 替换为
-/// 「粘连侧加 WJ(U+2060)」的等价文本，与相邻字粘成不可分单元
-/// （源码零改动，与 CJK 间距同属排版层 Sub 替换）。
+/// kinsoku 胶水字符 = 左粘 ∪ 右粘（判定与禁则表同源于 `view::linebreak`）。
 /// 已知简化：fallback 字体链中 WJ 有约 1.3px 的零墨 advance（非 tofu），
 /// 每个粘连点带来发丝级缝隙；`word_joiner_adds_no_advance` 守住 tofu 退化。
 fn is_glue_punct(ch: char) -> bool {
-    is_glue_left(ch) || is_glue_right(ch)
+    linebreak::glue_before(ch) || linebreak::glue_after(ch)
 }
 
 /// 中文排版替换表 v0 = kinsoku 胶水段 + 中西文自动间距。
@@ -959,34 +925,8 @@ fn build_typo_subs(body: &str) -> Vec<Sub> {
     let mut subs = Vec::new();
     // 第一趟：kinsoku 胶水段。左粘字符前插 WJ（文首/硬行首无需，与换行粘连本就无断点）、
     // 右粘字符后插 WJ（行尾同理）；WJ×/×WJ 禁断使 run 内不断、与相邻字不断。
-    let chars: Vec<(usize, char)> = body.char_indices().collect();
-    let mut i = 0;
-    while i < chars.len() {
-        if !is_glue_punct(chars[i].1) {
-            i += 1;
-            continue;
-        }
-        let start = chars[i].0;
-        let mut j = i;
-        while j < chars.len() && is_glue_punct(chars[j].1) {
-            j += 1;
-        }
-        let end = chars.get(j).map(|&(p, _)| p).unwrap_or(body.len());
-        let mut fill = String::with_capacity(end - start + 6 * (j - i));
-        for (k, &(p, c)) in chars[i..j].iter().enumerate() {
-            let idx = i + k;
-            let prev_nl = idx > 0 && matches!(chars[idx - 1].1, '\n' | '\r');
-            if is_glue_left(c) && p > 0 && !prev_nl {
-                fill.push('\u{2060}');
-            }
-            fill.push(c);
-            let next_nl = matches!(chars.get(idx + 1).map(|&(_, c)| c), Some('\n' | '\r'));
-            if is_glue_right(c) && !next_nl {
-                fill.push('\u{2060}');
-            }
-        }
-        subs.push(Sub::fill(start, end, fill));
-        i = j;
+    for g in linebreak::glue_spans(body) {
+        subs.push(Sub::fill(g.start, g.end, g.fill));
     }
     // 第二趟：CJK↔ASCII 边界间距——把「另一侧的首字符」替换为「空格+原字符」，
     // 让 OffsetMap 自动吸收新增字节。胶水字符两侧跳过（省略号/破折号是中文标点，
@@ -1007,6 +947,51 @@ fn build_typo_subs(body: &str) -> Vec<Sub> {
         subs.push(Sub::fill(j, j + nl, format!(" {next}")));
     }
     subs
+}
+
+/// 真机断行探针：仅在 `VEIL_BREAK_PROBE` 设置时输出行首/行尾禁则违规。
+/// 走 stderr（`2> probe.txt` 收集），默认路径只读一次环境变量，无逐块开销。
+/// 用途：C2 归因——区分「胶水集合不全」与「断行器绕过断点」。
+pub(crate) fn probe_break_violations(buffer: &Buffer) {
+    use std::sync::OnceLock;
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    if !*ENABLED.get_or_init(|| std::env::var_os("VEIL_BREAK_PROBE").is_some()) {
+        return;
+    }
+    let runs: Vec<_> = buffer.layout_runs().collect();
+    for (i, run) in runs.iter().enumerate() {
+        // `run.text` 是整条逻辑行（硬换行切分）的文本，字形 start/end 才是本视觉行片段。
+        // 只有「同一逻辑行内存在前/后视觉行」时，首/尾才由折行决定；
+        // 硬行首/硬行尾的标点属用户原文，不构成禁则违规。
+        let wrapped_start = i > 0 && runs[i - 1].line_i == run.line_i;
+        let wrapped_end = runs.get(i + 1).is_some_and(|next| next.line_i == run.line_i);
+        let visible = |c: char| c != '\u{2060}' && !c.is_whitespace() && c != '\n' && c != '\r';
+        let first = run
+            .glyphs
+            .iter()
+            .find_map(|g| run.text.get(g.start..g.end)?.chars().find(|&c| visible(c)));
+        let last = run
+            .glyphs
+            .iter()
+            .rev()
+            .find_map(|g| run.text.get(g.start..g.end)?.chars().rev().find(|&c| visible(c)));
+        if let Some(c) = first {
+            if wrapped_start && linebreak::forbidden_line_start(c) {
+                eprintln!(
+                    "[break-probe] 行首禁则违规 line={} char={c:?} text={:?}",
+                    run.line_i, run.text
+                );
+            }
+        }
+        if let Some(c) = last {
+            if wrapped_end && linebreak::forbidden_line_end(c) {
+                eprintln!(
+                    "[break-probe] 行尾禁则违规 line={} char={c:?} text={:?}",
+                    run.line_i, run.text
+                );
+            }
+        }
+    }
 }
 
 /// 构造排版文本与坐标映射：行尾 `\r`、非激活节点标记、块级替换统一进替换表。
@@ -1270,6 +1255,7 @@ fn attrs_of(kind: BlockKind, st: Style) -> Attrs<'static> {
 
 #[cfg(test)]
 mod tests {
+    use super::linebreak::{LINE_END_FORBIDDEN, LINE_START_FORBIDDEN};
     use super::*;
     use veil_core::Session;
 
@@ -2109,21 +2095,23 @@ mod tests {
         let w10 = single_line_width(&mut eng, &prefix);
         for &p in LINE_START_FORBIDDEN {
             let text = format!("{prefix}{p}{}{}", "中".repeat(4), "文".repeat(8));
-            // 版心恰好容纳 10 字：无禁则时第 11 位标点必顶到下一行行首
-            let l = layout_paragraph(&mut eng, &text, w10 + 1.0);
-            let edges = visual_line_edges(&l);
-            assert!(edges.len() >= 2, "{p:?} 处应折行: {edges:?}");
-            for (fc, _) in &edges {
-                assert!(
-                    !LINE_START_FORBIDDEN.contains(fc),
-                    "行首禁则违反: {fc:?} 出现在行首（测试标点 {p:?}）"
-                );
-            }
-            for (_, lc) in &edges {
-                assert!(
-                    !LINE_END_FORBIDDEN.contains(lc),
-                    "行尾禁则违反: {lc:?} 出现在行尾（测试标点 {p:?}）"
-                );
+            for delta in [-4.0, 0.0, 4.0] {
+                // 版心恰好容纳 10 字：无禁则时第 11 位标点必顶到下一行行首
+                let l = layout_paragraph(&mut eng, &text, w10 + 1.0 + delta);
+                let edges = visual_line_edges(&l);
+                assert!(edges.len() >= 2, "{p:?} 处应折行: {edges:?}");
+                for (fc, _) in &edges {
+                    assert!(
+                        !LINE_START_FORBIDDEN.contains(fc),
+                        "行首禁则违反: {fc:?} 出现在行首（测试标点 {p:?}，宽 {delta:+.1}）"
+                    );
+                }
+                for (_, lc) in &edges {
+                    assert!(
+                        !LINE_END_FORBIDDEN.contains(lc),
+                        "行尾禁则违反: {lc:?} 出现在行尾（测试标点 {p:?}，宽 {delta:+.1}）"
+                    );
+                }
             }
         }
     }

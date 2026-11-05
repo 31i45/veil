@@ -1,0 +1,53 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo builds
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build release binary
+        run: cargo build --release -p veil
+
+      - name: Report artifact size
+        run: |
+          $exe = Get-Item target\release\veil.exe
+          Write-Host "Veil Release: $([math]::Round($exe.Length/1MB, 2)) MiB ($($exe.Length) bytes)"
+          $vi = $exe.VersionInfo
+          Write-Host "Version: $($vi.ProductVersion) / FileVersion: $($vi.FileVersion)"
+
+      - name: Stage release bundle
+        run: |
+          New-Item -ItemType Directory -Force veil-artifact | Out-Null
+          Copy-Item target\release\veil.exe veil-artifact\
+          if (Test-Path target\release\veil.pdb) { Copy-Item target\release\veil.pdb veil-artifact\ }
+          Copy-Item README.md, LICENSE, CHANGELOG.md veil-artifact\
+          if (Test-Path icons\veil.ico) {
+            New-Item -ItemType Directory -Force veil-artifact\icons | Out-Null
+            Copy-Item icons\veil.ico veil-artifact\icons\
+          }
+          Compress-Archive -Path veil-artifact\* -DestinationPath veil-windows-x86_64.zip -Force
+          $zip = Get-Item veil-windows-x86_64.zip
+          Write-Host "Archive: $($zip.FullName) ($([math]::Round($zip.Length/1MB, 2)) MiB, $($zip.Length) bytes)"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: veil-windows-x86_64.zip

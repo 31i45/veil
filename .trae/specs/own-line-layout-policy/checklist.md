@@ -17,7 +17,7 @@
 - [x] `crates/veil-core/**` 零改动；`veil-ui` 外部依赖仍为 4（未新增依赖）
 - [x] C2 探针存在（`VEIL_BREAK_PROBE` 门控、默认关闭），输出每视觉行首/尾字符与违规行文本（cosmic 不暴露断点来源，暂无法输出）
 - [x] C2 真机归因已完成并回填 `3e-walkthrough-results.md`：正文段落 240–800px + 深滚动 0 违规；表格单元格窄列宽复现 `》` 行首违规；状态保持「未解决」
-- [ ] 表格单元格禁则修复（Task 0.7）完成并真机复测通过
+- [x] 表格单元格禁则修复（Task 0.7）完成并真机复测通过（探针 0 违规；回归 `narrow_cell_wrap_avoids_kinsoku_boundaries`、`narrow_cell_wrapping_keeps_source_bytes`）
 - [x] 未在真机观察前把 C2 填为「通过」
 
 ## 阶段 1 门禁（满足后才可开工）

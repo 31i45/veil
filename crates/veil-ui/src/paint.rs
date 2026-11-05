@@ -327,35 +327,27 @@ impl App {
         if total == 0 {
             return false;
         }
-        // 找到当前 cell 在 flat 数组中的索引
-        let mut cur: Option<usize> = None;
-        let mut idx = 0usize;
-        for c in tbl.header.iter() {
-            if cell_contains(&c.range, caret) {
-                cur = Some(idx);
-                break;
-            }
-            idx += 1;
-        }
-        if cur.is_none() {
-            for row in tbl.rows.iter() {
-                for c in row.iter() {
-                    if cell_contains(&c.range, caret) {
-                        cur = Some(idx);
-                        break;
-                    }
-                    idx += 1;
-                }
-                if cur.is_some() {
-                    break;
-                }
-            }
-        }
+        let cur = active_cell_index(&tbl, caret);
         let Some(cur_idx) = cur else {
-            return false; // caret 不在任何 cell 内
+            // caret 落在管道符/分隔行等结构字符上：Tab 跳到其后第一个单元格；
+            // 其后无格（如分隔行末尾）则按「末格」处理（追加行），Shift+Tab 交给 Indent 反缩进。
+            if dir > 0 {
+                if let Some(idx) = first_cell_after(&tbl, caret) {
+                    self.editor.set_caret(flat_cell_start(&tbl, idx));
+                    self.scroll_to_caret();
+                    self.request_redraw();
+                    return true;
+                }
+                return self.table_ctrl_enter();
+            }
+            return false;
         };
         let next = if dir > 0 {
-            (cur_idx + 1) % total
+            // 末格 Tab：与 Typora 对齐——追加一行并落首格，而不是绕回表首
+            if cur_idx + 1 == total {
+                return self.table_ctrl_enter();
+            }
+            cur_idx + 1
         } else if cur_idx == 0 {
             return true; // 首格 Shift+Tab：不动，吞掉按键
         } else {
@@ -366,6 +358,22 @@ impl App {
         self.scroll_to_caret();
         self.request_redraw();
         true
+    }
+
+    /// 网格态光标矩形：活动单元格内容左上角（与点击落点、Tab 落点同源）。
+    /// 表格显示为网格时，源码排版坐标与所见网格不一致，直接复用会画出「悬空光标」。
+    /// `doc_top` 为块的文档坐标（非视口坐标），滚动量在此统一扣除。
+    pub(crate) fn table_caret_xy(&self, id: BlockId, doc_top: f32, caret: usize) -> Option<(f32, f32, f32)> {
+        let tbl = self.editor.session().table(id)?;
+        let idx = active_cell_index(&tbl, caret)?;
+        let cell = self.cache.table(id, self.base_key())?.cells.get(idx)?;
+        let scale = self.input_state.scale;
+        let vp = self.viewport();
+        Some((
+            MARGIN * scale + cell.x,
+            vp.y + doc_top - self.window_state.scroll_y + cell.y,
+            BASE_LINE_HEIGHT * scale,
+        ))
     }
 
     /// 表格按需网格排版：caret 在结构字符上（管道/分隔行）或表外 → 排版网格；
@@ -1455,30 +1463,7 @@ impl App {
         // 活动单元格：caret 落在 cell.range 内 → 画选中色底色
         if self.caret_in_table_cell(id) {
             if let Some(src) = self.editor.session().table(id) {
-                let mut idx = 0usize;
-                let mut active = None;
-                for c in src.header.iter() {
-                    if cell_contains(&c.range, caret) {
-                        active = Some(idx);
-                        break;
-                    }
-                    idx += 1;
-                }
-                if active.is_none() {
-                    for row in src.rows.iter() {
-                        for c in row.iter() {
-                            if cell_contains(&c.range, caret) {
-                                active = Some(idx);
-                                break;
-                            }
-                            idx += 1;
-                        }
-                        if active.is_some() {
-                            break;
-                        }
-                    }
-                }
-                if let Some(active_idx) = active {
+                if let Some(active_idx) = active_cell_index(&src, caret) {
                     if let Some(cell_layout) = t.cells.get(active_idx) {
                         let cx = x0 + cell_layout.x.round() as i32;
                         let cy = top + cell_layout.y.round() as i32;
@@ -1591,11 +1576,23 @@ impl App {
         if new_src == src {
             return false;
         }
-        let edit = veil_core::Edit::Replace { range: block_range, text: new_src };
-        let Ok(events) = self.editor.session_mut().apply(edit) else {
+        // 新行在块尾；光标落到新行首个单元格内容处（`|` 后跳过前导空白）。
+        // 空单元格（`|  |`）若只按 `+2` 定位会落在管道符上，活动单元格判定失败、Tab 跳格错位。
+        let body = new_src.trim_end_matches(['\n', '\r']);
+        let row_start = body.rfind('\n').map(|i| i + 1).unwrap_or(0);
+        let after_pipe = body[row_start..]
+            .find('|')
+            .map(|i| row_start + i + 1)
+            .unwrap_or(row_start);
+        let leading = body[after_pipe..].len() - body[after_pipe..].trim_start_matches(' ').len();
+        let caret_in_block = after_pipe + leading;
+        let Some(dirty_blocks) = self
+            .editor
+            .append_table_row(block_range, new_src, caret_in_block)
+        else {
             return false;
         };
-        self.after_edit(events.dirty_blocks);
+        self.after_edit(dirty_blocks);
         self.request_redraw();
         true
     }
@@ -1620,6 +1617,32 @@ fn flat_cell_start(tbl: &veil_core::Table, idx: usize) -> usize {
         remaining -= row.len();
     }
     0
+}
+
+/// caret 所在单元格的 flat 索引（header 先，rows 后）；不在任何单元格时 None。
+fn active_cell_index(tbl: &veil_core::Table, caret: usize) -> Option<usize> {
+    let mut idx = 0usize;
+    for c in tbl.header.iter() {
+        if cell_contains(&c.range, caret) {
+            return Some(idx);
+        }
+        idx += 1;
+    }
+    for row in tbl.rows.iter() {
+        for c in row.iter() {
+            if cell_contains(&c.range, caret) {
+                return Some(idx);
+            }
+            idx += 1;
+        }
+    }
+    None
+}
+
+/// caret 之后（不含所在格）第一个单元格的 flat 索引：结构字符上的 Tab 落点。
+fn first_cell_after(tbl: &veil_core::Table, caret: usize) -> Option<usize> {
+    let total = tbl.header.len() + tbl.rows.iter().map(|r| r.len()).sum::<usize>();
+    (0..total).find(|&i| flat_cell_start(tbl, i) > caret)
 }
 
 // ---- GFM 表格行/列 Markdown 变换（T3：纯字符串，零核心依赖） ----

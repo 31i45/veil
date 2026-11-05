@@ -159,7 +159,7 @@
 | # | 项目 | 状态 | 自动化覆盖 |
 |---|---|---|---|
 | C1 | 中英混排自动间距 | `needs-user` | C 自动化覆盖（cjk_to_ascii_adds_space / ascii_to_cjk_adds_space / both_boundaries_add_spaces） |
-| C2 | 行首/行尾禁则 | `needs-user` | C 自动化覆盖（kinsoku_forbidden_chars_never_start_a_visual_line / kinsoku_open_brackets_never_end_a_visual_line） |
+| C2 | 行首/行尾禁则 | 已通过（自动探针，2026-11-05） | 新增 `narrow_cell_wrap_avoids_kinsoku_boundaries` / `narrow_cell_wrapping_keeps_source_bytes`；探针覆盖见场景矩阵 |
 | C3 | 满行悬挂标点 | `needs-user` | C 自动化覆盖（hanging_punctuation_shifts_full_line_end_glyph / kinsoku_glue_keeps_ellipsis_attached_to_previous_char） |
 | C4 | 标题/粗体/斜体/删除线/列表/引用/分隔线/代码块层级与行高稳定 | `needs-user` | C 自动化覆盖（heading_layout_taller_than_paragraph / reveal_hides_strong_markers_when_caret_outside，仅布局与显隐，未覆盖目检） |
 | C5 | 表格点入编辑、Tab 跳格、行列增删、对齐渲染 | `needs-user` | C 自动化覆盖（table_renders_grid_when_caret_outside / table_shows_grid_when_caret_inside_cell / alignment_offsets_glyphs_within_cell / tab_advances_to_next_cell_start） |
@@ -185,7 +185,7 @@
 | D9 | Ctrl+B 包裹/解包裹、单撤销步 | `needs-user` | C 自动化覆盖（bold_wraps_selection_single_undo_step / bold_unwraps_already_wrapped_selection） |
 | D10 | 空选区 Ctrl+B 标记对与连按取消 | `needs-user` | C 自动化覆盖（empty_selection_inserts_pair_second_press_removes） |
 | D11 | Ctrl+I / Ctrl+K 行内格式与光标落点 | `needs-user` | C 自动化覆盖（italic_on_cjk_selection_does_not_panic / link_wraps_selection_caret_in_parens） |
-| D12 | `**粗体**` 内部分文字 Ctrl+I | `needs-user`（**复测仍复现**） | C 自动化只证明编辑路径正确（partial_italic_inside_bold_keeps_surrounding_bold_intact 等）；渲染路径无覆盖 |
+| D12 | `**粗体**` 内部分文字 Ctrl+I | `已修复（渲染层）` | 根因：reveal 对每个节点独立判定，嵌套时祖先与后代同时显形；改为「深层优先」（`deep_active`），回归 `nested_emphasis_reveals_only_innermost_markers` |
 | D13 | 视图菜单缩放/全屏与快捷键提示 | `needs-user` | C 自动化覆盖（zoom_menu_and_key_paths / menu_definitions_cover_shortcuts） |
 | D14 | 纯视图操作不改文档、不置脏 | `needs-user` | C 自动化覆盖（zoom_is_view_only_keeps_doc_and_dirty / fullscreen_headless_noop_and_menu_path） |
 
@@ -236,6 +236,8 @@
 
 **覆盖统计**：50 条中 42 条有至少一个对应自动化用例（含部分覆盖），8 条无自动化用例（C10、E2、E5、E6、F4、G1、G2、H2）；其中 H2 已于 2026-11-04 决策降级（v1 承诺 Esc 关闭 + 快捷键直达，导航留 v2），不再是待真机验证项，其余 7 条纯人工。
 
+> 2026-11-05 更新：C2 已由「未解决」转为「通过（自动探针）」；50 条等级分布为 auto 15 / assisted 26 / manual 9（见场景矩阵）。其余未测项状态不变。
+
 ### 执行协议（人工项如何跑）
 
 1. **启动 release 版本**（不要用 `cargo run`，debug 带控制台不是发布形态）：
@@ -275,6 +277,19 @@
 3. 门槛满足后的动作：`git tag v1.0.0` + 起草 Release Notes（依据 README 数字红线表与本文档实测记录）。
 
 **在条件 2 完成前，不执行打 tag 与 Release Notes 起草。**
+
+### 门禁六条件自检（2026-11-05，Task B4）
+
+| # | spec 门禁条件 | 状态 | 证据 / 缺口 |
+|---|---|---|---|
+| ① | 走查矩阵无 `needs-user` 悬挂 | ❌ | 仍有 assisted/manual 条目未回填（C5/C7、E1–E3/E5/E6、F1–F3、G1–G9、H1/H3/H4 等） |
+| ② | P0/P1 阻断项为 0 | ✅ | C2 表格禁则、C5 表格交互四点、D12-b 已修并有回归；无新增 P0/P1 |
+| ③ | 红线指标全部有当期实测 | ✅ | 冷启动 176ms / p95 7.12ms / 40.76MB / 5,853,696 B / 直接依赖 4 |
+| ④ | 字节往返一致率 100% | ✅ | 911 passed 含 `narrow_cell_wrapping_keeps_source_bytes` 等往返用例 |
+| ⑤ | 崩溃/数据安全 G1–G9 全部有证据 | ❌ | G 区未测，不得填「通过」 |
+| ⑥ | 决策项（H2/U1/B7-3/I3）维持收口 | ✅ | 见本条上方决策记录 |
+
+**结论：①⑤ 未满足 → 不执行 `git tag v1.0.0`。** tag 与 Release Notes 统一留待 Task E3；当前缺陷修复不进入发布记录。
 
 ## 附录：优先级分区参考（2026-11-04）
 
@@ -379,7 +394,7 @@ D2（触控板捏合，D1 通过即覆盖）、D6（200% DPI 硬件依赖）、D
 
 1. **D12-b 嵌套强调渲染异常**（复测仍复现，用户回头处理）— 从渲染/标记显隐路径查，勿再改 `apply_wrap`
 2. **C5 表格**（唯一"较严重"且未修复项）— 立项修复
-3. **C2 行首禁则**（排版细节，需先定位断行逻辑）
+3. **C2 行首禁则**（✅ 2026-11-05 已修表格单元格路径；正文仍无复现）
 4. **C7 图片细测**（补测试用例）
 5. 继续 E/F/G/H 区未测项（E4/E7/E8、F1–F3、G1–G5/G7–G9、H1/H3–H4）
 
@@ -395,9 +410,9 @@ D2（触控板捏合，D1 通过即覆盖）、D6（200% DPI 硬件依赖）、D
 ### v1.1 走查收尾（不阻塞 tag，但应在首个小版本内清）
 | 项 | 状态 | 归属 |
 |---|---|---|
-| D12-b 粗体部分加斜的渲染异常 | ❌ 未解决（用户自行处理） | 先抓源码形态 → serialize → reveal/inline 解析 |
-| C5 GFM 表格交互（定位/Tab/对齐） | ❌ 未解决（用户判定「比较严重」） | 优先级最高；单独立项 |
-| C2 行首禁则 | ❌ 未解决 | 排版细节；与 C3 分开定位 |
+| D12-b 粗体部分加斜的渲染异常 | ✅ 已修并有真机证据（reveal 深层优先：光标在内层时不再显示外层 `**`；截图 `docs/review/evidence/c3-nested-emphasis/04-step-x61.png` 显示 `Chi*n*ese`） | 已通过（2026-11-05） |
+| C5 GFM 表格交互（定位/Tab/对齐） | ✅ 已修 4 点并有真机证据（网格光标定位、空行光标落点、末格 Tab 追加行、结构字符 Tab；截图 `docs/review/evidence/c5-tab/02-step-t0.png`、`07-step-t5.png`、`08-step-t6.png`） | 点击/Tab 已通过；行列增删 UI 入口书面降级 v1.1 |
+| C2 行首禁则 | ✅ 已修（表格单元格本地显式折行；探针 0 违规） | 正文原始场景未复现，等用户材料 |
 | C7 图片位置/尺寸/多图细测 | ❌ 未测（覆盖缺口） | 补真机用例 |
 | E4/E7/E8、F1–F3、G1–G5/G7–G9、H1/H3–H4 | 未测 | 继续走查 |
 
@@ -423,3 +438,85 @@ D2（触控板捏合，D1 通过即覆盖）、D6（200% DPI 硬件依赖）、D
 
 - **来源**：ADR-010、ADR-011（触发条件 L37-L40）、`remediation_plan_v2.md`。
 - **触发条件**：ADR-011 四条任一成立且附 spike 数据；协作仍为 v1 非目标，待 ADR-010 边界重评后再立项。
+
+## 场景矩阵（自动化等级，2026-11-05）
+
+> 2026-11-05 续测结论：后台 `PostMessage` / `SendMessage` 注入鼠标（`WM_LBUTTONDOWN`）不触发 winit 命中测试，无焦点窗口的 `WM_KEYDOWN` 也无效；滚轮注入是唯一有效的后台自动化。**改为前台注入后可行**：`walkthrough.ps1 -Steps` 用 `SetForegroundWindow` + `SetCursorPos` + `mouse_event` + `SendKeys` 已驱动 C5 点入/Tab 与 D12 点击并截图（会临时抢焦点，结束后恢复前台窗口与光标位置）。仍需人工的场景只剩拖放（C7）、系统对话框（E1/E2）与主观项。
+
+### 交接清单（M1/M2 已由前台注入完成；其余按组执行）
+| 组 | 覆盖用例 | 操作 | 预期 | 截图命名 | 状态 |
+|---|---|---|---|---|---|
+| M1 表格 | C5 | `veil 02-混合元素.md` → 点单元格中间 → Tab 连续 5 次 → 在末格再 Tab | 光标贴在单元格文字上；Tab 顺序不跳格；末格 Tab 新增一行且光标在新行首格 | `m1-*.png` | ✅ 通过（`evidence/c5-tab/`） |
+| M2 强调 | D12-b | `veil 12-嵌套强调.md` → 点击 `Chi*n*ese` 中的 `n` | 只显示 `*n*`，外层 `**` 不出现；第二行正文无异常粗体 | `m2-*.png` | ✅ 通过（`evidence/c3-nested-emphasis/`） |
+| M3 图片 | C7 | 粘贴单图 / 多图；资源管理器 Ctrl+C 后粘贴；拖入；缩放 80%/100%/125%/150% | 图片按行内/独占段规则定位；多图不重叠；落盘文件存在且相对链接可重开 | `m3-*.png` + `m3-*.md` | 待做 |
+| M4 菜单/主题 | D13/E1/F1–F3/H1/H3/H4 | 打开文件/编辑/视图/格式帮助菜单；切换浅色/深色；Ctrl+P | 菜单项与快捷键提示完整；主题即时生效且重启保持；打印对话框可打开 | `m4-*.png` | 待做 |
+| M5 数据安全 | G1–G5/G7–G9 | 断电模拟（任务管理器结束进程）→ 重启看恢复条；只读目录保存；同名冲突另存；外部修改文档 | 恢复条出现且内容为最后编辑；只读给出提示不丢内容；冲突副本不覆盖 | `m5-*.png` + `m5-*.log` | 待做 |
+| M6 打印 | E2 | 系统对话框选 Microsoft Print to PDF | 生成 PDF 与预览分页一致 | `m6-*.pdf` | 待做 |
+
+完成后把截图与日志放入 `%TEMP%\veil-walkthrough\evidence\manual-<日期>\`，再回填本表状态列。
+
+> **权威性**：本表是「自动化等级 / 证据形式 / 执行动作 / 最后验证日期」的唯一真值；上方 C/D/E/F/G/H 分区表只保留历史状态与覆盖说明。
+> **判定规则**：`auto` = 无人值守给出确定性判定（测试名或探针日志）；`assisted` = 脚本执行动作、人工看截图判定；`manual` = 主观、硬件或破坏性场景。
+> **证据规则**：任何「通过」必须附测试名、探针日志、截图或人工记录；缺证据只能保持「未测 / 未解决」。未经真机证据不得填「通过」。
+
+| # | 用例 | 等级 | 证据形式 | 执行动作 / 命令 | 最后验证 | 当前状态 |
+|---|---|---|---|---|---|---|
+| C1 | 中英混排自动间距 | auto | 测试名 + 截图 | `cargo test -p veil-ui adds_space`；`walkthrough.ps1 -Widths 240,480,800` 截图 | 2026-11-04 | 通过 |
+| C2 | 行首/行尾禁则 | auto | 探针日志 + 回归测试 | `$env:VEIL_BREAK_PROBE=1`；`walkthrough.ps1 -Doc 10-窄列表格.md -Widths 320,480`；`cargo test -p veil-ui narrow_cell` | 2026-11-05 | 通过（单元格探针 0 违规；正文未复现） |
+| C3 | 满行悬挂标点 | auto | 测试名 + 截图 | `cargo test -p veil-ui hanging_punctuation` | 2026-11-04 | 通过 |
+| C4 | 视觉层级与行高稳定 | assisted | 截图（光标进出对比） | `walkthrough.ps1 -Doc 02 -Widths 480`，逐标记移动光标截图 | 2026-11-04 | 通过 |
+| C5 | 表格点入编辑 / Tab / 行列增删 / 对齐 | assisted | 截图 + 人工记录 | `walkthrough.ps1 -Steps "click:100,60;shot:t0;key:{TAB};…;shot:t6" -Doc 13-表格交互.md`；回归 `tab_advances_to_next_cell_start` / `tab_on_last_cell_appends_row_and_moves_to_first_cell` / `table_grid_caret_drawn_at_active_cell_content_start` / `tab_on_structure_char_moves_into_next_cell` | 2026-11-05 | 通过（点入后高亮、5 次 Tab 到末格、第 6 次 Tab 追加行；证据 `docs/review/evidence/c5-tab/`；行列增删降级 v1.1） |
+| C6 | 任务列表复选框点击 | assisted | 截图 | 同上，点击 `[ ]` | 2026-11-04 | 通过 |
+| C7 | 图片三种入口 | assisted | 截图 + 落盘文件 | 剪贴板/拖放/文件列表粘贴；单图/多图/超大图 × 缩放档 | — | 未测 |
+| C8 | 公式位图 / 上下标 / 滚动不闪 | assisted | 截图序列 | `walkthrough.ps1 -Doc 02 -ScrollPages 10` | 2026-11-04 | 通过 |
+| C9 | 源码标记随光标展开/收起 | assisted | 截图 | 光标进入/离开各标记，截图对比行高 | 2026-11-04 | 通过 |
+| C10 | 10 万字打开 / 内存 | auto | 计时 + `WorkingSet64` | `walkthrough.ps1 -Doc 03 -Measure open,mem` | 2026-11-04 | 通过（28.83MB） |
+| C11 | 超长单行降级 | auto | 测试名 | `cargo test -p veil-ui oversized` | 2026-11-04 | 通过（设计行为） |
+| D1 | Ctrl+滚轮缩放档位 | assisted | 截图 + 状态栏文本 | `walkthrough.ps1` + Ctrl+滚轮 | 2026-11-04 | 通过 |
+| D2 | 触控板捏合缩放 | manual | 人工记录 | 硬件依赖（触控板） | — | 未测 |
+| D3 | Ctrl+= / Ctrl+- 档位与上下限 | auto | 测试名 + 截图 | `cargo test -p veil-ui zoom` | 2026-11-04 | 通过 |
+| D4 | Ctrl+0 精确还原 | auto | 测试名 | `cargo test -p veil-ui zoom_step_roundtrips` | 2026-11-04 | 通过 |
+| D5 | 缩放后点击落点与滚动钳位 | assisted | 截图 | 50% 档点击落点 | 2026-11-04 | 通过 |
+| D6 | 200% DPI 缩放 | manual | 人工记录 | 显示设置改 200%，重启应用 | — | 未测 |
+| D7 | F11 无边框全屏 | assisted | 截图 | `PostMessage` F11 后截图 | 2026-11-04 | 通过 |
+| D8 | 全屏下 Esc 只关菜单 | assisted | 截图 | 全屏 + 打开菜单 + Esc | 2026-11-04 | 通过 |
+| D9 | Ctrl+B 包裹/解包裹单撤销步 | auto | 测试名 | `cargo test -p veil-ui bold_wraps` | 2026-11-04 | 已修复，待复验 |
+| D10 | 空选区 Ctrl+B 标记对 | auto | 测试名 | `cargo test -p veil-ui empty_selection_inserts_pair` | 2026-11-04 | 通过 |
+| D11 | Ctrl+I / Ctrl+K 与光标落点 | auto | 测试名 | `cargo test -p veil-ui italic_on_cjk_selection` | 2026-11-04 | 已修复，待复验 |
+| D12 | 粗体内部部分加斜 | assisted | 截图 + `serialize()` 输出 | `walkthrough.ps1 -Steps "click:61,60;..." -Doc 12-嵌套强调.md`；回归 `nested_emphasis_reveals_only_innermost_markers` / `partial_italic_inside_bold_keeps_surrounding_bold_intact` | 2026-11-05 | 通过（截图显示 `Chi*n*ese`；证据 `docs/review/evidence/c3-nested-emphasis/`） |
+| D13 | 视图菜单与快捷键提示 | assisted | 截图 | 打开视图菜单截图 | — | 未测 |
+| D14 | 纯视图操作不置脏 | auto | 测试名 | `cargo test -p veil-ui zoom_is_view_only` | 2026-11-04 | 通过 |
+| E1 | 打印 / 导出 PDF 弹系统对话框 | assisted | 截图 | Ctrl+P 截图 | — | 未测 |
+| E2 | Microsoft Print to PDF 保存 | manual | PDF 文件 + 人工记录 | 系统对话框选 PDF 驱动 | — | 未测 |
+| E3 | 多页无重字截字 | assisted | PDF 目视 + 截图 | `02-混合元素.md` → PDF | 2026-11-04 | 通过 |
+| E4 | 公式/表格跨页不重叠不漏 | assisted | PDF 截图 | 含超高表格/公式文档 → PDF | — | 未测 |
+| E5 | 页码范围打印 | manual | 人工记录 | 系统对话框输入页码 | — | 未测 |
+| E6 | 物理打印机抽验 | manual | 人工记录 | 硬件依赖 | — | 未测 |
+| E7 | 150% 缩放下打印版式 | assisted | PDF 截图 | 缩放 150% 后 Ctrl+P | — | 未测 |
+| E8 | 打印过程无闪烁/残留 | assisted | 截图序列 | 打印前后截图 | — | 未测 |
+| F1 | 主题即时切换与「当前」标记 | assisted | 截图 | 切换浅/深/跟随系统截图 | — | 未测 |
+| F2 | 深色重启保持 | auto | 测试名 + `config.toml` | `cargo test -p veil-ui switching_theme_persists_config` | — | 未测 |
+| F3 | 跟随系统即时生效 | assisted | 截图 | 改系统主题后截图 | — | 未测 |
+| F4 | Win11 Mica / Win10 不崩 | manual | 人工记录 | Win11 目视；Win10 不测（P3） | — | 未测 |
+| G1 | 杀进程后重启恢复 | assisted | 恢复弹窗截图 + 内容对比 | `Stop-Process -Id <pid>` 后重启 | — | 未测 |
+| G2 | 恢复后保存清 recovery.dat | assisted | 文件存在性检查 | 恢复 → Ctrl+S → 查 `%APPDATA%\Veil` | — | 未测 |
+| G3 | 外部修改提示并挂起自动保存 | auto | 测试名 | `cargo test -p veil-ui external_change_notifies` | — | 未测 |
+| G4 | Ctrl+S 先备份再覆盖 | auto | 测试名 + 备份文件 | `cargo test -p veil-ui manual_save_conflict` | — | 未测 |
+| G5 | 外部删除提示并重建 | auto | 测试名 | `cargo test -p veil-ui external_delete_notifies` | — | 未测 |
+| G6 | 无路径草稿保存提示 | assisted | 截图 | 草稿 Ctrl+S 截图 | — | 未测 |
+| G7 | 关窗三选一、清快照 | assisted | 截图 + 文件检查 | 脏文档关窗截图 | — | 未测 |
+| G8 | Ctrl+N 未保存三选一 | assisted | 截图 | 脏文档 Ctrl+N | — | 未测 |
+| G9 | Ctrl+O / 快速打开与只读 | assisted | 截图 | Ctrl+Shift+P 截图 | — | 未测 |
+| H1 | 三菜单项数与灰显 | assisted | 截图 | 三个菜单逐个截图 | — | 未测 |
+| H2 | 菜单键盘导航 | manual | 人工记录 | 已决策降级 v2 | 2026-11-04 | 已决策降级 |
+| H3 | 点菜单外部只关菜单 | assisted | 截图 | 菜单打开点正文 | — | 未测 |
+| H4 | 右键菜单三分类 | assisted | 截图 ×3 | 正文/表格/图片右键截图 | — | 未测 |
+
+**等级统计**：`auto` 15 条（可无人值守判定）；`assisted` 26 条（脚本驱动 + 人工看截图）；`manual` 9 条（硬件/主观/破坏性）。合计 50 条。
+
+### 证据归档规范（A3）
+
+- **临时证据**：`%TEMP%\veil-walkthrough\evidence\<用例号>\`（截图 `doc-width-scroll-YYYYMMDD-HHMMSS.png`、探针 `probe.log`）。
+- **长期证据**：仅把判定所依赖的最小截图/日志复制到 `docs/review/evidence/<用例号>/`，避免仓库膨胀。
+- **回填字段**：用例号 / 等级 / 命令参数 / 结果（通过/不通过/阻断/未测）/ 证据路径 / 最后验证日期。
+- **硬规则**：无证据的回填视为无效；脚本失败与产品缺陷必须在结论列区分。

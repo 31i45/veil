@@ -1,0 +1,38 @@
+[14:21:15.044] INFO  exe=target\release\veil.exe doc=C:\Users\31i45\AppData\Local\Temp\veil-walkthrough\12-嵌套强调.md probe=False shots=C:\Users\31i45\AppData\Local\Temp\veil-walkthrough\evidence\c3-calx
+[14:21:15.121] INFO  已启动 PID=7344
+[14:21:15.277] INFO  主窗口就绪：句柄=1313468，启动到窗口 204 ms
+[14:21:16.807] INFO  宽度 640px 截图：C:\Users\31i45\AppData\Local\Temp\veil-walkthrough\evidence\c3-calx\01-w640-p0-20261105-142114.png（PrintWindow=True）
+[14:21:17.420] INFO  点击 55,60
+[14:21:17.457] INFO  步骤截图：C:\Users\31i45\AppData\Local\Temp\veil-walkthrough\evidence\c3-calx\02-step-x55-20261105-142114.png
+[14:21:17.998] INFO  点击 58,60
+[14:21:18.024] INFO  步骤截图：C:\Users\31i45\AppData\Local\Temp\veil-walkthrough\evidence\c3-calx\03-step-x58-20261105-142114.png
+[14:21:18.574] INFO  点击 61,60
+[14:21:18.599] INFO  步骤截图：C:\Users\31i45\AppData\Local\Temp\veil-walkthrough\evidence\c3-calx\04-step-x61-20261105-142114.png
+[14:21:19.137] INFO  点击 64,60
+[14:21:19.163] INFO  步骤截图：C:\Users\31i45\AppData\Local\Temp\veil-walkthrough\evidence\c3-calx\05-step-x64-20261105-142114.png
+[14:21:19.699] INFO  点击 67,60
+[14:21:19.726] INFO  步骤截图：C:\Users\31i45\AppData\Local\Temp\veil-walkthrough\evidence\c3-calx\06-step-x67-20261105-142114.png
+[14:21:20.264] INFO  点击 70,60
+[14:21:20.292] INFO  步骤截图：C:\Users\31i45\AppData\Local\Temp\veil-walkthrough\evidence\c3-calx\07-step-x70-20261105-142114.png
+[14:21:20.301] INFO  交互步骤完成，前台与鼠标位置已还原
+[14:21:20.338] INFO  已结束 PID=7344
+[14:21:20.343] INFO  证据目录：C:\Users\31i45\AppData\Local\Temp\veil-walkthrough\evidence\c3-calx
+[14:21:23.845] INFO  exe=target\release\veil.exe doc=C:\Users\31i45\AppData\Local\Temp\veil-walkthrough\12-嵌套强调.md probe=False shots=C:\Users\31i45\AppData\Local\Temp\veil-walkthrough\evidence\c3-calx
+[14:21:23.890] INFO  已启动 PID=19160
+[14:21:24.054] INFO  主窗口就绪：句柄=8784072，启动到窗口 194 ms
+[14:21:25.583] INFO  宽度 640px 截图：C:\Users\31i45\AppData\Local\Temp\veil-walkthrough\evidence\c3-calx\01-w640-p0-20261105-142123.png（PrintWindow=True）
+[14:21:26.183] INFO  点击 55,60
+[14:21:26.208] INFO  步骤截图：C:\Users\31i45\AppData\Local\Temp\veil-walkthrough\evidence\c3-calx\02-step-x55-20261105-142123.png
+[14:21:26.747] INFO  点击 58,60
+[14:21:26.775] INFO  步骤截图：C:\Users\31i45\AppData\Local\Temp\veil-walkthrough\evidence\c3-calx\03-step-x58-20261105-142123.png
+[14:21:27.342] INFO  点击 61,60
+[14:21:27.371] INFO  步骤截图：C:\Users\31i45\AppData\Local\Temp\veil-walkthrough\evidence\c3-calx\04-step-x61-20261105-142123.png
+[14:21:27.905] INFO  点击 64,60
+[14:21:27.929] INFO  步骤截图：C:\Users\31i45\AppData\Local\Temp\veil-walkthrough\evidence\c3-calx\05-step-x64-20261105-142123.png
+[14:21:28.485] INFO  点击 67,60
+[14:21:28.510] INFO  步骤截图：C:\Users\31i45\AppData\Local\Temp\veil-walkthrough\evidence\c3-calx\06-step-x67-20261105-142123.png
+[14:21:29.061] INFO  点击 70,60
+[14:21:29.082] INFO  步骤截图：C:\Users\31i45\AppData\Local\Temp\veil-walkthrough\evidence\c3-calx\07-step-x70-20261105-142123.png
+[14:21:29.089] INFO  交互步骤完成，前台与鼠标位置已还原
+[14:21:29.123] INFO  已结束 PID=19160
+[14:21:29.128] INFO  证据目录：C:\Users\31i45\AppData\Local\Temp\veil-walkthrough\evidence\c3-calx

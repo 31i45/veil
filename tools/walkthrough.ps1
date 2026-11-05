@@ -1,0 +1,449 @@
+﻿# Veil 真机走查驱动脚本（证据工具，非 CI 门禁）
+#
+# 用法示例：
+#   pwsh -File tools/walkthrough.ps1 -Doc "$env:TEMP\veil-walkthrough\02-混合元素.md" -Widths 240,320,480,800 -ScrollPages 3 -Probe
+#   pwsh -File tools/walkthrough.ps1 -Doc "$env:TEMP\veil-walkthrough\03-10万字.txt" -Measure open,mem -KeepAlive
+#
+# 说明：
+#   - 按 PID 定位窗口，不依赖前台焦点；滚动用 PostMessage，不抢用户焦点。
+#   - 截图用 PrintWindow（PW_RENDERFULLCONTENT），窗口被遮挡也能取到内容。
+#   - 结束时默认结束目标进程；-KeepAlive 可保留窗口供人工观察。
+#   - 任何失败都会写入 walkthrough.log，并区分「脚本失败」与「产品行为」。
+
+[CmdletBinding()]
+param(
+    [string]$Exe = "",
+    [string]$Doc = "",
+    [string]$Widths = "240,320,480,800",
+    [int]$ScrollPages = 0,
+    [string]$Steps = "",
+    [int]$StepsWidth = 0,
+    [string]$ShotDir = "",
+    [switch]$Probe,
+    [switch]$Measure,
+    [switch]$KeepAlive,
+    [int]$SettleMs = 700,
+    [int]$WindowWaitMs = 15000
+)
+
+$ErrorActionPreference = 'Stop'
+
+# ---------- 路径与日志 ----------
+$repoRoot = Split-Path -Parent $PSScriptRoot
+if (-not $Exe) { $Exe = Join-Path $repoRoot 'target\release\veil.exe' }
+if (-not (Test-Path -LiteralPath $Exe)) {
+    throw "脚本失败：找不到 exe：$Exe（请先 cargo build --release -p veil）"
+}
+if ($Doc -and -not (Test-Path -LiteralPath $Doc)) {
+    throw "脚本失败：找不到文档：$Doc"
+}
+
+$widthList = @($Widths -split '[,;\s]+' | Where-Object { $_ -match '^\d+$' } | ForEach-Object { [int]$_ })
+if ($widthList.Count -eq 0) {
+    throw "脚本失败：-Widths 没有可解析的宽度（收到：$Widths）"
+}
+
+$stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+if (-not $ShotDir) {
+    $ShotDir = Join-Path $env:TEMP "veil-walkthrough\evidence\run-$stamp"
+}
+New-Item -ItemType Directory -Path $ShotDir -Force | Out-Null
+$logPath = Join-Path $ShotDir 'walkthrough.log'
+$stdoutPath = Join-Path $ShotDir 'stdout.log'
+$stderrPath = Join-Path $ShotDir 'stderr.log'
+
+function Write-Log {
+    param([string]$Level, [string]$Message)
+    $line = "[{0}] {1,-5} {2}" -f (Get-Date -Format 'HH:mm:ss.fff'), $Level, $Message
+    Add-Content -LiteralPath $logPath -Value $line
+    Write-Host $line
+}
+
+# ---------- Win32 ----------
+Add-Type -AssemblyName System.Drawing
+Add-Type -AssemblyName System.Windows.Forms
+if (-not ('VeilWalkthrough.Win32' -as [type])) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+
+namespace VeilWalkthrough {
+    public struct RECT {
+        public int Left;
+        public int Top;
+        public int Right;
+        public int Bottom;
+    }
+
+    public static class Win32 {
+        [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int x, int y, int cx, int cy, uint flags);
+        [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+        [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
+        [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
+        [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+        [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
+        [DllImport("user32.dll")] public static extern bool GetCursorPos(ref POINT p);
+        [DllImport("user32.dll")] public static extern bool ClientToScreen(IntPtr hWnd, ref POINT p);
+        [DllImport("user32.dll")] public static extern void mouse_event(uint flags, uint dx, uint dy, uint data, UIntPtr extra);
+        [DllImport("user32.dll")] public static extern void keybd_event(byte vk, byte scan, uint flags, UIntPtr extra);
+
+        [StructLayout(LayoutKind.Sequential)]
+        public struct POINT { public int X; public int Y; }
+
+        public const uint MOUSEEVENTF_LEFTDOWN = 0x0002;
+        public const uint MOUSEEVENTF_LEFTUP = 0x0004;
+        public const byte VK_MENU = 0x12;
+        [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hWnd, out RECT rect);
+        [DllImport("user32.dll")] public static extern bool GetClientRect(IntPtr hWnd, out RECT rect);
+        [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr hWnd, IntPtr hdcBlt, uint flags);
+        [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hWnd);
+        [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr hWnd);
+    }
+
+    public static class Const {
+        public const uint WM_KEYDOWN = 0x0100;
+        public const uint WM_KEYUP = 0x0101;
+        public const uint WM_MOUSEWHEEL = 0x020A;
+        public const int VK_NEXT = 0x22;
+        public const int VK_PRIOR = 0x21;
+        public const int SW_RESTORE = 9;
+        public const uint SWP_NOMOVE = 0x0002;
+        public const uint SWP_NOZORDER = 0x0004;
+        public const uint SWP_NOSIZE = 0x0001;
+        public const uint SWP_NOACTIVATE = 0x0010;
+        public const uint PW_RENDERFULLCONTENT = 2;
+        public static readonly IntPtr HWND_TOPMOST = new IntPtr(-1);
+        public static readonly IntPtr HWND_NOTOPMOST = new IntPtr(-2);
+    }
+}
+'@
+}
+
+function Get-MainWindow {
+    param([int]$ProcessId, [int]$TimeoutMs)
+    $deadline = (Get-Date).AddMilliseconds($TimeoutMs)
+    do {
+        $p = Get-Process -Id $ProcessId -ErrorAction SilentlyContinue
+        if ($null -eq $p) { return $null }
+        $candidate = $p.MainWindowHandle
+        if ($candidate -ne 0) {
+            # 启动早期可能存在临时窗口；只接受可见且尺寸正常的窗口
+            $wr = New-Object VeilWalkthrough.RECT
+            [VeilWalkthrough.Win32]::GetWindowRect($candidate, [ref]$wr) | Out-Null
+            $h = $wr.Bottom - $wr.Top
+            if ([VeilWalkthrough.Win32]::IsWindowVisible($candidate) -and
+                -not [VeilWalkthrough.Win32]::IsIconic($candidate) -and
+                $h -ge 300) {
+                return $candidate
+            }
+        }
+        Start-Sleep -Milliseconds 100
+    } while ((Get-Date) -lt $deadline)
+    return $null
+}
+
+function Wait-WindowStable {
+    param([IntPtr]$Hwnd, [int]$TimeoutMs)
+    $deadline = (Get-Date).AddMilliseconds($TimeoutMs)
+    do {
+        $wr = New-Object VeilWalkthrough.RECT
+        [VeilWalkthrough.Win32]::GetWindowRect($Hwnd, [ref]$wr) | Out-Null
+        $h = $wr.Bottom - $wr.Top
+        $visible = [VeilWalkthrough.Win32]::IsWindowVisible($Hwnd)
+        $iconic = [VeilWalkthrough.Win32]::IsIconic($Hwnd)
+        if ($visible -and -not $iconic -and $h -ge 300) { return $true }
+        Start-Sleep -Milliseconds 100
+    } while ((Get-Date) -lt $deadline)
+    return $false
+}
+
+function Set-ClientWidth {
+    param([IntPtr]$Hwnd, [int]$ClientWidth)
+    $wr = New-Object VeilWalkthrough.RECT
+    $cr = New-Object VeilWalkthrough.RECT
+    [VeilWalkthrough.Win32]::GetWindowRect($Hwnd, [ref]$wr) | Out-Null
+    [VeilWalkthrough.Win32]::GetClientRect($Hwnd, [ref]$cr) | Out-Null
+    $outerW = $wr.Right - $wr.Left
+    $outerH = $wr.Bottom - $wr.Top
+    # 启动早期窗口可能是临时小尺寸；高度不可信时用常规窗口高度兜底
+    if ($outerH -lt 300) { $outerH = 900 }
+    $clientW = $cr.Right - $cr.Left
+    $nonClient = [Math]::Max($outerW - $clientW, 0)
+    $target = [Math]::Max($ClientWidth + $nonClient, 200)
+    [VeilWalkthrough.Win32]::SetWindowPos(
+        $Hwnd, [IntPtr]::Zero, 0, 0, $target, $outerH,
+        ([VeilWalkthrough.Const]::SWP_NOMOVE -bor [VeilWalkthrough.Const]::SWP_NOZORDER)
+    ) | Out-Null
+    Start-Sleep -Milliseconds $SettleMs
+}
+
+function Test-BlankBitmap {
+    param([System.Drawing.Bitmap]$Bmp)
+    $colors = @{}
+    $stepX = [Math]::Max(1, [int]($Bmp.Width / 16))
+    $stepY = [Math]::Max(1, [int]($Bmp.Height / 10))
+    for ($y = 2; $y -lt $Bmp.Height; $y += $stepY) {
+        for ($x = 2; $x -lt $Bmp.Width; $x += $stepX) {
+            $colors[$Bmp.GetPixel($x, $y).ToArgb()] = $true
+        }
+    }
+    return ($colors.Count -le 2)
+}
+
+function Save-Screenshot {
+    param([IntPtr]$Hwnd, [string]$Path)
+    $wr = New-Object VeilWalkthrough.RECT
+    [VeilWalkthrough.Win32]::GetWindowRect($Hwnd, [ref]$wr) | Out-Null
+    $w = $wr.Right - $wr.Left
+    $h = $wr.Bottom - $wr.Top
+    if ($w -le 0 -or $h -le 0) {
+        Write-Log 'WARN' "截图失败：窗口尺寸无效 ${w}x${h}"
+        return $false
+    }
+    $bmp = New-Object System.Drawing.Bitmap($w, $h)
+    $g = [System.Drawing.Graphics]::FromImage($bmp)
+    $hdc = $g.GetHdc()
+    $ok = [VeilWalkthrough.Win32]::PrintWindow($Hwnd, $hdc, [VeilWalkthrough.Const]::PW_RENDERFULLCONTENT)
+    $g.ReleaseHdc($hdc)
+    $g.Dispose()
+
+    $blank = $true
+    if ($ok) { $blank = Test-BlankBitmap -Bmp $bmp }
+
+    if (-not $ok -or $blank) {
+        # 自绘窗口 PrintWindow 常返回全黑：临时置顶后屏幕捕获，随后恢复 z-order。
+        # 不调用 SetForegroundWindow，避免抢走用户焦点。
+        $flags = ([VeilWalkthrough.Const]::SWP_NOMOVE -bor [VeilWalkthrough.Const]::SWP_NOSIZE -bor [VeilWalkthrough.Const]::SWP_NOACTIVATE)
+        [VeilWalkthrough.Win32]::SetWindowPos($Hwnd, [VeilWalkthrough.Const]::HWND_TOPMOST, 0, 0, 0, 0, $flags) | Out-Null
+        Start-Sleep -Milliseconds 250
+        $g2 = [System.Drawing.Graphics]::FromImage($bmp)
+        $g2.CopyFromScreen($wr.Left, $wr.Top, 0, 0, (New-Object System.Drawing.Size($w, $h)))
+        $g2.Dispose()
+        [VeilWalkthrough.Win32]::SetWindowPos($Hwnd, [VeilWalkthrough.Const]::HWND_NOTOPMOST, 0, 0, 0, 0, $flags) | Out-Null
+        Write-Log 'WARN' "PrintWindow 无效（ok=$ok, blank=$blank），已降级为置顶屏幕捕获（未抢焦点）：$Path"
+        $ok = $false
+    }
+
+    $bmp.Save($Path, [System.Drawing.Imaging.ImageFormat]::Png)
+    $bmp.Dispose()
+    return $ok
+}
+
+function Send-PageKey {
+    param([IntPtr]$Hwnd, [int]$VirtualKey, [int]$Times)
+    for ($i = 0; $i -lt $Times; $i++) {
+        [VeilWalkthrough.Win32]::PostMessage($Hwnd, [VeilWalkthrough.Const]::WM_KEYDOWN, [IntPtr]$VirtualKey, [IntPtr]0) | Out-Null
+        Start-Sleep -Milliseconds 40
+        [VeilWalkthrough.Win32]::PostMessage($Hwnd, [VeilWalkthrough.Const]::WM_KEYUP, [IntPtr]$VirtualKey, [IntPtr]0) | Out-Null
+        Start-Sleep -Milliseconds 240
+    }
+}
+
+function Send-Wheel {
+    param([IntPtr]$Hwnd, [int]$Notches)
+    $wParam = [IntPtr]::new((0 - 120 * $Notches) * 65536)
+    for ($i = 0; $i -lt $Notches; $i++) {
+        [VeilWalkthrough.Win32]::PostMessage($Hwnd, [VeilWalkthrough.Const]::WM_MOUSEWHEEL, $wParam, [IntPtr]0) | Out-Null
+        Start-Sleep -Milliseconds 120
+    }
+}
+
+# 前台化（交互型步骤专用）：返回原前台窗口，结束后由调用方还原。
+# Windows 前台锁会拒绝非前台进程的 SetForegroundWindow，失败时用 Alt 轻敲解锁后重试。
+function Enter-Foreground {
+    param([IntPtr]$Hwnd)
+    $prev = [VeilWalkthrough.Win32]::GetForegroundWindow()
+    if ($prev -eq $Hwnd) { return $prev }
+    [VeilWalkthrough.Win32]::ShowWindow($Hwnd, [VeilWalkthrough.Const]::SW_RESTORE) | Out-Null
+    [VeilWalkthrough.Win32]::SetForegroundWindow($Hwnd) | Out-Null
+    Start-Sleep -Milliseconds 350
+    if ([VeilWalkthrough.Win32]::GetForegroundWindow() -ne $Hwnd) {
+        [VeilWalkthrough.Win32]::keybd_event([VeilWalkthrough.Win32]::VK_MENU, 0, 0, [UIntPtr]::Zero)
+        [VeilWalkthrough.Win32]::keybd_event([VeilWalkthrough.Win32]::VK_MENU, 0, 2, [UIntPtr]::Zero)
+        Start-Sleep -Milliseconds 120
+        [VeilWalkthrough.Win32]::SetForegroundWindow($Hwnd) | Out-Null
+        Start-Sleep -Milliseconds 350
+    }
+    return $prev
+}
+
+function Send-RealClick {
+    param([IntPtr]$Hwnd, [int]$X, [int]$Y)
+    $pt = New-Object VeilWalkthrough.Win32+POINT
+    $pt.X = $X
+    $pt.Y = $Y
+    [VeilWalkthrough.Win32]::ClientToScreen($Hwnd, [ref]$pt) | Out-Null
+    [VeilWalkthrough.Win32]::SetCursorPos($pt.X, $pt.Y) | Out-Null
+    Start-Sleep -Milliseconds 120
+    [VeilWalkthrough.Win32]::mouse_event([VeilWalkthrough.Win32]::MOUSEEVENTF_LEFTDOWN, 0, 0, 0, [UIntPtr]::Zero)
+    Start-Sleep -Milliseconds 80
+    [VeilWalkthrough.Win32]::mouse_event([VeilWalkthrough.Win32]::MOUSEEVENTF_LEFTUP, 0, 0, 0, [UIntPtr]::Zero)
+    Start-Sleep -Milliseconds 300
+}
+
+# 步骤串：click:x,y / key:发送键串（SendKeys 语法，如 {TAB} ^p） / type:文本 / wait:毫秒 / shot:名字
+function Invoke-Steps {
+    param([IntPtr]$Hwnd, [string]$Spec, [string]$Dir, [string]$Stamp, [ref]$Index)
+    foreach ($raw in @($Spec -split ';')) {
+        $step = $raw.Trim()
+        if (-not $step) { continue }
+        $kind, $arg = $step.Split(':', 2)
+        switch ($kind) {
+            'click' {
+                $xy = $arg.Split(',')
+                Send-RealClick -Hwnd $Hwnd -X ([int]$xy[0]) -Y ([int]$xy[1])
+                Write-Log 'INFO' "点击 $arg"
+            }
+            'key' {
+                [System.Windows.Forms.SendKeys]::SendWait($arg)
+                Start-Sleep -Milliseconds 400
+                Write-Log 'INFO' "按键 $arg"
+            }
+            'type' {
+                [System.Windows.Forms.SendKeys]::SendWait($arg)
+                Start-Sleep -Milliseconds 400
+                Write-Log 'INFO' "输入文本"
+            }
+            'wait' {
+                Start-Sleep -Milliseconds ([int]$arg)
+            }
+            'shot' {
+                $Index.Value++
+                $path = Join-Path $Dir ("{0:00}-step-{1}-{2}.png" -f $Index.Value, $arg, $Stamp)
+                Save-Screenshot -Hwnd $Hwnd -Path $path | Out-Null
+                Write-Log 'INFO' "步骤截图：$path"
+            }
+            default { Write-Log 'WARN' "未知步骤：$step" }
+        }
+    }
+}
+
+
+
+function Get-ShotHash {
+    param([string]$Path)
+    if (-not (Test-Path -LiteralPath $Path)) { return '' }
+    (Get-FileHash -LiteralPath $Path -Algorithm MD5).Hash
+}
+
+# ---------- 主流程 ----------
+$oldProbe = $env:VEIL_BREAK_PROBE
+if ($Probe) { $env:VEIL_BREAK_PROBE = '1' }
+
+$proc = $null
+$procId = 0
+try {
+    Write-Log 'INFO' "exe=$Exe doc=$Doc probe=$($Probe.IsPresent) shots=$ShotDir"
+    $startArgs = @{
+        FilePath = $Exe
+        PassThru = $true
+        RedirectStandardOutput = $stdoutPath
+        RedirectStandardError = $stderrPath
+    }
+    if ($Doc) { $startArgs.ArgumentList = @($Doc) }
+
+    $openStart = Get-Date
+    $proc = Start-Process @startArgs
+    $procId = $proc.Id
+    Write-Log 'INFO' "已启动 PID=$procId"
+
+    $hwnd = Get-MainWindow -ProcessId $procId -TimeoutMs $WindowWaitMs
+    $openMs = [int]((Get-Date) - $openStart).TotalMilliseconds
+    if ($null -eq $hwnd -or $hwnd -eq 0) {
+        Write-Log 'FAIL' "脚本失败：${WindowWaitMs}ms 内未取得主窗口（可能启动崩溃，见 stderr.log）"
+        throw '未取得主窗口'
+    }
+    Write-Log 'INFO' "主窗口就绪：句柄=$hwnd，启动到窗口 $openMs ms"
+    [VeilWalkthrough.Win32]::ShowWindow($hwnd, [VeilWalkthrough.Const]::SW_RESTORE) | Out-Null
+    if (-not (Wait-WindowStable -Hwnd $hwnd -TimeoutMs 3000)) {
+        Write-Log 'WARN' '窗口在 3s 内未达到稳定可见尺寸（可能仍在首帧布局，截图可能不可信）'
+    } else {
+        Start-Sleep -Milliseconds $SettleMs
+    }
+
+    $shotIndex = 0
+    foreach ($width in $widthList) {
+        Set-ClientWidth -Hwnd $hwnd -ClientWidth $width
+        $shotIndex++
+        $shot = Join-Path $ShotDir ("{0:00}-w{1}-p0-{2}.png" -f $shotIndex, $width, $stamp)
+        $ok = Save-Screenshot -Hwnd $hwnd -Path $shot
+        Write-Log 'INFO' "宽度 ${width}px 截图：$shot（PrintWindow=$ok）"
+
+        if ($Steps -and ($StepsWidth -eq 0 -or $StepsWidth -eq $width)) {
+            $prevFg = Enter-Foreground -Hwnd $hwnd
+            $saved = New-Object VeilWalkthrough.Win32+POINT
+            [VeilWalkthrough.Win32]::GetCursorPos([ref]$saved) | Out-Null
+            try {
+                Invoke-Steps -Hwnd $hwnd -Spec $Steps -Dir $ShotDir -Stamp $stamp -Index ([ref]$shotIndex)
+            } finally {
+                [VeilWalkthrough.Win32]::SetCursorPos($saved.X, $saved.Y) | Out-Null
+                if ($prevFg -and $prevFg -ne [IntPtr]::Zero) {
+                    [VeilWalkthrough.Win32]::SetForegroundWindow($prevFg) | Out-Null
+                }
+                Write-Log 'INFO' '交互步骤完成，前台与鼠标位置已还原'
+            }
+        }
+
+        if ($ScrollPages -gt 0) {
+            $prevShot = $shot
+            for ($page = 1; $page -le $ScrollPages; $page++) {
+                Send-PageKey -Hwnd $hwnd -VirtualKey ([VeilWalkthrough.Const]::VK_NEXT) -Times 1
+                $shotIndex++
+                $shot = Join-Path $ShotDir ("{0:00}-w{1}-p{2}-{3}.png" -f $shotIndex, $width, $page, $stamp)
+                Save-Screenshot -Hwnd $hwnd -Path $shot | Out-Null
+                Write-Log 'INFO' "宽度 ${width}px 第 $page 页截图：$shot"
+                if ((Get-ShotHash $prevShot) -eq (Get-ShotHash $shot)) {
+                    # 无焦点窗口可能收不到键盘消息；改用滚轮消息并复核
+                    Write-Log 'WARN' "PageDown 未改变画面（page=$page），改用 WM_MOUSEWHEEL"
+                    Send-Wheel -Hwnd $hwnd -Notches 3
+                    Save-Screenshot -Hwnd $hwnd -Path $shot | Out-Null
+                    if ((Get-ShotHash $prevShot) -eq (Get-ShotHash $shot)) {
+                        Write-Log 'FAIL' "滚动未生效：截图与上一页完全相同，不能作为深滚动证据（page=$page）"
+                    }
+                }
+                $prevShot = $shot
+            }
+        }
+    }
+
+    if ($Measure) {
+        $p = Get-Process -Id $procId -ErrorAction SilentlyContinue
+        if ($p) {
+            $ws = [Math]::Round($p.WorkingSet64 / 1MB, 2)
+            $pv = [Math]::Round($p.PrivateMemorySize64 / 1MB, 2)
+            Write-Log 'METRIC' "启动到窗口=${openMs}ms  WorkingSet=${ws}MB  Private=${pv}MB"
+        } else {
+            Write-Log 'WARN' '进程已退出，无法采集内存'
+        }
+    }
+
+    if ($Probe) {
+        Start-Sleep -Milliseconds 200
+        if (Test-Path -LiteralPath $stderrPath) {
+            $probeLines = Get-Content -LiteralPath $stderrPath -ErrorAction SilentlyContinue |
+                Where-Object { $_ -match 'BREAK|禁则|violation' }
+            Write-Log 'INFO' "探针命中行数：$($probeLines.Count)（原始日志：$stderrPath）"
+            foreach ($line in ($probeLines | Select-Object -First 20)) { Write-Log 'PROBE' $line }
+        }
+    }
+} catch {
+    Write-Log 'FAIL' "脚本失败：$($_.Exception.Message)"
+    $exitCode = 1
+} finally {
+    if ($procId -ne 0 -and -not $KeepAlive) {
+        try {
+            $p = Get-Process -Id $procId -ErrorAction SilentlyContinue
+            if ($p) {
+                Stop-Process -Id $procId -Force
+                Write-Log 'INFO' "已结束 PID=$procId"
+            }
+        } catch {
+            Write-Log 'WARN' "结束进程失败：$($_.Exception.Message)"
+        }
+    }
+    if ($null -eq $oldProbe) { Remove-Item Env:VEIL_BREAK_PROBE -ErrorAction SilentlyContinue }
+    else { $env:VEIL_BREAK_PROBE = $oldProbe }
+    Write-Log 'INFO' "证据目录：$ShotDir"
+}
+
+if ($exitCode) { exit $exitCode }

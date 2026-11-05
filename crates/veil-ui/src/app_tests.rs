@@ -1214,6 +1214,43 @@ fn table_grid_hit_maps_to_cell_content_start() {
 }
 
 #[test]
+fn table_grid_caret_drawn_at_active_cell_content_start() {
+    // C5 定位修复：网格态光标必须画在活动单元格内容起点，而不是源码排版的字形位置。
+    let (mut a, _) = app_math(TABLE_DOC, false);
+    a.ensure_layouts_all();
+    a.ensure_tables();
+    let (id, _, _) = a.editor.session().blocks()[1].clone();
+    let caret = a.editor.session().table(id).unwrap().rows[0][1].range.start;
+    a.editor.set_caret(caret);
+    a.ensure_tables();
+    let top = a
+        .index
+        .blocks
+        .iter()
+        .find(|g| g.id == id)
+        .expect("表格块应存在")
+        .top;
+    let scale = a.input_state.scale;
+    let (cell_x, cell_y) = {
+        let cell = &a.cache.tables[&id].cells[3]; // 第 2 行第 2 列
+        (cell.x, cell.y)
+    };
+    let vp = a.viewport();
+    let (x, y, h) = a.caret_screen();
+    assert!(
+        (x - (MARGIN * scale + cell_x)).abs() < 0.5,
+        "光标 x 应等于单元格内容左缘：{x} vs {}",
+        MARGIN * scale + cell_x
+    );
+    assert!(
+        (y - (vp.y + top - a.window_state.scroll_y + cell_y)).abs() < 0.5,
+        "光标 y 应等于单元格内容上缘：{y} vs {}",
+        vp.y + top - a.window_state.scroll_y + cell_y
+    );
+    assert!((h - BASE_LINE_HEIGHT * scale).abs() < 0.5);
+}
+
+#[test]
 fn table_grid_rebuilds_when_editing_inside_active_cell() {
     let (mut a, _) = app_math(TABLE_DOC, false);
     a.ensure_layouts_all();
@@ -1238,6 +1275,38 @@ fn table_grid_rebuilds_when_editing_inside_active_cell() {
 
 const TABLE_2X3: &str = "p\n\n| a | b | c |\n| --- | --- | --- |\n| d | e | f |\n";
 
+/// 回归（架构审计【高】1）：Ctrl+Enter 追加行必须经 Editor 门面，
+/// 置脏标（自动保存/恢复/关窗确认依赖）、光标落入新行首格、单撤销步。
+#[test]
+fn table_ctrl_enter_sets_dirty_and_moves_caret_into_new_row() {
+    let (mut a, _) = app_math(TABLE_2X3, false);
+    a.ensure_layouts_all();
+    a.ensure_tables();
+    let (id, _, _) = a.editor.session().blocks()[1].clone();
+    let cell = a.editor.session().table(id).unwrap().rows[0][1].range.start;
+    a.editor.set_caret(cell);
+
+    assert!(a.table_ctrl_enter(), "表内 Ctrl+Enter 应追加空行");
+    assert!(a.editor.is_dirty(), "追加行必须置脏标");
+    assert!(a.title_text().starts_with('*'), "标题应显示脏标");
+
+    let src = a.editor.session().serialize();
+    assert!(src.ends_with("|  |  |  |\n"), "新行应为空单元格行：{src:?}");
+    let last_line = src.trim_end_matches('\n').rfind('\n').map(|i| i + 1).unwrap();
+    assert!(
+        a.editor.caret() >= last_line,
+        "光标应落在新行而非表首：caret={} last_line={last_line}",
+        a.editor.caret()
+    );
+
+    a.editor.apply(Intent::Undo).unwrap();
+    assert_eq!(
+        a.editor.session().serialize(),
+        TABLE_2X3,
+        "追加行是单撤销步"
+    );
+}
+
 #[test]
 fn tab_advances_to_next_cell_start() {
     let (mut a, _) = app_math(TABLE_2X3, false);
@@ -1260,7 +1329,7 @@ fn tab_advances_to_next_cell_start() {
 }
 
 #[test]
-fn tab_wraps_from_last_to_first_cell() {
+fn tab_on_last_cell_appends_row_and_moves_to_first_cell() {
     let (mut a, _) = app_math(TABLE_2X3, false);
     a.ensure_layouts_all();
     a.ensure_tables();
@@ -1269,8 +1338,54 @@ fn tab_wraps_from_last_to_first_cell() {
     // caret 在末格 "f" 内容起点
     a.editor.set_caret(tbl.rows[0][2].range.start);
     a.route_key(Key::Tab);
-    // 循环回到首格 "a" 起点
-    assert_eq!(a.editor.caret(), tbl.header[0].range.start);
+    // 与 Typora 对齐：末格 Tab 追加一行并落新行首格（不绕回表首）
+    assert!(a.editor.is_dirty(), "追加行必须置脏标");
+    let src = a.editor.session().serialize();
+    assert_eq!(src, format!("{TABLE_2X3}|  |  |  |\n"));
+    // 块替换后 Table 可能换 id：按 kind 重新定位
+    let id = a
+        .editor
+        .session()
+        .blocks()
+        .into_iter()
+        .find(|(_, k, _)| *k == BlockKind::Table)
+        .map(|(id, _, _)| id)
+        .expect("追加行后仍应有表格块");
+    let tbl = a.editor.session().table(id).unwrap();
+    assert_eq!(tbl.rows.len(), 2, "末格 Tab 应追加一行");
+    let first = &tbl.rows[1][0];
+    assert!(
+        first.range.start <= a.editor.caret() && a.editor.caret() <= first.range.end,
+        "光标应落在新行首格内：caret={} cell=[{},{}]",
+        a.editor.caret(),
+        first.range.start,
+        first.range.end
+    );
+}
+
+#[test]
+fn tab_on_structure_char_moves_into_next_cell() {
+    let (mut a, _) = app_math(TABLE_2X3, false);
+    a.ensure_layouts_all();
+    a.ensure_tables();
+    let (id, _, _) = a.editor.session().blocks()[1].clone();
+    let tbl = a.editor.session().table(id).unwrap();
+    // caret 落在表头 "a" 与 "b" 之间的管道符上（结构字符，不属于任何单元格）
+    let pipe = tbl.header[0].range.end + 1;
+    assert_eq!(
+        a.editor
+            .session()
+            .text_slice(Range::new(pipe, pipe + 1))
+            .as_deref(),
+        Some("|")
+    );
+    a.editor.set_caret(pipe);
+    a.route_key(Key::Tab);
+    assert_eq!(
+        a.editor.caret(),
+        tbl.header[1].range.start,
+        "结构字符上的 Tab 应进入其后第一个单元格"
+    );
 }
 
 #[test]

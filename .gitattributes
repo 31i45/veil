@@ -1,0 +1,19 @@
+# Force LF for CommonMark conformance examples. CI runner (windows-latest)
+# defaults to CRLF checkout on Windows, but CommonMark spec examples must
+# be byte-identical (blank-line handling differs between LF and CRLF).
+crates/veil-core/tests/conformance/examples/*.md text eol=lf
+
+# Markdown docs in repo — keep LF for cross-platform consistency
+*.md text eol=lf
+
+# Rust source — keep LF
+*.rs text eol=lf
+Cargo.toml text eol=lf
+Cargo.lock text eol=lf
+
+# PowerShell scripts — platform-native is fine, but LF preferred
+*.ps1 text eol=lf
+
+# YAML workflows — GitHub Actions prefers LF
+*.yml text eol=lf
+*.yaml text eol=lf

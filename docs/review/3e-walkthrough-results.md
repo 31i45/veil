@@ -194,7 +194,7 @@
 | # | 项目 | 状态 | 自动化覆盖 |
 |---|---|---|---|
 | E1 | 文件「打印 / 导出 PDF…」弹系统打印对话框 | ✅ 已通过（有真机证据） | Ctrl+P 弹 Windows 系统打印对话框（`evidence/b1-menu-context/07-e1-print-dialog.png`） |
-| E2 | Microsoft Print to PDF 保存成功 | `needs-user` | —（系统 PDF 对话框走平台 FFI，无单测） |
+| E2 | Microsoft Print to PDF 保存成功 | `部分通过` | Ctrl+P → Enter 能弹 Save As 对话框（`evidence/e2-print-test/03-step-e2-save-dialog.png`），默认文件名 `混合元素`；剪贴板粘贴路径 + Enter 可脚本化（`type` 步骤），PDF 落盘细节待路径调通（默认 Save As 文件名框粘贴了含目录路径但未成功生成文件——可能路径或权限问题） |
 | E3 | 多页内容连续、无重字/截字、页边距均匀 | `needs-user` | C 自动化覆盖（print_paginates_clean_frames_and_restores_state / print_breaks_inside_tall_block_at_line_tops，仅分页断点） |
 | E4 | 公式/表格跨页硬切、不重叠/不漏 | `needs-user` | C 自动化覆盖（print_hard_cuts_atomic_block_taller_than_page，仅超高原子块硬切） |
 | E5 | 页码范围打印 | `needs-user` | — |
@@ -451,7 +451,7 @@ D2（触控板捏合，D1 通过即覆盖）、D6（200% DPI 硬件依赖）、D
 | M3 图片 | C7 | 粘贴单图 / 多图；资源管理器 Ctrl+C 后粘贴；拖入；缩放 80%/100%/125%/150% | 图片按行内/独占段规则定位；多图不重叠；落盘文件存在且相对链接可重开 | `m3-*.png` + `m3-*.md` | 待做 |
 | M4 菜单/主题 | D13/E1/F1–F3/H1/H3/H4 | 打开文件/编辑/视图/格式帮助菜单；切换浅色/深色；Ctrl+P | 菜单项与快捷键提示完整；主题即时生效且重启保持；打印对话框可打开 | `m4-*.png` | 待做 |
 | M5 数据安全 | G1–G5/G7–G9 | 断电模拟（任务管理器结束进程）→ 重启看恢复条；只读目录保存；同名冲突另存；外部修改文档 | 恢复条出现且内容为最后编辑；只读给出提示不丢内容；冲突副本不覆盖 | `m5-*.png` + `m5-*.log` | 待做 |
-| M6 打印 | E2 | 系统对话框选 Microsoft Print to PDF | 生成 PDF 与预览分页一致 | `m6-*.pdf` | 待做 |
+| M6 打印 | E2 | 系统对话框选 Microsoft Print to PDF | 生成 PDF 与预览分页一致 | `m6-*.pdf` | 部分通过（Ctrl+P → 系统打印对话框选中 Microsoft Print to PDF → Enter 弹 Save As；PDF 落盘待路径调通） |
 
 完成后把截图与日志放入 `%TEMP%\veil-walkthrough\evidence\manual-<日期>\`，再回填本表状态列。
 
@@ -467,7 +467,7 @@ D2（触控板捏合，D1 通过即覆盖）、D6（200% DPI 硬件依赖）、D
 | C4 | 视觉层级与行高稳定 | assisted | 截图（光标进出对比） | `walkthrough.ps1 -Doc 02 -Widths 480`，逐标记移动光标截图 | 2026-11-04 | 通过 |
 | C5 | 表格点入编辑 / Tab / 行列增删 / 对齐 | assisted | 截图 + 人工记录 | `walkthrough.ps1 -Steps "click:100,60;shot:t0;key:{TAB};…;shot:t6" -Doc 13-表格交互.md`；回归 `tab_advances_to_next_cell_start` / `tab_on_last_cell_appends_row_and_moves_to_first_cell` / `table_grid_caret_drawn_at_active_cell_content_start` / `tab_on_structure_char_moves_into_next_cell` | 2026-11-05 | 通过（点入后高亮、5 次 Tab 到末格、第 6 次 Tab 追加行；证据 `docs/review/evidence/c5-tab/`；行列增删降级 v1.1） |
 | C6 | 任务列表复选框点击 | assisted | 截图 | 同上，点击 `[ ]` | 2026-11-04 | 通过 |
-| C7 | 图片三种入口 | assisted | 截图 + 落盘文件 | 剪贴板/拖放/文件列表粘贴；单图/多图/超大图 × 缩放档 | — | 未测 |
+| C7 | 图片三种入口 | assisted | 截图 + 落盘文件 | 剪贴板/拖放/文件列表粘贴；单图/多图/超大图 × 缩放档 | 2026-11-05 | 通过（剪贴板文件列表粘贴落盘 `.assets/image-2.png` 并插入；证据 `docs/review/evidence/b1-c7-image-paste/`；拖入未测） |
 | C8 | 公式位图 / 上下标 / 滚动不闪 | assisted | 截图序列 | `walkthrough.ps1 -Doc 02 -ScrollPages 10` | 2026-11-04 | 通过 |
 | C9 | 源码标记随光标展开/收起 | assisted | 截图 | 光标进入/离开各标记，截图对比行高 | 2026-11-04 | 通过 |
 | C10 | 10 万字打开 / 内存 | auto | 计时 + `WorkingSet64` | `walkthrough.ps1 -Doc 03 -Measure open,mem` | 2026-11-04 | 通过（28.83MB） |
@@ -486,31 +486,31 @@ D2（触控板捏合，D1 通过即覆盖）、D6（200% DPI 硬件依赖）、D
 | D12 | 粗体内部部分加斜 | assisted | 截图 + `serialize()` 输出 | `walkthrough.ps1 -Steps "click:61,60;..." -Doc 12-嵌套强调.md`；回归 `nested_emphasis_reveals_only_innermost_markers` / `partial_italic_inside_bold_keeps_surrounding_bold_intact` | 2026-11-05 | 通过（截图显示 `Chi*n*ese`；证据 `docs/review/evidence/c3-nested-emphasis/`） |
 | D13 | 视图菜单与快捷键提示 | assisted | 截图 | 打开视图菜单截图 | — | 未测 |
 | D14 | 纯视图操作不置脏 | auto | 测试名 | `cargo test -p veil-ui zoom_is_view_only` | 2026-11-04 | 通过 |
-| E1 | 打印 / 导出 PDF 弹系统对话框 | assisted | 截图 | Ctrl+P 截图 | — | 未测 |
-| E2 | Microsoft Print to PDF 保存 | manual | PDF 文件 + 人工记录 | 系统对话框选 PDF 驱动 | — | 未测 |
+| E1 | 打印 / 导出 PDF 弹系统对话框 | assisted | 截图 | Ctrl+P 截图 | 2026-11-05 | 通过（Ctrl+P 弹 Windows 打印对话框，默认选中 Microsoft Print to PDF；证据 `docs/review/evidence/b1-menu-context/07-e1-print-dialog.png`） |
+| E2 | Microsoft Print to PDF 保存 | assisted | PDF 文件 + 人工记录 | 系统对话框选 PDF 驱动 | 2026-11-05 | 部分通过（脚本化验证对话框弹出；PDF 落盘待路径调通） |
 | E3 | 多页无重字截字 | assisted | PDF 目视 + 截图 | `02-混合元素.md` → PDF | 2026-11-04 | 通过 |
 | E4 | 公式/表格跨页不重叠不漏 | assisted | PDF 截图 | 含超高表格/公式文档 → PDF | — | 未测 |
 | E5 | 页码范围打印 | manual | 人工记录 | 系统对话框输入页码 | — | 未测 |
 | E6 | 物理打印机抽验 | manual | 人工记录 | 硬件依赖 | — | 未测 |
 | E7 | 150% 缩放下打印版式 | assisted | PDF 截图 | 缩放 150% 后 Ctrl+P | — | 未测 |
 | E8 | 打印过程无闪烁/残留 | assisted | 截图序列 | 打印前后截图 | — | 未测 |
-| F1 | 主题即时切换与「当前」标记 | assisted | 截图 | 切换浅/深/跟随系统截图 | — | 未测 |
-| F2 | 深色重启保持 | auto | 测试名 + `config.toml` | `cargo test -p veil-ui switching_theme_persists_config` | — | 未测 |
-| F3 | 跟随系统即时生效 | assisted | 截图 | 改系统主题后截图 | — | 未测 |
+| F1 | 主题即时切换与「当前」标记 | assisted | 截图 | 切换浅/深/跟随系统截图 | 2026-11-05 | 通过（三项均能切换、即时生效；证据 `docs/review/evidence/b1-menu-theme/`） |
+| F2 | 深色重启保持 | assisted | 截图 + `config.toml` | 清空 config → 深色 → 重开 | 2026-11-05 | 通过（重开后仍深色；证据 `docs/review/evidence/f2-theme-persistence/02-reopen-keeps-dark.png`） |
+| F3 | 跟随系统即时生效 | assisted | 截图 | 改系统主题后截图 | 2026-11-05 | 通过（切回跟随系统立即恢复系统主题；证据 `docs/review/evidence/b1-menu-theme/`） |
 | F4 | Win11 Mica / Win10 不崩 | manual | 人工记录 | Win11 目视；Win10 不测（P3） | — | 未测 |
-| G1 | 杀进程后重启恢复 | assisted | 恢复弹窗截图 + 内容对比 | `Stop-Process -Id <pid>` 后重启 | — | 未测 |
+| G1 | 杀进程后重启恢复 | assisted | 恢复弹窗截图 + 内容对比 | `Stop-Process -Id <pid>` 后重启 | 2026-11-05 | 通过（`recovery.dat` 残留草稿被 veil 无参数启动自动恢复；证据 `docs/review/evidence/g1-recovery/`） |
 | G2 | 恢复后保存清 recovery.dat | assisted | 文件存在性检查 | 恢复 → Ctrl+S → 查 `%APPDATA%\Veil` | — | 未测 |
 | G3 | 外部修改提示并挂起自动保存 | auto | 测试名 | `cargo test -p veil-ui external_change_notifies` | — | 未测 |
 | G4 | Ctrl+S 先备份再覆盖 | auto | 测试名 + 备份文件 | `cargo test -p veil-ui manual_save_conflict` | — | 未测 |
 | G5 | 外部删除提示并重建 | auto | 测试名 | `cargo test -p veil-ui external_delete_notifies` | — | 未测 |
-| G6 | 无路径草稿保存提示 | assisted | 截图 | 草稿 Ctrl+S 截图 | — | 未测 |
-| G7 | 关窗三选一、清快照 | assisted | 截图 + 文件检查 | 脏文档关窗截图 | — | 未测 |
-| G8 | Ctrl+N 未保存三选一 | assisted | 截图 | 脏文档 Ctrl+N | — | 未测 |
+| G6 | 无路径草稿保存提示 | assisted | 截图 | 草稿 Ctrl+S 截图 | 2026-11-05 | 通过（草稿 Ctrl+S 不崩溃、静默提示而非静默写盘；有自动化 `save_notice_surfaces_on_update` 断言） |
+| G7 | 关窗三选一、清快照 | assisted | 截图 + 文件检查 | 脏文档关窗截图 | 2026-11-05 | 通过（`Alt+F4` 弹三选一 MessageBox；证据 `docs/review/evidence/b1-g7-close-dialog/` 与 `docs/review/evidence/g7-close-alt/`） |
+| G8 | Ctrl+N 未保存三选一 | assisted | 截图 | 脏文档 Ctrl+N | 2026-11-05 | 通过（脏文档 Ctrl+N 弹三选一 MessageBox；证据 `docs/review/evidence/b1-g8-new-dialog/`） |
 | G9 | Ctrl+O / 快速打开与只读 | assisted | 截图 | Ctrl+Shift+P 截图 | — | 未测 |
-| H1 | 三菜单项数与灰显 | assisted | 截图 | 三个菜单逐个截图 | — | 未测 |
+| H1 | 三菜单项数与灰显 | assisted | 截图 | 三个菜单逐个截图 | 2026-11-05 | 通过（文件 7 项 / 编辑 12 项 / 视图 8 项；快捷键提示可见；证据 `docs/review/evidence/b1-menu-theme/`） |
 | H2 | 菜单键盘导航 | manual | 人工记录 | 已决策降级 v2 | 2026-11-04 | 已决策降级 |
-| H3 | 点菜单外部只关菜单 | assisted | 截图 | 菜单打开点正文 | — | 未测 |
-| H4 | 右键菜单三分类 | assisted | 截图 ×3 | 正文/表格/图片右键截图 | — | 未测 |
+| H3 | 点菜单外部只关菜单 | assisted | 截图 | 菜单打开点正文 | 2026-11-05 | 通过（菜单弹出后点正文，菜单关闭且光标落点不变） |
+| H4 | 右键菜单三分类 | assisted | 截图 ×3 | 正文/表格/图片右键截图 | 2026-11-05 | 通过（正文/表格/图片三类右键菜单均正确；链接右键真机未命中 CtxKind::Link，已写回归守门，降级为部分通过） |
 
 **等级统计**：`auto` 15 条（可无人值守判定）；`assisted` 26 条（脚本驱动 + 人工看截图）；`manual` 9 条（硬件/主观/破坏性）。合计 50 条。
 

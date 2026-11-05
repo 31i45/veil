@@ -6202,6 +6202,37 @@ fn ctrl_h_first_open_focuses_query_then_repeat_focuses_replace() {
 }
 
 #[test]
+fn right_click_on_link_text_opens_link_menu() {
+    // 真机走查发现：折叠态链接被整体命中为节点尾（range.end 不含），
+    // 右键落在“链接”文字上却只出 Block 菜单，「复制链接地址」不可达。
+    let (mut a, _) = app_math("[链接](https://example.com)\n", false);
+    assert!(a.editor.set_caret(0));
+    a.ensure_layouts_all();
+    let id = a.editor.session().blocks()[0].0;
+    let top = a
+        .index
+        .blocks
+        .iter()
+        .find(|g| g.id == id)
+        .expect("正文块应存在")
+        .top;
+    let scale = a.input_state.scale;
+    let vp = a.viewport();
+    let (lx, ly, _) = {
+        let l = &a.cache.layouts[&id];
+        a.engine.caret_xy(l, 1)
+    };
+    a.input_state.mouse =
+        PhysicalPosition::new((MARGIN * scale + lx + 2.0) as f64, (vp.y + top - a.window_state.scroll_y + ly + 5.0) as f64);
+    a.on_right_click();
+    assert!(a.ui_state.ctx.open, "应打开右键菜单");
+    assert!(
+        a.ui_state.ctx.link.is_some(),
+        "链接文字上右键应出「复制链接地址」项集"
+    );
+}
+
+#[test]
 fn opening_search_closes_context_menu_so_keys_are_not_swallowed() {
     let store = MemStore::default();
     let mut a = app("abc\n", None, false, &store);

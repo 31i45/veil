@@ -90,8 +90,16 @@ namespace VeilWalkthrough {
         [StructLayout(LayoutKind.Sequential)]
         public struct POINT { public int X; public int Y; }
 
+        [DllImport("user32.dll")] public static extern int GetSystemMetrics(int index);
+        [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc proc, IntPtr param);
+        [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint pid);
+
+        public delegate bool EnumProc(IntPtr hWnd, IntPtr param);
+
         public const uint MOUSEEVENTF_LEFTDOWN = 0x0002;
         public const uint MOUSEEVENTF_LEFTUP = 0x0004;
+        public const uint MOUSEEVENTF_RIGHTDOWN = 0x0008;
+        public const uint MOUSEEVENTF_RIGHTUP = 0x0010;
         public const byte VK_MENU = 0x12;
         [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hWnd, out RECT rect);
         [DllImport("user32.dll")] public static extern bool GetClientRect(IntPtr hWnd, out RECT rect);
@@ -268,20 +276,67 @@ function Enter-Foreground {
 }
 
 function Send-RealClick {
-    param([IntPtr]$Hwnd, [int]$X, [int]$Y)
+    param([IntPtr]$Hwnd, [int]$X, [int]$Y, [switch]$Right)
     $pt = New-Object VeilWalkthrough.Win32+POINT
     $pt.X = $X
     $pt.Y = $Y
     [VeilWalkthrough.Win32]::ClientToScreen($Hwnd, [ref]$pt) | Out-Null
     [VeilWalkthrough.Win32]::SetCursorPos($pt.X, $pt.Y) | Out-Null
     Start-Sleep -Milliseconds 120
-    [VeilWalkthrough.Win32]::mouse_event([VeilWalkthrough.Win32]::MOUSEEVENTF_LEFTDOWN, 0, 0, 0, [UIntPtr]::Zero)
+    $down = if ($Right) { [VeilWalkthrough.Win32]::MOUSEEVENTF_RIGHTDOWN } else { [VeilWalkthrough.Win32]::MOUSEEVENTF_LEFTDOWN }
+    $up = if ($Right) { [VeilWalkthrough.Win32]::MOUSEEVENTF_RIGHTUP } else { [VeilWalkthrough.Win32]::MOUSEEVENTF_LEFTUP }
+    [VeilWalkthrough.Win32]::mouse_event($down, 0, 0, 0, [UIntPtr]::Zero)
     Start-Sleep -Milliseconds 80
-    [VeilWalkthrough.Win32]::mouse_event([VeilWalkthrough.Win32]::MOUSEEVENTF_LEFTUP, 0, 0, 0, [UIntPtr]::Zero)
+    [VeilWalkthrough.Win32]::mouse_event($up, 0, 0, 0, [UIntPtr]::Zero)
     Start-Sleep -Milliseconds 300
 }
 
-# 步骤串：click:x,y / key:发送键串（SendKeys 语法，如 {TAB} ^p） / type:文本 / wait:毫秒 / shot:名字
+# 屏幕捕获（始终 CopyFromScreen）：只取目标进程可见窗口的并集，
+# 既覆盖 MessageBox 等独立窗口，也不把其它应用截进证据。
+function Save-ScreenShot {
+    param([IntPtr]$Hwnd, [string]$Path)
+    $targetPid = [uint32]0
+    [VeilWalkthrough.Win32]::GetWindowThreadProcessId($Hwnd, [ref]$targetPid) | Out-Null
+    $script:capPid = $targetPid
+    $script:capRect = @([int]::MaxValue, [int]::MaxValue, [int]::MinValue, [int]::MinValue)
+    $collect = {
+        param([IntPtr]$h, [IntPtr]$p)
+        $wp = [uint32]0
+        [VeilWalkthrough.Win32]::GetWindowThreadProcessId($h, [ref]$wp) | Out-Null
+        if ($wp -ne $script:capPid) { return $true }
+        if (-not [VeilWalkthrough.Win32]::IsWindowVisible($h)) { return $true }
+        $r = New-Object VeilWalkthrough.RECT
+        [VeilWalkthrough.Win32]::GetWindowRect($h, [ref]$r) | Out-Null
+        if (($r.Right - $r.Left) -lt 80 -or ($r.Bottom - $r.Top) -lt 60) { return $true }
+        if ($r.Left -lt $script:capRect[0]) { $script:capRect[0] = $r.Left }
+        if ($r.Top -lt $script:capRect[1]) { $script:capRect[1] = $r.Top }
+        if ($r.Right -gt $script:capRect[2]) { $script:capRect[2] = $r.Right }
+        if ($r.Bottom -gt $script:capRect[3]) { $script:capRect[3] = $r.Bottom }
+        return $true
+    }
+    [VeilWalkthrough.Win32]::EnumWindows($collect, [IntPtr]::Zero) | Out-Null
+    $x0 = $script:capRect[0]
+    $y0 = $script:capRect[1]
+    $x1 = $script:capRect[2]
+    $y1 = $script:capRect[3]
+    if ($x1 -le $x0 -or $y1 -le $y0) {
+        Write-Log 'WARN' '屏幕捕获失败：未找到目标进程可见窗口'
+        return
+    }
+    $w = $x1 - $x0
+    $h = $y1 - $y0
+    $bmp = New-Object System.Drawing.Bitmap($w, $h)
+    $g = [System.Drawing.Graphics]::FromImage($bmp)
+    $g.CopyFromScreen($x0, $y0, 0, 0, (New-Object System.Drawing.Size($w, $h)))
+    $g.Dispose()
+    $bmp.Save($Path, [System.Drawing.Imaging.ImageFormat]::Png)
+    $bmp.Dispose()
+    Write-Log 'INFO' "进程窗口并集截图 ${w}x${h}（含独立对话框）"
+}
+
+
+# 步骤串：click:x,y / rclick:x,y / key:发送键串（SendKeys 语法，如 {TAB} ^p） / type:文本 / wait:毫秒 / shot:名字 / shot-screen:名字
+#   shot 走 PrintWindow（窗口内容）；shot-screen 走屏幕捕获（用于系统对话框等独立窗口）。
 function Invoke-Steps {
     param([IntPtr]$Hwnd, [string]$Spec, [string]$Dir, [string]$Stamp, [ref]$Index)
     foreach ($raw in @($Spec -split ';')) {
@@ -294,15 +349,39 @@ function Invoke-Steps {
                 Send-RealClick -Hwnd $Hwnd -X ([int]$xy[0]) -Y ([int]$xy[1])
                 Write-Log 'INFO' "点击 $arg"
             }
+            'rclick' {
+                $xy = $arg.Split(',')
+                Send-RealClick -Hwnd $Hwnd -X ([int]$xy[0]) -Y ([int]$xy[1]) -Right
+                Write-Log 'INFO' "右键 $arg"
+            }
+            'pastefile' {
+                # 以资源管理器复制的形式把文件放进剪贴板（文件列表），再 ^v 让应用走图片/附件粘贴。
+                $paths = @($arg -split ';' | Where-Object { $_ })
+                $list = New-Object System.Collections.Specialized.StringCollection
+                foreach ($f in $paths) { $list.Add((Resolve-Path -LiteralPath $f).Path) }
+                [System.Windows.Forms.Clipboard]::SetFileDropList($list)
+                Start-Sleep -Milliseconds 120
+                [System.Windows.Forms.SendKeys]::SendWait('^v')
+                Start-Sleep -Milliseconds 600
+                Write-Log 'INFO' "粘贴文件 $arg"
+            }
             'key' {
                 [System.Windows.Forms.SendKeys]::SendWait($arg)
                 Start-Sleep -Milliseconds 400
                 Write-Log 'INFO' "按键 $arg"
             }
             'type' {
-                [System.Windows.Forms.SendKeys]::SendWait($arg)
+                # 走剪贴板粘贴：SendKeys 逐字符会被输入法截获成分解候选，ESC 还会吞掉文本。
+                $old = $null
+                try { $old = [System.Windows.Forms.Clipboard]::GetText() } catch { $old = $null }
+                [System.Windows.Forms.Clipboard]::SetText($arg)
+                Start-Sleep -Milliseconds 120
+                [System.Windows.Forms.SendKeys]::SendWait('^v')
                 Start-Sleep -Milliseconds 400
-                Write-Log 'INFO' "输入文本"
+                if ($old) {
+                    try { [System.Windows.Forms.Clipboard]::SetText($old) } catch { }
+                }
+                Write-Log 'INFO' "输入文本（剪贴板粘贴）"
             }
             'wait' {
                 Start-Sleep -Milliseconds ([int]$arg)
@@ -312,6 +391,12 @@ function Invoke-Steps {
                 $path = Join-Path $Dir ("{0:00}-step-{1}-{2}.png" -f $Index.Value, $arg, $Stamp)
                 Save-Screenshot -Hwnd $Hwnd -Path $path | Out-Null
                 Write-Log 'INFO' "步骤截图：$path"
+            }
+            'shot-screen' {
+                $Index.Value++
+                $path = Join-Path $Dir ("{0:00}-step-{1}-{2}.png" -f $Index.Value, $arg, $Stamp)
+                Save-ScreenShot -Hwnd $Hwnd -Path $path
+                Write-Log 'INFO' "屏幕截图（含独立窗口）：$path"
             }
             default { Write-Log 'WARN' "未知步骤：$step" }
         }

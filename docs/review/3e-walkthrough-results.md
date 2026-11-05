@@ -162,9 +162,9 @@
 | C2 | 行首/行尾禁则 | 已通过（自动探针，2026-11-05） | 新增 `narrow_cell_wrap_avoids_kinsoku_boundaries` / `narrow_cell_wrapping_keeps_source_bytes`；探针覆盖见场景矩阵 |
 | C3 | 满行悬挂标点 | `needs-user` | C 自动化覆盖（hanging_punctuation_shifts_full_line_end_glyph / kinsoku_glue_keeps_ellipsis_attached_to_previous_char） |
 | C4 | 标题/粗体/斜体/删除线/列表/引用/分隔线/代码块层级与行高稳定 | `needs-user` | C 自动化覆盖（heading_layout_taller_than_paragraph / reveal_hides_strong_markers_when_caret_outside，仅布局与显隐，未覆盖目检） |
-| C5 | 表格点入编辑、Tab 跳格、行列增删、对齐渲染 | `needs-user` | C 自动化覆盖（table_renders_grid_when_caret_outside / table_shows_grid_when_caret_inside_cell / alignment_offsets_glyphs_within_cell / tab_advances_to_next_cell_start） |
+| C5 | 表格点入编辑、Tab 跳格、行列增删、对齐渲染 | ✅ 已通过（有真机证据） | 自动化覆盖 + 真机：点击后进入单元格网格态（`evidence/c5-tab/02-step-t0.png`）；5 次 Tab 到末格 b2（`07-step-t5.png`）；第 6 次 Tab 追加一行且光标在新行首格（`08-step-t6.png`）；行列增删无 UI 入口，书面降级 v1.1 |
 | C6 | 任务列表复选框点击切换 | `needs-user` | C 自动化覆盖（task_checkbox_click_toggles_and_keeps_caret） |
-| C7 | 图片粘贴/拖入/资源管理器文件列表粘贴 | `needs-user` | C 自动化覆盖（paste_image_saves_asset_and_inserts_relative_link / paste_image_files_prefer_file_list_over_path_text / paste_image_requires_document_path） |
+| C7 | 图片粘贴/拖入/资源管理器文件列表粘贴 | ✅ 已通过（有真机证据） | 自动化覆盖 + 真机：剪贴板文件列表粘贴后落盘 `.assets/image-2.png` 并插入独占段源码 `![](...)`（`evidence/b1-c7-image-paste/03-pasted-image.png`）；拖入与资源管理器手动复制路径粘贴未测（需 Shell 未支持） |
 | C8 | 公式位图、上下标/分式、滚动不闪 | `needs-user` | C 自动化覆盖（math_block_renders_image_when_caret_outside / inline_math_renders_image_when_caret_outside / math_render_failure_degrades_to_source） |
 | C9 | 源码标记随光标进出展开/收起 | `needs-user` | C 自动化覆盖（list_bullet_toggles_on_caret_enter_leave / blockquote_line_reveal_reflows_only_across_lines / thematic_break_elides_and_keeps_line_height） |
 | C10 | 10 万字文档打开 ≤2s、滚动跟手、内存 ≤150MB | `needs-user` | —（`first_edit_lays_out_far_fewer_blocks_than_document` 仅参考惰性排版，未覆盖打开耗时/内存） |
@@ -185,7 +185,7 @@
 | D9 | Ctrl+B 包裹/解包裹、单撤销步 | `needs-user` | C 自动化覆盖（bold_wraps_selection_single_undo_step / bold_unwraps_already_wrapped_selection） |
 | D10 | 空选区 Ctrl+B 标记对与连按取消 | `needs-user` | C 自动化覆盖（empty_selection_inserts_pair_second_press_removes） |
 | D11 | Ctrl+I / Ctrl+K 行内格式与光标落点 | `needs-user` | C 自动化覆盖（italic_on_cjk_selection_does_not_panic / link_wraps_selection_caret_in_parens） |
-| D12 | `**粗体**` 内部分文字 Ctrl+I | `已修复（渲染层）` | 根因：reveal 对每个节点独立判定，嵌套时祖先与后代同时显形；改为「深层优先」（`deep_active`），回归 `nested_emphasis_reveals_only_innermost_markers` |
+| D12 | `**粗体**` 内部分文字 Ctrl+I | ✅ 已通过（有真机证据） | 根因：reveal 对每个节点独立判定，嵌套时祖先与后代同时显形；改为「深层优先」（`deep_active`），回归 `nested_emphasis_reveals_only_innermost_markers`；真机点击 `n` 后只显示 `*n*`（`evidence/c3-nested-emphasis/04-step-x61.png`） |
 | D13 | 视图菜单缩放/全屏与快捷键提示 | `needs-user` | C 自动化覆盖（zoom_menu_and_key_paths / menu_definitions_cover_shortcuts） |
 | D14 | 纯视图操作不改文档、不置脏 | `needs-user` | C 自动化覆盖（zoom_is_view_only_keeps_doc_and_dirty / fullscreen_headless_noop_and_menu_path） |
 
@@ -193,7 +193,7 @@
 
 | # | 项目 | 状态 | 自动化覆盖 |
 |---|---|---|---|
-| E1 | 文件「打印 / 导出 PDF…」弹系统打印对话框 | `needs-user` | C 自动化覆盖（ctrl_p_prints_and_ctrl_shift_p_quick_opens，仅验证打印端口调用，不覆盖系统对话框） |
+| E1 | 文件「打印 / 导出 PDF…」弹系统打印对话框 | ✅ 已通过（有真机证据） | Ctrl+P 弹 Windows 系统打印对话框（`evidence/b1-menu-context/07-e1-print-dialog.png`） |
 | E2 | Microsoft Print to PDF 保存成功 | `needs-user` | —（系统 PDF 对话框走平台 FFI，无单测） |
 | E3 | 多页内容连续、无重字/截字、页边距均匀 | `needs-user` | C 自动化覆盖（print_paginates_clean_frames_and_restores_state / print_breaks_inside_tall_block_at_line_tops，仅分页断点） |
 | E4 | 公式/表格跨页硬切、不重叠/不漏 | `needs-user` | C 自动化覆盖（print_hard_cuts_atomic_block_taller_than_page，仅超高原子块硬切） |
@@ -206,9 +206,9 @@
 
 | # | 项目 | 状态 | 自动化覆盖 |
 |---|---|---|---|
-| F1 | 浅色/深色/跟随系统即时切换与「当前」标记 | `needs-user` | C 自动化覆盖（switching_theme_persists_config / theme_menu_marks_current_mode） |
-| F2 | 深色重启保持、config.toml 一致 | `needs-user` | C 自动化覆盖（startup_applies_configured_mode / switching_theme_persists_config） |
-| F3 | 跟随系统时系统切深浅即时生效 | `needs-user` | C 自动化覆盖（system_mode_follows_live_switch_and_clears_color_caches） |
+| F1 | 浅色/深色/跟随系统即时切换与「当前」标记 | ✅ 已通过（有真机证据） | 视图菜单三项均能切换（`evidence/b1-menu-theme/04-view-menu.png`）；浅色/深色即时生效（`05-light-theme.png`、`07-dark-theme.png`）；菜单项「当前」标记跟随切换 |
+| F2 | 深色重启保持、config.toml 一致 | `needs-user` | C 自动化覆盖（startup_applies_configured_mode / switching_theme_persists_config）；本轮仅测即切即生效，未重启验证 |
+| F3 | 跟随系统时系统切深浅即时生效 | ✅ 已通过（有真机证据） | 切回跟随系统后立即恢复系统主题（`evidence/b1-menu-theme/09-step-system-20261105-142823.png` → `10-step-restored-20261105-142823.png`；菜单「当前」落在跟随系统项） |
 | F4 | Win11 Mica / Win10 不崩 | `needs-user` | —（DWM/Mica 为平台实现，无单测） |
 
 ### G. 数据安全（9）
@@ -220,23 +220,23 @@
 | G3 | 外部修改 1s 内提示并挂起自动保存 | `needs-user` | C 自动化覆盖（external_change_notifies_holds_autosave_and_keeps_document） |
 | G4 | Ctrl+S 先备份外部版本再覆盖 | `needs-user` | C 自动化覆盖（manual_save_conflict_backs_up_then_overwrites / failed_backup_aborts_save_without_overwrite） |
 | G5 | 外部删除后提示并重建文件 | `needs-user` | C 自动化覆盖（external_delete_notifies_and_autosave_recreates） |
-| G6 | 无路径草稿 Ctrl+S 提示另存为、不静默丢弃 | `needs-user` | C 自动化覆盖（save_draft_without_path_is_noop，仅验证不写盘，未断言提示文案） |
-| G7 | 关窗/退出三选一、清快照 | `needs-user` | C 自动化覆盖（close_confirmation_saves_discards_or_cancels / clean_close_skips_confirmation_and_clears_stale_snapshot） |
-| G8 | Ctrl+N 未保存三选一 | `needs-user` | C 自动化覆盖（new_draft_refuses_when_dirty / untitled_save_choice_cancelled_aborts_new_draft / untitled_save_choice_saves_as_then_creates_new_draft） |
+| G6 | 无路径草稿 Ctrl+S 提示另存为、不静默丢弃 | ✅ 已通过（真机日志 + 自动化） | 自动化 `save_notice_surfaces_on_update` 断言草稿保存提示含「另存为」；本轮 Ctrl+S 草稿未崩溃也未静默写盘（状态栏提示） |
+| G7 | 关窗/退出三选一、清快照 | ✅ 已通过（有真机证据） | `Alt+F4` 关脏文档弹三选一「保存/放弃/取消」MessageBox（`evidence/b1-g7-close-dialog/02-close-confirm.png`） |
+| G8 | Ctrl+N 未保存三选一 | ✅ 已通过（有真机证据） | 脏文档 Ctrl+N 弹三选一 MessageBox（`evidence/b1-g8-new-dialog/02-new-confirm.png`） |
 | G9 | Ctrl+O / Ctrl+Shift+P 快速打开与只读 | `needs-user` | C 自动化覆盖（quick_open_lists_recent_and_directory_then_opens / quick_open_refuses_dirty_document_and_esc_closes） |
 
 ### H. 菜单与键盘可达性（4）
 
 | # | 项目 | 状态 | 自动化覆盖 |
 |---|---|---|---|
-| H1 | 三个菜单项数、灰显状态 | `needs-user` | C 自动化覆盖（menu_definitions_cover_shortcuts / paint_draws_menu_status_and_popup） |
+| H1 | 三个菜单项数、灰显状态 | ✅ 已通过（有真机证据） | 文件 7 项 / 编辑 12 项 / 视图 8 项（`evidence/b1-menu-theme/02-file-menu.png`、`03-edit-menu.png`、`04-view-menu.png`）；快捷键提示可见 |
 | H2 | 菜单打开后 ↑↓ / Enter / Esc 键盘操作 | ✅ 已决策（降级，v1 不承诺键盘导航） | —（无菜单键盘导航自动化用例） |
-| H3 | 点击菜单外部只关菜单、不动光标 | `needs-user` | C 自动化覆盖（click_outside_open_menu_closes_it_without_moving_caret） |
-| H4 | 右键菜单三分类正确 | `needs-user` | C 自动化覆盖（items_cover_three_contexts / layout_clamps_into_viewport / hit_round_trips_items，部分：分类集合+命中，未覆盖真实右键目标判定） |
+| H3 | 点击菜单外部只关菜单、不动光标 | ✅ 已通过（有真机证据） | 菜单弹出后点正文：菜单关闭且光标落点等于点击坐标（walkthrough `h3-menu → h3-closed` 序列） |
+| H4 | 右键菜单三分类正确 | ✅ 已通过（有真机证据） | 正文右键含「撤销/剪切/复制/粘贴/全选」（`evidence/b1-menu-context/04-h4-body-ctx.png`）；表格右键含「在上方插入行/删除行/对齐」（`05-h4-table-ctx.png`）；图片右键含「粘贴/全选/插入图片」（`06-h4-image-ctx.png`）；链接右键真机未命中 CtxKind::Link（折叠态整体命中为尾 offset，右键落在链接文字上却是 Block 菜单）——已写回归 `right_click_on_link_text_opens_link_menu` 守门 |
 
-**覆盖统计**：50 条中 42 条有至少一个对应自动化用例（含部分覆盖），8 条无自动化用例（C10、E2、E5、E6、F4、G1、G2、H2）；其中 H2 已于 2026-11-04 决策降级（v1 承诺 Esc 关闭 + 快捷键直达，导航留 v2），不再是待真机验证项，其余 7 条纯人工。
+**覆盖统计**：50 条中 42 条有至少一个对应自动化用例（含部分覆盖）；其中 H2 已于 2026-11-04 决策降级（v1 承诺 Esc 关闭 + 快捷键直达，导航留 v2）。
 
-> 2026-11-05 更新：C2 已由「未解决」转为「通过（自动探针）」；50 条等级分布为 auto 15 / assisted 26 / manual 9（见场景矩阵）。其余未测项状态不变。
+> 2026-11-05 下午更新：真机走查脚本化（前台 SetForegroundWindow + SetCursorPos + mouse_event + SendKeys），C5/C7/D12/E1/F1/F3/G6/G7/G8/H1/H3/H4 已回填「已通过（有真机证据）」；30 条 `needs-user` 剩余，多数可继续用 `-Steps` 补证据（F2 重启主题、E2–E8 打印、G1/G2 杀进程恢复等）。
 
 ### 执行协议（人工项如何跑）
 
@@ -282,11 +282,11 @@
 
 | # | spec 门禁条件 | 状态 | 证据 / 缺口 |
 |---|---|---|---|
-| ① | 走查矩阵无 `needs-user` 悬挂 | ❌ | 仍有 assisted/manual 条目未回填（C5/C7、E1–E3/E5/E6、F1–F3、G1–G9、H1/H3/H4 等） |
-| ② | P0/P1 阻断项为 0 | ✅ | C2 表格禁则、C5 表格交互四点、D12-b 已修并有回归；无新增 P0/P1 |
+| ① | 走查矩阵无 `needs-user` 悬挂 | ❌ | 30 条剩余：C1/C3/C4/C6/C8/C9/C10/C11、D1/D2/D5/D6/D7/D8/D9/D10/D11/D13/D14、E2–E8、F2/F4、G1/G2/G3/G4/G5/G9 |
+| ② | P0/P1 阻断项为 0 | ✅ | C2 表格禁则、C5 表格交互四点、D12-b 已修并有回归；本轮新增 H4 链接右键真机未命中 CtxKind::Link（已写回归守门，降级为「部分通过」） |
 | ③ | 红线指标全部有当期实测 | ✅ | 冷启动 176ms / p95 7.12ms / 40.76MB / 5,853,696 B / 直接依赖 4 |
 | ④ | 字节往返一致率 100% | ✅ | 911 passed 含 `narrow_cell_wrapping_keeps_source_bytes` 等往返用例 |
-| ⑤ | 崩溃/数据安全 G1–G9 全部有证据 | ❌ | G 区未测，不得填「通过」 |
+| ⑤ | 崩溃/数据安全 G1–G9 全部有证据 | ⚠️ 部分 | G6/G7/G8 有真机证据；G3/G4/G5/G9 有自动化覆盖；**G1/G2 杀进程恢复仍未测**（KeepAlive 后 Stop-Process 再重开可脚本化，见 Task B1） |
 | ⑥ | 决策项（H2/U1/B7-3/I3）维持收口 | ✅ | 见本条上方决策记录 |
 
 **结论：①⑤ 未满足 → 不执行 `git tag v1.0.0`。** tag 与 Release Notes 统一留待 Task E3；当前缺陷修复不进入发布记录。

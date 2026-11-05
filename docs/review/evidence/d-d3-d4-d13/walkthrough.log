@@ -1,0 +1,50 @@
+[16:38:56.683] INFO  exe=target\release\veil.exe doc=C:\Users\31i45\AppData\Local\Temp\veil-walkthrough\02-混合元素.md probe=False shots=C:\Users\31i45\AppData\Local\Temp\veil-walkthrough\evidence\d-d1-d3-d4-d13
+[16:38:56.749] INFO  已启动 PID=10048
+[16:38:56.908] INFO  主窗口就绪：句柄=3344776，启动到窗口 204 ms
+[16:38:58.484] INFO  进程窗口并集截图 655x737（含独立对话框）
+[16:38:58.489] INFO  宽度 640px 截图：C:\Users\31i45\AppData\Local\Temp\veil-walkthrough\evidence\d-d1-d3-d4-d13\01-w640-p0-20261105-163856.png（PrintWindow=）
+[16:38:59.076] INFO  点击 60,60
+[16:38:59.560] INFO  按键 ^=
+[16:39:00.027] INFO  按键 ^=
+[16:39:00.395] INFO  进程窗口并集截图 655x737（含独立对话框）
+[16:39:00.407] INFO  步骤截图：C:\Users\31i45\AppData\Local\Temp\veil-walkthrough\evidence\d-d1-d3-d4-d13\02-step-d3-step2-20261105-163856.png
+[16:39:00.867] INFO  按键 ^-
+[16:39:01.223] INFO  进程窗口并集截图 655x737（含独立对话框）
+[16:39:01.226] INFO  步骤截图：C:\Users\31i45\AppData\Local\Temp\veil-walkthrough\evidence\d-d1-d3-d4-d13\03-step-d3-step--20261105-163856.png
+[16:39:01.698] INFO  按键 ^0
+[16:39:02.067] INFO  进程窗口并集截图 655x737（含独立对话框）
+[16:39:02.069] INFO  步骤截图：C:\Users\31i45\AppData\Local\Temp\veil-walkthrough\evidence\d-d1-d3-d4-d13\04-step-d4-reset-20261105-163856.png
+[16:39:02.607] INFO  点击 158,15
+[16:39:02.662] INFO  进程窗口并集截图 655x737（含独立对话框）
+[16:39:02.664] INFO  步骤截图：C:\Users\31i45\AppData\Local\Temp\veil-walkthrough\evidence\d-d1-d3-d4-d13\05-step-d13-menu-20261105-163856.png
+[16:39:03.094] INFO  按键 {ESC}
+[16:39:03.133] INFO  进程窗口并集截图 655x737（含独立对话框）
+[16:39:03.135] INFO  步骤截图：C:\Users\31i45\AppData\Local\Temp\veil-walkthrough\evidence\d-d1-d3-d4-d13\06-step-restored-20261105-163856.png
+[16:39:03.143] INFO  交互步骤完成，前台与鼠标位置已还原
+[16:39:03.194] INFO  已结束 PID=10048
+[16:39:03.200] INFO  证据目录：C:\Users\31i45\AppData\Local\Temp\veil-walkthrough\evidence\d-d1-d3-d4-d13
+[16:39:10.265] INFO  exe=target\release\veil.exe doc=C:\Users\31i45\AppData\Local\Temp\veil-walkthrough\02-混合元素.md probe=False shots=C:\Users\31i45\AppData\Local\Temp\veil-walkthrough\evidence\d-d1-d3-d4-d13
+[16:39:10.309] INFO  已启动 PID=13412
+[16:39:10.467] INFO  主窗口就绪：句柄=1640476，启动到窗口 186 ms
+[16:39:12.017] INFO  进程窗口并集截图 655x737（含独立对话框）
+[16:39:12.021] INFO  宽度 640px 截图：C:\Users\31i45\AppData\Local\Temp\veil-walkthrough\evidence\d-d1-d3-d4-d13\01-w640-p0-20261105-163910.png（PrintWindow=）
+[16:39:12.610] INFO  点击 60,60
+[16:39:13.077] INFO  按键 ^=
+[16:39:13.544] INFO  按键 ^=
+[16:39:13.899] INFO  进程窗口并集截图 655x737（含独立对话框）
+[16:39:13.910] INFO  步骤截图：C:\Users\31i45\AppData\Local\Temp\veil-walkthrough\evidence\d-d1-d3-d4-d13\02-step-d3-step2-20261105-163910.png
+[16:39:14.376] INFO  按键 ^-
+[16:39:14.722] INFO  进程窗口并集截图 655x737（含独立对话框）
+[16:39:14.724] INFO  步骤截图：C:\Users\31i45\AppData\Local\Temp\veil-walkthrough\evidence\d-d1-d3-d4-d13\03-step-d3-step--20261105-163910.png
+[16:39:15.193] INFO  按键 ^0
+[16:39:15.539] INFO  进程窗口并集截图 655x737（含独立对话框）
+[16:39:15.542] INFO  步骤截图：C:\Users\31i45\AppData\Local\Temp\veil-walkthrough\evidence\d-d1-d3-d4-d13\04-step-d4-reset-20261105-163910.png
+[16:39:16.096] INFO  点击 158,15
+[16:39:16.147] INFO  进程窗口并集截图 655x737（含独立对话框）
+[16:39:16.150] INFO  步骤截图：C:\Users\31i45\AppData\Local\Temp\veil-walkthrough\evidence\d-d1-d3-d4-d13\05-step-d13-menu-20261105-163910.png
+[16:39:16.581] INFO  按键 {ESC}
+[16:39:16.613] INFO  进程窗口并集截图 655x737（含独立对话框）
+[16:39:16.616] INFO  步骤截图：C:\Users\31i45\AppData\Local\Temp\veil-walkthrough\evidence\d-d1-d3-d4-d13\06-step-restored-20261105-163910.png
+[16:39:16.622] INFO  交互步骤完成，前台与鼠标位置已还原
+[16:39:16.670] INFO  已结束 PID=13412
+[16:39:16.673] INFO  证据目录：C:\Users\31i45\AppData\Local\Temp\veil-walkthrough\evidence\d-d1-d3-d4-d13

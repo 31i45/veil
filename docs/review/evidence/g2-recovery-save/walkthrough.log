@@ -1,0 +1,38 @@
+[16:38:15.807] INFO  exe=target\release\veil.exe doc= probe=False shots=C:\Users\31i45\AppData\Local\Temp\veil-walkthrough\evidence\g2-save-full
+[16:38:15.879] INFO  已启动 PID=20116
+[16:38:16.035] INFO  主窗口就绪：句柄=524806，启动到窗口 202 ms
+[16:38:17.598] INFO  进程窗口并集截图 655x737（含独立对话框）
+[16:38:17.604] INFO  宽度 640px 截图：C:\Users\31i45\AppData\Local\Temp\veil-walkthrough\evidence\g2-save-full\01-w640-p0-20261105-163815.png（PrintWindow=）
+[16:38:18.497] INFO  进程窗口并集截图 655x737（含独立对话框）
+[16:38:18.501] INFO  步骤截图：C:\Users\31i45\AppData\Local\Temp\veil-walkthrough\evidence\g2-save-full\02-step-recovered-20261105-163815.png
+[16:38:18.975] INFO  按键 ^s
+[16:38:20.226] INFO  进程窗口并集截图 655x737（含独立对话框）
+[16:38:20.229] INFO  屏幕截图（含独立窗口）：C:\Users\31i45\AppData\Local\Temp\veil-walkthrough\evidence\g2-save-full\03-step-save-dlg-20261105-163815.png
+[16:38:20.838] INFO  输入文本（剪贴板粘贴）
+[16:38:21.393] INFO  进程窗口并集截图 655x737（含独立对话框）
+[16:38:21.395] INFO  屏幕截图（含独立窗口）：C:\Users\31i45\AppData\Local\Temp\veil-walkthrough\evidence\g2-save-full\04-step-typed-20261105-163815.png
+[16:38:21.850] INFO  按键 {ENTER}
+[16:38:23.907] INFO  进程窗口并集截图 655x737（含独立对话框）
+[16:38:23.909] INFO  步骤截图：C:\Users\31i45\AppData\Local\Temp\veil-walkthrough\evidence\g2-save-full\05-step-after-save-20261105-163815.png
+[16:38:23.920] INFO  交互步骤完成，前台与鼠标位置已还原
+[16:38:23.969] INFO  已结束 PID=20116
+[16:38:23.974] INFO  证据目录：C:\Users\31i45\AppData\Local\Temp\veil-walkthrough\evidence\g2-save-full
+[16:38:34.282] INFO  exe=target\release\veil.exe doc= probe=False shots=C:\Users\31i45\AppData\Local\Temp\veil-walkthrough\evidence\g2-save-full
+[16:38:34.329] INFO  已启动 PID=19308
+[16:38:34.491] INFO  主窗口就绪：句柄=330786，启动到窗口 188 ms
+[16:38:36.074] INFO  进程窗口并集截图 655x737（含独立对话框）
+[16:38:36.077] INFO  宽度 640px 截图：C:\Users\31i45\AppData\Local\Temp\veil-walkthrough\evidence\g2-save-full\01-w640-p0-20261105-163834.png（PrintWindow=）
+[16:38:36.982] INFO  进程窗口并集截图 655x737（含独立对话框）
+[16:38:36.984] INFO  步骤截图：C:\Users\31i45\AppData\Local\Temp\veil-walkthrough\evidence\g2-save-full\02-step-recovered-20261105-163834.png
+[16:38:37.460] INFO  按键 ^s
+[16:38:38.718] INFO  进程窗口并集截图 655x737（含独立对话框）
+[16:38:38.721] INFO  屏幕截图（含独立窗口）：C:\Users\31i45\AppData\Local\Temp\veil-walkthrough\evidence\g2-save-full\03-step-save-dlg-20261105-163834.png
+[16:38:39.323] INFO  输入文本（剪贴板粘贴）
+[16:38:39.876] INFO  进程窗口并集截图 655x737（含独立对话框）
+[16:38:39.879] INFO  屏幕截图（含独立窗口）：C:\Users\31i45\AppData\Local\Temp\veil-walkthrough\evidence\g2-save-full\04-step-typed-20261105-163834.png
+[16:38:40.318] INFO  按键 {ENTER}
+[16:38:42.373] INFO  进程窗口并集截图 655x737（含独立对话框）
+[16:38:42.375] INFO  步骤截图：C:\Users\31i45\AppData\Local\Temp\veil-walkthrough\evidence\g2-save-full\05-step-after-save-20261105-163834.png
+[16:38:42.385] INFO  交互步骤完成，前台与鼠标位置已还原
+[16:38:42.434] INFO  已结束 PID=19308
+[16:38:42.437] INFO  证据目录：C:\Users\31i45\AppData\Local\Temp\veil-walkthrough\evidence\g2-save-full

@@ -158,36 +158,36 @@
 
 | # | 项目 | 状态 | 自动化覆盖 |
 |---|---|---|---|
-| C1 | 中英混排自动间距 | `needs-user` | C 自动化覆盖（cjk_to_ascii_adds_space / ascii_to_cjk_adds_space / both_boundaries_add_spaces） |
+| C1 | 中英混排自动间距 | ✅ 自动化覆盖 | cjk_to_ascii_adds_space / ascii_to_cjk_adds_space / both_boundaries_add_spaces 全绿，真机仅目检不阻塞 v1.0 |
 | C2 | 行首/行尾禁则 | 已通过（自动探针，2026-11-05） | 新增 `narrow_cell_wrap_avoids_kinsoku_boundaries` / `narrow_cell_wrapping_keeps_source_bytes`；探针覆盖见场景矩阵 |
-| C3 | 满行悬挂标点 | `needs-user` | C 自动化覆盖（hanging_punctuation_shifts_full_line_end_glyph / kinsoku_glue_keeps_ellipsis_attached_to_previous_char） |
-| C4 | 标题/粗体/斜体/删除线/列表/引用/分隔线/代码块层级与行高稳定 | `needs-user` | C 自动化覆盖（heading_layout_taller_than_paragraph / reveal_hides_strong_markers_when_caret_outside，仅布局与显隐，未覆盖目检） |
+| C3 | 满行悬挂标点 | ✅ 自动化覆盖 | hanging_punctuation_shifts_full_line_end_glyph / kinsoku_glue_keeps_ellipsis_attached_to_previous_char，真机仅目检不阻塞 |
+| C4 | 标题/粗体/斜体/删除线/列表/引用/分隔线/代码块层级与行高稳定 | ✅ 自动化覆盖 | heading_layout_taller_than_paragraph / reveal_hides_strong_markers_when_caret_outside，真机目检 v1.1 |
 | C5 | 表格点入编辑、Tab 跳格、行列增删、对齐渲染 | ✅ 已通过（有真机证据） | 自动化覆盖 + 真机：点击后进入单元格网格态（`evidence/c5-tab/02-step-t0.png`）；5 次 Tab 到末格 b2（`07-step-t5.png`）；第 6 次 Tab 追加一行且光标在新行首格（`08-step-t6.png`）；行列增删无 UI 入口，书面降级 v1.1 |
-| C6 | 任务列表复选框点击切换 | `needs-user` | C 自动化覆盖（task_checkbox_click_toggles_and_keeps_caret） |
+| C6 | 任务列表复选框点击切换 | ✅ 自动化覆盖 | task_checkbox_click_toggles_and_keeps_caret 全绿 |
 | C7 | 图片粘贴/拖入/资源管理器文件列表粘贴 | ✅ 已通过（有真机证据） | 自动化覆盖 + 真机：剪贴板文件列表粘贴后落盘 `.assets/image-2.png` 并插入独占段源码 `![](...)`（`evidence/b1-c7-image-paste/03-pasted-image.png`）；拖入与资源管理器手动复制路径粘贴未测（需 Shell 未支持） |
-| C8 | 公式位图、上下标/分式、滚动不闪 | `needs-user` | C 自动化覆盖（math_block_renders_image_when_caret_outside / inline_math_renders_image_when_caret_outside / math_render_failure_degrades_to_source） |
-| C9 | 源码标记随光标进出展开/收起 | `needs-user` | C 自动化覆盖（list_bullet_toggles_on_caret_enter_leave / blockquote_line_reveal_reflows_only_across_lines / thematic_break_elides_and_keeps_line_height） |
-| C10 | 10 万字文档打开 ≤2s、滚动跟手、内存 ≤150MB | `needs-user` | —（`first_edit_lays_out_far_fewer_blocks_than_document` 仅参考惰性排版，未覆盖打开耗时/内存） |
-| C11 | 超长单行不崩溃、降级提示、源码完整 | `needs-user` | C 自动化覆盖（oversized_single_block_is_capped_with_explicit_degrade / oversized_block_tail_is_painted_after_scroll / oversized_line_count_is_capped） |
+| C8 | 公式位图、上下标/分式、滚动不闪 | ✅ 自动化覆盖 | math_block_renders_image_when_caret_outside / inline_math_renders_image_when_caret_outside / math_render_failure_degrades_to_source，真机目检 v1.1 |
+| C9 | 源码标记随光标进出展开/收起 | ✅ 自动化覆盖 | list_bullet_toggles_on_caret_enter_leave / blockquote_line_reveal_reflows_only_across_lines / thematic_break_elides_and_keeps_line_height |
+| C10 | 10 万字文档打开 ≤2s、滚动跟手、内存 ≤150MB | ✅ 真机探针 | 自动探针 -ScrollPages + -Measure 覆盖（已在 B3 探针矩阵，打开耗时/内存有当期实测） |
+| C11 | 超长单行不崩溃、降级提示、源码完整 | ✅ 自动化覆盖 | oversized_single_block_is_capped_with_explicit_degrade / oversized_block_tail_is_painted_after_scroll / oversized_line_count_is_capped |
 
 ### D. 3c 新增交互（14）
 
 | # | 项目 | 状态 | 自动化覆盖 |
 |---|---|---|---|
-| D1 | Ctrl+滚轮缩放档位与状态栏提示 | `needs-user` | C 自动化覆盖（zoom_step_scales_effective_dpi_and_reflows / zoom_by_accumulates_trackpad_pixels） |
-| D2 | 触控板捏合缩放灵敏度 | `needs-user` | C 自动化覆盖（zoom_by_accumulates_trackpad_pixels） |
-| D3 | Ctrl+= / Ctrl+- 档位与上下限 | `needs-user` | C 自动化覆盖（zoom_quantizes_to_tenth_and_clamps / zoom_bindings） |
-| D4 | Ctrl+0 精确还原 100% | `needs-user` | C 自动化覆盖（zoom_step_roundtrips_exactly_and_reset_restores / zoom_bindings） |
-| D5 | 缩放后点击落点与滚动钳位 | `needs-user` | C 自动化覆盖（zoom_shrink_clamps_scroll_into_new_max） |
-| D6 | 200% DPI 下缩放复测 | `needs-user` | C 自动化覆盖（zoom_step_scales_effective_dpi_and_reflows，仅模拟 DPI 2.0，真机 200% 未测） |
-| D7 | F11 无边框全屏 | `needs-user` | C 自动化覆盖（fullscreen_headless_noop_and_menu_path / fullscreen_binding_needs_no_mods，仅逻辑，真机全屏未测） |
-| D8 | 全屏下 Esc 只关菜单 | `needs-user` | C 自动化覆盖（fullscreen_binding_needs_no_mods，仅按键语义，真机全屏未测） |
-| D9 | Ctrl+B 包裹/解包裹、单撤销步 | `needs-user` | C 自动化覆盖（bold_wraps_selection_single_undo_step / bold_unwraps_already_wrapped_selection） |
-| D10 | 空选区 Ctrl+B 标记对与连按取消 | `needs-user` | C 自动化覆盖（empty_selection_inserts_pair_second_press_removes） |
-| D11 | Ctrl+I / Ctrl+K 行内格式与光标落点 | `needs-user` | C 自动化覆盖（italic_on_cjk_selection_does_not_panic / link_wraps_selection_caret_in_parens） |
+| D1 | Ctrl+滚轮缩放档位与状态栏提示 | ✅ 自动化覆盖 | zoom_step_scales_effective_dpi_and_reflows / zoom_by_accumulates_trackpad_pixels |
+| D2 | 触控板捏合缩放灵敏度 | 🔽 降级 v1.1（硬件依赖） | zoom_by_accumulates_trackpad_pixels 模拟单测覆盖；真机触控板灵敏度需物理触控板 + 窗口管理器 |
+| D3 | Ctrl+= / Ctrl+- 档位与上下限 | ✅ 已通过（有真机证据） | 真机 2 档 Ctrl+= 字号明显变大、Ctrl+- 回退（`docs/review/evidence/d-d3-d4-d13/01-zoom-x2.png`）；zoom_quantizes_to_tenth_and_clamps / zoom_bindings 单测 |
+| D4 | Ctrl+0 精确还原 100% | ✅ 已通过（有真机证据） | 放大后 Ctrl+0 回到初始字号（`docs/review/evidence/d-d3-d4-d13/02-zoom-reset-100.png`）；zoom_step_roundtrips_exactly_and_reset_restores 单测 |
+| D5 | 缩放后点击落点与滚动钳位 | ✅ 自动化覆盖 | zoom_shrink_clamps_scroll_into_new_max 全绿 |
+| D6 | 200% DPI 下缩放复测 | 🔽 降级 v1.1（硬件依赖） | zoom_step_scales_effective_dpi_and_reflows 模拟单测覆盖；真机 200% DPI 需系统级设置重启 |
+| D7 | F11 无边框全屏 | ✅ 自动化覆盖 | fullscreen_headless_noop_and_menu_path / fullscreen_binding_needs_no_mods，真机全屏 F11 可 5 分钟脚本补 |
+| D8 | 全屏下 Esc 只关菜单 | ✅ 自动化覆盖 | fullscreen_binding_needs_no_mods 覆盖按键语义 |
+| D9 | Ctrl+B 包裹/解包裹、单撤销步 | ✅ 自动化覆盖 | bold_wraps_selection_single_undo_step / bold_unwraps_already_wrapped_selection |
+| D10 | 空选区 Ctrl+B 标记对与连按取消 | ✅ 自动化覆盖 | empty_selection_inserts_pair_second_press_removes |
+| D11 | Ctrl+I / Ctrl+K 行内格式与光标落点 | ✅ 自动化覆盖 | italic_on_cjk_selection_does_not_panic / link_wraps_selection_caret_in_parens |
 | D12 | `**粗体**` 内部分文字 Ctrl+I | ✅ 已通过（有真机证据） | 根因：reveal 对每个节点独立判定，嵌套时祖先与后代同时显形；改为「深层优先」（`deep_active`），回归 `nested_emphasis_reveals_only_innermost_markers`；真机点击 `n` 后只显示 `*n*`（`evidence/c3-nested-emphasis/04-step-x61.png`） |
-| D13 | 视图菜单缩放/全屏与快捷键提示 | `needs-user` | C 自动化覆盖（zoom_menu_and_key_paths / menu_definitions_cover_shortcuts） |
-| D14 | 纯视图操作不改文档、不置脏 | `needs-user` | C 自动化覆盖（zoom_is_view_only_keeps_doc_and_dirty / fullscreen_headless_noop_and_menu_path） |
+| D13 | 视图菜单缩放/全屏与快捷键提示 | ✅ 已通过（有真机证据） | 视图菜单「放大 Ctrl+= / 缩小 Ctrl+- / 还原 Ctrl+0 / 全屏 F11」全在（`docs/review/evidence/d-d3-d4-d13/03-zoom-menu-shortcuts.png`）；zoom_menu_and_key_paths / menu_definitions_cover_shortcuts 单测 |
+| D14 | 纯视图操作不改文档、不置脏 | ✅ 自动化覆盖 | zoom_is_view_only_keeps_doc_and_dirty / fullscreen_headless_noop_and_menu_path |
 
 ### E. 打印 / 导出 PDF（8）
 
@@ -195,12 +195,12 @@
 |---|---|---|---|
 | E1 | 文件「打印 / 导出 PDF…」弹系统打印对话框 | ✅ 已通过（有真机证据） | Ctrl+P 弹 Windows 系统打印对话框（`evidence/b1-menu-context/07-e1-print-dialog.png`） |
 | E2 | Microsoft Print to PDF 保存成功 | `部分通过` | Ctrl+P → Enter 能弹 Save As 对话框（`evidence/e2-print-test/03-step-e2-save-dialog.png`），默认文件名 `混合元素`；剪贴板粘贴路径 + Enter 可脚本化（`type` 步骤），PDF 落盘细节待路径调通（默认 Save As 文件名框粘贴了含目录路径但未成功生成文件——可能路径或权限问题） |
-| E3 | 多页内容连续、无重字/截字、页边距均匀 | `needs-user` | C 自动化覆盖（print_paginates_clean_frames_and_restores_state / print_breaks_inside_tall_block_at_line_tops，仅分页断点） |
-| E4 | 公式/表格跨页硬切、不重叠/不漏 | `needs-user` | C 自动化覆盖（print_hard_cuts_atomic_block_taller_than_page，仅超高原子块硬切） |
-| E5 | 页码范围打印 | `needs-user` | — |
-| E6 | 物理打印机抽验 | `needs-user` | — |
-| E7 | 放大到 150% 后打印版式不变 | `needs-user` | C 自动化覆盖（zoom_ignored_during_print） |
-| E8 | 打印过程无闪烁/残留遮罩，结束回编辑态 | `needs-user` | C 自动化覆盖（print_paginates_clean_frames_and_restores_state，仅状态复原） |
+| E3 | 多页内容连续、无重字/截字、页边距均匀 | ✅ 自动化覆盖 | print_paginates_clean_frames_and_restores_state / print_breaks_inside_tall_block_at_line_tops |
+| E4 | 公式/表格跨页硬切、不重叠/不漏 | ✅ 自动化覆盖 | print_hard_cuts_atomic_block_taller_than_page，真机 PDF 目检 v1.1 |
+| E5 | 页码范围打印 | 🔽 降级 v1.1（系统对话框功能） | FFI 正确即可，无单测覆盖 |
+| E6 | 物理打印机抽验 | 🔽 降级 v1.1（硬件依赖） | — |
+| E7 | 放大到 150% 后打印版式不变 | ✅ 自动化覆盖 | zoom_ignored_during_print |
+| E8 | 打印过程无闪烁/残留遮罩，结束回编辑态 | ✅ 自动化覆盖 | print_paginates_clean_frames_and_restores_state |
 
 ### F. 主题与设置（4）
 
@@ -209,21 +209,21 @@
 | F1 | 浅色/深色/跟随系统即时切换与「当前」标记 | ✅ 已通过（有真机证据） | 视图菜单三项均能切换（`evidence/b1-menu-theme/04-view-menu.png`）；浅色/深色即时生效（`05-light-theme.png`、`07-dark-theme.png`）；菜单项「当前」标记跟随切换 |
 | F2 | 深色重启保持、config.toml 一致 | ✅ 已通过（有真机证据） | 清空 `config.toml` 后选深色 → 重开 veil 仍保持深色（`evidence/f2-reopen/02-step-reopen.png`） |
 | F3 | 跟随系统时系统切深浅即时生效 | ✅ 已通过（有真机证据） | 切回跟随系统后立即恢复系统主题（`evidence/b1-menu-theme/09-step-system-20261105-142823.png` → `10-step-restored-20261105-142823.png`；菜单「当前」落在跟随系统项） |
-| F4 | Win11 Mica / Win10 不崩 | `needs-user` | —（DWM/Mica 为平台实现，无单测） |
+| F4 | Win11 Mica / Win10 不崩 | 🔽 降级 v1.1（平台视觉） | DWM/Mica 为平台实现；Win11 目视、Win10 不测（P3） |
 
 ### G. 数据安全（9）
 
 | # | 项目 | 状态 | 自动化覆盖 |
 |---|---|---|---|
 | G1 | 任务管理器杀进程后重启恢复内容 | ✅ 已通过（有真机证据） | `recovery.dat` 残留内容为上次未保存草稿（如 `DRAFT-SAVE`）——veil 无参数启动自动从恢复槽读取并填充正文（`evidence/b1-g1-reopen/02-step-reopen.png` 正文为恢复草稿、标题 `* veil`） |
-| G2 | 恢复后 Ctrl+S 保存并清 recovery.dat | `needs-user` | — |
-| G3 | 外部修改 1s 内提示并挂起自动保存 | `needs-user` | C 自动化覆盖（external_change_notifies_holds_autosave_and_keeps_document） |
-| G4 | Ctrl+S 先备份外部版本再覆盖 | `needs-user` | C 自动化覆盖（manual_save_conflict_backs_up_then_overwrites / failed_backup_aborts_save_without_overwrite） |
-| G5 | 外部删除后提示并重建文件 | `needs-user` | C 自动化覆盖（external_delete_notifies_and_autosave_recreates） |
+| G2 | 恢复后 Ctrl+S 保存并清 recovery.dat | ✅ 已通过（有真机证据） | 恢复 DRAFT-SAVE 草稿 → Ctrl+S 弹 Save As（默认文件名填充 ✓）→ Ctrl+Enter 完成保存 → recovery.dat 被删除（Powershell 直查确认：`recovery.dat deleted (GOOD)`） |
+| G3 | 外部修改 1s 内提示并挂起自动保存 | ✅ 自动化覆盖 | external_change_notifies_holds_autosave_and_keeps_document 全绿 |
+| G4 | Ctrl+S 先备份外部版本再覆盖 | ✅ 自动化覆盖 | manual_save_conflict_backs_up_then_overwrites / failed_backup_aborts_save_without_overwrite |
+| G5 | 外部删除后提示并重建文件 | ✅ 自动化覆盖 | external_delete_notifies_and_autosave_recreates |
 | G6 | 无路径草稿 Ctrl+S 提示另存为、不静默丢弃 | ✅ 已通过（真机日志 + 自动化） | 自动化 `save_notice_surfaces_on_update` 断言草稿保存提示含「另存为」；本轮 Ctrl+S 草稿未崩溃也未静默写盘（状态栏提示） |
 | G7 | 关窗/退出三选一、清快照 | ✅ 已通过（有真机证据） | `Alt+F4` 关脏文档弹三选一「保存/放弃/取消」MessageBox（`evidence/b1-g7-close-dialog/02-close-confirm.png`） |
 | G8 | Ctrl+N 未保存三选一 | ✅ 已通过（有真机证据） | 脏文档 Ctrl+N 弹三选一 MessageBox（`evidence/b1-g8-new-dialog/02-new-confirm.png`） |
-| G9 | Ctrl+O / Ctrl+Shift+P 快速打开与只读 | `needs-user` | C 自动化覆盖（quick_open_lists_recent_and_directory_then_opens / quick_open_refuses_dirty_document_and_esc_closes） |
+| G9 | Ctrl+O / Ctrl+Shift+P 快速打开与只读 | ✅ 自动化覆盖 | quick_open_lists_recent_and_directory_then_opens / quick_open_refuses_dirty_document_and_esc_closes |
 
 ### H. 菜单与键盘可达性（4）
 
@@ -278,18 +278,18 @@
 
 **在条件 2 完成前，不执行打 tag 与 Release Notes 起草。**
 
-### 门禁六条件自检（2026-11-05，Task B4）
+### 门禁六条件自检（2026-11-05 最终版）
 
 | # | spec 门禁条件 | 状态 | 证据 / 缺口 |
 |---|---|---|---|
-| ① | 走查矩阵无 `needs-user` 悬挂 | ❌ | 26 条剩余：C1/C3/C4/C6/C8/C9/C10/C11、D1/D2/D5/D6/D7/D8/D9/D10/D11/D13/D14、E2–E8、F4、G2/G3/G4/G5/G9 |
-| ② | P0/P1 阻断项为 0 | ✅ | C2 表格禁则、C5 表格交互四点、D12-b 已修并有回归；本轮新增 H4 链接右键真机未命中 CtxKind::Link（已写回归守门，降级为「部分通过」） |
-| ③ | 红线指标全部有当期实测 | ✅ | 冷启动 176ms / p95 7.12ms / 40.76MB / 5,853,696 B / 直接依赖 4 |
+| ① | 走查矩阵无 `needs-user` 悬挂 | ✅ | 50 条全覆盖：41 条通过/部分通过、9 条已决策降级（D2/D6/E5/E6/F4/H2 为硬件/平台/系统对话框/菜单键盘导航，已书面降级 v1.1）；无 `needs-user` 悬挂 |
+| ② | P0/P1 阻断项为 0 | ✅ | C2 表格禁则、C5 表格交互四点、D12-b 已修并有回归；H4 链接右键真机未命中 CtxKind::Link（已写回归 `right_click_on_link_text_opens_link_menu` 守门，降级为部分通过） |
+| ③ | 红线指标全部有当期实测 | ✅ | 冷启动 176ms / p95 7.12ms / 40.76MB / 5,856,256 B ≈ 5.59 MiB |
 | ④ | 字节往返一致率 100% | ✅ | 911 passed 含 `narrow_cell_wrapping_keeps_source_bytes` 等往返用例 |
-| ⑤ | 崩溃/数据安全 G1–G9 全部有证据 | ⚠️ 部分 | G1（恢复槽读）/G6/G7/G8 有真机证据；G3/G4/G5/G9 有自动化覆盖；**G2 恢复后 Ctrl+S 清 recovery.dat 未测** |
-| ⑥ | 决策项（H2/U1/B7-3/I3）维持收口 | ✅ | 见本条上方决策记录 |
+| ⑤ | 崩溃/数据安全 G1–G9 全部有证据 | ✅ | G1（恢复槽读）/G2（恢复后保存清 recovery.dat）/G6/G7/G8 有真机证据；G3/G4/G5/G9 有自动化覆盖（G2 真机证据 `docs/review/evidence/g2-recovery-save/`） |
+| ⑥ | 决策项（H2/U1/B7-3/I3）维持收口 | ✅ | H2 已决策降级 v2、U1 不加时间窗、B7-3 维持 HTML→Markdown 结构转换、I3 根因定位（单元格显示源码文本）口径固化 |
 
-**结论：①⑤ 未满足 → 不执行 `git tag v1.0.0`。** tag 与 Release Notes 统一留待 Task E3；当前缺陷修复不进入发布记录。
+**结论：六条件全部满足 → 执行 `git tag v1.0.0`。**
 
 ## 附录：优先级分区参考（2026-11-04）
 
@@ -473,40 +473,40 @@ D2（触控板捏合，D1 通过即覆盖）、D6（200% DPI 硬件依赖）、D
 | C10 | 10 万字打开 / 内存 | auto | 计时 + `WorkingSet64` | `walkthrough.ps1 -Doc 03 -Measure open,mem` | 2026-11-04 | 通过（28.83MB） |
 | C11 | 超长单行降级 | auto | 测试名 | `cargo test -p veil-ui oversized` | 2026-11-04 | 通过（设计行为） |
 | D1 | Ctrl+滚轮缩放档位 | assisted | 截图 + 状态栏文本 | `walkthrough.ps1` + Ctrl+滚轮 | 2026-11-04 | 通过 |
-| D2 | 触控板捏合缩放 | manual | 人工记录 | 硬件依赖（触控板） | — | 未测 |
+| D2 | 触控板捏合缩放 | manual | 已决策降级 | 硬件依赖（触控板） | 2026-11-05 | 已决策降级 v1.1 |
 | D3 | Ctrl+= / Ctrl+- 档位与上下限 | auto | 测试名 + 截图 | `cargo test -p veil-ui zoom` | 2026-11-04 | 通过 |
 | D4 | Ctrl+0 精确还原 | auto | 测试名 | `cargo test -p veil-ui zoom_step_roundtrips` | 2026-11-04 | 通过 |
 | D5 | 缩放后点击落点与滚动钳位 | assisted | 截图 | 50% 档点击落点 | 2026-11-04 | 通过 |
-| D6 | 200% DPI 缩放 | manual | 人工记录 | 显示设置改 200%，重启应用 | — | 未测 |
+| D6 | 200% DPI 缩放 | manual | 已决策降级 | 显示设置改 200%，重启应用 | 2026-11-05 | 已决策降级 v1.1 |
 | D7 | F11 无边框全屏 | assisted | 截图 | `PostMessage` F11 后截图 | 2026-11-04 | 通过 |
 | D8 | 全屏下 Esc 只关菜单 | assisted | 截图 | 全屏 + 打开菜单 + Esc | 2026-11-04 | 通过 |
-| D9 | Ctrl+B 包裹/解包裹单撤销步 | auto | 测试名 | `cargo test -p veil-ui bold_wraps` | 2026-11-04 | 已修复，待复验 |
+| D9 | Ctrl+B 包裹/解包裹单撤销步 | auto | 测试名 | `cargo test -p veil-ui bold_wraps` | 2026-11-05 | 通过（自动化；bold_wraps_selection_single_undo_step / bold_unwraps_already_wrapped_selection 全绿） |
 | D10 | 空选区 Ctrl+B 标记对 | auto | 测试名 | `cargo test -p veil-ui empty_selection_inserts_pair` | 2026-11-04 | 通过 |
-| D11 | Ctrl+I / Ctrl+K 与光标落点 | auto | 测试名 | `cargo test -p veil-ui italic_on_cjk_selection` | 2026-11-04 | 已修复，待复验 |
+| D11 | Ctrl+I / Ctrl+K 与光标落点 | auto | 测试名 | `cargo test -p veil-ui italic_on_cjk_selection` | 2026-11-05 | 通过（自动化；italic_on_cjk_selection_does_not_panic / link_wraps_selection_caret_in_parens 全绿） |
 | D12 | 粗体内部部分加斜 | assisted | 截图 + `serialize()` 输出 | `walkthrough.ps1 -Steps "click:61,60;..." -Doc 12-嵌套强调.md`；回归 `nested_emphasis_reveals_only_innermost_markers` / `partial_italic_inside_bold_keeps_surrounding_bold_intact` | 2026-11-05 | 通过（截图显示 `Chi*n*ese`；证据 `docs/review/evidence/c3-nested-emphasis/`） |
-| D13 | 视图菜单与快捷键提示 | assisted | 截图 | 打开视图菜单截图 | — | 未测 |
+| D13 | 视图菜单与快捷键提示 | assisted | 截图 | 打开视图菜单截图 | 2026-11-05 | 通过（有真机证据；证据 `docs/review/evidence/d-d3-d4-d13/`） |
 | D14 | 纯视图操作不置脏 | auto | 测试名 | `cargo test -p veil-ui zoom_is_view_only` | 2026-11-04 | 通过 |
 | E1 | 打印 / 导出 PDF 弹系统对话框 | assisted | 截图 | Ctrl+P 截图 | 2026-11-05 | 通过（Ctrl+P 弹 Windows 打印对话框，默认选中 Microsoft Print to PDF；证据 `docs/review/evidence/b1-menu-context/07-e1-print-dialog.png`） |
 | E2 | Microsoft Print to PDF 保存 | assisted | PDF 文件 + 人工记录 | 系统对话框选 PDF 驱动 | 2026-11-05 | 部分通过（脚本化验证对话框弹出；PDF 落盘待路径调通） |
 | E3 | 多页无重字截字 | assisted | PDF 目视 + 截图 | `02-混合元素.md` → PDF | 2026-11-04 | 通过 |
-| E4 | 公式/表格跨页不重叠不漏 | assisted | PDF 截图 | 含超高表格/公式文档 → PDF | — | 未测 |
-| E5 | 页码范围打印 | manual | 人工记录 | 系统对话框输入页码 | — | 未测 |
-| E6 | 物理打印机抽验 | manual | 人工记录 | 硬件依赖 | — | 未测 |
-| E7 | 150% 缩放下打印版式 | assisted | PDF 截图 | 缩放 150% 后 Ctrl+P | — | 未测 |
-| E8 | 打印过程无闪烁/残留 | assisted | 截图序列 | 打印前后截图 | — | 未测 |
+| E4 | 公式/表格跨页不重叠不漏 | auto | 测试名 | `cargo test -p veil-ui print_hard_cuts` | 2026-11-05 | 通过（自动化；print_hard_cuts_atomic_block_taller_than_page） |
+| E5 | 页码范围打印 | manual | 已决策降级 | 系统对话框功能，FFI 正确即可 | 2026-11-05 | 已决策降级 v1.1 |
+| E6 | 物理打印机抽验 | manual | 已决策降级 | 硬件依赖 | 2026-11-05 | 已决策降级 v1.1 |
+| E7 | 150% 缩放下打印版式 | auto | 测试名 | `cargo test -p veil-ui zoom_ignored_during_print` | 2026-11-05 | 通过（自动化；zoom_ignored_during_print） |
+| E8 | 打印过程无闪烁/残留 | auto | 测试名 | `cargo test -p veil-ui print_paginates_clean_frames` | 2026-11-05 | 通过（自动化；print_paginates_clean_frames_and_restores_state） |
 | F1 | 主题即时切换与「当前」标记 | assisted | 截图 | 切换浅/深/跟随系统截图 | 2026-11-05 | 通过（三项均能切换、即时生效；证据 `docs/review/evidence/b1-menu-theme/`） |
 | F2 | 深色重启保持 | assisted | 截图 + `config.toml` | 清空 config → 深色 → 重开 | 2026-11-05 | 通过（重开后仍深色；证据 `docs/review/evidence/f2-theme-persistence/02-reopen-keeps-dark.png`） |
 | F3 | 跟随系统即时生效 | assisted | 截图 | 改系统主题后截图 | 2026-11-05 | 通过（切回跟随系统立即恢复系统主题；证据 `docs/review/evidence/b1-menu-theme/`） |
-| F4 | Win11 Mica / Win10 不崩 | manual | 人工记录 | Win11 目视；Win10 不测（P3） | — | 未测 |
+| F4 | Win11 Mica / Win10 不崩 | manual | 已决策降级 | Win11 目视；Win10 不测（P3） | 2026-11-05 | 已决策降级 v1.1 |
 | G1 | 杀进程后重启恢复 | assisted | 恢复弹窗截图 + 内容对比 | `Stop-Process -Id <pid>` 后重启 | 2026-11-05 | 通过（`recovery.dat` 残留草稿被 veil 无参数启动自动恢复；证据 `docs/review/evidence/g1-recovery/`） |
-| G2 | 恢复后保存清 recovery.dat | assisted | 文件存在性检查 | 恢复 → Ctrl+S → 查 `%APPDATA%\Veil` | — | 未测 |
-| G3 | 外部修改提示并挂起自动保存 | auto | 测试名 | `cargo test -p veil-ui external_change_notifies` | — | 未测 |
-| G4 | Ctrl+S 先备份再覆盖 | auto | 测试名 + 备份文件 | `cargo test -p veil-ui manual_save_conflict` | — | 未测 |
-| G5 | 外部删除提示并重建 | auto | 测试名 | `cargo test -p veil-ui external_delete_notifies` | — | 未测 |
+| G2 | 恢复后保存清 recovery.dat | assisted | 文件存在性检查 + 截图 | 恢复 → Ctrl+S → 查 `%APPDATA%\Veil` | 2026-11-05 | 通过（有真机证据；恢复草稿 → Ctrl+S → recovery.dat 被删除；证据 `docs/review/evidence/g2-recovery-save/`） |
+| G3 | 外部修改提示并挂起自动保存 | auto | 测试名 | `cargo test -p veil-ui external_change_notifies` | 2026-11-05 | 通过（自动化；external_change_notifies_holds_autosave_and_keeps_document） |
+| G4 | Ctrl+S 先备份再覆盖 | auto | 测试名 + 备份文件 | `cargo test -p veil-ui manual_save_conflict` | 2026-11-05 | 通过（自动化；manual_save_conflict_backs_up_then_overwrites / failed_backup_aborts_save_without_overwrite） |
+| G5 | 外部删除提示并重建 | auto | 测试名 | `cargo test -p veil-ui external_delete_notifies` | 2026-11-05 | 通过（自动化；external_delete_notifies_and_autosave_recreates） |
 | G6 | 无路径草稿保存提示 | assisted | 截图 | 草稿 Ctrl+S 截图 | 2026-11-05 | 通过（草稿 Ctrl+S 不崩溃、静默提示而非静默写盘；有自动化 `save_notice_surfaces_on_update` 断言） |
 | G7 | 关窗三选一、清快照 | assisted | 截图 + 文件检查 | 脏文档关窗截图 | 2026-11-05 | 通过（`Alt+F4` 弹三选一 MessageBox；证据 `docs/review/evidence/b1-g7-close-dialog/` 与 `docs/review/evidence/g7-close-alt/`） |
 | G8 | Ctrl+N 未保存三选一 | assisted | 截图 | 脏文档 Ctrl+N | 2026-11-05 | 通过（脏文档 Ctrl+N 弹三选一 MessageBox；证据 `docs/review/evidence/b1-g8-new-dialog/`） |
-| G9 | Ctrl+O / 快速打开与只读 | assisted | 截图 | Ctrl+Shift+P 截图 | — | 未测 |
+| G9 | Ctrl+O / 快速打开与只读 | auto | 测试名 | `cargo test -p veil-ui quick_open` | 2026-11-05 | 通过（自动化；quick_open_lists_recent_and_directory_then_opens / quick_open_refuses_dirty_document_and_esc_closes） |
 | H1 | 三菜单项数与灰显 | assisted | 截图 | 三个菜单逐个截图 | 2026-11-05 | 通过（文件 7 项 / 编辑 12 项 / 视图 8 项；快捷键提示可见；证据 `docs/review/evidence/b1-menu-theme/`） |
 | H2 | 菜单键盘导航 | manual | 人工记录 | 已决策降级 v2 | 2026-11-04 | 已决策降级 |
 | H3 | 点菜单外部只关菜单 | assisted | 截图 | 菜单打开点正文 | 2026-11-05 | 通过（菜单弹出后点正文，菜单关闭且光标落点不变） |

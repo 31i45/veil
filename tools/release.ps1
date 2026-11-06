@@ -62,11 +62,14 @@ Write-OK "Release build done: $($Exe.Length) bytes, build time $($Exe.LastWriteT
 Write-Step 5 'verify artifact'
 $vi = $Exe.VersionInfo
 $SizeMiB = [math]::Round($Exe.Length / 1MB, 2)
+$SizeBytes = $Exe.Length
+$SizeLimitBytes = 6MB
+$SizeMarginBytes = $SizeLimitBytes - $SizeBytes
 $Checks = @(
-  @{ n='FileVersion';   ok = $vi.FileVersion -match '^1\.0\.0'; val=$vi.FileVersion },
-  @{ n='ProductVersion';ok = $vi.ProductVersion -match '^1\.0\.0'; val=$vi.ProductVersion },
+  @{ n='FileVersion';   ok = $vi.FileVersion -match '^1\.'; val=$vi.FileVersion },
+  @{ n='ProductVersion';ok = $vi.ProductVersion -match '^1\.'; val=$vi.ProductVersion },
   @{ n='FileDescription'; ok = $vi.FileDescription -eq 'Veil Markdown 编辑器'; val=$vi.FileDescription },
-  @{ n='Size 4-8 MiB';  ok = ($Exe.Length -ge 4MB) -and ($Exe.Length -le 8MB); val="$SizeMiB MiB" },
+  @{ n='Size 4-6 MiB';  ok = ($Exe.Length -ge 4MB) -and ($Exe.Length -le $SizeLimitBytes); val="$SizeMiB MiB" },
   @{ n='icons/veil.ico'; ok = (Test-Path 'icons/veil.ico'); val="$(if(Test-Path 'icons/veil.ico'){(Get-Item 'icons/veil.ico').Length}else{'missing'})" },
   @{ n='LICENSE';       ok = (Test-Path 'LICENSE'); val="$(if(Test-Path 'LICENSE'){(Get-Content 'LICENSE' -TotalCount 1)}else{'missing'})" },
   @{ n='CHANGELOG.md';  ok = (Test-Path 'CHANGELOG.md'); val='v1.0.0 present' }
@@ -101,7 +104,8 @@ Write-Host '=====================================================' -ForegroundCo
 Write-Host "  Veil v$Version Release Summary" -ForegroundColor Magenta
 Write-Host '=====================================================' -ForegroundColor Magenta
 Write-Host "  Version     : $($vi.ProductVersion)"
-Write-Host "  Size        : $SizeMiB MiB"
+Write-Host "  Size        : $SizeMiB MiB ($SizeBytes bytes)"
+Write-Host "  Size Margin : $SizeMarginBytes bytes to 6 MiB"
 Write-Host "  FileDescr   : $($vi.FileDescription)"
 Write-Host "  Build Time  : $($Exe.LastWriteTime)"
 Write-Host "  Elapsed     : $([math]::Round($Stopwatch.Elapsed.TotalSeconds, 1)) s"

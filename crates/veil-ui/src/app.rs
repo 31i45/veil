@@ -247,6 +247,8 @@ pub(crate) struct InputState {
     pub(crate) last_theme_check: Option<Instant>,
     /// 拖拽悬停文件（阶段 1）：仅驱动落点提示叠层；松开/离开窗口即清空。
     pub(crate) drop_file: Option<PathBuf>,
+    /// 源码模式（Ctrl+/）：全文按 Markdown 源码排版。打印/导出恒按渲染态（见 `App::source_mode`）。
+    pub(crate) source_mode: bool,
 }
 
 impl InputState {
@@ -304,6 +306,8 @@ pub(crate) struct WindowState {
     pub(crate) resize_pending: bool,
     /// 窗口可见性（3g）：最小化/失焦/Occluded 时置 false，阻止 RedrawRequested → render → paint 路径。
     pub(crate) visible: bool,
+    /// 菜单键盘执行「退出」后的退出请求：由 KeyboardInput 沿鼠标退出路径处理。
+    pub(crate) exit_requested: bool,
 }
 impl Default for WindowState {
     fn default() -> Self {
@@ -319,6 +323,7 @@ impl Default for WindowState {
             fullscreen: false,
             resize_pending: false,
             visible: true,
+            exit_requested: false,
         }
     }
 }
@@ -335,6 +340,8 @@ impl Default for WindowState {
 /// - 瞬态 Transient：WindowState 子结构（scroll_y / goal_x / dragging / window / surface / frame）
 pub(crate) struct App {
     pub(crate) doc: DocState,
+    /// 启动时读入的配置（主题模式 + PDF 导出设置）；写回时整体落盘。
+    pub(crate) config: Config,
     pub(crate) window_state: WindowState,
     pub(crate) editor: Editor,
     pub(crate) engine: LayoutEngine,
@@ -475,22 +482,22 @@ impl App {
         let PersistEnv { recovery, session } = ports.persist_env;
         // 系统外观读不到（非 Windows/注册表异常）按浅色处理：不影响其它功能
         let system_dark = system.is_dark().unwrap_or(false);
-        let (mode, config_notice) = match config.load() {
+        let (app_config, config_notice) = match config.load() {
             Ok(text) => match theme::decode_config(text.as_bytes()) {
-                Ok(p) if p.ignored == 0 => (p.config.mode, String::new()),
+                Ok(p) if p.ignored == 0 => (p.config, String::new()),
                 Ok(p) => (
-                    p.config.mode,
+                    p.config,
                     format!("配置有 {} 处无法识别，已忽略", p.ignored),
                 ),
                 Err(e) => (
-                    ThemeMode::System,
+                    Config::default(),
                     format!("配置文件无效，已用默认主题: {e}"),
                 ),
             },
             // 文件不存在属正常状态（首次运行）：静默用默认配置
-            Err(_) => (ThemeMode::System, String::new()),
+            Err(_) => (Config::default(), String::new()),
         };
-        let theme = Theme::of(mode, system_dark);
+        let theme = Theme::of(app_config.mode, system_dark);
         let mut ports = AppPorts {
             clipboard: ports.clipboard,
             store: ports.store,
@@ -525,6 +532,7 @@ impl App {
                     .baseline
                     .unwrap_or_else(|| encode(&start.doc.text, start.doc.bom)),
             },
+            config: app_config,
             window_state: WindowState::default(),
             editor,
             engine: LayoutEngine::new(),
@@ -542,6 +550,7 @@ impl App {
                 system_dark,
                 last_theme_check: None,
                 drop_file: None,
+                source_mode: false,
             },
             ports,
             persist_state: PersistState {
@@ -566,6 +575,7 @@ impl App {
             start.notice // 恢复提示优先于配置提示
         };
         app.engine.set_syntax_colors(app.input_state.theme.syntax);
+        app.engine.set_link_color(app.input_state.theme.link);
         app.refresh_index();
         app.recompute_geometry();
         // 启动即登记最近文件（CLI 打开/会话恢复/崩溃恢复路径统一入口）
@@ -605,6 +615,7 @@ impl App {
     /// pub(crate) 供性质测试（S6 阶段 B）构造主题切换序列。
     pub(crate) fn refresh_theme_visuals(&mut self) {
         self.engine.set_syntax_colors(self.input_state.theme.syntax);
+        self.engine.set_link_color(self.input_state.theme.link);
         self.input_state.revs.theme += 1;
         self.ui_state.chrome.clear_label_cache();
         // 代次递增后按新调色板重排/重渲：只重做可见块，几何按新高度重算
@@ -617,6 +628,12 @@ impl App {
         self.request_redraw();
     }
 
+    /// 源码模式有效值：打印/导出期间恒 false（纸面永远是渲染态），
+    /// 打印结束回到屏幕后按用户开关恢复。base_key 与渲染判定统一读此口。
+    pub(crate) fn source_mode(&self) -> bool {
+        self.input_state.source_mode && self.window_state.print.is_none()
+    }
+
     /// 切换主题模式并持久化。切到「跟随系统」时立即重读一次系统外观，避免沿用陈旧值。
     pub(crate) fn set_theme_mode(&mut self, mode: ThemeMode) {
         if mode == ThemeMode::System {
@@ -625,6 +642,7 @@ impl App {
             }
         }
         self.input_state.theme = Theme::of(mode, self.input_state.system_dark);
+        self.config.mode = mode;
         self.input_state.last_theme_check = None;
         self.refresh_theme_visuals();
         // 先给成功提示再落盘：保存失败时错误提示更重要，覆盖为「配置未保存」
@@ -635,10 +653,7 @@ impl App {
 
     /// 配置落盘（极小文本、全量重写；实现侧保证原子与父目录创建）。
     fn save_config(&mut self) {
-        let text = Config {
-            mode: self.input_state.theme.mode,
-        }
-        .to_toml();
+        let text = self.config.to_toml();
         if let Err(e) = self.ports.config.save(&text) {
             self.ui_state.chrome.notice = format!("配置未保存: {e}");
             eprintln!("配置保存失败: {e}");
@@ -860,7 +875,13 @@ impl ApplicationHandler for App {
             WindowEvent::DroppedFile(path) => self.drop_file(path),
             WindowEvent::HoveredFile(path) => self.hover_file(Some(path)),
             WindowEvent::HoveredFileCancelled => self.hover_file(None),
-            WindowEvent::KeyboardInput { event, .. } => self.on_key(&event),
+            WindowEvent::KeyboardInput { event, .. } => {
+                self.on_key(&event);
+                // 菜单 Enter 选中「退出」：与鼠标路径同语义（先确认保存），标志只触发一次
+                if std::mem::take(&mut self.window_state.exit_requested) && self.confirm_close() {
+                    event_loop.exit();
+                }
+            }
             WindowEvent::ModifiersChanged(m) => {
                 let s = m.state();
                 self.input_state.mods = Mods {

@@ -52,6 +52,11 @@ impl History {
         tx.prim.deleted.len() + tx.prim.inserted.len()
     }
 
+    /// 当前可撤销步数（只读观测值；不改变分组/裁剪语义）。
+    pub(crate) fn undo_len(&self) -> usize {
+        self.undo.len()
+    }
+
     /// 显式断开分组：下一次 `record` 不与栈顶事务合并（光标移动/选区变化时调用）。
     pub(crate) fn break_group(&mut self) {
         self.last = None;

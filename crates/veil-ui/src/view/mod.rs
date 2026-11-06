@@ -14,7 +14,7 @@ mod style;
 mod table;
 
 pub use crate::geometry::{BASE_FONT_SIZE, BASE_LINE_HEIGHT};
-pub(crate) use cache::{Cache, LayoutKey, Memo, Revs};
+pub(crate) use cache::{Cache, LayoutKey, Memo, Revs, TableKey};
 pub use frame::Frame;
 #[cfg(test)]
 pub(crate) use layout::MAX_BLOCK_BYTES;

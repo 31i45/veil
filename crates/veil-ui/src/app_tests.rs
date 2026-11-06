@@ -16,7 +16,7 @@ use crate::interaction::map_key_parts;
 use crate::math::{MathImage, MathRenderer};
 use crate::mode::{Mode, TextSink};
 use crate::paint::{can_present, fit_size, local_image_path};
-use crate::print::{NoPrint, Print, PrintSession};
+use crate::print::{ExportOptions, NoPrint, Print, PrintSession};
 use crate::theme::{self, ConfigStore, SystemTheme, ThemeEnv, ThemeMode};
 use crate::view::ctx_menu;
 use crate::view::outline;
@@ -1271,6 +1271,54 @@ fn table_grid_rebuilds_when_editing_inside_active_cell() {
     );
 }
 
+// ---- 单元格富文本（B3） ----
+
+const TABLE_RICH_DOC: &str = "p\n\n| **MMMM** | x |\n| --- | --- |\n";
+
+#[test]
+fn table_active_cell_shows_source_then_restores_rich_text() {
+    let (mut a, _) = app_math(TABLE_RICH_DOC, false);
+    a.ensure_layouts_all();
+    a.ensure_tables();
+    let (id, _, _) = a.editor.session().blocks()[1].clone();
+    assert_eq!(a.cache.tables[&id].active, None, "表外 → 全部富文本");
+    let rich_w = a.cache.tables[&id].cells[0].pixel_w;
+
+    let cell_start = a.editor.session().table(id).unwrap().header[0].range.start;
+    assert!(a.editor.set_caret(cell_start));
+    a.ensure_tables();
+    assert_eq!(a.cache.tables[&id].active, Some(0), "格内 → 活动格源码态");
+    let src_w = a.cache.tables[&id].cells[0].pixel_w;
+    assert!(
+        src_w > rich_w + 8,
+        "活动格应显示含 ** 的源码：src={src_w} rich={rich_w}"
+    );
+
+    assert!(a.editor.set_caret(0));
+    a.ensure_tables();
+    assert_eq!(a.cache.tables[&id].active, None, "离开 → 恢复富文本");
+    assert_eq!(a.cache.tables[&id].cells[0].pixel_w, rich_w);
+}
+
+#[test]
+fn table_cache_key_tracks_active_cell() {
+    let (mut a, _) = app_math(TABLE_DOC, false);
+    a.ensure_layouts_all();
+    a.ensure_tables();
+    let (id, _, _) = a.editor.session().blocks()[1].clone();
+    let k0 = a.table_key(id);
+    assert!(a.cache.table(id, k0).is_some(), "表外键应命中");
+
+    let cell_start = a.editor.session().table(id).unwrap().rows[0][0].range.start;
+    assert!(a.editor.set_caret(cell_start));
+    a.ensure_tables();
+    let k1 = a.table_key(id);
+    assert_ne!(k0, k1, "活动格变化 → 键变化");
+    assert_eq!(k1.active, 2, "flat 索引：header 2 格后的首个体格");
+    assert!(a.cache.table(id, k1).is_some(), "新键命中");
+    assert!(a.cache.table(id, k0).is_none(), "旧键失配（切换活动格即失效）");
+}
+
 // ---- Tab / Shift+Tab 单元格导航（T2） ----
 
 const TABLE_2X3: &str = "p\n\n| a | b | c |\n| --- | --- | --- |\n| d | e | f |\n";
@@ -1305,6 +1353,387 @@ fn table_ctrl_enter_sets_dirty_and_moves_caret_into_new_row() {
         TABLE_2X3,
         "追加行是单撤销步"
     );
+}
+
+// ---- 表格行列增删右键菜单（Task 5 / B2） ----
+
+const TABLE_MENU_DOC: &str = "p\n\n| a | b |\n| --- | --- |\n| c | d |\n| e | f |\n";
+
+/// 在表格网格第 cell 个单元格（行优先：表头在前，正文随后）中心右键。
+fn right_click_table_cell(a: &mut App, cell: usize) {
+    a.ensure_layouts_all();
+    a.ensure_tables();
+    let id = a
+        .editor
+        .session()
+        .blocks()
+        .into_iter()
+        .find(|(_, k, _)| *k == BlockKind::Table)
+        .map(|(id, _, _)| id)
+        .expect("文档应含表格块");
+    let top = geom(a, id).top;
+    let (x, y) = {
+        let c = &a.cache.tables[&id].cells[cell];
+        (c.x + c.w / 2.0, c.y + c.h / 2.0)
+    };
+    let scale = a.input_state.scale;
+    let vp = a.viewport();
+    a.input_state.mouse = PhysicalPosition::new(
+        (MARGIN * scale + x) as f64,
+        (vp.y + top - a.window_state.scroll_y + y) as f64,
+    );
+    a.on_right_click();
+}
+
+#[test]
+fn right_click_table_body_opens_menu_and_inserts_row_below() {
+    let (mut a, _) = app_math(TABLE_MENU_DOC, false);
+    right_click_table_cell(&mut a, 2); // 第 1 个正文行第 1 列
+    assert!(a.ui_state.ctx.open, "表格内右键应打开菜单");
+    assert_eq!(
+        a.ui_state.ctx.table,
+        Some(ctx_menu::TableCtx {
+            body_row: Some(0),
+            col: 0,
+            ncols: 2
+        })
+    );
+
+    let i = a
+        .ui_state
+        .ctx
+        .items()
+        .iter()
+        .position(|&(_, act)| act == ctx_menu::CtxAction::TableInsertRowBelow)
+        .expect("正文行菜单应有「下方插入行」");
+    a.ui_state.ctx.hover = Some(i);
+    a.route_key(Key::Enter);
+
+    assert!(!a.ui_state.ctx.open, "执行后菜单关闭");
+    assert_eq!(
+        a.editor.session().serialize(),
+        "p\n\n| a | b |\n| --- | --- |\n| c | d |\n|  |  |\n| e | f |\n"
+    );
+    let id = a
+        .editor
+        .session()
+        .blocks()
+        .into_iter()
+        .find(|(_, k, _)| *k == BlockKind::Table)
+        .map(|(id, _, _)| id)
+        .expect("插入行后仍应有表格块");
+    let tbl = a.editor.session().table(id).unwrap();
+    assert_eq!(tbl.rows.len(), 3, "正文行 +1");
+    let cell = &tbl.rows[1][0];
+    assert!(
+        cell.range.start <= a.editor.caret() && a.editor.caret() <= cell.range.end,
+        "光标应落在新行第 1 列内容起点：caret={} cell=[{},{}]",
+        a.editor.caret(),
+        cell.range.start,
+        cell.range.end
+    );
+
+    a.editor.apply(Intent::Undo).unwrap();
+    assert_eq!(
+        a.editor.session().serialize(),
+        TABLE_MENU_DOC,
+        "插入行是单撤销步"
+    );
+}
+
+/// 经右键菜单项集执行一次表格结构操作（光标先落到上下文单元格）。
+fn exec_table_ctx(a: &mut App, tc: ctx_menu::TableCtx, action: ctx_menu::CtxAction) {
+    let id = a
+        .editor
+        .session()
+        .blocks()
+        .into_iter()
+        .find(|(_, k, _)| *k == BlockKind::Table)
+        .map(|(id, _, _)| id)
+        .expect("文档应含表格块");
+    let caret = {
+        let tbl = a.editor.session().table(id).unwrap();
+        match tc.body_row {
+            Some(r) => tbl.rows[r][tc.col].range.start,
+            None => tbl.header[tc.col].range.start,
+        }
+    };
+    a.editor.set_caret(caret);
+    a.ui_state
+        .ctx
+        .open_at(10.0, 20.0, ctx_menu::CtxKind::Table(tc), None);
+    let i = a
+        .ui_state
+        .ctx
+        .items()
+        .iter()
+        .position(|&(_, act)| act == action)
+        .unwrap_or_else(|| panic!("菜单缺少 {action:?}"));
+    a.ui_state.ctx.hover = Some(i);
+    a.route_key(Key::Enter);
+}
+
+#[test]
+fn table_ctx_actions_transform_source_and_place_caret() {
+    // (动作, 上下文, 期望源码, 期望光标所在行/列：0=header、2+=body)
+    type Case = (
+        ctx_menu::CtxAction,
+        ctx_menu::TableCtx,
+        &'static str,
+        usize,
+        usize,
+    );
+    let cases: [Case; 7] = [
+        (
+            ctx_menu::CtxAction::TableInsertRowAbove,
+            ctx_menu::TableCtx {
+                body_row: Some(0),
+                col: 0,
+                ncols: 2,
+            },
+            "p\n\n| a | b |\n| --- | --- |\n|  |  |\n| c | d |\n| e | f |\n",
+            2,
+            0,
+        ),
+        (
+            ctx_menu::CtxAction::TableInsertRowBelow,
+            ctx_menu::TableCtx {
+                body_row: Some(1),
+                col: 1,
+                ncols: 2,
+            },
+            "p\n\n| a | b |\n| --- | --- |\n| c | d |\n| e | f |\n|  |  |\n",
+            4,
+            1,
+        ),
+        (
+            // 删除首行 → 无上一行，落到下一行同列
+            ctx_menu::CtxAction::TableDeleteRow,
+            ctx_menu::TableCtx {
+                body_row: Some(0),
+                col: 1,
+                ncols: 2,
+            },
+            "p\n\n| a | b |\n| --- | --- |\n| e | f |\n",
+            2,
+            1,
+        ),
+        (
+            // 删除末行 → 落到上一行同列
+            ctx_menu::CtxAction::TableDeleteRow,
+            ctx_menu::TableCtx {
+                body_row: Some(1),
+                col: 1,
+                ncols: 2,
+            },
+            "p\n\n| a | b |\n| --- | --- |\n| c | d |\n",
+            2,
+            1,
+        ),
+        (
+            ctx_menu::CtxAction::TableInsertColumnLeft,
+            ctx_menu::TableCtx {
+                body_row: Some(0),
+                col: 1,
+                ncols: 2,
+            },
+            "p\n\n| a |  | b |\n| --- | --- | --- |\n| c |  | d |\n| e |  | f |\n",
+            2,
+            1,
+        ),
+        (
+            ctx_menu::CtxAction::TableInsertColumnRight,
+            ctx_menu::TableCtx {
+                body_row: Some(0),
+                col: 1,
+                ncols: 2,
+            },
+            "p\n\n| a | b |  |\n| --- | --- | --- |\n| c | d |  |\n| e | f |  |\n",
+            2,
+            2,
+        ),
+        (
+            ctx_menu::CtxAction::TableDeleteColumn,
+            ctx_menu::TableCtx {
+                body_row: None,
+                col: 0,
+                ncols: 2,
+            },
+            "p\n\n| b |\n| --- |\n| d |\n| f |\n",
+            0,
+            0,
+        ),
+    ];
+    for (action, tc, want, line, col) in cases {
+        let (mut a, _) = app_math(TABLE_MENU_DOC, false);
+        exec_table_ctx(&mut a, tc, action);
+        assert_eq!(a.editor.session().serialize(), want, "{action:?} 源码不符");
+        let id = a
+            .editor
+            .session()
+            .blocks()
+            .into_iter()
+            .find(|(_, k, _)| *k == BlockKind::Table)
+            .map(|(id, _, _)| id)
+            .expect("操作后仍应有表格块");
+        let tbl = a.editor.session().table(id).unwrap();
+        let cell = if line == 0 {
+            &tbl.header[col]
+        } else {
+            &tbl.rows[line - 2][col]
+        };
+        assert!(
+            cell.range.start <= a.editor.caret() && a.editor.caret() <= cell.range.end,
+            "{action:?} 光标未落到第 {line} 行第 {col} 列：caret={} cell=[{},{}]",
+            a.editor.caret(),
+            cell.range.start,
+            cell.range.end
+        );
+    }
+}
+
+#[test]
+fn table_ctx_actions_are_single_undo_step() {
+    let (mut a, _) = app_math(TABLE_MENU_DOC, false);
+    exec_table_ctx(
+        &mut a,
+        ctx_menu::TableCtx {
+            body_row: Some(0),
+            col: 0,
+            ncols: 2,
+        },
+        ctx_menu::CtxAction::TableDeleteColumn,
+    );
+    assert_ne!(a.editor.session().serialize(), TABLE_MENU_DOC);
+    a.editor.apply(Intent::Undo).unwrap();
+    assert_eq!(
+        a.editor.session().serialize(),
+        TABLE_MENU_DOC,
+        "结构操作是单撤销步"
+    );
+}
+
+#[test]
+fn table_align_actions_map_to_expected_markers() {
+    // 分隔格宽 3：左 `:--`、中 `:-:`、右 `--:`（宽度不变）
+    for (action, want) in [
+        (
+            ctx_menu::CtxAction::TableAlignLeft,
+            "p\n\n| a | b |\n| --- | :-- |\n| c | d |\n| e | f |\n",
+        ),
+        (
+            ctx_menu::CtxAction::TableAlignCenter,
+            "p\n\n| a | b |\n| --- | :-: |\n| c | d |\n| e | f |\n",
+        ),
+        (
+            ctx_menu::CtxAction::TableAlignRight,
+            "p\n\n| a | b |\n| --- | --: |\n| c | d |\n| e | f |\n",
+        ),
+    ] {
+        let (mut a, _) = app_math(TABLE_MENU_DOC, false);
+        exec_table_ctx(
+            &mut a,
+            ctx_menu::TableCtx {
+                body_row: Some(0),
+                col: 1,
+                ncols: 2,
+            },
+            action,
+        );
+        assert_eq!(a.editor.session().serialize(), want, "{action:?} 源码不符");
+    }
+}
+
+#[test]
+fn table_align_sets_aligns_keeps_caret_and_undo_restores() {
+    let (mut a, _) = app_math(TABLE_MENU_DOC, false);
+    let (id, _, range) = a
+        .editor
+        .session()
+        .blocks()
+        .into_iter()
+        .find(|(_, k, _)| *k == BlockKind::Table)
+        .expect("文档应含表格块");
+    let cell_start = a.editor.session().table(id).unwrap().rows[1][1].range.start;
+    assert!(a.editor.set_caret(cell_start));
+    let before = a.editor.caret() - range.start;
+
+    let tc = ctx_menu::TableCtx {
+        body_row: Some(1),
+        col: 1,
+        ncols: 2,
+    };
+    a.ui_state
+        .ctx
+        .open_at(10.0, 20.0, ctx_menu::CtxKind::Table(tc), None);
+    let i = a
+        .ui_state
+        .ctx
+        .items()
+        .iter()
+        .position(|&(_, act)| act == ctx_menu::CtxAction::TableAlignRight)
+        .expect("表格菜单应有「右对齐」");
+    a.ui_state.ctx.hover = Some(i);
+    a.route_key(Key::Enter);
+
+    assert_eq!(
+        a.editor.session().serialize(),
+        "p\n\n| a | b |\n| --- | --: |\n| c | d |\n| e | f |\n"
+    );
+    let align_of = |a: &App| -> veil_core::CellAlign {
+        let id = a
+            .editor
+            .session()
+            .blocks()
+            .into_iter()
+            .find(|(_, k, _)| *k == BlockKind::Table)
+            .map(|(id, _, _)| id)
+            .expect("编辑后仍应有表格块");
+        a.editor.session().table(id).unwrap().aligns[1]
+    };
+    assert_eq!(align_of(&a), veil_core::CellAlign::Right, "解析后的列对齐应更新");
+    assert_eq!(
+        a.editor.caret() - range.start,
+        before,
+        "对齐不移动光标（相对块起点偏移不变）"
+    );
+
+    a.editor.apply(Intent::Undo).unwrap();
+    assert_eq!(a.editor.session().serialize(), TABLE_MENU_DOC, "对齐是单撤销步");
+    assert_eq!(align_of(&a), veil_core::CellAlign::None, "撤销后对齐复原");
+}
+
+#[test]
+fn right_click_table_header_offers_no_row_actions() {
+    let (mut a, _) = app_math(TABLE_MENU_DOC, false);
+    right_click_table_cell(&mut a, 0); // 表头第 1 列
+    assert_eq!(
+        a.ui_state.ctx.table,
+        Some(ctx_menu::TableCtx {
+            body_row: None,
+            col: 0,
+            ncols: 2
+        })
+    );
+    let row_ops = [
+        ctx_menu::CtxAction::TableInsertRowAbove,
+        ctx_menu::CtxAction::TableInsertRowBelow,
+        ctx_menu::CtxAction::TableDeleteRow,
+    ];
+    assert!(
+        !a.ui_state
+            .ctx
+            .items()
+            .iter()
+            .any(|&(_, act)| row_ops.contains(&act)),
+        "表头不提供行操作"
+    );
+    assert!(a
+        .ui_state
+        .ctx
+        .items()
+        .iter()
+        .any(|&(_, act)| act == ctx_menu::CtxAction::TableDeleteColumn));
 }
 
 #[test]
@@ -2379,6 +2808,7 @@ fn status_line_reports_caret_line_col() {
         a.doc.path.as_deref(),
         a.editor.is_dirty(),
         a.external_state(),
+        a.source_mode(),
         a.ui_state.writing.words,
         2,
         2,
@@ -3491,6 +3921,25 @@ fn switching_theme_persists_config() {
 }
 
 #[test]
+fn startup_applies_export_config_and_saves_all_keys() {
+    let cfg = MemConfig::default();
+    *cfg.text.borrow_mut() = Some(
+        "mode = \"light\"\nexport_margin_mm = 12.5\nexport_page_numbers = false\nexport_toc = false\n"
+            .into(),
+    );
+    let saves = cfg.saves.clone();
+    let mut a = app_theme(Box::new(cfg), Rc::new(Cell::new(Some(false))));
+    assert_eq!(a.config.export_margin_mm, 12.5);
+    assert!(!a.config.export_page_numbers);
+    assert!(!a.config.export_toc);
+    a.perform_menu(MenuAction::ThemeDark);
+    let saved = saves.borrow();
+    assert!(saved[0].contains("export_margin_mm = 12.5"), "{}", saved[0]);
+    assert!(saved[0].contains("export_page_numbers = false"));
+    assert!(saved[0].contains("export_toc = false"));
+}
+
+#[test]
 fn config_save_failure_keeps_theme_and_notices() {
     let sys = Rc::new(Cell::new(Some(false)));
     let mut a = app_theme(Box::new(FailSaveConfig), sys);
@@ -3871,7 +4320,7 @@ fn new_paragraph_caret_with_cold_images_below() {
         .filter(|(_, g)| {
             a.cache.layout(g.id, &g.kind, g.range, base, caret).is_none()
                 && g.kind != BlockKind::Math
-                && !(g.kind == BlockKind::Table && a.cache.table(g.id, base).is_some())
+                && !(g.kind == BlockKind::Table && a.cache.table(g.id, a.table_key(g.id)).is_some())
         })
         .map(|(i, _)| vr.start + i)
         .collect();
@@ -3942,7 +4391,7 @@ fn new_paragraph_caret_matches_block_position_with_images() {
         .filter(|(_, g)| {
             a.cache.layout(g.id, &g.kind, g.range, base, caret).is_none()
                 && g.kind != BlockKind::Math
-                && !(g.kind == BlockKind::Table && a.cache.table(g.id, base).is_some())
+                && !(g.kind == BlockKind::Table && a.cache.table(g.id, a.table_key(g.id)).is_some())
         })
         .map(|(i, _)| vr.start + i)
         .collect();
@@ -3998,7 +4447,7 @@ fn new_paragraph_caret_matches_block_position_tall_cjk() {
             a.cache.layout(g.id, &g.kind, g.range, base, caret).is_none()
                 && g.kind != BlockKind::Math
                 && !(g.kind == BlockKind::Table
-                    && a.cache.table(g.id, base).is_some())
+                    && a.cache.table(g.id, a.table_key(g.id)).is_some())
         })
         .map(|(i, _)| vr.start + i)
         .collect();
@@ -7160,6 +7609,228 @@ fn print_stub_notices_when_platform_missing() {
     assert!(a.window_state.print.is_none(), "NoPrint 不进入打印态");
 }
 
+// ---- 8：PDF 导出（目录 / 页码）headless 断言 ----
+
+/// 导出探针：跑 begin_export（或 begin）→ 逐页采样 → end。
+#[derive(Clone, Default)]
+struct ExportProbe {
+    w: u32,
+    h: u32,
+    opt: ExportOptions,
+    legacy: bool,
+    pages: Rc<Cell<usize>>,
+    breaks: Rc<RefCell<Vec<f32>>>,
+    toc_count: Rc<Cell<usize>>,
+    entries: Rc<RefCell<Vec<(u8, String, usize)>>>,
+    heading_tops: Rc<RefCell<Vec<f32>>>,
+    frames: Rc<RefCell<Vec<Vec<u32>>>>,
+    ended: Rc<Cell<bool>>,
+}
+
+impl Print for ExportProbe {
+    fn print(&mut self, _s: &mut PrintSession) {
+        unreachable!("导出探针只走 export_pdf")
+    }
+
+    fn export_pdf(&mut self, s: &mut PrintSession) {
+        let pages = if self.legacy {
+            s.begin(self.w.max(1), self.h.max(1), 1.0)
+        } else {
+            s.begin_export(self.w.max(1), self.h.max(1), 1.0, self.opt)
+        };
+        self.pages.set(pages);
+        *self.breaks.borrow_mut() = s.page_breaks().to_vec();
+        self.toc_count.set(s.toc_entry_count());
+        *self.entries.borrow_mut() = s
+            .toc_entries()
+            .iter()
+            .map(|e| (e.level, e.text.clone(), e.page))
+            .collect();
+        *self.heading_tops.borrow_mut() = s
+            .app
+            .index
+            .blocks
+            .iter()
+            .filter(|g| matches!(g.kind, BlockKind::AtxHeading(_) | BlockKind::SetextHeading(_)))
+            .map(|g| g.top)
+            .collect();
+        let mut frames = Vec::new();
+        for i in 0..pages {
+            frames.push(s.render_page(i).pixels.clone());
+        }
+        *self.frames.borrow_mut() = frames;
+        s.end();
+        self.ended.set(true);
+    }
+}
+
+fn packed(c: [u8; 4]) -> u32 {
+    ((c[0] as u32) << 16) | ((c[1] as u32) << 8) | c[2] as u32
+}
+
+fn region_has_ink(
+    frame: &[u32],
+    width: u32,
+    bg: u32,
+    x0: u32,
+    y0: u32,
+    x1: u32,
+    y1: u32,
+) -> bool {
+    (y0..y1).any(|y| {
+        (x0..x1).any(|x| frame[(y as usize) * width as usize + x as usize] != bg)
+    })
+}
+
+fn export_doc() -> String {
+    let filler: String = (1..=12).map(|i| format!("正文段落 {i} 内容。\n\n")).collect();
+    format!(
+        "# 第一章\n\n{filler}## 第二节\n\n{filler}### 小节\n\n{filler}尾段\n"
+    )
+}
+
+#[test]
+fn export_toc_adds_pages_with_ink() {
+    let p = ExportProbe {
+        w: 300,
+        h: 120,
+        opt: ExportOptions {
+            page_numbers: false,
+            toc: true,
+        },
+        ..Default::default()
+    };
+    let (pages, breaks, count, frames, ended) = (
+        p.pages.clone(),
+        p.breaks.clone(),
+        p.toc_count.clone(),
+        p.frames.clone(),
+        p.ended.clone(),
+    );
+    let mut a = app_print(&export_doc(), Box::new(p));
+    assert!(!a.perform_menu(MenuAction::ExportPdf), "导出不退出应用");
+    assert!(ended.get(), "begin_export 之后必调 end");
+    let body_pages = breaks.borrow().len();
+    assert!(count.get() >= 3, "目录应含三个标题: {}", count.get());
+    assert!(
+        pages.get() > body_pages,
+        "目录页使总页数增加: {} vs {}",
+        pages.get(),
+        body_pages
+    );
+    let bg = packed(a.input_state.theme.bg);
+    let f0 = &frames.borrow()[0];
+    assert!(
+        f0.iter().any(|&px| px != bg),
+        "目录首页不应为空白（含标题/条目墨迹）"
+    );
+    assert!(a.window_state.print.is_none(), "导出态已退出");
+}
+
+#[test]
+fn export_without_toc_matches_plain_begin() {
+    let text = export_doc();
+    let toc_off = ExportProbe {
+        w: 300,
+        h: 120,
+        opt: ExportOptions {
+            page_numbers: false,
+            toc: false,
+        },
+        ..Default::default()
+    };
+    let (pages, breaks, frames) = (
+        toc_off.pages.clone(),
+        toc_off.breaks.clone(),
+        toc_off.frames.clone(),
+    );
+    let mut a = app_print(&text, Box::new(toc_off));
+    a.perform_menu(MenuAction::ExportPdf);
+    assert_eq!(pages.get(), breaks.borrow().len(), "无目录时总页数 = 正文页数");
+
+    let legacy = ExportProbe {
+        w: 300,
+        h: 120,
+        legacy: true,
+        ..Default::default()
+    };
+    let legacy_frames = legacy.frames.clone();
+    let mut b = app_print(&text, Box::new(legacy));
+    b.perform_menu(MenuAction::ExportPdf);
+    assert_eq!(
+        frames.borrow()[0],
+        legacy_frames.borrow()[0],
+        "关闭目录/页码时首页与 begin 完全一致"
+    );
+}
+
+#[test]
+fn export_page_numbers_draw_bottom_right_footer() {
+    let text = "a\n\nb\n";
+    let (w, h) = (300u32, 600u32);
+    let on = ExportProbe {
+        w,
+        h,
+        opt: ExportOptions {
+            page_numbers: true,
+            toc: false,
+        },
+        ..Default::default()
+    };
+    let on_frames = on.frames.clone();
+    let mut a = app_print(text, Box::new(on));
+    a.perform_menu(MenuAction::ExportPdf);
+    let bg = packed(a.input_state.theme.bg);
+    let on_ink = region_has_ink(&on_frames.borrow()[0], w, bg, w - 120, h - 48, w - 4, h - 4);
+
+    let off = ExportProbe {
+        w,
+        h,
+        opt: ExportOptions {
+            page_numbers: false,
+            toc: false,
+        },
+        ..Default::default()
+    };
+    let off_frames = off.frames.clone();
+    let mut b = app_print(text, Box::new(off));
+    b.perform_menu(MenuAction::ExportPdf);
+    let bg = packed(b.input_state.theme.bg);
+    let off_ink = region_has_ink(&off_frames.borrow()[0], w, bg, w - 120, h - 48, w - 4, h - 4);
+
+    assert!(on_ink, "页码开启时页脚右下应有墨迹");
+    assert!(!off_ink, "页码关闭时页脚区域应为背景色");
+}
+
+#[test]
+fn export_toc_entry_pages_follow_breaks() {
+    let p = ExportProbe {
+        w: 300,
+        h: 120,
+        opt: ExportOptions {
+            page_numbers: false,
+            toc: true,
+        },
+        ..Default::default()
+    };
+    let (pages, breaks, entries, tops) = (
+        p.pages.clone(),
+        p.breaks.clone(),
+        p.entries.clone(),
+        p.heading_tops.clone(),
+    );
+    let mut a = app_print(&export_doc(), Box::new(p));
+    a.perform_menu(MenuAction::ExportPdf);
+    let toc_pages = pages.get() - breaks.borrow().len();
+    let entries = entries.borrow();
+    assert_eq!(entries.len(), tops.borrow().len());
+    for ((_, text, page), top) in entries.iter().zip(tops.borrow().iter()) {
+        let expected = breaks.borrow().partition_point(|&b| b <= *top) + 1 + toc_pages;
+        assert_eq!(*page, expected, "标题 {text:?} 的物理页码");
+    }
+}
+
+
 // ── 3c-2：用户缩放（Ctrl+滚轮/捏合、Ctrl+=/-/0、视图菜单）────────────────────
 
 #[test]
@@ -7286,6 +7957,12 @@ fn zoom_ignored_during_print() {
         saved_scale: 1.0,
         saved_scroll: 0.0,
         breaks: vec![0.0],
+        toc_pages: 0,
+        toc_frames: Vec::new(),
+        footers: Vec::new(),
+        total_pages: 1,
+        options: ExportOptions::default(),
+        toc_entries: Vec::new(),
     });
     a.set_user_zoom(1.5);
     assert_eq!(a.input_state.user_zoom, 1.0, "打印页帧语义独占 scale");
@@ -7452,4 +8129,289 @@ fn paint_is_harmless_when_not_visible() {
     // 会直接 return，根本不会调 paint。这里仅断言「直接调 paint 在不可见态也无害」。
     assert!(a.window_state.frame.is_some());
     let _ = (frame_before, frame_after); // 无 surface，present 是 no-op
+}
+
+// ===== C1 菜单键盘导航 =====
+
+#[test]
+fn menu_keyboard_navigation_selects_and_clamps() {
+    let store = MemStore::default();
+    let mut a = app("ab\n", None, false, &store);
+    a.ui_state.chrome.open = Some(0);
+    let n = chrome::menu_rows(0, &a.recent_labels()).len();
+    assert!(n > 1);
+
+    a.route_key(Key::Down);
+    assert_eq!(a.ui_state.chrome.hover_item, Some((0, 0)), "无选中时 ↓ 选首项");
+    a.route_key(Key::Down);
+    assert_eq!(a.ui_state.chrome.hover_item, Some((0, 1)));
+    a.route_key(Key::Up);
+    a.route_key(Key::Up);
+    assert_eq!(a.ui_state.chrome.hover_item, Some((0, 0)), "首项处 ↑ 钳位");
+    for _ in 0..(n + 3) {
+        a.route_key(Key::Down);
+    }
+    assert_eq!(
+        a.ui_state.chrome.hover_item,
+        Some((0, n - 1)),
+        "末项处 ↓ 钳位"
+    );
+
+    // 无选中时 ↑ 直接选末项
+    a.ui_state.chrome.hover_item = None;
+    a.route_key(Key::Up);
+    assert_eq!(a.ui_state.chrome.hover_item, Some((0, n - 1)));
+}
+
+#[test]
+fn menu_keyboard_enter_runs_selected_item_and_closes() {
+    let store = MemStore::default();
+    let mut a = app("ab\n", None, false, &store);
+    a.ui_state.chrome.open = Some(2); // 视图菜单
+    let rows = chrome::menu_rows(2, &[]);
+    let dark = rows
+        .iter()
+        .position(|(_, _, action)| *action == MenuAction::ThemeDark)
+        .expect("视图菜单应含深色主题项");
+    for _ in 0..=dark {
+        a.route_key(Key::Down);
+    }
+    assert_eq!(a.ui_state.chrome.hover_item, Some((2, dark)));
+
+    a.route_key(Key::Enter);
+    assert_eq!(a.input_state.theme.mode, ThemeMode::Dark, "Enter 执行选中项");
+    assert_eq!(a.ui_state.chrome.open, None, "执行后菜单关闭");
+    assert_eq!(a.ui_state.chrome.hover_item, None);
+    assert_eq!(a.editor.session().serialize(), "ab\n", "菜单动作不改文档");
+}
+
+#[test]
+fn menu_keyboard_enter_toggles_source_mode_and_closes() {
+    let store = MemStore::default();
+    let mut a = app("# 标题\n", None, false, &store);
+    a.ui_state.chrome.open = Some(2); // 视图菜单
+    let rows = chrome::menu_rows(2, &[]);
+    let source = rows
+        .iter()
+        .position(|(_, _, action)| *action == MenuAction::ToggleSourceMode)
+        .expect("视图菜单应含源码模式项");
+    for _ in 0..=source {
+        a.route_key(Key::Down);
+    }
+    assert_eq!(a.ui_state.chrome.hover_item, Some((2, source)));
+
+    a.route_key(Key::Enter);
+    assert!(a.source_mode(), "Enter 打开源码模式");
+    assert_eq!(a.ui_state.chrome.open, None, "执行后菜单关闭");
+    assert_eq!(a.ui_state.chrome.hover_item, None);
+
+    // 再次经菜单执行可翻回渲染态
+    a.ui_state.chrome.open = Some(2);
+    a.ui_state.chrome.hover_item = Some((2, source));
+    a.route_key(Key::Enter);
+    assert!(!a.source_mode(), "再次执行关闭源码模式");
+    assert_eq!(a.ui_state.chrome.open, None);
+}
+
+#[test]
+fn menu_keyboard_enter_without_selection_is_noop() {
+    let store = MemStore::default();
+    let mut a = app("ab\n", None, false, &store);
+    a.ui_state.chrome.open = Some(0);
+    a.route_key(Key::Enter);
+    assert_eq!(a.ui_state.chrome.open, Some(0), "无选中项不执行也不关菜单");
+    assert_eq!(
+        a.editor.session().serialize(),
+        "ab\n",
+        "无选中项时 Enter 不得误编辑文档"
+    );
+}
+
+#[test]
+fn context_menu_keyboard_up_selects_last_and_enter_executes() {
+    let store = MemStore::default();
+    let mut a = app("ab\n", None, false, &store);
+    a.ui_state
+        .ctx
+        .open_at(10.0, 20.0, ctx_menu::CtxKind::Selection, None);
+    let n = a.ui_state.ctx.items().len();
+    assert_eq!(a.mode(), Mode::Menu);
+
+    a.route_key(Key::Up);
+    assert_eq!(a.ui_state.ctx.hover, Some(n - 1), "无选中时 ↑ 选末项");
+    // 选区菜单末项为「全选」：只改选区，不动文档文本
+    a.route_key(Key::Enter);
+    assert!(!a.ui_state.ctx.open, "执行后右键菜单关闭");
+    assert_eq!(a.ui_state.ctx.hover, None);
+    let sel = a.editor.selection().expect("全选应产生选区");
+    assert_eq!((sel.start, sel.end), (0, 3));
+    assert_eq!(a.editor.session().serialize(), "ab\n", "文档文本不得变化");
+}
+
+#[test]
+fn menu_open_swallows_character_keys() {
+    let store = MemStore::default();
+    let mut a = app("ab\n", None, false, &store);
+    a.ui_state.chrome.open = Some(0);
+    a.route_key(Key::Text("a".into()));
+    a.route_key(Key::Down);
+    a.route_key(Key::Text("中".into()));
+    assert_eq!(
+        a.editor.session().serialize(),
+        "ab\n",
+        "菜单展开时字符键不落文档"
+    );
+}
+
+/// 按块种类取 BlockId（源码模式测试的观测口）。
+fn block_id_of(a: &App, pred: impl Fn(&BlockKind) -> bool) -> BlockId {
+    a.index
+        .blocks
+        .iter()
+        .find(|g| pred(&g.kind))
+        .map(|g| g.id)
+        .expect("文档应含目标块")
+}
+
+#[test]
+fn source_mode_toggles_markup_but_keeps_caret_and_scroll() {
+    let store = MemStore::default();
+    let text = "# 标题\n\n**粗体** 与 [链接](https://example.com)\n\n尾\n";
+    let mut a = app(text, None, false, &store);
+    a.editor.set_caret(text.len() - 1); // 光标停在尾段，标题/行内节点均非激活
+    a.ensure_layouts_all();
+    a.window_state.scroll_y = 42.0;
+    let heading = block_id_of(&a, |k| matches!(k, BlockKind::AtxHeading(_)));
+    let para = a
+        .index
+        .blocks
+        .iter()
+        .find(|g| g.id != heading && g.kind == BlockKind::Paragraph)
+        .map(|g| g.id)
+        .expect("文档应含正文段");
+    let caret = a.editor.caret();
+
+    assert_eq!(a.cache.layouts[&heading].layout_text(), "标题");
+    assert!(!a.cache.layouts[&para].layout_text().contains("**"));
+    assert!(!a.cache.layouts[&para].layout_text().contains('['));
+
+    a.perform_action(Action::ToggleSourceMode);
+    a.ensure_layouts_all();
+    assert!(a.source_mode(), "Ctrl+/ 开启源码模式");
+    assert!(
+        a.cache.layouts[&heading].layout_text().contains('#'),
+        "标题显 `#`: {:?}",
+        a.cache.layouts[&heading].layout_text()
+    );
+    let src = a.cache.layouts[&para].layout_text().to_string();
+    assert!(src.contains("**"), "粗体显标记: {src:?}");
+    assert!(src.contains('['), "链接显标记: {src:?}");
+    assert_eq!(a.editor.caret(), caret, "切换不得移动光标");
+    assert_eq!(a.window_state.scroll_y, 42.0, "切换不得改变滚动位置");
+
+    a.perform_action(Action::ToggleSourceMode);
+    a.ensure_layouts_all();
+    assert!(!a.source_mode());
+    assert_eq!(a.cache.layouts[&heading].layout_text(), "标题");
+    assert!(!a.cache.layouts[&para].layout_text().contains("**"));
+}
+
+#[test]
+fn source_mode_hides_math_image_and_table_grid() {
+    let store = MemStore::default();
+    let text = "前言\n\n$$\nx=1\n$$\n\n| a | b |\n| - | - |\n| 1 | 2 |\n";
+    let mut a = app(text, None, false, &store);
+    a.editor.set_caret(0); // 光标只在首段，公式/表格块均非激活
+    a.ensure_layouts_all();
+    a.ensure_math();
+    a.ensure_tables();
+    let math = a
+        .index
+        .blocks
+        .iter()
+        .find(|g| g.kind == BlockKind::Math)
+        .map(|g| (g.id, g.range))
+        .expect("含公式块");
+    let table = a
+        .index
+        .blocks
+        .iter()
+        .find(|g| g.kind == BlockKind::Table)
+        .map(|g| (g.id, g.range))
+        .expect("含表格块");
+    assert!(a.math_shows_image(math.0, &math.1));
+    assert!(a.table_shows_grid(table.0, &table.1));
+
+    a.perform_action(Action::ToggleSourceMode);
+    a.ensure_layouts_all();
+    assert!(!a.math_shows_image(math.0, &math.1), "源码模式不渲染公式图");
+    assert!(!a.table_shows_grid(table.0, &table.1), "源码模式不渲染表格网格");
+    assert!(
+        !a.cache.tables.contains_key(&table.0),
+        "源码模式不产表格网格缓存"
+    );
+    let tl = a.cache.layouts[&table.0].layout_text().to_string();
+    assert!(tl.contains('|'), "表格显管道与分隔行源码: {tl:?}");
+
+    a.perform_action(Action::ToggleSourceMode);
+    a.ensure_math();
+    a.ensure_tables();
+    assert!(a.math_shows_image(math.0, &math.1), "关闭后恢复公式图");
+    assert!(a.table_shows_grid(table.0, &table.1), "关闭后恢复表格网格");
+}
+
+/// 打印探针：begin 后采样标题块（打印态）、end 后按屏幕态重排再采样。
+struct SourcePrintProbe {
+    during_heading: Rc<RefCell<String>>,
+    after_heading: Rc<RefCell<String>>,
+    source_during_print: Rc<Cell<bool>>,
+}
+impl Print for SourcePrintProbe {
+    fn print(&mut self, s: &mut PrintSession) {
+        s.begin(400, 600, 1.0);
+        let heading = s
+            .app
+            .index
+            .blocks
+            .iter()
+            .find(|g| matches!(g.kind, BlockKind::AtxHeading(_)))
+            .map(|g| g.id)
+            .expect("文档含标题块");
+        self.source_during_print.set(s.app.source_mode());
+        *self.during_heading.borrow_mut() =
+            s.app.cache.layouts[&heading].layout_text().to_string();
+        s.end();
+        s.app.ensure_layouts_all();
+        *self.after_heading.borrow_mut() =
+            s.app.cache.layouts[&heading].layout_text().to_string();
+    }
+}
+
+#[test]
+fn print_ignores_source_mode_and_screen_restores_it() {
+    let probe = SourcePrintProbe {
+        during_heading: Rc::new(RefCell::new(String::new())),
+        after_heading: Rc::new(RefCell::new(String::new())),
+        source_during_print: Rc::new(Cell::new(false)),
+    };
+    let during = probe.during_heading.clone();
+    let after = probe.after_heading.clone();
+    let flag = probe.source_during_print.clone();
+    let text = "# 标\n\n尾\n";
+    let mut a = app_print(text, Box::new(probe));
+    a.editor.set_caret(text.len() - 1);
+    a.perform_action(Action::ToggleSourceMode);
+    a.ensure_layouts_all();
+    let heading = block_id_of(&a, |k| matches!(k, BlockKind::AtxHeading(_)));
+    assert!(a.cache.layouts[&heading].layout_text().contains('#'));
+
+    a.perform_menu(MenuAction::Print);
+    assert!(!flag.get(), "打印中 source_mode() 恒 false");
+    assert_eq!(&*during.borrow(), "标", "打印态忽略源码模式");
+    assert_eq!(
+        &*after.borrow(),
+        "# 标",
+        "打印结束回屏幕后恢复源码模式"
+    );
+    assert!(a.source_mode(), "用户开关未被打印改写");
 }

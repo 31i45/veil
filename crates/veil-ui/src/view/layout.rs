@@ -16,7 +16,7 @@ use super::highlight::{highlight, to_styles};
 use super::linebreak;
 use super::style::{style_spans, Style};
 use crate::geometry::{BASE_FONT_SIZE, BASE_LINE_HEIGHT};
-use crate::theme::SyntaxColors;
+use crate::theme::{SyntaxColors, Theme};
 
 /// 行内资源键：占位图与位图缓存之间的寻址键（切片 8/13 共用占位机制）。
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -363,6 +363,8 @@ pub struct LayoutEngine {
     scale: f32,
     /// 代码块语法高亮色板（随主题切换更新）。
     syntax: SyntaxColors,
+    /// 链接前景色（随主题切换更新）。
+    link_color: [u8; 3],
 }
 
 impl Default for LayoutEngine {
@@ -378,12 +380,23 @@ impl LayoutEngine {
             swash: SwashCache::new(),
             scale: 1.0,
             syntax: SyntaxColors::default_light(),
+            link_color: Theme::light().link,
         }
     }
 
     /// 更新语法高亮色板（主题切换时调用）。
     pub fn set_syntax_colors(&mut self, colors: SyntaxColors) {
         self.syntax = colors;
+    }
+
+    /// 更新链接前景色（主题切换时调用）。
+    pub fn set_link_color(&mut self, color: [u8; 3]) {
+        self.link_color = color;
+    }
+
+    /// 当前链接前景色（表格富文本排版复用）。
+    pub(crate) fn link_color(&self) -> [u8; 3] {
+        self.link_color
     }
 
     pub fn set_scale(&mut self, scale: f32) {
@@ -410,7 +423,7 @@ impl LayoutEngine {
             end: text.len(),
         };
         let (layout_text, map, line_bases, source_newlines) =
-            build_layout_text(text, block, &[], usize::MAX, &[], true);
+            build_layout_text(text, block, &[], usize::MAX, &[], true, false);
         let mut buffer = Buffer::new(&mut self.font_system, metrics);
         buffer.set_text(&layout_text, &Attrs::new(), Shaping::Advanced, None);
         buffer.set_size(None, None);
@@ -440,6 +453,7 @@ impl LayoutEngine {
     /// `imgs`：已渲染的非激活行内公式/图片（切片 8/13）——节点整段替换为 NBSP 占位
     /// （宽≈位图宽），排版后定位占位首字形得 PlacedImg（基线对齐）。激活节点（caret
     /// 闭区间内）的 img 忽略。
+    /// `reveal_all`：源码模式——块级标记与行内标记全部显原文、不做图片占位。
     /// 已知 v0 简化：高超一行的行内公式/图片可能与同块下一视觉行重叠（块高已扩展
     /// 不溢出版心）；图片顶部钳在行顶（不上侵前一块），公式保留原基线；
     /// 标题内公式/图片不随标题字号放大（尺寸由渲染侧/图片自然尺寸决定）。
@@ -453,6 +467,7 @@ impl LayoutEngine {
         width: f32,
         caret: usize,
         imgs: &[InlineImg],
+        reveal_all: bool,
     ) -> BlockLayout {
         let full = text.strip_suffix('\n').unwrap_or(text);
         // 单块上限（v0）：只排前缀，超出部分不参与成形/光栅，避免内存放大
@@ -466,20 +481,27 @@ impl LayoutEngine {
             self.measure_nbsp(metrics)
         };
         let mut kept: Vec<&InlineImg> = Vec::new();
-        // 块级替换（切片 12）先入表；行内公式占位段随后按起点排序归并
-        let mut subs: Vec<Sub> = block_subs(kind.clone(), body, block, caret);
-        for im in imgs {
-            if node_active(im.range, caret) {
-                continue; // 激活态显源码，不占位
+        // 块级替换（切片 12）先入表；行内公式占位段随后按起点排序归并。
+        // 源码模式：不做任何块级替换，标记原样显示。
+        let mut subs: Vec<Sub> = if reveal_all {
+            Vec::new()
+        } else {
+            block_subs(kind.clone(), body, block, caret)
+        };
+        if !reveal_all {
+            for im in imgs {
+                if node_active(im.range, caret) {
+                    continue; // 激活态显源码，不占位
+                }
+                let rs = im.range.start.saturating_sub(block.start);
+                let re = im.range.end.saturating_sub(block.start).min(body.len());
+                if rs >= re {
+                    continue; // 防御：img 区间须落在本块内（shell 按块收集，不会越界）
+                }
+                let nbsp = ((im.width as f32 / nbsp_w).round() as usize).max(1);
+                subs.push(Sub::fill(rs, re, "\u{A0}".repeat(nbsp)));
+                kept.push(im);
             }
-            let rs = im.range.start.saturating_sub(block.start);
-            let re = im.range.end.saturating_sub(block.start).min(body.len());
-            if rs >= re {
-                continue; // 防御：img 区间须落在本块内（shell 按块收集，不会越界）
-            }
-            let nbsp = ((im.width as f32 / nbsp_w).round() as usize).max(1);
-            subs.push(Sub::fill(rs, re, "\u{A0}".repeat(nbsp)));
-            kept.push(im);
         }
         let apply_cjk = !matches!(
             kind,
@@ -489,7 +511,7 @@ impl LayoutEngine {
                 | BlockKind::Table
         );
         let (layout_text, map, line_bases, source_newlines) =
-            build_layout_text(body, block, inlines, caret, &subs, apply_cjk);
+            build_layout_text(body, block, inlines, caret, &subs, apply_cjk, reveal_all);
         let mut node_ranges = Vec::new();
         collect_node_ranges(inlines, &mut node_ranges);
         // 指纹输入一律存块相对坐标：增量重解析保留 BlockId 而块 range 可能整体平移，
@@ -510,7 +532,7 @@ impl LayoutEngine {
             .collect();
         img_ranges.sort_by_key(|r| (r.start, r.end));
         let mut buffer = Buffer::new(&mut self.font_system, metrics);
-        let default_attrs = attrs_of(kind.clone(), Style::default());
+        let default_attrs = attrs_of(kind.clone(), Style::default(), self.link_color);
         // style_spans 产出文档坐标，经映射转 layout 坐标；整体落入消隐/占位区的 span 零宽丢弃。
         // 占位 NBSP 区无样式来源，显式补默认样式 span（cosmic 排版文本 = 各 span 顺次拼接，
         // 覆盖必须完备且有序）；指针序即 layout 偏移序。
@@ -527,7 +549,7 @@ impl LayoutEngine {
         for &(s, e, st) in &style_segments {
             let (ls, le) = (map.doc_to_layout(s), map.doc_to_layout(e));
             if ls < le {
-                spans.push((&layout_text[ls..le], attrs_of(kind.clone(), st)));
+                spans.push((&layout_text[ls..le], attrs_of(kind.clone(), st, self.link_color)));
             }
         }
         for im in &kept {
@@ -1047,6 +1069,7 @@ fn build_layout_text(
     caret: usize,
     subs: &[Sub],
     apply_cjk: bool,
+    reveal_all: bool,
 ) -> (String, OffsetMap, Vec<usize>, Vec<usize>) {
     let mut all: Vec<Sub> = Vec::new();
     // 行尾 \r：仅剥「后继为 \n 或文末」的 \r（行内孤 \r 保持原样，与切片 1 行为一致）
@@ -1057,7 +1080,9 @@ fn build_layout_text(
         }
     }
     let mut elide: Vec<(usize, usize)> = Vec::new();
-    collect_elide(inlines, block, caret, &mut elide);
+    if !reveal_all {
+        collect_elide(inlines, block, caret, &mut elide);
+    }
     all.extend(elide.into_iter().map(|(s, e)| Sub::elide(s, e)));
     all.extend_from_slice(subs);
     if apply_cjk {
@@ -1260,7 +1285,47 @@ fn quote_marker_pos(line: &str) -> Option<usize> {
     (line.as_bytes().get(indent) == Some(&b'>')).then_some(indent)
 }
 
-fn attrs_of(kind: BlockKind, st: Style) -> Attrs<'static> {
+/// 单元格富文本样式段：剥标记坐标 → 可见文本坐标，致密覆盖 `[0, text_len)`。
+/// `text_len` 与 `OffsetMap` 结果不一致（如单元格内 `\|` 转义改写字节）时返回 None，
+/// 调用方降级为纯文本。
+pub(crate) fn cell_style_spans(
+    cell_range: Range,
+    text_len: usize,
+    inlines: &[InlineNode],
+    _link_color: [u8; 3],
+) -> Option<Vec<(usize, usize, Style)>> {
+    let mut elide: Vec<(usize, usize)> = Vec::new();
+    collect_elide(inlines, cell_range, usize::MAX, &mut elide);
+    let subs: Vec<Sub> = elide.into_iter().map(|(s, e)| Sub::elide(s, e)).collect();
+    let (map, _) = OffsetMap::from_spans(cell_range.len(), &subs);
+    if map.layout_len != text_len {
+        return None;
+    }
+    let mut out: Vec<(usize, usize, Style)> = Vec::new();
+    let mut cursor = 0usize;
+    for (s, e, st) in style_spans(cell_range.len(), cell_range, inlines) {
+        let ls = map.doc_to_layout(s).min(text_len);
+        let le = map.doc_to_layout(e).min(text_len);
+        if le <= cursor {
+            continue;
+        }
+        let ls = ls.max(cursor);
+        if ls > cursor {
+            out.push((cursor, ls, Style::default()));
+        }
+        match out.last_mut() {
+            Some(last) if last.1 == ls && last.2 == st => last.1 = le,
+            _ => out.push((ls, le, st)),
+        }
+        cursor = le;
+    }
+    if cursor < text_len {
+        out.push((cursor, text_len, Style::default()));
+    }
+    Some(out)
+}
+
+pub(super) fn attrs_of(kind: BlockKind, st: Style, link_color: [u8; 3]) -> Attrs<'static> {
     let a = Attrs::new();
     let a = if st.bold
         || matches!(
@@ -1287,12 +1352,14 @@ fn attrs_of(kind: BlockKind, st: Style) -> Attrs<'static> {
     } else {
         a
     };
-    let a = if let Some([r, g, b]) = st.color {
+    // 显式语法高亮色优先；链接在无色时才回落到主题链接色。
+    // 语法高亮只作用于代码块（style_spans 不产出），二者不会同时命中。
+    let color = st.color.or_else(|| st.link.then_some(link_color));
+    let a = if let Some([r, g, b]) = color {
         a.color(Color::rgb(r, g, b))
     } else {
         a
     };
-    // st.underline：0.19 Attrs 虽有 text_decoration，下划线渲染随 Reveal 切片另行落地
     a
 }
 
@@ -1300,6 +1367,7 @@ fn attrs_of(kind: BlockKind, st: Style) -> Attrs<'static> {
 mod tests {
     use super::linebreak::{LINE_END_FORBIDDEN, LINE_START_FORBIDDEN};
     use super::*;
+    use crate::theme::Theme;
     use veil_core::Session;
 
     fn layout_of(text: &str, width: f32) -> (LayoutEngine, BlockLayout) {
@@ -1324,7 +1392,7 @@ mod tests {
         let inlines = s.block_inlines(id).unwrap();
         let mut eng = LayoutEngine::new();
         let block_text = &text[range.start..range.end];
-        let l = eng.layout_block(kind, block_text, range, &inlines, width, caret, imgs);
+        let l = eng.layout_block(kind, block_text, range, &inlines, width, caret, imgs, false);
         (eng, l)
     }
 
@@ -1449,6 +1517,49 @@ mod tests {
         assert_eq!(l.layout_text(), "x t y");
         let (_, l) = layout_with_caret("x [t](http://a) y", 3, 300.0);
         assert_eq!(l.layout_text(), "x [t](http://a) y");
+    }
+
+    #[test]
+    fn link_span_attrs_follow_theme_link_color() {
+        let src = "see [官网](https://example.com) now";
+        let s = Session::open(src);
+        let (id, kind, range) = s.blocks()[0].clone();
+        let inlines = s.block_inlines(id).unwrap();
+        let spans = style_spans(range.len(), range, &inlines);
+        let style_at = |at: usize| {
+            spans
+                .iter()
+                .find(|(s, e, _)| *s <= at && at < *e)
+                .map(|(_, _, st)| *st)
+                .expect("style_spans 必须致密覆盖")
+        };
+        let link_at = src.find('官').unwrap();
+        let body_at = 0; // 「see」中的 s
+        assert!(style_at(link_at).link && !style_at(body_at).link);
+        for theme in [Theme::light(), Theme::dark()] {
+            let want = Color::rgb(theme.link[0], theme.link[1], theme.link[2]);
+            let link_attrs = attrs_of(kind.clone(), style_at(link_at), theme.link);
+            assert_eq!(
+                link_attrs.color_opt,
+                Some(want),
+                "链接字符应使用主题链接色: dark={}",
+                theme.dark
+            );
+            let body_attrs = attrs_of(kind.clone(), style_at(body_at), theme.link);
+            assert_eq!(body_attrs.color_opt, None, "正文不得使用链接色");
+            assert_ne!(theme.link, theme.fg, "链接色与正文前景色必须可区分");
+        }
+        // 活动链接显示源码，样式标记不变（仍由 link 色上色）
+        let (_, shown) = layout_with_caret(src, link_at, 400.0);
+        assert!(shown.layout_text().contains("https://example.com"));
+    }
+
+    #[test]
+    fn engine_link_color_defaults_light_and_follows_setter() {
+        let mut eng = LayoutEngine::new();
+        assert_eq!(eng.link_color, Theme::light().link);
+        eng.set_link_color(Theme::dark().link);
+        assert_eq!(eng.link_color, Theme::dark().link);
     }
 
     #[test]
@@ -2129,7 +2240,16 @@ mod tests {
             start: 0,
             end: text.len(),
         };
-        let l = eng.layout_block(BlockKind::Paragraph, text, block, &[], 4000.0, usize::MAX, &[]);
+        let l = eng.layout_block(
+            BlockKind::Paragraph,
+            text,
+            block,
+            &[],
+            4000.0,
+            usize::MAX,
+            &[],
+            false,
+        );
         l.buffer
             .layout_runs()
             .map(|r| r.line_w)
@@ -2141,7 +2261,16 @@ mod tests {
             start: 0,
             end: text.len(),
         };
-        eng.layout_block(BlockKind::Paragraph, text, block, &[], width, usize::MAX, &[])
+        eng.layout_block(
+            BlockKind::Paragraph,
+            text,
+            block,
+            &[],
+            width,
+            usize::MAX,
+            &[],
+            false,
+        )
     }
 
     #[test]
@@ -2291,5 +2420,81 @@ mod tests {
             (glued - plain).abs() < 2.0,
             "WJ advance 不可见级（<2px）: plain={plain} glued={glued}"
         );
+    }
+
+    // ---- 表格单元格富文本（B3）：剥标记坐标 → 可见文本坐标 ----
+
+    type CellSpans = Option<Vec<(usize, usize, Style)>>;
+
+    /// 打开单行表格，取第 row 行第 col 个单元格的样式段与可见文本长。
+    fn cell_spans(doc: &str, row: usize, col: usize) -> (CellSpans, usize) {
+        let s = Session::open(doc);
+        let (id, _, _) = s.blocks()[0].clone();
+        let t = s.table(id).unwrap();
+        let cell = if row == 0 {
+            &t.header[col]
+        } else {
+            &t.rows[row - 1][col]
+        };
+        let spans = cell_style_spans(cell.range, cell.text.len(), &cell.inlines, [0, 0, 0]);
+        (spans, cell.text.len())
+    }
+
+    fn at(spans: &[(usize, usize, Style)], p: usize) -> Style {
+        spans
+            .iter()
+            .find(|(s, e, _)| *s <= p && p < *e)
+            .map(|x| x.2)
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn cell_spans_map_markers_to_visible_text() {
+        let doc = "| **粗** | *斜* | `code` | [t](http://a) |\n| --- | --- | --- | --- |\n";
+        let (bold, n) = cell_spans(doc, 0, 0);
+        let bold = bold.expect("粗体应可映射");
+        assert_eq!(n, "粗".len());
+        assert_eq!(bold, vec![(0, n, Style { bold: true, ..Default::default() })]);
+
+        let (it, n) = cell_spans(doc, 0, 1);
+        let it = it.expect("斜体应可映射");
+        assert_eq!(it, vec![(0, n, Style { italic: true, ..Default::default() })]);
+
+        let (mono, n) = cell_spans(doc, 0, 2);
+        let mono = mono.expect("行内代码应可映射");
+        assert_eq!(mono, vec![(0, n, Style { mono: true, ..Default::default() })]);
+
+        let (link, n) = cell_spans(doc, 0, 3);
+        let link = link.expect("链接应可映射");
+        assert_eq!(n, 1);
+        assert!(link.iter().all(|(s, e, _)| (*s, *e) == (0, 1)) && at(&link, 0).link);
+    }
+
+    #[test]
+    fn cell_spans_cover_visible_text_densely() {
+        let docs = [
+            "| 中文 **粗** 混排 |\n| --- |\n",
+            "| a *b* `c` [d](u) |\n| --- |\n",
+            "|  |\n| --- |\n",
+        ];
+        for doc in docs {
+            let (spans, n) = cell_spans(doc, 0, 0);
+            let spans = spans.expect("应可映射");
+            let mut pos = 0;
+            for &(s, e, _) in &spans {
+                assert_eq!(s, pos, "致密覆盖不得有缝: {doc:?}");
+                assert!(s < e);
+                pos = e;
+            }
+            assert_eq!(pos, n, "覆盖须恰好等于可见文本长: {doc:?}");
+        }
+    }
+
+    #[test]
+    fn cell_spans_none_when_bytes_diverge() {
+        // `\|` 在 core 侧被解转义为单个 `|`，与剥标记长度不一致 → 降级信号
+        let (spans, n) = cell_spans("| a\\|b |\n| --- |\n", 0, 0);
+        assert!(spans.is_none(), "转义改写字节时应返回 None");
+        assert_eq!(n, "a|b".len());
     }
 }

@@ -35,6 +35,8 @@ pub(crate) struct Syntax {
     refs: RefMap,
     /// BlockId → blocks 内索引（new/reparse 后重建，O(1) 查表替代 iter().find）。
     id_index: std::collections::HashMap<BlockId, usize>,
+    /// 最近一次 `reparse` 实际扫描的行跨度（只读观测值，不参与解析语义）。
+    last_rescan_lines: usize,
 }
 
 impl Syntax {
@@ -44,6 +46,7 @@ impl Syntax {
             next_id: 0,
             refs: RefMap::new(),
             id_index: std::collections::HashMap::new(),
+            last_rescan_lines: 0,
         };
         let raw = scan_blocks(buf, 0, buf.line_count());
         syntax.blocks = raw
@@ -101,6 +104,13 @@ impl Syntax {
 
     pub fn blocks(&self) -> &[Block] {
         &self.blocks
+    }
+
+    /// 最近一次 `reparse` 实际扫描的行跨度（只读观测值，不影响解析结果）。
+    /// 口径：重扫起点（含向前扩展/列表区域回走后的 `scan_from`）到扫描终止行（不含）；
+    /// 命中旧块对齐而提前收尾时，对齐行自身不计入。全量首扫（`new`）记 0。
+    pub fn last_rescan_lines(&self) -> usize {
+        self.last_rescan_lines
     }
 
     /// 某块的 inline 节点（绝对字节偏移）。派生数据：访问时按块当前文本即时解析，
@@ -366,6 +376,10 @@ impl Syntax {
             produced.append(&mut v);
             line += consumed;
         }
+
+        // 观测口径：`scan_from` 到扫描终止行（不含）的行数，即本次逐行检查的跨度；
+        // 命中旧块对齐提前收尾时，对齐行未进入 produced，不计入。
+        self.last_rescan_lines = line.saturating_sub(scan_from);
 
         let mut dirty = Vec::with_capacity(produced.len());
         let mut new_blocks: Vec<Block> = self.blocks[..bi].to_vec();

@@ -9,14 +9,18 @@ use crate::geometry::{BASE_FONT_SIZE, BASE_LINE_HEIGHT, MARGIN, PARA_GAP};
 use crate::html::html_to_markdown;
 use crate::input::{Action, Key, Mods};
 use crate::mode::{route, Cmd, Mode, TextSink};
+use crate::paint::{
+    active_cell_index, table_cell_start, table_delete_column, table_delete_row, table_insert_column,
+    table_insert_row, table_set_align,
+};
 use crate::theme::ThemeMode;
 use crate::view::{ctx_menu, outline, quick_open, search};
-use crate::view::ctx_menu::{CtxAction, CtxKind};
+use crate::view::ctx_menu::{CtxAction, CtxKind, TableCtx};
 use std::path::Path;
 use std::time::{Duration, Instant};
-use veil_core::{task_span, BlockId, BlockKind, InlineKind, InlineNode, Range};
+use veil_core::{task_span, BlockId, BlockKind, CellAlign, InlineKind, InlineNode, Range};
 use winit::event::ElementState;
-use winit::keyboard::{Key as WKey, NamedKey};
+use winit::keyboard::{Key as WKey, KeyCode, NamedKey, PhysicalKey};
 use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
 
 /// 连续点击（双击/三击）的最大间隔。
@@ -58,6 +62,17 @@ impl App {
         self.recompute_geometry();
         self.scroll_to_caret();
         self.update_title(); // 脏标随编辑翻转
+
+        // P0 探针：仅在确有脏块（真实编辑）时记录一次快照；关闭时零开销。
+        if !dirty.is_empty() {
+            let session = self.editor.session();
+            crate::perf::edit(crate::perf::EditSnapshot {
+                dirty_blocks: dirty.len(),
+                total_blocks: session.block_count(),
+                rescan_lines: session.last_rescan_lines(),
+                undo_depth: session.undo_depth(),
+            });
+        }
         self.request_redraw();
     }
 
@@ -65,10 +80,12 @@ impl App {
         if event.state != ElementState::Pressed {
             return;
         }
+        let started = Instant::now();
         let Some(key) = map_key(event, self.input_state.mods) else {
             return;
         };
         self.route_key(key);
+        crate::perf::key(started.elapsed());
     }
 
     /// 单个内部键的路由与执行：`on_key` 与测试共用同一入口。
@@ -88,6 +105,8 @@ impl App {
                 self.ui_state.ctx.close();
                 self.request_redraw();
             }
+            Cmd::MenuMove(d) => self.menu_move(d),
+            Cmd::MenuAccept => self.menu_accept(),
             // 快速打开浮层动作自带重绘与 IME 区域刷新
             Cmd::QuickClose => self.close_quick(),
             Cmd::QuickAccept => self.quick_accept(),
@@ -193,7 +212,9 @@ impl App {
                 self.ui_state.ctx.close();
             }
             Action::ToggleOutline => self.toggle_outline(),
+            Action::ToggleSourceMode => self.toggle_source_mode(),
             Action::Export => self.export_now(),
+            Action::ExportPdf => self.export_pdf(),
             Action::Print => self.print_document(),
             Action::Find => self.open_search(),
             Action::Replace => self.open_replace(),
@@ -664,6 +685,80 @@ impl App {
         self.open_path(path);
     }
 
+    /// 菜单键盘导航（C1）：移动选中项。右键菜单优先；无选中时 ↓ 选首项、↑ 选末项，
+    /// 有选中时钳位在 `[0, n-1]`。高亮复用绘制既有的 `ctx.hover` / `chrome.hover_item`。
+    pub(crate) fn menu_move(&mut self, d: i32) {
+        if self.ui_state.ctx.open {
+            let n = self.ui_state.ctx.items().len();
+            if n == 0 {
+                return;
+            }
+            let last = n as i32 - 1;
+            let i = match self.ui_state.ctx.hover {
+                Some(i) => (i as i32 + d).clamp(0, last) as usize,
+                None if d < 0 => n - 1,
+                None => 0,
+            };
+            self.ui_state.ctx.hover = Some(i);
+            self.request_redraw();
+            return;
+        }
+        let Some(open) = self.ui_state.chrome.open else {
+            return;
+        };
+        let recent = self.recent_labels();
+        let n = chrome::menu_rows(open, &recent).len();
+        if n == 0 {
+            return;
+        }
+        let last = n as i32 - 1;
+        // 只认当前菜单的选中项：切换菜单后残留的旧下标不得参与移动
+        let current = match self.ui_state.chrome.hover_item {
+            Some((m, i)) if m == open && i < n => Some(i),
+            _ => None,
+        };
+        let i = match current {
+            Some(i) => (i as i32 + d).clamp(0, last) as usize,
+            None if d < 0 => n - 1,
+            None => 0,
+        };
+        self.ui_state.chrome.hover_item = Some((open, i));
+        self.request_redraw();
+    }
+
+    /// 菜单键盘执行（C1）：只执行有选中项的动作；无选中时不做任何事（不误编辑文档）。
+    pub(crate) fn menu_accept(&mut self) {
+        if self.ui_state.ctx.open {
+            let Some(i) = self.ui_state.ctx.hover else {
+                return;
+            };
+            if let Some(action) = self.ui_state.ctx.action(i) {
+                self.ctx_exec(action);
+            }
+            self.ui_state.ctx.close();
+            self.request_redraw();
+            return;
+        }
+        let Some(open) = self.ui_state.chrome.open else {
+            return;
+        };
+        let Some((menu, item)) = self.ui_state.chrome.hover_item else {
+            return;
+        };
+        if menu != open {
+            return;
+        }
+        let recent = self.recent_labels();
+        let Some(action) = chrome::action_at(open, item, &recent) else {
+            return;
+        };
+        self.ui_state.chrome.close();
+        self.request_redraw();
+        if self.perform_menu(action) {
+            self.window_state.exit_requested = true;
+        }
+    }
+
     /// 执行菜单动作。返回 true = 退出应用。
     pub(crate) fn perform_menu(&mut self, action: MenuAction) -> bool {
         match action {
@@ -672,6 +767,7 @@ impl App {
             MenuAction::Save => self.save_now(),
             MenuAction::SaveAs => self.save_as(),
             MenuAction::Export => self.export_now(),
+            MenuAction::ExportPdf => self.export_pdf(),
             MenuAction::Print => self.print_document(),
             MenuAction::Undo => {
                 if let Some(dirty) = self.editor.apply(Intent::Undo) {
@@ -694,6 +790,7 @@ impl App {
             MenuAction::ThemeDark => self.set_theme_mode(ThemeMode::Dark),
             MenuAction::ToggleFocus => self.toggle_focus(),
             MenuAction::ToggleTypewriter => self.toggle_typewriter(),
+            MenuAction::ToggleSourceMode => self.toggle_source_mode(),
             MenuAction::ZoomIn => self.zoom_step(1),
             MenuAction::ZoomOut => self.zoom_step(-1),
             MenuAction::ZoomReset => self.zoom_reset(),
@@ -769,14 +866,70 @@ impl App {
         } else {
             self.editor.set_caret(off);
             self.window_state.goal_x = None;
-            match self.link_at(off) {
-                Some(url) => (CtxKind::Link, Some(url)),
-                None => (CtxKind::Block, None),
+            match self.table_ctx_at(off) {
+                Some(tc) => (CtxKind::Table(tc), None),
+                None => match self.link_at(off) {
+                    Some(url) => (CtxKind::Link, Some(url)),
+                    None => (CtxKind::Block, None),
+                },
             }
         };
         self.ui_state.ctx.open_at(mx, my, kind, link);
         self.set_ime_area();
         self.request_redraw();
+    }
+
+    /// 偏移所在表格的行列上下文：命中单元格直接取，竖线/分隔行取同一行最近单元格。
+    /// 表头（及分隔行）`body_row` 为 None，只给列操作。
+    fn table_ctx_at(&self, off: usize) -> Option<TableCtx> {
+        let g = self.index.blocks.iter().find(|g| {
+            g.kind == BlockKind::Table && g.range.start <= off && off <= g.range.end
+        })?;
+        let tbl = self.editor.session().table(g.id)?;
+        let ncols = tbl.aligns.len().max(1);
+        if let Some(flat) = active_cell_index(&tbl, off) {
+            if flat < tbl.header.len() {
+                return Some(TableCtx {
+                    body_row: None,
+                    col: flat,
+                    ncols,
+                });
+            }
+            let mut idx = flat - tbl.header.len();
+            for (r, row) in tbl.rows.iter().enumerate() {
+                if idx < row.len() {
+                    return Some(TableCtx {
+                        body_row: Some(r),
+                        col: idx,
+                        ncols,
+                    });
+                }
+                idx -= row.len();
+            }
+            return None;
+        }
+        // 结构字符（竖线/分隔行）：按同一行最近单元格兜底
+        let src = self.editor.session().text_slice(g.range)?;
+        let rel = off.saturating_sub(g.range.start).min(src.len());
+        let last_line = src.trim_end_matches(['\n', '\r']).matches('\n').count();
+        let line_index = src[..rel].matches('\n').count().min(last_line);
+        let body_row = if line_index >= 2 && line_index - 2 < tbl.rows.len() {
+            Some(line_index - 2)
+        } else {
+            None
+        };
+        let mut best = (usize::MAX, 0usize);
+        for c in 0..ncols {
+            let d = table_cell_start(&src, line_index, c).abs_diff(rel);
+            if d < best.0 {
+                best = (d, c);
+            }
+        }
+        Some(TableCtx {
+            body_row,
+            col: best.1,
+            ncols,
+        })
     }
 
     /// 命中偏移处的 inline 链接 URL（含标记区命中；引用式链接无 url 区间不识别）。
@@ -816,8 +969,112 @@ impl App {
                 }
             }
             CtxAction::InsertImage => self.insert_image_via_dialog(),
+            CtxAction::TableInsertRowAbove
+            | CtxAction::TableInsertRowBelow
+            | CtxAction::TableDeleteRow
+            | CtxAction::TableInsertColumnLeft
+            | CtxAction::TableInsertColumnRight
+            | CtxAction::TableDeleteColumn
+            | CtxAction::TableAlignLeft
+            | CtxAction::TableAlignCenter
+            | CtxAction::TableAlignRight => self.apply_table_action(action),
         }
         self.request_redraw();
+    }
+
+    /// 表格结构操作（B2）：按打开菜单时的行列上下文生成新源码，经唯一门面
+    /// `replace_table_block` 整块替换（一次 undo 步），并落到目标单元格内容起点。
+    fn apply_table_action(&mut self, action: CtxAction) {
+        let Some(tc) = self.ui_state.ctx.table else {
+            return;
+        };
+        let caret = self.editor.caret();
+        let Some(block) = self
+            .index
+            .blocks
+            .iter()
+            .find(|g| {
+                g.kind == BlockKind::Table && g.range.start <= caret && caret <= g.range.end
+            })
+            .map(|g| g.range)
+        else {
+            return;
+        };
+        let src = self.editor.session().text_slice(block).unwrap_or_default();
+        // 对齐只改分隔行该列标记：等长替换，光标停留在原偏移（相对块起点不变）。
+        let align = match action {
+            CtxAction::TableAlignLeft => Some(CellAlign::Left),
+            CtxAction::TableAlignCenter => Some(CellAlign::Center),
+            CtxAction::TableAlignRight => Some(CellAlign::Right),
+            _ => None,
+        };
+        if let Some(align) = align {
+            let Some(new_src) = table_set_align(&src, tc.col, align) else {
+                return;
+            };
+            if new_src == src {
+                return;
+            }
+            let caret_in_block = caret.saturating_sub(block.start).min(new_src.len());
+            if let Some(dirty) = self
+                .editor
+                .replace_table_block(block, new_src, caret_in_block)
+            {
+                self.after_edit(dirty);
+            }
+            return;
+        }
+        let row = tc.body_row.unwrap_or(0);
+        let new_src = match action {
+            CtxAction::TableInsertRowAbove => table_insert_row(&src, row, true),
+            CtxAction::TableInsertRowBelow => table_insert_row(&src, row, false),
+            CtxAction::TableDeleteRow => table_delete_row(&src, row),
+            CtxAction::TableInsertColumnLeft => table_insert_column(&src, tc.col),
+            CtxAction::TableInsertColumnRight => table_insert_column(&src, tc.col + 1),
+            CtxAction::TableDeleteColumn => {
+                if tc.ncols <= 1 {
+                    return;
+                }
+                table_delete_column(&src, tc.col)
+            }
+            _ => return,
+        };
+        if new_src == src {
+            return;
+        }
+        let last_line = new_src.trim_end_matches(['\n', '\r']).matches('\n').count();
+        let (line, col) = match action {
+            // 插入行 → 新行同列内容起点
+            CtxAction::TableInsertRowAbove => ((2 + row).min(last_line), tc.col),
+            CtxAction::TableInsertRowBelow => ((3 + row).min(last_line), tc.col),
+            // 删除行 → 同列上一行；无上一行则下一个 body 行；再无可落到表头同列
+            CtxAction::TableDeleteRow => {
+                let line = if row > 0 {
+                    2 + row - 1
+                } else if last_line >= 2 {
+                    2
+                } else {
+                    0
+                };
+                (line.min(last_line), tc.col)
+            }
+            // 列操作 → 当前行（表头命中则表头）的新列内容起点
+            CtxAction::TableInsertColumnLeft => (tc.body_row.map_or(0, |r| 2 + r), tc.col),
+            CtxAction::TableInsertColumnRight => (tc.body_row.map_or(0, |r| 2 + r), tc.col + 1),
+            // 删除列 → 当前行删除后的同序（末列时取新的末列）
+            CtxAction::TableDeleteColumn => (
+                tc.body_row.map_or(0, |r| 2 + r),
+                tc.col.min(tc.ncols - 2),
+            ),
+            _ => return,
+        };
+        let caret_in_block = table_cell_start(&new_src, line, col);
+        if let Some(dirty) = self
+            .editor
+            .replace_table_block(block, new_src, caret_in_block)
+        {
+            self.after_edit(dirty);
+        }
     }
 
     /// 左键按下路由（右键菜单 > 菜单 > 菜单栏 > 滚动条 > 状态栏 > 正文光标）。
@@ -1104,6 +1361,20 @@ impl App {
             self.ui_state.outline.entries.clear();
         }
         self.ensure_layouts_visible();
+        self.ensure_tables_visible();
+        self.recompute_geometry();
+        self.set_ime_area();
+        self.request_redraw();
+    }
+
+    /// 切换源码模式（Ctrl+/）：全文按 Markdown 源码排版。
+    /// source_mode 进入 base_key → 布局/光栅/表格缓存按因果键整体失配，无需手工清缓存；
+    /// 光标与滚动位置不受影响（不动 editor，也不写 scroll_y）。
+    pub(crate) fn toggle_source_mode(&mut self) {
+        self.input_state.source_mode = !self.input_state.source_mode;
+        self.refresh_index();
+        self.ensure_layouts_visible();
+        self.ensure_math_visible();
         self.ensure_tables_visible();
         self.recompute_geometry();
         self.set_ime_area();
@@ -1598,6 +1869,14 @@ fn image_link_target(doc: &Path, img: &Path) -> String {
 /// Ctrl 组合一律交给 `key_without_modifiers()`（还原字母）；AltGr（Ctrl+Alt）
 /// 仍需走文本，否则欧洲布局字符无法上屏。
 pub(crate) fn map_key(event: &winit::event::KeyEvent, mods: Mods) -> Option<Key> {
+    // Ctrl+/：部分布局/IME 下逻辑键给 `/` 字符，另一些给物理 Slash 键；两者都认。
+    // 仅在 Ctrl 组合时映射，普通 `/` 仍走文本分支，不被吞。
+    let ctrl = mods.ctrl && !mods.alt;
+    let slash = matches!(&event.logical_key, WKey::Character(c) if c.as_str() == "/")
+        || event.physical_key == PhysicalKey::Code(KeyCode::Slash);
+    if ctrl && slash {
+        return Some(Key::Slash);
+    }
     map_key_parts(event.text.as_deref(), event.key_without_modifiers(), mods)
 }
 
@@ -1691,7 +1970,7 @@ impl App {
         if g.kind == BlockKind::Table && self.table_shows_grid(g.id, &g.range) {
             return self
                 .cache
-                .table(g.id, self.base_key())
+                .table(g.id, self.table_key(g.id))
                 .map_or(g.est_h, |t| t.height);
         }
         self.cache

@@ -158,7 +158,7 @@ impl Chrome {
         );
         frame.fill_rect(0, status_y as i32, frame.width, 1, theme.chrome_border);
         let mid = status_y + status_h / 2.0;
-        let (left, right) = status_line(path, dirty, external, words, line, col);
+        let (left, right) = status_line(path, dirty, external, flags.source, words, line, col);
         // S1：右侧字数行列优先完整固定，左文超宽时中段省略（head…tail），杜绝左右重叠。
         let right_edge = win_w - SCROLL_W * scale - 12.0 * scale;
         let left_x = 12.0 * scale;

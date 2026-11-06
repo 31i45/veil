@@ -6,7 +6,7 @@ use crate::chrome;
 use crate::geometry::{BASE_LINE_HEIGHT, MARGIN};
 use crate::view::{
     ctx_menu, node_active, outline, oversize_notice, quick_open, search, BlockLayout, Frame,
-    InlineAsset, InlineImg, LayoutKey, Memo,
+    InlineAsset, InlineImg, LayoutKey, Memo, TableKey,
 };
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -38,6 +38,7 @@ impl App {
         let width = self.content_width();
         let caret = self.effective_caret();
         let base = self.base_key();
+        let reveal_all = self.source_mode();
         self.engine.set_scale(self.input_state.scale);
         let Some(blocks) = self.index.blocks.get(indices) else {
             return;
@@ -164,9 +165,16 @@ impl App {
                     baseline: dh, // 底边贴基线
                 });
             }
-            let l =
-                self.engine
-                    .layout_block(kind.clone(), &text, range, &inlines, width, caret, &imgs);
+            let l = self.engine.layout_block(
+                kind.clone(),
+                &text,
+                range,
+                &inlines,
+                width,
+                caret,
+                &imgs,
+                reveal_all,
+            );
             let reveal = l.reveal_state(&kind, range, caret);
             self.cache.layouts.insert(
                 id,
@@ -213,7 +221,11 @@ impl App {
     }
 
     /// 光标在块内为源码态不渲染；失败记入 math_failed 不再每帧重试（降级源码显示）。
+    /// 源码模式整块显示原文，不需要公式图，也不产图缓存。
     pub(crate) fn ensure_math_range(&mut self, indices: std::ops::Range<usize>) {
+        if self.source_mode() {
+            return;
+        }
         let caret = self.effective_caret();
         let scale = self.input_state.scale;
         let fg = self.input_state.theme.fg;
@@ -270,6 +282,9 @@ impl App {
 
     /// 数学块当前是否按渲染图显示：光标在块内（Reveal 同语义）或未渲染时显示源码。
     pub(crate) fn math_shows_image(&self, id: BlockId, range: &veil_core::Range) -> bool {
+        if self.source_mode() {
+            return false; // 源码模式：全文显原文，不渲染公式图
+        }
         let caret = self.effective_caret();
         !(range.start <= caret && caret <= range.end)
             && self.cache.math(id, self.math_key(id)).is_some()
@@ -366,7 +381,7 @@ impl App {
     pub(crate) fn table_caret_xy(&self, id: BlockId, doc_top: f32, caret: usize) -> Option<(f32, f32, f32)> {
         let tbl = self.editor.session().table(id)?;
         let idx = active_cell_index(&tbl, caret)?;
-        let cell = self.cache.table(id, self.base_key())?.cells.get(idx)?;
+        let cell = self.cache.table(id, self.table_key(id))?.cells.get(idx)?;
         let scale = self.input_state.scale;
         let vp = self.viewport();
         Some((
@@ -381,37 +396,75 @@ impl App {
     /// 仅 caret 在表内但不落在任何单元格时跳过（源码态）。
     /// 网格缓存与文本布局缓存独立：网格仅供渲染/命中，源码态仍走既有块排版。
     pub(crate) fn ensure_tables_range(&mut self, indices: std::ops::Range<usize>) {
+        if self.source_mode() {
+            return; // 源码模式：表格显源码，不建网格缓存
+        }
         let width = self.content_width();
         let caret = self.effective_caret();
         let fg = self.input_state.theme.fg;
-        let base = self.base_key();
         let Some(blocks) = self.index.blocks.get(indices) else {
             return;
         };
         let mut pending = Vec::new();
         for g in blocks {
             let (id, kind, range) = (g.id, g.kind.clone(), g.range);
-            if kind != BlockKind::Table || self.cache.table(id, base).is_some() {
+            if kind != BlockKind::Table {
+                continue;
+            }
+            let key = self.table_key_at(id, caret);
+            if self.cache.table(id, key).is_some() {
                 continue;
             }
             let inside_block = range.start <= caret && caret <= range.end;
-            if inside_block && !self.caret_in_table_cell(id) {
+            if inside_block && key.active == u32::MAX {
                 // caret 落在管道符/分隔行等结构字符上 → 源码态，不排版网格
                 continue;
             }
             if let Some(t) = self.editor.session().table(id) {
-                pending.push((id, t));
+                // 活动格显示源码（含标记）；离开即恢复富文本。
+                let active = (key.active != u32::MAX)
+                    .then(|| {
+                        let idx = key.active as usize;
+                        flat_cell_range(&t, idx)
+                            .and_then(|r| self.editor.session().text_slice(r))
+                            .map(|src| (idx, src))
+                    })
+                    .flatten();
+                pending.push((id, key, t, active));
             }
         }
-        for (id, t) in pending {
-            let l = self.engine.layout_table(&t, width, fg);
+        for (id, key, t, active) in pending {
+            let l = self.engine.layout_table(
+                &t,
+                width,
+                fg,
+                active.as_ref().map(|(idx, src)| (*idx, src.as_str())),
+            );
             self.cache.tables.insert(
                 id,
                 Memo {
-                    key: base,
+                    key,
                     value: l,
                 },
             );
+        }
+    }
+
+    /// 表格网格缓存键：基础键 + 活动单元格（flat 索引；None = 全部富文本）。
+    pub(crate) fn table_key(&self, id: BlockId) -> TableKey {
+        self.table_key_at(id, self.effective_caret())
+    }
+
+    fn table_key_at(&self, id: BlockId, caret: usize) -> TableKey {
+        let active = self
+            .editor
+            .session()
+            .table(id)
+            .and_then(|t| active_cell_index(&t, caret))
+            .map_or(u32::MAX, |i| i as u32);
+        TableKey {
+            base: self.base_key(),
+            active,
         }
     }
 
@@ -432,12 +485,15 @@ impl App {
     /// - caret 在单元格内容区间内 → 显示网格（活动单元格高亮，源码编辑同路径）
     /// - caret 在表内但落在结构字符上（管道/分隔行）→ 源码态
     pub(crate) fn table_shows_grid(&self, id: BlockId, range: &veil_core::Range) -> bool {
+        if self.source_mode() {
+            return false; // 源码模式：表格显管道与分隔行原文
+        }
         let caret = self.effective_caret();
         let inside_block = range.start <= caret && caret <= range.end;
         if inside_block && !self.caret_in_table_cell(id) {
             return false;
         }
-        self.cache.table(id, self.base_key()).is_some()
+        self.cache.table(id, self.table_key(id)).is_some()
     }
 
     /// 渲染纯化（ADR-009 决策五）：产出完整帧缓冲，只读真值、只填派生缓存。
@@ -699,6 +755,7 @@ impl App {
                 fullscreen: self.window_state.fullscreen,
                 focus: self.ui_state.writing.focus,
                 typewriter: self.ui_state.writing.typewriter,
+                source: self.source_mode(),
             };
             self.ui_state.chrome.paint(
                 &mut frame,
@@ -754,8 +811,10 @@ impl App {
 
     /// 帧合成完整路径：render → present。产品层事件循环 Redraw 分支唯一调用。
     pub(crate) fn paint(&mut self) {
+        let started = std::time::Instant::now();
         let _ = self.render();
         self.present();
+        crate::perf::frame(started.elapsed());
     }
 
     /// 大纲面板（P3-2）：底色 → 条目（含悬停底色）→ 标题区（后画，覆盖上溢行）。
@@ -1450,29 +1509,22 @@ impl App {
     }
 
     /// 绘制表格网格：活动单元格底色 → 表头底色 → 单元格文本 → 网格线（先底后字，线压边）。
-    /// 活动单元格由 `caret_in_table_cell` 判定，光标绘制复用既有 `paint_caret_and_preedit` 路径。
+    /// 活动单元格由排版键记录的 `active` 判定，光标绘制复用既有 `paint_caret_and_preedit` 路径。
     /// 选区跨网格态表格时不画高亮（同数学块 v0 已知简化）。
     pub(crate) fn paint_table(&self, frame: &mut Frame, id: BlockId, top: i32) {
-        let Some(t) = self.cache.table(id, self.base_key()) else {
+        let Some(t) = self.cache.table(id, self.table_key(id)) else {
             return;
         };
         let x0 = (MARGIN * self.input_state.scale) as i32;
         let theme = self.input_state.theme;
-        let caret = self.editor.caret();
 
-        // 活动单元格：caret 落在 cell.range 内 → 画选中色底色
-        if self.caret_in_table_cell(id) {
-            if let Some(src) = self.editor.session().table(id) {
-                if let Some(active_idx) = active_cell_index(&src, caret) {
-                    if let Some(cell_layout) = t.cells.get(active_idx) {
-                        let cx = x0 + cell_layout.x.round() as i32;
-                        let cy = top + cell_layout.y.round() as i32;
-                        let cw = cell_layout.w.round().max(1.0) as u32;
-                        let ch = cell_layout.h.round().max(1.0) as u32;
-                        frame.fill_rect(cx, cy, cw, ch, theme.sel);
-                    }
-                }
-            }
+        // 活动单元格：排版键已记录 caret 命中的格（源码态显示），画选中色底色
+        if let Some(cell_layout) = t.active.and_then(|idx| t.cells.get(idx)) {
+            let cx = x0 + cell_layout.x.round() as i32;
+            let cy = top + cell_layout.y.round() as i32;
+            let cw = cell_layout.w.round().max(1.0) as u32;
+            let ch = cell_layout.h.round().max(1.0) as u32;
+            frame.fill_rect(cx, cy, cw, ch, theme.sel);
         }
 
         if let Some(first) = t.rows.first() {
@@ -1578,17 +1630,11 @@ impl App {
         }
         // 新行在块尾；光标落到新行首个单元格内容处（`|` 后跳过前导空白）。
         // 空单元格（`|  |`）若只按 `+2` 定位会落在管道符上，活动单元格判定失败、Tab 跳格错位。
-        let body = new_src.trim_end_matches(['\n', '\r']);
-        let row_start = body.rfind('\n').map(|i| i + 1).unwrap_or(0);
-        let after_pipe = body[row_start..]
-            .find('|')
-            .map(|i| row_start + i + 1)
-            .unwrap_or(row_start);
-        let leading = body[after_pipe..].len() - body[after_pipe..].trim_start_matches(' ').len();
-        let caret_in_block = after_pipe + leading;
+        let last_line = new_src.trim_end_matches(['\n', '\r']).matches('\n').count();
+        let caret_in_block = table_cell_start(&new_src, last_line, 0);
         let Some(dirty_blocks) = self
             .editor
-            .append_table_row(block_range, new_src, caret_in_block)
+            .replace_table_block(block_range, new_src, caret_in_block)
         else {
             return false;
         };
@@ -1599,7 +1645,7 @@ impl App {
 }
 
 /// 单元格 range 是否包含 caret（含 start/end，与 block range 判定同口径）。
-fn cell_contains(r: &Range, caret: usize) -> bool {
+pub(crate) fn cell_contains(r: &Range, caret: usize) -> bool {
     r.start <= caret && caret <= r.end
 }
 
@@ -1620,7 +1666,22 @@ fn flat_cell_start(tbl: &veil_core::Table, idx: usize) -> usize {
 }
 
 /// caret 所在单元格的 flat 索引（header 先，rows 后）；不在任何单元格时 None。
-fn active_cell_index(tbl: &veil_core::Table, caret: usize) -> Option<usize> {
+fn flat_cell_range(tbl: &veil_core::Table, idx: usize) -> Option<Range> {
+    if let Some(c) = tbl.header.get(idx) {
+        return Some(c.range);
+    }
+    let mut remaining = idx.checked_sub(tbl.header.len())?;
+    for row in &tbl.rows {
+        if remaining < row.len() {
+            return Some(row[remaining].range);
+        }
+        remaining -= row.len();
+    }
+    None
+}
+
+/// caret 所在单元格的 flat 索引（header 先，rows 后）；不在任何单元格时 None。
+pub(crate) fn active_cell_index(tbl: &veil_core::Table, caret: usize) -> Option<usize> {
     let mut idx = 0usize;
     for c in tbl.header.iter() {
         if cell_contains(&c.range, caret) {
@@ -1693,7 +1754,6 @@ fn parse_aligns(sep_line: &str) -> Vec<veil_core::CellAlign> {
     out
 }
 
-#[allow(dead_code)]
 pub(crate) fn table_append_row(src: &str) -> String {
     let lines: Vec<&str> = src.trim_end().split('\n').collect();
     if lines.len() < 3 {
@@ -1707,9 +1767,62 @@ pub(crate) fn table_append_row(src: &str) -> String {
     format!("{}\n", new_lines.join("\n"))
 }
 
+/// 在 body 行前/后插入一个空行（body_index 0-based；越界按尾部处理）。
+/// 列数取自表头，分隔行原样保留，故列数与对齐方式不变。
+pub(crate) fn table_insert_row(src: &str, body_index: usize, above: bool) -> String {
+    let lines: Vec<&str> = src.trim_end().split('\n').collect();
+    if lines.len() < 2 {
+        return src.to_string();
+    }
+    let ncols = split_row(lines[0]).len().max(1);
+    let empty = join_row(&vec![String::new(); ncols]);
+    let body_count = lines.len().saturating_sub(2);
+    let at = if body_index >= body_count {
+        lines.len()
+    } else if above {
+        2 + body_index
+    } else {
+        3 + body_index
+    };
+    let mut new_lines: Vec<&str> = Vec::with_capacity(lines.len() + 1);
+    new_lines.extend_from_slice(&lines[..at]);
+    new_lines.push(&empty);
+    new_lines.extend_from_slice(&lines[at..]);
+    format!("{}\n", new_lines.join("\n"))
+}
+
+/// 生成源码中第 line_index 行（0=header、1=分隔行、2+=body）第 col 列单元格
+/// 内容起点（`|` 后跳过前导空白）；行/列越界返回 0。
+pub(crate) fn table_cell_start(src: &str, line_index: usize, col: usize) -> usize {
+    let lines: Vec<&str> = src.split('\n').collect();
+    let Some(line) = lines.get(line_index) else {
+        return 0;
+    };
+    let line_off: usize = lines[..line_index].iter().map(|l| l.len() + 1).sum();
+    let mut i = line.len() - line.trim_start().len();
+    if line[i..].starts_with('|') {
+        i += 1;
+    }
+    let mut cur = 0usize;
+    loop {
+        while i < line.len() && line.as_bytes()[i] == b' ' {
+            i += 1;
+        }
+        if cur == col {
+            return line_off + i;
+        }
+        match line[i..].find('|') {
+            Some(k) => {
+                i += k + 1;
+                cur += 1;
+            }
+            None => return 0,
+        }
+    }
+}
+
 /// 删除指定 body 行（body_index 0-based；0 = 第一行 body，不是 header）。
 /// 保留表格至少 1 行 body（只有 header + 分隔行时退化为仅 header 行）。
-#[allow(dead_code)]
 pub(crate) fn table_delete_row(src: &str, body_index: usize) -> String {
     let lines: Vec<&str> = src.trim_end().split('\n').collect();
     if lines.len() < 3 {
@@ -1719,7 +1832,7 @@ pub(crate) fn table_delete_row(src: &str, body_index: usize) -> String {
     if body_index + 2 >= lines.len() {
         return src.to_string();
     }
-    if lines.len() - 1 <= 3 {
+    if lines.len() <= 3 {
         // 只剩 header + 分隔行 + 1 body → 删除 body，留 header + 分隔行
         let keep: Vec<&str> = lines[..2].to_vec();
         return format!("{}\n", keep.join("\n"));
@@ -1730,7 +1843,6 @@ pub(crate) fn table_delete_row(src: &str, body_index: usize) -> String {
 }
 
 /// 在指定列 index 前插入空列（col_index 0-based；包含 header 和 separator）。
-#[allow(dead_code)]
 pub(crate) fn table_insert_column(src: &str, col_index: usize) -> String {
     let lines: Vec<&str> = src.trim_end().split('\n').collect();
     if lines.len() < 3 {
@@ -1760,7 +1872,6 @@ pub(crate) fn table_insert_column(src: &str, col_index: usize) -> String {
 
 /// 删除指定列（col_index 0-based）。
 /// 保留至少 1 列（只有 header 时删除后仍有 1 列）。
-#[allow(dead_code)]
 pub(crate) fn table_delete_column(src: &str, col_index: usize) -> String {
     let lines: Vec<&str> = src.trim_end().split('\n').collect();
     if lines.len() < 3 {
@@ -1783,6 +1894,82 @@ pub(crate) fn table_delete_column(src: &str, col_index: usize) -> String {
         new_lines.push(join_row(&new_cells));
     }
     format!("{}\n", new_lines.join("\n"))
+}
+
+/// 分隔行单元格（含两侧空白）的字节区间：剥除行首尾空白与可选外层竖线后按 `|` 切分。
+fn sep_cell_spans(line: &str) -> Vec<(usize, usize)> {
+    let b = line.as_bytes();
+    let (mut s, mut e) = (0, b.len());
+    while s < e && b[s].is_ascii_whitespace() {
+        s += 1;
+    }
+    while e > s && b[e - 1].is_ascii_whitespace() {
+        e -= 1;
+    }
+    if s < e && b[s] == b'|' {
+        s += 1;
+    }
+    if e > s && b[e - 1] == b'|' {
+        e -= 1;
+    }
+    let mut out = Vec::new();
+    let mut seg = s;
+    let mut i = s;
+    while i < e {
+        if b[i] == b'|' {
+            out.push((seg, i));
+            i += 1;
+            seg = i;
+        } else {
+            i += 1;
+        }
+    }
+    out.push((seg, e));
+    out
+}
+
+/// 改写分隔行第 `col` 列的对齐标记（左/中/右/无），其余字节逐字保留，返回新源码。
+/// 标记宽度沿用该列原有分隔符宽度（不足 3 补到 3），避免列宽跳动；
+/// `col` 越界或第 2 行不是合法分隔格时返回 None。已是目标对齐时输出与输入相等。
+pub(crate) fn table_set_align(
+    src: &str,
+    col: usize,
+    align: veil_core::CellAlign,
+) -> Option<String> {
+    // 第 2 行（分隔行）的字节区间；`\r` 归入行尾不参与改写。
+    let mut line_start = 0usize;
+    let mut sep = None;
+    for (i, line) in src.split_inclusive('\n').enumerate() {
+        if i == 1 {
+            sep = Some((
+                line_start,
+                line_start + line.trim_end_matches(['\n', '\r']).len(),
+            ));
+            break;
+        }
+        line_start += line.len();
+    }
+    let (ls, le) = sep?;
+    let line = &src[ls..le];
+    let (cs, ce) = *sep_cell_spans(line).get(col)?;
+    let content = &line[cs..ce];
+    let trimmed = content.trim();
+    if trimmed.is_empty() || !trimmed.bytes().all(|b| b == b'-' || b == b':') {
+        return None;
+    }
+    let start = cs + (content.len() - content.trim_start().len());
+    let width = trimmed.len().max(3);
+    let marker = match align {
+        veil_core::CellAlign::None => "-".repeat(width),
+        veil_core::CellAlign::Left => format!(":{}", "-".repeat(width - 1)),
+        veil_core::CellAlign::Center => format!(":{}:", "-".repeat(width - 2)),
+        veil_core::CellAlign::Right => format!("{}:", "-".repeat(width - 1)),
+    };
+    let mut out = String::with_capacity(src.len() + 2);
+    out.push_str(&src[..ls + start]);
+    out.push_str(&marker);
+    out.push_str(&src[ls + start + trimmed.len()..]);
+    Some(out)
 }
 
 /// 图片 URL → 本地路径（切片 13）。相对 URL 相对文档所在目录；草稿（无路径）的
@@ -1815,3 +2002,179 @@ pub(crate) fn fit_size(w: u32, h: u32, max_width: f32) -> (u32, u32) {
         (h * s).round().max(1.0) as u32,
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const TABLE: &str = "| a | b |\n| --- | --- |\n| c | d |\n";
+    const TABLE_2X2_ALIGNED: &str = "| a | b |\n| :-- | --: |\n| c | d |\n| e | f |\n";
+
+    #[test]
+    fn append_row_adds_empty_row_with_same_columns() {
+        assert_eq!(table_append_row(TABLE), format!("{TABLE}|  |  |\n"));
+        // 不足 header + 分隔行时不改动
+        assert_eq!(table_append_row("| a |\n"), "| a |\n");
+    }
+
+    #[test]
+    fn insert_row_above_and_below_keep_alignment() {
+        assert_eq!(
+            table_insert_row(TABLE_2X2_ALIGNED, 1, true),
+            "| a | b |\n| :-- | --: |\n| c | d |\n|  |  |\n| e | f |\n"
+        );
+        assert_eq!(
+            table_insert_row(TABLE_2X2_ALIGNED, 1, false),
+            "| a | b |\n| :-- | --: |\n| c | d |\n| e | f |\n|  |  |\n"
+        );
+        // 分隔行与列数不变
+        assert_eq!(
+            table_insert_row(TABLE_2X2_ALIGNED, 0, true)
+                .lines()
+                .nth(1),
+            Some("| :-- | --: |")
+        );
+    }
+
+    #[test]
+    fn insert_row_out_of_range_appends_to_tail() {
+        assert_eq!(
+            table_insert_row(TABLE_2X2_ALIGNED, 99, true),
+            format!("{TABLE_2X2_ALIGNED}|  |  |\n")
+        );
+        assert_eq!(
+            table_insert_row(TABLE_2X2_ALIGNED, 99, false),
+            format!("{TABLE_2X2_ALIGNED}|  |  |\n")
+        );
+    }
+
+    #[test]
+    fn delete_row_and_last_body_row() {
+        assert_eq!(
+            table_delete_row(TABLE_2X2_ALIGNED, 0),
+            "| a | b |\n| :-- | --: |\n| e | f |\n"
+        );
+        // 仅剩 1 行 body → 删成只有 header + 分隔行
+        assert_eq!(table_delete_row(TABLE, 0), "| a | b |\n| --- | --- |\n");
+        // 越界不改动
+        assert_eq!(table_delete_row(TABLE, 9), TABLE);
+    }
+
+    #[test]
+    fn insert_column_keeps_aligns_and_column_count() {
+        let out = table_insert_column(TABLE_2X2_ALIGNED, 1);
+        assert_eq!(
+            out,
+            "| a |  | b |\n| :-- | --- | --: |\n| c |  | d |\n| e |  | f |\n"
+        );
+        assert_eq!(
+            parse_aligns(out.lines().nth(1).unwrap()),
+            vec![
+                veil_core::CellAlign::Left,
+                veil_core::CellAlign::None,
+                veil_core::CellAlign::Right
+            ],
+            "插入列不得改动既有列对齐"
+        );
+        // 追加到末尾
+        assert_eq!(
+            table_insert_column(TABLE, 9),
+            "| a | b |  |\n| --- | --- | --- |\n| c | d |  |\n"
+        );
+    }
+
+    #[test]
+    fn delete_column_and_single_column_boundary() {
+        assert_eq!(
+            table_delete_column(TABLE_2X2_ALIGNED, 0),
+            "| b |\n| --: |\n| d |\n| f |\n"
+        );
+        assert_eq!(
+            table_delete_column(TABLE_2X2_ALIGNED, 1),
+            "| a |\n| :-- |\n| c |\n| e |\n"
+        );
+        // 单列不删除
+        assert_eq!(table_delete_column("| a |\n| --- |\n| b |\n", 0), "| a |\n| --- |\n| b |\n");
+    }
+
+    #[test]
+    fn set_align_round_trips_and_leaves_other_bytes_untouched() {
+        let src = "| a | b |\n| --- | --- |\n| c | d |\n";
+        let left = table_set_align(src, 1, veil_core::CellAlign::Left).unwrap();
+        assert_eq!(left, "| a | b |\n| --- | :-- |\n| c | d |\n");
+        let center = table_set_align(&left, 1, veil_core::CellAlign::Center).unwrap();
+        assert_eq!(center, "| a | b |\n| --- | :-: |\n| c | d |\n");
+        let right = table_set_align(&center, 1, veil_core::CellAlign::Right).unwrap();
+        assert_eq!(right, "| a | b |\n| --- | --: |\n| c | d |\n");
+        assert_eq!(
+            table_set_align(&right, 1, veil_core::CellAlign::None).unwrap(),
+            src,
+            "回到无对齐时与原文逐字节一致"
+        );
+        // 幂等：同值再设一次输出相等
+        assert_eq!(table_set_align(&right, 1, veil_core::CellAlign::Right), Some(right));
+    }
+
+    #[test]
+    fn set_align_keeps_crlf_and_wide_cell_padding() {
+        let src = "| a | b |\r\n| :---: | ---- |\r\n| c | d |\r\n";
+        let out = table_set_align(src, 1, veil_core::CellAlign::Center).unwrap();
+        assert_eq!(out, "| a | b |\r\n| :---: | :--: |\r\n| c | d |\r\n");
+        // 未选中列的 `:---:` 与该列宽度原样保留（总字节长度不变）
+        assert_eq!(out.len(), src.len());
+        assert_eq!(
+            table_set_align(&out, 1, veil_core::CellAlign::None).unwrap(),
+            src
+        );
+        // 窄于 3 的分隔格补齐到 3
+        assert_eq!(
+            table_set_align("| a |\n| - |\n| b |\n", 0, veil_core::CellAlign::Center).unwrap(),
+            "| a |\n| :-: |\n| b |\n"
+        );
+        // 无外层竖线的单列表格
+        assert_eq!(
+            table_set_align("a\n---\nb\n", 0, veil_core::CellAlign::Right).unwrap(),
+            "a\n--:\nb\n"
+        );
+    }
+
+    #[test]
+    fn set_align_out_of_range_and_non_delimiter_rows() {
+        // 单列表格
+        assert_eq!(
+            table_set_align("| a |\n| --- |\n| b |\n", 0, veil_core::CellAlign::Left).unwrap(),
+            "| a |\n| :-- |\n| b |\n"
+        );
+        // col 越界 / 无分隔行 / 第 2 行不是分隔格
+        assert_eq!(table_set_align(TABLE, 2, veil_core::CellAlign::Left), None);
+        assert_eq!(table_set_align("| a |\n", 0, veil_core::CellAlign::Left), None);
+        assert_eq!(
+            table_set_align("| a |\n| x |\n| b |\n", 0, veil_core::CellAlign::Left),
+            None
+        );
+    }
+
+    #[test]
+    fn cell_start_skips_pipe_and_spaces() {
+        assert_eq!(table_cell_start(TABLE, 0, 0), 2);
+        assert_eq!(table_cell_start(TABLE, 0, 1), 6);
+        assert_eq!(table_cell_start(TABLE, 1, 0), 12);
+        assert_eq!(table_cell_start(TABLE, 2, 0), 26);
+        assert_eq!(table_cell_start(TABLE, 2, 1), 30);
+        // 无首管道符的行
+        assert_eq!(table_cell_start("a | b\n--- | ---\n", 0, 0), 0);
+        assert_eq!(table_cell_start("a | b\n--- | ---\n", 0, 1), 4);
+        // 越界
+        assert_eq!(table_cell_start(TABLE, 9, 0), 0);
+        assert_eq!(table_cell_start(TABLE, 0, 9), 0);
+    }
+
+    #[test]
+    fn cell_start_of_inserted_empty_row_matches_caret_convention() {
+        let src = format!("{TABLE}|  |  |\n");
+        // 空单元格内容起点 = 闭合管道符位置（与原 Ctrl+Enter 落点一致）
+        assert_eq!(table_cell_start(&src, 3, 0), 37);
+        assert_eq!(table_cell_start(&src, 3, 1), 40);
+    }
+}
+

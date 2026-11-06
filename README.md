@@ -47,15 +47,18 @@ Three crates, one-way dependency (`veil` → `veil-ui` → `veil-core`, no rever
 
 1. Text editing: insert / delete / undo / redo (transactional)
 2. Incremental parsing and semantic tree (dirty-block local resync)
-3. Cursor & selection: grapheme-boundary navigation; markers like `**bold**` auto-expand / collapse on caret enter/leave, caret visual position never jumps
+3. Cursor & selection: grapheme-boundary navigation; markers like `**bold**` auto-expand / collapse on caret enter/leave, caret visual position never jumps; links use the theme link colour (light `#2B6CB0` / dark `#7FB4F5`), distinct from body text
 4. File open / save: auto-save, external-modification notice + pre-overwrite backup
 5. Clipboard: plain text, HTML→Markdown conversion, screenshot paste writes to `<doc>.assets/` (incremental names, no overwrite)
-6. Block-level rendering: tables (grid mode + active-cell inline edit), math (pure Rust via latex-rust), inline images (relative-path PNG, broken link / remote URL degrades to alt text)
+6. Block-level rendering: tables (grid mode + active-cell inline edit; the active cell shows Markdown source, other cells render bold / italic / strikethrough / inline code / links with markers hidden), math (pure Rust via latex-rust), inline images (relative-path PNG, broken link / remote URL degrades to alt text)
 7. HTML export
 8. Config & themes: top-level `mode` single source (`system` / `light` / `dark`, backward-compat with old `[theme] mode`), follows system appearance, deep-titlebar / Mica, switch persistent
-9. In-house chrome: menu bar, status bar, scroll bar; system file dialogs (Open / Save As)
-10. Writing loop: CJK-calibrated word count, Focus Mode & Typewriter Mode (two mutually-exclusive view toggles, not persisted, reset on launch), Ctrl+P Quick Open (recent + current-dir candidates), image paste / drag-drop insertion
-11. Table keyboard editing: Tab / Shift+Tab navigate cells (last cell wraps back to first); Ctrl+Enter appends empty row at table tail
+9. In-house chrome: menu bar (↑/↓ move, Enter run, Esc close — main and context menus alike), status bar, scroll bar; system file dialogs (Open / Save As)
+10. Writing loop: CJK-calibrated word count, Focus Mode & Typewriter Mode (two mutually-exclusive view toggles, not persisted, reset on launch), Ctrl+Shift+P Quick Open (recent + current-dir candidates), image paste / drag-drop insertion
+11. Table editing: Tab / Shift+Tab navigate cells (last cell wraps back to first); Ctrl+Enter appends empty row at table tail; the right-click menu inserts/deletes rows and columns and sets column alignment (left / center / right, separator row only); each structural change is one undo step
+12. Fenced code blocks: syntax highlighting for 16 languages (keywords / strings / comments / numbers / types), implemented as a pure-Rust line-state machine — no `syntect`
+13. Source mode: Ctrl+/ shows the full Markdown source (tables and math blocks included); toggling keeps caret and scroll position; print and export always use the rendered view
+14. PDF export: Ctrl+Shift+E or File → Export PDF… writes `<stem>.pdf` beside the document (name collisions become ` (2)`, ` (3)`); optional TOC page, page numbers and margin (default 20 mm) via `config.toml`; relies on the system "Microsoft Print to PDF". Unsaved drafts or a missing PDF printer fall back to the system print dialog with a notice. Known limits: no PDF bookmarks, no font subsetting
 
 ## What It Won't Do (v1.0 explicitly out of scope)
 
@@ -63,9 +66,9 @@ Three crates, one-way dependency (`veil` → `veil-ui` → `veil-core`, no rever
 - Collaborative editing / CRDT (**permanent exclusion — Veil is single-user single-document**)
 - Plugin system
 - Mobile
-- Table visual editing (merge/split cells, column-width drag, alignment UI toggles); content editing + row/column keyboard ops supported
+- Table visual editing beyond the delivered subset (merge/split cells, column-width drag); content editing, row/column insert/delete and column alignment are supported
 - Mermaid inline rendering
-- Source-code edit mode (v1 deferred; reveal replaces it — markers expand on caret enter, collapse on leave — v2 re-evaluates file-toggle shape)
+- A separate rich-text document model: the text stays Markdown, and Ctrl+/ is a view toggle over the same document
 - Any networking: no sync, no update check, no telemetry
 
 ## Build / Run / Test
@@ -90,7 +93,7 @@ Measured on release build, probe-serialized, 2026-11-05 keystroke attribution de
 | Cold start (wall clock, process create → first frame; observation only) | ≤ 300 ms | 450–529 ms (440–470 ms before `main`, process-create overhead on this machine) |
 | Keystroke→commit p95 on 100 K-word doc | ≤ 16 ms | 3.37 ms / 5.20 ms / 9.25 ms (5.0k / 10.5k / 20.0k blocks) ✅ |
 | Resident memory, 100 K-word doc (private working set) | ≤ 150 MB | 40.76 MB |
-| Installed size (single `veil.exe`) | ≤ 15 MiB | 5,856,256 B ≈ 5.59 MiB |
+| Installed size (single `veil.exe`) | ≤ 15 MiB | 5,914,112 B ≈ 5.64 MiB |
 | `veil-core` unit + property tests | ≥ 80 | 209 |
 | E2E assertions | ≥ 20 | 41 (3 e2e scenarios: open→save→reopen, table+image paste, find/replace→crash recovery→self-clean) ✅ |
 | Markdown roundtrip (no edits: output == input bytes) | 100% | 100% |
@@ -125,6 +128,7 @@ Dependency blacklist: `tokio`, `wasmtime`, any webview crate (`webview2-com`/`wr
   - ADR-008 dependency upgrade strategy
   - ADR-011 wgpu deferral (v1 defers, trigger-based)
 - `.trae/specs/release-and-roadmap/v1.1-roadmap.md` — v1.1 detailed plan
+- `.trae/specs/release-and-roadmap/v1.2-roadmap.md` — v1.2 candidate pool (table visual editing, PDF bookmarks, font subsetting, typography settings)
 - `.trae/specs/release-and-roadmap/v2.0-roadmap.md` — v2.0 detailed plan (wgpu deferred — four trigger conditions must all trip)
 
 ## License

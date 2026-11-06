@@ -118,6 +118,7 @@ fn measure_cold_start(text: &str) -> (f64, f64) {
                 1200.0,
                 usize::MAX,
                 &[],
+                false,
             );
             black_box(l.height);
         }
@@ -205,6 +206,7 @@ fn measure_dirty_layout(text: &str, caret0: usize) -> (f64, f64) {
                     1200.0,
                     usize::MAX,
                     &[],
+                    false,
                 );
                 black_box(l.height);
             }

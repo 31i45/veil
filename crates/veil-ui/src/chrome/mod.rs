@@ -57,6 +57,8 @@ pub enum MenuAction {
     Save,
     SaveAs,
     Export,
+    /// 直接导出 PDF（Ctrl+Shift+E）：无打印对话框，写同目录 `<stem>.pdf`。
+    ExportPdf,
     /// 打印 / 导出 PDF（3b）：系统打印对话框，PDF 走「Microsoft Print to PDF」。
     Print,
     Undo,
@@ -85,6 +87,8 @@ pub enum MenuAction {
     ToggleFocus,
     /// 切换打字机模式（阶段 1）。
     ToggleTypewriter,
+    /// 切换源码模式（Ctrl+/）：全文按 Markdown 源码排版。
+    ToggleSourceMode,
     /// 视图缩放（3c-2）：放大/缩小一档、还原 100%。
     ZoomIn,
     ZoomOut,
@@ -112,7 +116,8 @@ pub const MENUS: [MenuDef; 3] = [
             ("保存", "Ctrl+S", MenuAction::Save),
             ("另存为…", "Ctrl+Shift+S", MenuAction::SaveAs),
             ("导出 HTML…", "Ctrl+E", MenuAction::Export),
-            ("打印 / 导出 PDF…", "Ctrl+P", MenuAction::Print),
+            ("导出 PDF…", "Ctrl+Shift+E", MenuAction::ExportPdf),
+            ("打印…", "Ctrl+P", MenuAction::Print),
             ("退出", "", MenuAction::Quit),
         ],
     },
@@ -144,6 +149,7 @@ pub const MENUS: [MenuDef; 3] = [
             ("跟随系统", "", MenuAction::ThemeSystem),
             ("浅色", "", MenuAction::ThemeLight),
             ("深色", "", MenuAction::ThemeDark),
+            ("源码模式", "Ctrl+/", MenuAction::ToggleSourceMode),
             ("专注模式", "", MenuAction::ToggleFocus),
             ("打字机模式", "", MenuAction::ToggleTypewriter),
         ],
@@ -336,12 +342,13 @@ pub fn scrollbar_hit(vp: Viewport, doc_h: f32, x: f32, y: f32, scale: f32) -> bo
         && x < vp.x + vp.w
 }
 
-/// 状态栏文本：(左, 右)。左 = 路径或「未命名草稿」+ 脏标 + 外部变更提示；
+/// 状态栏文本：(左, 右)。左 = 路径或「未命名草稿」+ 脏标 + 外部变更提示 + 源码模式提示；
 /// 右 = 全文字数 + 行列。
 pub fn status_line(
     path: Option<&Path>,
     dirty: bool,
     external: ExternalState,
+    source_mode: bool,
     words: usize,
     line: usize,
     col: usize,
@@ -358,6 +365,9 @@ pub fn status_line(
         ExternalState::Changed => left.push_str("（外部修改）"),
         ExternalState::BackedUp => left.push_str("（外部修改已备份）"),
         ExternalState::Missing => left.push_str("（文件缺失）"),
+    }
+    if source_mode {
+        left.push_str("（源码模式）");
     }
     (left, format!("{words} 字 · 行 {line}，列 {col}"))
 }
@@ -421,6 +431,7 @@ pub(crate) struct MenuFlags {
     pub(crate) fullscreen: bool,
     pub(crate) focus: bool,
     pub(crate) typewriter: bool,
+    pub(crate) source: bool,
 }
 
 /// 开关项是否处于开启态（非开关项恒 false）：决定弹出菜单该行右侧是否显示「当前」。
@@ -429,6 +440,7 @@ pub(crate) fn action_checked(action: MenuAction, flags: MenuFlags) -> bool {
         MenuAction::ToggleFullscreen => flags.fullscreen,
         MenuAction::ToggleFocus => flags.focus,
         MenuAction::ToggleTypewriter => flags.typewriter,
+        MenuAction::ToggleSourceMode => flags.source,
         _ => false,
     }
 }

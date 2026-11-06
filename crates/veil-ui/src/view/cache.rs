@@ -62,18 +62,19 @@ pub(crate) struct Revs {
 }
 
 impl Revs {
-    pub(crate) fn base(self, width: f32, scale: f32) -> BaseKey {
+    pub(crate) fn base(self, width: f32, scale: f32, source_mode: bool) -> BaseKey {
         BaseKey {
             width_q: quantize(width, 100.0),
             scale_q: quantize(scale, 1000.0),
             theme_rev: self.theme,
             session_rev: self.session,
             image_base: self.image_base,
+            source_mode,
         }
     }
 }
 
-/// 与版心宽/DPI/主题/会话/图片基准相关的键：布局、光栅、表格网格共用。
+/// 与版心宽/DPI/主题/会话/图片基准/源码模式相关的键：布局、光栅、表格网格共用。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) struct BaseKey {
     width_q: u32,
@@ -81,6 +82,16 @@ pub(crate) struct BaseKey {
     theme_rev: u32,
     session_rev: u32,
     image_base: u32,
+    /// 源码模式：true 时全部块按源码排版（打印态恒 false，与屏幕态天然区分）。
+    source_mode: bool,
+}
+
+/// 表格网格键 = 基础键 + 活动单元格 flat 索引（`u32::MAX` = 无活动格）。
+/// 活动格切换会改变单元格文本来源（源码 vs 剥标记），必须换键重建。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct TableKey {
+    pub(crate) base: BaseKey,
+    pub(crate) active: u32,
 }
 
 /// 布局键 = 基础键 + Reveal 激活指纹（0 = 无激活，其余为块结构的激活状态哈希）。
@@ -140,8 +151,8 @@ pub(crate) struct Cache {
     /// 文档内图片（自然尺寸位图）与失败记忆：键 = 按文档目录解析后的路径。
     pub(crate) inline_images: HashMap<String, Memo<u32, ImageData>>,
     pub(crate) image_failed: HashMap<String, Memo<u32, ()>>,
-    /// 表格网格。
-    pub(crate) tables: HashMap<BlockId, Memo<BaseKey, TableLayout>>,
+    /// 表格网格：键 = 基础键 + 活动单元格。
+    pub(crate) tables: HashMap<BlockId, Memo<TableKey, TableLayout>>,
 }
 
 impl Cache {
@@ -224,10 +235,10 @@ impl Cache {
         self.image_failed.get(path).is_some_and(|m| m.matches(&key))
     }
 
-    pub(crate) fn table(&self, id: BlockId, base: BaseKey) -> Option<&TableLayout> {
+    pub(crate) fn table(&self, id: BlockId, key: TableKey) -> Option<&TableLayout> {
         self.tables
             .get(&id)
-            .filter(|m| m.matches(&base))
+            .filter(|m| m.matches(&key))
             .map(|m| &m.value)
     }
 
@@ -243,7 +254,7 @@ impl Cache {
         self.rasters
             .retain(|id, m| alive.contains(id) && m.key.base == *base);
         self.tables
-            .retain(|id, m| alive.contains(id) && m.matches(base));
+            .retain(|id, m| alive.contains(id) && m.key.base == *base);
         self.math_imgs.retain(|id, m| {
             alive.contains(id)
                 && m.key.block == *id
@@ -274,7 +285,7 @@ impl Cache {
     ) {
         self.layouts.retain(|id, m| keep.contains(id) && m.key.base == *base);
         self.rasters.retain(|id, m| keep.contains(id) && m.key.base == *base);
-        self.tables.retain(|id, m| keep.contains(id) && m.matches(base));
+        self.tables.retain(|id, m| keep.contains(id) && m.key.base == *base);
     }
 }
 
@@ -283,7 +294,7 @@ impl App {
     pub(crate) fn base_key(&self) -> BaseKey {
         self.input_state
             .revs
-            .base(self.content_width(), self.input_state.scale)
+            .base(self.content_width(), self.input_state.scale, self.source_mode())
     }
 
     pub(crate) fn math_key(&self, block: BlockId) -> MathKey {
@@ -328,19 +339,20 @@ mod tests {
     #[test]
     fn base_key_quantizes_stably_and_tracks_inputs() {
         let revs = Revs::default();
-        let b = revs.base(800.0, 1.25);
-        assert_eq!(b, revs.base(800.0, 1.25), "同一输入必得同键");
-        assert_ne!(b, revs.base(800.5, 1.25), "版心宽变化即换键");
-        assert_ne!(b, revs.base(800.0, 1.5), "DPI 变化即换键");
+        let b = revs.base(800.0, 1.25, false);
+        assert_eq!(b, revs.base(800.0, 1.25, false), "同一输入必得同键");
+        assert_ne!(b, revs.base(800.5, 1.25, false), "版心宽变化即换键");
+        assert_ne!(b, revs.base(800.0, 1.5, false), "DPI 变化即换键");
+        assert_ne!(b, revs.base(800.0, 1.25, true), "源码模式变化即换键");
         let revs2 = Revs { theme: 1, ..revs };
-        assert_ne!(b, revs2.base(800.0, 1.25), "主题代次变化即换键");
+        assert_ne!(b, revs2.base(800.0, 1.25, false), "主题代次变化即换键");
         let revs3 = Revs {
             image_base: 1,
             ..revs
         };
-        assert_ne!(b, revs3.base(800.0, 1.25), "图片基准变化即换键");
+        assert_ne!(b, revs3.base(800.0, 1.25, false), "图片基准变化即换键");
         let revs4 = Revs { session: 1, ..revs };
-        assert_ne!(b, revs4.base(800.0, 1.25), "新会话（BlockId 复用）即换键");
+        assert_ne!(b, revs4.base(800.0, 1.25, false), "新会话（BlockId 复用）即换键");
     }
 
     #[test]
@@ -348,7 +360,7 @@ mod tests {
         let ids = ids();
         let mut c = Cache::default();
         let revs = Revs::default();
-        let base = revs.base(800.0, 1.0);
+        let base = revs.base(800.0, 1.0, false);
         c.math_failed.insert(
             ids[0],
             Memo {
@@ -405,7 +417,7 @@ mod tests {
         // 主题切换：颜色相关条目过期；失败记忆与图片保留
         let mut c2 = c;
         let revs2 = Revs { theme: 1, ..revs };
-        let base2 = revs2.base(800.0, 1.0);
+        let base2 = revs2.base(800.0, 1.0, false);
         c2.prune_alive(&alive, &revs2, &base2);
         assert!(c2.inline_math.is_empty(), "公式图随主题作废");
         assert!(
@@ -415,7 +427,7 @@ mod tests {
         assert!(c2.inline_images.contains_key("img"), "图片与主题无关，保留");
         // DPI 变化：失败记忆过期
         let revs3 = Revs { theme: 1, ..revs };
-        let base3 = revs3.base(800.0, 2.0);
+        let base3 = revs3.base(800.0, 2.0, false);
         c2.prune_alive(&alive, &revs3, &base3);
         assert!(!c2.inline_failed.contains_key("y"), "失败记忆随 DPI 作废");
         // 新会话：块相关条目过期，行内公式与失败记忆跨文档保留
@@ -424,7 +436,7 @@ mod tests {
             session: 1,
             image_base: 1,
         };
-        let base4 = revs4.base(800.0, 2.0);
+        let base4 = revs4.base(800.0, 2.0, false);
         // 行内失败记忆按当前 DPI 代次重新登记（上一轮 DPI 变化已使其过期）
         c2.inline_failed.insert(
             "y".into(),
@@ -444,7 +456,7 @@ mod tests {
         let ids = ids();
         let mut c = Cache::default();
         let revs = Revs::default();
-        let base = revs.base(800.0, 1.0);
+        let base = revs.base(800.0, 1.0, false);
         let lk0 = LayoutKey { base, reveal: 0 };
         let lk1 = LayoutKey { base, reveal: 0 };
 
@@ -469,7 +481,7 @@ mod tests {
 
         // base_key 不匹配的条目也被剪（双重保险：resize/DPI 风暴期间旧键残留）
         let revs2 = Revs { theme: 1, ..revs };
-        let base2 = revs2.base(800.0, 1.0);
+        let base2 = revs2.base(800.0, 1.0, false);
         // 用 ids[1] 插 base2 条目（ids[0] 已经被 prune_viewport 保留且还是 base 的条目）
         c.rasters.insert(
             ids[1],
@@ -487,7 +499,7 @@ mod tests {
         let ids = ids();
         let mut c = Cache::default();
         let revs = Revs::default();
-        let base = revs.base(800.0, 1.0);
+        let base = revs.base(800.0, 1.0, false);
 
         // math_imgs / inline_math / inline_images 是内容寻址（tex/path），不按 BlockId 累积
         c.math_imgs.insert(

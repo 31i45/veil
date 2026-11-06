@@ -2,7 +2,7 @@
 
 ![Veil](icons/veil.ico)
 
-[![Version](https://img.shields.io/badge/version-1.0.0-blue.svg)](https://github.com/veil/veil/releases)
+[![Version](https://img.shields.io/badge/version-1.0.0-blue.svg)](https://github.com/31i45/veil/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-stable-orange.svg)](https://www.rust-lang.org/)
 
@@ -13,6 +13,23 @@
 Veil 的灵感来自 Typedown — Typedown 是我最喜欢的 Windows Markdown 编辑器，没有之一，但是它启动需要几十秒到数分钟，每次都让人崩溃。Typedown 是 WinUI 框架实现的应用，冷启动快过你完成一杯咖啡的时间本该是理所当然的事，但现实并非如此。
 
 所以，我决定自己复刻。纯 Rust 实现，无 webview、无 Chromium/WebView2 进程、无外部运行时依赖。单文件 exe，150 ms 冷启动。**单机单用户 · 纯离线 · 永不协作**。
+
+## 下载与使用
+
+从 [Releases](https://github.com/31i45/veil/releases) 下载 `veil.exe`。无需安装、无外部运行时依赖、不需要管理员权限。
+
+1. 把 `veil.exe` 放到一个打算长期保留的目录（例如 `%LOCALAPPDATA%\Veil`）。Windows 按路径记录文件关联，之后移动 exe 会让关联失效。
+2. 双击运行，或执行 `veil.exe 某个文件.md`。
+
+## 把 .md 文件关联到 Veil
+
+Veil 是便携单文件程序，不写注册表，因此无法自动把自己注册为 `.md` 的默认打开方式。手动关联步骤：
+
+1. 右键任意 `.md` 文件，选择 **打开方式** → **选择其他应用**。
+2. 选择 **更多应用** → **在这台电脑上查找其他应用**，选中你的 `veil.exe`。
+3. 勾选 **始终使用此应用打开 .md 文件**。
+
+如果之后移动了 `veil.exe`，请在新位置重复上述步骤。
 
 ## 架构
 

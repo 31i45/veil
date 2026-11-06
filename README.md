@@ -2,7 +2,7 @@
 
 ![Veil](icons/veil.ico)
 
-[![Version](https://img.shields.io/badge/version-1.0.0-blue.svg)](https://github.com/veil/veil/releases)
+[![Version](https://img.shields.io/badge/version-1.0.0-blue.svg)](https://github.com/31i45/veil/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-stable-orange.svg)](https://www.rust-lang.org/)
 
@@ -13,6 +13,23 @@
 Veil was born because **Typedown** — my favorite Markdown editor on Windows, bar none — takes **tens of seconds to minutes** to launch, every single time. A WinUI app that starts cold faster than you finish sipping your coffee should not exist, yet here we are.
 
 So I built my own. Pure Rust. No webview, no Chromium, no Electron, no external runtime. Single-file exe. 150 ms cold start. **Single-user, single-document, purely offline — no collaboration, ever.**
+
+## Download & Run
+
+Grab `veil.exe` from [Releases](https://github.com/31i45/veil/releases). There is no installer, no runtime dependency, and no admin rights required.
+
+1. Put `veil.exe` in a folder you intend to keep (for example `%LOCALAPPDATA%\Veil`). Windows stores file associations by path, so moving the exe later breaks them.
+2. Double-click it, or run `veil.exe path\to\note.md`.
+
+## Open .md Files with Veil
+
+Veil is a portable single-file app and does not write to the registry, so it cannot register itself as the `.md` handler. To make `.md` open in Veil:
+
+1. Right-click any `.md` file and choose **Open with** → **Choose another app**.
+2. Choose **More apps** → **Look for another app on this PC**, then select your `veil.exe`.
+3. Tick **Always use this app to open .md files**.
+
+If you move `veil.exe` afterwards, repeat these steps from the new location.
 
 ## Architecture
 

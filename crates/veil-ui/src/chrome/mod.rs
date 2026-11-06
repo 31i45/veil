@@ -47,12 +47,15 @@ pub fn viewport(win_w: u32, win_h: u32, scale: f32) -> Viewport {
     }
 }
 
+/// 菜单动作 + 分隔线哨兵（不参与动作路由、不进命中区、不绘制文字）。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum MenuAction {
+    /// 分隔线：无动作，仅在布局和绘制层识别。
+    Separator,
     /// 新建空白草稿（Ctrl+N）。
     New,
     Open,
-    /// 快速打开浮层（Ctrl+Shift+P）。
+    /// 快速打开浮层（Ctrl+P）。
     QuickOpen,
     Save,
     SaveAs,
@@ -112,12 +115,15 @@ pub const MENUS: [MenuDef; 3] = [
         items: &[
             ("新建", "Ctrl+N", MenuAction::New),
             ("打开…", "Ctrl+O", MenuAction::Open),
-            ("快速打开…", "Ctrl+Shift+P", MenuAction::QuickOpen),
+            ("快速打开…", "Ctrl+P", MenuAction::QuickOpen),
+            ("", "", MenuAction::Separator),
             ("保存", "Ctrl+S", MenuAction::Save),
             ("另存为…", "Ctrl+Shift+S", MenuAction::SaveAs),
-            ("导出 HTML…", "Ctrl+E", MenuAction::Export),
-            ("导出 PDF…", "Ctrl+Shift+E", MenuAction::ExportPdf),
-            ("打印…", "Ctrl+P", MenuAction::Print),
+            ("", "", MenuAction::Separator),
+            ("导出 HTML", "Ctrl+E", MenuAction::Export),
+            ("导出 PDF", "Ctrl+Shift+E", MenuAction::ExportPdf),
+            ("打印…", "Ctrl+Shift+P", MenuAction::Print),
+            ("", "", MenuAction::Separator),
             ("退出", "", MenuAction::Quit),
         ],
     },
@@ -126,15 +132,19 @@ pub const MENUS: [MenuDef; 3] = [
         items: &[
             ("撤销", "Ctrl+Z", MenuAction::Undo),
             ("重做", "Ctrl+Shift+Z", MenuAction::Redo),
+            ("", "", MenuAction::Separator),
             ("剪切", "Ctrl+X", MenuAction::Cut),
             ("复制", "Ctrl+C", MenuAction::Copy),
             ("粘贴", "Ctrl+V", MenuAction::Paste),
             ("全选", "Ctrl+A", MenuAction::SelectAll),
+            ("", "", MenuAction::Separator),
             ("加粗", "Ctrl+B", MenuAction::ToggleBold),
             ("斜体", "Ctrl+I", MenuAction::ToggleItalic),
             ("链接", "Ctrl+K", MenuAction::InsertLink),
+            ("", "", MenuAction::Separator),
             ("查找…", "Ctrl+F", MenuAction::Find),
             ("替换…", "Ctrl+H", MenuAction::Replace),
+            ("", "", MenuAction::Separator),
             ("插入图片…", "Ctrl+Shift+I", MenuAction::InsertImage),
         ],
     },
@@ -142,13 +152,17 @@ pub const MENUS: [MenuDef; 3] = [
         title: "视图",
         items: &[
             ("大纲面板", "Ctrl+Shift+O", MenuAction::ToggleOutline),
+            ("", "", MenuAction::Separator),
             ("放大", "Ctrl+=", MenuAction::ZoomIn),
             ("缩小", "Ctrl+-", MenuAction::ZoomOut),
             ("还原缩放", "Ctrl+0", MenuAction::ZoomReset),
+            ("", "", MenuAction::Separator),
             ("全屏", "F11", MenuAction::ToggleFullscreen),
+            ("", "", MenuAction::Separator),
             ("跟随系统", "", MenuAction::ThemeSystem),
             ("浅色", "", MenuAction::ThemeLight),
             ("深色", "", MenuAction::ThemeDark),
+            ("", "", MenuAction::Separator),
             ("源码模式", "Ctrl+/", MenuAction::ToggleSourceMode),
             ("专注模式", "", MenuAction::ToggleFocus),
             ("打字机模式", "", MenuAction::ToggleTypewriter),
@@ -199,25 +213,33 @@ pub fn hit_menu_bar(x: f32, y: f32, scale: f32) -> Option<usize> {
 
 /// 菜单项行（0b 动态化）：静态项 + 文件菜单末尾插入的最近文件（在「退出」之前）。
 /// 返回 (标签, 快捷键提示, 动作)；最近文件标签为文件名（无文件名回退全路径）。
-/// 布局/命中/分发共用本函数，保证三者对同一菜单结构一致。
+/// Separator 项原样返回，由 popup_layout / paint 层处理（跳过命中、绘制分隔线）。
 pub(crate) fn menu_rows(open: usize, recent: &[String]) -> Vec<(String, &'static str, MenuAction)> {
     let Some(menu) = MENUS.get(open) else {
         return Vec::new();
     };
     let statics = || menu.items.iter().map(|(l, s, a)| (l.to_string(), *s, *a));
-    // 仅文件菜单（下标 0）且有最近文件时动态插入；插入点为最后一项（退出）之前
+    // 仅文件菜单（下标 0）且有最近文件时动态插入
     if open != 0 || recent.is_empty() {
         return statics().collect();
     }
-    let tail = menu.items.len() - 1;
-    let mut out: Vec<_> = statics().take(tail).collect();
+    // 插入点：最后一条分隔线之后（即「退出」区块之前）。
+    // 结果结构：… 打印 │ 最近文件… │ 退出，最近文件块上下各有分隔线。
+    let insert = menu
+        .items
+        .iter()
+        .rposition(|(_, _, a)| matches!(a, MenuAction::Separator))
+        .map(|i| i + 1)
+        .unwrap_or(menu.items.len());
+    let mut out: Vec<_> = statics().take(insert).collect();
     out.extend(
         recent
             .iter()
             .enumerate()
             .map(|(i, l)| (l.clone(), "", MenuAction::OpenRecent(i))),
     );
-    out.extend(statics().skip(tail));
+    out.push((String::new(), "", MenuAction::Separator));
+    out.extend(statics().skip(insert));
     out
 }
 
@@ -227,9 +249,13 @@ pub struct PopupLayout {
     pub y: f32,
     pub w: f32,
     pub h: f32,
-    /// (项下标, x, y, w, h)
+    /// (项下标, x, y, w, h)；Separator 项不进 hit rect
     pub items: Vec<(usize, f32, f32, f32, f32)>,
+    /// 分隔线段：(下标, y)；paint.rs 用
+    pub separators: Vec<(usize, f32)>,
 }
+
+const SEP_H: f32 = 4.0; // 分隔线上下各留 SEP_H/2 间距，线高 1px
 
 pub fn popup_layout(open: usize, scale: f32, recent: &[String]) -> PopupLayout {
     let rows = menu_rows(open, recent);
@@ -240,6 +266,7 @@ pub fn popup_layout(open: usize, scale: f32, recent: &[String]) -> PopupLayout {
             w: 0.0,
             h: 0.0,
             items: Vec::new(),
+            separators: Vec::new(),
         };
     }
     let x = menu_bar_rects(scale)
@@ -251,6 +278,7 @@ pub fn popup_layout(open: usize, scale: f32, recent: &[String]) -> PopupLayout {
     let gap = 24.0 * scale;
     let widest = rows
         .iter()
+        .filter(|(_, _, a)| !matches!(a, MenuAction::Separator))
         .map(|(label, sc, _)| {
             text_width(label, scale)
                 + if sc.is_empty() {
@@ -262,15 +290,29 @@ pub fn popup_layout(open: usize, scale: f32, recent: &[String]) -> PopupLayout {
         .fold(0.0_f32, f32::max);
     let w = (widest + 2.0 * pad).max(150.0 * scale);
     let item_h = ITEM_H * scale;
+    let sep_h = SEP_H * scale;
     let top_pad = 4.0 * scale;
     let y = MENU_H * scale;
-    let h = 2.0 * top_pad + item_h * rows.len() as f32;
-    let items = rows
-        .iter()
-        .enumerate()
-        .map(|(i, _)| (i, x, y + top_pad + item_h * i as f32, w, item_h))
-        .collect();
-    PopupLayout { x, y, w, h, items }
+    let mut cur_y = top_pad;
+    let mut items = Vec::new();
+    let mut separators = Vec::new();
+    for (i, (_label, _sc, action)) in rows.iter().enumerate() {
+        if matches!(action, MenuAction::Separator) {
+            separators.push((i, y + cur_y + sep_h / 2.0));
+            cur_y += sep_h;
+        } else {
+            items.push((i, x, y + cur_y, w, item_h));
+            cur_y += item_h;
+        }
+    }
+    PopupLayout {
+        x,
+        y,
+        w,
+        h: cur_y + top_pad,
+        items,
+        separators,
+    }
 }
 
 /// 弹出菜单内命中项下标。
@@ -342,7 +384,27 @@ pub fn scrollbar_hit(vp: Viewport, doc_h: f32, x: f32, y: f32, scale: f32) -> bo
         && x < vp.x + vp.w
 }
 
-/// 状态栏文本：(左, 右)。左 = 路径或「未命名草稿」+ 脏标 + 外部变更提示 + 源码模式提示；
+/// 路径标签：`文件名 · 父目录`，无路径时返回「未命名草稿」。
+/// 用于窗口标题、状态栏、notice 等所有需要展示路径的位置——统一避免完整路径太吵。
+pub fn path_label(p: Option<&Path>) -> String {
+    let Some(p) = p else {
+        return "未命名草稿".to_string();
+    };
+    let stem = p
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("未命名草稿");
+    let parent = p
+        .parent()
+        .and_then(|dir| dir.file_name())
+        .and_then(|n| n.to_str());
+    match parent {
+        Some(parent) if !parent.is_empty() => format!("{} · {}", stem, parent),
+        _ => stem.to_string(),
+    }
+}
+
+/// 状态栏文本：(左, 右)。左 = path_label + 脏标 + 外部变更提示 + 源码模式提示；
 /// 右 = 全文字数 + 行列。
 pub fn status_line(
     path: Option<&Path>,
@@ -353,10 +415,7 @@ pub fn status_line(
     line: usize,
     col: usize,
 ) -> (String, String) {
-    let mut left = match path {
-        Some(p) => p.display().to_string(),
-        None => "未命名草稿".to_string(),
-    };
+    let mut left = path_label(path);
     if dirty {
         left.push_str(" *");
     }
@@ -424,7 +483,7 @@ pub(super) fn theme_action_matches(action: MenuAction, mode: ThemeMode) -> bool 
     )
 }
 
-/// 菜单开关项的当前开启状态（「当前」提示的唯一数据源）。
+/// 菜单开关项的当前开启状态（「当前」提示的唯一数据源）+ 项可用性。
 /// 不包含大纲面板（用户要求：大纲是面板开关而非写作模式，不显示任何状态标识）。
 #[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
 pub(crate) struct MenuFlags {
@@ -432,6 +491,10 @@ pub(crate) struct MenuFlags {
     pub(crate) focus: bool,
     pub(crate) typewriter: bool,
     pub(crate) source: bool,
+    /// 有可保存内容（脏文档或未命名草稿）。
+    pub(crate) can_save: bool,
+    pub(crate) can_undo: bool,
+    pub(crate) can_redo: bool,
 }
 
 /// 开关项是否处于开启态（非开关项恒 false）：决定弹出菜单该行右侧是否显示「当前」。
@@ -442,6 +505,18 @@ pub(crate) fn action_checked(action: MenuAction, flags: MenuFlags) -> bool {
         MenuAction::ToggleTypewriter => flags.typewriter,
         MenuAction::ToggleSourceMode => flags.source,
         _ => false,
+    }
+}
+
+/// 菜单项是否可用：不可用时置灰、不可高亮、不可回车/点击执行。
+/// 只表达「此刻必然无效果」的项；拿不准的（如剪贴板是否为空）一律保持可用。
+pub(crate) fn action_enabled(action: MenuAction, flags: MenuFlags) -> bool {
+    match action {
+        MenuAction::Separator => false,
+        MenuAction::Save => flags.can_save,
+        MenuAction::Undo => flags.can_undo,
+        MenuAction::Redo => flags.can_redo,
+        _ => true,
     }
 }
 

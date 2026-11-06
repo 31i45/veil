@@ -57,6 +57,11 @@ impl History {
         self.undo.len()
     }
 
+    /// 当前可重做步数（只读观测值）。
+    pub(crate) fn redo_len(&self) -> usize {
+        self.redo.len()
+    }
+
     /// 显式断开分组：下一次 `record` 不与栈顶事务合并（光标移动/选区变化时调用）。
     pub(crate) fn break_group(&mut self) {
         self.last = None;

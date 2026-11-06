@@ -232,9 +232,15 @@ impl PrintSession<'_> {
         self.app.config.export_margin_mm
     }
 
-    /// 默认导出目标：文档同目录 `<stem>.pdf`；草稿返回 None（产品层回退打印对话框）。
+    /// 默认导出目标：文档同目录 `<stem>.pdf`；草稿返回 None。
     pub fn export_target(&self) -> Option<PathBuf> {
         self.app.doc.path.as_ref().map(|p| p.with_extension("pdf"))
+    }
+
+    /// 草稿态导出：由产品层弹保存对话框选定输出路径（`ext` 决定过滤器）。
+    /// None = 用户取消（产品层据此中止，不产生任何文件）。
+    pub fn choose_export_path(&mut self, suggested: &str, ext: &str) -> Option<PathBuf> {
+        self.app.ports.dialogs.save_export(suggested, ext)
     }
 
     /// 排版并光栅化单行文本，返回 (straight-alpha RGBA8, 宽, 高)。
@@ -383,14 +389,14 @@ impl PrintSession<'_> {
 }
 
 impl App {
-    /// 菜单「打印 / 导出 PDF…」入口（3b）：端口置换规避 app 与 ports.print 的同时借用。
+    /// 菜单「打印…」入口（3b）：端口置换规避 app 与 ports.print 的同时借用。
     pub(crate) fn print_document(&mut self) {
         let mut port = std::mem::replace(&mut self.ports.print, Box::new(NoPrint));
         port.print(&mut PrintSession { app: self });
         self.ports.print = port;
     }
 
-    /// 菜单「导出 PDF…」入口：与打印同一端口置换，产品层决定直接导出或回退对话框。
+    /// 菜单「导出 PDF」入口：与打印同一端口置换，产品层决定直接导出或回退对话框。
     pub(crate) fn export_pdf(&mut self) {
         let mut port = std::mem::replace(&mut self.ports.print, Box::new(NoPrint));
         port.export_pdf(&mut PrintSession { app: self });

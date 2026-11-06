@@ -210,8 +210,8 @@ impl AssetStore for NoAssets {
 }
 
 type MathCalls = Rc<RefCell<Vec<(String, bool)>>>;
-/// 导出调用记录：(会话序列化, 源路径, 主题样式快照)。
-type ExportCalls = Rc<RefCell<Vec<(String, Option<PathBuf>, ExportStyle)>>>;
+/// 导出调用记录：(会话序列化, 源路径, 主题样式快照, 调用方指定目标)。
+type ExportCalls = Rc<RefCell<Vec<(String, Option<PathBuf>, ExportStyle, Option<PathBuf>)>>>;
 
 /// 不弹对话框（既有测试的默认注入）：打开/另存为一律取消。
 struct NoDialogs;
@@ -267,6 +267,7 @@ struct FakeDialogs {
     open: Option<PathBuf>,
     save: Option<PathBuf>,
     image: Option<PathBuf>,
+    export: Option<PathBuf>,
     calls: Rc<RefCell<Vec<String>>>,
 }
 impl FileDialog for FakeDialogs {
@@ -281,6 +282,12 @@ impl FileDialog for FakeDialogs {
     fn open_image(&mut self) -> Option<PathBuf> {
         self.calls.borrow_mut().push("open_image".into());
         self.image.clone()
+    }
+    fn save_export(&mut self, suggested: &str, ext: &str) -> Option<PathBuf> {
+        self.calls
+            .borrow_mut()
+            .push(format!("export:{ext}:{suggested}"));
+        self.export.clone()
     }
 }
 
@@ -469,6 +476,7 @@ impl Exporter for NoExport {
         _s: &veil_core::Session,
         _style: ExportStyle,
         _p: Option<&Path>,
+        _t: Option<&Path>,
     ) -> Result<PathBuf, String> {
         Err("未注入导出器".into())
     }
@@ -2046,16 +2054,20 @@ impl Exporter for FakeExport {
         session: &veil_core::Session,
         style: ExportStyle,
         source_path: Option<&Path>,
+        target: Option<&Path>,
     ) -> Result<PathBuf, String> {
         self.calls.borrow_mut().push((
             session.serialize(),
             source_path.map(Path::to_path_buf),
             style,
+            target.map(Path::to_path_buf),
         ));
         if self.fail {
             Err("模拟导出失败".into())
         } else {
-            Ok(PathBuf::from("out.html"))
+            Ok(target
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| PathBuf::from("out.html")))
         }
     }
 }
@@ -2097,6 +2109,55 @@ fn app_export(text: &str, path: Option<&str>, fail: bool) -> (App, ExportCalls) 
     (a, calls)
 }
 
+/// 导出 + 对话框联合注入：用于「草稿态需先选导出目标」的路径。
+fn app_export_with_dialog(
+    text: &str,
+    export_target: Option<&str>,
+) -> (App, ExportCalls, Rc<RefCell<Vec<String>>>) {
+    let calls = Rc::new(RefCell::new(Vec::new()));
+    let dialog_calls = Rc::new(RefCell::new(Vec::new()));
+    let doc = Doc {
+        text: text.into(),
+        path: None,
+        bom: false,
+        resume: false,
+    };
+    let m = FakeMath {
+        fail: false,
+        calls: Rc::new(RefCell::new(Vec::new())),
+    };
+    let e = FakeExport {
+        calls: calls.clone(),
+        fail: false,
+    };
+    let d = FakeDialogs {
+        open: None,
+        save: None,
+        image: None,
+        export: export_target.map(PathBuf::from),
+        calls: dialog_calls.clone(),
+    };
+    let a = App::new(
+        doc,
+        Ports {
+            clipboard: Box::new(NoClip),
+            store: Box::new(MemStore::default()),
+            math: Box::new(m),
+            images: Box::new(NoImages),
+            assets: Box::new(NoAssets),
+            exporter: Box::new(e),
+            dialogs: Box::new(d),
+            watcher: Box::new(NoWatcher),
+            theme_env: theme::test_support::env(),
+            persist_env: persist_env(),
+            print: Box::new(NoPrint),
+            confirmer: no_confirm(),
+            url_opener: no_url(),
+        },
+    );
+    (a, calls, dialog_calls)
+}
+
 #[test]
 fn export_delegates_current_session_and_path() {
     let (mut a, calls) = app_export("ab", Some("a.md"), false);
@@ -2130,10 +2191,40 @@ fn export_passes_current_theme_style() {
 }
 
 #[test]
-fn export_draft_passes_none_path_without_crash() {
+fn export_draft_cancelled_dialog_aborts_without_output() {
+    // 草稿（无关联文件）+ 用户取消导出对话框：不调用导出器、提示「导出已取消」
     let (mut a, calls) = app_export("x", None, false);
     a.export_now();
-    assert_eq!(calls.borrow()[0].1, None); // 草稿：None 透传给导出器裁决
+    assert!(calls.borrow().is_empty(), "取消后不得产生导出调用");
+    assert_eq!(a.ui_state.chrome.notice, "导出已取消");
+}
+
+#[test]
+fn export_draft_asks_for_target_before_exporting() {
+    let (mut a, calls, dialog_calls) = app_export_with_dialog("x", Some("我的稿.html"));
+    a.export_now();
+    assert_eq!(
+        dialog_calls.borrow().as_slice(),
+        &["export:html:未命名.html".to_string()],
+        "草稿导出应先询问 HTML 目标"
+    );
+    let got = calls.borrow();
+    assert_eq!(got.len(), 1);
+    assert_eq!(got[0].1, None, "源路径仍为空（草稿语义不变）");
+    assert_eq!(
+        got[0].3.as_deref(),
+        Some(Path::new("我的稿.html")),
+        "对话框选定路径须透传给导出器"
+    );
+}
+
+#[test]
+fn export_named_document_does_not_ask_for_target() {
+    let (mut a, calls, dialog_calls) = app_export_with_dialog("x", Some("ignored.html"));
+    a.doc.path = Some(PathBuf::from("a.md"));
+    a.export_now();
+    assert!(dialog_calls.borrow().is_empty(), "有关联文件时不弹导出对话框");
+    assert_eq!(calls.borrow()[0].3, None, "沿用源目录同名规则");
 }
 
 #[test]
@@ -2441,6 +2532,7 @@ fn app_dialogs(
         open: open.map(PathBuf::from),
         save: save.map(PathBuf::from),
         image: None,
+        export: None,
         calls: calls.clone(),
     };
     let doc = Doc {
@@ -3145,6 +3237,7 @@ fn dirty_open_save_choice_writes_disk_before_opening() {
         open: Some(PathBuf::from("b.md")),
         save: None,
         image: None,
+        export: None,
         calls: calls.clone(),
     };
     let c = FakeConfirm::new(&[UnsavedChoice::Save]);
@@ -3267,6 +3360,7 @@ fn untitled_save_choice_saves_as_then_creates_new_draft() {
         open: None,
         save: Some(PathBuf::from("draft.md")),
         image: None,
+        export: None,
         calls: Rc::new(RefCell::new(Vec::new())),
     };
     let mut a = app_confirm(
@@ -3797,6 +3891,7 @@ fn save_as_rebinds_watcher() {
         open: None,
         save: Some(PathBuf::from("b.md")),
         image: None,
+        export: None,
         calls,
     };
     let mut a = App::new(
@@ -5747,6 +5842,7 @@ fn app_persist_dialogs(
         open: None,
         save: save.map(PathBuf::from),
         image: None,
+        export: None,
         calls: Rc::new(RefCell::new(Vec::new())),
     };
     App::new(
@@ -6144,8 +6240,17 @@ fn menu_click_opens_recent_file() {
     let (tx, ty) = menu_title_center(0);
     click_at(&mut a, tx, ty);
     assert_eq!(a.ui_state.chrome.open, Some(0));
-    // 最近文件插在「导出 HTML…」之后、「退出」之前：下标 = 静态项数 - 1
-    let (x, y) = popup_item_center_recent(0, chrome::MENUS[0].items.len() - 1, &labels);
+    // 最近文件块位于「退出」区块之前，上下各有分隔线
+    let rows = chrome::menu_rows(0, &labels);
+    let row = rows
+        .iter()
+        .position(|(_, _, a)| *a == MenuAction::OpenRecent(0))
+        .expect("文件菜单应含最近文件项");
+    let item = rows[..row]
+        .iter()
+        .filter(|(_, _, a)| *a != MenuAction::Separator)
+        .count();
+    let (x, y) = popup_item_center_recent(0, item, &labels);
     click_at(&mut a, x, y);
     assert_eq!(a.editor.session().serialize(), "recent-x");
     assert_eq!(a.doc.path, Some(PathBuf::from("x.md")));
@@ -6192,12 +6297,10 @@ fn quick_open_lists_recent_and_directory_then_opens() {
     let mut a = app("cur", Some("dir/cur.md"), false, &store);
     a.persist_state.recent = vec![PathBuf::from("dir/README.md")];
     a.input_state.mods.ctrl = true;
-    a.input_state.mods.shift = true;
     a.route_key(Key::P);
     a.input_state.mods.ctrl = false;
-    a.input_state.mods.shift = false;
 
-    assert!(a.ui_state.quick.open, "Ctrl+Shift+P 打开浮层");
+    assert!(a.ui_state.quick.open, "Ctrl+P 打开浮层");
     assert_eq!(a.mode(), Mode::QuickOpen, "浮层期间文档只读");
     let labels: Vec<_> = a
         .ui_state
@@ -6244,10 +6347,8 @@ fn quick_open_refuses_dirty_document_and_esc_closes() {
     let before = doc_text(&a);
 
     a.input_state.mods.ctrl = true;
-    a.input_state.mods.shift = true;
     a.route_key(Key::P);
     a.input_state.mods.ctrl = false;
-    a.input_state.mods.shift = false;
     assert!(a.ui_state.quick.open);
     a.route_key(Key::Enter);
     assert!(!a.ui_state.quick.open, "尝试打开后浮层关闭");
@@ -6260,10 +6361,8 @@ fn quick_open_refuses_dirty_document_and_esc_closes() {
 
     // Esc：关闭且不动文档
     a.input_state.mods.ctrl = true;
-    a.input_state.mods.shift = true;
     a.route_key(Key::P);
     a.input_state.mods.ctrl = false;
-    a.input_state.mods.shift = false;
     a.route_key(Key::Escape);
     assert!(!a.ui_state.quick.open);
     assert_eq!(doc_text(&a), before);
@@ -6280,10 +6379,8 @@ fn quick_open_step_and_backspace_requery() {
     }
     let mut a = app("cur", Some("dir/cur.md"), false, &store);
     a.input_state.mods.ctrl = true;
-    a.input_state.mods.shift = true;
     a.route_key(Key::P);
     a.input_state.mods.ctrl = false;
-    a.input_state.mods.shift = false;
     // 启动即打开的文件已登记为最近文件：候选 = 当前文件 + 目录内 a.md/b.md
     let labels: Vec<_> = a
         .ui_state
@@ -6319,10 +6416,8 @@ fn quick_open_takes_ime_text_and_preempts_search() {
     a.open_search();
     assert!(a.ui_state.search.open);
     a.input_state.mods.ctrl = true;
-    a.input_state.mods.shift = true;
     a.route_key(Key::P);
     a.input_state.mods.ctrl = false;
-    a.input_state.mods.shift = false;
     assert!(a.ui_state.quick.open);
     assert!(!a.ui_state.search.open, "快速打开抢占查找栏");
     assert_eq!(a.mode(), Mode::QuickOpen);
@@ -7100,7 +7195,13 @@ fn link_menu_offers_open_first_and_executes_it() {
         vp.y + vp.h,
         a.input_state.scale,
     );
-    let iy = l.y + l.top_pad + l.item_h * open_i as f32 + 1.0;
+    let iy = l.y
+        + l.rows
+            .iter()
+            .find(|&&(i, _)| i == open_i)
+            .map(|&(_, off)| off)
+            .expect("打开项应在可点行中")
+        + 1.0;
     click_at(&mut a, l.x + 2.0, iy);
     assert_eq!(*calls.borrow(), vec!["https://example.com".to_string()]);
     assert!(!a.ui_state.ctx.open, "点击后菜单关闭");
@@ -7865,9 +7966,9 @@ fn print_paginates_clean_frames_and_restores_state() {
     assert_eq!(doc_text(&a), text, "打印只读，不动真值");
 }
 
-/// K2：Ctrl+P = 打印（系统对话框，含预览）；快速打开改到 Ctrl+Shift+P，二者不串位。
+/// K2：Ctrl+P = 快速打开（VS Code 一致）；打印改到 Ctrl+Shift+P，二者不串位。
 #[test]
-fn ctrl_p_prints_and_ctrl_shift_p_quick_opens() {
+fn ctrl_p_quick_opens_and_ctrl_shift_p_prints() {
     let p = FakePrint {
         w: 300,
         h: 600,
@@ -7880,15 +7981,16 @@ fn ctrl_p_prints_and_ctrl_shift_p_quick_opens() {
     a.input_state.mods.ctrl = true;
     a.route_key(Key::P);
     a.input_state.mods.ctrl = false;
-    assert!(ended.get(), "Ctrl+P 经路由到达打印端口");
-    assert!(!a.ui_state.quick.open, "Ctrl+P 不再打开快速打开浮层");
+    assert!(a.ui_state.quick.open, "Ctrl+P 打开快速打开浮层");
+    assert!(!ended.get(), "Ctrl+P 不触发打印");
 
+    a.close_quick();
     a.input_state.mods.ctrl = true;
     a.input_state.mods.shift = true;
     a.route_key(Key::P);
     a.input_state.mods.ctrl = false;
     a.input_state.mods.shift = false;
-    assert!(a.ui_state.quick.open, "Ctrl+Shift+P 仍是快速打开");
+    assert!(ended.get(), "Ctrl+Shift+P 经路由到达打印端口");
 }
 
 #[test]
@@ -8597,11 +8699,18 @@ fn menu_keyboard_enter_runs_selected_item_and_closes() {
     let mut a = app("ab\n", None, false, &store);
     a.ui_state.chrome.open = Some(2); // 视图菜单
     let rows = chrome::menu_rows(2, &[]);
-    let dark = rows
+    let nav: Vec<usize> = rows
         .iter()
-        .position(|(_, _, action)| *action == MenuAction::ThemeDark)
+        .enumerate()
+        .filter(|(_, (_, _, a))| *a != MenuAction::Separator)
+        .map(|(i, _)| i)
+        .collect();
+    let dark_pos = nav
+        .iter()
+        .position(|&i| rows[i].2 == MenuAction::ThemeDark)
         .expect("视图菜单应含深色主题项");
-    for _ in 0..=dark {
+    let dark = nav[dark_pos];
+    for _ in 0..=dark_pos {
         a.route_key(Key::Down);
     }
     assert_eq!(a.ui_state.chrome.hover_item, Some((2, dark)));
@@ -8619,11 +8728,18 @@ fn menu_keyboard_enter_toggles_source_mode_and_closes() {
     let mut a = app("# 标题\n", None, false, &store);
     a.ui_state.chrome.open = Some(2); // 视图菜单
     let rows = chrome::menu_rows(2, &[]);
-    let source = rows
+    let nav: Vec<usize> = rows
         .iter()
-        .position(|(_, _, action)| *action == MenuAction::ToggleSourceMode)
+        .enumerate()
+        .filter(|(_, (_, _, a))| *a != MenuAction::Separator)
+        .map(|(i, _)| i)
+        .collect();
+    let source_pos = nav
+        .iter()
+        .position(|&i| rows[i].2 == MenuAction::ToggleSourceMode)
         .expect("视图菜单应含源码模式项");
-    for _ in 0..=source {
+    let source = nav[source_pos];
+    for _ in 0..=source_pos {
         a.route_key(Key::Down);
     }
     assert_eq!(a.ui_state.chrome.hover_item, Some((2, source)));
@@ -8653,6 +8769,172 @@ fn menu_keyboard_enter_without_selection_is_noop() {
         "ab\n",
         "无选中项时 Enter 不得误编辑文档"
     );
+}
+
+#[test]
+fn menu_flags_track_save_undo_redo_availability() {
+    let store = MemStore::default();
+    let mut a = app("ab\n", Some("a.md"), false, &store);
+    let clean = a.menu_flags();
+    assert!(!clean.can_save, "干净文档：保存禁用");
+    assert!(!clean.can_undo, "无撤销步：撤销禁用");
+    assert!(!clean.can_redo, "无重做步：重做禁用");
+
+    a.editor.apply(Intent::InsertText("c".into())).unwrap();
+    let dirty = a.menu_flags();
+    assert!(dirty.can_save, "脏文档：保存可用");
+    assert!(dirty.can_undo, "有撤销步：撤销可用");
+    assert!(!dirty.can_redo, "未撤销前无重做");
+
+    a.editor.apply(Intent::Undo).unwrap();
+    let undone = a.menu_flags();
+    assert!(undone.can_redo, "撤销后可重做");
+    assert!(!undone.can_undo, "撤销栈已空");
+
+    // 脏标只在保存时清除（撤销回初始态仍算「有改动待确认」）
+    a.editor.mark_saved();
+    assert!(!a.menu_flags().can_save, "保存后回干净态：保存禁用");
+
+    // 未命名草稿：保存始终可用（转另存为）
+    let d = app("x", None, false, &store);
+    assert!(d.menu_flags().can_save, "未命名草稿：保存可用");
+}
+
+#[test]
+fn menu_keyboard_skips_disabled_items_and_enter_is_noop() {
+    let store = MemStore::default();
+    let mut a = app("ab\n", Some("a.md"), false, &store);
+    a.ui_state.chrome.open = Some(1); // 编辑菜单
+    a.route_key(Key::Down);
+    assert_eq!(
+        a.ui_state.chrome.hover_item,
+        Some((1, 3)),
+        "无可撤销时跳过撤销/重做，落在首个可用项（剪切）"
+    );
+    // 直接落到禁用项（模拟鼠标悬停）：回车不执行、菜单保持打开
+    a.ui_state.chrome.hover_item = Some((1, 0));
+    a.route_key(Key::Enter);
+    assert_eq!(a.ui_state.chrome.open, Some(1), "禁用项回车不关菜单");
+    assert_eq!(a.editor.session().serialize(), "ab\n", "禁用项不产生编辑");
+}
+
+#[test]
+fn menu_click_on_disabled_item_keeps_menu_open() {
+    let store = MemStore::default();
+    let (mut a, calls) = app_dialogs("ab\n", Some("a.md"), false, &store, None, Some("out.md"));
+    let (tx, ty) = menu_title_center(0);
+    click_at(&mut a, tx, ty);
+    assert_eq!(a.ui_state.chrome.open, Some(0));
+    let (x, y) = popup_item_center(0, 3); // 保存（干净文档 → 禁用）
+    click_at(&mut a, x, y);
+    assert_eq!(a.ui_state.chrome.open, Some(0), "禁用项点击不关菜单");
+    assert!(calls.borrow().is_empty(), "禁用项不触发任何对话框/写盘");
+}
+
+#[test]
+fn file_menu_paints_group_separators_and_recent_block() {
+    use crate::theme::{Theme, ThemeMode};
+    let store = MemStore::default();
+    let mut a = app("ab\n", Some("dir/a.md"), false, &store);
+    a.input_state.theme = Theme::of(ThemeMode::Light, false);
+    let theme = a.input_state.theme;
+    a.persist_state.recent = vec![
+        PathBuf::from("dir/r1.md"),
+        PathBuf::from("dir/r2.md"),
+        PathBuf::from("dir/r3.md"),
+    ];
+    a.ui_state.chrome.open = Some(0);
+    a.paint();
+    let frame = a.window_state.frame.as_ref().expect("paint 应产出帧");
+    let recent = a.recent_labels();
+    let p = chrome::popup_layout(0, 1.0, &recent);
+
+    // 4 条分隔线：三个静态分组边界 + 最近文件块与「退出」之间
+    assert_eq!(p.separators.len(), 4, "文件菜单应有 4 条分隔线");
+    let border = [theme.chrome_border[0], theme.chrome_border[1], theme.chrome_border[2]];
+    for (_, sy) in &p.separators {
+        let mid = frame.get((p.x + 20.0) as u32, sy.round() as u32);
+        assert_eq!(
+            [mid[0], mid[1], mid[2]],
+            border,
+            "分隔线像素质点应为边框色（y={sy}）"
+        );
+        // 左右内缩：贴边处不应是分隔线
+        let edge = frame.get(p.x as u32, sy.round() as u32);
+        assert_ne!([edge[0], edge[1], edge[2]], border);
+    }
+    // 项行中部不是分隔线色（防止把整行涂成线）
+    let (_, _, iy, _, ih) = p.items[0];
+    let row = frame.get((p.x + 20.0) as u32, (iy + ih / 2.0) as u32);
+    assert_ne!([row[0], row[1], row[2]], border);
+}
+
+#[test]
+fn disabled_menu_item_paints_muted_without_hover() {
+    use crate::theme::{Theme, ThemeMode};
+    let store = MemStore::default();
+    let mut a = app("ab\n", Some("dir/a.md"), false, &store);
+    a.input_state.theme = Theme::of(ThemeMode::Light, false);
+    let theme = a.input_state.theme;
+    a.ui_state.chrome.open = Some(0);
+    // 干净文档：保存禁用，且悬停其上
+    let p = chrome::popup_layout(0, 1.0, &[]);
+    let save = p.items[3]; // 新建 / 打开 / 快速打开 / 保存
+    let (row, sx, sy, sw, sh) = save;
+    a.ui_state.chrome.hover_item = Some((0, row));
+    a.paint();
+    let y0 = sy.ceil() as u32;
+    let y1 = (sy + sh).floor() as u32;
+    let x1 = (sx + sw).floor() as u32;
+    {
+        let frame = a.window_state.frame.as_ref().unwrap();
+        let bg = frame.get(sx as u32 + 2, y0 + 2);
+        assert_eq!(
+            [bg[0], bg[1], bg[2]],
+            [
+                theme.popup_bg[0],
+                theme.popup_bg[1],
+                theme.popup_bg[2]
+            ],
+            "禁用项不得出现悬停底色"
+        );
+        let (mut muted, mut normal) = (0, 0);
+        for y in y0..y1 {
+            for x in (sx as u32)..x1 {
+                let px = frame.get(x, y);
+                let c = [px[0], px[1], px[2]];
+                if c == theme.muted {
+                    muted += 1;
+                }
+                if c == theme.text {
+                    normal += 1;
+                }
+            }
+        }
+        assert!(muted > 0, "禁用项文字应以弱化色绘制");
+        assert_eq!(normal, 0, "禁用项不得使用正常文字色");
+    }
+
+    // 脏文档：保存可用 → 悬停底色 + 正常字色
+    a.editor.apply(Intent::InsertText("c".into())).unwrap();
+    a.paint();
+    let frame = a.window_state.frame.as_ref().unwrap();
+    let bg = frame.get(sx as u32 + 2, y0 + 2);
+    assert_eq!(
+        [bg[0], bg[1], bg[2]],
+        [theme.hover[0], theme.hover[1], theme.hover[2]],
+        "可用项悬停应有底色"
+    );
+    let mut normal = 0;
+    for y in y0..y1 {
+        for x in (sx as u32)..x1 {
+            let px = frame.get(x, y);
+            if [px[0], px[1], px[2]] == theme.text {
+                normal += 1;
+            }
+        }
+    }
+    assert!(normal > 0, "可用项文字应使用正常色");
 }
 
 #[test]

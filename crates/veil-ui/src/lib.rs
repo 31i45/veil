@@ -39,6 +39,7 @@ pub use app::{
     run, url_is_openable, Clipboard, Confirmer, Doc, Exporter, FileDialog, FileEvent, FileStore,
     FileWatcher, PersistEnv, Ports, RecoveryStore, SessionStore, UnsavedChoice, UrlOpener,
 };
+pub use chrome::path_label;
 pub use docio::decode;
 pub use image::{AssetStore, ImageData, ImageLoader};
 pub use math::{MathImage, MathRenderer};

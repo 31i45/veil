@@ -8,7 +8,7 @@
 
 use std::ffi::c_void;
 
-use veil_ui::{Print, PrintSession};
+use veil_ui::{path_label, Print, PrintSession};
 
 type Hwnd = *mut c_void;
 type Hdc = *mut c_void;
@@ -302,12 +302,17 @@ impl Print for WinPrint {
     }
 
     fn export_pdf(&mut self, session: &mut PrintSession) {
-        let Some(target) = session.export_target() else {
-            session.notice("请先保存文档，再导出 PDF");
-            self.print(session);
-            return;
+        // 有关联文件：写同目录同名 PDF；草稿：先问保存位置（取消即中止）
+        let target = match session.export_target() {
+            Some(t) => next_pdf_path(t),
+            None => match session.choose_export_path("未命名.pdf", "pdf") {
+                Some(t) => t,
+                None => {
+                    session.notice("导出已取消");
+                    return;
+                }
+            },
         };
-        let target = next_pdf_path(target);
         let cfg = session.export_options();
         let margin_mm = session.export_margin_mm();
 
@@ -336,7 +341,7 @@ impl Print for WinPrint {
         unsafe { DeleteDC(hdc) };
         session.end();
         match result {
-            Ok(_) => session.notice(&format!("已导出 PDF：{}", target.display())),
+            Ok(_) => session.notice(&format!("已导出 PDF：{}", path_label(Some(target.as_path())))),
             Err(_) => {
                 // next_pdf_path 已保证目标原本不存在：失败时清掉驱动可能留下的半成品
                 let _ = std::fs::remove_file(&target);

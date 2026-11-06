@@ -7,6 +7,8 @@ use crate::geometry::BASE_FONT_SIZE;
 /// 上下文菜单动作：执行映射在 interaction.rs（复用既有剪贴板/插入路径）。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum CtxAction {
+    /// 分组分隔线：无动作、无命中区、不绘制文字。
+    Separator,
     Cut,
     Copy,
     Paste,
@@ -54,25 +56,30 @@ pub(crate) enum CtxKind {
 }
 
 /// 各类上下文的项集（单一来源：布局/命中/分发共用）。
+/// 分隔线按语义分组：编辑类 / 选择类 / 链接类 / 表格结构 / 对齐 / 剪贴板。
 pub(crate) fn items_for(kind: CtxKind) -> Vec<(&'static str, CtxAction)> {
     match kind {
         CtxKind::Selection => vec![
             ("剪切", CtxAction::Cut),
             ("复制", CtxAction::Copy),
             ("粘贴", CtxAction::Paste),
+            ("", CtxAction::Separator),
             ("全选", CtxAction::SelectAll),
         ],
         CtxKind::Link => vec![
             // 「打开」在「复制」之前：链接上下文的首要意图是跳转
             ("在浏览器中打开", CtxAction::OpenLink),
             ("复制链接地址", CtxAction::CopyLink),
+            ("", CtxAction::Separator),
             ("复制", CtxAction::Copy),
             ("粘贴", CtxAction::Paste),
+            ("", CtxAction::Separator),
             ("全选", CtxAction::SelectAll),
         ],
         CtxKind::Block => vec![
             ("粘贴", CtxAction::Paste),
             ("全选", CtxAction::SelectAll),
+            ("", CtxAction::Separator),
             ("插入图片…", CtxAction::InsertImage),
         ],
         CtxKind::Table(tc) => {
@@ -82,16 +89,19 @@ pub(crate) fn items_for(kind: CtxKind) -> Vec<(&'static str, CtxAction)> {
                 items.push(("上方插入行", CtxAction::TableInsertRowAbove));
                 items.push(("下方插入行", CtxAction::TableInsertRowBelow));
                 items.push(("删除行", CtxAction::TableDeleteRow));
+                items.push(("", CtxAction::Separator));
             }
             items.push(("左侧插入列", CtxAction::TableInsertColumnLeft));
             items.push(("右侧插入列", CtxAction::TableInsertColumnRight));
             if tc.ncols > 1 {
                 items.push(("删除列", CtxAction::TableDeleteColumn));
             }
+            items.push(("", CtxAction::Separator));
             // 任意列（含表头、单列）都可对齐
             items.push(("左对齐", CtxAction::TableAlignLeft));
             items.push(("居中", CtxAction::TableAlignCenter));
             items.push(("右对齐", CtxAction::TableAlignRight));
+            items.push(("", CtxAction::Separator));
             items.push(("粘贴", CtxAction::Paste));
             items.push(("全选", CtxAction::SelectAll));
             items
@@ -165,7 +175,14 @@ pub(crate) struct Layout {
     pub(crate) pad: f32,
     /// 面板内边距（上下各一份），命中与绘制共用。
     pub(crate) top_pad: f32,
+    /// (项下标, 相对面板顶部的 y 偏移)；分隔线不在此列。
+    pub(crate) rows: Vec<(usize, f32)>,
+    /// 分隔线中线相对面板顶部的偏移。
+    pub(crate) seps: Vec<f32>,
 }
+
+/// 分隔线占位高度（基准值）：上下各留一半，线高 1px。
+const SEP_H: f32 = 4.0;
 
 pub(crate) fn layout(
     items: &[(&'static str, CtxAction)],
@@ -178,12 +195,26 @@ pub(crate) fn layout(
     let pad = 12.0 * scale;
     let top_pad = 4.0 * scale;
     let item_h = chrome::ITEM_H * scale;
+    let sep_h = SEP_H * scale;
     let widest = items
         .iter()
+        .filter(|(_, a)| *a != CtxAction::Separator)
         .map(|(l, _)| text_width(l, scale))
         .fold(0.0_f32, f32::max);
     let w = (widest + 2.0 * pad).max(120.0 * scale);
-    let h = 2.0 * top_pad + item_h * items.len() as f32;
+    let mut cur = top_pad;
+    let mut rows = Vec::with_capacity(items.len());
+    let mut seps = Vec::new();
+    for (i, (_, a)) in items.iter().enumerate() {
+        if *a == CtxAction::Separator {
+            seps.push(cur + sep_h / 2.0);
+            cur += sep_h;
+        } else {
+            rows.push((i, cur));
+            cur += item_h;
+        }
+    }
+    let h = cur + top_pad;
     let x = x.min((vp_right - w).max(0.0));
     let y = y.min((vp_bottom - h).max(0.0));
     Layout {
@@ -194,16 +225,21 @@ pub(crate) fn layout(
         item_h,
         pad,
         top_pad,
+        rows,
+        seps,
     }
 }
 
-/// 命中项下标（含上边距偏移；面板内空白为 None）。
-pub(crate) fn hit(l: &Layout, count: usize, x: f32, y: f32) -> Option<usize> {
+/// 命中项下标（分隔线与面板空白均返回 None）。
+pub(crate) fn hit(l: &Layout, x: f32, y: f32) -> Option<usize> {
     if x < l.x || x >= l.x + l.w || y < l.y + l.top_pad {
         return None;
     }
-    let i = ((y - l.y - l.top_pad) / l.item_h) as usize;
-    (i < count).then_some(i)
+    let dy = y - l.y;
+    l.rows
+        .iter()
+        .find(|&&(_, off)| dy >= off && dy < off + l.item_h)
+        .map(|&(i, _)| i)
 }
 
 #[cfg(test)]
@@ -283,7 +319,11 @@ mod tests {
         ] {
             assert!(items.iter().any(|&(_, a)| a == want), "缺少 {want:?}");
         }
-        assert_eq!(items.len(), 11, "6 项结构操作 + 3 项对齐 + 粘贴 + 全选");
+        assert_eq!(
+            items.len(),
+            14,
+            "6 项结构操作 + 3 项对齐 + 粘贴 + 全选 + 3 条分隔线"
+        );
     }
 
     #[test]
@@ -326,6 +366,43 @@ mod tests {
     }
 
     #[test]
+    fn every_context_groups_items_with_separators() {
+        for kind in [
+            CtxKind::Selection,
+            CtxKind::Link,
+            CtxKind::Block,
+            CtxKind::Table(TableCtx {
+                body_row: Some(0),
+                col: 0,
+                ncols: 3,
+            }),
+            CtxKind::Table(TableCtx {
+                body_row: None,
+                col: 0,
+                ncols: 1,
+            }),
+        ] {
+            let items = items_for(kind);
+            assert!(
+                items.iter().any(|&(_, a)| a == CtxAction::Separator),
+                "{kind:?} 应有分组分隔线"
+            );
+            assert_ne!(items[0].1, CtxAction::Separator, "首项不得是分隔线");
+            assert_ne!(
+                items.last().unwrap().1,
+                CtxAction::Separator,
+                "末项不得是分隔线"
+            );
+            assert!(
+                !items
+                    .windows(2)
+                    .any(|w| w[0].1 == CtxAction::Separator && w[1].1 == CtxAction::Separator),
+                "{kind:?} 不允许连续分隔线"
+            );
+        }
+    }
+
+    #[test]
     fn layout_clamps_into_viewport() {
         let items = items_for(CtxKind::Block);
         let l = layout(&items, 790.0, 590.0, 800.0, 600.0, 1.0);
@@ -338,15 +415,23 @@ mod tests {
     fn hit_round_trips_items() {
         let items = items_for(CtxKind::Block);
         let l = layout(&items, 100.0, 100.0, 800.0, 600.0, 1.0);
-        for i in 0..items.len() {
-            let y = l.y + 4.0 + l.item_h * i as f32 + 1.0;
-            assert_eq!(hit(&l, items.len(), l.x + 2.0, y), Some(i));
+        // 每个可点项的中心都能命中自身（分隔线不占命中区）
+        for &(i, off) in &l.rows {
+            let y = l.y + off + l.item_h / 2.0;
+            assert_eq!(hit(&l, l.x + 2.0, y), Some(i));
         }
-        assert_eq!(hit(&l, items.len(), l.x + 2.0, l.y + 1.0), None, "上边距无命中");
+        assert_eq!(hit(&l, l.x + 2.0, l.y + 1.0), None, "上边距无命中");
         assert_eq!(
-            hit(&l, items.len(), l.x - 1.0, l.y + l.top_pad + 1.0),
+            hit(&l, l.x - 1.0, l.y + l.top_pad + 1.0),
             None,
             "面板外无命中"
         );
+        // 分隔线中线上无命中
+        for sy in &l.seps {
+            assert_eq!(hit(&l, l.x + 2.0, l.y + sy), None, "分隔线无命中");
+        }
+        // 面板高度 = 上内边距 + 可点项行高 + 分隔线占位 + 下内边距
+        let expect = 2.0 * l.top_pad + l.item_h * l.rows.len() as f32 + 4.0 * l.seps.len() as f32;
+        assert!((l.h - expect).abs() < 0.01, "高度包含分隔线占位");
     }
 }

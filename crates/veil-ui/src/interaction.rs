@@ -680,6 +680,19 @@ impl App {
             .collect()
     }
 
+    /// 菜单开关项与可用性标志的唯一构造点：绘制与命中/执行共用，避免两处漂移。
+    pub(crate) fn menu_flags(&self) -> chrome::MenuFlags {
+        chrome::MenuFlags {
+            fullscreen: self.window_state.fullscreen,
+            focus: self.ui_state.writing.focus,
+            typewriter: self.ui_state.writing.typewriter,
+            source: self.source_mode(),
+            can_save: self.editor.is_dirty() || self.doc.path.is_none(),
+            can_undo: self.editor.session().undo_depth() > 0,
+            can_redo: self.editor.session().redo_depth() > 0,
+        }
+    }
+
     /// 打开最近文件（0b）：复用 open_path（脏文档拒绝；下标越界静默忽略）。
     pub(crate) fn open_recent(&mut self, i: usize) {
         let Some(path) = self.persist_state.recent.get(i).cloned() else {
@@ -692,17 +705,30 @@ impl App {
     /// 有选中时钳位在 `[0, n-1]`。高亮复用绘制既有的 `ctx.hover` / `chrome.hover_item`。
     pub(crate) fn menu_move(&mut self, d: i32) {
         if self.ui_state.ctx.open {
-            let n = self.ui_state.ctx.items().len();
-            if n == 0 {
+            // 可停靠项：跳过分隔线
+            let nav: Vec<usize> = self
+                .ui_state
+                .ctx
+                .items()
+                .iter()
+                .enumerate()
+                .filter(|(_, (_, a))| *a != CtxAction::Separator)
+                .map(|(i, _)| i)
+                .collect();
+            if nav.is_empty() {
                 return;
             }
-            let last = n as i32 - 1;
-            let i = match self.ui_state.ctx.hover {
-                Some(i) => (i as i32 + d).clamp(0, last) as usize,
-                None if d < 0 => n - 1,
+            let i = match self
+                .ui_state
+                .ctx
+                .hover
+                .and_then(|h| nav.iter().position(|&r| r == h))
+            {
+                Some(p) => (p as i32 + d).clamp(0, nav.len() as i32 - 1) as usize,
+                None if d < 0 => nav.len() - 1,
                 None => 0,
             };
-            self.ui_state.ctx.hover = Some(i);
+            self.ui_state.ctx.hover = Some(nav[i]);
             self.request_redraw();
             return;
         }
@@ -710,22 +736,31 @@ impl App {
             return;
         };
         let recent = self.recent_labels();
-        let n = chrome::menu_rows(open, &recent).len();
-        if n == 0 {
+        let rows = chrome::menu_rows(open, &recent);
+        // 可停靠项：跳过分隔线与禁用项（二者无命中反馈、不可执行）
+        let flags = self.menu_flags();
+        let nav: Vec<usize> = rows
+            .iter()
+            .enumerate()
+            .filter(|(_, (_, _, a))| chrome::action_enabled(*a, flags))
+            .map(|(i, _)| i)
+            .collect();
+        if nav.is_empty() {
             return;
         }
-        let last = n as i32 - 1;
         // 只认当前菜单的选中项：切换菜单后残留的旧下标不得参与移动
-        let current = match self.ui_state.chrome.hover_item {
-            Some((m, i)) if m == open && i < n => Some(i),
-            _ => None,
-        };
+        let current = self
+            .ui_state
+            .chrome
+            .hover_item
+            .filter(|(m, _)| *m == open)
+            .and_then(|(_, i)| nav.iter().position(|&r| r == i));
         let i = match current {
-            Some(i) => (i as i32 + d).clamp(0, last) as usize,
-            None if d < 0 => n - 1,
+            Some(p) => (p as i32 + d).clamp(0, nav.len() as i32 - 1) as usize,
+            None if d < 0 => nav.len() - 1,
             None => 0,
         };
-        self.ui_state.chrome.hover_item = Some((open, i));
+        self.ui_state.chrome.hover_item = Some((open, nav[i]));
         self.request_redraw();
     }
 
@@ -755,6 +790,9 @@ impl App {
         let Some(action) = chrome::action_at(open, item, &recent) else {
             return;
         };
+        if !chrome::action_enabled(action, self.menu_flags()) {
+            return; // 禁用项：回车无效果，菜单保持打开
+        }
         self.ui_state.chrome.close();
         self.request_redraw();
         if self.perform_menu(action) {
@@ -807,6 +845,7 @@ impl App {
             MenuAction::InsertLink => self.perform_action(Action::Doc(Intent::InsertLink)),
             MenuAction::OpenRecent(i) => self.open_recent(i),
             MenuAction::QuickOpen => self.open_quick(),
+            MenuAction::Separator => {},
             MenuAction::Quit => return true,
         }
         self.request_redraw();
@@ -1147,6 +1186,7 @@ impl App {
     /// 执行右键菜单动作（菜单随后由调用方关闭；CopyLink 载荷读自 ctx.link）。
     fn ctx_exec(&mut self, action: CtxAction) {
         match action {
+            CtxAction::Separator => {}
             CtxAction::Cut => self.cut_selection(),
             CtxAction::Copy => self.copy_selection(),
             CtxAction::Paste => self.paste_clipboard(),
@@ -1282,7 +1322,7 @@ impl App {
         // 右键菜单打开中：命中项执行；其余位置（含面板内空白）关闭并吞掉
         if self.ui_state.ctx.open {
             let l = self.ctx_layout();
-            let hit = ctx_menu::hit(&l, self.ui_state.ctx.items().len(), mx, my);
+            let hit = ctx_menu::hit(&l, mx, my);
             if let Some(i) = hit {
                 if let Some(a) = self.ui_state.ctx.action(i) {
                     self.ctx_exec(a);
@@ -1295,10 +1335,15 @@ impl App {
         if let Some(open) = self.ui_state.chrome.open {
             let recent = self.recent_labels();
             if let Some(item) = chrome::hit_popup_item(mx, my, open, scale, &recent) {
-                self.ui_state.chrome.close();
                 if let Some(action) = chrome::action_at(open, item, &recent) {
+                    // 禁用项：吞掉点击、菜单保持打开（与原生菜单一致）
+                    if !chrome::action_enabled(action, self.menu_flags()) {
+                        return false;
+                    }
+                    self.ui_state.chrome.close();
                     return self.perform_menu(action);
                 }
+                self.ui_state.chrome.close();
                 return false;
             }
             if chrome::popup_contains(mx, my, open, scale, &recent) {
@@ -1501,7 +1546,7 @@ impl App {
         );
         if self.ui_state.ctx.open {
             let l = self.ctx_layout();
-            let h = ctx_menu::hit(&l, self.ui_state.ctx.items().len(), x, y);
+            let h = ctx_menu::hit(&l, x, y);
             if self.ui_state.ctx.hover != h {
                 self.ui_state.ctx.hover = h;
                 self.request_redraw();
@@ -1748,7 +1793,7 @@ impl App {
         ))
     }
 
-    /// 打开浮层（Ctrl+Shift+P / 菜单）：关闭菜单与查找栏，重建候选（最近文件 + 当前目录）。
+    /// 打开浮层（Ctrl+P / 菜单）：关闭菜单与查找栏，重建候选（最近文件 + 当前目录）。
     pub(crate) fn open_quick(&mut self) {
         self.ui_state.chrome.close();
         self.ui_state.ctx.close();

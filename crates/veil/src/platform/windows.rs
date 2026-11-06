@@ -179,4 +179,20 @@ impl FileDialog for WinDialogs {
             "png",
         )
     }
+
+    fn save_export(&mut self, suggested: &str, ext: &str) -> Option<PathBuf> {
+        let (title, pattern, label) = if ext.eq_ignore_ascii_case("pdf") {
+            ("导出 PDF", "pdf", "PDF (*.pdf)")
+        } else {
+            ("导出 HTML", "html", "HTML (*.html)")
+        };
+        let filter = format!("{label}\u{0}*.{pattern}\u{0}所有文件 (*.*)\u{0}*.*\u{0}\u{0}");
+        run_with(
+            OFN_EXPLORER | OFN_OVERWRITEPROMPT | OFN_HIDEREADONLY | OFN_NOCHANGEDIR,
+            title,
+            Some(suggested),
+            filter.encode_utf16().collect(),
+            pattern,
+        )
+    }
 }

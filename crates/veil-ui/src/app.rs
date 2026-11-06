@@ -85,6 +85,11 @@ pub trait FileDialog {
     fn open_image(&mut self) -> Option<PathBuf> {
         None
     }
+    /// 导出目标对话框（草稿态无关联文件时）：`ext` 为扩展名（`html` / `pdf`），
+    /// 决定标题与过滤器。默认 None：不实现导出的平台视为取消，不产生输出。
+    fn save_export(&mut self, _suggested: &str, _ext: &str) -> Option<PathBuf> {
+        None
+    }
 }
 
 /// 外部文件变更事件（切片 16）：只关心当前关联文件，不携带路径。
@@ -109,11 +114,14 @@ pub trait FileWatcher {
 /// 成功返回产物路径；草稿无路径等可预期失败返回 Err（调用方走 stderr，不崩溃）。
 /// `style` 是当前主题的不可变快照（值传递）：导出器无需感知 Theme/App，只按色值出样式。
 pub trait Exporter {
+    /// `target` 为调用方已选定的输出路径（草稿态经对话框选定）；None 表示沿用
+    /// 源文件同目录同名规则（`source_path.with_extension("html")`）。
     fn export_html(
         &mut self,
         session: &veil_core::Session,
         style: ExportStyle,
         source_path: Option<&Path>,
+        target: Option<&Path>,
     ) -> Result<PathBuf, String>;
 }
 

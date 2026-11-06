@@ -2810,7 +2810,20 @@ fn open_from_dialog_replaces_document() {
     assert_eq!(a.editor.session().serialize(), "# new");
     assert_eq!(a.doc.path.as_deref(), Some(Path::new("b.md")));
     assert!(!a.editor.is_dirty());
-    assert!(a.ui_state.chrome.notice.contains("已打开"));
+    assert_eq!(a.ui_state.chrome.notice, "已打开：b.md");
+}
+
+#[test]
+fn open_from_dialog_notice_uses_path_label() {
+    let store = MemStore::default();
+    store
+        .files
+        .borrow_mut()
+        .insert(PathBuf::from("dir/b.md"), b"# new".to_vec());
+    let (mut a, _calls) = app_dialogs("old", Some("a.md"), false, &store, Some("dir/b.md"), None);
+    a.open_via_dialog();
+    assert_eq!(a.doc.path.as_deref(), Some(Path::new("dir/b.md")));
+    assert_eq!(a.ui_state.chrome.notice, "已打开：b.md · dir");
 }
 
 #[test]
@@ -2829,6 +2842,15 @@ fn save_as_success_switches_path_baseline_and_clears_dirty() {
     assert_eq!(a.doc.baseline, "中ab".as_bytes());
     assert_eq!(store.files.borrow()[Path::new("new.md")], "中ab".as_bytes());
     assert!(a.ui_state.chrome.notice.contains("已另存为"));
+}
+
+#[test]
+fn draft_save_now_routes_to_save_as_dialog() {
+    let store = MemStore::default();
+    let (mut a, calls) = app_dialogs("x", None, false, &store, None, Some("new.md"));
+    a.save_now();
+    assert_eq!(calls.borrow().as_slice(), &["save:未命名.md".to_string()]);
+    assert_eq!(a.doc.path.as_deref(), Some(Path::new("new.md")));
 }
 
 #[test]

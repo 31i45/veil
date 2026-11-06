@@ -556,6 +556,32 @@ D2（触控板捏合，D1 通过即覆盖）、D6（200% DPI 硬件依赖）、D
 | 主菜单分组分隔线 | 通过 | 像素级断言 `file_menu_paints_group_separators_and_recent_block`（4 条线、左右内缩 10*scale、行中部非线色） |
 | 菜单项禁用态（保存/撤销/重做） | 通过 | 像素级 `disabled_menu_item_paints_muted_without_hover` + `menu_keyboard_skips_disabled_items_and_enter_is_noop` + `menu_click_on_disabled_item_keeps_menu_open` |
 | 右键菜单分隔线/分组 | 通过 | `every_context_groups_items_with_separators`、`hit_round_trips_items` |
-| 状态栏/Notice 路径统一 | 通过 | `status_line_variants` 与 notice 系列断言 |
+| 状态栏/Notice 路径统一 | 通过（复核后） | 二轮复核发现 1 处残留：打开文件的 notice 仍是 `已打开 {完整路径}`（无冒号、泄漏全路径），已修为 `已打开：{文件名 · 父目录}` 并补回归 `open_from_dialog_notice_uses_path_label`；`platform/print.rs` 4 处错误文案中文冒号/逗号改英文冒号；`status_line_variants` 与 notice 系列断言 |
 | Ctrl+P 快速打开 / Ctrl+Shift+P 打印 | 通过 | `ctrl_p_quick_opens_and_ctrl_shift_p_prints`（`input.rs` + `mode.rs` 穿透规则） |
 | 草稿态导出/保存先问路径 | 通过 | 见上节真机对话框三行 + 4 个导出/保存用例 |
+
+### 二轮复核（2026-11-06）：真机复测 + 残留清理
+
+复核方式：不信任上一轮结论，逐条回到代码与真机重测。结论——**9 项需求均已落地，但 Notice 统一存在 1 处漏改 + 4 处标点不统一，已修复**。
+
+| 项 | 上轮结论 | 二轮实测 | 处置 |
+|---|---|---|---|
+| 打开文件 notice | 声称已统一（漏审） | 代码仍为 `"已打开 {}"` + `path.display()`：**无冒号 + 完整路径** | 改为 `"已打开：{}"` + `path_label`，新增回归 `open_from_dialog_notice_uses_path_label`（`dir/b.md` → `已打开：b.md · dir`） |
+| 打印/导出错误 notice | 声称英文冒号（漏审） | `print.rs` 3 处中文冒号、1 处逗号 | 4 处统一英文冒号（`打印失败: / 导出失败: / 导出 PDF 失败:`） |
+| 外部备份失败 notice | 未审 | `"外部版本备份失败，取消保存: {e}"` | 改为 `"外部版本备份失败: 取消保存 {e}"` |
+| 窗口标题 | 通过 | 真机重测：`Window Class[veil — sample.md]` | 无需改动 |
+| 三道草稿对话框 | 通过 | 真机重测三行均 `PASS visible=True`，子控件完整（`保存(&S)/取消/帮助(&H)`、导航窗格、地址栏） | 无需改动 |
+| 菜单分隔线/禁用态/右键分组 | 通过 | 代码与像素级用例逐条复看，未发现虚假断言 | 无需改动 |
+| Ctrl+P / Ctrl+Shift+P | 通过 | `input.rs` 与 `mode.rs` 双入口一致；`ctrl_p_quick_opens_and_ctrl_shift_p_prints` 通过 | 无需改动 |
+
+二轮门禁（修复后重跑）：
+
+| 项 | 结果 |
+|---|---|
+| `cargo test --workspace` | ✅ 1044 passed / 12 ignored / 0 failed（新增 2 条回归：打开 notice 走 path_label、草稿保存转另存为） |
+| `cargo clippy --workspace --all-targets -- -D warnings` | ✅ 0 告警 |
+| `cargo build --release -p veil` | ✅ 5,991,936 B（与修复前逐字节一致） |
+| `walkthrough.ps1 -Probe -Widths 240,320,480,800` | ✅ 探针命中 0 行（`run-20261106-204401`） |
+| `walkthrough.ps1 -Perf -PerfChars 200` | ✅ key_us p50=1519 / **p95=2161** / p99=7332 µs；frame p95=4453 µs；rss 38.2 MB |
+
+> 仍未取证的只有「按键注入 + 可视截图」这一类（屏幕被锁屏占用，`PrintWindow` 空图）。其余结论都有代码位置、测试名或真机窗口枚举支撑，没有任何一条仅凭「看起来对」勾选。

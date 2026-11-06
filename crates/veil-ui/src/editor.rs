@@ -270,10 +270,11 @@ impl Editor {
         r
     }
 
-    /// 表格 Ctrl+Enter：整块替换追加空行，并把光标落到新行首单元格。
+    /// 表格结构编辑（Ctrl+Enter 追加行、右键插入/删除行列）：整块替换，
+    /// 并把光标落到新源码中的 `caret_in_block` 处。
     /// 所有表格结构编辑必须经此门面（脏标、撤销分组、光标位置同源），
     /// 视图层不得再直接 `session_mut().apply`。
-    pub(crate) fn append_table_row(
+    pub(crate) fn replace_table_block(
         &mut self,
         block: Range,
         new_src: String,
@@ -2299,7 +2300,7 @@ mod tests {
     }
 
     #[test]
-    fn append_table_row_sets_dirty_and_moves_caret_into_new_row() {
+    fn replace_table_block_sets_dirty_and_moves_caret_into_new_row() {
         let src = "| a | b |\n|---|---|\n| c | d |\n";
         let new_src = "| a | b |\n|---|---|\n| c | d |\n|  |  |\n";
         let body = new_src.trim_end_matches(['\n', '\r']);
@@ -2311,7 +2312,7 @@ mod tests {
 
         let mut e = ed(src, 0);
         let dirty = e
-            .append_table_row(Range::new(0, src.len()), new_src.to_string(), caret_in_block)
+            .replace_table_block(Range::new(0, src.len()), new_src.to_string(), caret_in_block)
             .expect("表格追加行应成功");
 
         assert!(!dirty.is_empty(), "追加行必须返回脏块");

@@ -3,12 +3,18 @@
 # 用法示例：
 #   pwsh -File tools/walkthrough.ps1 -Doc "$env:TEMP\veil-walkthrough\02-混合元素.md" -Widths 240,320,480,800 -ScrollPages 3 -Probe
 #   pwsh -File tools/walkthrough.ps1 -Doc "$env:TEMP\veil-walkthrough\03-10万字.txt" -Measure open,mem -KeepAlive
+#   pwsh -File tools/walkthrough.ps1 -Doc "$env:TEMP\veil-walkthrough\03-10万字.txt" -Perf
 #
 # 说明：
 #   - 按 PID 定位窗口，不依赖前台焦点；滚动用 PostMessage，不抢用户焦点。
 #   - 截图用 PrintWindow（PW_RENDERFULLCONTENT），窗口被遮挡也能取到内容。
 #   - 结束时默认结束目标进程；-KeepAlive 可保留窗口供人工观察。
 #   - 任何失败都会写入 walkthrough.log，并区分「脚本失败」与「产品行为」。
+#
+# Win10 冒烟（启动 / 打开 / 保存 / 打印 / 导出 PDF，交互桌面执行）：
+#   pwsh -File tools/walkthrough.ps1 -Doc "$env:TEMP\veil-smoke\smoke.md" -Steps "wait:1500;click:25,15;wait:400;key:^s;wait:800;shot:save;click:25,15;wait:400;key:{DOWN}{DOWN}{DOWN}{DOWN}{DOWN}{DOWN}{ENTER};wait:5000;shot:done;click:25,15;wait:400;key:{DOWN}{DOWN}{DOWN}{DOWN}{DOWN}{DOWN}{DOWN}{ENTER};wait:2000;shot-screen:print"
+#   期望：保存步骤后 dirty 标记消失；导出步骤后同目录出现 `<stem>.pdf`（以 %PDF 开头）；
+#   打印步骤开系统对话框（shot-screen 取证，人工关闭）。菜单项顺序见 chrome::MENUS
 
 [CmdletBinding()]
 param(
@@ -21,6 +27,8 @@ param(
     [string]$ShotDir = "",
     [switch]$Probe,
     [switch]$Measure,
+    [switch]$Perf,
+    [int]$PerfChars = 200,
     [switch]$KeepAlive,
     [int]$SettleMs = 700,
     [int]$WindowWaitMs = 15000
@@ -411,9 +419,92 @@ function Get-ShotHash {
     (Get-FileHash -LiteralPath $Path -Algorithm MD5).Hash
 }
 
+# ---------- 性能探针场景（-Perf） ----------
+
+# 最近秩百分位（对样本量小的情况也稳定）：p50/p95/p99 均取排序后的 ceil(p*n)-1。
+function Get-Percentile {
+    param([double[]]$Values, [double]$Percent)
+    if ($null -eq $Values -or $Values.Count -eq 0) { return $null }
+    $sorted = @($Values | Sort-Object)
+    $rank = [Math]::Ceiling(($Percent / 100) * $sorted.Count) - 1
+    $idx = [Math]::Min([Math]::Max([int]$rank, 0), $sorted.Count - 1)
+    return $sorted[$idx]
+}
+
+# 固定键入序列 → 收集 stderr 中的 `[perf] {json}` → 打印分位数 / RSS / 重扫比例。
+# 探针行由 veil-ui::perf 输出，字段均为整数（key_us/frame_us/rss_mb/dirty_blocks/
+# total_blocks/rescan_lines/undo_depth）；rescan 比例以源文档行数为分母。
+function Invoke-PerfScenario {
+    param([IntPtr]$Hwnd, [string]$StderrPath, [string]$DocPath, [int]$Chars)
+    # 逐字符 PostMessage 到目标窗口：不依赖前台焦点，也不抢用户焦点
+    # （SendKeys 需要前台焦点，前台锁会让键入落到别处而采集不到 key_us）。
+    # 只发 A–Z 小写字母，避免修饰键与输入法组合。
+    $text = 'a' * [Math]::Max($Chars, 1)
+    foreach ($ch in $text.ToCharArray()) {
+        $vk = [int][char]([char]::ToUpperInvariant($ch))
+        [VeilWalkthrough.Win32]::PostMessage($Hwnd, [VeilWalkthrough.Const]::WM_KEYDOWN, [IntPtr]$vk, [IntPtr]0) | Out-Null
+        Start-Sleep -Milliseconds 12
+        [VeilWalkthrough.Win32]::PostMessage($Hwnd, [VeilWalkthrough.Const]::WM_KEYUP, [IntPtr]$vk, [IntPtr]0) | Out-Null
+        Start-Sleep -Milliseconds 4
+    }
+    Start-Sleep -Milliseconds 1200
+
+    if (-not (Test-Path -LiteralPath $StderrPath)) {
+        throw "脚本失败：找不到 stderr 日志：$StderrPath"
+    }
+    $perfLines = @(Get-Content -LiteralPath $StderrPath -ErrorAction SilentlyContinue |
+        Where-Object { $_ -match '^\[perf\] ' })
+    if ($perfLines.Count -eq 0) {
+        throw "脚本失败：未采集到 [perf] 行（VEIL_PERF_PROBE=1 未生效或探针未启用；见 $StderrPath）"
+    }
+
+    $records = @()
+    foreach ($line in $perfLines) {
+        $json = $line.Substring(7)
+        try {
+            $records += ($json | ConvertFrom-Json)
+        } catch {
+            throw "脚本失败：探针行不是合法 JSON：$line"
+        }
+    }
+
+    $keyUs = @($records | Where-Object { $_ -and ($_.PSObject.Properties.Name -contains 'key_us') } |
+        ForEach-Object { [double]$_.key_us })
+    $frameUs = @($records | Where-Object { $_ -and ($_.PSObject.Properties.Name -contains 'frame_us') } |
+        ForEach-Object { [double]$_.frame_us })
+    $rss = @($records | Where-Object { $_ -and ($_.PSObject.Properties.Name -contains 'rss_mb') } |
+        ForEach-Object { [double]$_.rss_mb })
+    $rescan = @($records | Where-Object { $_ -and ($_.PSObject.Properties.Name -contains 'rescan_lines') } |
+        ForEach-Object { [double]$_.rescan_lines })
+
+    if ($keyUs.Count -eq 0) {
+        throw "脚本失败：探针输出中没有 key_us 样本（共 $($perfLines.Count) 条 [perf] 行）"
+    }
+
+    $avgRss = if ($rss.Count -gt 0) { [Math]::Round(($rss | Measure-Object -Average).Average, 1) } else { $null }
+    $avgRescan = if ($rescan.Count -gt 0) { ($rescan | Measure-Object -Average).Average } else { $null }
+    $ratioText = 'n/a'
+    if ($null -ne $avgRescan -and $DocPath -and (Test-Path -LiteralPath $DocPath)) {
+        $totalLines = @(Get-Content -LiteralPath $DocPath -ErrorAction SilentlyContinue).Count
+        if ($totalLines -gt 0) { $ratioText = ('{0:P2}' -f ($avgRescan / $totalLines)) }
+    }
+
+    Write-Log 'METRIC' "perf samples key=$($keyUs.Count) frame=$($frameUs.Count) edit=$($rescan.Count) lines=$($perfLines.Count)"
+    Write-Log 'METRIC' ("perf key_us  p50={0} p95={1} p99={2}" -f (Get-Percentile $keyUs 50), (Get-Percentile $keyUs 95), (Get-Percentile $keyUs 99))
+    if ($frameUs.Count -gt 0) {
+        Write-Log 'METRIC' ("perf frame_us p50={0} p95={1} p99={2}" -f (Get-Percentile $frameUs 50), (Get-Percentile $frameUs 95), (Get-Percentile $frameUs 99))
+    } else {
+        Write-Log 'WARN' '未采集到 frame_us 样本（窗口可能未重绘）'
+    }
+    Write-Log 'METRIC' "perf rss_mb avg=$avgRss"
+    Write-Log 'METRIC' "perf rescan_lines avg=$avgRescan ratio=$ratioText"
+}
+
 # ---------- 主流程 ----------
 $oldProbe = $env:VEIL_BREAK_PROBE
 if ($Probe) { $env:VEIL_BREAK_PROBE = '1' }
+$oldPerf = $env:VEIL_PERF_PROBE
+if ($Perf) { $env:VEIL_PERF_PROBE = '1' }
 
 $proc = $null
 $procId = 0
@@ -444,6 +535,12 @@ try {
         Write-Log 'WARN' '窗口在 3s 内未达到稳定可见尺寸（可能仍在首帧布局，截图可能不可信）'
     } else {
         Start-Sleep -Milliseconds $SettleMs
+    }
+
+    if ($Perf) {
+        Write-Log 'INFO' "性能场景：VEIL_PERF_PROBE=1，固定键入 $PerfChars 字符"
+        Invoke-PerfScenario -Hwnd $hwnd -StderrPath $stderrPath -DocPath $Doc -Chars $PerfChars
+        return
     }
 
     $shotIndex = 0
@@ -528,6 +625,8 @@ try {
     }
     if ($null -eq $oldProbe) { Remove-Item Env:VEIL_BREAK_PROBE -ErrorAction SilentlyContinue }
     else { $env:VEIL_BREAK_PROBE = $oldProbe }
+    if ($null -eq $oldPerf) { Remove-Item Env:VEIL_PERF_PROBE -ErrorAction SilentlyContinue }
+    else { $env:VEIL_PERF_PROBE = $oldPerf }
     Write-Log 'INFO' "证据目录：$ShotDir"
 }
 

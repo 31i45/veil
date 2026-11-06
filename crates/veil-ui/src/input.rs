@@ -48,6 +48,8 @@ pub enum Key {
     Digit0,
     Minus,
     Equal,
+    /// 逻辑/物理键 `/`（仅 Ctrl 组合映射；无 ctrl 的 `/` 文本由 Text 变体承载）。
+    Slash,
     /// Escape：关闭菜单（切片 15）。
     Escape,
     /// F11：全屏切换（3c-3；不需要修饰键）。
@@ -98,8 +100,12 @@ pub enum Action {
     CloseMenu,
     /// 切换大纲面板（Ctrl+Shift+O）：纯视图动作。
     ToggleOutline,
+    /// 切换源码模式（Ctrl+/）：全文按 Markdown 源码排版；纯视图动作。
+    ToggleSourceMode,
     /// 导出 HTML（Ctrl+E）：由 shell 经 `Exporter` trait 完成（此处不产文档意图）。
     Export,
+    /// 直接导出 PDF（Ctrl+Shift+E）：无打印对话框，由 shell 经 `Print` trait 完成。
+    ExportPdf,
     /// 打印（Ctrl+P）：系统打印对话框（含预览），由 shell 经 `Print` trait 完成。
     Print,
     /// 打开文档内查找栏（Ctrl+F）：纯视图动作。
@@ -141,6 +147,7 @@ pub fn translate(key: Key, mods: Mods) -> Option<Action> {
         Key::O => None, // 无 ctrl 的 o 文本由 Text 变体承载
         Key::Escape => Some(Action::CloseMenu),
         Key::F11 => Some(Action::ToggleFullscreen), // 全屏切换不需要修饰键（3c-3）
+        Key::E if ctrl && mods.shift => Some(Action::ExportPdf),
         Key::E if ctrl => Some(Action::Export),
         Key::E => None, // 无 ctrl 的 e 文本由 Text 变体承载
         Key::F if ctrl => Some(Action::Find),
@@ -165,6 +172,8 @@ pub fn translate(key: Key, mods: Mods) -> Option<Action> {
         Key::Minus if ctrl => Some(Action::ZoomOut),
         Key::Digit0 if ctrl => Some(Action::ZoomReset),
         Key::Digit0 | Key::Minus | Key::Equal => None, // 无 ctrl 的符号文本由 Text 变体承载
+        Key::Slash if ctrl => Some(Action::ToggleSourceMode),
+        Key::Slash => None, // 无 ctrl 的 `/` 文本由 Text 变体承载
         // Ctrl+Shift+←/→ 按词扩选；Ctrl+←/→ 按词移动；Shift+方向为字符级扩选。
         Key::Left if ctrl && mods.shift => Some(Action::Doc(Intent::SelectWordLeft)),
         Key::Right if ctrl && mods.shift => Some(Action::Doc(Intent::SelectWordRight)),
@@ -274,6 +283,14 @@ mod tests {
         assert_eq!(translate(Key::F11, NONE), Some(Action::ToggleFullscreen));
         assert_eq!(translate(Key::F11, CTRL), Some(Action::ToggleFullscreen));
         assert_eq!(translate(Key::Escape, NONE), Some(Action::CloseMenu));
+    }
+
+    #[test]
+    fn source_mode_toggle_binding() {
+        // Ctrl+/ 切换源码模式；无 ctrl 的 `/` 是普通文本（由 Text 变体承载）
+        assert_eq!(translate(Key::Slash, CTRL), Some(Action::ToggleSourceMode));
+        assert_eq!(translate(Key::Slash, NONE), None);
+        assert_eq!(translate(Key::Slash, ALT_GR), None);
     }
 
     #[test]
@@ -450,6 +467,7 @@ mod tests {
     #[test]
     fn export_binding() {
         assert_eq!(translate(Key::E, CTRL), Some(Action::Export));
+        assert_eq!(translate(Key::E, CTRL_SHIFT), Some(Action::ExportPdf));
         assert_eq!(translate(Key::E, NONE), None); // 无 ctrl 的 e 由 Text 变体承载
     }
 

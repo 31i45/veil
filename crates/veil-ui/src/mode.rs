@@ -10,7 +10,7 @@ use crate::input::{translate, Action, Key, Mods};
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Mode {
     Document,
-    /// 菜单展开：只响应 Esc，其余按键吞掉（避免误编辑）。
+    /// 菜单展开：Esc 关闭、↑/↓ 移动选中项、Enter 执行，其余非 Ctrl 键吞掉（避免误编辑）。
     Menu,
     /// 快速打开浮层：文档只读，按键归过滤串与选中项。
     QuickOpen,
@@ -46,6 +46,10 @@ pub(crate) enum Cmd {
     SearchInput(String),
     SearchBackspace,
     SearchPaste,
+    /// 菜单选中项上下移动（右键菜单优先，其次主菜单）。
+    MenuMove(i32),
+    /// 回车：执行菜单选中项。
+    MenuAccept,
     /// 替换模式下 Tab 在查询/替换输入框之间切换焦点。
     SearchToggleField,
     SearchNext,
@@ -72,7 +76,12 @@ pub(crate) fn route(mode: Mode, key: Key, mods: Mods, composing: bool) -> Cmd {
                     None => Cmd::Ignore,
                 }
             } else {
-                Cmd::Ignore
+                match key {
+                    Key::Up => Cmd::MenuMove(-1),
+                    Key::Down => Cmd::MenuMove(1),
+                    Key::Enter => Cmd::MenuAccept,
+                    _ => Cmd::Ignore,
+                }
             }
         }
         Mode::QuickOpen => {
@@ -194,7 +203,7 @@ mod tests {
     fn menu_mode_swallows_non_ctrl_but_passes_ctrl_through() {
         // 非 ctrl 组合：仍被吞（Esc 除外）
         assert_eq!(route(Mode::Menu, Key::Escape, NONE, false), Cmd::CloseMenu);
-        for key in [Key::Enter, Key::Backspace, Key::Left, text("a"), text("中")] {
+        for key in [Key::Backspace, Key::Left, text("a"), text("中")] {
             assert_eq!(route(Mode::Menu, key.clone(), NONE, false), Cmd::Ignore);
             assert_eq!(route(Mode::Menu, key, SHIFT, false), Cmd::Ignore);
         }
@@ -216,6 +225,27 @@ mod tests {
             Cmd::Edit(Action::QuickOpen)
         );
         assert_eq!(route(Mode::Menu, text("f"), CTRL, false), Cmd::Ignore, "ctrl+文本 不绑定则 Ignore");
+    }
+
+    #[test]
+    fn menu_mode_routes_arrows_and_enter() {
+        assert_eq!(route(Mode::Menu, Key::Up, NONE, false), Cmd::MenuMove(-1));
+        assert_eq!(route(Mode::Menu, Key::Down, NONE, false), Cmd::MenuMove(1));
+        assert_eq!(route(Mode::Menu, Key::Enter, NONE, false), Cmd::MenuAccept);
+        assert_eq!(route(Mode::Menu, Key::Escape, NONE, false), Cmd::CloseMenu);
+        // Shift 方向键仍是菜单导航（不是文档扩选）
+        assert_eq!(route(Mode::Menu, Key::Up, SHIFT, false), Cmd::MenuMove(-1));
+        // Ctrl 组合保持穿透：仍交 translate 决定，不劫持为菜单移动
+        assert_eq!(
+            route(Mode::Menu, Key::Down, CTRL, false),
+            Cmd::Edit(Action::MoveVertical(1))
+        );
+        assert_eq!(
+            route(Mode::Menu, Key::F, CTRL, false),
+            Cmd::Edit(Action::Find)
+        );
+        // 字符键仍被吞掉，不得落文档
+        assert_eq!(route(Mode::Menu, text("a"), NONE, false), Cmd::Ignore);
     }
 
     #[test]

@@ -14,6 +14,28 @@ pub(crate) enum CtxAction {
     /// 复制命中链接的 URL（inline 链接才有；引用式无 url 区间不出现本项）。
     CopyLink,
     InsertImage,
+    /// 表格结构操作（B2）：6 项均经 `Editor::replace_table_block` 落入源码。
+    TableInsertRowAbove,
+    TableInsertRowBelow,
+    TableDeleteRow,
+    TableInsertColumnLeft,
+    TableInsertColumnRight,
+    TableDeleteColumn,
+    /// 列对齐（F3）：只改分隔行该列标记。
+    TableAlignLeft,
+    TableAlignCenter,
+    TableAlignRight,
+}
+
+/// 表格右键上下文：打开时刻的命中位置（表头命中时 `body_row` 为 None）。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct TableCtx {
+    /// 命中的正文行下标（0-based）；表头/分隔行为 None（不提供行操作）。
+    pub(crate) body_row: Option<usize>,
+    /// 命中的列下标（0-based）。
+    pub(crate) col: usize,
+    /// 表格列数（单列不提供删除列）。
+    pub(crate) ncols: usize,
 }
 
 /// 打开时刻定的上下文类别：决定项集，打开期间不随编辑变化（菜单是瞬态）。
@@ -25,6 +47,8 @@ pub(crate) enum CtxKind {
     Link,
     /// 其余正文位置。
     Block,
+    /// 表格单元格/结构字符上。
+    Table(TableCtx),
 }
 
 /// 各类上下文的项集（单一来源：布局/命中/分发共用）。
@@ -47,6 +71,27 @@ pub(crate) fn items_for(kind: CtxKind) -> Vec<(&'static str, CtxAction)> {
             ("全选", CtxAction::SelectAll),
             ("插入图片…", CtxAction::InsertImage),
         ],
+        CtxKind::Table(tc) => {
+            let mut items = Vec::new();
+            // 表头只给列操作；正文行才给行操作
+            if tc.body_row.is_some() {
+                items.push(("上方插入行", CtxAction::TableInsertRowAbove));
+                items.push(("下方插入行", CtxAction::TableInsertRowBelow));
+                items.push(("删除行", CtxAction::TableDeleteRow));
+            }
+            items.push(("左侧插入列", CtxAction::TableInsertColumnLeft));
+            items.push(("右侧插入列", CtxAction::TableInsertColumnRight));
+            if tc.ncols > 1 {
+                items.push(("删除列", CtxAction::TableDeleteColumn));
+            }
+            // 任意列（含表头、单列）都可对齐
+            items.push(("左对齐", CtxAction::TableAlignLeft));
+            items.push(("居中", CtxAction::TableAlignCenter));
+            items.push(("右对齐", CtxAction::TableAlignRight));
+            items.push(("粘贴", CtxAction::Paste));
+            items.push(("全选", CtxAction::SelectAll));
+            items
+        }
     }
 }
 
@@ -58,6 +103,8 @@ pub(crate) struct CtxMenu {
     pub(crate) y: f32,
     pub(crate) hover: Option<usize>,
     pub(crate) link: Option<String>,
+    /// 表格上下文（打开时刻定；执行结构操作时读行列信息）。
+    pub(crate) table: Option<TableCtx>,
     items: Vec<(&'static str, CtxAction)>,
 }
 
@@ -68,6 +115,10 @@ impl CtxMenu {
         self.y = y;
         self.hover = None;
         self.link = link;
+        self.table = match kind {
+            CtxKind::Table(tc) => Some(tc),
+            _ => None,
+        };
         self.items = items_for(kind);
     }
 
@@ -75,6 +126,7 @@ impl CtxMenu {
         self.open = false;
         self.hover = None;
         self.link = None;
+        self.table = None;
     }
 
     pub(crate) fn items(&self) -> &[(&'static str, CtxAction)] {
@@ -164,6 +216,100 @@ mod tests {
         let blk = items_for(CtxKind::Block);
         assert!(blk.iter().any(|&(_, a)| a == CtxAction::InsertImage));
         assert!(!blk.iter().any(|&(_, a)| a == CtxAction::Cut), "无选区不出现剪切");
+    }
+
+    #[test]
+    fn table_header_only_offers_column_actions() {
+        let tc = TableCtx {
+            body_row: None,
+            col: 0,
+            ncols: 2,
+        };
+        let items = items_for(CtxKind::Table(tc));
+        assert!(!items.iter().any(|&(_, a)| matches!(
+            a,
+            CtxAction::TableInsertRowAbove
+                | CtxAction::TableInsertRowBelow
+                | CtxAction::TableDeleteRow
+        )));
+        assert!(items.iter().any(|&(_, a)| a == CtxAction::TableInsertColumnLeft));
+        assert!(items.iter().any(|&(_, a)| a == CtxAction::TableInsertColumnRight));
+        assert!(items.iter().any(|&(_, a)| a == CtxAction::TableDeleteColumn));
+        assert!(items.iter().any(|&(_, a)| a == CtxAction::Paste));
+        assert!(items.iter().any(|&(_, a)| a == CtxAction::SelectAll));
+    }
+
+    #[test]
+    fn table_single_column_hides_delete_column() {
+        let tc = TableCtx {
+            body_row: Some(0),
+            col: 0,
+            ncols: 1,
+        };
+        let items = items_for(CtxKind::Table(tc));
+        assert!(items.iter().any(|&(_, a)| a == CtxAction::TableInsertRowAbove));
+        assert!(items.iter().any(|&(_, a)| a == CtxAction::TableDeleteRow));
+        assert!(!items.iter().any(|&(_, a)| a == CtxAction::TableDeleteColumn));
+    }
+
+    #[test]
+    fn table_body_row_offers_all_six_actions() {
+        let tc = TableCtx {
+            body_row: Some(1),
+            col: 0,
+            ncols: 3,
+        };
+        let items = items_for(CtxKind::Table(tc));
+        for want in [
+            CtxAction::TableInsertRowAbove,
+            CtxAction::TableInsertRowBelow,
+            CtxAction::TableDeleteRow,
+            CtxAction::TableInsertColumnLeft,
+            CtxAction::TableInsertColumnRight,
+            CtxAction::TableDeleteColumn,
+        ] {
+            assert!(items.iter().any(|&(_, a)| a == want), "缺少 {want:?}");
+        }
+        assert_eq!(items.len(), 11, "6 项结构操作 + 3 项对齐 + 粘贴 + 全选");
+    }
+
+    #[test]
+    fn table_align_items_present_for_any_column() {
+        for tc in [
+            TableCtx {
+                body_row: None,
+                col: 0,
+                ncols: 1,
+            },
+            TableCtx {
+                body_row: Some(0),
+                col: 2,
+                ncols: 3,
+            },
+        ] {
+            let items = items_for(CtxKind::Table(tc));
+            for want in [
+                CtxAction::TableAlignLeft,
+                CtxAction::TableAlignCenter,
+                CtxAction::TableAlignRight,
+            ] {
+                assert!(items.iter().any(|&(_, a)| a == want), "{tc:?} 缺少 {want:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn opening_table_context_caches_table_and_closes_clears() {
+        let mut m = CtxMenu::default();
+        let tc = TableCtx {
+            body_row: Some(0),
+            col: 1,
+            ncols: 2,
+        };
+        m.open_at(0.0, 0.0, CtxKind::Table(tc), None);
+        assert_eq!(m.table, Some(tc));
+        m.close();
+        assert_eq!(m.table, None);
     }
 
     #[test]

@@ -78,6 +78,12 @@ extern "system" {
 
 #[link(name = "gdi32")]
 extern "system" {
+    fn CreateDCW(
+        pwsz_driver: *const u16,
+        pwsz_device: *const u16,
+        psz_port: *const u16,
+        pdm: *const c_void,
+    ) -> Hdc;
     fn GetDeviceCaps(hdc: Hdc, index: i32) -> i32;
     fn StartDocW(hdc: Hdc, lpdi: *const DocInfoW) -> i32;
     fn EndDoc(hdc: Hdc) -> i32;
@@ -125,18 +131,22 @@ fn wide(s: &str) -> Vec<u16> {
 }
 
 /// 打印作业体（begin 之后必经路径）：StartDoc → 逐页贴帧 → EndDoc/AbortDoc。
+/// `margin`：页帧在物理页内的贴图偏移（像素）；`output`：DOCINFO 输出文件名
+/// （None = 由打印机/对话框决定，PDF 导出时指向目标路径）。
 /// 返回 Ok(已输出页数) 或 Err(提示文案)。任何失败都不留半开作业。
 fn run_print_job(
     hdc: Hdc,
     session: &mut PrintSession,
     from: usize,
     to: usize,
+    margin: i32,
+    output: Option<&[u16]>,
 ) -> Result<usize, &'static str> {
     let doc_name = wide("Veil 文档");
     let di = DocInfoW {
         cb_size: std::mem::size_of::<DocInfoW>() as i32,
         lpsz_doc_name: doc_name.as_ptr(),
-        lpsz_output: std::ptr::null(),
+        lpsz_output: output.map_or(std::ptr::null(), |o| o.as_ptr()),
         lpsz_datatype: std::ptr::null(),
         fw_type: 0,
     };
@@ -161,7 +171,6 @@ fn run_print_job(
                 bi_clr_important: 0,
             };
             let (w, h) = (frame.width, frame.height);
-            let margin = unsafe { GetDeviceCaps(hdc, LOGPIXELSX) }.max(0);
             let lines = unsafe {
                 SetDIBitsToDevice(
                     hdc,
@@ -188,6 +197,39 @@ fn run_print_job(
     }
     unsafe { EndDoc(hdc) };
     Ok(done)
+}
+
+/// 导出页帧几何：毫米边距 → 设备像素，扣除两侧边距得到页帧尺寸。
+/// 纯函数（不碰 DC），便于 headless 断言「页边距数值生效」。
+fn export_frame(page_w: i32, page_h: i32, margin_mm: f32, dpi: i32) -> (i32, u32, u32) {
+    let margin = (margin_mm / 25.4 * dpi.max(1) as f32).round() as i32;
+    let w = (page_w - 2 * margin).max(1) as u32;
+    let h = (page_h - 2 * margin).max(1) as u32;
+    (margin, w, h)
+}
+
+/// 目标 PDF 去重：已存在则 `stem (2).pdf`、`stem (3).pdf`…（纯函数，便于单测）。
+fn next_pdf_path(target: std::path::PathBuf) -> std::path::PathBuf {
+    if !target.exists() {
+        return target;
+    }
+    let stem = target
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("document")
+        .to_string();
+    let dir = target
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_default();
+    let mut n = 2u32;
+    loop {
+        let candidate = dir.join(format!("{stem} ({n}).pdf"));
+        if !candidate.exists() {
+            return candidate;
+        }
+        n = n.saturating_add(1);
+    }
 }
 
 /// Win32 打印端口：系统打印对话框 + GDI 位图输出。
@@ -250,12 +292,102 @@ impl Print for WinPrint {
         } else {
             (1, pages)
         };
-        let result = run_print_job(hdc, session, from, to);
+        let result = run_print_job(hdc, session, from, to, dpi, None);
         unsafe { DeleteDC(hdc) };
         session.end();
         match result {
             Ok(n) => session.notice(&format!("已发送 {n} 页到打印机")),
             Err(e) => session.notice(e),
         }
+    }
+
+    fn export_pdf(&mut self, session: &mut PrintSession) {
+        let Some(target) = session.export_target() else {
+            session.notice("请先保存文档，再导出 PDF");
+            self.print(session);
+            return;
+        };
+        let target = next_pdf_path(target);
+        let cfg = session.export_options();
+        let margin_mm = session.export_margin_mm();
+
+        let driver = wide("WINSPOOL");
+        let device = wide("Microsoft Print to PDF");
+        let hdc = unsafe {
+            CreateDCW(
+                driver.as_ptr(),
+                device.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+            )
+        };
+        if hdc.is_null() {
+            session.notice("导出失败：无法创建 PDF 打印机上下文");
+            self.print(session);
+            return;
+        }
+        let dpi = unsafe { GetDeviceCaps(hdc, LOGPIXELSX) }.max(1);
+        let page_w = unsafe { GetDeviceCaps(hdc, HORZRES) };
+        let page_h = unsafe { GetDeviceCaps(hdc, VERTRES) };
+        let (margin, frame_w, frame_h) = export_frame(page_w, page_h, margin_mm, dpi);
+        let total = session.begin_export(frame_w, frame_h, dpi as f32 / 96.0, cfg);
+        let output = wide(&target.to_string_lossy());
+        let result = run_print_job(hdc, session, 1, total, margin, Some(&output));
+        unsafe { DeleteDC(hdc) };
+        session.end();
+        match result {
+            Ok(_) => session.notice(&format!("已导出 PDF：{}", target.display())),
+            Err(_) => {
+                // next_pdf_path 已保证目标原本不存在：失败时清掉驱动可能留下的半成品
+                let _ = std::fs::remove_file(&target);
+                session.notice("导出 PDF 失败，已回退打印对话框");
+                self.print(session);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{export_frame, next_pdf_path};
+    use std::fs;
+    use std::path::PathBuf;
+
+    #[test]
+    fn export_frame_follows_margin_config() {
+        // A4 @600dpi = 4961x7016；20mm → 472px，10mm → 236px
+        let (m20, w20, h20) = export_frame(4961, 7016, 20.0, 600);
+        let (m10, w10, h10) = export_frame(4961, 7016, 10.0, 600);
+        assert_eq!((m20, m10), (472, 236));
+        assert!(w20 < w10 && h20 < h10, "边距越大页帧越小");
+        assert_eq!(w10 + 2 * (m10 as u32), 4961);
+        assert_eq!(h20 + 2 * (m20 as u32), 7016);
+        // 边距超过半页时钳到 1，不下溢
+        assert_eq!(export_frame(100, 100, 90.0, 600).1, 1);
+        assert_eq!(export_frame(100, 100, 90.0, 600).2, 1);
+    }
+
+    #[test]
+    fn next_pdf_path_increments_until_free() {
+        let dir: PathBuf = std::env::temp_dir().join(format!(
+            "veil_pdf_test_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let base = dir.join("doc.pdf");
+        assert_eq!(next_pdf_path(base.clone()), base, "目标不存在直接用");
+
+        fs::write(&base, b"x").unwrap();
+        let second = dir.join("doc (2).pdf");
+        assert_eq!(next_pdf_path(base.clone()), second);
+
+        fs::write(&second, b"x").unwrap();
+        assert_eq!(next_pdf_path(base), dir.join("doc (3).pdf"));
+
+        fs::remove_dir_all(&dir).unwrap();
     }
 }

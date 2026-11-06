@@ -112,6 +112,7 @@ fn menu_definitions_cover_shortcuts() {
             MenuAction::Save,
             MenuAction::SaveAs,
             MenuAction::Export,
+            MenuAction::ExportPdf,
             MenuAction::Print,
             MenuAction::Quit
         ]
@@ -134,6 +135,42 @@ fn menu_definitions_cover_shortcuts() {
             MenuAction::InsertImage
         ]
     );
+}
+
+#[test]
+fn print_entry_label_has_no_export_wording() {
+    // 「打印…」只负责系统打印对话框；PDF 导出由上方独立的「导出 PDF…」承载
+    let print = MENUS[0]
+        .items
+        .iter()
+        .find(|(_, _, a)| *a == MenuAction::Print)
+        .expect("文件菜单应含打印项");
+    assert_eq!(print.0, "打印…");
+    assert_eq!(print.1, "Ctrl+P");
+    assert!(
+        !MENUS[0].items.iter().any(|(l, _, _)| l.contains("打印")
+            && l.contains("导出 PDF")),
+        "打印项不得再兼提导出 PDF"
+    );
+}
+
+#[test]
+fn view_menu_exposes_source_mode_toggle() {
+    let item = MENUS[2]
+        .items
+        .iter()
+        .find(|(_, _, a)| *a == MenuAction::ToggleSourceMode)
+        .expect("视图菜单应含源码模式");
+    assert_eq!(item.0, "源码模式");
+    assert_eq!(item.1, "Ctrl+/");
+    // 与专注/打字机模式同类开关项相邻
+    let idx = MENUS[2]
+        .items
+        .iter()
+        .position(|(_, _, a)| *a == MenuAction::ToggleSourceMode)
+        .unwrap();
+    assert_eq!(MENUS[2].items[idx + 1].2, MenuAction::ToggleFocus);
+    assert_eq!(MENUS[2].items[idx + 2].2, MenuAction::ToggleTypewriter);
 }
 
 #[test]
@@ -226,7 +263,7 @@ fn scrollbar_hit_requires_overflow_and_right_edge() {
 #[test]
 fn status_line_variants() {
     assert_eq!(
-        status_line(None, false, ExternalState::None, 0, 1, 1),
+        status_line(None, false, ExternalState::None, false, 0, 1, 1),
         ("未命名草稿".into(), "0 字 · 行 1，列 1".into())
     );
     assert_eq!(
@@ -234,6 +271,7 @@ fn status_line_variants() {
             Some(Path::new("dir/a.md")),
             true,
             ExternalState::BackedUp,
+            false,
             1234,
             12,
             3
@@ -244,8 +282,35 @@ fn status_line_variants() {
         )
     );
     assert_eq!(
-        status_line(Some(Path::new("b.md")), false, ExternalState::None, 0, 2, 7).0,
+        status_line(
+            Some(Path::new("b.md")),
+            false,
+            ExternalState::None,
+            false,
+            0,
+            2,
+            7
+        )
+        .0,
         "b.md"
+    );
+}
+
+#[test]
+fn status_line_marks_source_mode() {
+    let p = Some(Path::new("a.md"));
+    assert_eq!(
+        status_line(p, false, ExternalState::None, true, 0, 1, 1).0,
+        "a.md（源码模式）"
+    );
+    // 与外部状态共存时追加在最后，关闭时逐字节等于旧输出
+    assert_eq!(
+        status_line(p, true, ExternalState::Changed, true, 0, 1, 1).0,
+        "a.md *（外部修改）（源码模式）"
+    );
+    assert_eq!(
+        status_line(p, true, ExternalState::Changed, false, 0, 1, 1).0,
+        "a.md *（外部修改）"
     );
 }
 
@@ -253,11 +318,11 @@ fn status_line_variants() {
 fn status_line_marks_external_states() {
     let p = Some(Path::new("a.md"));
     assert_eq!(
-        status_line(p, false, ExternalState::Changed, 0, 1, 1).0,
+        status_line(p, false, ExternalState::Changed, false, 0, 1, 1).0,
         "a.md（外部修改）"
     );
     assert_eq!(
-        status_line(p, true, ExternalState::Missing, 0, 1, 1).0,
+        status_line(p, true, ExternalState::Missing, false, 0, 1, 1).0,
         "a.md *（文件缺失）"
     );
 }
@@ -421,15 +486,43 @@ fn toggle_rows_report_and_paint_checked_state() {
             ..Default::default()
         }
     ));
+    // 源码模式只认自己的开关位，不与其它模式串扰
+    assert!(action_checked(
+        MenuAction::ToggleSourceMode,
+        MenuFlags {
+            source: true,
+            ..Default::default()
+        }
+    ));
+    assert!(!action_checked(
+        MenuAction::ToggleSourceMode,
+        MenuFlags::default()
+    ));
+    assert!(!action_checked(
+        MenuAction::ToggleFocus,
+        MenuFlags {
+            source: true,
+            ..Default::default()
+        }
+    ));
+    assert!(!action_checked(
+        MenuAction::ToggleSourceMode,
+        MenuFlags {
+            focus: true,
+            typewriter: true,
+            ..Default::default()
+        }
+    ));
 
     // 像素级：视图菜单「专注模式」行开启后多出右侧「当前」像素
+    // 帧高需容纳新增源码模式项后的整张弹窗（11 行）
     let theme = Theme::light();
-    let v = viewport(300, 300, 1.0);
+    let v = viewport(300, 400, 1.0);
     let p = popup_layout(2, 1.0, &[]);
-    let (_, ix, iy, iw, ih) = p.items[8];
+    let (_, ix, iy, iw, ih) = p.items[9];
     let shot = |on: bool| {
         let mut engine = LayoutEngine::new();
-        let mut frame = Frame::new(300, 300, [255, 255, 255, 255]);
+        let mut frame = Frame::new(300, 400, [255, 255, 255, 255]);
         let mut chrome = Chrome {
             open: Some(2),
             ..Default::default()
@@ -504,8 +597,9 @@ fn theme_menu_marks_current_mode() {
     assert_eq!(action_at(2, 5, &[]), Some(MenuAction::ThemeSystem));
     assert_eq!(action_at(2, 6, &[]), Some(MenuAction::ThemeLight));
     assert_eq!(action_at(2, 7, &[]), Some(MenuAction::ThemeDark));
-    assert_eq!(action_at(2, 8, &[]), Some(MenuAction::ToggleFocus));
-    assert_eq!(action_at(2, 9, &[]), Some(MenuAction::ToggleTypewriter));
+    assert_eq!(action_at(2, 8, &[]), Some(MenuAction::ToggleSourceMode));
+    assert_eq!(action_at(2, 9, &[]), Some(MenuAction::ToggleFocus));
+    assert_eq!(action_at(2, 10, &[]), Some(MenuAction::ToggleTypewriter));
     assert!(theme_action_matches(
         MenuAction::ThemeSystem,
         ThemeMode::System

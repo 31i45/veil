@@ -3,7 +3,7 @@
 //! v0 取舍（逐条钉在测试上）：
 //! - 样式恒按整节点（含标记）产出；标记消隐（Reveal）由 layout 层 OffsetMap 映射完成。
 //! - 样式叠加走并集（Strong 内嵌 Emph → bold+italic）。
-//! - Link 整 range（含 URL）下划线；行内 Math 不加样式（行内公式渲染属后续切片）。
+//! - Link 整 range（含 URL）置 link 标记，由 layout 按主题链接色上色；行内 Math 不加样式。
 //! - 标题放大是块级属性，由调用方乘进 metrics，不在 spans 内。
 
 use veil_core::{InlineKind, InlineNode, Range};
@@ -13,7 +13,8 @@ pub struct Style {
     pub bold: bool,
     pub italic: bool,
     pub mono: bool,
-    pub underline: bool,
+    /// 链接标记：layout 在无显式前景色时使用主题链接色。
+    pub link: bool,
     /// 删除线：由 paint 层按区间绘制横线（cosmic-text 无原生支持）。
     pub strikethrough: bool,
     /// 语法高亮前景色；None 表示沿用主题默认前景色。
@@ -49,7 +50,7 @@ pub fn style_spans(
                 st.bold |= mst.bold;
                 st.italic |= mst.italic;
                 st.mono |= mst.mono;
-                st.underline |= mst.underline;
+                st.link |= mst.link;
                 st.strikethrough |= mst.strikethrough;
             }
         }
@@ -77,7 +78,7 @@ fn collect(nodes: &[InlineNode], block: Range, out: &mut Vec<(usize, usize, Styl
                 ..Default::default()
             },
             InlineKind::Link => Style {
-                underline: true,
+                link: true,
                 ..Default::default()
             },
             InlineKind::Strikethrough => Style {
@@ -163,10 +164,16 @@ mod tests {
     }
 
     #[test]
-    fn link_underlines_url_too() {
-        // 「[t](http://a)」整节点下划线
-        let sp = spans("[t](http://a)");
-        assert!(find(&sp, 0).underline && find(&sp, 12).underline);
+    fn link_marks_text_and_url_but_not_body() {
+        // 「[t](http://a)」整节点（文本 + URL）link；前后正文不置位
+        let sp = spans("a [t](http://a) b");
+        assert!(find(&sp, 3).link, "链接文本");
+        assert!(find(&sp, 6).link, "URL 起点");
+        assert!(find(&sp, 14).link, "URL 末端");
+        for at in 2..15 {
+            assert!(find(&sp, at).link, "链接整段都应置位: at={at}");
+        }
+        assert!(!find(&sp, 0).link && !find(&sp, 16).link, "正文不得置位");
     }
 
     #[test]

@@ -95,6 +95,8 @@ pub struct Theme {
     pub thumb: [u8; 4],
     pub muted: [u8; 3],
     pub text: [u8; 3],
+    /// 链接前景色（渲染态链接与正文的视觉区分）。
+    pub link: [u8; 3],
     pub syntax: SyntaxColors,
 }
 
@@ -128,6 +130,7 @@ impl Theme {
             thumb: [176, 184, 195, 255],
             muted: [110, 110, 110],
             text: [45, 45, 45],
+            link: [43, 108, 176],
             syntax: SyntaxColors {
                 keyword: [132, 48, 137],   // 紫
                 string: [3, 106, 78],      // 深绿
@@ -157,6 +160,7 @@ impl Theme {
             thumb: [96, 102, 110, 255],
             muted: [160, 160, 160],
             text: [225, 225, 225],
+            link: [127, 180, 245],
             syntax: SyntaxColors {
                 keyword: [197, 134, 192],     // 亮紫
                 string: [125, 191, 153],      // 青绿
@@ -170,24 +174,45 @@ impl Theme {
     }
 }
 
-/// 配置内容：v1 仅主题模式。
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+/// 配置内容：主题模式 + PDF 导出设置。
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Config {
     pub mode: ThemeMode,
+    /// PDF 页边距（毫米）。
+    pub export_margin_mm: f32,
+    /// PDF 页脚页码 `n / total`。
+    pub export_page_numbers: bool,
+    /// PDF 目录页。
+    pub export_toc: bool,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Config {
+            mode: ThemeMode::System,
+            export_margin_mm: 20.0,
+            export_page_numbers: true,
+            export_toc: true,
+        }
+    }
 }
 
 impl Config {
     /// 生成配置文件文本（写入即此格式；`parse_config(to_toml())` 恒等往返）。
     pub fn to_toml(self) -> String {
         format!(
-            "# Veil 配置（自动生成）\n# mode: system（跟随系统）| light | dark\nmode = \"{}\"\n",
-            self.mode.as_str()
+            "# Veil 配置（自动生成）\n# mode: system（跟随系统）| light | dark\nmode = \"{}\"\n\
+             export_margin_mm = {}\nexport_page_numbers = {}\nexport_toc = {}\n",
+            self.mode.as_str(),
+            self.export_margin_mm,
+            self.export_page_numbers,
+            self.export_toc
         )
     }
 }
 
 /// 解析结果：`ignored` 为无法识别的条目数（调用方提示后忽略）。
-#[derive(Clone, PartialEq, Eq, Debug, Default)]
+#[derive(Clone, PartialEq, Debug, Default)]
 pub struct ConfigParse {
     pub config: Config,
     pub ignored: usize,
@@ -211,16 +236,36 @@ pub fn parse_config(text: &str) -> ConfigParse {
             continue;
         };
         let (key, value) = (key.trim(), value.trim());
-        if key == "mode" {
-            match unquote(value).and_then(ThemeMode::parse) {
+        match key {
+            "mode" => match unquote(value).and_then(ThemeMode::parse) {
                 Some(m) => out.config.mode = m,
                 None => out.ignored += 1,
-            }
-        } else {
-            out.ignored += 1;
+            },
+            "export_margin_mm" => match value.parse::<f32>() {
+                Ok(v) if v.is_finite() && v >= 0.0 => out.config.export_margin_mm = v,
+                _ => out.ignored += 1,
+            },
+            "export_page_numbers" => match parse_bool(value) {
+                Some(v) => out.config.export_page_numbers = v,
+                None => out.ignored += 1,
+            },
+            "export_toc" => match parse_bool(value) {
+                Some(v) => out.config.export_toc = v,
+                None => out.ignored += 1,
+            },
+            _ => out.ignored += 1,
         }
     }
     out
+}
+
+/// TOML 布尔字面量（只接受裸 `true`/`false`）。
+fn parse_bool(v: &str) -> Option<bool> {
+    match v {
+        "true" => Some(true),
+        "false" => Some(false),
+        _ => None,
+    }
 }
 
 /// 配置文件字节 → 解析结果：剥 BOM、要求合法 UTF-8（非法编码整体拒绝，用默认主题）。
@@ -450,12 +495,40 @@ mod tests {
     #[test]
     fn config_round_trips_through_toml() {
         for mode in [ThemeMode::System, ThemeMode::Light, ThemeMode::Dark] {
-            let text = Config { mode }.to_toml();
+            let cfg = Config {
+                mode,
+                export_margin_mm: 12.5,
+                export_page_numbers: false,
+                export_toc: true,
+            };
+            let text = cfg.to_toml();
             assert!(!text.contains("[theme]"), "新版配置不再写段标题");
             let p = parse(&text);
-            assert_eq!(p.config.mode, mode);
+            assert_eq!(p.config, cfg);
             assert_eq!(p.ignored, 0, "自产配置不得含无法识别条目");
         }
+    }
+
+    #[test]
+    fn missing_export_keys_use_defaults() {
+        let p = parse("mode = \"dark\"\n");
+        assert_eq!(p.ignored, 0);
+        assert_eq!(p.config.export_margin_mm, 20.0);
+        assert!(p.config.export_page_numbers);
+        assert!(p.config.export_toc);
+        assert_eq!(p.config.mode, ThemeMode::Dark);
+    }
+
+    #[test]
+    fn invalid_export_values_are_ignored_and_keep_defaults() {
+        let p = parse(
+            "export_margin_mm = abc\nexport_page_numbers = \"true\"\nexport_toc = yes\n",
+        );
+        assert_eq!(p.ignored, 3);
+        assert_eq!(p.config, Config::default());
+        // 负/非有限边距同样拒绝
+        assert_eq!(parse("export_margin_mm = -1").ignored, 1);
+        assert_eq!(parse("export_margin_mm = inf").config.export_margin_mm, 20.0);
     }
 
     #[test]
@@ -479,6 +552,16 @@ mod tests {
         assert_eq!(t.thumb, [176, 184, 195, 255]);
         assert_eq!(t.muted, [110, 110, 110]);
         assert_eq!(t.text, [45, 45, 45]);
+        assert_eq!(t.link, [43, 108, 176]);
+    }
+
+    #[test]
+    fn link_colors_are_distinct_from_body_text() {
+        assert_eq!(Theme::dark().link, [127, 180, 245]);
+        for t in [Theme::light(), Theme::dark()] {
+            assert_ne!(t.link, t.text, "链接色必须与菜单/正文文字色不同");
+            assert_ne!(t.link, t.fg, "链接色必须与正文前景色不同");
+        }
     }
 
     #[test]

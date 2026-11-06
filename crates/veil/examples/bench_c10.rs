@@ -30,7 +30,7 @@ fn main() {
     for (id, kind, range) in &blocks {
         let body = session.text_slice(*range).unwrap_or_default();
         let inlines = session.block_inlines(*id).unwrap_or_default();
-        let l = eng.layout_block(kind.clone(), &body, *range, &inlines, 1200.0, usize::MAX, &[]);
+        let l = eng.layout_block(kind.clone(), &body, *range, &inlines, 1200.0, usize::MAX, &[], false);
         black_box(l.height);
     }
     let full_layout_ms = t.elapsed().as_secs_f64() * 1000.0;

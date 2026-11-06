@@ -160,6 +160,21 @@ impl Session {
             .collect()
     }
 
+    /// 当前块总数（只读观测值，供性能探针/测试；不构建快照）。
+    pub fn block_count(&self) -> usize {
+        self.syntax.blocks().len()
+    }
+
+    /// 最近一次编辑的增量重扫行数（只读观测值）。口径见 `Syntax::last_rescan_lines`。
+    pub fn last_rescan_lines(&self) -> usize {
+        self.syntax.last_rescan_lines()
+    }
+
+    /// 当前可撤销步数（只读观测值，不改变撤销分组/裁剪语义）。
+    pub fn undo_depth(&self) -> usize {
+        self.history.undo_len()
+    }
+
     /// 某块的 inline 节点快照（绝对字节偏移）。派生数据，随块结构自动正确；
     /// FencedCode/Math 恒为空，未知 id 返回 None。
     pub fn block_inlines(&self, block: BlockId) -> Option<Vec<InlineNode>> {
@@ -473,5 +488,87 @@ mod tests {
             );
         }
         assert_ranges_consistent(&s);
+    }
+
+    // ===== P0 观测值：block_count / last_rescan_lines / undo_depth =====
+
+    #[test]
+    fn observability_values_track_edits() {
+        let mut s = Session::open("# 标题\n\n第一段\n\n第二段\n");
+        let blocks_before = s.block_count();
+        assert!(blocks_before >= 2, "多块文档应产生多个块");
+        assert_eq!(s.last_rescan_lines(), 0, "首扫不计增量重扫行数");
+        assert_eq!(s.undo_depth(), 0, "打开文档时无撤销步");
+
+        s.apply(insert(0, "x")).unwrap();
+        assert!(s.last_rescan_lines() > 0, "编辑后应记录本次重扫行数");
+        assert_eq!(s.undo_depth(), 1, "首次编辑产生一步");
+        assert_eq!(s.block_count(), blocks_before, "行内编辑不改变块数");
+        assert_eq!(s.serialize(), "x# 标题\n\n第一段\n\n第二段\n");
+
+        // 光标移动断组后，下一次编辑单独成步（不被单字符合并吞掉）
+        s.break_undo_group();
+        let pos = s.serialize().find("第二段").unwrap();
+        s.apply(insert(pos, "y")).unwrap();
+        assert!(s.last_rescan_lines() > 0);
+        assert_eq!(s.undo_depth(), 2, "断组后应新增一步");
+        assert_eq!(s.block_count(), blocks_before);
+
+        s.undo().unwrap();
+        assert_eq!(s.undo_depth(), 1, "撤销后步数回落");
+        assert_eq!(s.serialize(), "x# 标题\n\n第一段\n\n第二段\n");
+    }
+
+    /// release 编辑耗时 bench（不引入 criterion）：
+    /// `cargo test -p veil-core --release bench_edit_reparse_history -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn bench_edit_reparse_history_100k() {
+        use std::time::Instant;
+
+        // 约 10 万字节：2041 个「48 字符 + 空行」段落。
+        let line = format!("{}\n\n", "x".repeat(48));
+        let doc: String = line.repeat(2041);
+        let mut s = Session::open(&doc);
+        let mid_line = 1020;
+        const ITERS: usize = 50;
+
+        let (mut edit_ns, mut reparse_ns, mut history_ns) = (0u128, 0u128, 0u128);
+        for _ in 0..ITERS {
+            let start = s.offset_of_line(mid_line) + 10;
+            let old_start_line = s.buf.line_of_offset(start);
+            let old_end_line = s.buf.line_of_offset(start);
+
+            let t = Instant::now();
+            let deleted = s.buf.edit(start, start, "z");
+            edit_ns += t.elapsed().as_nanos();
+
+            let new_end_line = s.buf.line_of_offset(start + 1);
+            let t = Instant::now();
+            let _dirty = s
+                .syntax
+                .reparse(&s.buf, old_start_line, old_end_line, new_end_line);
+            reparse_ns += t.elapsed().as_nanos();
+
+            let t = Instant::now();
+            s.history.record(Transaction {
+                prim: PrimEdit {
+                    start,
+                    deleted,
+                    inserted: "z".to_owned(),
+                },
+            });
+            history_ns += t.elapsed().as_nanos();
+        }
+
+        let per_iter = |total: u128| total as f64 / ITERS as f64 / 1000.0;
+        println!(
+            "bench 10万字 {ITERS} 次编辑：edit={:.2} µs/次  reparse={:.2} µs/次  history={:.2} µs/次（末次重扫 {} 行）",
+            per_iter(edit_ns),
+            per_iter(reparse_ns),
+            per_iter(history_ns),
+            s.last_rescan_lines()
+        );
+        assert!(s.block_count() >= 2000, "bench 文档应产生大量块");
     }
 }

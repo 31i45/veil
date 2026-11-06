@@ -1,0 +1,14 @@
+[21:46:56.424] INFO  exe=D:\VSCode\Veil\target\release\veil.exe doc=C:\Users\31i45\AppData\Local\Temp\veil-walkthrough\02-混合元素.md probe=True shots=C:\Users\31i45\AppData\Local\Temp\veil-walkthrough\evidence\run-20261106-214655
+[21:46:56.483] INFO  已启动 PID=7460
+[21:46:56.625] INFO  主窗口就绪：句柄=5834876，启动到窗口 183 ms
+[21:46:58.155] INFO  进程窗口并集截图 262x1106（含独立对话框）
+[21:46:58.159] INFO  宽度 240px 截图：C:\Users\31i45\AppData\Local\Temp\veil-walkthrough\evidence\run-20261106-214655\01-w240-p0-20261106-214655.png（PrintWindow=）
+[21:46:58.895] INFO  进程窗口并集截图 342x1106（含独立对话框）
+[21:46:58.897] INFO  宽度 320px 截图：C:\Users\31i45\AppData\Local\Temp\veil-walkthrough\evidence\run-20261106-214655\02-w320-p0-20261106-214655.png（PrintWindow=）
+[21:46:59.650] INFO  进程窗口并集截图 502x1106（含独立对话框）
+[21:46:59.652] INFO  宽度 480px 截图：C:\Users\31i45\AppData\Local\Temp\veil-walkthrough\evidence\run-20261106-214655\03-w480-p0-20261106-214655.png（PrintWindow=）
+[21:47:00.431] INFO  进程窗口并集截图 822x1106（含独立对话框）
+[21:47:00.433] INFO  宽度 800px 截图：C:\Users\31i45\AppData\Local\Temp\veil-walkthrough\evidence\run-20261106-214655\04-w800-p0-20261106-214655.png（PrintWindow=）
+[21:47:00.638] INFO  探针命中行数：0（原始日志：C:\Users\31i45\AppData\Local\Temp\veil-walkthrough\evidence\run-20261106-214655\stderr.log）
+[21:47:00.646] INFO  已结束 PID=7460
+[21:47:00.652] INFO  证据目录：C:\Users\31i45\AppData\Local\Temp\veil-walkthrough\evidence\run-20261106-214655

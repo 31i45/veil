@@ -6280,6 +6280,22 @@ fn menu_click_opens_recent_file() {
 }
 
 #[test]
+fn recent_labels_disambiguate_same_file_name_across_dirs() {
+    // 真机发现：不同目录下的同名文件在最近文件菜单里显示成同一行，无法区分。
+    // 标签必须带父目录（path_label），与状态栏/标题/notice 保持一致。
+    let store = MemStore::default();
+    let rec = FakeRecovery::default();
+    let ses = FakeSession::default();
+    *ses.text.borrow_mut() =
+        Some("recent=dir/a.md\nrecent=dir2/a.md\n".into());
+    let a = app_persist("默认样例", None, &store, &rec, &ses, false);
+    assert_eq!(
+        a.recent_labels(),
+        vec!["a.md · dir".to_string(), "a.md · dir2".to_string()]
+    );
+}
+
+#[test]
 fn open_recent_ignored_when_dirty_or_out_of_range() {
     let store = MemStore::default();
     store

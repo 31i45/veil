@@ -585,3 +585,62 @@ D2（触控板捏合，D1 通过即覆盖）、D6（200% DPI 硬件依赖）、D
 | `walkthrough.ps1 -Perf -PerfChars 200` | ✅ key_us p50=1519 / **p95=2161** / p99=7332 µs；frame p95=4453 µs；rss 38.2 MB |
 
 > 仍未取证的只有「按键注入 + 可视截图」这一类（屏幕被锁屏占用，`PrintWindow` 空图）。其余结论都有代码位置、测试名或真机窗口枚举支撑，没有任何一条仅凭「看起来对」勾选。
+
+## 三轮：解锁桌面后的全量真机走查（2026-11-06 21:10–21:56）
+
+> 前置：交互桌面可用（无锁屏），release 构建 5,992,448 B（含本轮 3 项修复，见下）。
+> 取证方式：`tools/walkthrough.ps1 -Steps` 前台注入（`SetForegroundWindow` + `SetCursorPos` + `mouse_event` + `SendKeys`）+ 窗口截图，全部为真实输入事件，不再是进程内直调。
+> 原始证据：`%TEMP%\veil-walkthrough\evidence\run-20261106-HHMMSS\`；关键截图归档至 [evidence/ux-walkthrough-20261106](evidence/ux-walkthrough-20261106)。
+
+### 前置排障：状态栏「消失」是 DPI 取证假象，不是产品缺陷
+
+| 步骤 | 观察 |
+|---|---|
+| `window-probe.ps1` 逐行像素统计 | 窗口底部每行仅 1 个深色像素、背景值 206 → 初判「状态栏未绘制」 |
+| 改用 `SetProcessDPIAware()` 后重新截图（`shot2.ps1`） | 屏幕 2560×1440（物理），窗口 (0,0)-(1000,800)，客户区 978×744；同一窗口截图**完整显示状态栏**：左 `sample.md · veil-ux`、右 `79 字 · 行 1，列 1` |
+| 根因 | 150% 缩放下 DPI 不感知的 pwsh 混用虚拟/物理坐标，`CopyFromScreen` 只覆盖窗口左上部分，底部被裁掉 |
+| 固化 | `tools/walkthrough.ps1` 在 `Add-Type` 后调用 `SetProcessDPIAware()`，此后所有取自脚本的截图/坐标统一为物理像素 |
+
+### 逐项取证
+
+| # | 场景 | 动作 | 实测 | 证据 |
+|---|---|---|---|---|
+| 1 | 主界面基线 | 打开 `sample.md`，窗口宽 1400 | 标题 `veil — sample.md`；状态栏 `sample.md · veil-ux` ｜ `79 字 · 行 1，列 1`；标题层级/列表/引用/代码块/表格渲染正常 | `01-main-statusbar.png`（run-211023） |
+| 2 | 右键菜单四类 | 链接 (853,150)、表格 (50,456)、全选后正文 (300,150)、普通块 (197,93) | 四类菜单项与分组全部正确：链接「打开/复制链接 ｜ 复制/粘贴 ｜ 全选」、表格「行 ｜ 列 ｜ 对齐 ｜ 粘贴/全选」、选区「剪切/复制/粘贴 ｜ 全选」、块「粘贴/全选 ｜ 插入图片…」；分隔线可见；Esc 逐个关闭 | `02..05-ctx-*.png`（run-211149） |
+| 3 | 系统对话框五类 | Ctrl+O；Ctrl+N 造草稿后 Ctrl+S / Ctrl+E / Ctrl+Shift+E；Ctrl+Shift+P | 「打开 Markdown」（.md 过滤）；「另存为 Markdown」默认 `未命名.md`；「导出 HTML」默认 `未命名.html`；「导出 PDF」默认 `未命名.pdf`；「Veil - 打印」默认 Microsoft Print to PDF | `06-dlg-open.png`（run-211414）、`07..09`（run-211239）、`10-dlg-print.png`（run-211701） |
+| 4 | 视图菜单与主题 | 点击「视图」；切深色 | 全项与快捷键提示正确：大纲面板 / 放大 / 缩小 / 还原缩放 / 全屏 / 跟随系统「当前」/ 浅色 / 深色 / 源码模式 / 专注模式 / 打字机模式；切深色后 notice「主题：深色」，界面即时生效 | `11-view-menu.png`（run-211934） |
+| 5 | 面板与写作模式 | Ctrl+/、Ctrl+Shift+O、放大、专注模式 | 源码模式显示标记；大纲面板出现在**右侧**且列出两条目录项；放大后字号/行高同步；专注模式正文外区域变暗 | `12-outline-panel.png`（run-212108） |
+| 6 | 窄宽排版 | `02-混合元素.md` / `03-10万字.txt` 四档宽度 240/320/480/800 | 修复探针后 `探针命中行数：0`（`run-20261106-214655`）；240px 截图无溢出、无标记压字 | `15-width-240.png` |
+| 7 | 深滚动 | `03-10万字.txt` 800px × 25 页 | 25 页截图**全部变化**、0 FAIL（`run-20261106-212806`）；另一轮 PageDown 不生效时自动改 `WM_MOUSEWHEEL` 后逐页推进，仍 0 FAIL（`run-20261106-212824`，WARN=25 均为该降级记录） | run 目录内 `02..26-w800-p*.png` |
+| 8 | 性能（10 万字） | `-Perf -PerfChars 200` | `key_us` p50=4703 / **p95=6506** / p99=9589 µs；`frame_us` p50=5079 / p95=6781 / p99=7953 µs；rss avg 43.6 MB；rescan 2 行（0.06%）；启动到窗口 182 ms | run-212906 `walkthrough.log` |
+| 9 | 保存链路 | 输入「测试」→ Ctrl+Z → Ctrl+S | 脏态标题 `* veil — sample.md`、状态 `sample.md · veil-ux *`、81 字；保存后星号消失，notice `已保存：sample.md · veil-ux` | run-212929 / run-212941 |
+| 10 | 查找/替换/插图/导出 | Ctrl+F、Ctrl+H、Ctrl+Shift+I、Ctrl+E、Ctrl+Shift+E | 查找与替换双框出现；插图弹系统打开对话框，确认后正文只多一行图片；`sample.html` 含 `<table>`；`sample (8).pdf` 以 `%PDF` 开头且按 `(N)` 去重；notice 均为中文冒号 + `path_label` | run-213038 / 213100 / 213209…213400 |
+| 11 | 菜单禁用态（双向） | 干净态与脏态各打开一次文件菜单，量取文本行最小亮度 | 干净态：`保存`=109（muted）、`另存为`=44、`撤销/重做`=109；脏态（插图后约 0.5s）：`保存`=44，其余可用项同为 44 → 禁用态确实由 `menu_flags()` 实时驱动 | `13-file-menu-fresh.png` / `14-file-menu-dirty.png` |
+| 12 | 最近文件标签 | 清理 `%APPDATA%\Veil\session.txt` 前后各开文件菜单 | 修复前出现两个同名 `smoke.md`（不同目录，无法区分）；修复后菜单仅 `sample.md · veil-ux`，分隔线位置正确 | `13-file-menu-fresh.png`（run-214844） |
+| 13 | 插图单行复测 | 三次独立运行分别对 `ins.md`（2 行）与新建 `ins2.md`（0 行）插图 | 2→3、0→1，均只插入 1 行；渲染正常且自动保存落盘 | run-215306 / 215354 |
+
+### 本轮发现与修复
+
+| 问题 | 性质 | 处置 |
+|---|---|---|
+| 不同目录同名文件在「最近文件」里显示成同一行，无法区分 | **真 UX 缺陷** | [interaction.rs](../../crates/veil-ui/src/interaction.rs) `recent_labels` 改走 `chrome::path_label`（`文件名 · 父目录`），与状态栏/标题/notice 同一套标签；新增回归 `recent_labels_disambiguate_same_file_name_across_dirs` |
+| 断行探针把 `行内公式 $E=mc^2$，块级公式：` 的逗号报成「行首禁则」 | 取证工具误报 | 240/320px 放大截图确认逗号在行尾、公式图在下一行行首；根因是行内公式用 NBSP 占位，探针跳过后误取 `，`。`probe_break_violations` 的 `skip_first` 增加 NBSP 占位识别（行首/行尾分别判定），复测 0 命中 |
+| 窗口底部截图缺失，误判「状态栏未绘制」 | 取证工具误报（DPI） | `tools/walkthrough.ps1` 增加 `SetProcessDPIAware()` |
+| 深滚动到文末后连续输出 FAIL，污染结论 | 取证工具噪声 | 连续 2 页截图相同即判定到达文末并 `break`，日志改为 INFO |
+
+### 三轮门禁（修复后重跑）
+
+| 项 | 结果 |
+|---|---|
+| `cargo test --workspace` | ✅ **1045 passed / 12 ignored / 0 failed**（新增 1 条回归） |
+| `cargo clippy --workspace --all-targets -- -D warnings` | ✅ 0 告警 |
+| `cargo build --release -p veil` | ✅ 5,992,448 B（≈5.71 MiB，红线 15 MiB） |
+| `walkthrough.ps1 -Probe -Widths 240,320,480,800` | ✅ 探针命中 0 行（`run-20261106-214655`） |
+| `walkthrough.ps1 -Perf -PerfChars 200` | ✅ key_us p95 6506 µs ≤ 16 ms；frame_us p95 6781 µs；rss 43.6 MB |
+
+### 本轮限制（如实记录）
+
+- 纯文本字符注入（`SendKeys` 单字符 / 剪贴板粘贴）偶发不落地，因此「编辑产生脏态」的菜单证据改用「插入图片」触发；组合键（Ctrl+*）注入稳定。
+- `ins.md` 首次复测出现连续两行相同图片，此后 3 次独立复测均为单行；归因为上一轮遗留的文件对话框被二次确认，未再复现。
+- PDF 导出 notice 受打印假脱机影响，需等待约 10 s 才能截到（`sample (8).pdf` 那次即为延时截图）。
+- 打印只验证系统对话框弹出与默认打印机，不执行真实打印（物理输出仍为 v1.1 降级项）。

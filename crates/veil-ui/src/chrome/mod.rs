@@ -212,7 +212,8 @@ pub fn hit_menu_bar(x: f32, y: f32, scale: f32) -> Option<usize> {
 }
 
 /// 菜单项行（0b 动态化）：静态项 + 文件菜单末尾插入的最近文件（在「退出」之前）。
-/// 返回 (标签, 快捷键提示, 动作)；最近文件标签为文件名（无文件名回退全路径）。
+/// 返回 (标签, 快捷键提示, 动作)；最近文件标签由调用方按 `path_label` 生成
+/// （`文件名 · 父目录`，同名文件可区分）。
 /// Separator 项原样返回，由 popup_layout / paint 层处理（跳过命中、绘制分隔线）。
 pub(crate) fn menu_rows(open: usize, recent: &[String]) -> Vec<(String, &'static str, MenuAction)> {
     let Some(menu) = MENUS.get(open) else {

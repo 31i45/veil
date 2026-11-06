@@ -19,20 +19,15 @@ target/
 **/*.rs.bk
 Cargo.lock.bak
 
-# ─── Trae / AI agent intermediate artifacts ───
-.trae/skills/
-.trae/documents/
-.trae/specs/drive-v1-excellence/
-.trae/specs/v1-progress-review-and-roadmap/
-.trae/specs/own-line-layout-policy/
-.trae/specs/consolidate-v1-records/
-.trae/specs/fix-window-minimize-crash/
-.trae/specs/close-v1-pending-decisions/
-.trae/specs/finish-v1-release-hardening/
+# ─── Throwaway prototypes (非 workspace 成员，仅本地实验) ───
+spikes/
 
-# Explicitly KEEP: .trae/specs/release-and-roadmap/ (v1.1/v2.0 roadmap is permanent)
+# ─── Trae / AI agent intermediate artifacts ───
+# 整个 .trae/ 不入库，唯一例外是 release-and-roadmap（v1.1/v2.0 长期路线图）。
+.trae/*
+!.trae/specs/
+.trae/specs/*
 !.trae/specs/release-and-roadmap/
-!.trae/specs/release-and-roadmap/**
 
 # ─── ai-dev-skills local instantiation ───
 .skills/
@@ -42,9 +37,12 @@ release-bundle/
 veil-artifact/
 veil-windows-x86_64.zip
 
-# ─── Benchmark outputs (本机实测结果，不入库) ───
+# ─── Benchmark corpus / results (可由 tools/bench/gen_corpus.py 再生，不入库) ───
+bench/corpus/
 bench/results/
-bench/corpus/pathological-10mb.md
+
+# ─── Local UI snapshots ───
+.screenshots/
 
 # ─── Real-device walkthrough evidence (PNG screenshots, local only) ───
 docs/review/evidence/**/*.png

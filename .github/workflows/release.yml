@@ -17,8 +17,6 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
 
       - name: Cache cargo builds
         uses: Swatinem/rust-cache@v2
@@ -33,21 +31,25 @@ jobs:
           $vi = $exe.VersionInfo
           Write-Host "Version: $($vi.ProductVersion) / FileVersion: $($vi.FileVersion)"
 
-      - name: Stage release bundle
+      - name: Extract release notes from CHANGELOG
         run: |
-          New-Item -ItemType Directory -Force veil-artifact | Out-Null
-          Copy-Item target\release\veil.exe veil-artifact\
-          if (Test-Path target\release\veil.pdb) { Copy-Item target\release\veil.pdb veil-artifact\ }
-          Copy-Item README.md, LICENSE, CHANGELOG.md veil-artifact\
-          if (Test-Path icons\veil.ico) {
-            New-Item -ItemType Directory -Force veil-artifact\icons | Out-Null
-            Copy-Item icons\veil.ico veil-artifact\icons\
+          $tag = "${{ github.ref_name }}"
+          $out = @()
+          $inside = $false
+          foreach ($line in Get-Content CHANGELOG.md) {
+            if ($line -match '^##\s+') {
+              if ($line -match ('^##\s+' + [regex]::Escape($tag) + '(\s|$)')) { $inside = $true; $out += $line; continue }
+              elseif ($inside) { break }
+            }
+            if ($inside) { $out += $line }
           }
-          Compress-Archive -Path veil-artifact\* -DestinationPath veil-windows-x86_64.zip -Force
-          $zip = Get-Item veil-windows-x86_64.zip
-          Write-Host "Archive: $($zip.FullName) ($([math]::Round($zip.Length/1MB, 2)) MiB, $($zip.Length) bytes)"
+          if ($out.Count -eq 0) { $out = @('See CHANGELOG.md for details.') }
+          $out -join "`n" | Set-Content -Path release-notes.md -Encoding utf8
+          Write-Host "release-notes.md written: $($out.Count) lines"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: veil-windows-x86_64.zip
+          name: Veil ${{ github.ref_name }}
+          body_path: release-notes.md
+          files: target/release/veil.exe

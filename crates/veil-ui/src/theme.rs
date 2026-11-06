@@ -174,6 +174,62 @@ impl Theme {
     }
 }
 
+/// HTML 导出样式快照：把「当前主题」压缩为导出所需的最小颜色集合。
+///
+/// 为什么单独一个结构：`Theme` 是渲染内部细节（含 chrome/选区/滚动条等导出用不到的色），
+/// 产品层（veil）只应拿到不可变的值语义快照，故只导出具名字段的全 `Copy` 结构，
+/// 导出端不依赖任何 GUI/主题模块即可生成样式。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct ExportStyle {
+    pub dark: bool,
+    pub bg: [u8; 3],
+    pub text: [u8; 3],
+    pub muted: [u8; 3],
+    pub link: [u8; 3],
+    pub code_bg: [u8; 3],
+    pub border: [u8; 3],
+}
+
+impl Default for ExportStyle {
+    /// 浅色默认：与改造前硬编码的导出样式逐色一致，未注入主题时视觉不回退。
+    fn default() -> Self {
+        ExportStyle {
+            dark: false,
+            bg: [0xff, 0xff, 0xff],
+            text: [0x1e, 0x1e, 0x1e],
+            muted: [0x66, 0x66, 0x66],
+            link: [0x2b, 0x6c, 0xb0],
+            code_bg: [0xf5, 0xf5, 0xf5],
+            border: [0xdd, 0xdd, 0xdd],
+        }
+    }
+}
+
+impl ExportStyle {
+    /// 主题 → 导出样式。字段映射：
+    /// - `bg`/`text`/`muted`/`link` 直接取同名主题字段（`text` 取 `fg`，正文前景）；
+    /// - `code_bg` 复用主题 `code_bg`（编辑器代码块底色，导出与屏幕一致）；
+    /// - `border` 复用 `chrome_border`（主题里唯一通用的分界色，表格/引用/分隔线共用）。
+    ///
+    /// 为什么 `pub(crate)`：产品层只消费导出的快照，不需要自己从 `Theme` 推颜色；
+    /// 保持 `Theme` 不进入公共 API（ADR-009 S5 按实际使用收窄导出面）。
+    pub(crate) fn from_theme(t: &Theme) -> Self {
+        /// 主题色为 4 字节（含 alpha），导出 CSS 只需 RGB。
+        const fn rgb(c: [u8; 4]) -> [u8; 3] {
+            [c[0], c[1], c[2]]
+        }
+        ExportStyle {
+            dark: t.dark,
+            bg: rgb(t.bg),
+            text: t.fg,
+            muted: t.muted,
+            link: t.link,
+            code_bg: rgb(t.code_bg),
+            border: rgb(t.chrome_border),
+        }
+    }
+}
+
 /// 配置内容：主题模式 + PDF 导出设置。
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Config {
@@ -615,6 +671,28 @@ mod tests {
                 t.dark
             );
         }
+    }
+
+    #[test]
+    fn export_style_maps_theme_colors() {
+        let light = ExportStyle::from_theme(&Theme::light());
+        assert!(!light.dark);
+        assert_eq!(light.bg, [255, 255, 255]);
+        assert_eq!(light.text, [30, 30, 30]);
+        assert_eq!(light.muted, Theme::light().muted);
+        assert_eq!(light.link, Theme::light().link);
+        // code_bg / border 有对应主题字段：必须逐字节复用，不在导出侧另起一套色
+        assert_eq!(light.code_bg, [245, 245, 245]);
+        assert_eq!(light.border, [208, 213, 221]);
+        let dark = ExportStyle::from_theme(&Theme::dark());
+        assert!(dark.dark);
+        assert_eq!(dark.bg, [30, 30, 30]);
+        assert_eq!(dark.text, [220, 220, 220]); // 取 fg（正文前景），非菜单文字色
+        assert_eq!(dark.code_bg, [40, 40, 40]);
+        assert_eq!(dark.border, [60, 64, 70]);
+        // Default 与主题无关：浅色兜底值固定，供未注入主题的调用方使用
+        assert_eq!(ExportStyle::default().bg, [255, 255, 255]);
+        assert!(!ExportStyle::default().dark);
     }
 
     #[test]

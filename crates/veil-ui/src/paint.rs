@@ -8,7 +8,7 @@ use crate::view::{
     ctx_menu, node_active, outline, oversize_notice, quick_open, search, BlockLayout, Frame,
     InlineAsset, InlineImg, LayoutKey, Memo, TableKey,
 };
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use veil_core::{BlockId, BlockKind, InlineKind, InlineNode, Range};
 
@@ -39,6 +39,8 @@ impl App {
         let caret = self.effective_caret();
         let base = self.base_key();
         let reveal_all = self.source_mode();
+        // 脚注编号表：每轮构建一次（O(引用数)），块内查询 O(1)，不逐块回查会话。
+        let footnotes = self.footnote_ctx();
         self.engine.set_scale(self.input_state.scale);
         let Some(blocks) = self.index.blocks.get(indices) else {
             return;
@@ -165,7 +167,7 @@ impl App {
                     baseline: dh, // 底边贴基线
                 });
             }
-            let l = self.engine.layout_block(
+            let l = self.engine.layout_block_with_footnotes(
                 kind.clone(),
                 &text,
                 range,
@@ -174,6 +176,7 @@ impl App {
                 caret,
                 &imgs,
                 reveal_all,
+                Some(&footnotes),
             );
             let reveal = l.reveal_state(&kind, range, caret);
             self.cache.layouts.insert(
@@ -430,15 +433,19 @@ impl App {
                             .map(|src| (idx, src))
                     })
                     .flatten();
-                pending.push((id, key, t, active));
+                // 含 `[^id]` 的单元格按纯文本降级：core 的 cell.text 已剥掉 `[^`/`]`，
+                // 这里取源码原文交给网格（不编号、不着色），避免「引用的 id 混进正文」。
+                let raw_cells = footnote_cell_sources(self.editor.session(), &t);
+                pending.push((id, key, t, active, raw_cells));
             }
         }
-        for (id, key, t, active) in pending {
-            let l = self.engine.layout_table(
+        for (id, key, t, active, raw_cells) in pending {
+            let l = self.engine.layout_table_opts(
                 &t,
                 width,
                 fg,
                 active.as_ref().map(|(idx, src)| (*idx, src.as_str())),
+                Some(&raw_cells),
             );
             self.cache.tables.insert(
                 id,
@@ -1678,6 +1685,37 @@ fn flat_cell_range(tbl: &veil_core::Table, idx: usize) -> Option<Range> {
         remaining -= row.len();
     }
     None
+}
+
+/// 含脚注引用的单元格 → 源码原文（flat 索引 → 文本）。
+/// 单元格内的 `[^id]` 按纯文本降级（不编号不着色）；core 的可见文本已剥标记，
+/// 因此这里回取源码，保持「原文可见」。空表/无引用时返回空表，调用方零成本。
+fn footnote_cell_sources(
+    session: &veil_core::Session,
+    tbl: &veil_core::Table,
+) -> HashMap<usize, String> {
+    fn has_ref(nodes: &[InlineNode]) -> bool {
+        nodes
+            .iter()
+            .any(|n| n.kind == InlineKind::FootnoteRef || has_ref(&n.children))
+    }
+    let mut out = HashMap::new();
+    let cols = tbl.aligns.len();
+    let mut idx = 0usize;
+    for cells in std::iter::once(&tbl.header).chain(tbl.rows.iter()) {
+        // 与表格排版的 flat 索引口径一致：按列数递增（缺格也占位）。
+        for col in 0..cols {
+            if let Some(cell) = cells.get(col) {
+                if has_ref(&cell.inlines) {
+                    if let Some(src) = session.text_slice(cell.range) {
+                        out.insert(idx, src);
+                    }
+                }
+            }
+            idx += 1;
+        }
+    }
+    out
 }
 
 /// caret 所在单元格的 flat 索引（header 先，rows 后）；不在任何单元格时 None。

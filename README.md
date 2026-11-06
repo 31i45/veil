@@ -51,7 +51,7 @@ Three crates, one-way dependency (`veil` → `veil-ui` → `veil-core`, no rever
 4. File open / save: auto-save, external-modification notice + pre-overwrite backup
 5. Clipboard: plain text, HTML→Markdown conversion, screenshot paste writes to `<doc>.assets/` (incremental names, no overwrite)
 6. Block-level rendering: tables (grid mode + active-cell inline edit; the active cell shows Markdown source, other cells render bold / italic / strikethrough / inline code / links with markers hidden), math (pure Rust via latex-rust), inline images (relative-path PNG, broken link / remote URL degrades to alt text)
-7. HTML export
+7. HTML export: a single self-contained file with no external assets; inline CSS follows the current light/dark theme (background, body text, muted text, link colour, code background, borders), and dark pages declare `color-scheme: dark`
 8. Config & themes: top-level `mode` single source (`system` / `light` / `dark`, backward-compat with old `[theme] mode`), follows system appearance, deep-titlebar / Mica, switch persistent
 9. In-house chrome: menu bar (↑/↓ move, Enter run, Esc close — main and context menus alike), status bar, scroll bar; system file dialogs (Open / Save As)
 10. Writing loop: CJK-calibrated word count, Focus Mode & Typewriter Mode (two mutually-exclusive view toggles, not persisted, reset on launch), Ctrl+Shift+P Quick Open (recent + current-dir candidates), image paste / drag-drop insertion
@@ -59,6 +59,9 @@ Three crates, one-way dependency (`veil` → `veil-ui` → `veil-core`, no rever
 12. Fenced code blocks: syntax highlighting for 16 languages (keywords / strings / comments / numbers / types), implemented as a pure-Rust line-state machine — no `syntect`
 13. Source mode: Ctrl+/ shows the full Markdown source (tables and math blocks included); toggling keeps caret and scroll position; print and export always use the rendered view
 14. PDF export: Ctrl+Shift+E or File → Export PDF… writes `<stem>.pdf` beside the document (name collisions become ` (2)`, ` (3)`); optional TOC page, page numbers and margin (default 20 mm) via `config.toml`; relies on the system "Microsoft Print to PDF". Unsaved drafts or a missing PDF printer fall back to the system print dialog with a notice. Known limits: no PDF bookmarks, no font subsetting
+15. Opening links: `Ctrl+click` an http/https/mailto link (a mouse gesture, not a new shortcut) to hand it to the system default browser or mail client; the caret does not move. The link context menu starts with "Open in Browser", followed by "Copy Link Address". Protocols outside the allowlist only show a notice; Veil itself makes no network requests
+16. GFM footnotes: `[^id]` references and `[^id]: content` definitions. In rendered view, references show as a link-coloured `[n]`, while definition blocks hide the marker and show "number + content + ↩"; numbers follow first-reference order in the document. `Ctrl+click` a reference to jump to its definition, and `Ctrl+click` the trailing `↩` to jump back to the first reference. Source mode (`Ctrl+/`) shows the raw markup. HTML export emits `<sup>` references and a footnote list at the end (with backlinks)
+17. In-document anchors: `Ctrl+click` `[text](#slug)` to jump to the matching heading; exported headings carry `id="<slug>"`; duplicate headings are de-duplicated as `name`, `name-1` (the same `heading_slug` / `heading_slugs` rules used by export)
 
 ## What It Won't Do (v1.0 explicitly out of scope)
 
@@ -69,7 +72,7 @@ Three crates, one-way dependency (`veil` → `veil-ui` → `veil-core`, no rever
 - Table visual editing beyond the delivered subset (merge/split cells, column-width drag); content editing, row/column insert/delete and column alignment are supported
 - Mermaid inline rendering
 - A separate rich-text document model: the text stays Markdown, and Ctrl+/ is a view toggle over the same document
-- Any networking: no sync, no update check, no telemetry
+- Any networking: no sync, no update check, no telemetry; external links are handed to the system default program, and Veil itself makes no network requests
 
 ## Build / Run / Test
 
@@ -93,7 +96,7 @@ Measured on release build, probe-serialized, 2026-11-05 keystroke attribution de
 | Cold start (wall clock, process create → first frame; observation only) | ≤ 300 ms | 450–529 ms (440–470 ms before `main`, process-create overhead on this machine) |
 | Keystroke→commit p95 on 100 K-word doc | ≤ 16 ms | 3.37 ms / 5.20 ms / 9.25 ms (5.0k / 10.5k / 20.0k blocks) ✅ |
 | Resident memory, 100 K-word doc (private working set) | ≤ 150 MB | 40.76 MB |
-| Installed size (single `veil.exe`) | ≤ 15 MiB | 5,914,112 B ≈ 5.64 MiB |
+| Installed size (single `veil.exe`) | ≤ 15 MiB | 5,985,280 B ≈ 5.71 MiB |
 | `veil-core` unit + property tests | ≥ 80 | 209 |
 | E2E assertions | ≥ 20 | 41 (3 e2e scenarios: open→save→reopen, table+image paste, find/replace→crash recovery→self-clean) ✅ |
 | Markdown roundtrip (no edits: output == input bytes) | 100% | 100% |

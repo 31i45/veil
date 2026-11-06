@@ -9,7 +9,7 @@
 //! - 已知简化（同数学块）：跨渲染态表格的选区无高亮。
 
 use cosmic_text::{Align, Attrs, Buffer, FontSystem, Metrics, Shaping, Weight, Wrap};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use veil_core::{BlockKind, CellAlign, Table, TableCell};
 
 use super::layout::{attrs_of, cell_style_spans, probe_break_violations, LayoutEngine};
@@ -103,6 +103,20 @@ impl LayoutEngine {
         color: [u8; 3],
         active: Option<(usize, &str)>,
     ) -> TableLayout {
+        self.layout_table_opts(table, width, color, active, None)
+    }
+
+    /// 带纯文本覆盖的表格排版。`raw_cells`：flat 索引 → 源码原文，
+    /// 用于含脚注引用（`[^id]`）的单元格——core 的 `cell.text` 已剥标记，
+    /// 渲染态要求保留原文，且不编号、不着色（纯文本降级）。
+    pub(crate) fn layout_table_opts(
+        &mut self,
+        table: &Table,
+        width: f32,
+        color: [u8; 3],
+        active: Option<(usize, &str)>,
+        raw_cells: Option<&HashMap<usize, String>>,
+    ) -> TableLayout {
         let scale = self.scale_factor();
         let metrics = Metrics::new(BASE_FONT_SIZE * scale, BASE_LINE_HEIGHT * scale);
         let pad_x = CELL_PAD_X * scale;
@@ -122,10 +136,13 @@ impl LayoutEngine {
             for c in 0..ncols {
                 let cell = row.get(c);
                 let active_src = active.and_then(|(idx, src)| (idx == flat).then_some(src));
+                let raw = raw_cells.and_then(|m| m.get(&flat));
                 let (text, styles) = match active_src {
                     Some(src) => (src, None),
-                    None => match cell {
-                        Some(cell) => (
+                    // 脚注引用单元格：源码原文 + 无样式（不编号、不着色）。
+                    None => match (cell, raw) {
+                        (Some(_), Some(raw)) => (raw.as_str(), None),
+                        (Some(cell), None) => (
                             cell.text.as_str(),
                             cell_style_spans(
                                 cell.range,
@@ -134,7 +151,7 @@ impl LayoutEngine {
                                 link_color,
                             ),
                         ),
-                        None => ("", None),
+                        (None, _) => ("", None),
                     },
                 };
                 row_in.push(CellInput {
@@ -782,5 +799,27 @@ mod tests {
             active.cells[1].pixel_w,
             plain.cells[1].pixel_w
         );
+    }
+
+    #[test]
+    fn footnote_ref_cell_degrades_to_raw_text() {
+        // 单元格内 `[^id]`：按纯文本降级（保留原文、不编号、不着色），
+        // 且不得阻塞折行/光栅（含禁则 probe）。
+        let doc = "| a [^n] b | c |\n| --- | --- |\n\n[^n]: x\n";
+        let s = Session::open(doc);
+        let (id, _, _) = s.blocks()[0];
+        let table = s.table(id).unwrap();
+        let raw = s.text_slice(table.header[0].range).unwrap();
+        assert_eq!(raw, "a [^n] b", "源码区间应保留脚注标记");
+        let mut raw_cells = HashMap::new();
+        raw_cells.insert(0usize, raw);
+        let narrow = LayoutEngine::new()
+            .layout_table_opts(&table, 90.0, [0, 0, 0], None, Some(&raw_cells));
+        assert_eq!(narrow.cells.len(), 2);
+        assert!(narrow.height > 0.0);
+        assert!(!narrow.cells[0].pixels.is_empty(), "降级格仍须正常光栅");
+        // 无覆盖时不 panic：富文本降级路径（core 已剥标记）保持可排版。
+        let plain = LayoutEngine::new().layout_table(&table, 90.0, [0, 0, 0], None);
+        assert_eq!(plain.cells.len(), 2);
     }
 }

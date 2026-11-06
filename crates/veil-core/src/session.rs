@@ -196,6 +196,21 @@ impl Session {
         self.syntax.table(&self.buf, block)
     }
 
+    /// 脚注编号（1 起，按文档顺序首次引用）。未被引用或未知 id 返回 None。
+    pub fn footnote_number(&self, id: &str) -> Option<usize> {
+        self.syntax.footnote_number(id)
+    }
+
+    /// 已编号脚注 id（文档顺序，下标 + 1 = 编号）。
+    pub fn footnote_ids(&self) -> Vec<String> {
+        self.syntax.footnote_ids().to_vec()
+    }
+
+    /// 脚注首个定义的首行内容区间（重复定义 first wins）；无定义返回 None。
+    pub fn footnote_definition(&self, id: &str) -> Option<Range> {
+        self.syntax.footnote_definition(id)
+    }
+
     fn check_bounds(&self, start: usize, end: usize) -> Result<(), EditError> {
         if start > end || end > self.buf.len() {
             return Err(EditError::OutOfRange);
@@ -517,6 +532,60 @@ mod tests {
         s.undo().unwrap();
         assert_eq!(s.undo_depth(), 1, "撤销后步数回落");
         assert_eq!(s.serialize(), "x# 标题\n\n第一段\n\n第二段\n");
+    }
+
+    // ===== 脚注编号表：增量重扫必须与全量重建一致 =====
+
+    /// 编号表是派生数据：增量路径与 `Session::open` 全量重建必须给出同一结果。
+    fn assert_footnotes_match_fresh(s: &Session) {
+        let fresh = Session::open(&s.serialize());
+        assert_eq!(s.footnote_ids(), fresh.footnote_ids(), "编号顺序不一致");
+        for id in fresh.footnote_ids() {
+            assert_eq!(
+                s.footnote_number(&id),
+                fresh.footnote_number(&id),
+                "id={id:?} 编号不一致"
+            );
+        }
+    }
+
+    #[test]
+    fn footnote_numbering_consistent_after_incremental_reparse() {
+        let mut s = Session::open("[^a] [^b]\n\n[^a]: A\n[^b]: B\n");
+        assert_eq!(s.footnote_number("a"), Some(1));
+        assert_eq!(s.footnote_number("b"), Some(2));
+        assert_footnotes_match_fresh(&s);
+
+        // 开头插入对 b 的引用：b 变成首次引用 → b=1、a=2
+        s.apply(insert(0, "[^b] ")).unwrap();
+        assert_eq!(s.footnote_number("b"), Some(1));
+        assert_eq!(s.footnote_number("a"), Some(2));
+        assert_footnotes_match_fresh(&s);
+
+        // 删除 a 的引用后它不再占号（定义仍在也不算引用）
+        let pos = s.serialize().find("[^a]").unwrap();
+        s.apply(Edit::Delete {
+            range: Range::new(pos, pos + 4),
+        })
+        .unwrap();
+        assert_eq!(s.footnote_ids(), vec!["b".to_string()]);
+        assert_eq!(s.footnote_number("a"), None);
+        assert_eq!(s.footnote_number("b"), Some(1));
+        assert_footnotes_match_fresh(&s);
+
+        // 撤销后回到插入态，编号仍须一致
+        s.undo().unwrap();
+        assert_footnotes_match_fresh(&s);
+    }
+
+    #[test]
+    fn footnote_definition_visible_through_session() {
+        let s = Session::open("[^x]: 内容\n");
+        let r = s.footnote_definition("x").expect("脚注定义");
+        assert_eq!(s.text_slice(r).as_deref(), Some(" 内容"));
+        // 未被引用：不占编号
+        assert_eq!(s.footnote_number("x"), None);
+        assert!(s.footnote_ids().is_empty());
     }
 
     /// release 编辑耗时 bench（不引入 criterion）：

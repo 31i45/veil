@@ -100,6 +100,11 @@ pub(super) fn scan_one(buf: &Buffer, line: usize, total: usize) -> (BlockKind, u
     if let Some(n) = table_rows(buf, line, total) {
         return (BlockKind::Table, n);
     }
+    // 脚注定义先于链接引用定义：`[^1]: …` 的 label 以 `^` 开头，若先走链接判定
+    // 会被注册成一条名为 `^1` 的链接引用（GFM 中它是脚注，语义完全不同）。
+    if let Some(n) = footnote_def(buf, line, total) {
+        return (BlockKind::FootnoteDef, n);
+    }
     // 链接引用定义：块起始识别（不打断进行中段落，段落循环不检查此项）
     if let Some(n) = link_ref_def(buf, line, total) {
         return (BlockKind::LinkRefDef, n);
@@ -839,6 +844,11 @@ pub(super) fn parse_link_ref_def(text: &str, base: usize) -> Option<RefDefAst> {
         return None;
     }
     let ls = i + 1;
+    // `[^id]: …` 属脚注定义（GFM），显式排除，避免被当作 label 为 `^id` 的链接
+    // 引用（块级判定已优先走 footnote_def，此处是第二道保险）。
+    if b.get(ls) == Some(&b'^') {
+        return None;
+    }
     let mut j = ls;
     let mut has_non_ws = false;
     let le = loop {
@@ -1021,13 +1031,73 @@ fn link_ref_def(buf: &Buffer, line: usize, total: usize) -> Option<usize> {
     Some(starts.iter().filter(|&&s| s <= ast.len).count().max(1))
 }
 
-/// 引用块的容器剥离视图 + 其中 LinkRefDef 块的行区间（剥离视图与原文行 1:1 对应）。
+// ===== 脚注定义（GFM `[^id]: 内容`） =====
+//
+// 与 LinkRefDef 同构（块起始识别、不打断进行中段落、独立块、源码渲染、无 inline），
+// 取舍如下：
+// - id 限定为字母/数字/`-`/`_`/中文（Unicode alphanumeric 已覆盖中文），不含空白
+//   与 `]`。比 GFM「任意非空白字符」保守：`[^…]` 与图片/链接语法相邻时不会产生
+//   歧义解析，也避免 id 里混入 `^` 等标记字符。
+// - 续行须缩进 ≥4 列（tab 按 4 列制表位展开，与缩进代码块同一口径）；空行夹在
+//   续行之间可保留，末尾空行不计入块区间。GFM 的续行规则正是 4 空格缩进，故直接
+//   复用 `indented_code_lines` 的行吞噬逻辑，保证与既有缩进语义完全一致。
+// - 引用块内的定义走 `scan_quote_defs` 同一容器剥离路径（见下方 `def_lines`）：
+//   这些行被排除出 inline，否则定义行自身会被解析成引用；脚注定义不注册进链接
+//   引用表，`quote_link_ref_defs` 遇到它们会因 `^` 前缀被显式跳过。
+
+/// 解析脚注定义首行，返回 (id 区间, 首行内容区间)，均为 `base` 基准绝对偏移。
+/// 内容区间自 `:` 之后至行尾（不含换行）；非法定义返回 None。
+pub(super) fn parse_footnote_def(line: &str, base: usize) -> Option<(Range, Range)> {
+    let (indent, start) = indent_info(line);
+    if indent > 3 {
+        return None;
+    }
+    let b = line.as_bytes();
+    if b.get(start) != Some(&b'[') || b.get(start + 1) != Some(&b'^') {
+        return None;
+    }
+    let id_start = start + 2;
+    let mut i = id_start;
+    loop {
+        let Some(&c) = b.get(i) else {
+            return None; // 未闭合 `]`：不是定义
+        };
+        if c == b']' {
+            break;
+        }
+        let ch = line[i..].chars().next()?;
+        if !(ch.is_alphanumeric() || ch == '-' || ch == '_') {
+            return None;
+        }
+        i += ch.len_utf8();
+    }
+    let id_end = i;
+    if id_end == id_start || b.get(id_end + 1) != Some(&b':') {
+        return None;
+    }
+    let content_start = id_end + 2;
+    let line_end = line.trim_end_matches(['\r', '\n']).len();
+    Some((
+        Range::new(base + id_start, base + id_end),
+        Range::new(base + content_start.min(line_end), base + line_end),
+    ))
+}
+
+/// 块起始处识别脚注定义，返回消耗行数。首行前缀合法后，续行口径与缩进代码块
+/// 完全一致（空行暂存、非空行须缩进 ≥4 列、末尾空行不计入）。
+fn footnote_def(buf: &Buffer, line: usize, total: usize) -> Option<usize> {
+    parse_footnote_def(&line_text(buf, line), 0)?;
+    Some(indented_code_lines(buf, line, total))
+}
+
+/// 引用块的容器剥离视图 + 其中定义块（LinkRefDef / FootnoteDef）的行区间
+/// （剥离视图与原文行 1:1 对应）。
 struct QuoteDefScan {
     /// 剥离容器标记后的文本（临时 Buffer，行号与原文一致）。
     buf: Buffer,
     /// (剥离行起点, 该行内容文档绝对起点)
     line_map: Vec<(usize, usize)>,
-    /// LinkRefDef 块覆盖的行区间 [start, end)。
+    /// 定义块覆盖的行区间 [start, end)，两类定义同走此路径。
     def_lines: Vec<(usize, usize)>,
 }
 
@@ -1050,10 +1120,11 @@ fn scan_quote_defs(text: &str, base: usize) -> Option<QuoteDefScan> {
         return None;
     }
     let buf = Buffer::new(&stripped);
-    // 剥离文本走同一套块扫描：保证「定义不能打断进行中段落」等规则与顶层一致
+    // 剥离文本走同一套块扫描：保证「定义不能打断进行中段落」等规则与顶层一致。
+    // 脚注定义与链接引用定义共用容器剥离路径，两类行都必须从 inline 中剔除。
     let def_lines = scan_blocks(&buf, 0, buf.line_count())
         .into_iter()
-        .filter(|(k, _, _)| *k == BlockKind::LinkRefDef)
+        .filter(|(k, _, _)| matches!(k, BlockKind::LinkRefDef | BlockKind::FootnoteDef))
         .map(|(_, s, e)| (s, e))
         .collect();
     Some(QuoteDefScan {
@@ -1063,7 +1134,7 @@ fn scan_quote_defs(text: &str, base: usize) -> Option<QuoteDefScan> {
     })
 }
 
-/// 引用块内属于链接引用定义的行区间（行号为块内相对行）。
+/// 引用块内属于定义块（链接引用定义 / 脚注定义）的行区间（行号为块内相对行）。
 /// 这些行不产生 inline（Example 218：定义被消耗后引用块为空）。
 pub(super) fn quote_def_lines(text: &str) -> Vec<(usize, usize)> {
     scan_quote_defs(text, 0)
@@ -1558,6 +1629,8 @@ fn push_visible(
         let ce = n.content.end.saturating_sub(base);
         match n.kind {
             InlineKind::Code | InlineKind::Math => out.push_str(&src[cs..ce]),
+            // 脚注引用的可见文本暂取 id（视图层有编号表时按编号渲染）
+            InlineKind::FootnoteRef => out.push_str(&src[cs..ce]),
             InlineKind::Strong
             | InlineKind::Emph
             | InlineKind::Strikethrough

@@ -563,6 +563,7 @@ impl<'a> InlineParser<'a> {
                     .or_else(|| self.try_code_span())
                     .or_else(|| self.try_math())
                     .or_else(|| self.try_strikethrough(depth))
+                    .or_else(|| self.try_footnote_ref())
                     .or_else(|| self.try_image())
                     .or_else(|| {
                         if allow_link {
@@ -781,6 +782,56 @@ impl<'a> InlineParser<'a> {
             None,
             children,
         ))
+    }
+
+    /// `[^id]`（GFM 脚注引用）：节点 `content` 为 id 文本区间，不查定义——缺失定义
+    /// 仍产出节点，由视图按编号表降级。id 字符集与块级 `parse_footnote_def` 同源
+    /// （字母/数字/`-`/`_`/中文），故两处不会对同一个 `[^…]` 给出不同边界。
+    /// `![^id]` 是图片语法：紧邻的未转义 `!` 使本分支让位，避免把图片 alt 拆成
+    /// 一个 `!` 文本 + 脚注引用。
+    fn try_footnote_ref(&mut self) -> Option<InlineNode> {
+        let rest = &self.s[self.pos..];
+        let inner = rest.strip_prefix("[^")?;
+        if self.pos > 0
+            && self.s.as_bytes()[self.pos - 1] == b'!'
+            && !self.is_escaped(self.pos - 1)
+        {
+            return None;
+        }
+        let mut id_len = 0usize;
+        for (off, c) in inner.char_indices() {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                id_len = off + c.len_utf8();
+            } else {
+                break;
+            }
+        }
+        if id_len == 0 || inner.as_bytes().get(id_len) != Some(&b']') {
+            return None;
+        }
+        let start = self.pos;
+        let content_start = start + 2;
+        let content_end = content_start + id_len;
+        self.pos = content_end + 1;
+        Some(self.node(
+            InlineKind::FootnoteRef,
+            start,
+            content_start,
+            content_end,
+            None,
+            Vec::new(),
+        ))
+    }
+
+    /// 位置 `i` 的字符是否被反斜杠转义（前导连续反斜杠数为奇数）。
+    fn is_escaped(&self, i: usize) -> bool {
+        let mut n = 0;
+        let mut k = i;
+        while k > 0 && self.s.as_bytes()[k - 1] == b'\\' {
+            n += 1;
+            k -= 1;
+        }
+        n % 2 == 1
     }
 
     /// `[text](url)` / `[text][label]` / `[text][]` / `[text]`（shortcut）。

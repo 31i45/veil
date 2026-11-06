@@ -18,7 +18,10 @@ use crate::view::{ctx_menu, outline, quick_open, search};
 use crate::view::ctx_menu::{CtxAction, CtxKind, TableCtx};
 use std::path::Path;
 use std::time::{Duration, Instant};
-use veil_core::{task_span, BlockId, BlockKind, CellAlign, InlineKind, InlineNode, Range};
+use veil_core::{
+    heading_slug, heading_slugs, task_span, BlockId, BlockKind, CellAlign, InlineKind, InlineNode,
+    Range,
+};
 use winit::event::ElementState;
 use winit::keyboard::{Key as WKey, KeyCode, NamedKey, PhysicalKey};
 use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
@@ -956,6 +959,191 @@ impl App {
         self.editor.session().text_slice(url)
     }
 
+    /// 命中偏移处的脚注引用 id（`[^id]` 的整段 `range` 包含判定）。
+    /// 渲染态 `[^id]` 是替换段 `[n]`，点击 `[n]` 逆映射出的 doc 偏移仍落在节点
+    /// `range` 内，因此这里只能按源码区间判命中，不能拿可见文本 `[n]` 反查。
+    fn footnote_ref_id_at(&self, offset: usize) -> Option<String> {
+        let g = self
+            .index
+            .blocks
+            .iter()
+            .find(|g| g.range.start <= offset && offset < g.range.end)?;
+        let nodes = self.editor.session().block_inlines(g.id)?;
+        fn find(nodes: &[InlineNode], off: usize) -> Option<Range> {
+            nodes.iter().find_map(|n| {
+                if n.range.start <= off && off < n.range.end {
+                    if n.kind == InlineKind::FootnoteRef {
+                        return Some(n.content);
+                    }
+                    find(&n.children, off)
+                } else {
+                    None
+                }
+            })
+        }
+        let content = find(&nodes, offset)?;
+        self.editor.session().text_slice(content)
+    }
+
+    /// 文档顺序中首个 `[^id]` 引用节点起点（多引用时规范为「回到第一次引用」）。
+    fn first_footnote_ref(&self, id: &str) -> Option<usize> {
+        // 块按索引顺序、inline 按节点顺序递归，即文档顺序。
+        let session = self.editor.session();
+        for g in &self.index.blocks {
+            let Some(nodes) = session.block_inlines(g.id) else {
+                continue;
+            };
+            for n in &nodes {
+                if let Some(p) = self.find_inline_ref(n, id) {
+                    return Some(p);
+                }
+            }
+        }
+        None
+    }
+
+    fn find_inline_ref(&self, n: &InlineNode, id: &str) -> Option<usize> {
+        if n.kind == InlineKind::FootnoteRef
+            && self.editor.session().text_slice(n.content).as_deref() == Some(id)
+        {
+            return Some(n.range.start);
+        }
+        n.children.iter().find_map(|c| self.find_inline_ref(c, id))
+    }
+
+    /// 应用内跳转统一落点：设置光标 + 滚到可见。只动光标标记与滚动量，
+    /// 不编辑文档、不开撤销步（Ctrl+单击跳转不是编辑行为）。
+    fn jump_to_offset(&mut self, target: usize) {
+        if !self.editor.set_caret(target) {
+            return;
+        }
+        self.window_state.goal_x = None;
+        self.scroll_to_caret();
+        self.set_ime_area();
+        self.request_redraw();
+    }
+
+    /// Ctrl+单击脚注引用 → 定义内容起点。命中即消费点击（返回 true），
+    /// 未定义时提示但光标保持原位——用户预期是「跳过去」，不是「落光标」。
+    fn follow_footnote_ref(&mut self, offset: usize) -> bool {
+        let Some(id) = self.footnote_ref_id_at(offset) else {
+            return false;
+        };
+        let def = self.editor.session().footnote_definition(&id);
+        match def {
+            Some(def) => self.jump_to_offset(def.start),
+            None => {
+                self.ui_state.chrome.notice = "未找到脚注定义".to_string();
+                self.request_redraw();
+            }
+        }
+        true
+    }
+
+    /// Ctrl+单击定义块末尾 `↩` → 该 id 的首个引用（`↩` 为零宽插入段，锚在块末）。
+    fn follow_footnote_back(&mut self, offset: usize) -> bool {
+        // 文末无换行时块末命中可能等于 range.end，故对最后一个块补一次回退查找。
+        let Some(idx) = self
+            .index
+            .blocks
+            .iter()
+            .position(|g| g.range.start <= offset && offset < g.range.end)
+            .or_else(|| {
+                self.index
+                    .blocks
+                    .iter()
+                    .rposition(|g| g.range.end == offset)
+            })
+        else {
+            return false;
+        };
+        let (kind, range) = {
+            let g = &self.index.blocks[idx];
+            (g.kind.clone(), g.range)
+        };
+        if kind != BlockKind::FootnoteDef {
+            return false;
+        }
+        let text = self.editor.session().text_slice(range).unwrap_or_default();
+        // 排版 body 会剥掉末尾单个 `\n`（`↩` 插在 body.len() 处），故块末正文
+        // 末尾 = range.end - 1；命中逆映射只可能得到该点或 range.end（文末无换行）。
+        // 判 `offset >= body_end` 即命中返回标记，不必再猜可见字符宽度。
+        let body_end = range.start + text.strip_suffix('\n').unwrap_or(&text).len();
+        if offset < body_end {
+            return false;
+        }
+        let Some(id) = footnote_def_id(&text) else {
+            return false;
+        };
+        let target = self.first_footnote_ref(id);
+        match target {
+            Some(start) => self.jump_to_offset(start),
+            None => {
+                self.ui_state.chrome.notice = "未找到脚注引用".to_string();
+                self.request_redraw();
+            }
+        }
+        true
+    }
+
+    /// Ctrl+单击 `[文本](#slug)` → 同文档标题起点。
+    /// slug 先按导出口径（`heading_slugs` 去重结果）原样匹配，未命中再按
+    /// `heading_slug` 归一化匹配，容忍用户手写 `#Hello World` 这类非导出值。
+    fn jump_to_anchor(&mut self, url: &str) {
+        let slug = url.trim().trim_start_matches('#');
+        let target = {
+            let session = self.editor.session();
+            let mut starts = Vec::new();
+            let mut texts = Vec::new();
+            for g in &self.index.blocks {
+                if !matches!(
+                    g.kind,
+                    BlockKind::AtxHeading(_) | BlockKind::SetextHeading(_)
+                ) {
+                    continue;
+                }
+                if let Some((_, text)) = session.heading(g.id) {
+                    starts.push(g.range.start);
+                    texts.push(text);
+                }
+            }
+            let slugs = heading_slugs(texts.iter().map(String::as_str));
+            let exact = slugs.iter().position(|s| s == slug);
+            exact
+                .or_else(|| {
+                    let norm = heading_slug(slug);
+                    slugs.iter().position(|s| *s == norm)
+                })
+                .map(|i| starts[i])
+        };
+        match target {
+            Some(start) => self.jump_to_offset(start),
+            None => {
+                self.ui_state.chrome.notice = "未找到锚点".to_string();
+                self.request_redraw();
+            }
+        }
+    }
+
+    /// 用系统默认程序打开链接：Ctrl+左键与右键菜单「在浏览器中打开」共用此路径。
+    /// 协议白名单在此统一校验（不信任文档内容）；`#anchor` 属应用内跳转（另一任务），
+    /// 静默忽略，绝不交给系统 shell。失败原因直接写状态栏，不打断编辑。
+    pub(crate) fn open_link(&mut self, url: &str) {
+        let target = url.trim();
+        if target.starts_with('#') {
+            return; // 应用内锚点：由后续任务处理，这里不弹提示也不调端口
+        }
+        if !crate::url_is_openable(target) {
+            self.ui_state.chrome.notice = format!("无法打开链接: 不支持的链接地址 {target}");
+            self.request_redraw();
+            return;
+        }
+        if let Err(e) = self.ports.url_opener.open_url(target) {
+            self.ui_state.chrome.notice = format!("无法打开链接: {e}");
+        }
+        self.request_redraw();
+    }
+
     /// 执行右键菜单动作（菜单随后由调用方关闭；CopyLink 载荷读自 ctx.link）。
     fn ctx_exec(&mut self, action: CtxAction) {
         match action {
@@ -966,6 +1154,11 @@ impl App {
             CtxAction::CopyLink => {
                 if let Some(u) = self.ui_state.ctx.link.clone() {
                     self.ports.clipboard.set(&u);
+                }
+            }
+            CtxAction::OpenLink => {
+                if let Some(u) = self.ui_state.ctx.link.clone() {
+                    self.open_link(&u);
                 }
             }
             CtxAction::InsertImage => self.insert_image_via_dialog(),
@@ -1213,6 +1406,26 @@ impl App {
                     self.jump_outline(i);
                 }
                 return false;
+            }
+        }
+        // Ctrl+左键：应用内跳转（`#anchor` → 脚注引用 → 定义末尾返回）优先，
+        // 其余 http/https/mailto 才交给系统默认程序。必须在此提前返回——
+        // 后续落光标/双击选词会移动光标、改选区，甚至开启撤销步，
+        // 而「跳转/打开链接」都不应产生任何编辑副作用（文档真值保持只读）。
+        if self.input_state.mods.ctrl {
+            if let Some(off) = self.hit_offset() {
+                let link = self.link_at(off);
+                if let Some(url) = link.as_deref().filter(|u| u.trim().starts_with('#')) {
+                    self.jump_to_anchor(url);
+                    return false;
+                }
+                if self.follow_footnote_ref(off) || self.follow_footnote_back(off) {
+                    return false;
+                }
+                if let Some(url) = link {
+                    self.open_link(&url);
+                    return false;
+                }
             }
         }
         self.window_state.dragging = true;
@@ -1846,6 +2059,34 @@ impl App {
         self.after_edit(Vec::new()); // 补齐可见/光标块布局并滚动入视口
         self.set_ime_area();
     }
+}
+
+/// 解析脚注定义块首行 `[^id]: ` 的 id。
+/// 为什么在这里重写一遍：`layout::footnote_def_prefix` 是排版私有实现，
+/// 交互层只借它定位命中，不应把排版模块的内部约定变成公共 API。
+/// 规则与 core `parse_footnote_def` 同口径（缩进 ≤3、字母数字/-/_、`]:`）。
+fn footnote_def_id(text: &str) -> Option<&str> {
+    let indent = text.len() - text.trim_start_matches([' ', '\t']).len();
+    let bytes = text.as_bytes();
+    if indent > 3 || bytes.get(indent) != Some(&b'[') || bytes.get(indent + 1) != Some(&b'^') {
+        return None;
+    }
+    let start = indent + 2;
+    let mut i = start;
+    loop {
+        let ch = text.get(i..)?.chars().next()?;
+        if ch == ']' {
+            break;
+        }
+        if !(ch.is_alphanumeric() || ch == '-' || ch == '_') {
+            return None;
+        }
+        i += ch.len_utf8();
+    }
+    if i == start || bytes.get(i + 1) != Some(&b':') {
+        return None;
+    }
+    Some(&text[start..i])
 }
 
 /// 图片链接目标（2f）：文档目录内取相对路径，目录外取绝对路径；

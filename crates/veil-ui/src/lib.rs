@@ -36,15 +36,16 @@ mod view;
 mod app_tests;
 
 pub use app::{
-    run, Clipboard, Confirmer, Doc, Exporter, FileDialog, FileEvent, FileStore, FileWatcher,
-    PersistEnv, Ports, RecoveryStore, SessionStore, UnsavedChoice,
+    run, url_is_openable, Clipboard, Confirmer, Doc, Exporter, FileDialog, FileEvent, FileStore,
+    FileWatcher, PersistEnv, Ports, RecoveryStore, SessionStore, UnsavedChoice, UrlOpener,
 };
 pub use docio::decode;
 pub use image::{AssetStore, ImageData, ImageLoader};
 pub use math::{MathImage, MathRenderer};
 pub use print::{ExportOptions, NoPrint, Print, PrintSession};
 pub use theme::{
-    config_path, data_dir, ConfigStore, NativeWindow, SystemTheme, ThemeEnv, WindowEffects,
+    config_path, data_dir, ConfigStore, ExportStyle, NativeWindow, SystemTheme, ThemeEnv,
+    WindowEffects,
 };
 // bench_typing（产品层纯度量 example）需要 LayoutEngine / Frame 做纯排版与帧分配基准
 pub use view::{BlockLayout, Frame, LayoutEngine, BASE_FONT_SIZE, BASE_LINE_HEIGHT};

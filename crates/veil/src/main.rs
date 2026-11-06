@@ -52,6 +52,7 @@ fn main() {
             persist_env: platform::persist_env(),
             print: platform::print(),
             confirmer: platform::confirmer(),
+            url_opener: platform::url_opener(),
         },
     ) {
         eprintln!("{e}");
@@ -80,6 +81,7 @@ impl veil_ui::Exporter for NoExport {
     fn export_html(
         &mut self,
         _s: &veil_core::Session,
+        _style: veil_ui::ExportStyle,
         _p: Option<&Path>,
     ) -> Result<PathBuf, String> {
         Err("数学字体不可用".into())

@@ -181,7 +181,7 @@ pub fn actual_blocks(s: &Session) -> Vec<B> {
             BlockKind::Table => B::Table,
             BlockKind::BlockQuote => B::Quote,
             BlockKind::ThematicBreak => B::Rule,
-            BlockKind::LinkRefDef => continue,
+            BlockKind::LinkRefDef | BlockKind::FootnoteDef => continue,
             BlockKind::HtmlBlock => continue,
             BlockKind::ListItem { .. } => unreachable!("列表项已在上方处理"),
         };
@@ -210,7 +210,10 @@ pub fn export_body(s: &Session) -> String {
     let mut i = 0;
     while i < blocks.len() {
         let (_, kind, range) = blocks[i].clone();
-        if kind == BlockKind::Math || kind == BlockKind::LinkRefDef {
+        if kind == BlockKind::Math
+            || kind == BlockKind::LinkRefDef
+            || kind == BlockKind::FootnoteDef
+        {
             i += 1;
             continue;
         }
@@ -452,6 +455,7 @@ pub fn actual_inline(s: &Session) -> Counts {
                 InlineKind::Image => c.image += 1,
                 InlineKind::Strikethrough => c.del += 1,
                 InlineKind::Math => {}
+                InlineKind::FootnoteRef => {}
             }
             walk(&n.children, c);
         }
@@ -488,6 +492,7 @@ pub fn actual_inline_structure(s: &Session) -> Vec<(&'static str, usize)> {
                 InlineKind::Image => "image",
                 InlineKind::Strikethrough => "del",
                 InlineKind::Math => continue,
+                InlineKind::FootnoteRef => continue,
             };
             out.push((kind, depth));
             walk(&n.children, depth + 1, out);

@@ -306,11 +306,11 @@ impl App {
     /// Ctrl+E：经注入的 Exporter 导出 HTML。草稿无路径 / 导出失败走 stderr 不崩溃
     /// （同 save_now 草稿分支语义；界面呈现待 chrome UI）。导出不清脏标（源文件未变）。
     pub(crate) fn export_now(&mut self) {
-        match self
-            .ports
-            .exporter
-            .export_html(self.editor.session(), self.doc.path.as_deref())
-        {
+        match self.ports.exporter.export_html(
+            self.editor.session(),
+            self.doc.export_style,
+            self.doc.path.as_deref(),
+        ) {
             Ok(p) => {
                 self.ui_state.chrome.notice = format!("已导出 {}", p.display());
                 eprintln!("已导出 {}", p.display());

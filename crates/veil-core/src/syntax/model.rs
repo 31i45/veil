@@ -43,6 +43,10 @@ pub enum BlockKind {
     /// 链接引用定义（`[label]: dest "title"`，可多行）：注册进文档引用表，
     /// 无 HTML 输出、无 inline；编辑器按源码行渲染（不背叛源码）。
     LinkRefDef,
+    /// 脚注定义（GFM `[^id]: 内容`）：与 [`BlockKind::LinkRefDef`] 同构——仅块起始
+    /// 识别、缩进 ≤3、无 inline、编辑器按源码渲染（不背叛源码）；续行须缩进 ≥4 列。
+    /// 定义本身不占编号，只有被 `[^id]` 引用时才按首次引用顺序编号。
+    FootnoteDef,
     /// 原始 HTML 块（CommonMark §4.6，类型 1–7）：块内不解析 inline，源码原样渲染。
     /// 类型 1–5 以闭合模式终止；类型 6（块级标签）与 7（完整标签行）以空行终止。
     HtmlBlock,
@@ -112,6 +116,9 @@ pub enum InlineKind {
     Math,
     /// `~~del~~`（GFM 删除线）
     Strikethrough,
+    /// `[^id]`（GFM 脚注引用）：`content` 为 id 文本区间（不含 `[^` / `]`）。
+    /// 解析层不校验定义是否存在——缺失定义仍产出节点，由视图按编号表降级。
+    FootnoteRef,
 }
 
 /// 一棵 inline 子树。所有区间为文档字节偏移、半开 `[start, end)`。
@@ -120,7 +127,7 @@ pub struct InlineNode {
     pub kind: InlineKind,
     /// 含开闭标记的整个节点区间。
     pub range: Range,
-    /// 内容区间（不含标记；Link 为可见文本）。
+    /// 内容区间（不含标记；Link 为可见文本，FootnoteRef 为 id 文本）。
     pub content: Range,
     /// 链接 URL 区间（仅 Link 为 Some）。
     pub url: Option<Range>,

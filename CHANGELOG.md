@@ -12,12 +12,18 @@ Veil 版本迭代记录。每个版本的详细修复清单见对应 git tag 的
 - 源码模式 `Ctrl+/`：全文显示 Markdown 源码（含表格、公式块），切换保持光标与滚动位置；打印/导出始终为渲染态
 - 直接导出 PDF `Ctrl+Shift+E` / 文件菜单「导出 PDF…」：默认输出到文档同目录 `<stem>.pdf`（重名递增 ` (2)`/` (3)`），支持目录页、页码、页边距（默认 20 mm），配置写入 `config.toml`；依赖系统「Microsoft Print to PDF」，未保存草稿或无 PDF 打印机时回退系统打印对话框并提示
 - 性能探针：`VEIL_PERF_PROBE=1` 输出 `[perf] {json}`（key_us/frame_us/rss_mb/dirty_blocks/total_blocks/rescan_lines/undo_depth）；`tools/walkthrough.ps1 -Perf` 汇总 p50/p95/p99、RSS、rescan 比例
+- HTML 导出主题化：内联 CSS 跟随当前浅/深主题（背景、正文、弱化色、链接色、代码底色、边框），深色页面含 `color-scheme: dark`；仍为单文件自包含、无外部资源
+- 链接用系统默认程序打开：`Ctrl+单击`（鼠标手势，非新快捷键）http/https/mailto 链接交给系统默认浏览器/邮件客户端，光标不移动；链接右键菜单新增「在浏览器中打开」（位于「复制链接地址」之前）；非白名单协议只提示不打开，Veil 自身不发起网络请求
+- GFM 脚注：`[^id]` 引用与 `[^id]: 内容` 定义；渲染态引用显示链接色 `[n]`，定义块隐藏标记并显示「编号 + 内容 + ↩」，编号按全文首次引用顺序；`Ctrl+单击` 引用跳到定义、`Ctrl+单击 ↩` 跳回首次引用；源码模式显示原始标记；HTML 导出生成 `<sup>` 引用与含返回链接的文末脚注列表
+- 文档内锚点跳转：`[文本](#slug)` 的 `Ctrl+单击` 跳到对应标题；导出 HTML 的标题带 `id="<slug>"`；重复标题按 `名称`、`名称-1` 去重（与导出共用 `heading_slug` / `heading_slugs` 规则）
 
 ### Changed
 - 链接改用主题链接色（浅 `#2B6CB0` / 深 `#7FB4F5`），不再与正文同色
 - `LayoutEngine::layout_block` 增加 `reveal_all`，源码模式复用同一排版路径
 - `Editor::append_table_row` 更名 `replace_table_block`，表格结构变更统一走整块替换
 - 发布门禁：release exe 体积断言改为 4–6 MiB；版本断言改为 `^1\.`
+- 内部端口变更：`Exporter::export_html` 增加 `ExportStyle` 参数（`veil` 产品层同步），调用方在主题切换点传入当前主题快照；对外 CLI / 配置不变
+- 本批无新增依赖，`Cargo.toml` 未新增 crate
 
 ### Fixed
 - `table_delete_row` 在仅两行正文时误删两行

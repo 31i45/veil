@@ -13,6 +13,8 @@ pub(crate) enum CtxAction {
     SelectAll,
     /// 复制命中链接的 URL（inline 链接才有；引用式无 url 区间不出现本项）。
     CopyLink,
+    /// 用系统默认程序打开命中链接（协议白名单在 interaction 侧统一校验）。
+    OpenLink,
     InsertImage,
     /// 表格结构操作（B2）：6 项均经 `Editor::replace_table_block` 落入源码。
     TableInsertRowAbove,
@@ -61,6 +63,8 @@ pub(crate) fn items_for(kind: CtxKind) -> Vec<(&'static str, CtxAction)> {
             ("全选", CtxAction::SelectAll),
         ],
         CtxKind::Link => vec![
+            // 「打开」在「复制」之前：链接上下文的首要意图是跳转
+            ("在浏览器中打开", CtxAction::OpenLink),
             ("复制链接地址", CtxAction::CopyLink),
             ("复制", CtxAction::Copy),
             ("粘贴", CtxAction::Paste),
@@ -212,7 +216,16 @@ mod tests {
         assert!(sel.iter().any(|&(_, a)| a == CtxAction::Cut));
         assert!(sel.iter().any(|&(_, a)| a == CtxAction::Copy));
         let link = items_for(CtxKind::Link);
-        assert_eq!(link[0].1, CtxAction::CopyLink, "链接上下文首项为复制链接");
+        assert_eq!(
+            link[0].1,
+            CtxAction::OpenLink,
+            "链接上下文首项为在浏览器中打开"
+        );
+        assert_eq!(
+            link[1].1,
+            CtxAction::CopyLink,
+            "复制链接地址紧随其后"
+        );
         let blk = items_for(CtxKind::Block);
         assert!(blk.iter().any(|&(_, a)| a == CtxAction::InsertImage));
         assert!(!blk.iter().any(|&(_, a)| a == CtxAction::Cut), "无选区不出现剪切");

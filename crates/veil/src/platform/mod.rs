@@ -7,6 +7,8 @@ mod confirm;
 #[cfg(windows)]
 mod print;
 #[cfg(windows)]
+mod shell;
+#[cfg(windows)]
 mod theme;
 mod watch;
 #[cfg(windows)]
@@ -59,6 +61,19 @@ pub fn print() -> Box<dyn veil_ui::Print> {
     }
 }
 
+/// URL 打开能力装配：Windows 走 ShellExecuteW（系统默认程序）；
+/// 其他平台为「不支持」兜底（本仓库仅支持 Windows，兜底只为保持编译整洁）。
+pub fn url_opener() -> Box<dyn veil_ui::UrlOpener> {
+    #[cfg(windows)]
+    {
+        Box::new(shell::SystemUrlOpener)
+    }
+    #[cfg(not(windows))]
+    {
+        Box::new(NoUrlOpener)
+    }
+}
+
 /// 未保存内容确认（3e 修 B）：Windows 原生 MessageBoxW 三选一；
 /// 其他平台为「取消」兜底（宁可拒绝退出，也绝不静默丢内容）。
 pub fn confirmer() -> Box<dyn veil_ui::Confirmer> {
@@ -96,6 +111,15 @@ struct CancelAll;
 impl veil_ui::Confirmer for CancelAll {
     fn confirm_unsaved(&mut self, _file: Option<&std::path::Path>) -> veil_ui::UnsavedChoice {
         veil_ui::UnsavedChoice::Cancel
+    }
+}
+
+#[cfg(not(windows))]
+struct NoUrlOpener;
+#[cfg(not(windows))]
+impl veil_ui::UrlOpener for NoUrlOpener {
+    fn open_url(&mut self, _url: &str) -> Result<(), String> {
+        Err("当前平台不支持打开链接".into())
     }
 }
 

@@ -6,11 +6,14 @@
 //! `OffsetMap` 负责 doc↔layout 坐标换算——对外偏移一律为文档坐标。
 //! 激活规则 v0：`range.start <= caret <= range.end` 闭区间，逐节点独立、嵌套各自生效。
 
+use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
+
 use cosmic_text::{
     Attrs, Buffer, Color, Cursor, Family, FontSystem, Metrics, Shaping, Style as FontStyle,
     SwashCache, Weight, Wrap,
 };
-use veil_core::{task_span, BlockKind, InlineNode, Range};
+use veil_core::{task_span, BlockKind, InlineKind, InlineNode, Range};
 
 use super::highlight::{highlight, to_styles};
 use super::linebreak;
@@ -135,6 +138,16 @@ impl Sub {
             fill: text.into(),
         }
     }
+
+    /// 纯插入：零宽源码区间 → 有宽展示文本（脚注定义的编号前缀 / 块末 `↩`）。
+    /// 插入段不消费源码字符，doc 坐标只作锚点；fill 同样不得含换行。
+    fn insert(doc: usize, text: impl Into<String>) -> Self {
+        Sub {
+            doc_start: doc,
+            doc_end: doc,
+            fill: text.into(),
+        }
+    }
 }
 
 /// 坐标映射段。`sub` 为替换段在已接受替换表中的下标；`None` 为保留源文本段。
@@ -162,16 +175,33 @@ impl OffsetMap {
     /// 其余重叠属调用方违约，防御性跳过不崩。
     fn from_spans(doc_len: usize, spans: &[Sub]) -> (Self, Vec<Sub>) {
         let mut sorted: Vec<Sub> = spans.to_vec();
-        // 同起点长者在前：占位段先于其内消隐段入表，保证包含判定命中
+        // 同起点：零宽插入最先（否则会被同起点的替换段包含判定吃掉），
+        // 其次长者在前（占位段先于其内消隐段入表，保证包含判定命中）。
         sorted.sort_unstable_by(|a, b| {
-            a.doc_start
-                .cmp(&b.doc_start)
-                .then(b.doc_end.cmp(&a.doc_end))
+            a.doc_start.cmp(&b.doc_start).then_with(|| {
+                match (a.doc_end == a.doc_start, b.doc_end == b.doc_start) {
+                    (true, false) => std::cmp::Ordering::Less,
+                    (false, true) => std::cmp::Ordering::Greater,
+                    _ => b.doc_end.cmp(&a.doc_end),
+                }
+            })
         });
         let mut accepted: Vec<Sub> = Vec::new();
         for sub in sorted {
             let (s, e) = (sub.doc_start.min(doc_len), sub.doc_end.min(doc_len));
-            if s >= e {
+            if s > e || (s == e && sub.fill.is_empty()) {
+                continue;
+            }
+            if s == e {
+                // 纯插入：不占源码字符，只要求不落在已接受替换段内部（会把替换段劈开）。
+                if accepted.last().is_some_and(|last| s < last.doc_end) {
+                    continue;
+                }
+                accepted.push(Sub {
+                    doc_start: s,
+                    doc_end: s,
+                    fill: sub.fill,
+                });
                 continue;
             }
             match accepted.last() {
@@ -235,6 +265,8 @@ impl OffsetMap {
     fn doc_to_layout(&self, p: usize) -> usize {
         let i = self.segs.partition_point(|s| s.doc_start <= p);
         match i.checked_sub(1).map(|j| self.segs[j]) {
+            // 零宽插入段：doc 锚点落在装饰之前（块末光标停在 `↩` 前，而不是跳到最后）。
+            Some(seg) if seg.doc_len == 0 => seg.layout_start,
             Some(seg) if p < seg.doc_start + seg.doc_len => {
                 if seg.sub.is_some() {
                     seg.layout_start
@@ -272,6 +304,56 @@ impl OffsetMap {
             _ => self.doc_len, // 致密覆盖下不可达，防御
         }
     }
+}
+
+/// 脚注渲染上下文：全文编号表（id → 序号）+ 前缀装饰色。
+/// 为什么独立成表：编号是全文派生量（按首次引用顺序），若每个块回查会话就是
+/// O(块数 × 全文)；这里每轮排版构建一次，块内查询为 HashMap O(1)。
+pub(crate) struct FootnoteCtx {
+    numbers: HashMap<String, usize>,
+    muted: [u8; 3],
+}
+
+impl FootnoteCtx {
+    pub(crate) fn new(ids: Vec<String>, muted: [u8; 3]) -> Self {
+        let numbers = ids
+            .into_iter()
+            .enumerate()
+            .map(|(i, id)| (id, i + 1))
+            .collect();
+        Self { numbers, muted }
+    }
+
+    /// 未引用/未定义 → None（调用方保留源码原文，不伪造编号）。
+    fn number(&self, id: &str) -> Option<usize> {
+        self.numbers.get(id).copied()
+    }
+
+    fn muted(&self) -> [u8; 3] {
+        self.muted
+    }
+}
+
+/// 脚注代次：`footnote_ids()` 的顺序与编号的确定性哈希。
+/// 为什么进缓存键：文首新增一个引用会改变全文编号（含文末定义块的前缀），
+/// 但定义块自身文本没变；只按文本缓存会残留旧编号。同一次运行内稳定即可。
+pub(crate) fn footnote_epoch(ids: &[String]) -> u64 {
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    ids.len().hash(&mut h);
+    for (i, id) in ids.iter().enumerate() {
+        id.hash(&mut h);
+        (i + 1).hash(&mut h);
+    }
+    h.finish()
+}
+
+/// 块级装饰段：`subs` 之外还记录装饰在 layout 中的宽度，
+/// 供 `layout_block` 为「不来自源码」的前缀/后缀补齐样式 span。
+#[derive(Default)]
+struct BlockDecor {
+    subs: Vec<Sub>,
+    prefix_len: usize,
+    suffix_len: usize,
 }
 
 /// 单块排版结果。`line_bases[i]` = 第 i 个逻辑行在排版文本（layout 坐标）中的起始字节偏移。
@@ -324,12 +406,13 @@ impl BlockLayout {
                 fnv(&mut h, line);
             }
             // 块级标记显隐按整块 caret 判定（`block_subs`）：标题 `#`/Setext 下划线/围栏
-            // ```` ``` ````/列表符号/分隔线。漏折任一种 → caret 进出块时缓存不变，残留旧态。
+            // ```` ``` ````/列表符号/分隔线/脚注定义前缀。漏折任一种 → caret 进出块时缓存不变，残留旧态。
             BlockKind::ListItem { .. }
             | BlockKind::ThematicBreak
             | BlockKind::AtxHeading(_)
             | BlockKind::SetextHeading(_)
-            | BlockKind::FencedCode(_) => {
+            | BlockKind::FencedCode(_)
+            | BlockKind::FootnoteDef => {
                 fnv(&mut h, inside as u64);
             }
             _ => {}
@@ -469,6 +552,26 @@ impl LayoutEngine {
         imgs: &[InlineImg],
         reveal_all: bool,
     ) -> BlockLayout {
+        // 无编号表的调用方（打印等）降级：定义标记仍消隐，引用保留 `[^id]` 原文。
+        self.layout_block_with_footnotes(
+            kind, text, block, inlines, width, caret, imgs, reveal_all, None,
+        )
+    }
+
+    /// 带脚注编号表的排版入口：编号在全文范围内派生，由调用方每轮构建一次并传引用。
+    #[allow(clippy::too_many_arguments)] // 内部布局函数参数天然多
+    pub(crate) fn layout_block_with_footnotes(
+        &mut self,
+        kind: BlockKind,
+        text: &str,
+        block: Range,
+        inlines: &[InlineNode],
+        width: f32,
+        caret: usize,
+        imgs: &[InlineImg],
+        reveal_all: bool,
+        footnotes: Option<&FootnoteCtx>,
+    ) -> BlockLayout {
         let full = text.strip_suffix('\n').unwrap_or(text);
         // 单块上限（v0）：只排前缀，超出部分不参与成形/光栅，避免内存放大
         let (body, mut truncated) = cap_body(full);
@@ -481,14 +584,28 @@ impl LayoutEngine {
             self.measure_nbsp(metrics)
         };
         let mut kept: Vec<&InlineImg> = Vec::new();
+        // 脚注引用 `[^id]` → `[n]` 的替换区间（块相对 doc 坐标），供 style_spans 之后染链接色。
+        let mut footnote_links: Vec<(usize, usize)> = Vec::new();
+        // 脚注定义块的编号前缀 / 块末 ↩ 装饰（不来自源码区间，需单独补样式）。
+        let is_footnote_def = matches!(kind, BlockKind::FootnoteDef);
+        let decor = if !reveal_all && is_footnote_def {
+            footnote_def_decor(body, block, caret, footnotes)
+        } else {
+            BlockDecor::default()
+        };
         // 块级替换（切片 12）先入表；行内公式占位段随后按起点排序归并。
         // 源码模式：不做任何块级替换，标记原样显示。
         let mut subs: Vec<Sub> = if reveal_all {
             Vec::new()
+        } else if is_footnote_def {
+            decor.subs.clone()
         } else {
             block_subs(kind.clone(), body, block, caret)
         };
         if !reveal_all {
+            let (ref_subs, links) = footnote_ref_subs(inlines, block, caret, body, footnotes);
+            subs.extend(ref_subs);
+            footnote_links = links;
             for im in imgs {
                 if node_active(im.range, caret) {
                     continue; // 激活态显源码，不占位
@@ -545,10 +662,37 @@ impl LayoutEngine {
             }
             _ => style_spans(body.len(), block, inlines),
         };
+        // `[n]` 的展示文本并非源码字符，样式表里没有它的颜色来源；
+        // 按替换区间切分样式段并置 link（style_spans 会把同式相邻段合并，不能整段改）。
+        let style_segments = with_link_spans(style_segments, &footnote_links, body.len());
         let mut spans: Vec<(&str, Attrs)> = Vec::new();
         for &(s, e, st) in &style_segments {
             let (ls, le) = (map.doc_to_layout(s), map.doc_to_layout(e));
             if ls < le {
+                spans.push((&layout_text[ls..le], attrs_of(kind.clone(), st, self.link_color)));
+            }
+        }
+        // 装饰 span：前缀 `n. `（muted）与块末 `↩`（链接色）由插入段产生，
+        // 必须显式补样式；否则会落进默认 attrs（前缀不高亮、后缀无链接色）。
+        if decor.prefix_len > 0 {
+            let ls = map.doc_to_layout(0);
+            let le = (ls + decor.prefix_len).min(layout_text.len());
+            if ls < le {
+                let st = Style {
+                    color: footnotes.map(FootnoteCtx::muted),
+                    ..Default::default()
+                };
+                spans.push((&layout_text[ls..le], attrs_of(kind.clone(), st, self.link_color)));
+            }
+        }
+        if decor.suffix_len > 0 {
+            let ls = map.doc_to_layout(body.len());
+            let le = (ls + decor.suffix_len).min(layout_text.len());
+            if ls < le {
+                let st = Style {
+                    link: true,
+                    ..Default::default()
+                };
                 spans.push((&layout_text[ls..le], attrs_of(kind.clone(), st, self.link_color)));
             }
         }
@@ -941,6 +1085,169 @@ fn collect_elide(nodes: &[InlineNode], block: Range, caret: usize, out: &mut Vec
     }
 }
 
+/// 脚注引用替换：非激活 `[^id]` → `[n]`，同时返回替换区间供样式层染链接色。
+/// `footnotes` 缺省或 id 无编号时**保留源码原文**：宁可露出 `[^id]`，
+/// 也不把未定义引用伪装成已编号（不背叛源码）。
+fn footnote_ref_subs(
+    nodes: &[InlineNode],
+    block: Range,
+    caret: usize,
+    body: &str,
+    footnotes: Option<&FootnoteCtx>,
+) -> (Vec<Sub>, Vec<(usize, usize)>) {
+    fn walk(
+        nodes: &[InlineNode],
+        block: Range,
+        caret: usize,
+        body: &str,
+        footnotes: Option<&FootnoteCtx>,
+        subs: &mut Vec<Sub>,
+        links: &mut Vec<(usize, usize)>,
+    ) {
+        for n in nodes {
+            if n.kind == InlineKind::FootnoteRef && !node_active(n.range, caret) {
+                let rs = n.range.start.saturating_sub(block.start);
+                let re = n.range.end.saturating_sub(block.start).min(body.len());
+                let cs = n.content.start.saturating_sub(block.start);
+                let ce = n.content.end.saturating_sub(block.start).min(body.len());
+                // 截断块（cap_body）可能切掉引用尾部：越界即保持原样，不猜。
+                if rs < re && rs < body.len() && cs < ce && ce <= body.len() {
+                    match footnotes.and_then(|f| f.number(&body[cs..ce])) {
+                        Some(num) => {
+                            subs.push(Sub::fill(rs, re, format!("[{num}]")));
+                            links.push((rs, re));
+                        }
+                        None => subs.push(Sub::fill(rs, re, body[rs..re].to_string())),
+                    }
+                }
+            }
+            walk(
+                &n.children,
+                block,
+                caret,
+                body,
+                footnotes,
+                subs,
+                links,
+            );
+        }
+    }
+
+    let mut subs = Vec::new();
+    let mut links = Vec::new();
+    walk(
+        nodes, block, caret, body, footnotes, &mut subs, &mut links,
+    );
+    (subs, links)
+}
+
+/// 在样式段上叠加「链接色区间」（脚注引用替换段）。
+/// `style_spans` 会把同式相邻段合并（引用两侧都是默认样式），因此必须按
+/// 链接区间边界重新切分，再逐段求并，不能直接改整段。
+fn with_link_spans(
+    segments: Vec<(usize, usize, Style)>,
+    links: &[(usize, usize)],
+    text_len: usize,
+) -> Vec<(usize, usize, Style)> {
+    if links.is_empty() {
+        return segments;
+    }
+    let mut bounds: Vec<usize> = vec![0, text_len];
+    for &(s, e, _) in &segments {
+        bounds.push(s);
+        bounds.push(e);
+    }
+    for &(s, e) in links {
+        bounds.push(s.min(text_len));
+        bounds.push(e.min(text_len));
+    }
+    bounds.sort_unstable();
+    bounds.dedup();
+    let mut out: Vec<(usize, usize, Style)> = Vec::new();
+    for w in bounds.windows(2) {
+        let (s, e) = (w[0], w[1]);
+        if s >= e {
+            continue;
+        }
+        let mut st = segments
+            .iter()
+            .find(|(ss, se, _)| *ss <= s && e <= *se)
+            .map(|x| x.2)
+            .unwrap_or_default();
+        if links.iter().any(|&(fs, fe)| fs <= s && e <= fe) {
+            st.link = true;
+        }
+        match out.last_mut() {
+            Some(last) if last.2 == st && last.1 == s => last.1 = e,
+            _ => out.push((s, e, st)),
+        }
+    }
+    out
+}
+
+/// 解析脚注定义首行前缀 `[^id]: `（块相对）→ (前缀结束偏移, id 区间)。
+/// 与 core 的 `parse_footnote_def` 同口径（缩进 ≤3、id 允许字母数字/-/_、`]:`），
+/// 但只做「标记消隐 + 编号」所需的定位，不重新解释块语义。
+fn footnote_def_prefix(body: &str) -> Option<(usize, std::ops::Range<usize>)> {
+    let indent = body.len() - body.trim_start_matches([' ', '\t']).len();
+    let bytes = body.as_bytes();
+    if indent > 3 || bytes.get(indent) != Some(&b'[') || bytes.get(indent + 1) != Some(&b'^')
+    {
+        return None;
+    }
+    let id_start = indent + 2;
+    let mut i = id_start;
+    loop {
+        let ch = body.get(i..)?.chars().next()?;
+        if ch == ']' {
+            break;
+        }
+        if !(ch.is_alphanumeric() || ch == '-' || ch == '_') {
+            return None;
+        }
+        i += ch.len_utf8();
+    }
+    if i == id_start || body.as_bytes().get(i + 1) != Some(&b':') {
+        return None;
+    }
+    let line_end = body.find('\n').unwrap_or(body.len());
+    let mut prefix_end = (i + 2).min(line_end);
+    // 标记后的一个空格一并消隐（GFM 惯例），与 content 区间是否含空格无关。
+    if body.as_bytes().get(prefix_end) == Some(&b' ') && prefix_end < line_end {
+        prefix_end += 1;
+    }
+    Some((prefix_end, id_start..i))
+}
+
+/// 脚注定义块装饰：消隐 `[^id]:`（含一个空格），有编号时以 `n. ` 插入到内容前，
+/// 块末追加 `↩`。光标进入块 → 沿用既有 reveal 规则，返回空装饰（源码原样）。
+fn footnote_def_decor(
+    body: &str,
+    block: Range,
+    caret: usize,
+    footnotes: Option<&FootnoteCtx>,
+) -> BlockDecor {
+    if node_active(block, caret) {
+        return BlockDecor::default();
+    }
+    let Some((prefix_end, id_range)) = footnote_def_prefix(body) else {
+        return BlockDecor::default();
+    };
+    let mut decor = BlockDecor {
+        subs: vec![Sub::elide(0, prefix_end)],
+        prefix_len: 0,
+        // 未编号（定义未被引用）也保留返回标记：它是「定义块」的视觉标识，不依赖编号。
+        suffix_len: "↩".len(),
+    };
+    if let Some(n) = footnotes.and_then(|f| f.number(&body[id_range])) {
+        let text = format!("{n}. ");
+        decor.prefix_len = text.len();
+        decor.subs.push(Sub::insert(prefix_end, text));
+    }
+    decor.subs.push(Sub::insert(body.len(), "↩"));
+    decor
+}
+
 /// CJK 字符判定：覆盖中日韩统一表意文字、韩文音节、平假名/片假名、
 /// 全角标点/字母（Halfwidth & Fullwidth Forms）及 CJK 符号与标点。
 /// v0 近似（不覆盖 Extension B-F 等生僻区；命中不到只是不加间距，不会崩）。
@@ -1016,10 +1323,21 @@ pub(crate) fn probe_break_violations(buffer: &Buffer, include_hard: bool) {
         return;
     }
     let runs: Vec<_> = buffer.layout_runs().collect();
+    const WJ: char = '\u{2060}';
+    let run_head = |run: &cosmic_text::LayoutRun| -> Option<char> {
+        run.glyphs
+            .first()
+            .and_then(|g| run.text.get(g.start..g.end))
+            .and_then(|s| s.chars().next())
+    };
+    let run_tail = |run: &cosmic_text::LayoutRun| -> Option<char> {
+        run.glyphs
+            .last()
+            .and_then(|g| run.text.get(g.start..g.end))
+            .and_then(|s| s.chars().last())
+    };
+    let visible = |c: char| c != WJ && !c.is_whitespace() && c != '\n' && c != '\r';
     for (i, run) in runs.iter().enumerate() {
-        // `run.text` 是整条逻辑行（硬换行切分）的文本，字形 start/end 才是本视觉行片段。
-        // 正文默认只有「同一逻辑行内存在前/后视觉行」时，首/尾才由折行决定；
-        // 硬行首/硬行尾的标点属用户原文，不构成禁则违规。
         let wrapped_start = if include_hard {
             i > 0
         } else {
@@ -1030,7 +1348,17 @@ pub(crate) fn probe_break_violations(buffer: &Buffer, include_hard: bool) {
         } else {
             runs.get(i + 1).is_some_and(|next| next.line_i == run.line_i)
         };
-        let visible = |c: char| c != '\u{2060}' && !c.is_whitespace() && c != '\n' && c != '\r';
+        // 胶水保护的两种形态：
+        // 1) 本 run 以 WJ 开头→断行点在 WJ 之前（cosmic 正确遵守 WJ 规则）
+        // 2) 前一 run 以 WJ 结尾→断行点在 WJ 之后（cosmic 违反 WJ，但 WJ 已阻止
+        //    在禁则字符之前断行）
+        // 两种情况都不应判为禁则违规。
+        let prev_tail_is_wj = i > 0 && run_tail(&runs[i - 1]) == Some(WJ);
+        let next_head_is_wj = runs
+            .get(i + 1)
+            .is_some_and(|next| run_head(next) == Some(WJ));
+        let skip_first = run_head(run) == Some(WJ) || prev_tail_is_wj;
+        let skip_last = run_tail(run) == Some(WJ) || next_head_is_wj;
         let first = run
             .glyphs
             .iter()
@@ -1041,7 +1369,7 @@ pub(crate) fn probe_break_violations(buffer: &Buffer, include_hard: bool) {
             .rev()
             .find_map(|g| run.text.get(g.start..g.end)?.chars().rev().find(|&c| visible(c)));
         if let Some(c) = first {
-            if wrapped_start && linebreak::forbidden_line_start(c) {
+            if wrapped_start && !skip_first && linebreak::forbidden_line_start(c) {
                 eprintln!(
                     "[break-probe] 行首禁则违规 line={} char={c:?} text={:?}",
                     run.line_i, run.text
@@ -1049,7 +1377,7 @@ pub(crate) fn probe_break_violations(buffer: &Buffer, include_hard: bool) {
             }
         }
         if let Some(c) = last {
-            if wrapped_end && linebreak::forbidden_line_end(c) {
+            if wrapped_end && !skip_last && linebreak::forbidden_line_end(c) {
                 eprintln!(
                     "[break-probe] 行尾禁则违规 line={} char={c:?} text={:?}",
                     run.line_i, run.text
@@ -2496,5 +2824,264 @@ mod tests {
         let (spans, n) = cell_spans("| a\\|b |\n| --- |\n", 0, 0);
         assert!(spans.is_none(), "转义改写字节时应返回 None");
         assert_eq!(n, "a|b".len());
+    }
+
+    // ---- 脚注（渲染态）：引用 `[^id]` → `[n]`，定义块前缀/返回标记 ----
+
+    /// 打开文档，取第 `idx` 个块，带全文编号表排版（caret 为文档绝对偏移）。
+    fn layout_footnote_block(
+        text: &str,
+        idx: usize,
+        caret: usize,
+        width: f32,
+        reveal_all: bool,
+    ) -> (LayoutEngine, BlockLayout, Range) {
+        let s = Session::open(text);
+        let (id, kind, range) = s.blocks()[idx].clone();
+        let inlines = s.block_inlines(id).unwrap_or_default();
+        let ctx = FootnoteCtx::new(s.footnote_ids(), Theme::light().muted);
+        let mut eng = LayoutEngine::new();
+        let l = eng.layout_block_with_footnotes(
+            kind,
+            &text[range.start..range.end],
+            range,
+            &inlines,
+            width,
+            caret,
+            &[],
+            reveal_all,
+            Some(&ctx),
+        );
+        (eng, l, range)
+    }
+
+    fn first_footnote_ref(nodes: &[InlineNode]) -> Option<&InlineNode> {
+        for n in nodes {
+            if n.kind == InlineKind::FootnoteRef {
+                return Some(n);
+            }
+            if let Some(f) = first_footnote_ref(&n.children) {
+                return Some(f);
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn footnote_ref_renders_number_with_link_color() {
+        let src = "see [^a] now\n\n[^a]: note\n";
+        let (_eng, l, _) = layout_footnote_block(src, 0, usize::MAX, 400.0, false);
+        assert_eq!(
+            l.layout_text(),
+            "see [1] now",
+            "引用应渲染为 [n]，不暴露 ^ 与 id 原文"
+        );
+        let link = Theme::light().link;
+        let want = Color::rgb(link[0], link[1], link[2]);
+        let colored = l
+            .buffer
+            .layout_runs()
+            .flat_map(|r| r.glyphs.iter())
+            .filter(|g| g.color_opt == Some(want))
+            .count();
+        assert!(colored >= 3, "`[1]` 字形应使用链接色: colored={colored}");
+    }
+
+    #[test]
+    fn footnote_ref_without_number_keeps_source() {
+        let src = "see [^a] now\n\n[^a]: note\n";
+        let s = Session::open(src);
+        let (id, kind, range) = s.blocks()[0].clone();
+        let inlines = s.block_inlines(id).unwrap();
+        let mut eng = LayoutEngine::new();
+        // 无编号表（打印等降级路径）：不伪造编号，保留 `[^id]`。
+        let l = eng.layout_block(
+            kind,
+            &src[range.start..range.end],
+            range,
+            &inlines,
+            400.0,
+            usize::MAX,
+            &[],
+            false,
+        );
+        assert_eq!(l.layout_text(), "see [^a] now");
+        let (x, y, _) = eng.caret_xy(&l, 4);
+        let off = eng.hit(&l, x + 0.5, y + 1.0);
+        assert!((4..=8).contains(&off), "原文降级态点击不得串位: {off}");
+    }
+
+    #[test]
+    fn footnote_ref_source_mode_shows_raw() {
+        let src = "see [^a] now\n\n[^a]: note\n";
+        let (_eng, l, _) = layout_footnote_block(src, 0, usize::MAX, 400.0, true);
+        assert_eq!(l.layout_text(), "see [^a] now", "源码模式不受替换影响");
+    }
+
+    #[test]
+    fn footnote_ref_hit_maps_into_source_range_after_edits() {
+        // 引用前后插入/删除字符后重新排版：点击 `[1]` 任一位置都必须落在源码区间内。
+        for src in [
+            "a[^n]b\n\n[^n]: x\n",
+            "aX[^n]b\n\n[^n]: x\n",
+            "a[^n]bY\n\n[^n]: x\n",
+        ] {
+            let (eng, l, range) = layout_footnote_block(src, 0, usize::MAX, 400.0, false);
+            let s = Session::open(src);
+            let (id, _, _) = s.blocks()[0].clone();
+            let inlines = s.block_inlines(id).unwrap();
+            let node = first_footnote_ref(&inlines).expect("应有脚注引用节点");
+            let (rs, re) = (
+                node.range.start - range.start,
+                node.range.end - range.start,
+            );
+            let (x0, y, _) = eng.caret_xy(&l, rs);
+            let (x1, _, _) = eng.caret_xy(&l, re);
+            assert!(x1 > x0, "替换段应有宽度: {src:?}");
+            for t in [0.25, 0.75] {
+                let off = eng.hit(&l, x0 + (x1 - x0) * t, y + 1.0);
+                assert!(
+                    (rs..=re).contains(&off),
+                    "{src:?} 点击 `[1]` 应落在源码引用区间 [{rs},{re}]: {off}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn footnote_def_hides_marker_and_appends_return_mark() {
+        let src = "body[^a]\n\n[^a]: note\n";
+        let (eng, l, _range) = layout_footnote_block(src, 1, usize::MAX, 400.0, false);
+        assert_eq!(l.layout_text(), "1. note↩");
+        // 点击 `1. ` 前缀 → 内容起点（`[^a]: ` 长 6）。
+        let (x0, y, _) = eng.caret_xy(&l, 0);
+        assert_eq!(eng.hit(&l, x0 + 1.0, y + 1.0), 6, "前缀应映射到内容起点");
+        // 点击块末 `↩` → 块末。
+        let body_len = "[^a]: note".len();
+        let (xs, ys, _) = eng.caret_xy(&l, body_len);
+        assert_eq!(
+            eng.hit(&l, xs + 1.0, ys + 1.0),
+            body_len,
+            "返回标记应映射到块末"
+        );
+    }
+
+    #[test]
+    fn footnote_def_without_reference_hides_marker_without_number() {
+        let src = "no refs\n\n[^b]: unused\n";
+        let (_eng, l, _) = layout_footnote_block(src, 1, usize::MAX, 400.0, false);
+        assert_eq!(l.layout_text(), "unused↩", "未编号定义不显示编号前缀");
+    }
+
+    #[test]
+    fn footnote_def_reveals_source_when_caret_inside() {
+        let src = "body[^a]\n\n[^a]: note\n";
+        let s = Session::open(src);
+        let (_, _, range) = s.blocks()[1].clone();
+        let (_eng, l, _) =
+            layout_footnote_block(src, 1, range.start + 2, 400.0, false);
+        assert_eq!(l.layout_text(), "[^a]: note", "光标进入沿用 reveal 显源码");
+    }
+
+    #[test]
+    fn footnote_def_number_prefix_survives_typo_spacing() {
+        // `[^a]:中文`：中西文间距段与编号插入段同起点，插入段必须排在前，否则被吞。
+        let src = "see [^a]\n\n[^a]:中文\n";
+        let (_eng, l, _) = layout_footnote_block(src, 1, usize::MAX, 400.0, false);
+        let t = l.layout_text();
+        assert!(t.starts_with("1. "), "编号前缀不得被间距段挤掉: {t:?}");
+        assert!(t.ends_with('↩'));
+    }
+
+    #[test]
+    fn offset_map_insertion_at_end_keeps_suffix_out_of_caret() {
+        let (m, _) = OffsetMap::from_spans(3, &[Sub::insert(3, "↩")]);
+        assert_eq!(m.layout_len, 3 + "↩".len());
+        assert_eq!(m.doc_to_layout(3), 3, "块末光标停在装饰之前");
+        assert_eq!(m.layout_to_doc(3), 3, "点击装饰 → 块末");
+        assert_eq!(m.layout_to_doc(m.layout_len), 3);
+    }
+
+    #[test]
+    fn offset_map_insertion_after_elided_prefix_maps_to_content_start() {
+        // "[^a]: x"：前缀 [0,6) 消隐，`1. ` 于 6 处插入；内容 "x" 仍在 6..7。
+        let (m, _) = OffsetMap::from_spans(7, &[Sub::elide(0, 6), Sub::insert(6, "1. ")]);
+        assert_eq!(m.layout_len, "1. x".len());
+        assert_eq!(m.doc_to_layout(0), 0);
+        assert_eq!(m.doc_to_layout(6), 3);
+        assert_eq!(m.doc_to_layout(7), 4);
+        assert_eq!(m.layout_to_doc(0), 6, "前缀任一点击 → 内容起点");
+        assert_eq!(m.layout_to_doc(2), 6);
+        assert_eq!(m.layout_to_doc(3), 6);
+    }
+
+    #[test]
+    fn footnote_epoch_invalidates_tail_definition_layout() {
+        use crate::view::cache::{Cache, LayoutKey, Memo, Revs};
+
+        let before = "see [^x]\n\n[^x]: X\n\n[^y]: Y\n";
+        let after = "[^y] see [^x]\n\n[^x]: X\n\n[^y]: Y\n";
+        let revs = Revs::default();
+        let mut eng = LayoutEngine::new();
+
+        let s1 = Session::open(before);
+        let (id1, kind1, range1) = s1.blocks()[2].clone();
+        assert_eq!(kind1, BlockKind::FootnoteDef);
+        let ctx1 = FootnoteCtx::new(s1.footnote_ids(), Theme::light().muted);
+        let base1 = revs.base(800.0, 1.0, false, footnote_epoch(&s1.footnote_ids()));
+        let inlines1 = s1.block_inlines(id1).unwrap_or_default();
+        let l1 = eng.layout_block_with_footnotes(
+            kind1.clone(),
+            &before[range1.start..range1.end],
+            range1,
+            &inlines1,
+            800.0,
+            usize::MAX,
+            &[],
+            false,
+            Some(&ctx1),
+        );
+        assert_eq!(l1.layout_text(), "Y↩", "未被引用：仅隐藏标记");
+        let reveal1 = l1.reveal_state(&kind1, range1, usize::MAX);
+        let mut cache = Cache::default();
+        cache.layouts.insert(
+            id1,
+            Memo {
+                key: LayoutKey {
+                    base: base1,
+                    reveal: reveal1,
+                },
+                value: l1,
+            },
+        );
+        assert!(
+            cache.layout(id1, &kind1, range1, base1, usize::MAX).is_some(),
+            "代次未变必须命中"
+        );
+
+        let s2 = Session::open(after);
+        let (id2, kind2, range2) = s2.blocks()[2].clone();
+        let ctx2 = FootnoteCtx::new(s2.footnote_ids(), Theme::light().muted);
+        let base2 = revs.base(800.0, 1.0, false, footnote_epoch(&s2.footnote_ids()));
+        assert_ne!(base1, base2, "文首新增未出现的引用 → 全文编号变化");
+        assert!(
+            cache
+                .layout(id2, &kind2, range2, base2, usize::MAX)
+                .is_none(),
+            "旧布局不得以新代次命中"
+        );
+        let inlines2 = s2.block_inlines(id2).unwrap_or_default();
+        let l2 = eng.layout_block_with_footnotes(
+            kind2,
+            &after[range2.start..range2.end],
+            range2,
+            &inlines2,
+            800.0,
+            usize::MAX,
+            &[],
+            false,
+            Some(&ctx2),
+        );
+        assert_eq!(l2.layout_text(), "1. Y↩", "新引用让文末定义块获得编号");
     }
 }

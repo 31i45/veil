@@ -87,7 +87,9 @@ fn collect(nodes: &[InlineNode], block: Range, out: &mut Vec<(usize, usize, Styl
             },
             // Image 非激活时整段被占位图替换（layout），无可见文本需要样式；
             // 降级态（加载失败/远程 URL）只显 alt 文本，与正文同式。
-            InlineKind::Image | InlineKind::Math => Style::default(),
+            // FootnoteRef 的 `[n]` 是 layout 层替换文本，由 layout 按其替换区间补链接色；
+            // 样式层不置 link（否则表格单元格等纯文本降级路径也会被染色）。
+            InlineKind::Image | InlineKind::Math | InlineKind::FootnoteRef => Style::default(),
         };
         if style != Style::default() {
             let s = n.range.start.saturating_sub(block.start);

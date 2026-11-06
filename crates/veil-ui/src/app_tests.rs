@@ -17,7 +17,7 @@ use crate::math::{MathImage, MathRenderer};
 use crate::mode::{Mode, TextSink};
 use crate::paint::{can_present, fit_size, local_image_path};
 use crate::print::{ExportOptions, NoPrint, Print, PrintSession};
-use crate::theme::{self, ConfigStore, SystemTheme, ThemeEnv, ThemeMode};
+use crate::theme::{self, ConfigStore, ExportStyle, SystemTheme, ThemeEnv, ThemeMode};
 use crate::view::ctx_menu;
 use crate::view::outline;
 use crate::view::search;
@@ -27,7 +27,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
-use veil_core::{BlockId, BlockKind, Range};
+use veil_core::{BlockId, BlockKind, InlineKind, Range};
 use winit::dpi::PhysicalPosition;
 use winit::keyboard::Key as WKey;
 
@@ -37,6 +37,32 @@ impl Clipboard for NoClip {
         None
     }
     fn set(&mut self, _text: &str) {}
+}
+
+/// 默认 URL 打开端口：成功且无副作用（既有测试不关心「打开链接」）。
+struct NoUrl;
+impl UrlOpener for NoUrl {
+    fn open_url(&mut self, _url: &str) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+fn no_url() -> Box<dyn UrlOpener> {
+    Box::new(NoUrl)
+}
+
+/// 可编排的 URL 打开端口：记录每次调用的 URL，结果由 `result` 决定（校验失败注入）。
+#[derive(Clone)]
+struct FakeUrl {
+    calls: Rc<RefCell<Vec<String>>>,
+    result: Result<(), String>,
+}
+
+impl UrlOpener for FakeUrl {
+    fn open_url(&mut self, url: &str) -> Result<(), String> {
+        self.calls.borrow_mut().push(url.to_string());
+        self.result.clone()
+    }
 }
 
 // ---- 0b 持久化 mock：崩溃恢复槽 + 会话/最近文件 ----
@@ -184,7 +210,8 @@ impl AssetStore for NoAssets {
 }
 
 type MathCalls = Rc<RefCell<Vec<(String, bool)>>>;
-type AssetCalls = Rc<RefCell<Vec<(String, Option<PathBuf>)>>>;
+/// 导出调用记录：(会话序列化, 源路径, 主题样式快照)。
+type ExportCalls = Rc<RefCell<Vec<(String, Option<PathBuf>, ExportStyle)>>>;
 
 /// 不弹对话框（既有测试的默认注入）：打开/另存为一律取消。
 struct NoDialogs;
@@ -361,6 +388,7 @@ fn app_clip(html: Option<&str>, plain: Option<&str>) -> App {
         persist_env: persist_env(),
         print: Box::new(NoPrint),
         confirmer: no_confirm(),
+        url_opener: no_url(),
     }
 )
 }
@@ -439,6 +467,7 @@ impl Exporter for NoExport {
     fn export_html(
         &mut self,
         _s: &veil_core::Session,
+        _style: ExportStyle,
         _p: Option<&Path>,
     ) -> Result<PathBuf, String> {
         Err("未注入导出器".into())
@@ -472,6 +501,7 @@ fn app_math(text: &str, fail: bool) -> (App, MathCalls) {
         persist_env: persist_env(),
         print: Box::new(NoPrint),
         confirmer: no_confirm(),
+        url_opener: no_url(),
     }
 );
     (a, calls)
@@ -693,6 +723,7 @@ fn app_with_images(
         persist_env: persist_env(),
         print: Box::new(NoPrint),
         confirmer: no_confirm(),
+        url_opener: no_url(),
     }
 );
     (a, calls)
@@ -879,6 +910,7 @@ fn app_paste_image(
         persist_env: persist_env(),
         print: Box::new(NoPrint),
         confirmer: no_confirm(),
+        url_opener: no_url(),
     }
 );
     PasteFixture { app, calls }
@@ -964,6 +996,7 @@ fn paste_image_files_prefer_file_list_over_path_text() {
         persist_env: persist_env(),
         print: Box::new(NoPrint),
         confirmer: no_confirm(),
+        url_opener: no_url(),
     }
 );
     app.paste_clipboard();
@@ -1059,6 +1092,7 @@ fn app_drop(
         persist_env: persist_env(),
         print: Box::new(NoPrint),
         confirmer: no_confirm(),
+        url_opener: no_url(),
     }
 );
     DropFixture {
@@ -1959,6 +1993,17 @@ impl FileStore for MemStore {
 }
 
 fn app(text: &str, path: Option<&str>, bom: bool, store: &MemStore) -> App {
+    app_with(text, path, bom, store, no_url())
+}
+
+/// 可替换 URL 打开端口的无路径/有路径装配（链接打开测试用）。
+fn app_with(
+    text: &str,
+    path: Option<&str>,
+    bom: bool,
+    store: &MemStore,
+    url_opener: Box<dyn UrlOpener>,
+) -> App {
     let doc = Doc {
         text: text.into(),
         path: path.map(PathBuf::from),
@@ -1984,25 +2029,29 @@ fn app(text: &str, path: Option<&str>, bom: bool, store: &MemStore) -> App {
         persist_env: persist_env(),
         print: Box::new(NoPrint),
         confirmer: no_confirm(),
+        url_opener,
     }
 )
 }
 
-/// 记录调用（会话序列化 + 源路径透传）的导出器；fail 时返回 Err。
+/// 记录调用（会话序列化 + 源路径 + 主题样式透传）的导出器；fail 时返回 Err。
 #[derive(Default)]
 struct FakeExport {
-    calls: AssetCalls,
+    calls: ExportCalls,
     fail: bool,
 }
 impl Exporter for FakeExport {
     fn export_html(
         &mut self,
         session: &veil_core::Session,
+        style: ExportStyle,
         source_path: Option<&Path>,
     ) -> Result<PathBuf, String> {
-        self.calls
-            .borrow_mut()
-            .push((session.serialize(), source_path.map(Path::to_path_buf)));
+        self.calls.borrow_mut().push((
+            session.serialize(),
+            source_path.map(Path::to_path_buf),
+            style,
+        ));
         if self.fail {
             Err("模拟导出失败".into())
         } else {
@@ -2011,7 +2060,7 @@ impl Exporter for FakeExport {
     }
 }
 
-fn app_export(text: &str, path: Option<&str>, fail: bool) -> (App, AssetCalls) {
+fn app_export(text: &str, path: Option<&str>, fail: bool) -> (App, ExportCalls) {
     let calls = Rc::new(RefCell::new(Vec::new()));
     let doc = Doc {
         text: text.into(),
@@ -2042,6 +2091,7 @@ fn app_export(text: &str, path: Option<&str>, fail: bool) -> (App, AssetCalls) {
         persist_env: persist_env(),
         print: Box::new(NoPrint),
         confirmer: no_confirm(),
+        url_opener: no_url(),
     }
 );
     (a, calls)
@@ -2056,6 +2106,27 @@ fn export_delegates_current_session_and_path() {
     assert_eq!(got.len(), 1);
     assert_eq!(got[0].0, "中ab");
     assert_eq!(got[0].1.as_deref(), Some(Path::new("a.md")));
+}
+
+#[test]
+fn export_passes_current_theme_style() {
+    let (mut a, calls) = app_export("x", Some("a.md"), false);
+    // 初始快照必须与当前主题映射一致（未切换前即浅色）
+    assert_eq!(
+        a.doc.export_style,
+        ExportStyle::from_theme(&a.input_state.theme)
+    );
+    assert!(!a.doc.export_style.dark);
+    a.export_now();
+    assert_eq!(calls.borrow()[0].2, a.doc.export_style); // 透传的是 App 侧快照
+    // 切到深色：主题刷新同点更新导出样式，之后导出立刻是深色页面
+    a.set_theme_mode(ThemeMode::Dark);
+    assert_eq!(
+        a.doc.export_style,
+        ExportStyle::from_theme(&a.input_state.theme)
+    );
+    a.export_now();
+    assert!(calls.borrow()[1].2.dark, "主题切换后导出须为深色样式");
 }
 
 #[test]
@@ -2397,6 +2468,7 @@ fn app_dialogs(
         persist_env: persist_env(),
         print: Box::new(NoPrint),
         confirmer: no_confirm(),
+        url_opener: no_url(),
     }
 );
     (a, calls)
@@ -2932,6 +3004,7 @@ fn app_watch(text: &str, path: Option<&str>, store: &MemStore, watch: &FakeWatch
         persist_env: persist_env(),
         print: Box::new(NoPrint),
         confirmer: no_confirm(),
+        url_opener: no_url(),
     }
 )
 }
@@ -3049,6 +3122,7 @@ fn app_confirm(
         persist_env: persist_env_with(recovery, session.clone()),
         print: Box::new(NoPrint),
         confirmer,
+        url_opener: no_url(),
     }
 )
 }
@@ -3740,6 +3814,7 @@ fn save_as_rebinds_watcher() {
         persist_env: persist_env(),
         print: Box::new(NoPrint),
         confirmer: no_confirm(),
+        url_opener: no_url(),
     }
 );
     a.save_as();
@@ -3818,6 +3893,7 @@ fn app_theme(config: Box<dyn ConfigStore>, system: Rc<Cell<Option<bool>>>) -> Ap
         persist_env: persist_env(),
         print: Box::new(NoPrint),
         confirmer: no_confirm(),
+        url_opener: no_url(),
     }
 )
 }
@@ -5635,6 +5711,7 @@ fn app_persist(
         persist_env: persist_env_with(recovery.clone(), session.clone()),
         print: Box::new(NoPrint),
         confirmer: no_confirm(),
+        url_opener: no_url(),
     }
 )
 }
@@ -5687,6 +5764,7 @@ fn app_persist_dialogs(
         persist_env: persist_env_with(recovery.clone(), session.clone()),
         print: Box::new(NoPrint),
         confirmer: no_confirm(),
+        url_opener: no_url(),
     }
 )
 }
@@ -6681,6 +6759,353 @@ fn right_click_on_link_text_opens_link_menu() {
     );
 }
 
+// ---- 链接打开：Ctrl+左键 / 右键菜单（协议白名单 + 失败提示） ----
+
+const LINK_DOC: &str = "[链接](https://example.com)\n";
+
+/// 链接文字上的鼠标落点（与右键测试同口径：偏移 1 的字符盒 + 少量内缩）。
+fn link_point(a: &mut App) -> (f32, f32) {
+    a.ensure_layouts_all();
+    let id = a.editor.session().blocks()[0].0;
+    let top = a
+        .index
+        .blocks
+        .iter()
+        .find(|g| g.id == id)
+        .expect("正文块应存在")
+        .top;
+    let (lx, ly, _) = {
+        let l = &a.cache.layouts[&id];
+        a.engine.caret_xy(l, 1)
+    };
+    let scale = a.input_state.scale;
+    let vp = a.viewport();
+    (
+        MARGIN * scale + lx + 2.0,
+        vp.y + top - a.window_state.scroll_y + ly + 5.0,
+    )
+}
+
+fn link_app(
+    text: &str,
+    calls: &Rc<RefCell<Vec<String>>>,
+    result: Result<(), String>,
+) -> App {
+    app_with(
+        text,
+        None,
+        false,
+        &MemStore::default(),
+        Box::new(FakeUrl {
+            calls: calls.clone(),
+            result,
+        }),
+    )
+}
+
+// ---- Ctrl+单击应用内跳转（脚注引用↔定义、`#slug` → 标题）----
+
+/// 文档偏移 → 鼠标坐标（落到该偏移所在块的排版位置）。
+/// 装饰（`[n]`/`↩`）没有独立源码偏移，但它们都能用锚点 docs 偏移定位：
+/// `caret_xy` 内部走 `doc_to_layout`，零宽插入段会钳到装饰左缘。
+fn point_at_doc(a: &mut App, offset: usize) -> (f32, f32) {
+    a.ensure_layouts_all();
+    let idx = a
+        .index
+        .blocks
+        .iter()
+        .rposition(|g| g.range.start <= offset && offset <= g.range.end)
+        .expect("偏移应落在某块内");
+    let (id, top, start) = {
+        let g = &a.index.blocks[idx];
+        (g.id, g.top, g.range.start)
+    };
+    let (lx, ly, lh) = {
+        let l = &a.cache.layouts[&id];
+        a.engine.caret_xy(l, offset - start)
+    };
+    let scale = a.input_state.scale;
+    let vp = a.viewport();
+    (
+        MARGIN * scale + lx + 1.0,
+        vp.y + top - a.window_state.scroll_y + ly + lh / 2.0,
+    )
+}
+
+/// Ctrl + 单击某文档偏移（按下/抬起 Ctrl 模拟真实修饰键状态）。
+fn ctrl_click_doc(a: &mut App, offset: usize) {
+    let (x, y) = point_at_doc(a, offset);
+    a.input_state.mods.ctrl = true;
+    click_at(a, x, y);
+    a.input_state.mods.ctrl = false;
+}
+
+/// 某块首个 `FootnoteRef` 节点的源码起点。
+fn first_ref_start(a: &App, block_idx: usize) -> usize {
+    let id = a.index.blocks[block_idx].id;
+    a.editor
+        .session()
+        .block_inlines(id)
+        .expect("块应有 inline 节点")
+        .iter()
+        .find(|n| n.kind == InlineKind::FootnoteRef)
+        .expect("块内应有脚注引用")
+        .range
+        .start
+}
+
+/// 标题块起点（文档顺序）。
+fn heading_starts(a: &App) -> Vec<usize> {
+    a.editor
+        .session()
+        .blocks()
+        .iter()
+        .filter(|(_, k, _)| matches!(k, BlockKind::AtxHeading(_) | BlockKind::SetextHeading(_)))
+        .map(|(_, _, r)| r.start)
+        .collect()
+}
+
+#[test]
+fn ctrl_click_footnote_ref_jumps_to_definition_without_editing() {
+    let text = "正文[^a]引用\n\n[^a]: 定义内容\n";
+    let mut a = app_with(text, None, false, &MemStore::default(), no_url());
+    a.ensure_layouts_all();
+    let def_start = a
+        .editor
+        .session()
+        .footnote_definition("a")
+        .expect("定义应已注册")
+        .start;
+    let bytes0 = a.editor.session().serialize();
+    let undo0 = a.editor.session().undo_depth();
+    let ref_start = first_ref_start(&a, 0);
+
+    ctrl_click_doc(&mut a, ref_start);
+
+    assert_eq!(a.editor.caret(), def_start, "光标落到定义内容起点");
+    assert_eq!(a.editor.session().serialize(), bytes0, "文档字节不变");
+    assert_eq!(a.editor.session().undo_depth(), undo0, "不产生撤销步");
+}
+
+#[test]
+fn ctrl_click_footnote_back_marker_jumps_to_first_reference() {
+    let text = "甲[^a] 乙[^a]\n\n[^a]: 尾注\n";
+    let mut a = app_with(text, None, false, &MemStore::default(), no_url());
+    a.ensure_layouts_all();
+    let first_ref = first_ref_start(&a, 0);
+    let def_idx = a
+        .index
+        .blocks
+        .iter()
+        .position(|g| g.kind == BlockKind::FootnoteDef)
+        .expect("应有定义块");
+    let lit = {
+        let id = a.index.blocks[def_idx].id;
+        a.cache.layouts[&id].layout_text().to_string()
+    };
+    assert!(lit.contains('↩'), "定义块末应渲染返回标记: {lit:?}");
+    // `↩` 插在块末正文之后（零宽），其锚点即块 range.end。
+    let back = a.index.blocks[def_idx].range.end;
+    ctrl_click_doc(&mut a, back);
+
+    assert_eq!(a.editor.caret(), first_ref, "回到文档顺序首个引用");
+    assert_eq!(a.editor.session().serialize(), text, "跳转不改文档");
+}
+
+#[test]
+fn ctrl_click_anchor_link_jumps_to_heading() {
+    let text = "# 目标标题\n\n[去](#目标标题)\n";
+    let mut a = app_with(text, None, false, &MemStore::default(), no_url());
+    a.editor.set_caret(a.editor.session().text_len());
+
+    ctrl_click_doc(&mut a, text.find('去').expect("应找到链接文字"));
+
+    assert_eq!(a.editor.caret(), 0, "跳到标题块起点");
+    assert_eq!(a.editor.session().serialize(), text, "跳转不改文档");
+}
+
+#[test]
+fn ctrl_click_anchor_duplicate_heading_matches_suffix_slug() {
+    let text = "# A\n\n# A\n\n[x](#a-1)\n";
+    let mut a = app_with(text, None, false, &MemStore::default(), no_url());
+    let heads = heading_starts(&a);
+    assert_eq!(heads.len(), 2, "两个同名标题均应参与去重编号");
+    a.editor.set_caret(a.editor.session().text_len());
+
+    ctrl_click_doc(&mut a, text.find('x').expect("应找到链接文字"));
+
+    assert_eq!(a.editor.caret(), heads[1], "#a-1 命中第二个同名标题");
+}
+
+#[test]
+fn ctrl_click_undefined_footnote_keeps_caret_and_reports() {
+    let text = "x[^nope]\n";
+    let mut a = app_with(text, None, false, &MemStore::default(), no_url());
+    let caret0 = a.editor.session().text_len();
+    a.editor.set_caret(caret0);
+
+    ctrl_click_doc(&mut a, text.find("[^nope]").expect("引用起点"));
+
+    assert_eq!(a.editor.caret(), caret0, "光标不变");
+    assert_eq!(a.ui_state.chrome.notice, "未找到脚注定义");
+}
+
+#[test]
+fn ctrl_click_missing_anchor_keeps_caret_and_reports() {
+    let text = "[x](#nope)\n";
+    let mut a = app_with(text, None, false, &MemStore::default(), no_url());
+    let caret0 = a.editor.session().text_len();
+    a.editor.set_caret(caret0);
+
+    ctrl_click_doc(&mut a, text.find('x').expect("应找到链接文字"));
+
+    assert_eq!(a.editor.caret(), caret0, "光标不变");
+    assert_eq!(a.ui_state.chrome.notice, "未找到锚点");
+}
+
+#[test]
+fn plain_click_footnote_ref_does_not_jump() {
+    let text = "正文[^a]引用\n\n[^a]: 定义内容\n";
+    let mut a = app_with(text, None, false, &MemStore::default(), no_url());
+    let def_start = a
+        .editor
+        .session()
+        .footnote_definition("a")
+        .expect("定义应已注册")
+        .start;
+    a.editor.set_caret(a.editor.session().text_len());
+    let ref_start = first_ref_start(&a, 0);
+
+    let (x, y) = point_at_doc(&mut a, ref_start);
+    click_at(&mut a, x, y);
+
+    assert_ne!(a.editor.caret(), def_start, "无 Ctrl 不得跳转");
+    assert!(
+        (ref_start..=ref_start + 4).contains(&a.editor.caret()),
+        "普通单击落在脚注引用标记区: {}",
+        a.editor.caret()
+    );
+    assert!(a.ui_state.chrome.notice.is_empty(), "不得产生跳转提示");
+}
+
+#[test]
+fn url_whitelist_accepts_only_web_and_mail_schemes() {
+    for ok in ["https://example.com", "  HTTP://a.b", "MAILTO:x@y.z"] {
+        assert!(url_is_openable(ok), "应放行: {ok:?}");
+    }
+    for bad in ["file:///C:/x", "javascript:alert(1)", "a.md", "#anchor", "/abs"] {
+        assert!(!url_is_openable(bad), "应拒绝: {bad:?}");
+    }
+}
+
+#[test]
+fn ctrl_click_link_opens_without_touching_document() {
+    let calls = Rc::new(RefCell::new(Vec::new()));
+    let mut a = link_app(LINK_DOC, &calls, Ok(()));
+    let (x, y) = link_point(&mut a);
+    let caret0 = a.editor.caret();
+    let bytes0 = a.editor.session().serialize();
+    let undo0 = a.editor.session().undo_depth();
+
+    a.input_state.mods.ctrl = true;
+    assert!(!click_at(&mut a, x, y), "打开链接不触发退出");
+
+    assert_eq!(*calls.borrow(), vec!["https://example.com".to_string()]);
+    assert_eq!(a.editor.caret(), caret0, "Ctrl+单击不移动光标");
+    assert_eq!(a.editor.selection(), None, "Ctrl+单击不改变选区");
+    assert_eq!(a.editor.session().serialize(), bytes0, "文档字节不变");
+    assert_eq!(a.editor.session().undo_depth(), undo0, "不产生撤销步");
+    assert!(a.window_state.last_click.is_none(), "不进入点击计数/拖选路径");
+}
+
+#[test]
+fn plain_click_link_moves_caret_and_does_not_open() {
+    let calls = Rc::new(RefCell::new(Vec::new()));
+    let mut a = link_app(LINK_DOC, &calls, Ok(()));
+    let (x, y) = link_point(&mut a);
+    let doc_len = a.editor.session().text_len();
+    a.editor.set_caret(doc_len);
+
+    click_at(&mut a, x, y);
+
+    assert!(calls.borrow().is_empty(), "未按 Ctrl 不打开链接");
+    assert_ne!(a.editor.caret(), doc_len, "未按 Ctrl 时回落光标定位");
+}
+
+#[test]
+fn ctrl_click_rejects_non_whitelisted_scheme() {
+    let calls = Rc::new(RefCell::new(Vec::new()));
+    let mut a = link_app("[x](file:///C:/Windows/notepad.exe)\n", &calls, Ok(()));
+    let (x, y) = link_point(&mut a);
+    a.input_state.mods.ctrl = true;
+    click_at(&mut a, x, y);
+
+    assert!(calls.borrow().is_empty(), "白名单外不得调用平台实现");
+    assert!(
+        a.ui_state.chrome.notice.contains("无法打开链接"),
+        "状态栏须提示：{:?}",
+        a.ui_state.chrome.notice
+    );
+
+    // 应用内锚点：不交给系统 shell，也不弹提示（锚点跳转属另一任务）
+    a.ui_state.chrome.notice.clear();
+    a.open_link("#section");
+    assert!(calls.borrow().is_empty(), "锚点不进入 opener");
+    assert!(a.ui_state.chrome.notice.is_empty(), "锚点静默忽略");
+}
+
+#[test]
+fn ctrl_click_reports_open_failure_in_status_bar() {
+    let calls = Rc::new(RefCell::new(Vec::new()));
+    let mut a = link_app(LINK_DOC, &calls, Err("模拟打开失败".into()));
+    let (x, y) = link_point(&mut a);
+    a.input_state.mods.ctrl = true;
+    click_at(&mut a, x, y);
+
+    assert_eq!(calls.borrow().len(), 1, "白名单内应已交给平台实现");
+    assert!(
+        a.ui_state.chrome.notice.contains("模拟打开失败"),
+        "失败原因须可见：{:?}",
+        a.ui_state.chrome.notice
+    );
+}
+
+#[test]
+fn link_menu_offers_open_first_and_executes_it() {
+    let calls = Rc::new(RefCell::new(Vec::new()));
+    let mut a = link_app(LINK_DOC, &calls, Ok(()));
+    let (x, y) = link_point(&mut a);
+    a.input_state.mouse = PhysicalPosition::new(x as f64, y as f64);
+    a.on_right_click();
+    assert!(a.ui_state.ctx.open, "链接上右键应打开菜单");
+
+    let items = a.ui_state.ctx.items().to_vec();
+    let open_i = items
+        .iter()
+        .position(|&(_, act)| act == ctx_menu::CtxAction::OpenLink)
+        .expect("应提供「在浏览器中打开」");
+    let copy_i = items
+        .iter()
+        .position(|&(_, act)| act == ctx_menu::CtxAction::CopyLink)
+        .expect("应保留「复制链接地址」");
+    assert!(open_i < copy_i, "打开项须排在复制项之前");
+
+    // 点击首项：走与 Ctrl+左键相同的打开路径
+    let vp = a.viewport();
+    let l = ctx_menu::layout(
+        a.ui_state.ctx.items(),
+        a.ui_state.ctx.x,
+        a.ui_state.ctx.y,
+        vp.x + vp.w,
+        vp.y + vp.h,
+        a.input_state.scale,
+    );
+    let iy = l.y + l.top_pad + l.item_h * open_i as f32 + 1.0;
+    click_at(&mut a, l.x + 2.0, iy);
+    assert_eq!(*calls.borrow(), vec!["https://example.com".to_string()]);
+    assert!(!a.ui_state.ctx.open, "点击后菜单关闭");
+}
+
 #[test]
 fn opening_search_closes_context_menu_so_keys_are_not_swallowed() {
     let store = MemStore::default();
@@ -7191,6 +7616,7 @@ fn e2e_table_edit_and_image_paste() {
         persist_env: persist_env(),
         print: Box::new(NoPrint),
         confirmer: no_confirm(),
+        url_opener: no_url(),
     }
 );
 
@@ -7382,6 +7808,7 @@ fn app_print(text: &str, print: Box<dyn Print>) -> App {
         persist_env: persist_env(),
         print,
         confirmer: no_confirm(),
+        url_opener: no_url(),
     }
 )
 }
@@ -7578,6 +8005,7 @@ fn print_hard_cuts_atomic_block_taller_than_page() {
         persist_env: persist_env(),
         print: Box::new(p),
         confirmer: no_confirm(),
+        url_opener: no_url(),
     }
 );
     a.perform_menu(MenuAction::Print);

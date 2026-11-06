@@ -25,7 +25,7 @@ use crate::interaction::ZOOM_WHEEL_PX;
 use crate::math::MathRenderer;
 use crate::print::{Print, PrintState};
 use crate::theme::{
-    self, Config, ConfigStore, SystemTheme, Theme, ThemeEnv, ThemeMode, WindowEffects,
+    self, Config, ConfigStore, ExportStyle, SystemTheme, Theme, ThemeEnv, ThemeMode, WindowEffects,
 };
 use crate::view::{
     quick_open, search, Cache, Frame, LayoutEngine, Outline, QuickOpen, Revs, Search,
@@ -107,12 +107,31 @@ pub trait FileWatcher {
 
 /// HTML 导出抽象：实现由产品层（veil）注入（同 FileStore 模式，INSTANCE §6）。
 /// 成功返回产物路径；草稿无路径等可预期失败返回 Err（调用方走 stderr，不崩溃）。
+/// `style` 是当前主题的不可变快照（值传递）：导出器无需感知 Theme/App，只按色值出样式。
 pub trait Exporter {
     fn export_html(
         &mut self,
         session: &veil_core::Session,
+        style: ExportStyle,
         source_path: Option<&Path>,
     ) -> Result<PathBuf, String>;
+}
+
+/// 用系统默认程序打开链接：实现由产品层（veil）注入（同 Clipboard 模式）。
+/// `Err(String)` 是可直接展示给用户的失败原因（不崩溃、不吞错）。
+pub trait UrlOpener {
+    fn open_url(&mut self, url: &str) -> Result<(), String>;
+}
+
+/// 链接协议白名单：只放行 http/https/mailto（大小写不敏感，允许前导空白）。
+/// 为什么：链接文本来自文档内容（不可信输入），相对路径、`file:`、`javascript:` 等
+/// 一旦交给系统 shell 就是任意本地程序/脚本执行入口，故一律拒绝。
+/// 应用内锚点（`#...`）不归本端口处理（由锚点跳转任务负责），调用方须先自行忽略。
+pub fn url_is_openable(url: &str) -> bool {
+    let u = url.trim_start();
+    ["http://", "https://", "mailto:"]
+        .iter()
+        .any(|scheme| u.get(..scheme.len()).is_some_and(|h| h.eq_ignore_ascii_case(scheme)))
 }
 
 /// 未保存内容的处置选择（3e 修 B）：关闭/新建/打开前统一三选一。
@@ -183,6 +202,7 @@ pub struct Ports {
     pub persist_env: PersistEnv,
     pub print: Box<dyn Print>,
     pub confirmer: Box<dyn Confirmer>,
+    pub url_opener: Box<dyn UrlOpener>,
 }
 
 /// 运行编辑器窗口。所有外部依赖经 Ports struct 注入；公式渲染器、图片加载/资产
@@ -282,6 +302,9 @@ pub(crate) struct DocState {
     pub(crate) bom: bool,
     /// 上次保存的磁盘字节（或新建时的初始字节）：冲突检测的基线。
     pub(crate) baseline: Vec<u8>,
+    /// 当前主题的导出样式快照（Ctrl+E 导出用）：在主题初始化/切换点同步更新，
+    /// 使导出与屏幕配色一致；放在文档真值旁是因为导出对象就是当前文档。
+    pub(crate) export_style: ExportStyle,
 }
 
 /// 瞬态窗口/呈现状态（ADR-009 S6 C1）：6 个字段无交叉借用风险，单独子结构。
@@ -376,6 +399,7 @@ pub(crate) struct AppPorts {
     pub(crate) session: Box<dyn SessionStore>,
     pub(crate) print: Box<dyn Print>,
     pub(crate) confirmer: Box<dyn Confirmer>,
+    pub(crate) url_opener: Box<dyn UrlOpener>,
 }
 
 /// 启动文档决议（0b）：resume 模式下按「崩溃恢复 > 会话恢复 > 传入文档」重建。
@@ -498,6 +522,8 @@ impl App {
             Err(_) => (Config::default(), String::new()),
         };
         let theme = Theme::of(app_config.mode, system_dark);
+        // 导出样式随主题一起初始化：之后只在 refresh_theme_visuals 一处同步，避免两处漂移
+        let export_style = ExportStyle::from_theme(&theme);
         let mut ports = AppPorts {
             clipboard: ports.clipboard,
             store: ports.store,
@@ -514,6 +540,7 @@ impl App {
             session,
             print: ports.print,
             confirmer: ports.confirmer,
+            url_opener: ports.url_opener,
         };
         let start = startup_doc(&mut ports, doc);
         let mut editor = Editor::new(&start.doc.text);
@@ -531,6 +558,7 @@ impl App {
                 baseline: start
                     .baseline
                     .unwrap_or_else(|| encode(&start.doc.text, start.doc.bom)),
+                export_style,
             },
             config: app_config,
             window_state: WindowState::default(),
@@ -616,6 +644,8 @@ impl App {
     pub(crate) fn refresh_theme_visuals(&mut self) {
         self.engine.set_syntax_colors(self.input_state.theme.syntax);
         self.engine.set_link_color(self.input_state.theme.link);
+        // 导出样式与渲染样式同点更新：主题切换后立即导出也应拿到新配色
+        self.doc.export_style = ExportStyle::from_theme(&self.input_state.theme);
         self.input_state.revs.theme += 1;
         self.ui_state.chrome.clear_label_cache();
         // 代次递增后按新调色板重排/重渲：只重做可见块，几何按新高度重算

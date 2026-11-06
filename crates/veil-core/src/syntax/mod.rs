@@ -22,8 +22,9 @@ use crate::buffer::Buffer;
 use crate::range::Range;
 use block::{
     fence_close, fence_open, heading_content_span, is_thematic_break, line_text, list_mark,
-    normalize_label, parse_delim_row, parse_link_ref_def, parse_table_cells, quote_def_lines,
-    quote_link_ref_defs, quote_marker_pos, scan_blocks, scan_next, visible_text, RefMap,
+    normalize_label, parse_delim_row, parse_footnote_def, parse_link_ref_def, parse_table_cells,
+    quote_def_lines, quote_link_ref_defs, quote_marker_pos, scan_blocks, scan_next, visible_text,
+    RefMap,
 };
 use inline::parse_inlines;
 
@@ -33,6 +34,15 @@ pub(crate) struct Syntax {
     /// 文档级链接引用表（0c P0-1）：规范化 label → (dest, title) 绝对区间。
     /// 派生数据：new/reparse 后由 LinkRefDef 块全量重建，不持久化、不进撤销栈。
     refs: RefMap,
+    /// 派生脚注编号表：id → 编号（1 起）。重建时机与 `refs` 相同——new/reparse 后
+    /// 全量重算，不持久化、不进撤销栈；视图侧以 `footnote_epoch` 摘要参与布局缓存键，
+    /// 保证文首新增引用后文末脚注块编号失效重排。
+    footnote_numbers: std::collections::HashMap<String, usize>,
+    /// 编号顺序的 id 列表（下标 + 1 = 编号），供视图按序渲染脚注区。
+    footnote_ids: Vec<String>,
+    /// 脚注定义表：id → 首个定义的首行内容区间（重复定义 first wins）。
+    /// 仅用于视图取定义内容；编号与它无关（未被引用的定义不占号）。
+    footnote_defs: std::collections::HashMap<String, Range>,
     /// BlockId → blocks 内索引（new/reparse 后重建，O(1) 查表替代 iter().find）。
     id_index: std::collections::HashMap<BlockId, usize>,
     /// 最近一次 `reparse` 实际扫描的行跨度（只读观测值，不参与解析语义）。
@@ -45,6 +55,9 @@ impl Syntax {
             blocks: Vec::new(),
             next_id: 0,
             refs: RefMap::new(),
+            footnote_numbers: std::collections::HashMap::new(),
+            footnote_ids: Vec::new(),
+            footnote_defs: std::collections::HashMap::new(),
             id_index: std::collections::HashMap::new(),
             last_rescan_lines: 0,
         };
@@ -54,7 +67,9 @@ impl Syntax {
             .map(|(kind, s, e)| syntax.fresh_block(buf, kind, s, e))
             .collect();
         syntax.build_refs(buf);
+        // 先建 id 索引：build_footnotes 经 `inlines` 查块，依赖索引已就绪。
         syntax.rebuild_id_index();
+        syntax.build_footnotes(buf);
         syntax
     }
 
@@ -86,6 +101,80 @@ impl Syntax {
             let label = normalize_label(&buf.slice(ast.label.start, ast.label.end));
             self.refs.entry(label).or_insert((ast.dest, ast.title));
         }
+    }
+
+    /// 重建脚注派生表（与 `build_refs` 同点位、同生命周期）：
+    /// - `footnote_numbers` / `footnote_ids`：按**文档顺序首次引用**从 1 递增；
+    ///   同 id 重复引用同号，未被引用的定义不占号。
+    /// - `footnote_defs`：id → 首个定义内容区间（重复定义 first wins）。
+    ///
+    /// 全量重算的代价是逐块 inline 解析；为守住击键热路径，块文本不含 `[^` 时
+    /// 直接跳过（脚注在普通文档里稀疏），不改变语义。
+    fn build_footnotes(&mut self, buf: &Buffer) {
+        self.footnote_numbers.clear();
+        self.footnote_ids.clear();
+        self.footnote_defs.clear();
+        for i in 0..self.blocks.len() {
+            let (kind, start_line, end_line) = {
+                let b = &self.blocks[i];
+                (b.kind.clone(), b.start_line, b.end_line)
+            };
+            if kind == BlockKind::FootnoteDef {
+                let line = line_text(buf, start_line);
+                let base = buf.offset_of_line(start_line);
+                if let Some((id_range, content)) = parse_footnote_def(&line, base) {
+                    let id = buf.slice(id_range.start, id_range.end);
+                    self.footnote_defs.entry(id).or_insert(content);
+                }
+                continue;
+            }
+            if matches!(
+                kind,
+                BlockKind::FencedCode(_)
+                    | BlockKind::IndentedCode
+                    | BlockKind::Math
+                    | BlockKind::Table
+                    | BlockKind::ThematicBreak
+                    | BlockKind::LinkRefDef
+                    | BlockKind::HtmlBlock
+            ) {
+                continue;
+            }
+            let start = buf.offset_of_line(start_line);
+            let end = if end_line < buf.line_count() {
+                buf.offset_of_line(end_line)
+            } else {
+                buf.len()
+            };
+            if !buf.slice(start, end).contains("[^") {
+                continue;
+            }
+            let block_id = self.blocks[i].id;
+            let Some(nodes) = self.inlines(buf, block_id) else {
+                continue;
+            };
+            collect_footnote_refs(
+                &nodes,
+                buf,
+                &mut self.footnote_numbers,
+                &mut self.footnote_ids,
+            );
+        }
+    }
+
+    /// 脚注编号（1 起）；未引用/未知 id 返回 None。
+    pub fn footnote_number(&self, id: &str) -> Option<usize> {
+        self.footnote_numbers.get(id).copied()
+    }
+
+    /// 已编号脚注 id（文档顺序，下标 + 1 = 编号）。
+    pub fn footnote_ids(&self) -> &[String] {
+        &self.footnote_ids
+    }
+
+    /// 脚注首个定义的首行内容区间（绝对字节偏移）；无定义返回 None。
+    pub fn footnote_definition(&self, id: &str) -> Option<Range> {
+        self.footnote_defs.get(id).copied()
     }
 
     /// 重建 BlockId → blocks 索引 HashMap（每次 new/reparse 后调用）。
@@ -127,6 +216,7 @@ impl Syntax {
                 | BlockKind::Table
                 | BlockKind::ThematicBreak
                 | BlockKind::LinkRefDef
+                | BlockKind::FootnoteDef
                 | BlockKind::HtmlBlock
         ) {
             return Some(Vec::new());
@@ -446,7 +536,9 @@ impl Syntax {
         }
         self.blocks = new_blocks;
         self.build_refs(buf);
+        // 同上：编号表经 `inlines` 查块，须在 id 索引重建之后
         self.rebuild_id_index();
+        self.build_footnotes(buf);
         debug_assert!(self
             .blocks
             .iter()
@@ -528,6 +620,26 @@ fn collect_emphasis(nodes: &[InlineNode], out: &mut Vec<EmphasisSpan>) {
             });
         }
         collect_emphasis(&n.children, out);
+    }
+}
+
+/// 按文档顺序（前序）收集脚注引用并编号：首次出现的 id 取下一个递增编号。
+/// 编号只由引用决定，定义块不参与；这也保证了「未被引用的定义不占号」。
+fn collect_footnote_refs(
+    nodes: &[InlineNode],
+    buf: &Buffer,
+    numbers: &mut std::collections::HashMap<String, usize>,
+    ids: &mut Vec<String>,
+) {
+    for n in nodes {
+        if n.kind == InlineKind::FootnoteRef {
+            let id = buf.slice(n.content.start, n.content.end);
+            if let std::collections::hash_map::Entry::Vacant(e) = numbers.entry(id) {
+                ids.push(e.key().clone());
+                e.insert(ids.len());
+            }
+        }
+        collect_footnote_refs(&n.children, buf, numbers, ids);
     }
 }
 
@@ -1048,6 +1160,150 @@ mod tests {
         // `[a](/inline)` 优先于引用式（同 label 有定义也用 inline URL）
         let (_s, _b, nodes) = para_inlines("[a](/inline)\n\n[a]: /ref\n");
         assert_eq!(sexp(&nodes), "Link[0..12 c=1..2 url=4..11]");
+    }
+
+    // ===== GFM 脚注（定义块 / 引用 inline / 派生编号表） =====
+
+    #[test]
+    fn footnote_def_block_and_indented_continuation() {
+        // 续行须缩进 ≥4 列（与缩进代码块同口径）；末尾空行不计入块区间
+        let b = Buffer::new("正文\n\n[^1]: 第一行\n    续行\n\n尾段\n");
+        let s = Syntax::new(&b);
+        let kinds: Vec<_> = s.blocks().iter().map(|b| b.kind.clone()).collect();
+        assert_eq!(
+            kinds,
+            [BlockKind::Paragraph, BlockKind::FootnoteDef, BlockKind::Paragraph]
+        );
+        let def = &s.blocks()[1];
+        assert_eq!((def.start_line, def.end_line), (2, 4));
+        // 定义块按源码渲染：无 inline（不背叛源码，与 LinkRefDef 一致）
+        assert_eq!(s.inlines(&b, def.id), Some(Vec::new()));
+    }
+
+    #[test]
+    fn footnote_def_never_becomes_link_ref_def() {
+        // 判定优先 + parse_link_ref_def 显式排除 `^`：`[^1]: …` 只能是脚注定义
+        let b = Buffer::new("[^1]: /url\n");
+        let s = Syntax::new(&b);
+        assert_eq!(s.blocks().len(), 1);
+        assert_eq!(s.blocks()[0].kind, BlockKind::FootnoteDef);
+        // 文档内 `[^1]` 仍是脚注引用，不是 shortcut 链接
+        let b2 = Buffer::new("[^1]\n\n[^1]: /url\n");
+        let s2 = Syntax::new(&b2);
+        assert_eq!(
+            sexp(&s2.inlines(&b2, s2.blocks()[0].id).unwrap()),
+            "FootnoteRef[0..4 c=2..3]"
+        );
+    }
+
+    #[test]
+    fn footnote_def_indentation_and_non_continuation() {
+        // ≤3 空格合法
+        let b = Buffer::new("   [^a]: x\n");
+        let s = Syntax::new(&b);
+        assert_eq!(s.blocks()[0].kind, BlockKind::FootnoteDef);
+        // 4 空格属缩进代码领地
+        let b = Buffer::new("    [^a]: x\n");
+        let s = Syntax::new(&b);
+        assert_eq!(s.blocks()[0].kind, BlockKind::IndentedCode);
+        // 非缩进续行另起段落
+        let b = Buffer::new("[^a]: x\nnot continuation\n");
+        let s = Syntax::new(&b);
+        assert_eq!(s.blocks().len(), 2);
+        assert_eq!(s.blocks()[1].kind, BlockKind::Paragraph);
+        // 定义不打断进行中段落（与 LinkRefDef 同构）
+        let b = Buffer::new("文本\n[^a]: x\n");
+        let s = Syntax::new(&b);
+        assert_eq!(s.blocks().len(), 1);
+        assert_eq!(s.blocks()[0].kind, BlockKind::Paragraph);
+    }
+
+    #[test]
+    fn footnote_ref_skipped_in_code_and_fenced_blocks() {
+        // 代码跨度内不解析
+        let b = Buffer::new("`[^1]`\n");
+        let s = Syntax::new(&b);
+        assert_eq!(
+            sexp(&s.inlines(&b, s.blocks()[0].id).unwrap()),
+            "Code[0..6 c=1..5]"
+        );
+        // 围栏代码块无 inline
+        let b = Buffer::new("```\n[^1]\n```\n");
+        let s = Syntax::new(&b);
+        assert_eq!(s.inlines(&b, s.blocks()[0].id), Some(Vec::new()));
+    }
+
+    #[test]
+    fn footnote_ref_not_parsed_in_image_syntax() {
+        let b = Buffer::new("![^1]\n");
+        let s = Syntax::new(&b);
+        assert!(s.inlines(&b, s.blocks()[0].id).unwrap().is_empty());
+        // 即使存在同名定义，`![^id]` 仍属图片语法，不得拆出脚注引用
+        let b = Buffer::new("![^1]\n\n[^1]: x\n");
+        let s = Syntax::new(&b);
+        assert!(s.inlines(&b, s.blocks()[0].id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn footnote_ref_without_definition_still_parsed() {
+        // 解析层不依赖定义：缺失定义也产出节点（视图按编号表缺失降级纯文本）
+        let b = Buffer::new("无定义 [^ghost]\n");
+        let s = Syntax::new(&b);
+        assert_eq!(
+            sexp(&s.inlines(&b, s.blocks()[0].id).unwrap()),
+            "FootnoteRef[10..18 c=12..17]"
+        );
+        assert_eq!(s.footnote_number("ghost"), Some(1));
+        assert_eq!(s.footnote_definition("ghost"), None);
+    }
+
+    #[test]
+    fn footnote_numbers_follow_first_reference_order() {
+        let b = Buffer::new("[^b] [^a] [^b]\n\n[^a]: A\n[^b]: B\n[^c]: C\n");
+        let s = Syntax::new(&b);
+        // 首次引用顺序：b 先于 a；同 id 重复引用同号
+        assert_eq!(s.footnote_number("b"), Some(1));
+        assert_eq!(s.footnote_number("a"), Some(2));
+        // 未被引用的定义不占号
+        assert_eq!(s.footnote_number("c"), None);
+        assert_eq!(s.footnote_ids(), ["b", "a"]);
+    }
+
+    #[test]
+    fn footnote_duplicate_definition_first_wins() {
+        let b = Buffer::new("[^a]: first\n[^a]: second\n");
+        let s = Syntax::new(&b);
+        assert_eq!(s.blocks().len(), 2);
+        let r = s.footnote_definition("a").unwrap();
+        assert_eq!(&b.slice(0, b.len())[r.start..r.end], " first");
+    }
+
+    #[test]
+    fn footnote_chinese_id() {
+        let b = Buffer::new("脚注[^中文-id_2]。\n\n[^中文-id_2]: 定义\n");
+        let s = Syntax::new(&b);
+        assert_eq!(s.footnote_number("中文-id_2"), Some(1));
+        assert_eq!(s.footnote_ids(), ["中文-id_2"]);
+        let r = s.footnote_definition("中文-id_2").unwrap();
+        assert_eq!(&b.slice(0, b.len())[r.start..r.end], " 定义");
+    }
+
+    #[test]
+    fn footnote_def_inside_blockquote_uses_container_stripping() {
+        // 引用块内定义走 LinkRefDef 同一容器剥离路径：定义行不产生 inline，
+        // 引用块本身仍为 BlockQuote（不是段落，也不误判成顶层 FootnoteDef）
+        let b = Buffer::new("> 引用\n>\n> [^n]: 定义\n");
+        let s = Syntax::new(&b);
+        assert_eq!(s.blocks().len(), 1);
+        assert_eq!(s.blocks()[0].kind, BlockKind::BlockQuote);
+        assert!(s.inlines(&b, s.blocks()[0].id).unwrap().is_empty());
+        // 定义行紧跟正文（无空行）时按段落续行处理，不能拆成定义
+        let b = Buffer::new("> text\n> [^n]: 定义\n");
+        let s = Syntax::new(&b);
+        assert_eq!(
+            sexp(&s.inlines(&b, s.blocks()[0].id).unwrap()),
+            "FootnoteRef[9..13 c=11..12]"
+        );
     }
 
     #[test]

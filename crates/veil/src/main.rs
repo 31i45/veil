@@ -83,6 +83,7 @@ impl veil_ui::Exporter for NoExport {
         _s: &veil_core::Session,
         _style: veil_ui::ExportStyle,
         _p: Option<&Path>,
+        _t: Option<&Path>,
     ) -> Result<PathBuf, String> {
         Err("数学字体不可用".into())
     }

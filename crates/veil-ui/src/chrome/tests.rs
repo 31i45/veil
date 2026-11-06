@@ -18,6 +18,29 @@ fn viewport_excludes_menu_and_status() {
 }
 
 #[test]
+fn action_enabled_only_gates_known_noop_items() {
+    let none = MenuFlags::default();
+    assert!(!action_enabled(MenuAction::Separator, none), "分隔线不可执行");
+    assert!(!action_enabled(MenuAction::Save, none), "无改动无草稿：保存禁用");
+    assert!(!action_enabled(MenuAction::Undo, none), "无撤销步：撤销禁用");
+    assert!(!action_enabled(MenuAction::Redo, none), "无重做步：重做禁用");
+    // 其余项恒可用（含剪贴板等不可静态判断的项）
+    assert!(action_enabled(MenuAction::Copy, none));
+    assert!(action_enabled(MenuAction::Open, none));
+    assert!(action_enabled(MenuAction::Export, none));
+
+    let all = MenuFlags {
+        can_save: true,
+        can_undo: true,
+        can_redo: true,
+        ..none
+    };
+    assert!(action_enabled(MenuAction::Save, all));
+    assert!(action_enabled(MenuAction::Undo, all));
+    assert!(action_enabled(MenuAction::Redo, all));
+}
+
+#[test]
 fn menu_bar_hit_and_toggle_zones() {
     let rects = menu_bar_rects(1.0);
     assert_eq!(rects.len(), MENUS.len());
@@ -70,24 +93,29 @@ fn file_menu_injects_recent_before_quit() {
     let recent = vec!["a.md".to_string(), "b.md".to_string()];
     let static_len = MENUS[0].items.len();
     let rows = menu_rows(0, &recent);
-    assert_eq!(rows.len(), static_len + 2, "静态项 + 两个最近文件");
-    assert_eq!(rows[static_len - 1].2, MenuAction::OpenRecent(0));
-    assert_eq!(rows[static_len].2, MenuAction::OpenRecent(1));
-    assert_eq!(rows[static_len + 1].2, MenuAction::Quit, "退出仍在最后");
+    // 静态项 + 两个最近文件 + 新增的一条分隔线（最近文件块与「退出」之间）
+    assert_eq!(rows.len(), static_len + 3, "静态项 + 两个最近文件 + 分隔线");
+    let first = rows
+        .iter()
+        .position(|(_, _, a)| *a == MenuAction::OpenRecent(0))
+        .expect("应含第一个最近文件");
+    assert_eq!(rows[first - 1].2, MenuAction::Separator, "最近文件块上方有分隔线");
+    assert_eq!(rows[first + 2].2, MenuAction::Separator, "最近文件块下方有分隔线");
+    assert_eq!(rows[first + 3].2, MenuAction::Quit, "退出仍在最后");
     // 分发与布局同源
     assert_eq!(
-        action_at(0, static_len - 1, &recent),
+        action_at(0, first, &recent),
         Some(MenuAction::OpenRecent(0))
     );
     assert_eq!(
-        action_at(0, static_len + 1, &recent),
-        Some(MenuAction::Quit)
+        action_at(0, first + 1, &recent),
+        Some(MenuAction::OpenRecent(1))
     );
-    assert_eq!(action_at(0, static_len + 2, &recent), None);
-    // 高度随项数增长；项命中与下标一致
+    assert_eq!(action_at(0, rows.len(), &recent), None);
+    // 高度随项数增长：两项行高 + 一条分隔线
     let p0 = popup_layout(0, 1.0, &[]);
     let p1 = popup_layout(0, 1.0, &recent);
-    assert_eq!(p1.h - p0.h, 2.0 * ITEM_H);
+    assert_eq!(p1.h - p0.h, 2.0 * ITEM_H + 4.0);
     for (i, ix, iy, iw, ih) in &p1.items {
         assert_eq!(
             hit_popup_item(ix + iw / 2.0, iy + ih / 2.0, 0, 1.0, &recent),
@@ -109,11 +137,14 @@ fn menu_definitions_cover_shortcuts() {
             MenuAction::New,
             MenuAction::Open,
             MenuAction::QuickOpen,
+            MenuAction::Separator,
             MenuAction::Save,
             MenuAction::SaveAs,
+            MenuAction::Separator,
             MenuAction::Export,
             MenuAction::ExportPdf,
             MenuAction::Print,
+            MenuAction::Separator,
             MenuAction::Quit
         ]
     );
@@ -123,30 +154,55 @@ fn menu_definitions_cover_shortcuts() {
         vec![
             MenuAction::Undo,
             MenuAction::Redo,
+            MenuAction::Separator,
             MenuAction::Cut,
             MenuAction::Copy,
             MenuAction::Paste,
             MenuAction::SelectAll,
+            MenuAction::Separator,
             MenuAction::ToggleBold,
             MenuAction::ToggleItalic,
             MenuAction::InsertLink,
+            MenuAction::Separator,
             MenuAction::Find,
             MenuAction::Replace,
+            MenuAction::Separator,
             MenuAction::InsertImage
+        ]
+    );
+    let view: Vec<_> = MENUS[2].items.iter().map(|(_, _, a)| *a).collect();
+    assert_eq!(
+        view,
+        vec![
+            MenuAction::ToggleOutline,
+            MenuAction::Separator,
+            MenuAction::ZoomIn,
+            MenuAction::ZoomOut,
+            MenuAction::ZoomReset,
+            MenuAction::Separator,
+            MenuAction::ToggleFullscreen,
+            MenuAction::Separator,
+            MenuAction::ThemeSystem,
+            MenuAction::ThemeLight,
+            MenuAction::ThemeDark,
+            MenuAction::Separator,
+            MenuAction::ToggleSourceMode,
+            MenuAction::ToggleFocus,
+            MenuAction::ToggleTypewriter
         ]
     );
 }
 
 #[test]
 fn print_entry_label_has_no_export_wording() {
-    // 「打印…」只负责系统打印对话框；PDF 导出由上方独立的「导出 PDF…」承载
+    // 「打印…」只负责系统打印对话框；PDF 导出由上方独立的「导出 PDF」承载
     let print = MENUS[0]
         .items
         .iter()
         .find(|(_, _, a)| *a == MenuAction::Print)
         .expect("文件菜单应含打印项");
     assert_eq!(print.0, "打印…");
-    assert_eq!(print.1, "Ctrl+P");
+    assert_eq!(print.1, "Ctrl+Shift+P");
     assert!(
         !MENUS[0].items.iter().any(|(l, _, _)| l.contains("打印")
             && l.contains("导出 PDF")),
@@ -277,7 +333,7 @@ fn status_line_variants() {
             3
         ),
         (
-            "dir/a.md *（外部修改已备份）".into(),
+            "a.md · dir *（外部修改已备份）".into(),
             "1234 字 · 行 12，列 3".into()
         )
     );
@@ -588,18 +644,29 @@ fn paint_uses_dark_palette() {
 #[test]
 fn theme_menu_marks_current_mode() {
     assert_eq!(MENUS.len(), 3);
-    assert_eq!(action_at(2, 0, &[]), Some(MenuAction::ToggleOutline));
-    // 3c-2：视图缩放进视图菜单（大纲面板之后、主题之前）
-    assert_eq!(action_at(2, 1, &[]), Some(MenuAction::ZoomIn));
-    assert_eq!(action_at(2, 2, &[]), Some(MenuAction::ZoomOut));
-    assert_eq!(action_at(2, 3, &[]), Some(MenuAction::ZoomReset));
-    assert_eq!(action_at(2, 4, &[]), Some(MenuAction::ToggleFullscreen));
-    assert_eq!(action_at(2, 5, &[]), Some(MenuAction::ThemeSystem));
-    assert_eq!(action_at(2, 6, &[]), Some(MenuAction::ThemeLight));
-    assert_eq!(action_at(2, 7, &[]), Some(MenuAction::ThemeDark));
-    assert_eq!(action_at(2, 8, &[]), Some(MenuAction::ToggleSourceMode));
-    assert_eq!(action_at(2, 9, &[]), Some(MenuAction::ToggleFocus));
-    assert_eq!(action_at(2, 10, &[]), Some(MenuAction::ToggleTypewriter));
+    // 分隔线不参与动作序：去掉后仍是「大纲 → 缩放组 → 全屏 → 主题组 → 模式组」
+    let view: Vec<MenuAction> = MENUS[2]
+        .items
+        .iter()
+        .map(|(_, _, a)| *a)
+        .filter(|a| *a != MenuAction::Separator)
+        .collect();
+    assert_eq!(
+        view,
+        vec![
+            MenuAction::ToggleOutline,
+            MenuAction::ZoomIn,
+            MenuAction::ZoomOut,
+            MenuAction::ZoomReset,
+            MenuAction::ToggleFullscreen,
+            MenuAction::ThemeSystem,
+            MenuAction::ThemeLight,
+            MenuAction::ThemeDark,
+            MenuAction::ToggleSourceMode,
+            MenuAction::ToggleFocus,
+            MenuAction::ToggleTypewriter,
+        ]
+    );
     assert!(theme_action_matches(
         MenuAction::ThemeSystem,
         ThemeMode::System

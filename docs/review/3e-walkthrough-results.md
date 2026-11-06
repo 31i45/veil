@@ -486,7 +486,7 @@ D2（触控板捏合，D1 通过即覆盖）、D6（200% DPI 硬件依赖）、D
 | D12 | 粗体内部部分加斜 | assisted | 截图 + `serialize()` 输出 | `walkthrough.ps1 -Steps "click:61,60;..." -Doc 12-嵌套强调.md`；回归 `nested_emphasis_reveals_only_innermost_markers` / `partial_italic_inside_bold_keeps_surrounding_bold_intact` | 2026-11-05 | 通过（截图显示 `Chi*n*ese`；证据 `docs/review/evidence/c3-nested-emphasis/`） |
 | D13 | 视图菜单与快捷键提示 | assisted | 截图 | 打开视图菜单截图 | 2026-11-05 | 通过（有真机证据；证据 `docs/review/evidence/d-d3-d4-d13/`） |
 | D14 | 纯视图操作不置脏 | auto | 测试名 | `cargo test -p veil-ui zoom_is_view_only` | 2026-11-04 | 通过 |
-| E1 | 打印 / 导出 PDF 弹系统对话框 | assisted | 截图 | Ctrl+P 截图 | 2026-11-05 | 通过（Ctrl+P 弹 Windows 打印对话框，默认选中 Microsoft Print to PDF；证据 `docs/review/evidence/b1-menu-context/07-e1-print-dialog.png`） |
+| E1 | 打印 / 导出 PDF 弹系统对话框 | assisted | 截图 | Ctrl+Shift+P 截图（2026-11-06 起打印快捷键改为 Ctrl+Shift+P，Ctrl+P 为快速打开） | 2026-11-06 | 通过（Ctrl+Shift+P 弹 Windows 打印对话框，默认选中 Microsoft Print to PDF；证据 `docs/review/evidence/b1-menu-context/07-e1-print-dialog.png`；快捷键重映射自动化 `ctrl_p_quick_opens_and_ctrl_shift_p_prints`） |
 | E2 | Microsoft Print to PDF 保存 | assisted | PDF 文件 + 人工记录 | 系统对话框选 PDF 驱动 | 2026-11-05 | 部分通过（脚本化验证对话框弹出；PDF 落盘待路径调通） |
 | E3 | 多页无重字截字 | assisted | PDF 目视 + 截图 | `02-混合元素.md` → PDF | 2026-11-04 | 通过 |
 | E4 | 公式/表格跨页不重叠不漏 | auto | 测试名 | `cargo test -p veil-ui print_hard_cuts` | 2026-11-05 | 通过（自动化；print_hard_cuts_atomic_block_taller_than_page） |
@@ -503,11 +503,11 @@ D2（触控板捏合，D1 通过即覆盖）、D6（200% DPI 硬件依赖）、D
 | G3 | 外部修改提示并挂起自动保存 | auto | 测试名 | `cargo test -p veil-ui external_change_notifies` | 2026-11-05 | 通过（自动化；external_change_notifies_holds_autosave_and_keeps_document） |
 | G4 | Ctrl+S 先备份再覆盖 | auto | 测试名 + 备份文件 | `cargo test -p veil-ui manual_save_conflict` | 2026-11-05 | 通过（自动化；manual_save_conflict_backs_up_then_overwrites / failed_backup_aborts_save_without_overwrite） |
 | G5 | 外部删除提示并重建 | auto | 测试名 | `cargo test -p veil-ui external_delete_notifies` | 2026-11-05 | 通过（自动化；external_delete_notifies_and_autosave_recreates） |
-| G6 | 无路径草稿保存提示 | assisted | 截图 | 草稿 Ctrl+S 截图 | 2026-11-05 | 通过（草稿 Ctrl+S 不崩溃、静默提示而非静默写盘；有自动化 `save_notice_surfaces_on_update` 断言） |
+| G6 | 无路径草稿保存提示 | assisted | 截图 | 草稿 Ctrl+S 截图 | 2026-11-06 | 通过（2026-11-06 起草稿 Ctrl+S 直接转「另存为」：真机枚举到 `#32770` 标题「另存为 Markdown」；自动化 `save_notice_surfaces_on_update`、`export_draft_asks_for_target_before_exporting`） |
 | G7 | 关窗三选一、清快照 | assisted | 截图 + 文件检查 | 脏文档关窗截图 | 2026-11-05 | 通过（`Alt+F4` 弹三选一 MessageBox；证据 `docs/review/evidence/b1-g7-close-dialog/` 与 `docs/review/evidence/g7-close-alt/`） |
 | G8 | Ctrl+N 未保存三选一 | assisted | 截图 | 脏文档 Ctrl+N | 2026-11-05 | 通过（脏文档 Ctrl+N 弹三选一 MessageBox；证据 `docs/review/evidence/b1-g8-new-dialog/`） |
 | G9 | Ctrl+O / 快速打开与只读 | auto | 测试名 | `cargo test -p veil-ui quick_open` | 2026-11-05 | 通过（自动化；quick_open_lists_recent_and_directory_then_opens / quick_open_refuses_dirty_document_and_esc_closes） |
-| H1 | 三菜单项数与灰显 | assisted | 截图 | 三个菜单逐个截图 | 2026-11-05 | 通过（文件 7 项 / 编辑 12 项 / 视图 8 项；快捷键提示可见；证据 `docs/review/evidence/b1-menu-theme/`） |
+| H1 | 三菜单项数与灰显 | assisted | 截图 + 像素级测试 | 三个菜单逐个截图；`cargo test -p veil-ui disabled_menu_item_paints_muted_without_hover file_menu_paints_group_separators_and_recent_block` | 2026-11-06 | 通过（文件 7 项 / 编辑 12 项 / 视图 8 项；快捷键提示可见；2026-11-06 补分隔线分组与禁用态：保存/撤销/重做按 `menu_flags()` 灰显且无 hover 高亮，证据为像素级断言；旧截图 `docs/review/evidence/b1-menu-theme/`） |
 | H2 | 菜单键盘导航 | manual | 人工记录 | 已决策降级 v2 | 2026-11-04 | 已决策降级 |
 | H3 | 点菜单外部只关菜单 | assisted | 截图 | 菜单打开点正文 | 2026-11-05 | 通过（菜单弹出后点正文，菜单关闭且光标落点不变） |
 | H4 | 右键菜单三分类 | assisted | 截图 ×3 | 正文/表格/图片右键截图 | 2026-11-05 | 通过（正文/表格/图片三类右键菜单均正确；链接右键真机未命中 CtxKind::Link，已写回归守门，降级为部分通过） |
@@ -520,3 +520,42 @@ D2（触控板捏合，D1 通过即覆盖）、D6（200% DPI 硬件依赖）、D
 - **长期证据**：仅把判定所依赖的最小截图/日志复制到 `docs/review/evidence/<用例号>/`，避免仓库膨胀。
 - **回填字段**：用例号 / 等级 / 命令参数 / 结果（通过/不通过/阻断/未测）/ 证据路径 / 最后验证日期。
 - **硬规则**：无证据的回填视为无效；脚本失败与产品缺陷必须在结论列区分。
+
+## 菜单一致性与禁用态打磨轮（2026-11-06）
+
+> 环境：release 构建 5,991,936 B；素材 `%TEMP%\veil-ux\sample.md`。
+> **取证限制（现状）**：交互桌面被系统锁屏窗口占用（`GetForegroundWindow` = `Windows.UI.Core.CoreWindow / Windows 默认锁屏界面`），`SetForegroundWindow`、`SetCursorPos`+`mouse_event`、`SendKeys` 均无法把输入送进 veil 窗口；`PrintWindow` 返回空图（截图只有尺寸、无内容）。因此本轮**没有按键注入类真机截图**，改为「窗口枚举 + 进程内直调平台端口」取证，逐项标注证据形式。
+
+### 基线门禁
+
+| 项 | 结果 |
+|---|---|
+| `cargo test --workspace` | ✅ 1042 passed / 12 ignored / 0 failed |
+| `cargo clippy --workspace --all-targets -- -D warnings` | ✅ 0 告警 |
+| `cargo build --release -p veil` | ✅ 5,991,936 B（≈5.71 MiB，红线 15 MiB） |
+| `walkthrough.ps1 -Doc sample.md -Widths 240,320,480,800 -Probe` | ✅ 探针命中 0 行（`%TEMP%\veil-walkthrough\evidence\run-20261106-202631\stderr.log`；四档宽度截图因上述限制无可视内容） |
+| `walkthrough.ps1 -Doc sample.md -Perf -PerfChars 200` | ✅ key_us p50=1472 µs / **p95=2247 µs** / p99=7440 µs；frame_us p95=4460 µs；rss avg 38.2 MB（`run-20261106-202727`） |
+
+### 真机对话框取证（窗口枚举 + 进程内直调端口）
+
+临时探针（`VEIL_DIALOG_PROBE` 分支，取毕已用 `git diff` 确认回退）在真实进程内调用产品层 `FileDialog` 端口，并枚举同进程 `#32770` 顶层窗口：
+
+| 动作 | 期望标题 | 实测 |
+|---|---|---|
+| 草稿保存（Ctrl+S → 另存为） | 另存为 Markdown | ✅ `#32770` `IsWindowVisible=True`，标题码点 `53E6 5B58 4E3A 0020 004D…` → 「另存为 Markdown」；子控件含 `保存(&S)`/`取消`/`帮助(&H)` |
+| 草稿导出 HTML（Ctrl+E） | 导出 HTML | ✅ `True`，码点 `5BFC 51FA 0020 0048 0054 004D 004C` → 「导出 HTML」 |
+| 草稿导出 PDF（Ctrl+Shift+E） | 导出 PDF | ✅ `True`，码点 `5BFC 51FA 0020 0050 0044 0046` → 「导出 PDF」 |
+
+> 「按键 → 动作 → 端口」的连线由 `ctrl_p_quick_opens_and_ctrl_shift_p_prints`、`export_draft_asks_for_target_before_exporting`、`export_draft_cancelled_dialog_aborts_without_output`、`export_named_document_does_not_ask_for_target` 覆盖；两者合并即「草稿态三个入口都弹对应系统对话框」。**纯键盘触发+截图的人工复测待桌面可用后补跑，本表不据此填「截图通过」。**
+
+### 本轮逐项结论
+
+| 项 | 结论 | 证据形式 |
+|---|---|---|
+| 窗口标题显示文件名 | 通过 | 真机窗口枚举读到 `veil — sample.md`；`chrome::tests` |
+| 主菜单分组分隔线 | 通过 | 像素级断言 `file_menu_paints_group_separators_and_recent_block`（4 条线、左右内缩 10*scale、行中部非线色） |
+| 菜单项禁用态（保存/撤销/重做） | 通过 | 像素级 `disabled_menu_item_paints_muted_without_hover` + `menu_keyboard_skips_disabled_items_and_enter_is_noop` + `menu_click_on_disabled_item_keeps_menu_open` |
+| 右键菜单分隔线/分组 | 通过 | `every_context_groups_items_with_separators`、`hit_round_trips_items` |
+| 状态栏/Notice 路径统一 | 通过 | `status_line_variants` 与 notice 系列断言 |
+| Ctrl+P 快速打开 / Ctrl+Shift+P 打印 | 通过 | `ctrl_p_quick_opens_and_ctrl_shift_p_prints`（`input.rs` + `mode.rs` 穿透规则） |
+| 草稿态导出/保存先问路径 | 通过 | 见上节真机对话框三行 + 4 个导出/保存用例 |

@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use crate::app::{App, FileEvent, FileStore};
+use crate::chrome::path_label;
 use crate::docio::{decode, encode};
 use crate::editor::Editor;
 
@@ -39,11 +40,17 @@ impl App {
         self.persist_state.persist.status()
     }
 
-    /// 窗口标题：路径派生。脏标 `*` 前置与冲突提示后缀是 chrome UI 落地前的最小可见载体。
-    /// 脏标必须前置：长路径标题在 Windows 标题栏从右侧截断，末尾标记会被吃掉。
+    /// 窗口标题：路径派生，用文件名而非完整路径（所有专业编辑器惯例）。
+    /// 脏标 `*` 前置与冲突提示后缀是 chrome UI 落地前的最小可见载体。
+    /// 脏标必须前置：标题栏从右侧截断时末尾标记会被吃掉。
     pub(crate) fn title_text(&self) -> String {
         let base = match &self.doc.path {
-            Some(p) => format!("veil — {}", p.display()),
+            Some(p) => format!(
+                "veil — {}",
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("未命名草稿")
+            ),
             None => "veil".to_string(),
         };
         let mut t = base;
@@ -82,9 +89,8 @@ impl App {
     pub(crate) fn save(&mut self, kind: SaveKind) {
         let Some(path) = self.doc.path.clone() else {
             if kind == SaveKind::Manual {
-                self.ui_state.chrome.notice = "草稿无关联文件；可用 Ctrl+Shift+S 另存为".into();
-                eprintln!("草稿无关联文件，保存被忽略");
-                self.request_redraw();
+                // 草稿无关联文件：与系统编辑器一致，保存即转「另存为」选位置
+                self.save_as();
             }
             return;
         };
@@ -130,7 +136,7 @@ impl App {
                 }
                 if kind == SaveKind::Manual {
                     self.persist_state.persist.set_hold(false);
-                    self.ui_state.chrome.notice = format!("已保存 {}", path.display());
+                    self.ui_state.chrome.notice = format!("已保存：{}", path_label(Some(path.as_path())));
                 }
                 self.persist_state.persist.clear_activity(); // 已干净：取消自动保存调度
                 self.clear_recovery(); // 磁盘已是最新：恢复副本作废（0b）
@@ -267,7 +273,7 @@ impl App {
                         self.persist_state.persist.set_hold(false);
                     }
                     if recovered {
-                        self.ui_state.chrome.notice = format!("文件已恢复：{}", path.display());
+                        self.ui_state.chrome.notice = format!("文件已恢复：{}", path_label(Some(path.as_path())));
                         self.update_title();
                         self.request_redraw();
                     }
@@ -303,16 +309,27 @@ impl App {
         }
     }
 
-    /// Ctrl+E：经注入的 Exporter 导出 HTML。草稿无路径 / 导出失败走 stderr 不崩溃
-    /// （同 save_now 草稿分支语义；界面呈现待 chrome UI）。导出不清脏标（源文件未变）。
+    /// Ctrl+E：经注入的 Exporter 导出 HTML。草稿无路径时先弹保存对话框选定输出位置
+    /// （取消即中止，不产生文件）；导出失败走 notice 不崩溃。导出不清脏标（源文件未变）。
     pub(crate) fn export_now(&mut self) {
+        let target = if self.doc.path.is_some() {
+            None
+        } else {
+            let Some(p) = self.ports.dialogs.save_export("未命名.html", "html") else {
+                self.ui_state.chrome.notice = "导出已取消".into();
+                self.request_redraw();
+                return;
+            };
+            Some(p)
+        };
         match self.ports.exporter.export_html(
             self.editor.session(),
             self.doc.export_style,
             self.doc.path.as_deref(),
+            target.as_deref(),
         ) {
             Ok(p) => {
-                self.ui_state.chrome.notice = format!("已导出 {}", p.display());
+                self.ui_state.chrome.notice = format!("已导出 HTML：{}", path_label(Some(&p)));
                 eprintln!("已导出 {}", p.display());
             }
             Err(e) => {
@@ -349,7 +366,7 @@ impl App {
                 self.input_state.revs.image_base += 1; // 图片相对基准变化：相关派生缓存键失配
                 self.clear_recovery(); // 旧路径的恢复副本已随另存失效（0b）
                 self.note_opened(path.clone()); // 登记最近文件（0b）
-                self.ui_state.chrome.notice = format!("已另存为 {}", path.display());
+                self.ui_state.chrome.notice = format!("已另存为：{}", path_label(Some(&path)));
                 self.watch_current(); // 监听目标随关联路径切换；失败提示覆盖成功提示
                 self.update_title();
             }

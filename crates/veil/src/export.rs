@@ -434,9 +434,14 @@ impl Exporter for HtmlExporter {
         session: &Session,
         style: ExportStyle,
         source_path: Option<&Path>,
+        target: Option<&Path>,
     ) -> Result<PathBuf, String> {
-        let src = source_path.ok_or_else(|| "草稿无关联文件，导出被忽略".to_string())?;
-        let out = src.with_extension("html");
+        let out = match target {
+            Some(t) => t.to_path_buf(),
+            None => source_path
+                .ok_or_else(|| "草稿无关联文件，导出被忽略".to_string())?
+                .with_extension("html"),
+        };
         self.store
             .save(&out, html_of(session, &style, &self.font).as_bytes())?;
         Ok(out)
@@ -811,7 +816,7 @@ mod tests {
         let s = Session::open("# T\n");
         let style = ExportStyle::default();
         let got = e
-            .export_html(&s, style, Some(Path::new("dir/a.md")))
+            .export_html(&s, style, Some(Path::new("dir/a.md")), None)
             .unwrap();
         assert_eq!(got, PathBuf::from("dir/a.html")); // 同名换扩展名
         let bytes = files.borrow()[Path::new("dir/a.html")].clone();
@@ -831,8 +836,30 @@ mod tests {
         };
         let s = Session::open("x\n");
         assert!(
-            e.export_html(&s, ExportStyle::default(), None).is_err()
+            e.export_html(&s, ExportStyle::default(), None, None).is_err()
         ); // 草稿：可读错误
         assert!(files.borrow().is_empty()); // 无半截产物
+    }
+
+    #[test]
+    fn exporter_writes_to_explicit_target_for_draft() {
+        let store = MemStore::default();
+        let files = store.files.clone();
+        let mut e = HtmlExporter {
+            font: font(),
+            store: Box::new(store),
+        };
+        let s = Session::open("x\n");
+        // 草稿无源路径，但用户已在对话框选定目标：按目标落盘
+        let got = e
+            .export_html(
+                &s,
+                ExportStyle::default(),
+                None,
+                Some(Path::new("out/draft.html")),
+            )
+            .unwrap();
+        assert_eq!(got, PathBuf::from("out/draft.html"));
+        assert_eq!(files.borrow().len(), 1);
     }
 }

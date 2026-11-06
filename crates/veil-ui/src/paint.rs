@@ -758,12 +758,7 @@ impl App {
             self.paint_drop_hint(&mut frame);
             // chrome 最后绘制（不透明覆盖内容；滚动条区保留给状态栏行列）
             let recent = self.recent_labels();
-            let flags = chrome::MenuFlags {
-                fullscreen: self.window_state.fullscreen,
-                focus: self.ui_state.writing.focus,
-                typewriter: self.ui_state.writing.typewriter,
-                source: self.source_mode(),
-            };
+            let flags = self.menu_flags();
             self.ui_state.chrome.paint(
                 &mut frame,
                 &mut self.engine,
@@ -1435,9 +1430,22 @@ impl App {
         frame.fill_rect(px, py, 1, ph, theme.chrome_border);
         frame.fill_rect(px + pw as i32 - 1, py, 1, ph, theme.chrome_border);
         let hover = self.ui_state.ctx.hover;
-        for (i, (label, _)) in items.iter().enumerate() {
-            let iy = l.y + l.top_pad + l.item_h * i as f32;
-            if hover == Some(i) {
+        // 分组分隔线：左右内缩，与文字起止对齐
+        for sy in &l.seps {
+            frame.fill_rect(
+                (l.x + 10.0 * scale).round() as i32,
+                (l.y + sy).round() as i32,
+                (l.w - 20.0 * scale).max(1.0) as u32,
+                1,
+                theme.chrome_border,
+            );
+        }
+        for (i, off) in &l.rows {
+            let Some((label, _)) = items.get(*i) else {
+                continue;
+            };
+            let iy = l.y + off;
+            if hover == Some(*i) {
                 frame.fill_rect(
                     px + 1,
                     iy.round() as i32,

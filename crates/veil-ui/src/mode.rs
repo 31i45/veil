@@ -32,7 +32,7 @@ pub(crate) enum TextSink {
 pub(crate) enum Cmd {
     /// 本模式下该键无效：不产生任何副作用。
     Ignore,
-    /// 打开快速打开浮层（Ctrl+Shift+P；查找栏打开时也允许抢占）。
+    /// 打开快速打开浮层（Ctrl+P；查找栏打开时也允许抢占）。
     OpenQuick,
     CloseMenu,
     CloseSearch,
@@ -69,7 +69,7 @@ pub(crate) fn route(mode: Mode, key: Key, mods: Mods, composing: bool) -> Cmd {
             if key == Key::Escape {
                 Cmd::CloseMenu
             } else if ctrl {
-                // Ctrl 组合键一律放行：全局快捷键（Ctrl+F/H/P/Ctrl+Shift+P 等）
+                // Ctrl 组合键一律放行：全局快捷键（Ctrl+F/H/P/Ctrl+Shift+E 等）
                 // 必须穿透菜单覆盖层；执行层各 open_* 会先关 chrome/ctx 菜单。
                 match translate(key, mods) {
                     Some(action) => Cmd::Edit(action),
@@ -111,7 +111,10 @@ pub(crate) fn route(mode: Mode, key: Key, mods: Mods, composing: bool) -> Cmd {
                 // Ctrl+F/H/P 穿透：重申查询焦点 / 展开替换 / 打开快速打开
                 Key::F if ctrl => Cmd::Edit(Action::Find),
                 Key::H if ctrl => Cmd::Edit(Action::Replace),
-                Key::P if ctrl && mods.shift => Cmd::OpenQuick,
+                // Ctrl+P = 快速打开（穿透查找栏）；Ctrl+Shift+P = 打印不穿透
+                // （避免在查询框输入时误触系统打印对话框）
+                Key::P if ctrl && mods.shift => Cmd::Ignore,
+                Key::P if ctrl => Cmd::OpenQuick,
                 // 查找栏输入框自己的粘贴：Ctrl+V 不能让 Action::Paste 去改文档，
                 // 必须粘进查询/替换框；文件列表/图片在查找栏语境下一律当文本粘入。
                 Key::V if ctrl => Cmd::SearchPaste,
@@ -218,11 +221,11 @@ mod tests {
         );
         assert_eq!(
             route(Mode::Menu, Key::P, CTRL, false),
-            Cmd::Edit(Action::Print)
+            Cmd::Edit(Action::QuickOpen)
         );
         assert_eq!(
             route(Mode::Menu, Key::P, CTRL_SHIFT, false),
-            Cmd::Edit(Action::QuickOpen)
+            Cmd::Edit(Action::Print)
         );
         assert_eq!(route(Mode::Menu, text("f"), CTRL, false), Cmd::Ignore, "ctrl+文本 不绑定则 Ignore");
     }
@@ -278,12 +281,9 @@ mod tests {
         // Ctrl+文本 / 未绑定键：吞掉，不得落进查询串
         assert_eq!(route(Mode::Search, text("f"), CTRL, false), Cmd::Ignore);
         assert_eq!(route(Mode::Search, Key::Left, NONE, false), Cmd::Ignore);
-        // Ctrl+Shift+P 抢占为快速打开；Ctrl+P 在查找栏内也不得触发（K2）
-        assert_eq!(
-            route(Mode::Search, Key::P, CTRL_SHIFT, false),
-            Cmd::OpenQuick
-        );
-        assert_eq!(route(Mode::Search, Key::P, CTRL, false), Cmd::Ignore);
+        // Ctrl+P 抢占为快速打开；Ctrl+Shift+P（打印）在查找栏内不触发
+        assert_eq!(route(Mode::Search, Key::P, CTRL, false), Cmd::OpenQuick);
+        assert_eq!(route(Mode::Search, Key::P, CTRL_SHIFT, false), Cmd::Ignore);
         // 栏已开时 Ctrl+F/Ctrl+H 仍生效：重申查询焦点 / 展开替换行
         assert_eq!(
             route(Mode::Search, Key::F, CTRL, false),

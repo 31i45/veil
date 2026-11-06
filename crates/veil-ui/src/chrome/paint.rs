@@ -4,8 +4,9 @@
 use std::path::Path;
 
 use super::{
-    action_checked, menu_bar_rects, menu_rows, popup_layout, scroll_thumb, status_line,
-    theme_action_matches, Chrome, MenuFlags, Viewport, MENUS, MENU_H, SCROLL_W, STATUS_H,
+    action_checked, action_enabled, menu_bar_rects, menu_rows, popup_layout, scroll_thumb,
+    status_line, theme_action_matches, Chrome, MenuFlags, Viewport, MENUS, MENU_H, SCROLL_W,
+    STATUS_H,
 };
 use crate::document::ExternalState;
 use crate::theme::Theme;
@@ -229,19 +230,24 @@ impl Chrome {
                 1,
                 theme.chrome_border,
             );
-            // 最近文件块（文件菜单末尾、「退出」之前）上方的分隔线
-            let recent_start = (open == 0 && !recent.is_empty()).then(|| MENUS[0].items.len() - 1);
+            // 分隔线：左右内缩与菜单项文字起止对齐（不顶到弹层边框）
+            let sep_inset = 10.0 * scale;
+            for (_, sy) in &p.separators {
+                frame.fill_rect(
+                    (p.x + sep_inset).round() as i32,
+                    sy.round() as i32,
+                    (p.w - 2.0 * sep_inset).max(1.0) as u32,
+                    1,
+                    theme.chrome_border,
+                );
+            }
             for (i, ix, iy, iw, ih) in &p.items {
-                if recent_start == Some(*i) {
-                    frame.fill_rect(
-                        ix.round() as i32,
-                        iy.round() as i32,
-                        iw.ceil() as u32,
-                        1,
-                        theme.chrome_border,
-                    );
-                }
-                if self.hover_item == Some((open, *i)) {
+                let Some((label, shortcut, action)) = rows.get(*i) else {
+                    continue;
+                };
+                let enabled = action_enabled(*action, flags);
+                // 禁用项不参与高亮（原生菜单语义：置灰且无悬停反馈）
+                if enabled && self.hover_item == Some((open, *i)) {
                     frame.fill_rect(
                         ix.round() as i32,
                         iy.round() as i32,
@@ -250,17 +256,15 @@ impl Chrome {
                         theme.hover,
                     );
                 }
-                let Some((label, shortcut, action)) = rows.get(*i) else {
-                    continue;
-                };
                 let pad = 12.0 * scale;
+                let label_color = if enabled { theme.text } else { theme.muted };
                 self.draw_left(
                     frame,
                     engine,
                     label,
                     ix + pad,
                     iy + ih / 2.0,
-                    theme.text,
+                    label_color,
                     scale,
                 );
                 // 主题项 / 开关项：开启态在右侧显示「当前」（快捷键列复用）

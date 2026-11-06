@@ -175,6 +175,11 @@ impl Session {
         self.history.undo_len()
     }
 
+    /// 当前可重做步数（只读观测值）：菜单「重做」禁用态的唯一数据源。
+    pub fn redo_depth(&self) -> usize {
+        self.history.redo_len()
+    }
+
     /// 某块的 inline 节点快照（绝对字节偏移）。派生数据，随块结构自动正确；
     /// FencedCode/Math 恒为空，未知 id 返回 None。
     pub fn block_inlines(&self, block: BlockId) -> Option<Vec<InlineNode>> {

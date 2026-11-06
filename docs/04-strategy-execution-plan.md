@@ -394,8 +394,9 @@ B 用 `gfm_canonical` 抹平 cmark-gfm 与 pulldown 的序列化差异（align/s
     缩放即全量重排，缩放后滚动位置钳入新上界；打印页帧语义独占 scale，纸张字号不随
     用户缩放变。
   - 3c-3 F11 无边框全屏（Borderless）；Esc 语义不变（只关菜单，不退全屏）。
-  快捷键决策登记：**打印不占用 Ctrl+P**——该键已绑定快速打开（VS Code/Typora 同），
-  打印由文件菜单「打印 / 导出 PDF…」可达，不另占键。
+  快捷键决策登记：**Ctrl+P = 快速打开**（VS Code 语义，v3 起），打印移到 Ctrl+Shift+P
+  （P=Print 助记保留，菜单始终显示组合，可发现性不依赖肌肉记忆）；导出 HTML/PDF 仍为
+  Ctrl+E / Ctrl+Shift+E。
   门禁：workspace 805 测试绿 + clippy 零警告（commit 649cd05 / 4e46d81 / fc510e7）。
   **真机走查项（人工，转 3e）**：Ctrl+滚轮/捏合缩放档位与百分比提示、F11 进出全屏、
   Ctrl+B/I/K 包裹手感（含 `**` 内按 Ctrl+I 不误拆）。

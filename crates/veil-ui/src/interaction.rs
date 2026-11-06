@@ -672,11 +672,9 @@ impl App {
         self.persist_state
             .recent
             .iter()
-            .map(|p| {
-                p.file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| p.display().to_string())
-            })
+            // 与状态栏/标题/notice 同一套 `文件名 · 父目录` 标签：
+            // 不同目录下的同名文件中可区分，也避免完整路径挤爆菜单宽度。
+            .map(|p| crate::chrome::path_label(Some(p.as_path())))
             .collect()
     }
 

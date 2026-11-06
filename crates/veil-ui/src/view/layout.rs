@@ -1337,6 +1337,21 @@ pub(crate) fn probe_break_violations(buffer: &Buffer, include_hard: bool) {
             .and_then(|s| s.chars().last())
     };
     let visible = |c: char| c != WJ && !c.is_whitespace() && c != '\n' && c != '\r';
+    // 行内图片/公式用 NBSP 占位（唯一 NBSP 来源，见上方 Sub::fill）。
+    // 占位符本身不可见，但它是视觉行首/行尾的合法对象：其后的标点不属于「行首禁则」，
+    // 否则会把 "…行内公式$E=mc^2$，块级公式…" 的逗号误报成行首（真机已确认视觉正确）。
+    let starts_with_placeholder = |run: &cosmic_text::LayoutRun| {
+        run.glyphs
+            .first()
+            .and_then(|g| run.text.get(g.start..g.end))
+            .is_some_and(|s| s.starts_with('\u{A0}'))
+    };
+    let ends_with_placeholder = |run: &cosmic_text::LayoutRun| {
+        run.glyphs
+            .last()
+            .and_then(|g| run.text.get(g.start..g.end))
+            .is_some_and(|s| s.ends_with('\u{A0}'))
+    };
     for (i, run) in runs.iter().enumerate() {
         let wrapped_start = if include_hard {
             i > 0
@@ -1357,7 +1372,10 @@ pub(crate) fn probe_break_violations(buffer: &Buffer, include_hard: bool) {
         let next_head_is_wj = runs
             .get(i + 1)
             .is_some_and(|next| run_head(next) == Some(WJ));
-        let skip_first = run_head(run) == Some(WJ) || prev_tail_is_wj;
+        let skip_first = run_head(run) == Some(WJ)
+            || prev_tail_is_wj
+            || starts_with_placeholder(run)
+            || (i > 0 && ends_with_placeholder(&runs[i - 1]));
         let skip_last = run_tail(run) == Some(WJ) || next_head_is_wj;
         let first = run
             .glyphs

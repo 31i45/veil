@@ -114,6 +114,7 @@ namespace VeilWalkthrough {
         [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr hWnd, IntPtr hdcBlt, uint flags);
         [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hWnd);
         [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr hWnd);
+        [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
     }
 
     public static class Const {
@@ -134,6 +135,11 @@ namespace VeilWalkthrough {
 }
 '@
 }
+
+# 高 DPI 屏（如 150%）下 DPI 不感知的 pwsh 会拿到虚拟坐标：
+# GetWindowRect/CopyFromScreen 混用会让截图只覆盖窗口左上角的一部分（实测丢掉状态栏）。
+# 进程内声明 DPI 感知后，窗口矩形、客户端矩形、点击坐标、屏幕捕获统一为物理像素。
+[VeilWalkthrough.Win32]::SetProcessDPIAware() | Out-Null
 
 function Get-MainWindow {
     param([int]$ProcessId, [int]$TimeoutMs)
@@ -568,6 +574,7 @@ try {
 
         if ($ScrollPages -gt 0) {
             $prevShot = $shot
+            $stuck = 0
             for ($page = 1; $page -le $ScrollPages; $page++) {
                 Send-PageKey -Hwnd $hwnd -VirtualKey ([VeilWalkthrough.Const]::VK_NEXT) -Times 1
                 $shotIndex++
@@ -580,8 +587,18 @@ try {
                     Send-Wheel -Hwnd $hwnd -Notches 3
                     Save-Screenshot -Hwnd $hwnd -Path $shot | Out-Null
                     if ((Get-ShotHash $prevShot) -eq (Get-ShotHash $shot)) {
+                        $stuck++
                         Write-Log 'FAIL' "滚动未生效：截图与上一页完全相同，不能作为深滚动证据（page=$page）"
+                        # 连续两页都滚不动：文档已到末尾，继续翻页只会重复报 FAIL，误伤结论。
+                        if ($stuck -ge 2) {
+                            Write-Log 'INFO' "连续 2 页无变化：判定已到文末（或已达滚动边界），宽度 ${width}px 深滚动结束，共 $page 页"
+                            break
+                        }
+                    } else {
+                        $stuck = 0
                     }
+                } else {
+                    $stuck = 0
                 }
                 $prevShot = $shot
             }

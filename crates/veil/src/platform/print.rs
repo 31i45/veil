@@ -151,7 +151,7 @@ fn run_print_job(
         fw_type: 0,
     };
     if unsafe { StartDocW(hdc, &di) } <= 0 {
-        return Err("打印失败：无法开始打印作业");
+        return Err("打印失败: 无法开始打印作业");
     }
     let mut done = 0;
     for i in (from - 1)..to {
@@ -274,7 +274,7 @@ impl Print for WinPrint {
         }
         let hdc = pd.h_dc;
         if hdc.is_null() {
-            session.notice("打印失败：无法获取打印机上下文");
+            session.notice("打印失败: 无法获取打印机上下文");
             return;
         }
         // 页帧 = 可打印区 - 两侧 1 英寸边距；排版缩放 = 打印机 DPI / 96
@@ -327,7 +327,7 @@ impl Print for WinPrint {
             )
         };
         if hdc.is_null() {
-            session.notice("导出失败：无法创建 PDF 打印机上下文");
+            session.notice("导出失败: 无法创建 PDF 打印机上下文");
             self.print(session);
             return;
         }
@@ -345,7 +345,7 @@ impl Print for WinPrint {
             Err(_) => {
                 // next_pdf_path 已保证目标原本不存在：失败时清掉驱动可能留下的半成品
                 let _ = std::fs::remove_file(&target);
-                session.notice("导出 PDF 失败，已回退打印对话框");
+                session.notice("导出 PDF 失败: 已回退打印对话框");
                 self.print(session);
             }
         }

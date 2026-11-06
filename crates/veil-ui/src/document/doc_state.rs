@@ -108,7 +108,7 @@ impl App {
                         eprintln!("检测到外部修改，原文件已备份到 {}", bp.display());
                     }
                     Err(e) => {
-                        self.ui_state.chrome.notice = format!("外部版本备份失败，取消保存: {e}");
+                        self.ui_state.chrome.notice = format!("外部版本备份失败: 取消保存 {e}");
                         eprintln!("外部修改备份失败，取消保存（不覆盖原文件）: {e}");
                         self.update_title();
                         self.request_redraw();
@@ -489,7 +489,7 @@ impl App {
         self.ensure_math_visible();
         self.ensure_tables_visible();
         self.recompute_geometry();
-        self.ui_state.chrome.notice = format!("已打开 {}", path.display());
+        self.ui_state.chrome.notice = format!("已打开：{}", path_label(Some(path.as_path())));
         self.watch_current(); // 失败提示覆盖「已打开」，避免隐藏降级原因
         self.update_title();
         self.set_ime_area();

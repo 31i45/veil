@@ -16,8 +16,8 @@ pub const BAR_H: f32 = 36.0;
 pub const BTN_W: f32 = 30.0;
 /// 栏内左右内边距基准值：与全部浮层同一 surface 令牌。
 pub const PAD: f32 = crate::theme::surface::PADDING;
-/// 浮栏与内容视口顶边的间距基准值。
-pub const GAP: f32 = 8.0;
+/// 浮栏与内容视口顶边的间距基准值：与全部浮层同一 surface 令牌。
+pub const GAP: f32 = crate::theme::surface::CONTROL_GAP;
 /// 计数区基准宽（右对齐「i/n」）。
 pub const COUNT_W: f32 = 56.0;
 /// 替换行按钮基准宽（「替换」/「全部」）。

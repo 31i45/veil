@@ -60,6 +60,8 @@ pub enum Key {
     Down,
     Home,
     End,
+    PageUp,
+    PageDown,
     Backspace,
     Delete,
     Enter,
@@ -195,6 +197,8 @@ pub fn translate(key: Key, mods: Mods) -> Option<Action> {
         Key::End if mods.shift => Some(Action::SelectLineEnd),
         Key::Home => Some(Action::MoveLineStart),
         Key::End => Some(Action::MoveLineEnd),
+        // 翻页键只服务浮层/查找栏导航，文档路径无绑定
+        Key::PageUp | Key::PageDown => None,
         Key::Backspace => Some(Action::Doc(Intent::DeleteBackward)),
         Key::Delete => Some(Action::Doc(Intent::DeleteForward)),
         Key::Enter => Some(Action::Doc(Intent::Newline)),

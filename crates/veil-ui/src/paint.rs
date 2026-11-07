@@ -908,11 +908,26 @@ impl App {
         let scale = self.input_state.scale;
         let theme = self.input_state.theme;
         let count = self.ui_state.outline.entries.len();
-        self.ui_state.outline.scroll = self
-            .ui_state
-            .outline
-            .scroll
-            .clamp(0.0, outline::max_scroll(panel, count, scale));
+        // 当前条目由光标每帧派生（不落条目状态）；仅光标变化时把当前条目滚入视野，
+        // 否则用户手动滚动大纲会被每帧拉回。
+        let caret = self.effective_caret();
+        let current = outline::current_index(&self.ui_state.outline.entries, caret);
+        let max_scroll = outline::max_scroll(panel, count, scale);
+        self.ui_state.outline.scroll = self.ui_state.outline.scroll.clamp(0.0, max_scroll);
+        if self.ui_state.outline.last_caret != Some(caret) {
+            if let Some(ci) = current {
+                if max_scroll > 0.0 {
+                    self.ui_state.outline.scroll = outline::ensure_visible(
+                        self.ui_state.outline.scroll,
+                        ci,
+                        count,
+                        panel,
+                        scale,
+                    );
+                }
+            }
+            self.ui_state.outline.last_caret = Some(caret);
+        }
         let x = panel.x.round() as i32;
         let y = panel.y.round() as i32;
         let w = panel.w.ceil() as u32;
@@ -927,7 +942,9 @@ impl App {
             theme.chrome_border,
         );
         for row in outline::visible_rows(panel, count, self.ui_state.outline.scroll, scale) {
-            if self.ui_state.outline.hover == Some(row.index) {
+            let is_current = current == Some(row.index);
+            // 当前条目与悬停同底色：只画一次，避免重复叠加变暗。
+            if is_current || self.ui_state.outline.hover == Some(row.index) {
                 frame.fill_hover(
                     x,
                     row.y.round() as i32,
@@ -935,6 +952,18 @@ impl App {
                     row.h.ceil() as u32,
                     scale,
                     theme.hover,
+                );
+            }
+            if is_current {
+                // 左内侧 accent 指示条：文字缩进与 x 不因指示条挪动。
+                let bar_h = (row.h - 12.0 * scale).max(3.0);
+                frame.fill_rounded_rect(
+                    (panel.x + 4.0 * scale).round() as i32,
+                    (row.y + (row.h - bar_h) / 2.0).round() as i32,
+                    (3.0 * scale).max(1.0) as u32,
+                    bar_h.ceil() as u32,
+                    1.5 * scale,
+                    [theme.accent[0], theme.accent[1], theme.accent[2], 255],
                 );
             }
             let (level, text) = {
@@ -953,6 +982,39 @@ impl App {
             ) {
                 let ly = mid - l.h as f32 / 2.0;
                 frame.blit(&l.pixels, l.w, l.h, lx.round() as i32, ly.round() as i32);
+            }
+        }
+        // 溢出滚动指示：轨道贴面板右内侧，拇指按 scroll/max_scroll 线性映射；
+        // 起止均从条目区顶端开始，不进入标题区。
+        if count > 0 && max_scroll > 0.0 {
+            let top = outline::rows_top(panel, scale);
+            let bottom = panel.y + panel.h - 4.0 * scale;
+            let track_h = (bottom - top).max(0.0);
+            if track_h > 0.0 {
+                let track_x = panel.x + panel.w - 6.0 * scale;
+                let track_w = (3.0 * scale).max(1.0) as u32;
+                let radius = 1.5 * scale;
+                frame.fill_rounded_rect(
+                    track_x.round() as i32,
+                    top.round() as i32,
+                    track_w,
+                    track_h.ceil() as u32,
+                    radius,
+                    theme.chrome_border,
+                );
+                let content_h = count as f32 * outline::ROW_H * scale;
+                let thumb_h = (track_h * track_h / content_h)
+                    .max(crate::theme::surface::scrollbar_min_thumb(scale))
+                    .min(track_h);
+                let ty = top + (self.ui_state.outline.scroll / max_scroll) * (track_h - thumb_h);
+                frame.fill_rounded_rect(
+                    track_x.round() as i32,
+                    ty.round() as i32,
+                    track_w,
+                    thumb_h.ceil() as u32,
+                    radius,
+                    theme.thumb,
+                );
             }
         }
         if count == 0 {
@@ -1102,9 +1164,17 @@ impl App {
                 );
             }
         }
-        // 栏内分隔线（1px）：替换行与按钮间（卡片外框由 fill_surface_card 提供）
+        // 栏内分隔线（1px）：替换行与按钮间，左右内缩与输入区文字对齐
+        //（卡片外框由 fill_surface_card 提供）
         if replace {
-            frame.fill_rect(bx, sep_y, bw, 1, theme.chrome_border);
+            let pad = crate::theme::surface::padding(scale);
+            frame.fill_rect(
+                (bx as f32 + pad).round() as i32,
+                sep_y,
+                (bw as f32 - 2.0 * pad).max(1.0) as u32,
+                1,
+                theme.chrome_border,
+            );
         }
         for r in [l.prev, l.next, l.close] {
             frame.fill_rect(
@@ -1160,9 +1230,10 @@ impl App {
         // 查询框光标：聚焦 + 无 IME preedit → 可见文本末端画 2×ch 竖线
         if focus == search::Field::Query && self.editor.preedit().is_none() {
             let cx = (l.text.x + qw).round() as i32;
-            let ch = 16.0 * scale;
+            let cw = crate::theme::surface::caret_width(scale).round().max(1.0) as u32;
+            let ch = crate::theme::surface::caret_height(scale);
             let cy = (mid - ch / 2.0).round() as i32;
-            frame.fill_rect(cx, cy, 2, ch as u32, [theme.fg[0], theme.fg[1], theme.fg[2], 255]);
+            frame.fill_rect(cx, cy, cw, ch as u32, [theme.fg[0], theme.fg[1], theme.fg[2], 255]);
         }
         // IME 组合串：贴在查询文本之后（贴右缘钳位），下划线同文档 preedit；
         // 替换模式下焦点在替换框时由替换行负责绘制
@@ -1182,6 +1253,17 @@ impl App {
                     [theme.fg[0], theme.fg[1], theme.fg[2], 255],
                 );
             }
+        }
+        // 查询行焦点下划线：与替换是否展开无关，焦点在查询框即画。
+        // 用 accent 2px 表达焦点（低对比边框色在浅色底上几乎不可见）。
+        if focus == search::Field::Query {
+            frame.fill_rect(
+                l.text.x.round() as i32,
+                (bar.y + bar.h).round() as i32 - 2,
+                l.text.w.ceil() as u32,
+                2,
+                [theme.accent[0], theme.accent[1], theme.accent[2], 255],
+            );
         }
         // 替换行：文本框 → 焦点下划线 → IME 组合串 → 两个按钮字形
         if let Some(r) = rl {
@@ -1226,9 +1308,10 @@ impl App {
             // 替换框光标：聚焦 + 无 IME preedit → 可见文本末端画 2×ch 竖线
             if focus == search::Field::Replace && self.editor.preedit().is_none() {
                 let cx = (r.text.x + rw).round() as i32;
-                let ch = 16.0 * scale;
+                let cw = crate::theme::surface::caret_width(scale).round().max(1.0) as u32;
+                let ch = crate::theme::surface::caret_height(scale);
                 let cy = (rmid - ch / 2.0).round() as i32;
-                frame.fill_rect(cx, cy, 2, ch as u32, [theme.fg[0], theme.fg[1], theme.fg[2], 255]);
+                frame.fill_rect(cx, cy, cw, ch as u32, [theme.fg[0], theme.fg[1], theme.fg[2], 255]);
             }
             if focus == search::Field::Replace {
                 if let Some(pre) = self.editor.preedit() {
@@ -1247,19 +1330,16 @@ impl App {
                     );
                 }
             }
-            // 焦点框底边细线：点击/IME 都落在这里
-            let (fy, fx, fw) = if focus == search::Field::Replace {
-                (r.row.y + r.row.h, r.text.x, r.text.w)
-            } else {
-                (bar.y + bar.h, l.text.x, l.text.w)
-            };
-            frame.fill_rect(
-                fx.round() as i32,
-                fy.round() as i32 - 2,
-                fw.ceil() as u32,
-                1,
-                theme.chrome_border,
-            );
+            // 替换行焦点下划线：仅焦点在替换框时画（accent 2px，与查询行一致）
+            if focus == search::Field::Replace {
+                frame.fill_rect(
+                    r.text.x.round() as i32,
+                    (r.row.y + r.row.h).round() as i32 - 2,
+                    r.text.w.ceil() as u32,
+                    2,
+                    [theme.accent[0], theme.accent[1], theme.accent[2], 255],
+                );
+            }
             for (btn, glyph) in [(r.one, "替换"), (r.all, "全部")] {
                 frame.fill_rect(
                     btn.x.round() as i32,
@@ -1334,11 +1414,11 @@ impl App {
         let pw = l.panel.w.ceil() as u32;
         let ph = l.panel.h.ceil() as u32;
         frame.fill_surface_card(px, py, pw, ph, scale, theme.dark, theme.popup_bg, theme.chrome_border);
-        // 输入行与候选行的分隔线
+        // 输入行与候选行的分隔线：左右内缩与输入区文字对齐（不顶到卡片边）
         frame.fill_rect(
-            px,
+            (px as f32 + pad).round() as i32,
             (l.input.y + l.input.h).round() as i32,
-            pw,
+            (pw as f32 - 2.0 * pad).max(1.0) as u32,
             1,
             theme.chrome_border,
         );
@@ -1416,6 +1496,24 @@ impl App {
                 (y0 + h as f32) as i32 - 1,
                 w,
                 1,
+                [theme.fg[0], theme.fg[1], theme.fg[2], 255],
+            );
+        }
+        // 插入光标：无 IME preedit 时画在输入区左端/文本末端（占位提示不参与定位）
+        if self.editor.preedit().is_none() {
+            let cx = if query.is_empty() {
+                l.input.x + pad
+            } else {
+                l.input.x + pad + qw
+            };
+            let cw = crate::theme::surface::caret_width(scale).round().max(1.0) as u32;
+            let ch = crate::theme::surface::caret_height(scale);
+            let cy = (imid - ch / 2.0).round() as i32;
+            frame.fill_rect(
+                cx.round() as i32,
+                cy,
+                cw,
+                ch as u32,
                 [theme.fg[0], theme.fg[1], theme.fg[2], 255],
             );
         }
@@ -1601,11 +1699,7 @@ impl App {
         let bh = lab.h + pad * 2;
         let bx = (vp.x + (vp.w - bw as f32) / 2.0).round() as i32;
         let by = (vp.y + (vp.h - bh as f32) / 2.0).round() as i32;
-        frame.fill_rect(bx, by, bw, bh, theme.popup_bg);
-        frame.fill_rect(bx, by, bw, 1, theme.chrome_border);
-        frame.fill_rect(bx, by + bh as i32 - 1, bw, 1, theme.chrome_border);
-        frame.fill_rect(bx, by, 1, bh, theme.chrome_border);
-        frame.fill_rect(bx + bw as i32 - 1, by, 1, bh, theme.chrome_border);
+        frame.fill_surface_card(bx, by, bw, bh, scale, theme.dark, theme.popup_bg, theme.chrome_border);
         frame.blit(
             &lab.pixels,
             lab.w,

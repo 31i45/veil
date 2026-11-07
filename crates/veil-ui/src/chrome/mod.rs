@@ -438,6 +438,8 @@ pub struct Chrome {
     pub notice: String,
     /// 拖动滚动条时鼠标相对滑块顶边的偏移。
     pub scroll_drag: Option<f32>,
+    /// 指针悬停在滚动条上（滑块或轨道）：滑块加亮，与拖动态同一视觉。
+    pub scroll_hover: bool,
     pub(crate) labels: LabelCache,
     /// 状态栏左文中段省略结果缓存（S1）：键 = (原文, 可用宽 bits, scale bits)。
     /// 打字期右文变而左文/窗口不变，命中避免每帧二分重排。

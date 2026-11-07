@@ -16,8 +16,6 @@ pub const HEAD_H: f32 = 34.0;
 pub const ROW_H: f32 = crate::theme::surface::ROW_HEIGHT;
 /// 面板左右内边距基准值：与全部浮层同一 surface 令牌。
 pub const PAD: f32 = crate::theme::surface::PADDING;
-/// 卡片外边距基准值：面板由「停靠条」改为「浮起卡片」后与窗口/滚动条的间距。
-pub const MARGIN: f32 = 8.0;
 /// 标题层级缩进步长基准值。
 pub const INDENT_STEP: f32 = 14.0;
 
@@ -38,6 +36,9 @@ pub(crate) struct Outline {
     pub(crate) scroll: f32,
     pub(crate) hover: Option<usize>,
     pub(crate) entries: Vec<OutlineEntry>,
+    /// 上次自动跟随的光标位置：仅光标变化时把当前条目滚入视野，
+    /// 避免用户手动滚动大纲时被每帧强制拉回。打开面板时置 None 以重新同步。
+    pub(crate) last_caret: Option<usize>,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -58,11 +59,11 @@ pub(crate) struct Row {
     pub(crate) h: f32,
 }
 
-/// 面板矩形（卡片式）：右缘距滚动条 MARGIN，上下距窗口边缘 MARGIN；
+/// 面板矩形（卡片式）：右缘距滚动条、上下距窗口边缘均为 surface 的 PANEL_MARGIN；
 /// 左侧与版心相邻（投影提供分隔）。命中与绘制共用本矩形。
 pub(crate) fn panel_rect(right: f32, top: f32, height: f32, scale: f32) -> Rect {
     let w = PANEL_W * scale;
-    let m = MARGIN * scale;
+    let m = crate::theme::surface::panel_margin(scale);
     Rect {
         x: right - w,
         y: top + m,
@@ -84,6 +85,34 @@ pub(crate) fn rows_height(panel: Rect, scale: f32) -> f32 {
 /// 面板最大滚动量（条目不溢出时为 0）。
 pub(crate) fn max_scroll(panel: Rect, count: usize, scale: f32) -> f32 {
     (count as f32 * ROW_H * scale - rows_height(panel, scale)).max(0.0)
+}
+
+/// 当前光标所在条目：最后一个起点不晚于 `caret` 的标题下标。
+/// 光标在首个标题之前（或没有标题）返回 `None`。
+pub(crate) fn current_index(entries: &[OutlineEntry], caret: usize) -> Option<usize> {
+    entries.partition_point(|e| e.start <= caret).checked_sub(1)
+}
+
+/// 让第 `index` 行完整可见所需的滚动量：行在条目区上方则上滚、下方则下滚；
+/// 结果钳制到 `[0, max_scroll]`，条目不溢出时恒为 0。
+pub(crate) fn ensure_visible(
+    scroll: f32,
+    index: usize,
+    count: usize,
+    panel: Rect,
+    scale: f32,
+) -> f32 {
+    let row_h = ROW_H * scale;
+    let view_h = rows_height(panel, scale);
+    let top = index as f32 * row_h;
+    let bottom = top + row_h;
+    let mut out = scroll;
+    if top < scroll {
+        out = top;
+    } else if bottom > scroll + view_h {
+        out = bottom - view_h;
+    }
+    out.clamp(0.0, max_scroll(panel, count, scale))
 }
 
 /// 可见条目行（含与条目区相交的部分行；调用方按需裁剪绘制）。
@@ -168,14 +197,15 @@ mod tests {
 
     #[test]
     fn panel_rect_inset_card_margins() {
+        let m = crate::theme::surface::panel_margin(1.0);
         let p = panel();
         assert_eq!(p.x, 800.0 - PANEL_W);
-        assert_eq!(p.x + p.w, 800.0 - MARGIN);
-        assert_eq!(p.y, 30.0 + MARGIN);
-        assert_eq!(p.h, 600.0 - 2.0 * MARGIN);
+        assert_eq!(p.x + p.w, 800.0 - m);
+        assert_eq!(p.y, 30.0 + m);
+        assert_eq!(p.h, 600.0 - 2.0 * m);
         // 标题区之下才是条目区
-        assert_eq!(rows_top(p, 1.0), 30.0 + MARGIN + HEAD_H);
-        assert_eq!(rows_height(p, 1.0), 600.0 - 2.0 * MARGIN - HEAD_H);
+        assert_eq!(rows_top(p, 1.0), 30.0 + m + HEAD_H);
+        assert_eq!(rows_height(p, 1.0), 600.0 - 2.0 * m - HEAD_H);
     }
 
     #[test]
@@ -219,6 +249,58 @@ mod tests {
         assert_eq!(hit_row(p, 10, 0.0, 1.0, p.x + 1.0, p.y + p.h - 1.0), None);
         let far = hit_row(p, 1000, 0.0, 1.0, p.x + 1.0, p.y + p.h - 1.0);
         assert!(far.is_some_and(|i| i < 1000));
+    }
+
+    fn sample_entries() -> Vec<OutlineEntry> {
+        [10usize, 40, 100]
+            .into_iter()
+            .enumerate()
+            .map(|(i, start)| OutlineEntry {
+                level: 1,
+                text: format!("h{i}"),
+                block: BlockId(i as u64),
+                start,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn current_index_covers_before_exact_between_after() {
+        let e = sample_entries();
+        // 首个标题之前（含无标题）
+        assert_eq!(current_index(&e, 0), None);
+        assert_eq!(current_index(&e, 9), None);
+        assert_eq!(current_index(&[], 5), None);
+        // 恰好落在标题起点
+        assert_eq!(current_index(&e, 10), Some(0));
+        assert_eq!(current_index(&e, 40), Some(1));
+        assert_eq!(current_index(&e, 100), Some(2));
+        // 两个标题之间（取前一个）
+        assert_eq!(current_index(&e, 25), Some(0));
+        assert_eq!(current_index(&e, 99), Some(1));
+        // 末个标题之后
+        assert_eq!(current_index(&e, 1000), Some(2));
+    }
+
+    #[test]
+    fn ensure_visible_keeps_visible_row_and_scrolls_both_ways() {
+        let p = panel();
+        let rows_h = rows_height(p, 1.0);
+        let count = 100;
+        // 已完整可见：滚动量不变
+        assert!((ensure_visible(100.0, 10, count, p, 1.0) - 100.0).abs() < 0.01);
+        // 下方越界：下滚到行底贴住条目区底
+        let down = ensure_visible(0.0, 25, count, p, 1.0);
+        assert!((down - (26.0 * ROW_H - rows_h)).abs() < 0.01);
+        // 上方越界：上滚到行顶贴住条目区顶
+        let up = ensure_visible(300.0, 2, count, p, 1.0);
+        assert!((up - 2.0 * ROW_H).abs() < 0.01);
+        // 溢出钳制：末行贴底、超量滚动回落到 max_scroll
+        let max = max_scroll(p, count, 1.0);
+        assert!((ensure_visible(0.0, count - 1, count, p, 1.0) - max).abs() < 0.01);
+        assert!((ensure_visible(9999.0, count - 1, count, p, 1.0) - max).abs() < 0.01);
+        // 不溢出：恒为 0
+        assert_eq!(ensure_visible(0.0, 9, 10, p, 1.0), 0.0);
     }
 
     #[test]

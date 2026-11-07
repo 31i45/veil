@@ -682,28 +682,38 @@ fn theme_menu_marks_current_mode() {
 #[test]
 fn scrollbar_thumb_painted_when_overflowing() {
     let mut engine = LayoutEngine::new();
-    let mut frame = Frame::new(300, 200, [255, 255, 255, 255]);
     let theme = Theme::light();
     let mut chrome = Chrome::default();
     let v = viewport(300, 200, 1.0);
-    chrome.paint(
-        &mut frame,
-        &mut engine,
-        v,
-        1.0,
-        &theme,
-        None,
-        false,
-        ExternalState::None,
-        0,
-        1,
-        1,
-        3000.0,
-        0.0,
-        &[],
-        MenuFlags::default(),
-    );
-    let x = (300.0 - SCROLL_W + 2.0) as u32;
-    let y = (v.y + 2.0) as u32;
-    assert_eq!(frame.get(x, y), theme.thumb);
+    let mut draw = |chrome: &mut Chrome| {
+        let mut frame = Frame::new(300, 200, [255, 255, 255, 255]);
+        chrome.paint(
+            &mut frame,
+            &mut engine,
+            v,
+            1.0,
+            &theme,
+            None,
+            false,
+            ExternalState::None,
+            0,
+            1,
+            1,
+            3000.0,
+            0.0,
+            &[],
+            MenuFlags::default(),
+        );
+        frame
+    };
+    // 滑块中线取样：胶囊右侧圆角处会落在轨迹上，必须取几何中心
+    let x = (300.0 - SCROLL_W + 2.0 + 6.0) as u32;
+    let y = (v.y + 10.0) as u32;
+
+    let idle = draw(&mut chrome).get(x, y);
+    assert_ne!(idle, theme.chrome_bg, "溢出时滑块必须可见");
+    assert_ne!(idle, theme.thumb, "常态滑块为半透明，悬停才满不透明");
+
+    chrome.scroll_hover = true;
+    assert_eq!(draw(&mut chrome).get(x, y), theme.thumb, "悬停滑块加亮");
 }

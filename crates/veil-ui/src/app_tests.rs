@@ -4362,6 +4362,79 @@ fn oversized_block_tail_is_painted_after_scroll() {
     assert!(notice_px > 100, "块尾降级提示须可见，实际 {notice_px} 像素");
 }
 
+/// 中文围栏代码块所在的 ≥4000 字长文档：多级标题 + 一个 ```markdown 中文代码块。
+fn cjk_fence_long_doc() -> String {
+    let mut text = String::new();
+    for i in 0..60 {
+        text.push_str(&format!("# 一级标题 {i}\n\n"));
+        text.push_str("这是用于构造长文档的中文段落，包含足够多的文字以产生多行折行效果。\n\n");
+        text.push_str(&format!("## 二级标题 {i}\n\n"));
+        text.push_str(&format!(
+            "### 三级标题 {i}\n\n段落 {i}：中文正文，**粗体** 与 `代码`。\n\n"
+        ));
+        if i == 30 {
+            text.push_str(
+                "```markdown\n# 任务：[精准任务名称]\n\n- 第一步：确认中文围栏代码块的字符边界\n- 第二步：滚动至文末不崩溃\n\n正文：中文标识_1 与 emoji 😀。\n```\n\n",
+            );
+        }
+    }
+    text
+}
+
+/// UTF-8 回归：中文围栏代码块在排版与逐屏滚动时都不得因字节下标非字符边界而 panic。
+#[test]
+fn cjk_fenced_code_scroll_to_end_does_not_panic() {
+    let store = MemStore::default();
+    let text = cjk_fence_long_doc();
+    assert!(text.chars().count() >= 4000, "文档须 ≥4000 字");
+    let mut a = app(&text, Some("doc/cjk.md"), false, &store);
+    // 全量排版即触发中文围栏代码块的高亮（回归点：曾在此 panic）
+    a.ensure_layouts_all();
+    let code_id = a
+        .index
+        .blocks
+        .iter()
+        .find(|g| matches!(&g.kind, BlockKind::FencedCode(Some(lang)) if lang == "markdown"))
+        .map(|g| g.id)
+        .expect("文档须含 markdown 围栏代码块");
+    assert!(
+        a.cache.layouts.contains_key(&code_id),
+        "中文代码块布局须存在"
+    );
+    a.recompute_geometry();
+    let code_h0 = {
+        let g = a.index.blocks.iter().find(|g| g.id == code_id).unwrap();
+        a.block_height(g)
+    };
+    let vp = a.viewport();
+    let max = chrome::max_scroll(vp, a.doc_height());
+    assert!(max > 0.0, "长文档须可滚动");
+    let mut covered = false;
+    let mut y = 0.0f32;
+    loop {
+        a.window_state.scroll_y = y;
+        let _ = a.render(); // 每屏触发布局/绘制
+        // 用当前帧几何判定可见性（块高在滚动中可能从实高回退估算值）
+        let (code_top, code_h) = {
+            let g = a.index.blocks.iter().find(|g| g.id == code_id).unwrap();
+            (g.top, a.block_height(g))
+        };
+        let sy = vp.y + code_top - a.window_state.scroll_y;
+        if sy < vp.y + vp.h && sy + code_h > vp.y {
+            covered = true;
+            assert!(
+                a.cache.layouts.contains_key(&code_id),
+                "中文代码块进入视口时布局必须存在"
+            );
+        }
+        if a.window_state.scroll_y >= max {
+            break;
+        }
+        y = (y + vp.h.max(1.0)).min(max);
+    }
+    assert!(covered, "滚动须覆盖到中文代码块所在块（块高 {code_h0}）");
+}
+
 /// 端到端源码真值（阶段 2）：CRLF + BOM 文档回车、输入、保存后，磁盘字节仍是
 /// CRLF + BOM，不混入 LF、不产生孤立 `\r`——无隐式规范化。
 #[test]
@@ -9265,3 +9338,4 @@ fn print_ignores_source_mode_and_screen_restores_it() {
     );
     assert!(a.source_mode(), "用户开关未被打印改写");
 }
+

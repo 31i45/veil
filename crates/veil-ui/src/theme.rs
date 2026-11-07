@@ -190,7 +190,6 @@ impl Theme {
 /// surface 设计令牌（不可配置）：浮层（右键菜单 / 快速打开 / 大纲 / 搜索条）共用几何。
 /// 所有长度以 1.0× scale 为基准，经取值函数按 scale 线性放大；深/浅主题共用几何，
 /// 仅阴影 alpha 按主题微调（阴影是半透明黑叠加，深底下需稍强才有同等存在感）。
-#[allow(dead_code)] // dialog/scrim 令牌供尚未接入 App 的模态组件使用
 pub(crate) mod surface {
     /// 圆角半径（px，1.0× 基准）
     pub const CORNER_RADIUS: f32 = 6.0;
@@ -202,6 +201,16 @@ pub(crate) mod surface {
     pub const DIVIDER_HEIGHT: f32 = 4.0;
     /// 悬停内缩（px）：悬停底色相对条目外边界内缩，形成「浮起」边距
     pub const HOVER_INSET: f32 = 3.0;
+    /// 面板外边距（px）：浮起卡片与窗口边缘/滚动条之间的间距
+    pub const PANEL_MARGIN: f32 = 8.0;
+    /// 控件间距（px）：同一浮层内相邻控件或与内容视口之间的间隙
+    pub const CONTROL_GAP: f32 = 8.0;
+    /// 文本光标宽（px）
+    pub const CARET_WIDTH: f32 = 2.0;
+    /// 文本光标高（px）
+    pub const CARET_HEIGHT: f32 = 16.0;
+    /// 滚动条拇指最小高度（px）
+    pub const SCROLLBAR_MIN_THUMB: f32 = 24.0;
     /// 阴影整体向下偏移（px）
     pub const SHADOW_OFFSET_Y: f32 = 2.0;
     /// 阴影层（外扩 px, 基础 alpha），自外向内排列：外层大而淡、内层小而浓，
@@ -249,6 +258,22 @@ pub(crate) mod surface {
     }
     pub fn hover_inset(scale: f32) -> f32 {
         HOVER_INSET * scale
+    }
+    pub fn panel_margin(scale: f32) -> f32 {
+        PANEL_MARGIN * scale
+    }
+    pub fn control_gap(scale: f32) -> f32 {
+        CONTROL_GAP * scale
+    }
+    pub fn caret_width(scale: f32) -> f32 {
+        CARET_WIDTH * scale
+    }
+    pub fn caret_height(scale: f32) -> f32 {
+        CARET_HEIGHT * scale
+    }
+    /// 细滚动条拇指最小高度（大纲等浮层内使用；主滚动条沿用 chrome 的 THUMB_MIN_H）。
+    pub fn scrollbar_min_thumb(scale: f32) -> f32 {
+        SCROLLBAR_MIN_THUMB * scale
     }
     pub fn shadow_offset_y(scale: f32) -> f32 {
         SHADOW_OFFSET_Y * scale
@@ -864,6 +889,11 @@ mod tests {
         assert_eq!(surface::divider_height(2.0), 8.0);
         assert_eq!(surface::hover_inset(2.0), 6.0);
         assert_eq!(surface::shadow_offset_y(2.0), 4.0);
+        assert_eq!(surface::panel_margin(2.0), 16.0);
+        assert_eq!(surface::control_gap(2.0), 16.0);
+        assert_eq!(surface::caret_width(2.0), 4.0);
+        assert_eq!(surface::caret_height(2.0), 32.0);
+        assert_eq!(surface::scrollbar_min_thumb(2.0), 48.0);
         // 1.0× 即基准常量本身
         assert_eq!(surface::corner_radius(1.0), surface::CORNER_RADIUS);
         // 阴影 alpha：浅色不变，深色按增益放大并钳制

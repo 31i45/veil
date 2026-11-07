@@ -753,3 +753,63 @@ D2（触控板捏合，D1 通过即覆盖）、D6（200% DPI 硬件依赖）、D
 - 系统原生「打开 / 另存为 / 导出」对话框保持系统实现：它们承载文件系统浏览与覆盖确认，属平台职责，不做自绘。
 - 本文件前四条记录中的 MessageBoxW 截图保留为历史，不再代表当前实现。
 
+## 六轮：长文档滚动崩溃修复与浮层一致性打磨（2026-11-07）
+
+> 用户反馈：打开约 4 千字文档后向下滚动，应用崩溃退出；并要求「所有弹窗、菜单、大纲的视觉与交互符合专业审美和一致性」。
+> 规格见 [.trae/specs/fix-scroll-crash-and-polish-overlays/spec.md](../../.trae/specs/fix-scroll-crash-and-polish-overlays/spec.md)（本地，按 `.gitignore` 不入库）。
+
+### 崩溃根因与修复
+
+| 项 | 内容 |
+|---|---|
+| 复现 | 用户实际文档（桌面 `运维量化核心：标签体系与记录模板终极配置.md`，8,552 字符 / 242 行，含 ```markdown 中文围栏代码块）；1400px 宽滚动到代码块进入视口时退出 |
+| 证据 | `%TEMP%\veil-walkthrough\evidence\run-20261107-120018\stderr.log`：`panicked at crates\veil-ui\src\view\highlight.rs:755:24: start byte index 16 is not a char boundary; it is inside '任' (bytes 15..18 of string)` |
+| 根因 | `highlight()` 按字节步进扫描：默认分支 `i += 1` 会停在多字节字符中间，随后 `&text[i..]` 越界切片 panic。纯 ASCII 文档不会触发，故此前未暴露 |
+| 修复 | 所有前进路径改为按 UTF-8 宽度推进：普通字符 `char::len_utf8`、反斜杠先 +1 再按被转义字符宽度、字符串/注释/默认分支同口径；任何时刻 `i` 都落在字符边界（`crates/veil-ui/src/view/highlight.rs`） |
+| 回归 | 单测：中文围栏、中文字符串、行/块注释、emoji、未闭合字符串、中英混排，断言所有区间 `is_char_boundary`；集成测试 `cjk_fenced_code_scroll_to_end_does_not_panic`：≥4000 字 + 中文 ```markdown 代码块，全量排版后逐屏滚到 `max_scroll` |
+
+### 浮层一致性改动
+
+| # | 改动 | 落点 |
+|---|---|---|
+| 1 | surface 令牌补齐 `PANEL_MARGIN` / `CONTROL_GAP` / `CARET_WIDTH` / `CARET_HEIGHT` / `SCROLLBAR_MIN_THUMB`，按 scale 取值 | `theme.rs::surface`，大纲 `MARGIN`、查找条 `GAP`、光标尺寸改为引用令牌，不再散落 8px / 16px 硬编码 |
+| 2 | 查找条替换行、快速打开输入行的分隔线左右内缩 `surface::padding`，与主菜单/右键/大纲同一对齐线 | `paint.rs` |
+| 3 | 快速打开输入行补插入光标（空查询在左端、有查询在文本末端、IME 组合期隐藏） | `paint.rs::paint_quick` |
+| 4 | 查找条焦点下划线：查询行/替换行在聚焦时画 2px `accent` 下划线（原 `chrome_border` 在浅底几乎不可见） | `paint.rs::paint_search` |
+| 5 | 状态栏通知改中段布局：左右文本实测宽度，剩余区间不足 24px 则不画；超宽 `fit_middle` 中段省略，彻底消除长路径/长通知重叠 | `chrome/paint.rs` |
+| 6 | 大纲按光标定位当前章节（`partition_point` 取最后一个 `start <= caret`）：accent 左侧指示条 + 轻底色；`last_caret` 门控仅在光标变化时 `ensure_visible`，不与手动滚动打架 | `view/outline.rs`、`paint.rs::paint_outline` |
+| 7 | 大纲条目溢出时右内侧细滚动条（圆角、`theme.thumb`、最小高度 24px），不溢出不绘制 | `paint.rs::paint_outline` |
+| 8 | 键盘可达：主菜单 Left/Right 切同级菜单（右键菜单打开时不误切）；快速打开 Home/End/PageUp/PageDown；查找 Home/End 跳首/末命中；`Key::PageUp/PageDown` 补齐翻译 | `mode.rs`、`interaction.rs`、`input.rs` |
+| 9 | 滚动条滑块改胶囊（半径 = 宽/2）：常态半透明、悬停/拖动满不透明加亮，尺寸不变避免抖动；最小高度沿用 36px | `chrome/paint.rs`、`chrome/mod.rs`（`scroll_hover`）、`interaction.rs::update_hover` |
+
+### 视觉取证（headless 帧，`App::paint()` 同一渲染路径）
+
+> 工作站处于锁屏（`LogonUI` 运行），`PrintWindow` 返回空、屏幕捕获仅得壁纸，真机截图不可用；因此用 headless 帧逐项核对绘制结果，归档于
+> `docs/review/evidence/scroll-crash-overlay-polish-20261107/`（800×600，与真机同一 `paint()` 代码路径）。
+
+| 文件 | 核对点 | 结果 |
+|---|---|---|
+| 02-outline-current-section.png | 当前章节 accent 指示条 + 轻底色；右内侧细滚动条；标题分隔线对齐 | ✅ |
+| 03-quick-open-empty.png / 04-quick-open-query.png | 空查询左端插入光标 / 有查询末端光标；分隔线左右内缩 | ✅ |
+| 05-find-focus.png / 06-find-replace-focus.png | 查询行与替换行各有一条 2px accent 焦点下划线，与按钮分隔线不冲突 | ✅（本轮由低对比边框色改为 accent） |
+| 07-main-menu.png / 09-context-menu.png | 圆角 + 投影 + 1px 边框 + 内缩分隔线，主菜单与右键菜单同源 | ✅ |
+| 08-unsaved-modal.png | 遮罩、卡片圆角、主按钮白焦点环、危险按钮红描边 | ✅（与五轮一致） |
+| 09-context-menu.png 状态栏 | 「已取消：当前文档仍有未保存的修改」居中出现且不与左右文本重叠 | ✅（中段布局生效） |
+| 10-dark-main-menu.png / 11-dark-outline.png | 深色下浮层底色分层、边框、accent 指示条与滚动条对比度 | ✅ |
+| 12-scrollbar-idle.png / 13-scrollbar-hover.png | 滑块胶囊圆角完整；常态半透明、悬停明显加深且尺寸不变（4× 放大） | ✅ |
+
+### 六轮门禁
+
+| 项 | 结果 |
+|---|---|
+| `cargo test --workspace` | ✅ **1075 passed / 13 ignored / 0 failed**（veil-ui lib 708 passed / 11 ignored） |
+| `cargo clippy --workspace --all-targets -- -D warnings` | ✅ 0 告警 |
+| `cargo build --release -p veil` | ✅ **6,022,656 B ≈ 5.74 MiB**（红线 15 MiB；五轮 6,018,048 B，本轮 +4.5 KB 为回归测试与令牌/绘制改动） |
+| 新增第三方依赖 | ✅ 无（`veil-ui` 仍不依赖任何 GUI 库） |
+
+### 本轮限制
+
+- 锁屏期间不能做真机截图与交互式深滚动（脚本启动二进制、PostMessage 滚轮/PageDown 属前台输入副作用，未获锁屏状态下的授权）。新二进制打开用户实际文档时 `stderr` 仅有一条无关的会话写入告警（`最近文件记录失败: 拒绝访问`，隔离 APPDATA 所致），无 panic；滚动崩溃由 `cjk_fenced_code_scroll_to_end_does_not_panic` 全量排版 + 逐屏滚到 `max_scroll` 覆盖。解锁后建议补一次 800/1400px 真机深滚走查。
+- 未做 150% DPI 真机取证；缩放线性由 `geometry_scales_linearly_with_dpi`（scale 1.5 / 2.0）覆盖。
+
+

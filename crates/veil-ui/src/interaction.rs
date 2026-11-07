@@ -123,11 +123,15 @@ impl App {
                 self.request_redraw();
             }
             Cmd::MenuMove(d) => self.menu_move(d),
+            Cmd::MenuSwitch(d) => self.menu_switch(d),
             Cmd::MenuAccept => self.menu_accept(),
             // 快速打开浮层动作自带重绘与 IME 区域刷新
             Cmd::QuickClose => self.close_quick(),
             Cmd::QuickAccept => self.quick_accept(),
             Cmd::QuickMove(d) => self.quick_step(d),
+            Cmd::QuickFirst => self.quick_first(),
+            Cmd::QuickLast => self.quick_last(),
+            Cmd::QuickPage(d) => self.quick_page(d),
             Cmd::QuickBackspace => self.quick_backspace(),
             Cmd::QuickInput(t) => self.quick_input(&t),
             // 查找栏动作自带重绘与 IME 区域刷新
@@ -138,6 +142,8 @@ impl App {
             Cmd::SearchToggleField => self.search_toggle_field(),
             Cmd::SearchNext => self.search_next(),
             Cmd::SearchPrev => self.search_prev(),
+            Cmd::SearchFirstMatch => self.search_first_match(),
+            Cmd::SearchLastMatch => self.search_last_match(),
             Cmd::Edit(Action::Doc(Intent::Indent)) if !self.editor.preedit().is_some() => {
                 if !self.tab_next_cell() {
                     self.perform_action(Action::Doc(Intent::Indent));
@@ -773,6 +779,22 @@ impl App {
             None => 0,
         };
         self.ui_state.chrome.hover_item = Some((open, nav[i]));
+        self.request_redraw();
+    }
+
+    /// 主菜单左右切换（Left/Right）：右键菜单打开时不切换主菜单。
+    /// 循环取模，切换后清空旧菜单的选中项，只保留悬停高亮。
+    pub(crate) fn menu_switch(&mut self, d: i32) {
+        if self.ui_state.ctx.open {
+            return;
+        }
+        let Some(open) = self.ui_state.chrome.open else {
+            return;
+        };
+        let next = (open as i32 + d).rem_euclid(chrome::MENUS.len() as i32) as usize;
+        self.ui_state.chrome.open = Some(next);
+        self.ui_state.chrome.hover_item = None;
+        self.ui_state.chrome.hover_menu = Some(next);
         self.request_redraw();
     }
 
@@ -1581,6 +1603,9 @@ impl App {
             }
             return; // 右键菜单打开时其余悬停不更新
         }
+        if self.ui_state.chrome.scroll_hover {
+            self.ui_state.chrome.scroll_hover = false;
+        }
         let menu = chrome::hit_menu_bar(x, y, self.input_state.scale);
         let item = self.ui_state.chrome.open.and_then(|open| {
             let recent = self.recent_labels();
@@ -1589,6 +1614,13 @@ impl App {
         if self.ui_state.chrome.hover_menu != menu || self.ui_state.chrome.hover_item != item {
             self.ui_state.chrome.hover_menu = menu;
             self.ui_state.chrome.hover_item = item;
+            self.request_redraw();
+        }
+        // 滚动条悬停：与点击命中同一判据（轨道/滑块），拖动中也保持高亮
+        let vp = self.viewport();
+        let sh_bar = chrome::scrollbar_hit(vp, self.doc_height(), x, y, self.input_state.scale);
+        if self.ui_state.chrome.scroll_hover != sh_bar {
+            self.ui_state.chrome.scroll_hover = sh_bar;
             self.request_redraw();
         }
         let row = self.outline_rect().and_then(|p| {
@@ -1640,6 +1672,8 @@ impl App {
         self.ui_state.outline.open = !self.ui_state.outline.open;
         self.ui_state.outline.hover = None;
         self.ui_state.outline.scroll = 0.0;
+        // 重新打开时强制按光标同步一次（避免沿用上次的「已跟随」位置）
+        self.ui_state.outline.last_caret = None;
         self.refresh_index();
         if self.ui_state.outline.open {
             self.refresh_outline();
@@ -1903,6 +1937,35 @@ impl App {
         self.request_redraw();
     }
 
+    /// Home：选中首个候选。
+    pub(crate) fn quick_first(&mut self) {
+        self.quick_select(0);
+    }
+
+    /// End：选中末个候选（空列表时归零）。
+    pub(crate) fn quick_last(&mut self) {
+        let last = self.ui_state.quick.filtered.len().saturating_sub(1);
+        self.quick_select(last);
+    }
+
+    /// PageUp/PageDown：按面板可见行数翻页。
+    pub(crate) fn quick_page(&mut self, direction: i32) {
+        let step = quick_open::MAX_VISIBLE as i32;
+        self.quick_step(direction * step);
+    }
+
+    /// 直接定位选中项（钳制在 `filtered` 范围内并同步滚动）。
+    fn quick_select(&mut self, selected: usize) {
+        if !self.ui_state.quick.open {
+            return;
+        }
+        let n = self.ui_state.quick.filtered.len();
+        let quick = &mut self.ui_state.quick;
+        quick.selected = if n == 0 { 0 } else { selected.min(n - 1) };
+        quick.ensure_visible();
+        self.request_redraw();
+    }
+
     /// 回车/点击：打开选中项；脏文档由 open_path 拒绝并在状态栏提示。
     pub(crate) fn quick_accept(&mut self) {
         let Some(path) = self.ui_state.quick.current().map(|it| it.path.clone()) else {
@@ -2077,6 +2140,24 @@ impl App {
         }
     }
 
+    /// Home：跳到首个命中（查询框无内部光标，故按命中导航）。
+    pub(crate) fn search_first_match(&mut self) {
+        if self.ui_state.search.matches.is_empty() {
+            return;
+        }
+        self.ui_state.search.current = 0;
+        self.jump_to_match();
+    }
+
+    /// End：跳到末个命中。
+    pub(crate) fn search_last_match(&mut self) {
+        let Some(last) = self.ui_state.search.matches.len().checked_sub(1) else {
+            return;
+        };
+        self.ui_state.search.current = last;
+        self.jump_to_match();
+    }
+
     /// 单次替换：替换当前命中（一步事务），重扫后跳到剩余的首个命中。
     pub(crate) fn replace_current(&mut self) {
         if !self.ui_state.search.open || !self.ui_state.search.replace_open {
@@ -2214,6 +2295,8 @@ pub(crate) fn map_key_parts(text: Option<&str>, wom: WKey, mods: Mods) -> Option
         WKey::Named(NamedKey::ArrowDown) => Some(Key::Down),
         WKey::Named(NamedKey::Home) => Some(Key::Home),
         WKey::Named(NamedKey::End) => Some(Key::End),
+        WKey::Named(NamedKey::PageUp) => Some(Key::PageUp),
+        WKey::Named(NamedKey::PageDown) => Some(Key::PageDown),
         WKey::Named(NamedKey::Backspace) => Some(Key::Backspace),
         WKey::Named(NamedKey::Delete) => Some(Key::Delete),
         WKey::Named(NamedKey::Enter) => Some(Key::Enter),

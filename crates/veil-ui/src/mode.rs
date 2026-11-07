@@ -41,6 +41,12 @@ pub(crate) enum Cmd {
     QuickAccept,
     /// 上下移动选中项。
     QuickMove(i32),
+    /// 跳到首个候选。
+    QuickFirst,
+    /// 跳到末个候选。
+    QuickLast,
+    /// 按可见行数翻页（正 = 向下）。
+    QuickPage(i32),
     QuickBackspace,
     QuickInput(String),
     SearchInput(String),
@@ -48,12 +54,17 @@ pub(crate) enum Cmd {
     SearchPaste,
     /// 菜单选中项上下移动（右键菜单优先，其次主菜单）。
     MenuMove(i32),
+    /// 主菜单左右循环切换（右键菜单不参与）。
+    MenuSwitch(i32),
     /// 回车：执行菜单选中项。
     MenuAccept,
     /// 替换模式下 Tab 在查询/替换输入框之间切换焦点。
     SearchToggleField,
     SearchNext,
     SearchPrev,
+    /// 跳到首个/末个命中。
+    SearchFirstMatch,
+    SearchLastMatch,
     /// 文档级动作（含纯视图动作），交 `perform_action` 执行。
     Edit(Action),
 }
@@ -79,6 +90,8 @@ pub(crate) fn route(mode: Mode, key: Key, mods: Mods, composing: bool) -> Cmd {
                 match key {
                     Key::Up => Cmd::MenuMove(-1),
                     Key::Down => Cmd::MenuMove(1),
+                    Key::Left => Cmd::MenuSwitch(-1),
+                    Key::Right => Cmd::MenuSwitch(1),
                     Key::Enter => Cmd::MenuAccept,
                     _ => Cmd::Ignore,
                 }
@@ -93,6 +106,10 @@ pub(crate) fn route(mode: Mode, key: Key, mods: Mods, composing: bool) -> Cmd {
                 Key::Enter => Cmd::QuickAccept,
                 Key::Up => Cmd::QuickMove(-1),
                 Key::Down => Cmd::QuickMove(1),
+                Key::Home => Cmd::QuickFirst,
+                Key::End => Cmd::QuickLast,
+                Key::PageUp => Cmd::QuickPage(-1),
+                Key::PageDown => Cmd::QuickPage(1),
                 Key::Backspace => Cmd::QuickBackspace,
                 Key::Text(t) if !ctrl => Cmd::QuickInput(t),
                 _ => Cmd::Ignore,
@@ -107,6 +124,8 @@ pub(crate) fn route(mode: Mode, key: Key, mods: Mods, composing: bool) -> Cmd {
                 Key::Enter if mods.shift => Cmd::SearchPrev,
                 Key::Enter => Cmd::SearchNext,
                 Key::Backspace => Cmd::SearchBackspace,
+                Key::Home => Cmd::SearchFirstMatch,
+                Key::End => Cmd::SearchLastMatch,
                 Key::Tab => Cmd::SearchToggleField,
                 // Ctrl+F/H/P 穿透：重申查询焦点 / 展开替换 / 打开快速打开
                 Key::F if ctrl => Cmd::Edit(Action::Find),
@@ -206,7 +225,7 @@ mod tests {
     fn menu_mode_swallows_non_ctrl_but_passes_ctrl_through() {
         // 非 ctrl 组合：仍被吞（Esc 除外）
         assert_eq!(route(Mode::Menu, Key::Escape, NONE, false), Cmd::CloseMenu);
-        for key in [Key::Backspace, Key::Left, text("a"), text("中")] {
+        for key in [Key::Backspace, text("a"), text("中")] {
             assert_eq!(route(Mode::Menu, key.clone(), NONE, false), Cmd::Ignore);
             assert_eq!(route(Mode::Menu, key, SHIFT, false), Cmd::Ignore);
         }
@@ -235,6 +254,19 @@ mod tests {
         assert_eq!(route(Mode::Menu, Key::Up, NONE, false), Cmd::MenuMove(-1));
         assert_eq!(route(Mode::Menu, Key::Down, NONE, false), Cmd::MenuMove(1));
         assert_eq!(route(Mode::Menu, Key::Enter, NONE, false), Cmd::MenuAccept);
+        assert_eq!(
+            route(Mode::Menu, Key::Left, NONE, false),
+            Cmd::MenuSwitch(-1)
+        );
+        assert_eq!(
+            route(Mode::Menu, Key::Right, NONE, false),
+            Cmd::MenuSwitch(1)
+        );
+        // Shift 不改变切换方向
+        assert_eq!(
+            route(Mode::Menu, Key::Left, SHIFT, false),
+            Cmd::MenuSwitch(-1)
+        );
         assert_eq!(route(Mode::Menu, Key::Escape, NONE, false), Cmd::CloseMenu);
         // Shift 方向键仍是菜单导航（不是文档扩选）
         assert_eq!(route(Mode::Menu, Key::Up, SHIFT, false), Cmd::MenuMove(-1));
@@ -268,6 +300,15 @@ mod tests {
         assert_eq!(
             route(Mode::Search, Key::Backspace, NONE, false),
             Cmd::SearchBackspace
+        );
+        // 查询框无内部光标：Home/End 回退为跳首个/末个命中
+        assert_eq!(
+            route(Mode::Search, Key::Home, NONE, false),
+            Cmd::SearchFirstMatch
+        );
+        assert_eq!(
+            route(Mode::Search, Key::End, NONE, false),
+            Cmd::SearchLastMatch
         );
         assert_eq!(
             route(Mode::Search, Key::Tab, NONE, false),
@@ -335,6 +376,23 @@ mod tests {
         assert_eq!(
             route(Mode::QuickOpen, Key::Backspace, NONE, false),
             Cmd::QuickBackspace
+        );
+        // 首/末项与按可见行数翻页
+        assert_eq!(
+            route(Mode::QuickOpen, Key::Home, NONE, false),
+            Cmd::QuickFirst
+        );
+        assert_eq!(
+            route(Mode::QuickOpen, Key::End, NONE, false),
+            Cmd::QuickLast
+        );
+        assert_eq!(
+            route(Mode::QuickOpen, Key::PageUp, NONE, false),
+            Cmd::QuickPage(-1)
+        );
+        assert_eq!(
+            route(Mode::QuickOpen, Key::PageDown, NONE, false),
+            Cmd::QuickPage(1)
         );
         assert_eq!(
             route(Mode::QuickOpen, text("md"), NONE, false),

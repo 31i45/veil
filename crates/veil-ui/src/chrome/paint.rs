@@ -163,23 +163,31 @@ impl Chrome {
         // S1：右侧字数行列优先完整固定，左文超宽时中段省略（head…tail），杜绝左右重叠。
         let right_edge = win_w - SCROLL_W * scale - 12.0 * scale;
         let left_x = 12.0 * scale;
-        let avail = right_edge - measure_w(engine, &right) - left_x - 12.0 * scale;
-        let left = self.fit_middle(engine, &left, avail, scale);
-        self.draw_left(frame, engine, &left, left_x, mid, theme.muted, scale);
+        let right_w = measure_w(engine, &right);
+        let avail = right_edge - right_w - left_x - 12.0 * scale;
+        let left_fitted = self.fit_middle(engine, &left, avail, scale);
+        let left_w = measure_w(engine, &left_fitted);
+        self.draw_left(frame, engine, &left_fitted, left_x, mid, theme.muted, scale);
         self.draw_right(frame, engine, &right, right_edge, mid, theme.muted, scale);
         if !self.notice.is_empty() {
-            let notice = self.notice.clone();
-            if let Some(l) = self
-                .labels
-                .get_or_insert(engine, &notice, theme.muted, scale)
-            {
-                let x = (win_w - l.w as f32) / 2.0;
-                let y = mid - l.h as f32 / 2.0;
-                frame.blit(&l.pixels, l.w, l.h, x.round() as i32, y.round() as i32);
+            // 通知只在中段空白内绘制：避让左右文本，空间不足则直接不画
+            let gap = crate::theme::surface::control_gap(scale);
+            let x0 = left_x + left_w + gap;
+            let x1 = right_edge - right_w - gap;
+            let avail_notice = x1 - x0;
+            if avail_notice >= 24.0 * scale {
+                let notice = self.notice.clone();
+                let fitted = self.fit_middle(engine, &notice, avail_notice, scale);
+                if let Some(l) = self.labels.get_or_insert(engine, &fitted, theme.muted, scale) {
+                    let x = x0 + (avail_notice - l.w as f32) / 2.0;
+                    let y = mid - l.h as f32 / 2.0;
+                    frame.blit(&l.pixels, l.w, l.h, x.round() as i32, y.round() as i32);
+                }
             }
         }
 
-        // 滚动条
+        // 滚动条：胶囊滑块；悬停/拖动时 alpha 由 170 → 255 加亮（深浅主题都可见），
+        // 尺寸不变避免抖动。最小高度由 scroll_thumb 的 THUMB_MIN_H 保证。
         if let Some((ty, th)) = scroll_thumb(vp, doc_h, scroll, scale) {
             let x = win_w - SCROLL_W * scale;
             frame.fill_rect(
@@ -189,12 +197,16 @@ impl Chrome {
                 vp.h.ceil() as u32,
                 theme.chrome_bg,
             );
-            frame.fill_rect(
+            let tw = ((SCROLL_W - 4.0) * scale).max(1.0);
+            let active = self.scroll_hover || self.scroll_drag.is_some();
+            let alpha = if active { 255 } else { 170 };
+            frame.fill_rounded_rect(
                 (x + 2.0 * scale).round() as i32,
                 ty.round() as i32,
-                ((SCROLL_W - 4.0) * scale).max(1.0) as u32,
+                tw.ceil() as u32,
                 th.max(1.0) as u32,
-                theme.thumb,
+                tw / 2.0,
+                [theme.thumb[0], theme.thumb[1], theme.thumb[2], alpha],
             );
         }
 

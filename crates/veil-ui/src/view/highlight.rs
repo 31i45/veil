@@ -807,9 +807,11 @@ pub fn highlight(lang: &str, text: &str) -> Vec<(usize, usize, TokenKind)> {
                 continue;
             }
             while i < bytes.len() {
-                let ch = bytes[i] as char;
+                let ch = text[i..].chars().next().unwrap_or('\0');
                 if ch == '\\' && i + 1 < bytes.len() {
-                    i += 2;
+                    // `\` 是 ASCII（1 字节），转义序列按被转义字符的 UTF-8 宽度前进
+                    i += 1;
+                    i += text[i..].chars().next().map(char::len_utf8).unwrap_or(1);
                     continue;
                 }
                 if ch == quote {
@@ -820,7 +822,7 @@ pub fn highlight(lang: &str, text: &str) -> Vec<(usize, usize, TokenKind)> {
                     // 未闭合字符串到行尾
                     break;
                 }
-                i += 1;
+                i += ch.len_utf8();
             }
             out.push((start, i, TokenKind::String));
             continue;
@@ -916,8 +918,9 @@ pub fn highlight(lang: &str, text: &str) -> Vec<(usize, usize, TokenKind)> {
             continue;
         }
 
-        // 其余字符跳过（默认色）
-        i += 1;
+        // 其余字符跳过（默认色）：按当前字符的 UTF-8 宽度前进，
+        // 保证 `i` 始终落在字符边界（否则下一轮 `&text[i..]` 会 panic）。
+        i += text[i..].chars().next().map(char::len_utf8).unwrap_or(1);
     }
 
     // 合并相邻同类型段（减少 layout 层 span 数）
@@ -986,6 +989,55 @@ mod tests {
             .iter()
             .find(|(s, e, _)| *s <= at && at < *e)
             .map(|x| x.2)
+    }
+
+    /// 每个 span 的区间必须合法且两端都落在字符边界上。
+    fn assert_spans_valid(text: &str, spans: &[(usize, usize, TokenKind)]) {
+        for &(start, end, _) in spans {
+            assert!(start <= end, "start={start} > end={end}（text={text:?}）");
+            assert!(end <= text.len(), "end={end} > len={}（text={text:?}）", text.len());
+            assert!(
+                text.is_char_boundary(start),
+                "start={start} 非字符边界（text={text:?}）"
+            );
+            assert!(
+                text.is_char_boundary(end),
+                "end={end} 非字符边界（text={text:?}）"
+            );
+        }
+    }
+
+    #[test]
+    fn cjk_markdown_fence_does_not_panic() {
+        // 用户复现用例：中文围栏代码块正文按字节下标扫描时曾 panic
+        let src = "# 任务：[精准任务名称]\n\n- 第一步：确认边界\n- 第二步：滚动到底\n\n```markdown\n# 任务：[精准任务名称]\n中文正文：保持 UTF-8 字符边界。\n```\n";
+        let sp = highlight("markdown", src);
+        assert_spans_valid(src, &sp);
+    }
+
+    #[test]
+    fn cjk_strings_comments_emoji_and_identifiers_stay_on_boundaries() {
+        let cases: &[(&str, &str)] = &[
+            // 中文字符串 + emoji + 中文行注释
+            (
+                "rust",
+                "let 中文标识_1 = \"中文字符串😀\";\n// 中文行注释\n",
+            ),
+            // 中文块注释内 emoji
+            ("rust", "/* 中文块注释\n😀 继续 */\nlet x = 1;"),
+            // 反斜杠转义 emoji（转义序列不得固定 += 2）
+            ("rust", "let s = \"a\\😀b\";\nlet t = 1;"),
+            // 未闭合中文字符串（到行尾收束）
+            ("rust", "let s = \"未闭合中文字符串\nlet t = 2;"),
+            // 三引号中文串
+            ("python", "s = \"\"\"中文三引号😀\n第二行\"\"\""),
+            // 中文标识符 + 中文注释混排
+            ("markdown", "```rust\nfn 中文() { println!(\"你好😀\"); }\n```"),
+        ];
+        for &(lang, src) in cases {
+            let sp = highlight(lang, src);
+            assert_spans_valid(src, &sp);
+        }
     }
 
     #[test]

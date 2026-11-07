@@ -80,13 +80,16 @@ pub trait FileStore {
 /// 取消（用户关闭对话框）返回 None；路径选择成功后由 shell 负责读写与状态切换。
 pub trait FileDialog {
     fn open_markdown(&mut self) -> Option<PathBuf>;
+    /// 另存为对话框。`suggested` 可为完整路径（含目录，用于定位到文档所在目录），
+    /// 也可为裸文件名（草稿首次保存）：平台层负责补上用户「文档」目录。
     fn save_markdown(&mut self, suggested: &str) -> Option<PathBuf>;
     /// 选择图片文件（2f 插入图片入口）。默认 None：不关心图片的实现无需改动。
     fn open_image(&mut self) -> Option<PathBuf> {
         None
     }
-    /// 导出目标对话框（草稿态无关联文件时）：`ext` 为扩展名（`html` / `pdf`），
-    /// 决定标题与过滤器。默认 None：不实现导出的平台视为取消，不产生输出。
+    /// 导出目标对话框：每次导出都调用（导出是显式副作用，不复用源文件目录）。
+    /// `ext` 为扩展名（`html` / `pdf`），决定标题与过滤器；`suggested` 语义同
+    /// `save_markdown`。默认 None：不实现导出的平台视为取消，不产生输出。
     fn save_export(&mut self, _suggested: &str, _ext: &str) -> Option<PathBuf> {
         None
     }

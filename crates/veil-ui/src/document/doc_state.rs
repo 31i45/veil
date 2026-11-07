@@ -309,24 +309,25 @@ impl App {
         }
     }
 
-    /// Ctrl+E：经注入的 Exporter 导出 HTML。草稿无路径时先弹保存对话框选定输出位置
-    /// （取消即中止，不产生文件）；导出失败走 notice 不崩溃。导出不清脏标（源文件未变）。
+    /// Ctrl+E：经注入的 Exporter 导出 HTML。导出是显式副作用：无论文档是否有关联路径，
+    /// 都先弹保存对话框确认输出位置（建议路径 = 同目录同名 `.html`，草稿为裸名，
+    /// 由平台层补「文档」目录）。取消即中止，不产生文件；失败走 notice 不崩溃。
+    /// 导出不清脏标（源文件未变）。
     pub(crate) fn export_now(&mut self) {
-        let target = if self.doc.path.is_some() {
-            None
-        } else {
-            let Some(p) = self.ports.dialogs.save_export("未命名.html", "html") else {
-                self.ui_state.chrome.notice = "导出已取消".into();
-                self.request_redraw();
-                return;
-            };
-            Some(p)
+        let suggested = match self.doc.path.as_ref() {
+            Some(p) => p.with_extension("html").to_string_lossy().into_owned(),
+            None => "未命名.html".to_string(),
+        };
+        let Some(target) = self.ports.dialogs.save_export(&suggested, "html") else {
+            self.ui_state.chrome.notice = "导出已取消".into();
+            self.request_redraw();
+            return;
         };
         match self.ports.exporter.export_html(
             self.editor.session(),
             self.doc.export_style,
             self.doc.path.as_deref(),
-            target.as_deref(),
+            Some(&target),
         ) {
             Ok(p) => {
                 self.ui_state.chrome.notice = format!("已导出 HTML：{}", path_label(Some(&p)));
@@ -343,14 +344,11 @@ impl App {
     /// Ctrl+Shift+S：另存为。写入成功才切换关联路径/基线并清脏；失败保留旧路径与脏标。
     /// 新路径改变图片相对基准：图片代次递增，图片/布局/表格按因果键失配重取。
     pub(crate) fn save_as(&mut self) {
-        let suggested = self
-            .doc
-            .path
-            .as_ref()
-            .and_then(|p| p.file_name())
-            .and_then(|s| s.to_str())
-            .unwrap_or("未命名.md")
-            .to_string();
+        // 传完整路径：对话框直接定位到文档所在目录（只传裸名会落到系统记忆的任意目录）。
+        let suggested = match self.doc.path.as_ref() {
+            Some(p) => p.to_string_lossy().into_owned(),
+            None => "未命名.md".to_string(),
+        };
         let Some(path) = self.ports.dialogs.save_markdown(&suggested) else {
             self.ui_state.chrome.notice = "另存为已取消".into();
             self.request_redraw();

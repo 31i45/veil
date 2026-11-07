@@ -3,7 +3,7 @@
 //! 策略（打印对话框、设备上下文、逐页 blit）由产品层（veil）经 `Print` 端口注入。
 //! 本文件零 Win32 依赖，headless 全测（同 Clipboard/FileStore 模式，INSTANCE §6）。
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::app::App;
 use crate::theme::NativeWindow;
@@ -232,15 +232,22 @@ impl PrintSession<'_> {
         self.app.config.export_margin_mm
     }
 
-    /// 默认导出目标：文档同目录 `<stem>.pdf`；草稿返回 None。
-    pub fn export_target(&self) -> Option<PathBuf> {
-        self.app.doc.path.as_ref().map(|p| p.with_extension("pdf"))
+    /// 导出建议路径：文档同目录 `<stem>.pdf`；草稿为裸名（平台层补「文档」目录）。
+    /// 仅用于预填对话框，绝不作为静默落盘目标。
+    pub fn export_suggestion(&self) -> PathBuf {
+        match self.app.doc.path.as_ref() {
+            Some(p) => p.with_extension("pdf"),
+            None => PathBuf::from("未命名.pdf"),
+        }
     }
 
-    /// 草稿态导出：由产品层弹保存对话框选定输出路径（`ext` 决定过滤器）。
+    /// 导出输出路径：每次导出都由用户确认（`ext` 决定标题与过滤器）。
     /// None = 用户取消（产品层据此中止，不产生任何文件）。
-    pub fn choose_export_path(&mut self, suggested: &str, ext: &str) -> Option<PathBuf> {
-        self.app.ports.dialogs.save_export(suggested, ext)
+    pub fn choose_export_path(&mut self, suggested: &Path, ext: &str) -> Option<PathBuf> {
+        self.app
+            .ports
+            .dialogs
+            .save_export(&suggested.to_string_lossy(), ext)
     }
 
     /// 排版并光栅化单行文本，返回 (straight-alpha RGBA8, 宽, 高)。

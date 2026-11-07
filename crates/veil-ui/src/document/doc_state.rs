@@ -4,10 +4,11 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use crate::app::{App, FileEvent, FileStore};
+use crate::app::{ActiveModal, App, FileEvent, FileStore, PendingIntent};
 use crate::chrome::path_label;
 use crate::docio::{decode, encode};
 use crate::editor::Editor;
+use crate::view::modal;
 
 use super::{recovery, session, ExternalState};
 
@@ -108,7 +109,7 @@ impl App {
                         eprintln!("检测到外部修改，原文件已备份到 {}", bp.display());
                     }
                     Err(e) => {
-                        self.ui_state.chrome.notice = format!("外部版本备份失败: 取消保存 {e}");
+                        self.ui_state.chrome.notice = format!("外部版本备份失败：取消保存 {e}");
                         eprintln!("外部修改备份失败，取消保存（不覆盖原文件）: {e}");
                         self.update_title();
                         self.request_redraw();
@@ -143,7 +144,7 @@ impl App {
                 self.update_title();
             }
             Err(e) => {
-                self.ui_state.chrome.notice = format!("保存失败: {e}");
+                self.ui_state.chrome.notice = format!("保存失败：{e}");
                 eprintln!("保存失败 {}: {e}", path.display());
             }
         }
@@ -221,7 +222,7 @@ impl App {
             }
             Err(e) => {
                 self.persist_state.recovery_failed_at = Some(now);
-                self.ui_state.chrome.notice = format!("崩溃恢复写入失败: {e}");
+                self.ui_state.chrome.notice = format!("崩溃恢复写入失败：{e}");
                 eprintln!("崩溃恢复写入失败: {e}");
             }
         }
@@ -334,7 +335,7 @@ impl App {
                 eprintln!("已导出 {}", p.display());
             }
             Err(e) => {
-                self.ui_state.chrome.notice = format!("导出失败: {e}");
+                self.ui_state.chrome.notice = format!("导出失败：{e}");
                 eprintln!("导出失败: {e}");
             }
         }
@@ -369,75 +370,117 @@ impl App {
                 self.update_title();
             }
             Err(e) => {
-                self.ui_state.chrome.notice = format!("另存为失败: {e}");
+                self.ui_state.chrome.notice = format!("另存为失败：{e}");
                 eprintln!("另存为失败 {}: {e}", path.display());
             }
         }
         self.request_redraw();
     }
 
-    /// 未保存内容的统一处置（3e 修 B）：脏文档弹三选一，返回「是否继续」。
-    /// - 保存：有路径走保存，无路径草稿必须另存为；未完成（失败或取消）→ 取消继续；
-    /// - 放弃：立即作废恢复快照，避免下次启动复活已放弃的内容；
-    /// - 取消：保持编辑状态（状态栏提示，不静默）。
-    pub(crate) fn resolve_unsaved(&mut self) -> bool {
-        if !self.editor.is_dirty() {
-            return true; // 干净文档：无需确认
+    /// 未保存确认的挂起入口：干净立即执行意图并返回 true；
+    /// 脏则登记模态（不阻塞）并返回 false，结论由 `resolve_modal` 驱动。
+    pub(crate) fn begin_unsaved(&mut self, intent: PendingIntent) -> bool {
+        if self.ui_state.modal.is_some() {
+            return false; // 已有模态未决：不叠加
         }
-        let path = self.doc.path.clone();
-        match self.ports.confirmer.confirm_unsaved(path.as_deref()) {
-            crate::app::UnsavedChoice::Cancel => {
-                self.ui_state.chrome.notice = "已取消：当前文档仍有未保存的修改".into();
-                self.request_redraw();
-                false
-            }
-            crate::app::UnsavedChoice::Discard => {
+        if !self.editor.is_dirty() {
+            self.execute_intent(intent);
+            return true;
+        }
+        let name = self
+            .doc
+            .path
+            .as_ref()
+            .and_then(|p| p.file_name())
+            .and_then(|n| n.to_str())
+            .unwrap_or("未命名草稿");
+        let spec = modal::ModalSpec::new(
+            format!("是否保存对「{name}」的更改？"),
+            "未保存的修改在关闭后将无法恢复。",
+            vec![
+                modal::ModalButton::new(1, "保存", modal::ButtonRole::Primary)
+                    .with_mnemonic('s'),
+                modal::ModalButton::new(2, "不保存", modal::ButtonRole::Danger)
+                    .with_mnemonic('n'),
+                modal::ModalButton::new(3, "取消", modal::ButtonRole::Secondary),
+            ],
+        );
+        let state = modal::ModalState::new(&spec);
+        self.ui_state.modal = Some(ActiveModal {
+            spec,
+            state,
+            intent,
+        });
+        self.request_redraw();
+        false
+    }
+
+    /// 执行被挂起的意图（不再二次确认）。
+    pub(crate) fn execute_intent(&mut self, intent: PendingIntent) {
+        match intent {
+            PendingIntent::Close => {
                 self.clear_recovery();
-                true
+                self.window_state.exit_requested = true;
             }
-            crate::app::UnsavedChoice::Save => {
+            PendingIntent::New => self.new_draft_now(),
+            PendingIntent::Open => self.open_via_dialog_now(),
+            PendingIntent::OpenRecent(p) => self.open_path_now(p),
+        }
+    }
+
+    /// 模态结论落地：1=保存、2=不保存、3=取消（未知 id 按取消）。
+    pub(crate) fn resolve_modal(&mut self, id: u16) {
+        let Some(active) = self.ui_state.modal.take() else {
+            return;
+        };
+        // 经 spec 校验 id（未知 id 不命中任何按钮 → 按取消处理）
+        match active.spec.find(id).map(|b| b.id) {
+            Some(1) => {
                 if self.doc.path.is_some() {
                     self.save_now();
                 } else {
                     self.save_as(); // 无路径草稿：保存的唯一出路
                 }
                 if !self.editor.is_dirty() {
-                    return true;
+                    self.execute_intent(active.intent);
+                } else {
+                    self.ui_state.chrome.notice =
+                        "保存未完成（失败或取消），操作已取消".into();
                 }
-                self.ui_state.chrome.notice = "保存未完成（失败或取消），操作已取消".into();
-                self.request_redraw();
-                false
+            }
+            Some(2) => {
+                // 明确放弃：先作废恢复快照，避免下次启动复活已放弃内容
+                self.clear_recovery();
+                self.execute_intent(active.intent);
+            }
+            _ => {
+                self.ui_state.chrome.notice = "已取消：当前文档仍有未保存的修改".into();
             }
         }
+        self.request_redraw();
     }
 
-    /// 关窗/退出：脏文档先三选一；确认退出后清恢复快照（干净退出不留残稿）。
-    /// 返回 false = 留在编辑器继续（用户取消）；仅当返回 true 才允许事件循环退出。
-    pub(crate) fn confirm_close(&mut self) -> bool {
-        if !self.resolve_unsaved() {
-            return false;
-        }
-        self.clear_recovery();
-        true
+    /// 关窗/退出：脏文档先挂起应用内模态；干净文档直接获准退出（清恢复快照）。
+    pub(crate) fn confirm_close(&mut self) {
+        let _ = self.begin_unsaved(PendingIntent::Close);
     }
 
-    /// Ctrl+O / 菜单打开：先处置未保存内容（保存/放弃/取消），再弹文件对话框。
+    /// Ctrl+O / 菜单打开：先登记未保存意图，结论出来后再弹文件对话框。
     /// 选择「保存」后才选文件：避免选完文件才发现保存失败。
     pub(crate) fn open_via_dialog(&mut self) {
-        if !self.resolve_unsaved() {
-            return;
-        }
+        let _ = self.begin_unsaved(PendingIntent::Open);
+    }
+
+    /// 拖放/最近文件/快速打开：先登记未保存意图，结论出来后再整体替换编辑器。
+    pub(crate) fn open_path(&mut self, path: PathBuf) {
+        let _ = self.begin_unsaved(PendingIntent::OpenRecent(path));
+    }
+
+    /// 未保存处置已完成后的打开对话框（不再确认）。
+    fn open_via_dialog_now(&mut self) {
         if let Some(path) = self.ports.dialogs.open_markdown() {
             self.open_path_now(path);
         }
-    }
-
-    /// 拖放/最近文件/快速打开：先处置未保存内容，再整体替换编辑器。
-    pub(crate) fn open_path(&mut self, path: PathBuf) {
-        if !self.resolve_unsaved() {
-            return;
-        }
-        self.open_path_now(path);
     }
 
     /// 已完成未保存处置后的打开（不再确认）：加载失败保留当前文档与编辑内容。
@@ -445,7 +488,7 @@ impl App {
         let bytes = match self.ports.store.load(&path) {
             Ok(b) => b,
             Err(e) => {
-                self.ui_state.chrome.notice = format!("打开失败: {e}");
+                self.ui_state.chrome.notice = format!("打开失败：{e}");
                 eprintln!("打开失败 {}: {e}", path.display());
                 self.request_redraw();
                 return;
@@ -454,7 +497,7 @@ impl App {
         let (text, bom) = match decode(&bytes) {
             Ok(x) => x,
             Err(e) => {
-                self.ui_state.chrome.notice = format!("打开失败: {e}");
+                self.ui_state.chrome.notice = format!("打开失败：{e}");
                 eprintln!("打开失败 {}: {e}", path.display());
                 self.request_redraw();
                 return;
@@ -494,12 +537,14 @@ impl App {
         self.request_redraw();
     }
 
-    /// Ctrl+N / 菜单新建：先处置未保存内容，再以空白草稿替换当前文档。
-    /// 成功即换新编辑器（新撤销栈、脏标清除）、文件监听解除、派生缓存按会话代次失效。
+    /// Ctrl+N / 菜单新建：先登记未保存意图，结论出来后再以空白草稿替换当前文档。
     pub(crate) fn new_draft(&mut self) {
-        if !self.resolve_unsaved() {
-            return;
-        }
+        let _ = self.begin_unsaved(PendingIntent::New);
+    }
+
+    /// 新建的落地点（不再确认）：成功即换新编辑器（新撤销栈、脏标清除）、
+    /// 文件监听解除、派生缓存按会话代次失效。
+    fn new_draft_now(&mut self) {
         self.editor = Editor::new("");
         self.doc.path = None;
         self.doc.bom = false;

@@ -94,6 +94,20 @@ impl App {
     /// 单个内部键的路由与执行：`on_key` 与测试共用同一入口。
     /// 模式优先级与各模式的按键语义只在 `mode::route` 一处表达。
     pub(crate) fn route_key(&mut self, key: Key) {
+        // 模态优先：打开时它是唯一输入接收者，其余路由（菜单/浮层/正文）全部让位
+        if self.ui_state.modal.is_some() {
+            let shift = self.input_state.mods.shift;
+            let id = if let Some(a) = self.ui_state.modal.as_mut() {
+                a.state.on_key(&key, shift, &a.spec)
+            } else {
+                None
+            };
+            match id {
+                Some(id) => self.resolve_modal(id),
+                None => self.request_redraw(),
+            }
+            return;
+        }
         let cmd = route(
             self.mode(),
             key,
@@ -354,7 +368,7 @@ impl App {
         match self.ports.assets.save_pasted_image(&doc, img) {
             Ok(rel) => self.insert_paste(&self.image_paragraph_markup(&rel)),
             Err(e) => {
-                self.ui_state.chrome.notice = format!("图片落盘失败: {e}");
+                self.ui_state.chrome.notice = format!("图片落盘失败：{e}");
                 eprintln!("图片落盘失败（文档未改动）: {e}");
                 self.request_redraw();
             }
@@ -368,7 +382,7 @@ impl App {
             match self.ports.images.load(path) {
                 Ok(img) => self.insert_image_data(&img),
                 Err(e) => {
-                    self.ui_state.chrome.notice = format!("图片读取失败: {e}");
+                    self.ui_state.chrome.notice = format!("图片读取失败：{e}");
                     eprintln!("图片读取失败（文档未改动）{}: {e}", path.display());
                     self.request_redraw();
                 }
@@ -417,7 +431,7 @@ impl App {
         match self.ports.images.load(&path) {
             Ok(img) => self.insert_image_data(&img),
             Err(e) => {
-                self.ui_state.chrome.notice = format!("图片读取失败: {e}");
+                self.ui_state.chrome.notice = format!("图片读取失败：{e}");
                 eprintln!("图片读取失败（文档未改动）{}: {e}", path.display());
                 self.request_redraw();
             }
@@ -793,12 +807,10 @@ impl App {
         }
         self.ui_state.chrome.close();
         self.request_redraw();
-        if self.perform_menu(action) {
-            self.window_state.exit_requested = true;
-        }
+        self.perform_menu(action);
     }
 
-    /// 执行菜单动作。返回 true = 退出应用。
+    /// 执行菜单动作。返回 true = 退出应用（现由模态结论写 exit_requested，恒为 false）。
     pub(crate) fn perform_menu(&mut self, action: MenuAction) -> bool {
         match action {
             MenuAction::New => self.new_draft(),
@@ -844,7 +856,7 @@ impl App {
             MenuAction::OpenRecent(i) => self.open_recent(i),
             MenuAction::QuickOpen => self.open_quick(),
             MenuAction::Separator => {},
-            MenuAction::Quit => return true,
+            MenuAction::Quit => self.confirm_close(),
         }
         self.request_redraw();
         false
@@ -887,6 +899,9 @@ impl App {
             self.input_state.mouse.y as f32,
         );
         let vp = self.viewport();
+        if self.ui_state.modal.is_some() {
+            return; // 模态优先：不叠加右键菜单
+        }
         if self.ui_state.quick.open || self.ui_state.search.open {
             return; // 模态浮层优先：不叠加右键菜单
         }
@@ -1171,7 +1186,7 @@ impl App {
             return; // 应用内锚点：由后续任务处理，这里不弹提示也不调端口
         }
         if !crate::url_is_openable(target) {
-            self.ui_state.chrome.notice = format!("无法打开链接: 不支持的链接地址 {target}");
+            self.ui_state.chrome.notice = format!("无法打开链接：不支持的链接地址 {target}");
             self.request_redraw();
             return;
         }
@@ -1308,13 +1323,28 @@ impl App {
         }
     }
 
-    /// 左键按下路由（右键菜单 > 菜单 > 菜单栏 > 滚动条 > 状态栏 > 正文光标）。
-    /// 返回 true = 退出应用。菜单打开时点击外部只关菜单、不移动光标。
+    /// 左键按下路由（模态 > 右键菜单 > 菜单 > 菜单栏 > 滚动条 > 状态栏 > 正文光标）。
+    /// 返回值恒为 false：退出统一由模态结论写 `exit_requested`。
+    /// 菜单打开时点击外部只关菜单、不移动光标。
     pub(crate) fn on_left_click(&mut self) -> bool {
         let (mx, my) = (
             self.input_state.mouse.x as f32,
             self.input_state.mouse.y as f32,
         );
+        // 模态优先：只判定按钮命中，遮罩/空白点击一律吞掉且不关闭（须显式作答）
+        if self.ui_state.modal.is_some() {
+            let l = self.modal_layout();
+            let hit = self
+                .ui_state
+                .modal
+                .as_mut()
+                .and_then(|a| a.state.on_click((mx, my), &l));
+            if let Some(id) = hit {
+                self.resolve_modal(id);
+            }
+            self.request_redraw();
+            return false;
+        }
         let scale = self.input_state.scale;
         let vp = self.viewport();
         // 右键菜单打开中：命中项执行；其余位置（含面板内空白）关闭并吞掉
@@ -1736,6 +1766,9 @@ impl App {
     /// 滚轮：右键菜单打开时吞掉（瞬态菜单不滚动正文）；快速打开浮层内滚动候选，
     /// 指针在大纲面板内时滚动面板，否则滚动正文。
     pub(crate) fn on_wheel(&mut self, d: f32) {
+        if self.ui_state.modal.is_some() {
+            return; // 模态优先：遮罩下不滚动正文
+        }
         if self.ui_state.ctx.open {
             return;
         }

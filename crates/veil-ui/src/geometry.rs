@@ -11,3 +11,15 @@ pub const BASE_LINE_HEIGHT: f32 = 22.0;
 pub const MARGIN: f32 = 16.0;
 /// 块间垂直间距（物理像素）。
 pub const PARA_GAP: f32 = 10.0;
+
+/// 视口坐标下的轴对齐矩形（物理像素）。
+///
+/// 为什么放在 geometry：模态布局需要跨 view 子模块共享同一个矩形语义
+/// （命中/绘制/测试都用它），避免再定义第四份同形结构。
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub(crate) struct Rect {
+    pub(crate) x: f32,
+    pub(crate) y: f32,
+    pub(crate) w: f32,
+    pub(crate) h: f32,
+}

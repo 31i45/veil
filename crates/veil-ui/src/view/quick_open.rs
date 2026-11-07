@@ -12,12 +12,12 @@ use crate::geometry::BASE_FONT_SIZE;
 pub const PANEL_W: f32 = 520.0;
 /// 输入行基准高。
 pub const INPUT_H: f32 = 40.0;
-/// 候选行基准高。
-pub const ROW_H: f32 = 26.0;
+/// 候选行基准高：与全部浮层同一 surface 令牌。
+pub const ROW_H: f32 = crate::theme::surface::ROW_HEIGHT;
 /// 浮层同时可见的候选行数。
 pub const MAX_VISIBLE: usize = 10;
-/// 浮层左右内边距基准值。
-pub const PAD: f32 = 10.0;
+/// 浮层左右内边距基准值：与全部浮层同一 surface 令牌。
+pub const PAD: f32 = crate::theme::surface::PADDING;
 /// 候选上限：巨型目录也只入列有限条目。
 pub const CANDIDATE_CAP: usize = 500;
 

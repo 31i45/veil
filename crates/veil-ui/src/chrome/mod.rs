@@ -22,8 +22,6 @@ pub(crate) use cache::LabelCache;
 pub const MENU_H: f32 = 30.0;
 pub const STATUS_H: f32 = 26.0;
 pub const SCROLL_W: f32 = 12.0;
-/// 菜单项行高（基准值）。
-pub const ITEM_H: f32 = 28.0;
 /// 滚动条滑块最小高度（基准值）。
 pub const THUMB_MIN_H: f32 = 24.0;
 
@@ -256,8 +254,6 @@ pub struct PopupLayout {
     pub separators: Vec<(usize, f32)>,
 }
 
-const SEP_H: f32 = 4.0; // 分隔线上下各留 SEP_H/2 间距，线高 1px
-
 pub fn popup_layout(open: usize, scale: f32, recent: &[String]) -> PopupLayout {
     let rows = menu_rows(open, recent);
     if rows.is_empty() {
@@ -275,7 +271,7 @@ pub fn popup_layout(open: usize, scale: f32, recent: &[String]) -> PopupLayout {
         .find(|&(i, _, _)| i == open)
         .map(|(_, x, _)| x)
         .unwrap_or(0.0);
-    let pad = 12.0 * scale;
+    let pad = crate::theme::surface::padding(scale);
     let gap = 24.0 * scale;
     let widest = rows
         .iter()
@@ -290,8 +286,8 @@ pub fn popup_layout(open: usize, scale: f32, recent: &[String]) -> PopupLayout {
         })
         .fold(0.0_f32, f32::max);
     let w = (widest + 2.0 * pad).max(150.0 * scale);
-    let item_h = ITEM_H * scale;
-    let sep_h = SEP_H * scale;
+    let item_h = crate::theme::surface::row_height(scale);
+    let sep_h = crate::theme::surface::divider_height(scale);
     let top_pad = 4.0 * scale;
     let y = MENU_H * scale;
     let mut cur_y = top_pad;

@@ -3,10 +3,10 @@
 
 use crate::app::App;
 use crate::chrome;
-use crate::geometry::{BASE_LINE_HEIGHT, MARGIN};
+use crate::geometry::{Rect, BASE_LINE_HEIGHT, MARGIN};
 use crate::view::{
     ctx_menu, node_active, outline, oversize_notice, quick_open, search, BlockLayout, Frame,
-    InlineAsset, InlineImg, LayoutKey, Memo, TableKey,
+    InlineAsset, InlineImg, LayoutEngine, LayoutKey, Memo, TableKey,
 };
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -20,6 +20,31 @@ const TYPEWRITER_ANCHOR: f32 = 0.42;
 
 /// 拖放悬停压暗强度（阶段 1）：内容区背景覆盖，突出居中提示条。
 const DROP_DIM_ALPHA: u8 = 120;
+
+/// 模态文本接缝：度量走 engine（不栅格化），绘制走 chrome 标签位图缓存。
+struct ModalText<'a> {
+    labels: &'a mut crate::chrome::LabelCache,
+    engine: &'a mut LayoutEngine,
+    scale: f32,
+}
+
+impl crate::view::modal::Text for ModalText<'_> {
+    fn width(&mut self, s: &str) -> f32 {
+        self.engine.measure(s).0
+    }
+
+    fn draw(&mut self, frame: &mut Frame, s: &str, color: [u8; 3], x: i32, y: i32) {
+        if s.is_empty() {
+            return;
+        }
+        if let Some(l) = self
+            .labels
+            .get_or_insert(self.engine, s, color, self.scale)
+        {
+            frame.blit(&l.pixels, l.w, l.h, x, y);
+        }
+    }
+}
 
 /// present 前置条件：帧像素数与 surface 缓冲长度一致才可整块拷贝。
 /// 最小化时 Resized 宽/高为 0，surface 不 resize 而帧被钳成 1×1，长度失配即丢帧。
@@ -777,6 +802,10 @@ impl App {
                 flags,
             );
         }
+        // 应用内模态：覆盖菜单栏与状态栏的最后一层；打印帧不含遮罩
+        if self.ui_state.modal.is_some() && self.window_state.print.is_none() {
+            self.paint_modal(&mut frame);
+        }
         // 视口驱动缓存回收：paint 帧末尾把 rasters/layouts/tables 从"全部累积"剪到
         // "可见区间 + caret 块 + 块级公式图"量级，防止滚动过程中内存持续增长。
         // 滚动是纯 view-only 操作，不触发 refresh_index → prune_alive，光栅累积永不回收。
@@ -819,6 +848,57 @@ impl App {
         crate::perf::frame(started.elapsed());
     }
 
+    /// 模态覆盖整窗（含菜单栏/状态栏），布局与绘制共用同一几何。
+    pub(crate) fn modal_layout(&mut self) -> crate::view::modal::ModalLayout {
+        let (w, h) = self.win_size();
+        let vp = Rect {
+            x: 0.0,
+            y: 0.0,
+            w: w as f32,
+            h: h as f32,
+        };
+        let scale = self.input_state.scale;
+        // spec 与 labels 同属 ui_state：克隆 spec 以拆开借用
+        let spec = self
+            .ui_state
+            .modal
+            .as_ref()
+            .map(|a| a.spec.clone())
+            .unwrap_or_else(|| {
+                crate::view::modal::ModalSpec::new(String::new(), String::new(), Vec::new())
+            });
+        let mut text = ModalText {
+            labels: &mut self.ui_state.chrome.labels,
+            engine: &mut self.engine,
+            scale,
+        };
+        crate::view::modal::layout(vp, scale, &spec, &mut text)
+    }
+
+    /// 最后一层：遮罩 + 卡片 + 按钮。
+    fn paint_modal(&mut self, frame: &mut Frame) {
+        let layout = self.modal_layout();
+        let Some((spec, state)) = self.ui_state.modal.as_ref().map(|a| (a.spec.clone(), a.state))
+        else {
+            return;
+        };
+        let (w, h) = self.win_size();
+        let vp = Rect {
+            x: 0.0,
+            y: 0.0,
+            w: w as f32,
+            h: h as f32,
+        };
+        let scale = self.input_state.scale;
+        let theme = self.input_state.theme;
+        let mut text = ModalText {
+            labels: &mut self.ui_state.chrome.labels,
+            engine: &mut self.engine,
+            scale,
+        };
+        crate::view::modal::paint(frame, vp, scale, &theme, &spec, &state, &layout, &mut text);
+    }
+
     /// 大纲面板（P3-2）：底色 → 条目（含悬停底色）→ 标题区（后画，覆盖上溢行）。
     /// 面板宽已从版心扣除；标签位图复用 chrome 缓存（键含颜色/scale）。
     pub(crate) fn paint_outline(&mut self, frame: &mut Frame) {
@@ -834,11 +914,28 @@ impl App {
             .scroll
             .clamp(0.0, outline::max_scroll(panel, count, scale));
         let x = panel.x.round() as i32;
+        let y = panel.y.round() as i32;
         let w = panel.w.ceil() as u32;
-        frame.fill_rect(x, panel.y as i32, w, panel.h.ceil() as u32, theme.chrome_bg);
+        frame.fill_surface_card(
+            x,
+            y,
+            w,
+            panel.h.ceil() as u32,
+            scale,
+            theme.dark,
+            theme.popup_bg,
+            theme.chrome_border,
+        );
         for row in outline::visible_rows(panel, count, self.ui_state.outline.scroll, scale) {
             if self.ui_state.outline.hover == Some(row.index) {
-                frame.fill_rect(x, row.y.round() as i32, w, row.h.ceil() as u32, theme.hover);
+                frame.fill_hover(
+                    x,
+                    row.y.round() as i32,
+                    w,
+                    row.h.ceil() as u32,
+                    scale,
+                    theme.hover,
+                );
             }
             let (level, text) = {
                 let e = &self.ui_state.outline.entries[row.index];
@@ -875,13 +972,25 @@ impl App {
                 );
             }
         }
-        // 标题区（覆盖滚动到标题区内的行）
+        // 标题区（覆盖滚动到标题区内的行）：顶角与卡片同曲率、底边平直，
+        // 内缩 1px 避开卡片圆角边框；分隔线与条目文字起止对齐（不顶到卡片边）
         let head_h = (outline::HEAD_H * scale).ceil() as u32;
-        frame.fill_rect(x, panel.y as i32, w, head_h, theme.chrome_bg);
+        let r = crate::theme::surface::corner_radius(scale);
+        frame.fill_rounded_rect(
+            x + 1,
+            y + 1,
+            w.saturating_sub(2),
+            head_h,
+            (r - 1.0).max(0.0),
+            theme.popup_bg,
+        );
+        let sq = r.ceil().max(1.0) as i32;
+        let hi = y + head_h as i32;
+        frame.fill_rect(x + 1, hi - sq, w.saturating_sub(2), sq as u32, theme.popup_bg);
         frame.fill_rect(
-            x,
-            (panel.y + outline::HEAD_H * scale) as i32 - 1,
-            w,
+            (panel.x + outline::PAD * scale).round() as i32,
+            hi - 1,
+            (panel.w - 2.0 * outline::PAD * scale).max(1.0) as u32,
             1,
             theme.chrome_border,
         );
@@ -900,14 +1009,6 @@ impl App {
                 ly.round() as i32,
             );
         }
-        // 左边框最后画：标题区底色不得覆盖它
-        frame.fill_rect(
-            x,
-            panel.y as i32,
-            1,
-            panel.h.ceil() as u32,
-            theme.chrome_border,
-        );
     }
 
     /// 查找命中高亮（P3-3）：全部命中用 hover 色、当前命中用选区色，画在字形之下。
@@ -978,7 +1079,7 @@ impl App {
         let bottom = rl.map_or(bar.y + bar.h, |r| r.row.y + r.row.h).round() as i32;
         let total_h = (bottom - by).max(1) as u32;
         let sep_y = (bar.y + bar.h).round() as i32;
-        frame.fill_rect(bx, by, bw, total_h, theme.chrome_bg);
+        frame.fill_surface_card(bx, by, bw, total_h, scale, theme.dark, theme.popup_bg, theme.chrome_border);
         // 按钮悬停底色（两行按钮同一枚举）
         let mut hovers = vec![
             (search::Hit::Prev, l.prev),
@@ -991,20 +1092,17 @@ impl App {
         }
         for (hit, r) in hovers {
             if search.hover == Some(hit) {
-                frame.fill_rect(
-                    r.x.round() as i32 + 1,
-                    r.y.round() as i32 + 1,
-                    r.w.ceil() as u32 - 2,
-                    r.h.ceil() as u32 - 2,
+                frame.fill_hover(
+                    r.x.round() as i32,
+                    r.y.round() as i32,
+                    r.w.ceil() as u32,
+                    r.h.ceil() as u32,
+                    scale,
                     theme.hover,
                 );
             }
         }
-        // 边框与按钮分隔线（1px）
-        frame.fill_rect(bx, by, bw, 1, theme.chrome_border);
-        frame.fill_rect(bx, by + total_h as i32 - 1, bw, 1, theme.chrome_border);
-        frame.fill_rect(bx, by, 1, total_h, theme.chrome_border);
-        frame.fill_rect(bx + bw as i32 - 1, by, 1, total_h, theme.chrome_border);
+        // 栏内分隔线（1px）：替换行与按钮间（卡片外框由 fill_surface_card 提供）
         if replace {
             frame.fill_rect(bx, sep_y, bw, 1, theme.chrome_border);
         }
@@ -1235,11 +1333,7 @@ impl App {
         let py = l.panel.y.round() as i32;
         let pw = l.panel.w.ceil() as u32;
         let ph = l.panel.h.ceil() as u32;
-        frame.fill_rect(px, py, pw, ph, theme.popup_bg);
-        frame.fill_rect(px, py, pw, 1, theme.chrome_border);
-        frame.fill_rect(px, py + ph as i32 - 1, pw, 1, theme.chrome_border);
-        frame.fill_rect(px, py, 1, ph, theme.chrome_border);
-        frame.fill_rect(px + pw as i32 - 1, py, 1, ph, theme.chrome_border);
+        frame.fill_surface_card(px, py, pw, ph, scale, theme.dark, theme.popup_bg, theme.chrome_border);
         // 输入行与候选行的分隔线
         frame.fill_rect(
             px,
@@ -1332,11 +1426,12 @@ impl App {
                 continue;
             };
             if slot == selected || hover == Some(slot) {
-                frame.fill_rect(
-                    row.x.round() as i32 + 1,
+                frame.fill_hover(
+                    row.x.round() as i32,
                     row.y.round() as i32,
-                    row.w.ceil() as u32 - 2,
+                    row.w.ceil() as u32,
                     row.h.ceil() as u32,
+                    scale,
                     theme.hover,
                 );
             }
@@ -1424,18 +1519,14 @@ impl App {
         let py = l.y.round() as i32;
         let pw = l.w.ceil() as u32;
         let ph = l.h.ceil() as u32;
-        frame.fill_rect(px, py, pw, ph, theme.popup_bg);
-        frame.fill_rect(px, py, pw, 1, theme.chrome_border);
-        frame.fill_rect(px, py + ph as i32 - 1, pw, 1, theme.chrome_border);
-        frame.fill_rect(px, py, 1, ph, theme.chrome_border);
-        frame.fill_rect(px + pw as i32 - 1, py, 1, ph, theme.chrome_border);
+        frame.fill_surface_card(px, py, pw, ph, scale, theme.dark, theme.popup_bg, theme.chrome_border);
         let hover = self.ui_state.ctx.hover;
         // 分组分隔线：左右内缩，与文字起止对齐
         for sy in &l.seps {
             frame.fill_rect(
-                (l.x + 10.0 * scale).round() as i32,
+                (l.x + l.pad).round() as i32,
                 (l.y + sy).round() as i32,
-                (l.w - 20.0 * scale).max(1.0) as u32,
+                (l.w - 2.0 * l.pad).max(1.0) as u32,
                 1,
                 theme.chrome_border,
             );
@@ -1446,11 +1537,12 @@ impl App {
             };
             let iy = l.y + off;
             if hover == Some(*i) {
-                frame.fill_rect(
-                    px + 1,
+                frame.fill_hover(
+                    px,
                     iy.round() as i32,
-                    pw.saturating_sub(2),
+                    pw,
                     l.item_h.ceil() as u32,
+                    scale,
                     theme.hover,
                 );
             }

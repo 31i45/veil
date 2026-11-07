@@ -115,7 +115,7 @@ fn file_menu_injects_recent_before_quit() {
     // 高度随项数增长：两项行高 + 一条分隔线
     let p0 = popup_layout(0, 1.0, &[]);
     let p1 = popup_layout(0, 1.0, &recent);
-    assert_eq!(p1.h - p0.h, 2.0 * ITEM_H + 4.0);
+    assert_eq!(p1.h - p0.h, 2.0 * crate::theme::surface::ROW_HEIGHT + 4.0);
     for (i, ix, iy, iw, ih) in &p1.items {
         assert_eq!(
             hit_popup_item(ix + iw / 2.0, iy + ih / 2.0, 0, 1.0, &recent),
@@ -489,9 +489,9 @@ fn paint_draws_menu_status_and_popup() {
     assert_eq!(frame.get(0, 0), theme.chrome_bg, "菜单栏底色");
     let status_y = 200 - STATUS_H as i32;
     assert_eq!(
-        frame.get(0, (status_y + 5) as u32),
+        frame.get(299, (status_y + 5) as u32),
         theme.chrome_bg,
-        "状态栏底色"
+        "状态栏底色（采样点避开弹层投影）"
     );
     let p = popup_layout(0, 1.0, &[]);
     assert_eq!(

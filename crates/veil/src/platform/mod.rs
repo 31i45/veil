@@ -3,8 +3,6 @@
 //! 文件监听：notify 事件线程（切片 16），跨平台同一实现。配置读写：std 原子写（切片 17）。
 
 #[cfg(windows)]
-mod confirm;
-#[cfg(windows)]
 mod print;
 #[cfg(windows)]
 mod shell;
@@ -74,19 +72,6 @@ pub fn url_opener() -> Box<dyn veil_ui::UrlOpener> {
     }
 }
 
-/// 未保存内容确认（3e 修 B）：Windows 原生 MessageBoxW 三选一；
-/// 其他平台为「取消」兜底（宁可拒绝退出，也绝不静默丢内容）。
-pub fn confirmer() -> Box<dyn veil_ui::Confirmer> {
-    #[cfg(windows)]
-    {
-        Box::new(confirm::WinConfirm)
-    }
-    #[cfg(not(windows))]
-    {
-        Box::new(CancelAll)
-    }
-}
-
 /// 文件系统监听：notify 建议实现（事件线程 + 非阻塞通道）。
 /// 初始化失败时返回的对象仍可用：`watch` 返回 Err，由视图层降级为提示。
 pub fn watcher() -> Box<dyn FileWatcher> {
@@ -102,15 +87,6 @@ impl FileDialog for NoDialogs {
     }
     fn save_markdown(&mut self, _suggested: &str) -> Option<std::path::PathBuf> {
         None
-    }
-}
-
-#[cfg(not(windows))]
-struct CancelAll;
-#[cfg(not(windows))]
-impl veil_ui::Confirmer for CancelAll {
-    fn confirm_unsaved(&mut self, _file: Option<&std::path::Path>) -> veil_ui::UnsavedChoice {
-        veil_ui::UnsavedChoice::Cancel
     }
 }
 

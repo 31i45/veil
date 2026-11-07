@@ -51,7 +51,6 @@ fn main() {
             theme_env: platform::theme_env(),
             persist_env: platform::persist_env(),
             print: platform::print(),
-            confirmer: platform::confirmer(),
             url_opener: platform::url_opener(),
         },
     ) {

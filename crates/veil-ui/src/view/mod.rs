@@ -7,6 +7,7 @@ mod frame;
 mod highlight;
 mod layout;
 pub(crate) mod linebreak;
+pub(crate) mod modal;
 pub(crate) mod outline;
 pub(crate) mod quick_open;
 pub(crate) mod search;

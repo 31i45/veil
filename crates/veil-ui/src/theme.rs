@@ -97,6 +97,13 @@ pub struct Theme {
     pub text: [u8; 3],
     /// 链接前景色（渲染态链接与正文的视觉区分）。
     pub link: [u8; 3],
+    /// 危险操作前景/描边色（删除确认等模态按钮）：在各自 bg 上满足 ≥4.5:1。
+    pub danger: [u8; 3],
+    /// 主操作强调色（主按钮填充、焦点环）：与 `link` 分开，因为链接色要浅到能读，
+    /// 而填充底色要深到能承载反色文字——两者不可复用同一值。
+    pub accent: [u8; 3],
+    /// 强调色上的文字色（主按钮文字）。
+    pub accent_text: [u8; 3],
     pub syntax: SyntaxColors,
 }
 
@@ -131,6 +138,9 @@ impl Theme {
             muted: [110, 110, 110],
             text: [45, 45, 45],
             link: [43, 108, 176],
+            danger: [178, 34, 34],
+            accent: [43, 108, 176],
+            accent_text: [255, 255, 255],
             syntax: SyntaxColors {
                 keyword: [132, 48, 137],   // 紫
                 string: [3, 106, 78],      // 深绿
@@ -161,6 +171,9 @@ impl Theme {
             muted: [160, 160, 160],
             text: [225, 225, 225],
             link: [127, 180, 245],
+            danger: [255, 130, 130],
+            accent: [14, 99, 156],
+            accent_text: [255, 255, 255],
             syntax: SyntaxColors {
                 keyword: [197, 134, 192],     // 亮紫
                 string: [125, 191, 153],      // 青绿
@@ -170,6 +183,122 @@ impl Theme {
                 type_name: [120, 170, 230],   // 蓝
                 punctuation: [160, 160, 160], // 浅灰
             },
+        }
+    }
+}
+
+/// surface 设计令牌（不可配置）：浮层（右键菜单 / 快速打开 / 大纲 / 搜索条）共用几何。
+/// 所有长度以 1.0× scale 为基准，经取值函数按 scale 线性放大；深/浅主题共用几何，
+/// 仅阴影 alpha 按主题微调（阴影是半透明黑叠加，深底下需稍强才有同等存在感）。
+#[allow(dead_code)] // dialog/scrim 令牌供尚未接入 App 的模态组件使用
+pub(crate) mod surface {
+    /// 圆角半径（px，1.0× 基准）
+    pub const CORNER_RADIUS: f32 = 6.0;
+    /// 条目行高（px）
+    pub const ROW_HEIGHT: f32 = 28.0;
+    /// 内边距（px）
+    pub const PADDING: f32 = 12.0;
+    /// 分隔线高（px）
+    pub const DIVIDER_HEIGHT: f32 = 4.0;
+    /// 悬停内缩（px）：悬停底色相对条目外边界内缩，形成「浮起」边距
+    pub const HOVER_INSET: f32 = 3.0;
+    /// 阴影整体向下偏移（px）
+    pub const SHADOW_OFFSET_Y: f32 = 2.0;
+    /// 阴影层（外扩 px, 基础 alpha），自外向内排列：外层大而淡、内层小而浓，
+    /// 叠加大致等效 8px 高斯模糊 + 2px 下移。alpha 总和 72（深色 ×1.25 ≈ 90），
+    /// 远低于「显脏」阈值（浅底上 alpha 和 >140 开始凝成灰团）。
+    pub const SHADOW_LAYERS: &[(f32, u8)] = &[(8.0, 4), (6.0, 8), (4.0, 14), (2.0, 20), (1.0, 26)];
+    /// 深色主题阴影 alpha 增益
+    pub const SHADOW_DARK_GAIN: f32 = 1.25;
+    /// 模态卡片圆角（px）：比普通浮层大一级，强调「应用内对话框」的层级。
+    pub const DIALOG_RADIUS: f32 = 8.0;
+    /// 模态卡片内边距（px）
+    pub const DIALOG_PADDING: f32 = 20.0;
+    /// 模态卡片最小宽度（px）
+    pub const DIALOG_MIN_WIDTH: f32 = 320.0;
+    /// 模态卡片最大宽度（px）
+    pub const DIALOG_MAX_WIDTH: f32 = 520.0;
+    /// 模态按钮高（px）：与 ROW_HEIGHT 同值但语义独立，避免行高一改按钮跟着变。
+    pub const DIALOG_BUTTON_HEIGHT: f32 = 28.0;
+    /// 模态按钮最小宽（px）
+    pub const DIALOG_BUTTON_MIN_WIDTH: f32 = 88.0;
+    /// 模态按钮水平间距（px）
+    pub const DIALOG_BUTTON_GAP: f32 = 8.0;
+    /// 标题与正文间距（px）
+    pub const DIALOG_TITLE_GAP: f32 = 8.0;
+    /// 正文与按钮行间距（px）
+    pub const DIALOG_BODY_GAP: f32 = 20.0;
+    /// 模态卡片距视口边缘的最小留白（px）
+    pub const DIALOG_MARGIN: f32 = 24.0;
+    /// 浅色主题遮罩 alpha（黑）：足以压暗正文又把弹窗推前。
+    pub const SCRIM_ALPHA_LIGHT: u8 = 80;
+    /// 深色主题遮罩 alpha（黑）：深底需更重才有分离感。
+    pub const SCRIM_ALPHA_DARK: u8 = 120;
+
+    pub fn corner_radius(scale: f32) -> f32 {
+        CORNER_RADIUS * scale
+    }
+    pub fn row_height(scale: f32) -> f32 {
+        ROW_HEIGHT * scale
+    }
+    pub fn padding(scale: f32) -> f32 {
+        PADDING * scale
+    }
+    pub fn divider_height(scale: f32) -> f32 {
+        DIVIDER_HEIGHT * scale
+    }
+    pub fn hover_inset(scale: f32) -> f32 {
+        HOVER_INSET * scale
+    }
+    pub fn shadow_offset_y(scale: f32) -> f32 {
+        SHADOW_OFFSET_Y * scale
+    }
+    pub fn dialog_radius(scale: f32) -> f32 {
+        DIALOG_RADIUS * scale
+    }
+    pub fn dialog_padding(scale: f32) -> f32 {
+        DIALOG_PADDING * scale
+    }
+    pub fn dialog_min_width(scale: f32) -> f32 {
+        DIALOG_MIN_WIDTH * scale
+    }
+    pub fn dialog_max_width(scale: f32) -> f32 {
+        DIALOG_MAX_WIDTH * scale
+    }
+    pub fn dialog_button_height(scale: f32) -> f32 {
+        DIALOG_BUTTON_HEIGHT * scale
+    }
+    pub fn dialog_button_min_width(scale: f32) -> f32 {
+        DIALOG_BUTTON_MIN_WIDTH * scale
+    }
+    pub fn dialog_button_gap(scale: f32) -> f32 {
+        DIALOG_BUTTON_GAP * scale
+    }
+    pub fn dialog_title_gap(scale: f32) -> f32 {
+        DIALOG_TITLE_GAP * scale
+    }
+    pub fn dialog_body_gap(scale: f32) -> f32 {
+        DIALOG_BODY_GAP * scale
+    }
+    pub fn dialog_margin(scale: f32) -> f32 {
+        DIALOG_MARGIN * scale
+    }
+
+    /// 遮罩 alpha：只随主题明暗切换，不随 scale 变化。
+    pub fn scrim_alpha(dark: bool) -> u8 {
+        if dark {
+            SCRIM_ALPHA_DARK
+        } else {
+            SCRIM_ALPHA_LIGHT
+        }
+    }
+
+    /// 阴影单层 alpha：深色主题按增益放大（钳制 255）。
+    pub fn shadow_alpha(base: u8, dark: bool) -> u8 {
+        if dark {
+            (base as f32 * SHADOW_DARK_GAIN).round().min(255.0) as u8
+        } else {
+            base
         }
     }
 }
@@ -671,6 +800,75 @@ mod tests {
                 t.dark
             );
         }
+    }
+
+    #[test]
+    fn danger_colors_meet_contrast_targets() {
+        // 危险操作文字/描边必须在各自底上可读（模态删除按钮的可用性门禁）。
+        for t in [Theme::light(), Theme::dark()] {
+            let bg = [t.bg[0], t.bg[1], t.bg[2]];
+            let c = contrast(t.danger, bg);
+            assert!(c >= 4.5, "danger/bg 对比度不足: dark={} {c:.2}", t.dark);
+        }
+    }
+
+    #[test]
+    fn accent_colors_carry_label_text() {
+        // 主按钮是「accent 填充 + accent_text 文字」：两者对比度必须达标，
+        // 且填充色在卡片底上要能看出边界（否则白卡上的主按钮会「消失」）。
+        for t in [Theme::light(), Theme::dark()] {
+            let c = contrast(t.accent_text, t.accent);
+            assert!(c >= 4.5, "accent_text/accent 对比度不足: dark={} {c:.2}", t.dark);
+            let popup = [t.popup_bg[0], t.popup_bg[1], t.popup_bg[2]];
+            let edge = contrast(t.accent, popup);
+            assert!(edge >= 2.0, "accent/popup 边界对比不足: dark={} {edge:.2}", t.dark);
+        }
+    }
+
+    #[test]
+    fn surface_pairs_meet_contrast_targets() {
+        // 浮层（surface）三组关键配色的 WCAG 对比度门禁：
+        // 正文级文字（text / muted 在 popup_bg 上）≥ 4.5；
+        // 悬停态（text 在 hover 上，短暂交互态，按大字级放宽）≥ 3.0。
+        // 若调整 muted / hover 取值，必须保持本断言成立。
+        for t in [Theme::light(), Theme::dark()] {
+            let popup = [t.popup_bg[0], t.popup_bg[1], t.popup_bg[2]];
+            let hover = [t.hover[0], t.hover[1], t.hover[2]];
+            let c_text_popup = contrast(t.text, popup);
+            let c_muted_popup = contrast(t.muted, popup);
+            let c_text_hover = contrast(t.text, hover);
+            assert!(
+                c_text_popup >= 4.5,
+                "text/popup_bg 对比度不足: dark={} {c_text_popup:.2}",
+                t.dark
+            );
+            assert!(
+                c_muted_popup >= 4.5,
+                "muted/popup_bg 对比度不足: dark={} {c_muted_popup:.2}",
+                t.dark
+            );
+            assert!(
+                c_text_hover >= 3.0,
+                "text/hover 对比度不足: dark={} {c_text_hover:.2}",
+                t.dark
+            );
+        }
+    }
+
+    #[test]
+    fn surface_tokens_scale_linearly() {
+        // 2.0× 时几何令牌数值翻倍
+        assert_eq!(surface::corner_radius(2.0), 12.0);
+        assert_eq!(surface::row_height(2.0), 56.0);
+        assert_eq!(surface::padding(2.0), 24.0);
+        assert_eq!(surface::divider_height(2.0), 8.0);
+        assert_eq!(surface::hover_inset(2.0), 6.0);
+        assert_eq!(surface::shadow_offset_y(2.0), 4.0);
+        // 1.0× 即基准常量本身
+        assert_eq!(surface::corner_radius(1.0), surface::CORNER_RADIUS);
+        // 阴影 alpha：浅色不变，深色按增益放大并钳制
+        assert_eq!(surface::shadow_alpha(20, false), 20);
+        assert_eq!(surface::shadow_alpha(20, true), 25); // 20 × 1.25
     }
 
     #[test]

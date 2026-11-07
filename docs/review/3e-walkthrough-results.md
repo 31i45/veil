@@ -697,3 +697,59 @@ D2（触控板捏合，D1 通过即覆盖）、D6（200% DPI 硬件依赖）、D
 - COM 对话框的 `SetFolder` 依赖 `SHCreateItemFromParsingName` 能解析目录；目录被删除时静默退回系统默认位置，不阻断导出。
 - 自动化测试只覆盖「端口收到什么建议路径 / 取消后是否产出」，vtable 与 GUID 这类平台细节由真机截图兜底（无法在 headless 断言）。
 
+## 五轮：未保存确认改为应用内自绘模态（2026-11-07）
+
+> 前提：用户要求「保存/放弃草稿弹窗、搜索替换弹窗，以及一切弹窗、展开菜单、大纲的视觉都符合专业审美与一致性」。规格见 [.trae/specs/unify-dialog-aesthetics/spec.md](../../.trae/specs/unify-dialog-aesthetics/spec.md)（本地，按 `.gitignore` 不入库）。
+> 结论：五类浮层已共享同一套 surface 令牌；唯一异类「未保存修改确认」原为系统 MessageBox，本轮改为应用自绘模态，与菜单/大纲同源。
+
+### 技术选型对比（v1 → v2）
+
+| 方案 | 做法 | 结果 |
+|---|---|---|
+| v1-A：`MessageBoxW` | 直接调系统弹窗 | 字体/配色/圆角/阴影全不受应用控制，与菜单、大纲割裂；即用户最初的反馈 |
+| v1-B：手写 `TaskDialogIndirect` FFI + comctl32 v6 清单 | 自绘 vtable、manifest 资源 | 稳定返回 `E_INVALIDARG (0x80070057)`；Rust FFI、PowerShell P/Invoke、`cbSize` 176→240 扫描、独立 manifest 经 `CreateActCtxW` 激活、comctl32 资源枚举（无 `RT_MANIFEST`）全部验证过，未被修复 |
+| v2：应用内自绘模态（采用） | 复用 `Frame` 位图原语与 `theme::surface` 令牌；`modal.rs` 纯逻辑，`Text` trait 注入度量与栅格化 | 与菜单/大纲同一渲染栈、同一套令牌；零新增依赖、无嵌套事件循环、headless 可测 |
+
+判定：v1-B 属「复杂且不可靠」路线，按用户要求整体废弃——删除 `crates/veil/examples/tdprobe.rs`、`crates/veil/src/platform/confirm.rs`，并移除 `build.rs` 的 comctl32 清单资源行。
+
+### 行为变更
+
+| 项 | 变更前 | 变更后 |
+|---|---|---|
+| 脏文档关窗 | 阻塞式系统对话框，主线程停摆 | 挂起意图（`PendingIntent::{Close,New,Open,OpenRecent}`），窗口不退出、持续重绘 |
+| 键盘 | 系统默认 | Enter = 主按钮、Esc = 取消、Tab/Shift+Tab 循环、Space = 焦点按钮、S/N 助记 |
+| 点击遮罩/卡片空白 | 系统行为 | 不关闭（避免误触丢失编辑上下文） |
+| 选「保存」但另存为被取消或失败 | — | 模态关闭 + 状态栏 `保存未完成（失败或取消），操作已取消` |
+| 选「取消」 | — | 模态关闭 + 状态栏 `已取消：当前文档仍有未保存的修改` |
+| 干净文档 | — | 不出现模态，直接执行 |
+| 直接关窗 | — | 仅在模态结论为「保存成功/不保存」后才真正 `exit()` |
+
+### 真机逐项取证（`tools\walkthrough.ps1`，`-Widths 800 -SettleMs 600`，隔离 APPDATA）
+
+| # | 场景 | 实测 | 证据（`docs/review/evidence/unify-dialog-aesthetics-20261107/`） |
+|---|---|---|---|
+| 1 | 有路径文档关窗 · 浅色 | 标题「是否保存对「modal-doc.md」的更改？」；正文 muted；保存 = accent 填充 + 白字 + 1px 白色焦点环，不保存 = 红色描边，取消 = 中性描边；全窗遮罩 | modal-path-light.png（run-20261107-111645） |
+| 2 | 无路径草稿关窗 · 浅色 | 标题含 `未命名草稿`；选「保存」走另存为 | modal-draft-light.png（run-20261107-112627） |
+| 3 | 有路径文档关窗 · 深色 | 卡片 `popup_bg #2d2d2d`、主按钮 `accent #0e639c` + 白字（6.3:1）、遮罩 alpha 120 | modal-path-dark.png（run-20261107-112503） |
+| 4 | 顶部下拉菜单 | 圆角 + 投影 + 1px 边框 + 内缩圆角悬停项 | popup-menu.png（run-20261107-112351） |
+| 5 | 右键菜单 | 同上 | popup-context.png（同 run） |
+| 6 | 快速打开 | 同上 | popup-quick-open.png（同 run） |
+| 7 | 查找/替换浮栏 | 同上 | popup-find.png（同 run） |
+| 8 | 大纲 | 同上 | popup-outline.png（同 run） |
+| 9 | 按钮特写（4× 放大） | 焦点环为清晰 1px 白描边内缩 2px，无浑浊双边框 | 本地 `%TEMP%\veil-walkthrough\evidence\crop-buttons2.png`（不归档） |
+
+### 五轮门禁
+
+| 项 | 结果 |
+|---|---|
+| `cargo test --workspace` | ✅ **1070 passed / 13 ignored / 0 failed**（veil-ui 703；其中 modal 9 条覆盖几何、折行、DPI 线性、键鼠状态机与像素） |
+| `cargo clippy --workspace --all-targets -- -D warnings` | ✅ 0 告警 |
+| `cargo build --release -p veil` | ✅ 6,018,048 B（≈5.74 MiB，红线 15 MiB）。上一轮 6,001,152 B，本轮 +17 KB：模态自绘代码与 3 个主题色字段；删除的 FFI/清单代码量小于新增量，故未净减 |
+
+### 本轮限制
+
+- 未改系统 DPI 做 150% 真机取证（会污染其它会话）；缩放线性由单测 `geometry_scales_linearly_with_dpi`（scale 1.5 / 2.0）覆盖。
+- 遮罩覆盖客户区（菜单栏以下整窗），不覆盖非客户区边框与系统按钮；与 VS Code 的模态层行为一致。
+- 系统原生「打开 / 另存为 / 导出」对话框保持系统实现：它们承载文件系统浏览与覆盖确认，属平台职责，不做自绘。
+- 本文件前四条记录中的 MessageBoxW 截图保留为历史，不再代表当前实现。
+

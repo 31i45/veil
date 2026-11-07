@@ -812,4 +812,38 @@ D2（触控板捏合，D1 通过即覆盖）、D6（200% DPI 硬件依赖）、D
 - 锁屏期间不能做真机截图与交互式深滚动（脚本启动二进制、PostMessage 滚轮/PageDown 属前台输入副作用，未获锁屏状态下的授权）。新二进制打开用户实际文档时 `stderr` 仅有一条无关的会话写入告警（`最近文件记录失败: 拒绝访问`，隔离 APPDATA 所致），无 panic；滚动崩溃由 `cjk_fenced_code_scroll_to_end_does_not_panic` 全量排版 + 逐屏滚到 `max_scroll` 覆盖。解锁后建议补一次 800/1400px 真机深滚走查。
 - 未做 150% DPI 真机取证；缩放线性由 `geometry_scales_linearly_with_dpi`（scale 1.5 / 2.0）覆盖。
 
+## 七轮：弹出菜单宽度收敛与最近文件悬停提示（2026-11-07）
+
+> 用户反馈：文件菜单因最近文件含长文件名（`运维量化核心：标签体系与记录模板终极配置.md · Desktop`）被撑到与窗口同宽，不合理；同时要求全面复核所有浮层视觉与交互。
+
+### 改动
+
+| # | 改动 | 落点 |
+|---|---|---|
+| 1 | `popup_layout` 增加 `win_w` 参数，菜单宽度钳制到 `[150px, 420px]`（1.0×）且不超出窗口右缘 | `chrome/mod.rs` |
+| 2 | 超出宽度的标签用 `ellipsize_middle` 中段截断，保留扩展名与 ` · 父目录` | `chrome/paint.rs` |
+| 3 | 悬停最近文件项时状态栏显示完整路径，离开后恢复原提示（`saved_notice` 保存/还原） | `interaction.rs::update_hover`、`chrome::close` |
+
+### 真机取证（900px 宽，用户实际文档）
+
+证据：`%TEMP%\veil-walkthrough\evidence\run-menu-cap\` 与 `run-overlays\`
+
+| 浮层 | 核对点 | 结果 |
+|---|---|---|
+| 文件菜单 | 宽度不再撑满窗口；长文件名中段截断为 `运维量化核心：标签体系与记录模…配置.md · Desktop`，扩展名与父目录可见 | ✅ |
+| 快速打开 | `PANEL_W=520` 钳制 + `fit_label` 截断，与文件菜单同源卡片/分隔线/光标 | ✅ |
+| 查找条 | accent 焦点下划线、圆角卡片、prev/next/关闭按钮 | ✅ |
+| 右键菜单 | 圆角/阴影/分隔线内缩，与主菜单一致 | ✅ |
+| 大纲 | 当前章节 accent 指示条 + 轻底色，长标题 `fit_label` 截断，层级缩进 | ✅ |
+
+### 七轮门禁
+
+| 项 | 结果 |
+|---|---|
+| `cargo test --workspace` | ✅ **1078 passed / 13 ignored / 0 failed**（veil-ui lib 711 passed / 11 ignored） |
+| `cargo clippy --workspace --all-targets -- -D warnings` | ✅ 0 告警 |
+| `cargo build --release -p veil` | ✅ **6,026,240 B ≈ 5.75 MiB**（红线 15 MiB） |
+| 新增第三方依赖 | ✅ 无 |
+
+
 

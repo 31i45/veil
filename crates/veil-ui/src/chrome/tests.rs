@@ -66,22 +66,22 @@ fn menu_bar_hit_and_toggle_zones() {
 
 #[test]
 fn popup_hit_maps_items_and_contains_padding() {
-    let p = popup_layout(0, 1.0, &[]);
+    let p = popup_layout(0, 1.0, &[], 1000.0);
     assert!(p.h > 0.0);
     assert_eq!(p.y, MENU_H);
     for (i, ix, iy, iw, ih) in &p.items {
         assert_eq!(
-            hit_popup_item(ix + iw / 2.0, iy + ih / 2.0, 0, 1.0, &[]),
+            hit_popup_item(ix + iw / 2.0, iy + ih / 2.0, 0, 1.0, &[], 1000.0),
             Some(*i)
         );
     }
     assert_eq!(
-        hit_popup_item(p.x + 1.0, p.y + 1.0, 0, 1.0, &[]),
+        hit_popup_item(p.x + 1.0, p.y + 1.0, 0, 1.0, &[], 1000.0),
         None,
         "内边距非项区"
     );
-    assert!(popup_contains(p.x + 1.0, p.y + 1.0, 0, 1.0, &[]));
-    assert!(!popup_contains(p.x - 1.0, p.y + 1.0, 0, 1.0, &[]));
+    assert!(popup_contains(p.x + 1.0, p.y + 1.0, 0, 1.0, &[], 1000.0));
+    assert!(!popup_contains(p.x - 1.0, p.y + 1.0, 0, 1.0, &[], 1000.0));
     assert_eq!(action_at(0, 0, &[]), Some(MenuAction::New));
     assert_eq!(action_at(0, 1, &[]), Some(MenuAction::Open));
     assert_eq!(action_at(0, 99, &[]), None);
@@ -113,12 +113,12 @@ fn file_menu_injects_recent_before_quit() {
     );
     assert_eq!(action_at(0, rows.len(), &recent), None);
     // 高度随项数增长：两项行高 + 一条分隔线
-    let p0 = popup_layout(0, 1.0, &[]);
-    let p1 = popup_layout(0, 1.0, &recent);
+    let p0 = popup_layout(0, 1.0, &[], 1000.0);
+    let p1 = popup_layout(0, 1.0, &recent, 1000.0);
     assert_eq!(p1.h - p0.h, 2.0 * crate::theme::surface::ROW_HEIGHT + 4.0);
     for (i, ix, iy, iw, ih) in &p1.items {
         assert_eq!(
-            hit_popup_item(ix + iw / 2.0, iy + ih / 2.0, 0, 1.0, &recent),
+            hit_popup_item(ix + iw / 2.0, iy + ih / 2.0, 0, 1.0, &recent, 1000.0),
             Some(*i)
         );
     }
@@ -126,6 +126,66 @@ fn file_menu_injects_recent_before_quit() {
     assert_eq!(menu_rows(1, &recent).len(), MENUS[1].items.len());
     // 空最近列表：零动态项
     assert_eq!(menu_rows(0, &[]).len(), static_len);
+}
+
+#[test]
+fn popup_width_capped_for_long_recent_label() {
+    // 模拟超长最近文件标签：菜单宽度不应超过 420px（1.0×）
+    let long = "运维量化核心：标签体系与记录模板终极配置.md · Desktop".to_string();
+    let p = popup_layout(0, 1.0, &[long], 1000.0);
+    assert!(p.w <= 420.0, "宽菜单应被钳制到 420px，实际 {:.1}", p.w);
+    // 命中仍落在完整行高内：取最近文件第一项的 rect
+    let recent_first = p
+        .items
+        .iter()
+        .find(|(i, _, _, _, _)| {
+            matches!(
+                action_at(0, *i, &["x.md".to_string()]),
+                Some(MenuAction::OpenRecent(0))
+            )
+        })
+        .copied();
+    assert!(recent_first.is_some(), "应能命中最近文件项");
+    let (_, _, _, _, ih) = recent_first.unwrap();
+    assert!(ih >= 28.0 * 1.0, "命中行高不应被截断影响");
+}
+
+#[test]
+fn popup_label_truncated_when_too_long() {
+    let long = "运维量化核心：标签体系与记录模板终极配置.md · Desktop".to_string();
+    let recent = vec![long.clone()];
+    let mut engine = LayoutEngine::new();
+    let mut frame = Frame::new(800, 200, [255, 255, 255, 255]);
+    let theme = Theme::light();
+    let mut chrome = Chrome {
+        open: Some(0),
+        ..Default::default()
+    };
+    chrome.paint(
+        &mut frame,
+        &mut engine,
+        viewport(800, 200, 1.0),
+        1.0,
+        &theme,
+        None,
+        false,
+        ExternalState::None,
+        0,
+        1,
+        1,
+        0.0,
+        0.0,
+        &recent,
+        MenuFlags::default(),
+    );
+    // 像素断言：菜单宽度被钳制，右缘不超出窗口
+    let p = popup_layout(0, 1.0, &recent, 800.0);
+    assert!(p.w <= 420.0, "菜单宽度应 ≤ 420px，实际 {:.1}", p.w);
+    assert!(p.x + p.w <= 800.0, "菜单右缘不应超出窗口");
+    // 菜单外（x=430）应为背景色，不会有标签像素溢出
+    let text4 = [theme.text[0], theme.text[1], theme.text[2], 255];
+    let outside = frame.get(430, (p.y + p.h / 2.0) as u32);
+    assert_ne!(outside, text4, "长标签不应溢出到菜单外");
 }
 
 #[test]
@@ -493,7 +553,7 @@ fn paint_draws_menu_status_and_popup() {
         theme.chrome_bg,
         "状态栏底色（采样点避开弹层投影）"
     );
-    let p = popup_layout(0, 1.0, &[]);
+    let p = popup_layout(0, 1.0, &[], 1000.0);
     assert_eq!(
         frame.get((p.x + p.w / 2.0) as u32, (p.y + p.h / 2.0) as u32),
         theme.popup_bg,
@@ -574,7 +634,7 @@ fn toggle_rows_report_and_paint_checked_state() {
     // 帧高需容纳新增源码模式项后的整张弹窗（11 行）
     let theme = Theme::light();
     let v = viewport(300, 400, 1.0);
-    let p = popup_layout(2, 1.0, &[]);
+    let p = popup_layout(2, 1.0, &[], 1000.0);
     let (_, ix, iy, iw, ih) = p.items[9];
     let shot = |on: bool| {
         let mut engine = LayoutEngine::new();

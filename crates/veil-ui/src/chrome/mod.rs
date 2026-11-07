@@ -242,7 +242,8 @@ pub(crate) fn menu_rows(open: usize, recent: &[String]) -> Vec<(String, &'static
     out
 }
 
-/// 弹出菜单布局：位置贴当前菜单标题左缘，宽取最长项（含快捷键）并留内边距。
+/// 弹出菜单布局：位置贴当前菜单标题左缘，宽取最长项（含快捷键）并留内边距，
+/// 但不超过窗口宽度减去菜单左缘与外边距，且钳制到 [150px, 420px]（1.0× 基准）。
 pub struct PopupLayout {
     pub x: f32,
     pub y: f32,
@@ -254,7 +255,14 @@ pub struct PopupLayout {
     pub separators: Vec<(usize, f32)>,
 }
 
-pub fn popup_layout(open: usize, scale: f32, recent: &[String]) -> PopupLayout {
+/// 弹出菜单宽度上限（1.0× 基准）：专业编辑器菜单一般不超过此值。
+const POPUP_MAX_W: f32 = 420.0;
+/// 弹出菜单宽度下限（1.0× 基准）。
+const POPUP_MIN_W: f32 = 150.0;
+/// 弹出菜单与窗口右缘的最小外边距（1.0× 基准）。
+const POPUP_RIGHT_MARGIN: f32 = 8.0;
+
+pub fn popup_layout(open: usize, scale: f32, recent: &[String], win_w: f32) -> PopupLayout {
     let rows = menu_rows(open, recent);
     if rows.is_empty() {
         return PopupLayout {
@@ -285,7 +293,10 @@ pub fn popup_layout(open: usize, scale: f32, recent: &[String]) -> PopupLayout {
                 }
         })
         .fold(0.0_f32, f32::max);
-    let w = (widest + 2.0 * pad).max(150.0 * scale);
+    let content_w = widest + 2.0 * pad;
+    let win_limit = (win_w - x - POPUP_RIGHT_MARGIN * scale).max(POPUP_MIN_W * scale);
+    let cap = POPUP_MAX_W * scale;
+    let w = content_w.min(win_limit).min(cap).max(POPUP_MIN_W * scale);
     let item_h = crate::theme::surface::row_height(scale);
     let sep_h = crate::theme::surface::divider_height(scale);
     let top_pad = 4.0 * scale;
@@ -313,8 +324,15 @@ pub fn popup_layout(open: usize, scale: f32, recent: &[String]) -> PopupLayout {
 }
 
 /// 弹出菜单内命中项下标。
-pub fn hit_popup_item(x: f32, y: f32, open: usize, scale: f32, recent: &[String]) -> Option<usize> {
-    popup_layout(open, scale, recent)
+pub fn hit_popup_item(
+    x: f32,
+    y: f32,
+    open: usize,
+    scale: f32,
+    recent: &[String],
+    win_w: f32,
+) -> Option<usize> {
+    popup_layout(open, scale, recent, win_w)
         .items
         .into_iter()
         .find(|&(_, ix, iy, iw, ih)| x >= ix && x < ix + iw && y >= iy && y < iy + ih)
@@ -322,8 +340,15 @@ pub fn hit_popup_item(x: f32, y: f32, open: usize, scale: f32, recent: &[String]
 }
 
 /// 点是否落在弹出菜单矩形内（含内边距；用于「点在菜单内但不在项上」时吞掉点击）。
-pub fn popup_contains(x: f32, y: f32, open: usize, scale: f32, recent: &[String]) -> bool {
-    let p = popup_layout(open, scale, recent);
+pub fn popup_contains(
+    x: f32,
+    y: f32,
+    open: usize,
+    scale: f32,
+    recent: &[String],
+    win_w: f32,
+) -> bool {
+    let p = popup_layout(open, scale, recent, win_w);
     x >= p.x && x < p.x + p.w && y >= p.y && y < p.y + p.h
 }
 
@@ -436,6 +461,8 @@ pub struct Chrome {
     /// (菜单下标, 项下标)
     pub hover_item: Option<(usize, usize)>,
     pub notice: String,
+    /// 悬停最近文件项时，临时保存的原状态栏提示（离开后恢复）。
+    pub(crate) saved_notice: Option<String>,
     /// 拖动滚动条时鼠标相对滑块顶边的偏移。
     pub scroll_drag: Option<f32>,
     /// 指针悬停在滚动条上（滑块或轨道）：滑块加亮，与拖动态同一视觉。
@@ -454,6 +481,9 @@ impl Chrome {
     pub fn close(&mut self) {
         self.open = None;
         self.hover_item = None;
+        if let Some(saved) = self.saved_notice.take() {
+            self.notice = saved;
+        }
     }
 
     pub fn toggle(&mut self, menu: usize) {

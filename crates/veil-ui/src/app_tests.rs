@@ -2730,7 +2730,7 @@ fn popup_item_center(menu: usize, item: usize) -> (f32, f32) {
 
 /// 带最近文件的弹窗项中心（0b 动态菜单测试用）。
 fn popup_item_center_recent(menu: usize, item: usize, recent: &[String]) -> (f32, f32) {
-    let p = chrome::popup_layout(menu, 1.0, recent);
+    let p = chrome::popup_layout(menu, 1.0, recent, 1000.0);
     let (_, x, y, w, h) = p.items[item];
     (x + w / 2.0, y + h / 2.0)
 }
@@ -9055,7 +9055,7 @@ fn file_menu_paints_group_separators_and_recent_block() {
     a.paint();
     let frame = a.window_state.frame.as_ref().expect("paint 应产出帧");
     let recent = a.recent_labels();
-    let p = chrome::popup_layout(0, 1.0, &recent);
+    let p = chrome::popup_layout(0, 1.0, &recent, 1000.0);
 
     // 4 条分隔线：三个静态分组边界 + 最近文件块与「退出」之间
     assert_eq!(p.separators.len(), 4, "文件菜单应有 4 条分隔线");
@@ -9082,6 +9082,48 @@ fn file_menu_paints_group_separators_and_recent_block() {
 }
 
 #[test]
+fn hover_recent_file_shows_full_path_in_statusbar() {
+    use crate::chrome;
+    use std::path::PathBuf;
+    let store = MemStore::default();
+    let mut a = app("ab\n", Some("dir/a.md"), false, &store);
+    a.persist_state.recent = vec![PathBuf::from("dir/r1.md")];
+    a.ui_state.chrome.open = Some(0);
+    let original = "原有提示".to_string();
+    a.ui_state.chrome.notice = original.clone();
+
+    // 找到第一个最近文件项的中心坐标
+    let recent = a.recent_labels();
+    let p = chrome::popup_layout(0, 1.0, &recent, 1000.0);
+    let recent_item = p
+        .items
+        .iter()
+        .find(|(i, _, _, _, _)| {
+            matches!(
+                chrome::action_at(0, *i, &recent),
+                Some(chrome::MenuAction::OpenRecent(0))
+            )
+        })
+        .copied()
+        .expect("应有最近文件项");
+    let (_, ix, iy, iw, ih) = recent_item;
+
+    // 鼠标移到最近文件项上 → 状态栏显示完整路径
+    a.input_state.mouse = PhysicalPosition::new((ix + iw / 2.0) as f64, (iy + ih / 2.0) as f64);
+    a.update_hover();
+    assert!(
+        a.ui_state.chrome.notice.contains("r1.md"),
+        "悬停最近文件应显示完整路径，实际：{}",
+        a.ui_state.chrome.notice
+    );
+
+    // 鼠标移开 → 恢复原提示
+    a.input_state.mouse = PhysicalPosition::new(0.0, 0.0);
+    a.update_hover();
+    assert_eq!(a.ui_state.chrome.notice, original, "离开后应恢复原提示");
+}
+
+#[test]
 fn disabled_menu_item_paints_muted_without_hover() {
     use crate::theme::{Theme, ThemeMode};
     let store = MemStore::default();
@@ -9090,7 +9132,7 @@ fn disabled_menu_item_paints_muted_without_hover() {
     let theme = a.input_state.theme;
     a.ui_state.chrome.open = Some(0);
     // 干净文档：保存禁用，且悬停其上
-    let p = chrome::popup_layout(0, 1.0, &[]);
+    let p = chrome::popup_layout(0, 1.0, &[], 1000.0);
     let save = p.items[3]; // 新建 / 打开 / 快速打开 / 保存
     let (row, sx, sy, sw, sh) = save;
     a.ui_state.chrome.hover_item = Some((0, row));

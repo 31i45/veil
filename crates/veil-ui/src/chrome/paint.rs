@@ -213,7 +213,7 @@ impl Chrome {
         // 弹出菜单（最后画：压过菜单栏下缘与内容）
         if let Some(open) = self.open {
             let rows = menu_rows(open, recent);
-            let p = popup_layout(open, scale, recent);
+            let p = popup_layout(open, scale, recent, win_w);
             frame.fill_surface_card(
                 p.x.round() as i32,
                 p.y.round() as i32,
@@ -251,16 +251,6 @@ impl Chrome {
                         theme.hover,
                     );
                 }
-                let label_color = if enabled { theme.text } else { theme.muted };
-                self.draw_left(
-                    frame,
-                    engine,
-                    label,
-                    ix + pad,
-                    iy + ih / 2.0,
-                    label_color,
-                    scale,
-                );
                 // 主题项 / 开关项：开启态在右侧显示「当前」（快捷键列复用）
                 let hint = if theme_action_matches(*action, theme.mode)
                     || action_checked(*action, flags)
@@ -269,6 +259,29 @@ impl Chrome {
                 } else {
                     shortcut
                 };
+                // 标签可用宽 = 行内宽 - 左右内边距 - 右侧提示占位
+                let inner = iw - 2.0 * pad;
+                let hint_w = if hint.is_empty() {
+                    0.0
+                } else {
+                    24.0 * scale + measure_w(engine, hint)
+                };
+                let avail = (inner - hint_w).max(0.0);
+                let shown = if measure_w(engine, label) > avail {
+                    ellipsize_middle(engine, label, avail)
+                } else {
+                    label.to_string()
+                };
+                let label_color = if enabled { theme.text } else { theme.muted };
+                self.draw_left(
+                    frame,
+                    engine,
+                    &shown,
+                    ix + pad,
+                    iy + ih / 2.0,
+                    label_color,
+                    scale,
+                );
                 if !hint.is_empty() {
                     self.draw_right(
                         frame,

@@ -1369,6 +1369,7 @@ impl App {
         }
         let scale = self.input_state.scale;
         let vp = self.viewport();
+        let win_w = vp.w;
         // 右键菜单打开中：命中项执行；其余位置（含面板内空白）关闭并吞掉
         if self.ui_state.ctx.open {
             let l = self.ctx_layout();
@@ -1384,7 +1385,7 @@ impl App {
         }
         if let Some(open) = self.ui_state.chrome.open {
             let recent = self.recent_labels();
-            if let Some(item) = chrome::hit_popup_item(mx, my, open, scale, &recent) {
+            if let Some(item) = chrome::hit_popup_item(mx, my, open, scale, &recent, win_w) {
                 if let Some(action) = chrome::action_at(open, item, &recent) {
                     // 禁用项：吞掉点击、菜单保持打开（与原生菜单一致）
                     if !chrome::action_enabled(action, self.menu_flags()) {
@@ -1396,7 +1397,7 @@ impl App {
                 self.ui_state.chrome.close();
                 return false;
             }
-            if chrome::popup_contains(mx, my, open, scale, &recent) {
+            if chrome::popup_contains(mx, my, open, scale, &recent, win_w) {
                 return false; // 弹窗内边距：吞掉点击
             }
             self.ui_state.chrome.close();
@@ -1609,12 +1610,33 @@ impl App {
         let menu = chrome::hit_menu_bar(x, y, self.input_state.scale);
         let item = self.ui_state.chrome.open.and_then(|open| {
             let recent = self.recent_labels();
-            chrome::hit_popup_item(x, y, open, self.input_state.scale, &recent).map(|i| (open, i))
+            chrome::hit_popup_item(x, y, open, self.input_state.scale, &recent, self.viewport().w)
+                .map(|i| (open, i))
         });
         if self.ui_state.chrome.hover_menu != menu || self.ui_state.chrome.hover_item != item {
             self.ui_state.chrome.hover_menu = menu;
             self.ui_state.chrome.hover_item = item;
             self.request_redraw();
+        }
+        // 悬停最近文件项时，状态栏显示完整路径；离开后恢复原提示
+        let recent_paths = &self.persist_state.recent;
+        let is_recent_hover = item.and_then(|(open, i)| {
+            let recent = self.recent_labels();
+            chrome::action_at(open, i, &recent)
+        });
+        match is_recent_hover {
+            Some(chrome::MenuAction::OpenRecent(idx)) if idx < recent_paths.len() => {
+                if self.ui_state.chrome.saved_notice.is_none() {
+                    self.ui_state.chrome.saved_notice =
+                        Some(self.ui_state.chrome.notice.clone());
+                }
+                self.ui_state.chrome.notice = recent_paths[idx].display().to_string();
+            }
+            _ => {
+                if let Some(saved) = self.ui_state.chrome.saved_notice.take() {
+                    self.ui_state.chrome.notice = saved;
+                }
+            }
         }
         // 滚动条悬停：与点击命中同一判据（轨道/滑块），拖动中也保持高亮
         let vp = self.viewport();

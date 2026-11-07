@@ -546,7 +546,7 @@ D2（触控板捏合，D1 通过即覆盖）、D6（200% DPI 硬件依赖）、D
 | 草稿导出 HTML（Ctrl+E） | 导出 HTML | ✅ `True`，码点 `5BFC 51FA 0020 0048 0054 004D 004C` → 「导出 HTML」 |
 | 草稿导出 PDF（Ctrl+Shift+E） | 导出 PDF | ✅ `True`，码点 `5BFC 51FA 0020 0050 0044 0046` → 「导出 PDF」 |
 
-> 「按键 → 动作 → 端口」的连线由 `ctrl_p_quick_opens_and_ctrl_shift_p_prints`、`export_draft_asks_for_target_before_exporting`、`export_draft_cancelled_dialog_aborts_without_output`、`export_named_document_does_not_ask_for_target` 覆盖；两者合并即「草稿态三个入口都弹对应系统对话框」。**纯键盘触发+截图的人工复测待桌面可用后补跑，本表不据此填「截图通过」。**
+> 「按键 → 动作 → 端口」的连线由 `ctrl_p_quick_opens_and_ctrl_shift_p_prints`、`export_draft_asks_for_target_before_exporting`、`export_draft_cancelled_dialog_aborts_without_output`、`export_named_document_asks_for_target_in_doc_dir` 覆盖；两者合并即「草稿态三个入口都弹对应系统对话框」。**纯键盘触发+截图的人工复测待桌面可用后补跑，本表不据此填「截图通过」。**（2026-11-07 四轮起，有路径文档导出也恒弹对话框，见下节。）
 
 ### 本轮逐项结论
 
@@ -614,7 +614,7 @@ D2（触控板捏合，D1 通过即覆盖）、D6（200% DPI 硬件依赖）、D
 | 7 | 深滚动 | `03-10万字.txt` 800px × 25 页 | 25 页截图**全部变化**、0 FAIL（`run-20261106-212806`）；另一轮 PageDown 不生效时自动改 `WM_MOUSEWHEEL` 后逐页推进，仍 0 FAIL（`run-20261106-212824`，WARN=25 均为该降级记录） | run 目录内 `02..26-w800-p*.png` |
 | 8 | 性能（10 万字） | `-Perf -PerfChars 200` | `key_us` p50=4703 / **p95=6506** / p99=9589 µs；`frame_us` p50=5079 / p95=6781 / p99=7953 µs；rss avg 43.6 MB；rescan 2 行（0.06%）；启动到窗口 182 ms | run-212906 `walkthrough.log` |
 | 9 | 保存链路 | 输入「测试」→ Ctrl+Z → Ctrl+S | 脏态标题 `* veil — sample.md`、状态 `sample.md · veil-ux *`、81 字；保存后星号消失，notice `已保存：sample.md · veil-ux` | run-212929 / run-212941 |
-| 10 | 查找/替换/插图/导出 | Ctrl+F、Ctrl+H、Ctrl+Shift+I、Ctrl+E、Ctrl+Shift+E | 查找与替换双框出现；插图弹系统打开对话框，确认后正文只多一行图片；`sample.html` 含 `<table>`；`sample (8).pdf` 以 `%PDF` 开头且按 `(N)` 去重；notice 均为中文冒号 + `path_label` | run-213038 / 213100 / 213209…213400 |
+| 10 | 查找/替换/插图/导出 | Ctrl+F、Ctrl+H、Ctrl+Shift+I、Ctrl+E、Ctrl+Shift+E | 查找与替换双框出现；插图弹系统打开对话框，确认后正文只多一行图片；`sample.html` 含 `<table>`；`sample (8).pdf` 以 `%PDF` 开头且按 `(N)` 去重（**四轮已废除 `(N)` 去重**，改为对话框选路径 + 原地覆盖）；notice 均为中文冒号 + `path_label` | run-213038 / 213100 / 213209…213400 |
 | 11 | 菜单禁用态（双向） | 干净态与脏态各打开一次文件菜单，量取文本行最小亮度 | 干净态：`保存`=109（muted）、`另存为`=44、`撤销/重做`=109；脏态（插图后约 0.5s）：`保存`=44，其余可用项同为 44 → 禁用态确实由 `menu_flags()` 实时驱动 | `13-file-menu-fresh.png` / `14-file-menu-dirty.png` |
 | 12 | 最近文件标签 | 清理 `%APPDATA%\Veil\session.txt` 前后各开文件菜单 | 修复前出现两个同名 `smoke.md`（不同目录，无法区分）；修复后菜单仅 `sample.md · veil-ux`，分隔线位置正确 | `13-file-menu-fresh.png`（run-214844） |
 | 13 | 插图单行复测 | 三次独立运行分别对 `ins.md`（2 行）与新建 `ins2.md`（0 行）插图 | 2→3、0→1，均只插入 1 行；渲染正常且自动保存落盘 | run-215306 / 215354 |
@@ -644,3 +644,56 @@ D2（触控板捏合，D1 通过即覆盖）、D6（200% DPI 硬件依赖）、D
 - `ins.md` 首次复测出现连续两行相同图片，此后 3 次独立复测均为单行；归因为上一轮遗留的文件对话框被二次确认，未再复现。
 - PDF 导出 notice 受打印假脱机影响，需等待约 10 s 才能截到（`sample (8).pdf` 那次即为延时截图）。
 - 打印只验证系统对话框弹出与默认打印机，不执行真实打印（物理输出仍为 v1.1 降级项）。
+
+## 四轮：导出改为「每次显式选路径」（2026-11-06 23:40–2026-11-07 00:40）
+
+> 前提：用户反馈「导出 PDF/HTML 没有弹窗选择目录，默认保存位置用户不知道是哪里」。规格见 [.trae/specs/require-export-save-dialog](../../.trae/specs/require-export-save-dialog/spec.md)。
+> 对照的专业实践：VS Code / Typora / Obsidian 导出与「另存为」一致，均每次弹系统对话框并定位到当前文件目录；Word/Pages 的 Create PDF 同样弹完整保存框。结论：导出是显式一次性副作用，必须每次让用户选定；只有无路径草稿首次保存才需要弹框（已有路径的 Ctrl+S 仍静默，与 Word/VS Code 一致）。
+
+### 行为变更
+
+| 项 | 变更前 | 变更后 |
+|---|---|---|
+| 有路径文档 Ctrl+E / Ctrl+Shift+E | 静默写同目录 | 每次都弹「导出 HTML / 导出 PDF」，初始目录 = 文档所在目录，建议名 `<stem>.html` / `<stem>.pdf` |
+| 无路径草稿导出 | 弹框但定位到系统「上次位置」 | 定位用户「文档」目录，建议名 `未命名.html` / `未命名.pdf` |
+| 另存为（Ctrl+Shift+S） | 只传裸文件名 | 传完整路径，对话框定位到文档所在目录；草稿落「文档」+ `未命名.md` |
+| PDF 覆盖已有文件 | `sample (2).pdf` 静默改名 | 系统「要替换它吗？」确认；先写同目录临时文件，成功后改名替换，失败保留旧文件并报错 |
+| 取消 | — | notice `导出已取消`，不产生/不覆盖任何文件 |
+
+### 平台层根因与修复
+
+| 步骤 | 观察 |
+|---|---|
+| 旧实现 `GetSaveFileNameW` + `lpstrInitialDir` | 无论传文档目录还是硬编码 `%TEMP%\veil-ux\exp`，对话框**始终开在「桌面」** |
+| 排除项 | 传入完整路径到 `lpstrFile`、去掉 `OFN_NOCHANGEDIR`、显式 `CoInitializeEx(STA)`（hr=`S_FALSE`，本线程已是 STA）均无效；同机 pwsh 用同一 API 却能正确定位 → 不是权限/系统问题 |
+| 根因 | Win7+ 的 `GetSaveFileNameW` 初始目录规则里，「上次位置（MRU）」优先于 `lpstrInitialDir`，老 API 无法确定性定位 |
+| 修复 | 保存/导出改用 COM `IFileSaveDialog`：`SetFolder`（槽位 12）优先级高于 MRU；`SetFileName` 15、`SetTitle` 17、`GetResult` 20、`SetDefaultExtension` 22、`Show` 3（`IModalWindow`）。手写 vtable，零新增依赖 |
+| 踩坑记录 | CLSID 必须用注册表里名为 "File Save Dialog" 的 `{C0B4E2F3-BA21-4773-8DBA-335EC946EB8B}`（另一组流传值未注册，`CoCreateInstance` 报 `0x80040154`）；`IID_IFileSaveDialog` 为 `{84BCCD23-5FDE-4CDB-AEA4-AF64B83D78AB}`（写错报 `E_NOINTERFACE`），两者均以本机 SDK `shobjidl_core.h` 校准 |
+
+### 真机逐项取证
+
+| # | 场景 | 实测 | 证据 |
+|---|---|---|---|
+| 1 | 有路径文档 Ctrl+E | 「导出 HTML」标题；地址栏 `…\Temp\veil-ux\exp`；文件名 `a.html`；过滤器 `HTML (*.html)` | [export-html-dialog.png](evidence/export-dialog-20261107/export-html-dialog.png)（run-002855） |
+| 2 | 有路径文档 Ctrl+Shift+E | 「导出 PDF」；同一目录；`b.pdf`；过滤器 `PDF (*.pdf)`；Enter 后 `b.pdf` 1,075,399 B，头 `%PDF-1.7` | [export-pdf-dialog.png](evidence/export-dialog-20261107/export-pdf-dialog.png)（run-003312） |
+| 3 | 草稿 Ctrl+S | 「另存为 Markdown」；地址栏「文档」；`未命名.md` | [draft-save-dialog.png](evidence/export-dialog-20261107/draft-save-dialog.png)（run-003427） |
+| 4 | 草稿 Ctrl+E | 「导出 HTML」；「文档」；`未命名.html` | [draft-export-dialog.png](evidence/export-dialog-20261107/draft-export-dialog.png)（run-003427） |
+| 5 | 有路径文档 Ctrl+Shift+S | 「另存为 Markdown」；`…\exp`；`b.md` | [save-as-dialog.png](evidence/export-dialog-20261107/save-as-dialog.png)（run-003549） |
+| 6 | 覆盖已有 HTML | 「确认另存为：a.html 已存在。要替换它吗？」；默认焦点在「否(N)」；按 Enter（否）不写盘；按 `y` 后原地覆盖为 1,737 B，无第二份文件 | [overwrite-confirm.png](evidence/export-dialog-20261107/overwrite-confirm.png)（run-003102） |
+| 7 | 覆盖已有 PDF | 确认后 `b.pdf` 原地更新（mtime 00:36:15），大小仍 1,075,399 B，目录内无 `.tmp.pdf` / `.bak` 残留 | run-003559 + `Get-ChildItem -Force` |
+| 8 | 取消导出 | ESC 后 notice `导出已取消`，目录内文件集合与时间戳均未变化 | 同 #1 / #2 两次 ESC 运行 |
+| 9 | 无文件早写 | 只按 ESC 的运行中，确认前后目录无任何新文件 | run-000757（三轮遗留，本轮复验） |
+
+### 四轮门禁
+
+| 项 | 结果 |
+|---|---|
+| `cargo test --workspace` | ✅ **1048 passed / 13 ignored / 0 failed**（veil-ui 681；新增 3 条：导出必弹框、取消不产出、另存为传目录） |
+| `cargo clippy --workspace --all-targets -- -D warnings` | ✅ 0 告警 |
+| `cargo build --release -p veil` | ✅ 5,997,056 B（≈5.72 MiB，红线 15 MiB） |
+
+### 本轮限制
+
+- COM 对话框的 `SetFolder` 依赖 `SHCreateItemFromParsingName` 能解析目录；目录被删除时静默退回系统默认位置，不阻断导出。
+- 自动化测试只覆盖「端口收到什么建议路径 / 取消后是否产出」，vtable 与 GUID 这类平台细节由真机截图兜底（无法在 headless 断言）。
+

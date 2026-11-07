@@ -2088,6 +2088,15 @@ fn app_export(text: &str, path: Option<&str>, fail: bool) -> (App, ExportCalls) 
         calls: calls.clone(),
         fail,
     };
+    // 导出必弹对话框（spec 要求）：mock 直接把建议路径当作用户选择，
+    // 既有断言只关心「导出器被调用」，不受目标路径影响。
+    let d = FakeDialogs {
+        open: None,
+        save: None,
+        image: None,
+        export: path.map(|p| PathBuf::from(p).with_extension("html")),
+        calls: Rc::new(RefCell::new(Vec::new())),
+    };
     let a = App::new(
     doc,
     Ports {
@@ -2097,7 +2106,7 @@ fn app_export(text: &str, path: Option<&str>, fail: bool) -> (App, ExportCalls) 
         images: Box::new(NoImages),
         assets: Box::new(NoAssets),
         exporter: Box::new(e),
-        dialogs: Box::new(NoDialogs),
+        dialogs: Box::new(d),
         watcher: Box::new(NoWatcher),
         theme_env: theme::test_support::env(),
         persist_env: persist_env(),
@@ -2219,12 +2228,31 @@ fn export_draft_asks_for_target_before_exporting() {
 }
 
 #[test]
-fn export_named_document_does_not_ask_for_target() {
-    let (mut a, calls, dialog_calls) = app_export_with_dialog("x", Some("ignored.html"));
-    a.doc.path = Some(PathBuf::from("a.md"));
+fn export_named_document_asks_for_target_in_doc_dir() {
+    // 导出是显式副作用：即使有关联文件也先让用户确认位置，
+    // 建议路径 = 文档同目录同名 `.html`（对话框直接定位到文档所在目录）。
+    let (mut a, calls, dialog_calls) = app_export_with_dialog("x", Some("a.html"));
+    a.doc.path = Some(PathBuf::from("dir/a.md"));
     a.export_now();
-    assert!(dialog_calls.borrow().is_empty(), "有关联文件时不弹导出对话框");
-    assert_eq!(calls.borrow()[0].3, None, "沿用源目录同名规则");
+    assert_eq!(
+        dialog_calls.borrow().as_slice(),
+        &["export:html:dir/a.html".to_string()],
+        "建议路径须落在文档所在目录"
+    );
+    assert_eq!(
+        calls.borrow()[0].3.as_deref(),
+        Some(Path::new("a.html")),
+        "用户确认的路径须透传给导出器"
+    );
+}
+
+#[test]
+fn export_named_document_cancelled_dialog_aborts_without_output() {
+    let (mut a, calls, _) = app_export_with_dialog("x", None);
+    a.doc.path = Some(PathBuf::from("dir/a.md"));
+    a.export_now();
+    assert!(calls.borrow().is_empty(), "取消后不得产生导出调用");
+    assert_eq!(a.ui_state.chrome.notice, "导出已取消");
 }
 
 #[test]
@@ -2854,11 +2882,12 @@ fn draft_save_now_routes_to_save_as_dialog() {
 }
 
 #[test]
-fn save_as_uses_old_file_name_as_suggestion() {
+fn save_as_suggests_current_path_for_directory() {
+    // 传完整路径而不是裸文件名：对话框直接定位到文档所在目录，不依赖系统记忆
     let store = MemStore::default();
     let (mut a, calls) = app_dialogs("ab", Some("dir/a.md"), false, &store, None, None);
     a.save_as(); // 取消
-    assert_eq!(calls.borrow().as_slice(), &["save:a.md".to_string()]);
+    assert_eq!(calls.borrow().as_slice(), &["save:dir/a.md".to_string()]);
     assert!(a.ui_state.chrome.notice.contains("取消"));
 }
 

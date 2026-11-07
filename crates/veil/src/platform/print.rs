@@ -208,28 +208,38 @@ fn export_frame(page_w: i32, page_h: i32, margin_mm: f32, dpi: i32) -> (i32, u32
     (margin, w, h)
 }
 
-/// 目标 PDF 去重：已存在则 `stem (2).pdf`、`stem (3).pdf`…（纯函数，便于单测）。
-fn next_pdf_path(target: std::path::PathBuf) -> std::path::PathBuf {
-    if !target.exists() {
-        return target;
-    }
+/// 同目录临时目标：驱动写到全新文件，成功后替换正式目标。
+/// 这样「覆盖已有 PDF」时即使打印失败也不会毁掉用户原文件（纯函数，便于单测）。
+fn temp_pdf_path(target: &std::path::Path) -> std::path::PathBuf {
     let stem = target
         .file_stem()
         .and_then(|s| s.to_str())
-        .unwrap_or("document")
-        .to_string();
-    let dir = target
-        .parent()
-        .map(std::path::Path::to_path_buf)
-        .unwrap_or_default();
-    let mut n = 2u32;
-    loop {
-        let candidate = dir.join(format!("{stem} ({n}).pdf"));
-        if !candidate.exists() {
-            return candidate;
-        }
-        n = n.saturating_add(1);
+        .unwrap_or("export");
+    target.with_file_name(format!(".{stem}.{}.tmp.pdf", std::process::id()))
+}
+
+/// 用临时文件替换目标：旧文件先改名为备份（Windows 的 rename 不允许目标已存在），
+/// 新文件落位成功后才删备份；任何一步失败都把旧文件恢复回去。
+fn replace_file(tmp: &std::path::Path, target: &std::path::Path) -> Result<(), String> {
+    let stem = target
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("export");
+    let backup = target.with_file_name(format!(".{stem}.{}.bak", std::process::id()));
+    let had_old = target.exists();
+    if had_old {
+        std::fs::rename(target, &backup).map_err(|e| format!("无法备份旧文件: {e}"))?;
     }
+    if let Err(e) = std::fs::rename(tmp, target) {
+        if had_old {
+            let _ = std::fs::rename(&backup, target); // 落位失败：把旧文件放回去
+        }
+        return Err(format!("无法写入目标文件: {e}"));
+    }
+    if had_old {
+        let _ = std::fs::remove_file(&backup);
+    }
+    Ok(())
 }
 
 /// Win32 打印端口：系统打印对话框 + GDI 位图输出。
@@ -302,16 +312,15 @@ impl Print for WinPrint {
     }
 
     fn export_pdf(&mut self, session: &mut PrintSession) {
-        // 有关联文件：写同目录同名 PDF；草稿：先问保存位置（取消即中止）
-        let target = match session.export_target() {
-            Some(t) => next_pdf_path(t),
-            None => match session.choose_export_path("未命名.pdf", "pdf") {
-                Some(t) => t,
-                None => {
-                    session.notice("导出已取消");
-                    return;
-                }
-            },
+        // 导出是显式副作用：每次都先让用户确认输出位置（取消即中止，不写盘）。
+        // 建议路径为文档同目录 `<stem>.pdf`，草稿为裸名（平台层补「文档」目录）。
+        let suggested = session.export_suggestion();
+        let target = match session.choose_export_path(&suggested, "pdf") {
+            Some(t) => t,
+            None => {
+                session.notice("导出已取消");
+                return;
+            }
         };
         let cfg = session.export_options();
         let margin_mm = session.export_margin_mm();
@@ -336,15 +345,26 @@ impl Print for WinPrint {
         let page_h = unsafe { GetDeviceCaps(hdc, VERTRES) };
         let (margin, frame_w, frame_h) = export_frame(page_w, page_h, margin_mm, dpi);
         let total = session.begin_export(frame_w, frame_h, dpi as f32 / 96.0, cfg);
-        let output = wide(&target.to_string_lossy());
+        // 先写临时文件：覆盖已有 PDF 时，打印失败不破坏原文件。
+        let tmp = temp_pdf_path(&target);
+        let _ = std::fs::remove_file(&tmp); // 清掉上次异常退出可能留下的同名临时文件
+        let output = wide(&tmp.to_string_lossy());
         let result = run_print_job(hdc, session, 1, total, margin, Some(&output));
         unsafe { DeleteDC(hdc) };
         session.end();
         match result {
-            Ok(_) => session.notice(&format!("已导出 PDF：{}", path_label(Some(target.as_path())))),
+            Ok(_) => match replace_file(&tmp, &target) {
+                Ok(()) => session.notice(&format!(
+                    "已导出 PDF：{}",
+                    path_label(Some(target.as_path()))
+                )),
+                Err(e) => {
+                    let _ = std::fs::remove_file(&tmp);
+                    session.notice(&format!("导出 PDF 失败: {e}"));
+                }
+            },
             Err(_) => {
-                // next_pdf_path 已保证目标原本不存在：失败时清掉驱动可能留下的半成品
-                let _ = std::fs::remove_file(&target);
+                let _ = std::fs::remove_file(&tmp);
                 session.notice("导出 PDF 失败: 已回退打印对话框");
                 self.print(session);
             }
@@ -354,7 +374,7 @@ impl Print for WinPrint {
 
 #[cfg(test)]
 mod tests {
-    use super::{export_frame, next_pdf_path};
+    use super::{export_frame, replace_file, temp_pdf_path};
     use std::fs;
     use std::path::PathBuf;
 
@@ -372,10 +392,9 @@ mod tests {
         assert_eq!(export_frame(100, 100, 90.0, 600).2, 1);
     }
 
-    #[test]
-    fn next_pdf_path_increments_until_free() {
-        let dir: PathBuf = std::env::temp_dir().join(format!(
-            "veil_pdf_test_{}_{}",
+    fn temp_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "veil_pdf_test_{tag}_{}_{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -383,15 +402,52 @@ mod tests {
                 .unwrap_or(0)
         ));
         fs::create_dir_all(&dir).unwrap();
-        let base = dir.join("doc.pdf");
-        assert_eq!(next_pdf_path(base.clone()), base, "目标不存在直接用");
+        dir
+    }
 
-        fs::write(&base, b"x").unwrap();
-        let second = dir.join("doc (2).pdf");
-        assert_eq!(next_pdf_path(base.clone()), second);
+    #[test]
+    fn temp_pdf_path_stays_next_to_target() {
+        // 临时文件必须与目标同目录（跨卷 rename 会失败），且扩展名仍为 .pdf（驱动要求）
+        let target = PathBuf::from("dir/doc.pdf");
+        let tmp = temp_pdf_path(&target);
+        assert_eq!(tmp.parent(), target.parent());
+        let name = tmp.file_name().unwrap().to_string_lossy();
+        assert!(name.starts_with(".doc."), "实际: {name}");
+        assert!(name.ends_with(".tmp.pdf"), "实际: {name}");
+    }
 
-        fs::write(&second, b"x").unwrap();
-        assert_eq!(next_pdf_path(base), dir.join("doc (3).pdf"));
+    #[test]
+    fn replace_file_overwrites_existing_target() {
+        // 覆盖已存在的 PDF：旧文件被替换，不产生 `doc (2).pdf` 之类的第二份文件
+        let dir = temp_dir("replace");
+        let target = dir.join("doc.pdf");
+        let tmp = temp_pdf_path(&target);
+        fs::write(&target, b"old").unwrap();
+        fs::write(&tmp, b"new").unwrap();
+
+        replace_file(&tmp, &target).unwrap();
+
+        assert_eq!(fs::read(&target).unwrap(), b"new");
+        assert!(!tmp.exists(), "临时文件应被移走");
+        let pdfs: Vec<_> = fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().is_some_and(|x| x == "pdf"))
+            .collect();
+        assert_eq!(pdfs.len(), 1, "目录中只应有一个 PDF");
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn replace_file_keeps_old_target_when_rename_fails() {
+        // 临时文件不存在（模拟打印未产出）：替换失败，旧文件原样保留
+        let dir = temp_dir("keep");
+        let target = dir.join("doc.pdf");
+        fs::write(&target, b"old").unwrap();
+
+        assert!(replace_file(&dir.join("missing.tmp.pdf"), &target).is_err());
+        assert_eq!(fs::read(&target).unwrap(), b"old");
 
         fs::remove_dir_all(&dir).unwrap();
     }

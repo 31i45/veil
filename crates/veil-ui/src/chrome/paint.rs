@@ -202,41 +202,23 @@ impl Chrome {
         if let Some(open) = self.open {
             let rows = menu_rows(open, recent);
             let p = popup_layout(open, scale, recent);
-            frame.fill_rect(
+            frame.fill_surface_card(
                 p.x.round() as i32,
                 p.y.round() as i32,
                 p.w.ceil() as u32,
                 p.h.ceil() as u32,
+                scale,
+                theme.dark,
                 theme.popup_bg,
-            );
-            frame.fill_rect(
-                p.x.round() as i32,
-                p.y.round() as i32,
-                p.w.ceil() as u32,
-                1,
                 theme.chrome_border,
             );
-            frame.fill_rect(
-                (p.x + p.w).round() as i32 - 1,
-                p.y.round() as i32,
-                1,
-                p.h.ceil() as u32,
-                theme.chrome_border,
-            );
-            frame.fill_rect(
-                p.x.round() as i32,
-                (p.y + p.h).round() as i32 - 1,
-                p.w.ceil() as u32,
-                1,
-                theme.chrome_border,
-            );
+            let pad = crate::theme::surface::padding(scale);
             // 分隔线：左右内缩与菜单项文字起止对齐（不顶到弹层边框）
-            let sep_inset = 10.0 * scale;
             for (_, sy) in &p.separators {
                 frame.fill_rect(
-                    (p.x + sep_inset).round() as i32,
+                    (p.x + pad).round() as i32,
                     sy.round() as i32,
-                    (p.w - 2.0 * sep_inset).max(1.0) as u32,
+                    (p.w - 2.0 * pad).max(1.0) as u32,
                     1,
                     theme.chrome_border,
                 );
@@ -248,15 +230,15 @@ impl Chrome {
                 let enabled = action_enabled(*action, flags);
                 // 禁用项不参与高亮（原生菜单语义：置灰且无悬停反馈）
                 if enabled && self.hover_item == Some((open, *i)) {
-                    frame.fill_rect(
+                    frame.fill_hover(
                         ix.round() as i32,
                         iy.round() as i32,
                         iw.ceil() as u32,
                         ih.ceil() as u32,
+                        scale,
                         theme.hover,
                     );
                 }
-                let pad = 12.0 * scale;
                 let label_color = if enabled { theme.text } else { theme.muted };
                 self.draw_left(
                     frame,

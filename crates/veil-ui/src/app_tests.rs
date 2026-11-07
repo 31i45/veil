@@ -136,44 +136,6 @@ fn persist_env_with(recovery: FakeRecovery, session: FakeSession) -> PersistEnv 
     }
 }
 
-/// 既有测试的默认确认端口：恒「取消」（等同旧行为：脏文档拒绝操作、内容不丢）。
-struct NoConfirm;
-impl Confirmer for NoConfirm {
-    fn confirm_unsaved(&mut self, _file: Option<&Path>) -> UnsavedChoice {
-        UnsavedChoice::Cancel
-    }
-}
-
-fn no_confirm() -> Box<dyn Confirmer> {
-    Box::new(NoConfirm)
-}
-
-/// 可编排的确认端口：按队列依次给出选择，并记录每次调用时的关联路径。
-#[derive(Clone, Default)]
-struct FakeConfirm {
-    choices: Rc<RefCell<Vec<UnsavedChoice>>>,
-    calls: Rc<RefCell<Vec<Option<PathBuf>>>>,
-}
-impl FakeConfirm {
-    fn new(choices: &[UnsavedChoice]) -> Self {
-        FakeConfirm {
-            choices: Rc::new(RefCell::new(choices.to_vec())),
-            calls: Rc::new(RefCell::new(Vec::new())),
-        }
-    }
-}
-impl Confirmer for FakeConfirm {
-    fn confirm_unsaved(&mut self, file: Option<&Path>) -> UnsavedChoice {
-        self.calls.borrow_mut().push(file.map(Path::to_path_buf));
-        let mut q = self.choices.borrow_mut();
-        if q.is_empty() {
-            UnsavedChoice::Cancel
-        } else {
-            q.remove(0)
-        }
-    }
-}
-
 /// 不加载任何图片（既有测试的默认注入）：所有图片降级 alt 文本。
 struct NoImages;
 impl ImageLoader for NoImages {
@@ -394,7 +356,6 @@ fn app_clip(html: Option<&str>, plain: Option<&str>) -> App {
         theme_env: theme::test_support::env(),
         persist_env: persist_env(),
         print: Box::new(NoPrint),
-        confirmer: no_confirm(),
         url_opener: no_url(),
     }
 )
@@ -508,7 +469,6 @@ fn app_math(text: &str, fail: bool) -> (App, MathCalls) {
         theme_env: theme::test_support::env(),
         persist_env: persist_env(),
         print: Box::new(NoPrint),
-        confirmer: no_confirm(),
         url_opener: no_url(),
     }
 );
@@ -730,7 +690,6 @@ fn app_with_images(
         theme_env: theme::test_support::env(),
         persist_env: persist_env(),
         print: Box::new(NoPrint),
-        confirmer: no_confirm(),
         url_opener: no_url(),
     }
 );
@@ -917,7 +876,6 @@ fn app_paste_image(
         theme_env: theme::test_support::env(),
         persist_env: persist_env(),
         print: Box::new(NoPrint),
-        confirmer: no_confirm(),
         url_opener: no_url(),
     }
 );
@@ -1003,7 +961,6 @@ fn paste_image_files_prefer_file_list_over_path_text() {
         theme_env: theme::test_support::env(),
         persist_env: persist_env(),
         print: Box::new(NoPrint),
-        confirmer: no_confirm(),
         url_opener: no_url(),
     }
 );
@@ -1099,7 +1056,6 @@ fn app_drop(
         theme_env: theme::test_support::env(),
         persist_env: persist_env(),
         print: Box::new(NoPrint),
-        confirmer: no_confirm(),
         url_opener: no_url(),
     }
 );
@@ -2036,7 +1992,6 @@ fn app_with(
         theme_env: theme::test_support::env(),
         persist_env: persist_env(),
         print: Box::new(NoPrint),
-        confirmer: no_confirm(),
         url_opener,
     }
 )
@@ -2111,7 +2066,6 @@ fn app_export(text: &str, path: Option<&str>, fail: bool) -> (App, ExportCalls) 
         theme_env: theme::test_support::env(),
         persist_env: persist_env(),
         print: Box::new(NoPrint),
-        confirmer: no_confirm(),
         url_opener: no_url(),
     }
 );
@@ -2160,7 +2114,6 @@ fn app_export_with_dialog(
             theme_env: theme::test_support::env(),
             persist_env: persist_env(),
             print: Box::new(NoPrint),
-            confirmer: no_confirm(),
             url_opener: no_url(),
         },
     );
@@ -2335,6 +2288,7 @@ fn open_refused_when_dirty() {
     let mut a = app("旧", Some("a.md"), false, &store);
     a.editor.apply(Intent::InsertText("改".into())).unwrap();
     a.open_path(PathBuf::from("b.md"));
+    assert!(a.ui_state.modal.is_some(), "脏文档先挂起确认模态");
     assert_eq!(a.editor.session().serialize(), "改旧"); // 未被替换
     assert_eq!(a.doc.path.as_deref(), Some(Path::new("a.md")));
 }
@@ -2587,7 +2541,6 @@ fn app_dialogs(
         theme_env: theme::test_support::env(),
         persist_env: persist_env(),
         print: Box::new(NoPrint),
-        confirmer: no_confirm(),
         url_opener: no_url(),
     }
 );
@@ -2819,7 +2772,9 @@ fn dirty_document_refuses_open_before_dialog() {
     let (mut a, calls) = app_dialogs("old", Some("a.md"), false, &store, Some("b.md"), None);
     a.editor.apply(Intent::InsertText("x".into())).unwrap();
     a.open_via_dialog();
-    assert!(calls.borrow().is_empty(), "脏文档拒绝时不弹对话框");
+    assert!(calls.borrow().is_empty(), "未作答前不弹对话框");
+    assert!(a.ui_state.modal.is_some(), "脏文档必须先确认");
+    answer_modal(&mut a, Key::Escape);
     assert_eq!(a.editor.session().serialize(), "xold");
     assert_eq!(a.doc.path.as_deref(), Some(Path::new("a.md")));
     assert!(a.ui_state.chrome.notice.contains("未保存"));
@@ -2910,7 +2865,8 @@ fn save_as_failure_keeps_old_path_and_dirty() {
 fn menu_quit_requests_exit() {
     let store = MemStore::default();
     let (mut a, _) = app_dialogs("ab", None, false, &store, None, None);
-    assert!(a.perform_menu(MenuAction::Quit));
+    a.perform_menu(MenuAction::Quit);
+    assert!(a.window_state.exit_requested, "干净文档退出立即获准");
     assert!(!a.perform_menu(MenuAction::Copy));
 }
 
@@ -3146,7 +3102,6 @@ fn app_watch(text: &str, path: Option<&str>, store: &MemStore, watch: &FakeWatch
         theme_env: theme::test_support::env(),
         persist_env: persist_env(),
         print: Box::new(NoPrint),
-        confirmer: no_confirm(),
         url_opener: no_url(),
     }
 )
@@ -3221,6 +3176,8 @@ fn new_draft_refuses_when_dirty() {
     let store = MemStore::default();
     let mut a = dirty_app("ab", Some("a.md"), &store);
     a.perform_action(Action::New);
+    assert!(a.ui_state.modal.is_some(), "脏文档新建先挂起确认模态");
+    answer_modal(&mut a, Key::Escape);
     assert_eq!(doc_text(&a), "改ab", "脏文档拒绝新建，数据不丢");
     assert_eq!(a.doc.path.as_deref(), Some(Path::new("a.md")));
     assert!(a.editor.is_dirty());
@@ -3229,7 +3186,7 @@ fn new_draft_refuses_when_dirty() {
 
 // ---- 3e 修 B：未保存内容三选一（关闭/新建/打开） ----
 
-/// 装配：可控确认端口 + 指定对话框 + 恢复槽/会话；其余端口无副作用。
+/// 装配：指定对话框 + 恢复槽/会话；其余端口无副作用。
 #[allow(clippy::too_many_arguments)]
 fn app_confirm(
     text: &str,
@@ -3238,7 +3195,6 @@ fn app_confirm(
     recovery: FakeRecovery,
     session: &FakeSession,
     dialogs: Box<dyn FileDialog>,
-    confirmer: Box<dyn Confirmer>,
 ) -> App {
     let doc = Doc {
         text: text.into(),
@@ -3264,10 +3220,15 @@ fn app_confirm(
         theme_env: theme::test_support::env(),
         persist_env: persist_env_with(recovery, session.clone()),
         print: Box::new(NoPrint),
-        confirmer,
         url_opener: no_url(),
     }
 )
+}
+
+/// 断言模态已打开并按给定键作答（走真实路由，等价用户操作）。
+fn answer_modal(a: &mut App, key: Key) {
+    assert!(a.ui_state.modal.is_some(), "应弹出未保存确认模态");
+    a.route_key(key);
 }
 
 /// 写一份当前内容的恢复快照（模拟编辑中的崩溃兜底已落盘）。
@@ -3291,8 +3252,6 @@ fn dirty_open_save_choice_writes_disk_before_opening() {
         export: None,
         calls: calls.clone(),
     };
-    let c = FakeConfirm::new(&[UnsavedChoice::Save]);
-    let c_calls = c.calls.clone();
     let mut a = app_confirm(
         "old",
         Some("a.md"),
@@ -3300,16 +3259,13 @@ fn dirty_open_save_choice_writes_disk_before_opening() {
         FakeRecovery::default(),
         &FakeSession::default(),
         Box::new(d),
-        Box::new(c),
     );
     a.editor.apply(Intent::InsertText("改".into())).unwrap();
 
     a.open_via_dialog();
-    assert_eq!(
-        c_calls.borrow().as_slice(),
-        &[Some(PathBuf::from("a.md"))],
-        "确认端口拿到当前关联路径"
-    );
+    assert!(a.ui_state.modal.is_some(), "脏文档先挂起确认模态");
+    assert!(calls.borrow().is_empty(), "未作答前不得弹文件对话框");
+    answer_modal(&mut a, Key::Text("s".into()));
     assert_eq!(
         store.files.borrow()[Path::new("a.md")],
         "改old".as_bytes(),
@@ -3331,7 +3287,6 @@ fn dirty_open_discard_clears_snapshot_without_writing_disk() {
     disk(&store, "a.md", b"old");
     disk(&store, "b.md", b"new");
     let rec = FakeRecovery::default();
-    let c = FakeConfirm::new(&[UnsavedChoice::Discard]);
     let mut a = app_confirm(
         "old",
         Some("a.md"),
@@ -3339,12 +3294,16 @@ fn dirty_open_discard_clears_snapshot_without_writing_disk() {
         rec.clone(),
         &FakeSession::default(),
         Box::new(NoDialogs),
-        Box::new(c),
     );
     a.editor.apply(Intent::InsertText("改".into())).unwrap();
     seed_recovery(&mut a, &rec);
 
     a.open_path(PathBuf::from("b.md"));
+    assert!(
+        a.doc.path.as_deref() == Some(Path::new("a.md")),
+        "等待结论前不切换文档"
+    );
+    answer_modal(&mut a, Key::Text("n".into()));
     assert!(
         rec.slot.borrow().is_none(),
         "明确放弃：恢复快照必须作废，下次启动不得复活"
@@ -3362,8 +3321,6 @@ fn dirty_open_discard_clears_snapshot_without_writing_disk() {
 fn dirty_open_cancel_keeps_document_and_notice() {
     let store = MemStore::default();
     disk(&store, "b.md", b"new");
-    let c = FakeConfirm::new(&[UnsavedChoice::Cancel]);
-    let c_calls = c.calls.clone();
     let mut a = app_confirm(
         "old",
         Some("a.md"),
@@ -3371,16 +3328,17 @@ fn dirty_open_cancel_keeps_document_and_notice() {
         FakeRecovery::default(),
         &FakeSession::default(),
         Box::new(NoDialogs),
-        Box::new(c),
     );
     a.editor.apply(Intent::InsertText("改".into())).unwrap();
 
     a.open_path(PathBuf::from("b.md"));
-    assert_eq!(c_calls.borrow().len(), 1, "脏文档必须确认一次");
+    assert!(a.ui_state.modal.is_some(), "脏文档必须确认一次");
+    answer_modal(&mut a, Key::Escape);
+    assert!(a.ui_state.modal.is_none(), "取消即关闭模态");
     assert_eq!(doc_text(&a), "改old", "取消：文档保持原样");
     assert_eq!(a.doc.path.as_deref(), Some(Path::new("a.md")));
     assert!(a.editor.is_dirty(), "取消不清脏");
-    assert!(a.ui_state.chrome.notice.contains("未保存"));
+    assert!(a.ui_state.chrome.notice.contains("已取消"));
 }
 
 #[test]
@@ -3393,11 +3351,11 @@ fn untitled_save_choice_cancelled_aborts_new_draft() {
         FakeRecovery::default(),
         &FakeSession::default(),
         Box::new(NoDialogs),
-        Box::new(FakeConfirm::new(&[UnsavedChoice::Save])),
     );
     a.editor.apply(Intent::InsertText("改".into())).unwrap();
 
     a.new_draft();
+    answer_modal(&mut a, Key::Text("s".into()));
     assert_eq!(doc_text(&a), "改草稿", "另存为被取消 → 不新建");
     assert_eq!(a.doc.path, None);
     assert!(a.editor.is_dirty());
@@ -3421,11 +3379,11 @@ fn untitled_save_choice_saves_as_then_creates_new_draft() {
         FakeRecovery::default(),
         &FakeSession::default(),
         Box::new(d),
-        Box::new(FakeConfirm::new(&[UnsavedChoice::Save])),
     );
     a.editor.apply(Intent::InsertText("改".into())).unwrap();
 
     a.new_draft();
+    answer_modal(&mut a, Key::Text("s".into()));
     assert_eq!(
         store.files.borrow()[Path::new("draft.md")],
         "改草稿".as_bytes(),
@@ -3450,11 +3408,12 @@ fn close_confirmation_saves_discards_or_cancels() {
         rec.clone(),
         &FakeSession::default(),
         Box::new(NoDialogs),
-        Box::new(FakeConfirm::new(&[UnsavedChoice::Cancel])),
     );
     a.editor.apply(Intent::InsertText("改".into())).unwrap();
     seed_recovery(&mut a, &rec);
-    assert!(!a.confirm_close(), "取消必须阻止退出");
+    a.confirm_close();
+    answer_modal(&mut a, Key::Escape);
+    assert!(!a.window_state.exit_requested, "取消必须阻止退出");
     assert!(a.editor.is_dirty());
     assert!(rec.slot.borrow().is_some(), "取消不动作废快照");
 
@@ -3467,11 +3426,12 @@ fn close_confirmation_saves_discards_or_cancels() {
         rec.clone(),
         &FakeSession::default(),
         Box::new(NoDialogs),
-        Box::new(FakeConfirm::new(&[UnsavedChoice::Discard])),
     );
     b.editor.apply(Intent::InsertText("改".into())).unwrap();
     seed_recovery(&mut b, &rec);
-    assert!(b.confirm_close(), "放弃允许退出");
+    b.confirm_close();
+    answer_modal(&mut b, Key::Text("n".into()));
+    assert!(b.window_state.exit_requested, "放弃允许退出");
     assert!(rec.slot.borrow().is_none(), "放弃即清快照");
 
     // 保存：写盘后允许退出，快照作废
@@ -3483,11 +3443,12 @@ fn close_confirmation_saves_discards_or_cancels() {
         rec.clone(),
         &FakeSession::default(),
         Box::new(NoDialogs),
-        Box::new(FakeConfirm::new(&[UnsavedChoice::Save])),
     );
     c.editor.apply(Intent::InsertText("改".into())).unwrap();
     seed_recovery(&mut c, &rec);
-    assert!(c.confirm_close(), "保存成功允许退出");
+    c.confirm_close();
+    answer_modal(&mut c, Key::Text("s".into()));
+    assert!(c.window_state.exit_requested, "保存成功允许退出");
     assert_eq!(store.files.borrow()[Path::new("a.md")], "改old".as_bytes());
     assert!(rec.slot.borrow().is_none());
 }
@@ -3497,8 +3458,6 @@ fn clean_close_skips_confirmation_and_clears_stale_snapshot() {
     // 干净文档：不弹确认；若磁盘上仍残留本会话快照（保存后清理失败的兜底），退出时清掉
     let store = MemStore::default();
     let rec = FakeRecovery::default();
-    let c = FakeConfirm::new(&[]);
-    let c_calls = c.calls.clone();
     let mut a = app_confirm(
         "old",
         Some("a.md"),
@@ -3506,14 +3465,128 @@ fn clean_close_skips_confirmation_and_clears_stale_snapshot() {
         rec.clone(),
         &FakeSession::default(),
         Box::new(NoDialogs),
-        Box::new(c),
     );
     a.editor.apply(Intent::InsertText("改".into())).unwrap();
     seed_recovery(&mut a, &rec);
     a.editor.mark_saved(); // 模拟「内容已与磁盘一致」的干净态，快照仍残留
-    assert!(a.confirm_close());
-    assert!(c_calls.borrow().is_empty(), "干净文档不得弹确认");
+    a.confirm_close();
+    assert!(a.ui_state.modal.is_none(), "干净文档不得弹确认");
+    assert!(a.window_state.exit_requested, "干净关窗直接获准退出");
     assert!(rec.slot.borrow().is_none(), "干净退出清残稿");
+}
+
+#[test]
+fn dirty_open_is_deferred_until_modal_choice() {
+    let store = MemStore::default();
+    disk(&store, "b.md", b"new");
+    let mut a = app("old", Some("a.md"), false, &store);
+    a.editor.apply(Intent::InsertText("改".into())).unwrap();
+
+    a.open_path(PathBuf::from("b.md"));
+    assert!(a.ui_state.modal.is_some(), "应立即登记模态而非阻塞");
+    assert_eq!(
+        a.doc.path.as_deref(),
+        Some(Path::new("a.md")),
+        "结论出来前不切换文档"
+    );
+    assert_eq!(doc_text(&a), "改old");
+
+    answer_modal(&mut a, Key::Text("n".into()));
+    assert_eq!(a.doc.path.as_deref(), Some(Path::new("b.md")));
+    assert_eq!(doc_text(&a), "new");
+    assert!(!a.editor.is_dirty());
+}
+
+#[test]
+fn modal_cancel_closes_and_keeps_dirty_document() {
+    let store = MemStore::default();
+    disk(&store, "b.md", b"new");
+    let mut a = app("old", Some("a.md"), false, &store);
+    a.editor.apply(Intent::InsertText("改".into())).unwrap();
+
+    a.open_path(PathBuf::from("b.md"));
+    answer_modal(&mut a, Key::Escape);
+    assert!(a.ui_state.modal.is_none(), "取消即关闭模态");
+    assert_eq!(a.doc.path.as_deref(), Some(Path::new("a.md")));
+    assert_eq!(doc_text(&a), "改old");
+    assert!(a.ui_state.chrome.notice.contains("已取消"));
+}
+
+#[test]
+fn clean_open_and_new_skip_modal() {
+    let store = MemStore::default();
+    disk(&store, "b.md", b"new");
+    let mut a = app("old", Some("a.md"), false, &store);
+
+    a.open_path(PathBuf::from("b.md"));
+    assert!(a.ui_state.modal.is_none(), "干净文档不弹模态");
+    assert_eq!(a.doc.path.as_deref(), Some(Path::new("b.md")));
+
+    a.new_draft();
+    assert!(a.ui_state.modal.is_none(), "干净文档新建不弹模态");
+    assert_eq!(a.doc.path, None);
+    assert_eq!(doc_text(&a), "");
+}
+
+#[test]
+fn modal_swallows_editor_input_until_answered() {
+    let store = MemStore::default();
+    disk(&store, "b.md", b"new");
+    let mut a = app("old", Some("a.md"), false, &store);
+    a.editor.apply(Intent::InsertText("改".into())).unwrap();
+    let before = doc_text(&a);
+
+    a.open_path(PathBuf::from("b.md"));
+    a.route_key(Key::Text("x".into()));
+    assert_eq!(doc_text(&a), before, "模态打开时字母键不进入编辑器");
+    assert!(a.ui_state.modal.is_some(), "无效按键不关闭模态");
+}
+
+#[test]
+fn modal_scrim_click_does_not_close() {
+    let store = MemStore::default();
+    disk(&store, "b.md", b"new");
+    let mut a = app("old", Some("a.md"), false, &store);
+    a.editor.apply(Intent::InsertText("改".into())).unwrap();
+
+    a.open_path(PathBuf::from("b.md"));
+    a.input_state.mouse = PhysicalPosition::new(1.0, 1.0);
+    a.on_left_click();
+    assert!(a.ui_state.modal.is_some(), "点击遮罩不得关闭模态");
+}
+
+#[test]
+fn modal_paints_scrim_and_card() {
+    let store = MemStore::default();
+    disk(&store, "b.md", b"new");
+    let mut a = app("old", Some("a.md"), false, &store);
+    a.editor.apply(Intent::InsertText("改".into())).unwrap();
+    let popup_bg = a.input_state.theme.popup_bg;
+    let (_, h) = a.win_size();
+    let probe = (4u32, h / 2);
+    let before = {
+        let f = a.render();
+        f.get(probe.0, probe.1)
+    };
+
+    a.open_path(PathBuf::from("b.md"));
+    let l = a.modal_layout();
+    let card_pt = (
+        (l.card.x + l.card.w * 0.5).round() as u32,
+        (l.card.y + 10.0).round() as u32,
+    );
+    let f = a.render();
+    let after = f.get(probe.0, probe.1);
+    assert!(
+        after[0] < before[0] || after[1] < before[1] || after[2] < before[2],
+        "遮罩应压暗窗口角落: before={before:?} after={after:?}"
+    );
+    let card = f.get(card_pt.0, card_pt.1);
+    assert_eq!(
+        [card[0], card[1], card[2]],
+        [popup_bg[0], popup_bg[1], popup_bg[2]],
+        "卡片空白处应为 popup_bg"
+    );
 }
 
 #[test]
@@ -3729,8 +3802,8 @@ fn replace_row_is_painted_and_closed_with_bar() {
     a.paint_search(&mut f);
     assert_eq!(
         f.get((r.text.x + 3.0) as u32, (r.row.y + 3.0) as u32),
-        a.input_state.theme.chrome_bg,
-        "替换行不透明底色"
+        a.input_state.theme.popup_bg,
+        "替换行不透明底色（与全部浮层同色）"
     );
     a.close_search();
     let mut g = Frame::new(w, h, a.input_state.theme.bg);
@@ -3959,7 +4032,6 @@ fn save_as_rebinds_watcher() {
         theme_env: theme::test_support::env(),
         persist_env: persist_env(),
         print: Box::new(NoPrint),
-        confirmer: no_confirm(),
         url_opener: no_url(),
     }
 );
@@ -4038,7 +4110,6 @@ fn app_theme(config: Box<dyn ConfigStore>, system: Rc<Cell<Option<bool>>>) -> Ap
         },
         persist_env: persist_env(),
         print: Box::new(NoPrint),
-        confirmer: no_confirm(),
         url_opener: no_url(),
     }
 )
@@ -5856,7 +5927,6 @@ fn app_persist(
         theme_env: theme::test_support::env(),
         persist_env: persist_env_with(recovery.clone(), session.clone()),
         print: Box::new(NoPrint),
-        confirmer: no_confirm(),
         url_opener: no_url(),
     }
 )
@@ -5910,7 +5980,6 @@ fn app_persist_dialogs(
         theme_env: theme::test_support::env(),
         persist_env: persist_env_with(recovery.clone(), session.clone()),
         print: Box::new(NoPrint),
-        confirmer: no_confirm(),
         url_opener: no_url(),
     }
 )
@@ -6420,6 +6489,8 @@ fn quick_open_refuses_dirty_document_and_esc_closes() {
     a.route_key(Key::Enter);
     assert!(!a.ui_state.quick.open, "尝试打开后浮层关闭");
     assert_eq!(doc_text(&a), before, "脏文档拒绝替换");
+    assert!(a.ui_state.modal.is_some(), "未保存确认模态接管替换决策");
+    answer_modal(&mut a, Key::Escape);
     assert!(
         a.ui_state.chrome.notice.contains("未保存"),
         "状态栏提示拒绝原因: {}",
@@ -6661,13 +6732,13 @@ fn outline_panel_paints_only_when_open() {
     a.paint_outline(&mut f);
     assert_eq!(
         f.get((p.x + 4.0) as u32, (p.y + 4.0) as u32),
-        a.input_state.theme.chrome_bg,
-        "标题区底色"
+        a.input_state.theme.popup_bg,
+        "标题区底色（卡片式面板与浮层同色）"
     );
     assert_eq!(
-        f.get((p.x - 4.0) as u32, (p.y + 4.0) as u32),
+        f.get((p.x - 30.0) as u32, (p.y + 4.0) as u32),
         a.input_state.theme.bg,
-        "面板左侧仍为文档底色"
+        "面板左侧（投影范围外）仍为文档底色"
     );
     // 关闭后面板不再绘制
     a.toggle_outline();
@@ -7333,8 +7404,8 @@ fn search_bar_paints_overlay_and_clears_on_close() {
     a.paint_search(&mut f);
     assert_eq!(
         f.get((l.bar.x + 3.0) as u32, (l.bar.y + 3.0) as u32),
-        a.input_state.theme.chrome_bg,
-        "浮栏不透明底色"
+        a.input_state.theme.popup_bg,
+        "浮栏不透明底色（与全部浮层同色）"
     );
     a.close_search();
     let mut g = Frame::new(w, h, a.input_state.theme.bg);
@@ -7783,7 +7854,6 @@ fn e2e_table_edit_and_image_paste() {
         theme_env: theme::test_support::env(),
         persist_env: persist_env(),
         print: Box::new(NoPrint),
-        confirmer: no_confirm(),
         url_opener: no_url(),
     }
 );
@@ -7975,7 +8045,6 @@ fn app_print(text: &str, print: Box<dyn Print>) -> App {
         theme_env: theme::test_support::env(),
         persist_env: persist_env(),
         print,
-        confirmer: no_confirm(),
         url_opener: no_url(),
     }
 )
@@ -8173,7 +8242,6 @@ fn print_hard_cuts_atomic_block_taller_than_page() {
         theme_env: theme::test_support::env(),
         persist_env: persist_env(),
         print: Box::new(p),
-        confirmer: no_confirm(),
         url_opener: no_url(),
     }
 );
@@ -8926,9 +8994,13 @@ fn file_menu_paints_group_separators_and_recent_block() {
             border,
             "分隔线像素质点应为边框色（y={sy}）"
         );
-        // 左右内缩：贴边处不应是分隔线
-        let edge = frame.get(p.x as u32, sy.round() as u32);
-        assert_ne!([edge[0], edge[1], edge[2]], border);
+        // 左右内缩：卡片边框内 1px 起是面板底色，分隔线不得顶到边缘
+        let edge = frame.get(p.x as u32 + 1, sy.round() as u32);
+        assert_eq!(
+            [edge[0], edge[1], edge[2]],
+            [theme.popup_bg[0], theme.popup_bg[1], theme.popup_bg[2]],
+            "分隔线不得顶到面板边缘"
+        );
     }
     // 项行中部不是分隔线色（防止把整行涂成线）
     let (_, _, iy, _, ih) = p.items[0];
@@ -8986,7 +9058,8 @@ fn disabled_menu_item_paints_muted_without_hover() {
     a.editor.apply(Intent::InsertText("c".into())).unwrap();
     a.paint();
     let frame = a.window_state.frame.as_ref().unwrap();
-    let bg = frame.get(sx as u32 + 2, y0 + 2);
+    // 采样点落在内缩圆角高亮块内部（避开 3px 内缩与圆角过渡带）
+    let bg = frame.get(sx as u32 + 8, (sy + sh / 2.0) as u32);
     assert_eq!(
         [bg[0], bg[1], bg[2]],
         [theme.hover[0], theme.hover[1], theme.hover[2]],

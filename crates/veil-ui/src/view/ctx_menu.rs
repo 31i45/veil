@@ -1,7 +1,6 @@
 //! 右键上下文菜单（2f）：选区/链接/块三类上下文的项集、几何与命中。
 //! 纯模型与几何：不绘制（paint.rs 消费布局）、不执行（interaction.rs 分发动作）。
 
-use crate::chrome;
 use crate::geometry::BASE_FONT_SIZE;
 
 /// 上下文菜单动作：执行映射在 interaction.rs（复用既有剪贴板/插入路径）。
@@ -181,9 +180,6 @@ pub(crate) struct Layout {
     pub(crate) seps: Vec<f32>,
 }
 
-/// 分隔线占位高度（基准值）：上下各留一半，线高 1px。
-const SEP_H: f32 = 4.0;
-
 pub(crate) fn layout(
     items: &[(&'static str, CtxAction)],
     x: f32,
@@ -192,10 +188,10 @@ pub(crate) fn layout(
     vp_bottom: f32,
     scale: f32,
 ) -> Layout {
-    let pad = 12.0 * scale;
+    let pad = crate::theme::surface::padding(scale);
     let top_pad = 4.0 * scale;
-    let item_h = chrome::ITEM_H * scale;
-    let sep_h = SEP_H * scale;
+    let item_h = crate::theme::surface::row_height(scale);
+    let sep_h = crate::theme::surface::divider_height(scale);
     let widest = items
         .iter()
         .filter(|(_, a)| *a != CtxAction::Separator)

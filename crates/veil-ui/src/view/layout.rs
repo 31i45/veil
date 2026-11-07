@@ -531,6 +531,17 @@ impl LayoutEngine {
         }
     }
 
+    /// 单行文本度量（宽, 高）：仅 shape 不 rasterize，供浮层/模态按内容定宽与折行。
+    pub(crate) fn measure(&mut self, text: &str) -> (f32, f32) {
+        let layout = self.layout_preedit(text);
+        let w = layout
+            .buffer
+            .layout_runs()
+            .map(|r| r.line_w)
+            .fold(0.0, f32::max);
+        (w, layout.height)
+    }
+
     /// 排版单块。`text` 为块文本（含内部换行；尾换行可有可无）；`inlines`/`block` 为文档区间；
     /// `caret` 为文档绝对偏移，驱动 Reveal 激活判定（无光光标语义传 `usize::MAX` 全消隐）。
     /// `imgs`：已渲染的非激活行内公式/图片（切片 8/13）——节点整段替换为 NBSP 占位

@@ -12,10 +12,12 @@ use crate::geometry::BASE_FONT_SIZE;
 pub const PANEL_W: f32 = 240.0;
 /// 面板标题区基准高。
 pub const HEAD_H: f32 = 34.0;
-/// 条目行高基准值。
-pub const ROW_H: f32 = 26.0;
-/// 面板左右内边距基准值。
-pub const PAD: f32 = 12.0;
+/// 条目行高基准值：与全部浮层同一 surface 令牌。
+pub const ROW_H: f32 = crate::theme::surface::ROW_HEIGHT;
+/// 面板左右内边距基准值：与全部浮层同一 surface 令牌。
+pub const PAD: f32 = crate::theme::surface::PADDING;
+/// 卡片外边距基准值：面板由「停靠条」改为「浮起卡片」后与窗口/滚动条的间距。
+pub const MARGIN: f32 = 8.0;
 /// 标题层级缩进步长基准值。
 pub const INDENT_STEP: f32 = 14.0;
 
@@ -56,14 +58,16 @@ pub(crate) struct Row {
     pub(crate) h: f32,
 }
 
-/// 面板矩形：右缘贴滚动条左缘，纵向占满内容视口。
+/// 面板矩形（卡片式）：右缘距滚动条 MARGIN，上下距窗口边缘 MARGIN；
+/// 左侧与版心相邻（投影提供分隔）。命中与绘制共用本矩形。
 pub(crate) fn panel_rect(right: f32, top: f32, height: f32, scale: f32) -> Rect {
     let w = PANEL_W * scale;
+    let m = MARGIN * scale;
     Rect {
         x: right - w,
-        y: top,
-        w,
-        h: height,
+        y: top + m,
+        w: w - m,
+        h: (height - 2.0 * m).max(0.0),
     }
 }
 
@@ -163,15 +167,15 @@ mod tests {
     }
 
     #[test]
-    fn panel_rect_hugs_right_edge() {
+    fn panel_rect_inset_card_margins() {
         let p = panel();
         assert_eq!(p.x, 800.0 - PANEL_W);
-        assert_eq!(p.x + p.w, 800.0);
-        assert_eq!(p.y, 30.0);
-        assert_eq!(p.h, 600.0);
+        assert_eq!(p.x + p.w, 800.0 - MARGIN);
+        assert_eq!(p.y, 30.0 + MARGIN);
+        assert_eq!(p.h, 600.0 - 2.0 * MARGIN);
         // 标题区之下才是条目区
-        assert_eq!(rows_top(p, 1.0), 30.0 + HEAD_H);
-        assert_eq!(rows_height(p, 1.0), 600.0 - HEAD_H);
+        assert_eq!(rows_top(p, 1.0), 30.0 + MARGIN + HEAD_H);
+        assert_eq!(rows_height(p, 1.0), 600.0 - 2.0 * MARGIN - HEAD_H);
     }
 
     #[test]

@@ -145,23 +145,6 @@ pub fn url_is_openable(url: &str) -> bool {
         .any(|scheme| u.get(..scheme.len()).is_some_and(|h| h.eq_ignore_ascii_case(scheme)))
 }
 
-/// 未保存内容的处置选择（3e 修 B）：关闭/新建/打开前统一三选一。
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum UnsavedChoice {
-    /// 保存后继续（有路径直接保存；无路径草稿走另存为）。
-    Save,
-    /// 放弃修改（随后清恢复快照，避免下次启动复活已放弃内容）。
-    Discard,
-    /// 取消当前操作，保持编辑状态。
-    Cancel,
-}
-
-/// 未保存内容确认（3e 修 B）：系统模态框由产品层注入（Windows MessageBoxW），
-/// 本层只消费选择，不依赖任何 GUI 框架。`file` 为当前关联路径（None = 未命名草稿）。
-pub trait Confirmer {
-    fn confirm_unsaved(&mut self, file: Option<&Path>) -> UnsavedChoice;
-}
-
 /// 崩溃恢复草稿存储（0b）：单槽字节读写，实现由产品层注入（应用数据目录单文件）。
 /// `save` 须原子（tmp+rename）：恢复文件自身半截比没有更糟。
 /// `load` 在无恢复文件时返回 Err（正常状态）；`clear` 在文件不存在时视为成功。
@@ -212,7 +195,6 @@ pub struct Ports {
     pub theme_env: ThemeEnv,
     pub persist_env: PersistEnv,
     pub print: Box<dyn Print>,
-    pub confirmer: Box<dyn Confirmer>,
     pub url_opener: Box<dyn UrlOpener>,
 }
 
@@ -228,9 +210,26 @@ pub fn run(doc: Doc, ports: Ports) -> Result<(), String> {
         .map_err(|e| format!("事件循环错误: {e}"))
 }
 
+/// 被挂起的操作意图：模态结论出来后才执行，避免阻塞事件循环。
+pub(crate) enum PendingIntent {
+    Close,
+    New,
+    Open,
+    OpenRecent(PathBuf),
+}
+
+/// 应用内模态：规格 + 交互态 + 待执行意图（结论落地后整条替换）。
+pub(crate) struct ActiveModal {
+    pub(crate) spec: crate::view::modal::ModalSpec,
+    pub(crate) state: crate::view::modal::ModalState,
+    pub(crate) intent: PendingIntent,
+}
+
 /// 文档视图 UI 组件状态（ADR-009 S6 C6）：chrome/大纲/查找栏/写作模式。
 /// 四者是 UI 交互态，无数据互借，合并减少顶层字段。
 pub(crate) struct UIState {
+    /// 应用内模态（未保存确认等）：Some 时它是唯一输入接收者，绘制在最后一层。
+    pub(crate) modal: Option<ActiveModal>,
     /// 自绘 chrome（切片 15）：菜单/状态栏/滚动条交互态与标签缓存。
     pub(crate) chrome: Chrome,
     /// 大纲面板（P3-2）：标题条目、开关/滚动/悬停。
@@ -340,7 +339,7 @@ pub(crate) struct WindowState {
     pub(crate) resize_pending: bool,
     /// 窗口可见性（3g）：最小化/失焦/Occluded 时置 false，阻止 RedrawRequested → render → paint 路径。
     pub(crate) visible: bool,
-    /// 菜单键盘执行「退出」后的退出请求：由 KeyboardInput 沿鼠标退出路径处理。
+    /// 已获准退出：仅当「关闭意图」真正执行后置 true，事件循环在事件末尾统一消费。
     pub(crate) exit_requested: bool,
 }
 impl Default for WindowState {
@@ -409,7 +408,6 @@ pub(crate) struct AppPorts {
     pub(crate) recovery: Box<dyn RecoveryStore>,
     pub(crate) session: Box<dyn SessionStore>,
     pub(crate) print: Box<dyn Print>,
-    pub(crate) confirmer: Box<dyn Confirmer>,
     pub(crate) url_opener: Box<dyn UrlOpener>,
 }
 
@@ -550,7 +548,6 @@ impl App {
             recovery,
             session,
             print: ports.print,
-            confirmer: ports.confirmer,
             url_opener: ports.url_opener,
         };
         let start = startup_doc(&mut ports, doc);
@@ -600,6 +597,7 @@ impl App {
                 recent: start.recent,
             },
             ui_state: UIState {
+                modal: None,
                 chrome: Chrome::default(),
                 outline: Outline::default(),
                 search: Search::default(),
@@ -696,7 +694,7 @@ impl App {
     fn save_config(&mut self) {
         let text = self.config.to_toml();
         if let Err(e) = self.ports.config.save(&text) {
-            self.ui_state.chrome.notice = format!("配置未保存: {e}");
+            self.ui_state.chrome.notice = format!("配置未保存：{e}");
             eprintln!("配置保存失败: {e}");
         }
     }
@@ -867,9 +865,8 @@ impl ApplicationHandler for App {
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
             WindowEvent::CloseRequested => {
-                if self.confirm_close() {
-                    event_loop.exit();
-                }
+                // 关窗只是「请求」：脏文档先挂起模态，获准后由 exit_requested 统一退出
+                self.confirm_close();
             }
             WindowEvent::Resized(size) => {
                 // 重建延迟到下一帧合并执行（见 `apply_pending_resize`）：
@@ -918,10 +915,6 @@ impl ApplicationHandler for App {
             WindowEvent::HoveredFileCancelled => self.hover_file(None),
             WindowEvent::KeyboardInput { event, .. } => {
                 self.on_key(&event);
-                // 菜单 Enter 选中「退出」：与鼠标路径同语义（先确认保存），标志只触发一次
-                if std::mem::take(&mut self.window_state.exit_requested) && self.confirm_close() {
-                    event_loop.exit();
-                }
             }
             WindowEvent::ModifiersChanged(m) => {
                 let s = m.state();
@@ -933,6 +926,20 @@ impl ApplicationHandler for App {
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.input_state.mouse = position;
+                // 模态打开时它是唯一输入接收者：只更新悬停，不再触达其下浮层/正文
+                if self.ui_state.modal.is_some() {
+                    let m = (position.x as f32, position.y as f32);
+                    let l = self.modal_layout();
+                    let changed = self
+                        .ui_state
+                        .modal
+                        .as_mut()
+                        .is_some_and(|a| a.state.on_hover(m, &l));
+                    if changed {
+                        self.request_redraw();
+                    }
+                    return;
+                }
                 if let Some(off) = self.ui_state.chrome.scroll_drag {
                     // 拖动滚动条：按滑块顶边换算滚动量
                     let vp = self.viewport();
@@ -956,9 +963,8 @@ impl ApplicationHandler for App {
                 button: MouseButton::Left,
                 ..
             } => {
-                if self.on_left_click() && self.confirm_close() {
-                    event_loop.exit();
-                }
+                // 「退出」已不再是点击的副作用：模态结论会写 exit_requested
+                self.on_left_click();
             }
             WindowEvent::MouseInput {
                 state: ElementState::Pressed,
@@ -1020,6 +1026,10 @@ impl ApplicationHandler for App {
                 }
             }
             _ => {}
+        }
+        // 唯一退出出口：只有「关闭意图」真正执行后才会置位（模态结论 / 干净关窗）
+        if self.window_state.exit_requested {
+            event_loop.exit();
         }
     }
 

@@ -1,0 +1,94 @@
+[11:22:31.186] INFO  exe=D:\VSCode\Veil\target\release\veil.exe doc=C:\Users\31i45\AppData\Local\Temp\veil-smoke\long.md probe=False shots=C:\Users\31i45\AppData\Local\Temp\veil-smoke\evidence-long
+[11:22:31.260] INFO  已启动 PID=4016
+[11:22:31.413] INFO  主窗口就绪：句柄=7472780，启动到窗口 200 ms
+[11:22:32.949] INFO  进程窗口并集截图 262x1106（含独立对话框）
+[11:22:32.955] INFO  宽度 240px 截图：C:\Users\31i45\AppData\Local\Temp\veil-smoke\evidence-long\01-w240-p0-20261109-112230.png（PrintWindow=）
+[11:22:34.537] INFO  进程窗口并集截图 262x1106（含独立对话框）
+[11:22:34.540] INFO  步骤截图：C:\Users\31i45\AppData\Local\Temp\veil-smoke\evidence-long\02-step-load-20261109-112230.png
+[11:22:35.066] INFO  按键 ^s
+[11:22:36.029] INFO  进程窗口并集截图 262x1106（含独立对话框）
+[11:22:36.032] INFO  步骤截图：C:\Users\31i45\AppData\Local\Temp\veil-smoke\evidence-long\03-step-save-20261109-112230.png
+[11:22:36.041] INFO  交互步骤完成，前台与鼠标位置已还原
+[11:22:36.365] INFO  进程窗口并集截图 262x1106（含独立对话框）
+[11:22:36.368] INFO  宽度 240px 第 1 页截图：C:\Users\31i45\AppData\Local\Temp\veil-smoke\evidence-long\04-w240-p1-20261109-112230.png
+[11:22:36.694] INFO  进程窗口并集截图 262x1106（含独立对话框）
+[11:22:36.697] INFO  宽度 240px 第 2 页截图：C:\Users\31i45\AppData\Local\Temp\veil-smoke\evidence-long\05-w240-p2-20261109-112230.png
+[11:22:37.043] INFO  进程窗口并集截图 262x1106（含独立对话框）
+[11:22:37.046] INFO  宽度 240px 第 3 页截图：C:\Users\31i45\AppData\Local\Temp\veil-smoke\evidence-long\06-w240-p3-20261109-112230.png
+[11:22:37.791] INFO  进程窗口并集截图 342x1106（含独立对话框）
+[11:22:37.794] INFO  宽度 320px 截图：C:\Users\31i45\AppData\Local\Temp\veil-smoke\evidence-long\07-w320-p0-20261109-112230.png（PrintWindow=）
+[11:22:39.331] INFO  进程窗口并集截图 342x1106（含独立对话框）
+[11:22:39.334] INFO  步骤截图：C:\Users\31i45\AppData\Local\Temp\veil-smoke\evidence-long\08-step-load-20261109-112230.png
+[11:22:39.818] INFO  按键 ^s
+[11:22:40.788] INFO  进程窗口并集截图 342x1106（含独立对话框）
+[11:22:40.791] INFO  步骤截图：C:\Users\31i45\AppData\Local\Temp\veil-smoke\evidence-long\09-step-save-20261109-112230.png
+[11:22:40.793] INFO  交互步骤完成，前台与鼠标位置已还原
+[11:22:41.130] INFO  进程窗口并集截图 342x1106（含独立对话框）
+[11:22:41.140] INFO  宽度 320px 第 1 页截图：C:\Users\31i45\AppData\Local\Temp\veil-smoke\evidence-long\10-w320-p1-20261109-112230.png
+[11:22:41.469] INFO  进程窗口并集截图 342x1106（含独立对话框）
+[11:22:41.472] INFO  宽度 320px 第 2 页截图：C:\Users\31i45\AppData\Local\Temp\veil-smoke\evidence-long\11-w320-p2-20261109-112230.png
+[11:22:41.808] INFO  进程窗口并集截图 342x1106（含独立对话框）
+[11:22:41.811] INFO  宽度 320px 第 3 页截图：C:\Users\31i45\AppData\Local\Temp\veil-smoke\evidence-long\12-w320-p3-20261109-112230.png
+[11:22:42.565] INFO  进程窗口并集截图 502x1106（含独立对话框）
+[11:22:42.569] INFO  宽度 480px 截图：C:\Users\31i45\AppData\Local\Temp\veil-smoke\evidence-long\13-w480-p0-20261109-112230.png（PrintWindow=）
+[11:22:44.107] INFO  进程窗口并集截图 502x1106（含独立对话框）
+[11:22:44.110] INFO  步骤截图：C:\Users\31i45\AppData\Local\Temp\veil-smoke\evidence-long\14-step-load-20261109-112230.png
+[11:22:44.586] INFO  按键 ^s
+[11:22:45.534] INFO  进程窗口并集截图 502x1106（含独立对话框）
+[11:22:45.537] INFO  步骤截图：C:\Users\31i45\AppData\Local\Temp\veil-smoke\evidence-long\15-step-save-20261109-112230.png
+[11:22:45.540] INFO  交互步骤完成，前台与鼠标位置已还原
+[11:22:45.880] INFO  进程窗口并集截图 502x1106（含独立对话框）
+[11:22:45.882] INFO  宽度 480px 第 1 页截图：C:\Users\31i45\AppData\Local\Temp\veil-smoke\evidence-long\16-w480-p1-20261109-112230.png
+[11:22:46.215] INFO  进程窗口并集截图 502x1106（含独立对话框）
+[11:22:46.218] INFO  宽度 480px 第 2 页截图：C:\Users\31i45\AppData\Local\Temp\veil-smoke\evidence-long\17-w480-p2-20261109-112230.png
+[11:22:46.561] INFO  进程窗口并集截图 502x1106（含独立对话框）
+[11:22:46.564] INFO  宽度 480px 第 3 页截图：C:\Users\31i45\AppData\Local\Temp\veil-smoke\evidence-long\18-w480-p3-20261109-112230.png
+[11:22:46.575] INFO  已结束 PID=4016
+[11:22:46.591] INFO  证据目录：C:\Users\31i45\AppData\Local\Temp\veil-smoke\evidence-long
+[11:22:49.284] INFO  exe=D:\VSCode\Veil\target\release\veil.exe doc=C:\Users\31i45\AppData\Local\Temp\veil-smoke\long.md probe=False shots=C:\Users\31i45\AppData\Local\Temp\veil-smoke\evidence-long
+[11:22:49.334] INFO  已启动 PID=21964
+[11:22:49.473] INFO  主窗口就绪：句柄=4916888，启动到窗口 172 ms
+[11:22:50.992] INFO  进程窗口并集截图 262x1106（含独立对话框）
+[11:22:50.997] INFO  宽度 240px 截图：C:\Users\31i45\AppData\Local\Temp\veil-smoke\evidence-long\01-w240-p0-20261109-112249.png（PrintWindow=）
+[11:22:52.561] INFO  进程窗口并集截图 262x1106（含独立对话框）
+[11:22:52.564] INFO  步骤截图：C:\Users\31i45\AppData\Local\Temp\veil-smoke\evidence-long\02-step-load-20261109-112249.png
+[11:22:53.110] INFO  按键 ^s
+[11:22:54.074] INFO  进程窗口并集截图 262x1106（含独立对话框）
+[11:22:54.077] INFO  步骤截图：C:\Users\31i45\AppData\Local\Temp\veil-smoke\evidence-long\03-step-save-20261109-112249.png
+[11:22:54.085] INFO  交互步骤完成，前台与鼠标位置已还原
+[11:22:54.425] INFO  进程窗口并集截图 262x1106（含独立对话框）
+[11:22:54.427] INFO  宽度 240px 第 1 页截图：C:\Users\31i45\AppData\Local\Temp\veil-smoke\evidence-long\04-w240-p1-20261109-112249.png
+[11:22:54.754] INFO  进程窗口并集截图 262x1106（含独立对话框）
+[11:22:54.756] INFO  宽度 240px 第 2 页截图：C:\Users\31i45\AppData\Local\Temp\veil-smoke\evidence-long\05-w240-p2-20261109-112249.png
+[11:22:55.090] INFO  进程窗口并集截图 262x1106（含独立对话框）
+[11:22:55.092] INFO  宽度 240px 第 3 页截图：C:\Users\31i45\AppData\Local\Temp\veil-smoke\evidence-long\06-w240-p3-20261109-112249.png
+[11:22:55.827] INFO  进程窗口并集截图 342x1106（含独立对话框）
+[11:22:55.829] INFO  宽度 320px 截图：C:\Users\31i45\AppData\Local\Temp\veil-smoke\evidence-long\07-w320-p0-20261109-112249.png（PrintWindow=）
+[11:22:57.357] INFO  进程窗口并集截图 342x1106（含独立对话框）
+[11:22:57.359] INFO  步骤截图：C:\Users\31i45\AppData\Local\Temp\veil-smoke\evidence-long\08-step-load-20261109-112249.png
+[11:22:57.836] INFO  按键 ^s
+[11:22:58.791] INFO  进程窗口并集截图 342x1106（含独立对话框）
+[11:22:58.793] INFO  步骤截图：C:\Users\31i45\AppData\Local\Temp\veil-smoke\evidence-long\09-step-save-20261109-112249.png
+[11:22:58.794] INFO  交互步骤完成，前台与鼠标位置已还原
+[11:22:59.126] INFO  进程窗口并集截图 342x1106（含独立对话框）
+[11:22:59.128] INFO  宽度 320px 第 1 页截图：C:\Users\31i45\AppData\Local\Temp\veil-smoke\evidence-long\10-w320-p1-20261109-112249.png
+[11:22:59.455] INFO  进程窗口并集截图 342x1106（含独立对话框）
+[11:22:59.457] INFO  宽度 320px 第 2 页截图：C:\Users\31i45\AppData\Local\Temp\veil-smoke\evidence-long\11-w320-p2-20261109-112249.png
+[11:22:59.795] INFO  进程窗口并集截图 342x1106（含独立对话框）
+[11:22:59.797] INFO  宽度 320px 第 3 页截图：C:\Users\31i45\AppData\Local\Temp\veil-smoke\evidence-long\12-w320-p3-20261109-112249.png
+[11:23:00.545] INFO  进程窗口并集截图 502x1106（含独立对话框）
+[11:23:00.546] INFO  宽度 480px 截图：C:\Users\31i45\AppData\Local\Temp\veil-smoke\evidence-long\13-w480-p0-20261109-112249.png（PrintWindow=）
+[11:23:02.100] INFO  进程窗口并集截图 502x1106（含独立对话框）
+[11:23:02.102] INFO  步骤截图：C:\Users\31i45\AppData\Local\Temp\veil-smoke\evidence-long\14-step-load-20261109-112249.png
+[11:23:02.577] INFO  按键 ^s
+[11:23:03.510] INFO  进程窗口并集截图 502x1106（含独立对话框）
+[11:23:03.511] INFO  步骤截图：C:\Users\31i45\AppData\Local\Temp\veil-smoke\evidence-long\15-step-save-20261109-112249.png
+[11:23:03.513] INFO  交互步骤完成，前台与鼠标位置已还原
+[11:23:03.844] INFO  进程窗口并集截图 502x1106（含独立对话框）
+[11:23:03.845] INFO  宽度 480px 第 1 页截图：C:\Users\31i45\AppData\Local\Temp\veil-smoke\evidence-long\16-w480-p1-20261109-112249.png
+[11:23:04.189] INFO  进程窗口并集截图 502x1106（含独立对话框）
+[11:23:04.191] INFO  宽度 480px 第 2 页截图：C:\Users\31i45\AppData\Local\Temp\veil-smoke\evidence-long\17-w480-p2-20261109-112249.png
+[11:23:04.519] INFO  进程窗口并集截图 502x1106（含独立对话框）
+[11:23:04.520] INFO  宽度 480px 第 3 页截图：C:\Users\31i45\AppData\Local\Temp\veil-smoke\evidence-long\18-w480-p3-20261109-112249.png
+[11:23:04.528] INFO  已结束 PID=21964
+[11:23:04.533] INFO  证据目录：C:\Users\31i45\AppData\Local\Temp\veil-smoke\evidence-long

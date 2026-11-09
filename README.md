@@ -12,7 +12,7 @@
 
 Veil was born because **Typedown** — my favorite Markdown editor on Windows, bar none — takes **tens of seconds to minutes** to launch, every single time. A WinUI app that starts cold faster than you finish sipping your coffee should not exist, yet here we are.
 
-So I built my own. Pure Rust. No webview, no Chromium, no Electron, no external runtime. Single-file exe. 150 ms cold start. **Single-user, single-document, purely offline — no collaboration, ever.**
+So I built my own. Pure Rust. No webview, no Chromium, no Electron, no external runtime. Single-file exe. In-app cold start ≈150 ms (dual-metric measurements with command and date are in [Red Numbers](#red-numbers-targets-vs-measured)). **Single-user, single-document, purely offline — no collaboration, ever.**
 
 ## Download & Run
 
@@ -84,22 +84,27 @@ cargo test --workspace
 cargo run -p veil -- <file.md>
 ```
 
-Baseline: 910 passed / 0 failed / 12 ignored (2026-11-05), `cargo clippy --workspace --all-targets -- -D warnings` zero warnings.
+Baseline: 1131 passed / 0 failed / 13 ignored (2026-11-09); `cargo clippy --workspace --all-targets -- -D warnings` zero warnings.
 
 ## Red Numbers (targets vs measured)
 
-Measured on release build, probe-serialized, 2026-11-05 keystroke attribution detail in `docs/review/keystroke-attribution.md`:
+Measured on release build, probe-serialized, re-verified 2026-11-09. Commands: `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo run --release -p veil --example bench_typing`, and `(Get-Item target\release\veil.exe).Length`. Keystroke attribution detail in `docs/review/keystroke-attribution.md`.
 
 | Metric | Target | Measured |
 |---|---|---|
-| Cold start (release, `main` → first frame; acceptance口径) | ≤ 300 ms | 145–190 ms ✅ |
-| Cold start (wall clock, process create → first frame; observation only) | ≤ 300 ms | 450–529 ms (440–470 ms before `main`, process-create overhead on this machine) |
-| Keystroke→commit p95 on 100 K-word doc | ≤ 16 ms | 3.37 ms / 5.20 ms / 9.25 ms (5.0k / 10.5k / 20.0k blocks) ✅ |
-| Resident memory, 100 K-word doc (private working set) | ≤ 150 MB | 40.76 MB |
-| Installed size (single `veil.exe`) | ≤ 15 MiB | 5,985,280 B ≈ 5.71 MiB |
+| Cold start (release, `main` → first frame; acceptance口径; 5 runs) | ≤ 300 ms | 145–190 ms (min–max; 2026-11-05, `VEIL_BOOT_LOG` segmented probe) ✅ |
+| Cold start (in-process open + first full layout; p50 / max over 5 runs) | observation only | 520.87 / 533.85 ms (2026-11-09, `cargo run --release -p veil --example bench_typing`) |
+| Cold start (wall clock, process create → first frame; observation only) | ≤ 300 ms | 450–529 ms (440–470 ms before `main`, process-create overhead on this machine; 2026-10-31) |
+| Cold start (window handle; P2 comparison口径) | — | 30 ms (2026-10-30, `tools/bench/measure.ps1`) |
+| Keystroke→commit p95 on 100 K-word doc | ≤ 16 ms | 3.37 ms / 5.20 ms / 9.25 ms (5.0k / 10.5k / 20.0k blocks; 2026-11-03) ✅ |
+| Resident memory, 100 K-word doc (private working set) | ≤ 150 MB | 40.76 MB (2026-11-05) |
+| Installed size (single-file `veil.exe`; no install directory or separate unpacked payload) | ≤ 6 MiB = 6,291,456 B | 6,043,136 B ≈ 5.76 MiB (2026-11-09); margin 248,320 B |
 | `veil-core` unit + property tests | ≥ 80 | 209 |
 | E2E assertions | ≥ 20 | 41 (3 e2e scenarios: open→save→reopen, table+image paste, find/replace→crash recovery→self-clean) ✅ |
-| Markdown roundtrip (no edits: output == input bytes) | 100% | 100% |
+| Markdown roundtrip (no edits: output == input bytes; byte comparison) | 100% | 100% |
+| CommonMark 0.31.2 conformance (by test cases; dimension A / C / D) | — | A 652/652 · C 652/652 · D 652/652 ✅ |
+| CommonMark 0.31.2 conformance (dimension B) | — | B_EXPORT_EXACT 629/652 · B_CANON 630/652 (not full) |
+| GFM extension conformance (Tables / TaskList / Strikethrough; by test cases; dimension A / C / D) | — | A 23/23 · C 23/23 · D 23/23 ✅; B_CANON 12/23 (11 autolink cases observed only) |
 | `veil-core` GUI/async runtime deps | 0 | 0 |
 | `veil-ui` + `veil` direct deps | ≤ 8 | 8 |
 | Workspace transitive deps | ≤ 200 | 141 |
@@ -131,7 +136,7 @@ Dependency blacklist: `tokio`, `wasmtime`, any webview crate (`webview2-com`/`wr
   - ADR-008 dependency upgrade strategy
   - ADR-011 wgpu deferral (v1 defers, trigger-based)
 - `.trae/specs/release-and-roadmap/v1.1-roadmap.md` — v1.1 detailed plan
-- `.trae/specs/release-and-roadmap/v1.2-roadmap.md` — v1.2 candidate pool (table visual editing, PDF bookmarks, font subsetting, typography settings)
+- `.trae/specs/release-and-roadmap/v1.2-roadmap.md` — v1.2 candidate pool (typography settings, PDF bookmarks, font subsetting)
 - `.trae/specs/release-and-roadmap/v2.0-roadmap.md` — v2.0 detailed plan (wgpu deferred — four trigger conditions must all trip)
 
 ## License

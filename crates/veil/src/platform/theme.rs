@@ -5,6 +5,8 @@ use std::ffi::c_void;
 
 use veil_ui::{NativeWindow, SystemTheme, WindowEffects};
 
+use super::wide;
+
 // 注册表值读取（advapi32）：`RegGetValueW` 一步完成打开/取值/关闭。
 #[link(name = "advapi32")]
 extern "system" {
@@ -39,10 +41,6 @@ const DWMWA_USE_IMMERSIVE_DARK_MODE_LEGACY: u32 = 19;
 /// Win11 22H2+ 系统背景材质；值 2 = MICA（主窗口）。
 const DWMWA_SYSTEMBACKDROP_TYPE: u32 = 38;
 const DWMSBT_MAINWINDOW: u32 = 2;
-
-fn wide(s: &str) -> Vec<u16> {
-    s.encode_utf16().chain(std::iter::once(0)).collect()
-}
 
 /// 系统外观：`AppsUseLightTheme=0` 即深色。值缺失/读取失败返回 None（视图层按浅色处理）。
 pub struct WinSystemTheme;

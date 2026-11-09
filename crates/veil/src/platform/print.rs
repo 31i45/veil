@@ -10,6 +10,8 @@ use std::ffi::c_void;
 
 use veil_ui::{path_label, Print, PrintSession};
 
+use super::wide;
+
 type Hwnd = *mut c_void;
 type Hdc = *mut c_void;
 type Hglobal = *mut c_void;
@@ -125,10 +127,6 @@ const PD_RETURNDC: u32 = 0x0000_0100;
 const HORZRES: i32 = 8;
 const VERTRES: i32 = 10;
 const LOGPIXELSX: i32 = 88;
-
-fn wide(s: &str) -> Vec<u16> {
-    s.encode_utf16().chain(std::iter::once(0)).collect()
-}
 
 /// 打印作业体（begin 之后必经路径）：StartDoc → 逐页贴帧 → EndDoc/AbortDoc。
 /// `margin`：页帧在物理页内的贴图偏移（像素）；`output`：DOCINFO 输出文件名

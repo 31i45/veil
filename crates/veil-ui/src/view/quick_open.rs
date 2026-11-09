@@ -6,7 +6,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::geometry::BASE_FONT_SIZE;
+use crate::geometry::{Rect, BASE_FONT_SIZE};
 
 /// 浮层基准宽（乘 DPI scale）。
 pub const PANEL_W: f32 = 520.0;
@@ -216,20 +216,6 @@ pub(crate) fn filter(items: &[QuickItem], query: &str) -> Vec<usize> {
         .collect();
     hits.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
     hits.into_iter().map(|(_, i)| i).collect()
-}
-
-#[derive(Clone, Copy, PartialEq, Debug)]
-pub(crate) struct Rect {
-    pub(crate) x: f32,
-    pub(crate) y: f32,
-    pub(crate) w: f32,
-    pub(crate) h: f32,
-}
-
-impl Rect {
-    pub(crate) fn contains(&self, x: f32, y: f32) -> bool {
-        x >= self.x && x < self.x + self.w && y >= self.y && y < self.y + self.h
-    }
 }
 
 /// 浮层几何：面板、输入行与固定数量的候选行槽位。

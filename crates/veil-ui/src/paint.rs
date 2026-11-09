@@ -52,6 +52,22 @@ pub(crate) fn can_present(frame_len: usize, target_len: usize) -> bool {
     frame_len == target_len
 }
 
+/// 插入点的焦点表达：聚焦实心；失焦空心框（不依赖 alpha 合成，语义最直接）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CaretVisual {
+    Solid,
+    Hollow,
+}
+
+/// 焦点状态 → 插入点视觉（纯函数，便于断言）。
+pub(crate) fn caret_visual(focused: bool) -> CaretVisual {
+    if focused {
+        CaretVisual::Solid
+    } else {
+        CaretVisual::Hollow
+    }
+}
+
 impl App {
     /// 补齐缺失布局（键命中则零开销）。Reveal 激活已并入布局键，光标移动后
     /// 指纹失配即自动重排，无需另设失效调用（ADR-009 决策四）。
@@ -413,7 +429,7 @@ impl App {
         let scale = self.input_state.scale;
         let vp = self.viewport();
         Some((
-            MARGIN * scale + cell.x,
+            self.content_x() + cell.x,
             vp.y + doc_top - self.window_state.scroll_y + cell.y,
             BASE_LINE_HEIGHT * scale,
         ))
@@ -600,7 +616,7 @@ impl App {
             if self.math_shows_image(id, &range) {
                 // 数学块渲染态：图整体替换文本光栅（display 公式居中）
                 let img = &self.cache.math_imgs[&id].value;
-                let x = (MARGIN * scale
+                let x = (self.content_x()
                     + ((self.content_width() - img.width as f32) / 2.0).max(0.0))
                     as i32;
                 frame.blit(&img.pixels, img.width, img.height, x, sy);
@@ -629,7 +645,7 @@ impl App {
                     (r.1, r.2)
                 };
                 frame.fill_rect(
-                    (MARGIN * scale) as i32 - 4,
+                    self.content_x() as i32 - 4,
                     sy - 2,
                     rw + 8,
                     rh + 4,
@@ -649,7 +665,7 @@ impl App {
                             .selection_rects(l, s - range.start, e - range.start)
                     {
                         frame.fill_rect(
-                            (MARGIN * scale + rx) as i32,
+                            (self.content_x() + rx) as i32,
                             sy + ry as i32,
                             rw as u32,
                             rh as u32,
@@ -659,14 +675,14 @@ impl App {
                 }
             }
             let (px, rw, rh) = &self.cache.rasters[&id].value;
-            frame.blit(px, *rw, *rh, (MARGIN * scale) as i32, sy);
+            frame.blit(px, *rw, *rh, self.content_x() as i32, sy);
             // 删除线（P3-4）：叠加在字形之上；cosmic-text 无原生支持，
             // 按可视行矩形在文本中线画横线（粗细随 DPI 缩放）
             for (s, e) in &l.strikes {
                 for (rx, ry, rw2, rh2) in self.engine.selection_rects(l, *s, *e) {
                     let th = (scale as i32).max(1);
                     frame.fill_rect(
-                        (MARGIN * scale + rx) as i32,
+                        (self.content_x() + rx) as i32,
                         sy + (ry + rh2 * 0.5) as i32 - th / 2,
                         rw2 as u32,
                         th as u32,
@@ -677,7 +693,7 @@ impl App {
             // 行内公式/图片：位置在排版期已定（PlacedImg），叠在文本光栅之上。
             // 图片按占位显示尺寸最近邻缩放（缓存保留自然尺寸，不生成缩放副本）。
             for p in &l.imgs {
-                let dx = (MARGIN * scale + p.x) as i32;
+                let dx = (self.content_x() + p.x) as i32;
                 let dy = sy + p.y as i32;
                 match &p.key {
                     InlineAsset::Math(tex) => {
@@ -705,7 +721,7 @@ impl App {
                 BlockKind::BlockQuote => {
                     let bh = self.block_height(g) as u32;
                     frame.fill_rect(
-                        (MARGIN * scale) as i32 - (8.0 * scale) as i32,
+                        self.content_x() as i32 - (8.0 * scale) as i32,
                         sy,
                         (3.0 * scale).max(1.0) as u32,
                         bh,
@@ -715,7 +731,7 @@ impl App {
                 BlockKind::ThematicBreak if !node_active(range, caret) => {
                     let bh = self.block_height(g);
                     frame.fill_rect(
-                        (MARGIN * scale) as i32,
+                        self.content_x() as i32,
                         sy + (bh * 0.5) as i32,
                         self.content_width().max(1.0) as u32,
                         1,
@@ -743,6 +759,7 @@ impl App {
             }
         }
         // 超限块降级提示：块高已含提示行，画在文本之后、光标/选区之上
+        let notice_x = self.content_x().round() as i32;
         for (sy, bh, full) in oversize {
             let notice = oversize_notice(full);
             let mid = sy as f32 + bh - BASE_LINE_HEIGHT * scale / 2.0;
@@ -756,7 +773,7 @@ impl App {
                     &l.pixels,
                     l.w,
                     l.h,
-                    (MARGIN * scale).round() as i32,
+                    notice_x,
                     (mid - l.h as f32 / 2.0).round() as i32,
                 );
             }
@@ -793,6 +810,7 @@ impl App {
                 self.doc.path.as_deref(),
                 dirty,
                 external,
+                self.persist_state.last_saved_hhmm.as_deref(),
                 self.ui_state.writing.words,
                 line,
                 col,
@@ -1085,7 +1103,7 @@ impl App {
         if !self.ui_state.search.open || self.ui_state.search.matches.is_empty() {
             return;
         }
-        let x0 = MARGIN * self.input_state.scale;
+        let x0 = self.content_x();
         // 命中按起点升序：二分定位首个相交者，向后多取一个以覆盖跨块命中
         let from = self
             .ui_state
@@ -1147,6 +1165,7 @@ impl App {
             (search::Hit::Prev, l.prev),
             (search::Hit::Next, l.next),
             (search::Hit::Close, l.close),
+            (search::Hit::ToggleCase, l.case),
         ];
         if let Some(r) = rl {
             hovers.push((search::Hit::ReplaceOne, r.one));
@@ -1176,7 +1195,7 @@ impl App {
                 theme.chrome_border,
             );
         }
-        for r in [l.prev, l.next, l.close] {
+        for r in [l.prev, l.next, l.close, l.case] {
             frame.fill_rect(
                 r.x.round() as i32,
                 r.y.round() as i32 + 1,
@@ -1378,6 +1397,28 @@ impl App {
                 let x = (l.count_right - lab.w as f32).round() as i32;
                 frame.blit(&lab.pixels, lab.w, lab.h, x, text_y(lab.h));
             }
+        }
+        // 「区分大小写」开关字形：开启时用 accent 令牌表达选中态（悬停底色另行绘制）。
+        let case_color = if search.case_sensitive {
+            theme.accent
+        } else {
+            theme.text
+        };
+        if let Some(lab) =
+            self.ui_state
+                .chrome
+                .labels
+                .get_or_insert(&mut self.engine, "Aa", case_color, scale)
+        {
+            let x = l.case.x + (l.case.w - lab.w as f32) / 2.0;
+            let y = l.case.y + (l.case.h - lab.h as f32) / 2.0;
+            frame.blit(
+                &lab.pixels,
+                lab.w,
+                lab.h,
+                x.round() as i32,
+                y.round() as i32,
+            );
         }
         // 查询行按钮字形（居中）
         for (r, glyph) in [(l.prev, "‹"), (l.next, "›"), (l.close, "×")] {
@@ -1716,7 +1757,7 @@ impl App {
         let Some(t) = self.cache.table(id, self.table_key(id)) else {
             return;
         };
-        let x0 = (MARGIN * self.input_state.scale) as i32;
+        let x0 = self.content_x() as i32;
         let theme = self.input_state.theme;
 
         // 活动单元格：排版键已记录 caret 命中的格（源码态显示），画选中色底色
@@ -1789,8 +1830,20 @@ impl App {
             let inner = pre.cursor.map(|(s, _)| s).unwrap_or(0);
             let (ix, _, _) = self.engine.caret_xy(&l, inner);
             frame.fill_rect((cx + ix) as i32, cy as i32, 1, ch as u32, caret_color);
-        } else {
+        } else if caret_visual(self.ui_state.focused) == CaretVisual::Solid {
             frame.fill_rect(cx as i32, cy as i32, 2, ch as u32, caret_color);
+        } else {
+            // 失焦：同位置同高（ch）的空心框——1 逻辑像素描边（按 scale 换算，至少
+            // 1 物理像素），内部留空。仅视觉差异：命中区域/行高/排版均不变。
+            let stroke = (self.input_state.scale.round() as i32).max(1);
+            let w = (crate::theme::surface::caret_width(self.input_state.scale).round() as i32)
+                .max(stroke * 3);
+            let h = (ch as i32).max(stroke * 2 + 1);
+            let (x, y) = (cx as i32, cy as i32);
+            frame.fill_rect(x, y, w as u32, stroke as u32, caret_color);
+            frame.fill_rect(x, y + h - stroke, w as u32, stroke as u32, caret_color);
+            frame.fill_rect(x, y, stroke as u32, h as u32, caret_color);
+            frame.fill_rect(x + w - stroke, y, stroke as u32, h as u32, caret_color);
         }
     }
 
@@ -2241,6 +2294,22 @@ mod tests {
 
     const TABLE: &str = "| a | b |\n| --- | --- |\n| c | d |\n";
     const TABLE_2X2_ALIGNED: &str = "| a | b |\n| :-- | --: |\n| c | d |\n| e | f |\n";
+
+    #[test]
+    fn caret_visual_marks_focus_state() {
+        assert_eq!(caret_visual(true), CaretVisual::Solid, "聚焦：实心插入点");
+        assert_eq!(caret_visual(false), CaretVisual::Hollow, "失焦：空心框");
+    }
+
+    #[test]
+    fn ui_state_focus_defaults_true_and_flips() {
+        let mut ui = crate::app::UIState::default();
+        assert!(ui.focused, "启动默认聚焦");
+        ui.focused = false;
+        assert!(!ui.focused, "失焦写入 false");
+        ui.focused = true;
+        assert!(ui.focused, "重新聚焦写回 true");
+    }
 
     #[test]
     fn append_row_adds_empty_row_with_same_columns() {

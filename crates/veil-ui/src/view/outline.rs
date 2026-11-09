@@ -6,7 +6,7 @@
 
 use veil_core::BlockId;
 
-use crate::geometry::BASE_FONT_SIZE;
+use crate::geometry::{Rect, BASE_FONT_SIZE};
 
 /// 面板基准宽（乘 DPI scale）。
 pub const PANEL_W: f32 = 240.0;
@@ -39,14 +39,6 @@ pub(crate) struct Outline {
     /// 上次自动跟随的光标位置：仅光标变化时把当前条目滚入视野，
     /// 避免用户手动滚动大纲时被每帧强制拉回。打开面板时置 None 以重新同步。
     pub(crate) last_caret: Option<usize>,
-}
-
-#[derive(Clone, Copy, PartialEq, Debug)]
-pub(crate) struct Rect {
-    pub(crate) x: f32,
-    pub(crate) y: f32,
-    pub(crate) w: f32,
-    pub(crate) h: f32,
 }
 
 /// 单行命中矩形。

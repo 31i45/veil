@@ -21,6 +21,15 @@ pub(crate) struct BlockGeom {
     pub(crate) est_h: f32,
 }
 
+/// 块后间距（逻辑像素，未乘 scale）：标题类块与后续块拉开距离，
+/// 形成「标题—正文」段距大于正文段距的层级。几何累计与测试均用此单一真源。
+pub(crate) fn gap_after(kind: &BlockKind) -> f32 {
+    match kind {
+        BlockKind::AtxHeading(_) | BlockKind::SetextHeading(_) => (PARA_GAP * 1.6).round(),
+        _ => PARA_GAP,
+    }
+}
+
 /// 文档几何索引：`blocks` 与 `total_h` 只在本层刷新/重算后读取。
 #[derive(Default)]
 pub(crate) struct BlockIndex {
@@ -109,19 +118,19 @@ impl App {
     /// 按当前布局/公式/表格缓存重算高度与累计 top（不再枚举块）。
     /// 取出 Vec 再循环：`block_height(&self)` 与 `index` 的可变借用无法同时成立。
     pub(crate) fn recompute_geometry(&mut self) {
+        let scale = self.input_state.scale;
         let mut blocks = std::mem::take(&mut self.index.blocks);
-        let mut y = MARGIN * self.input_state.scale;
+        let mut y = MARGIN * scale;
         for g in &mut blocks {
             let h = self.block_height(g);
             g.height = h;
             g.top = y;
-            y += h + PARA_GAP * self.input_state.scale;
+            y += h + gap_after(&g.kind) * scale;
         }
         // 末块后不累加块间距（与原 block_tops 一致），文档尾部只留外边距
-        self.index.total_h = if blocks.is_empty() {
-            2.0 * MARGIN * self.input_state.scale
-        } else {
-            y - PARA_GAP * self.input_state.scale + MARGIN * self.input_state.scale
+        self.index.total_h = match blocks.last() {
+            Some(last) => y - gap_after(&last.kind) * scale + MARGIN * scale,
+            None => 2.0 * MARGIN * scale,
         };
         self.index.blocks = blocks;
     }

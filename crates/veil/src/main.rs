@@ -13,19 +13,29 @@ use veil_ui::{decode, Doc, FileStore, ImageData, MathImage};
 /// 无 CLI 参数时的示例文档，覆盖全部渲染路径：标题/粗体/斜体/代码/链接/行内公式/展示公式/代码块/中文。
 const SAMPLE: &str = "# Veil 切片 8\n\n支持 **粗体**、*斜体*、`行内代码`、[链接](https://example.com) 与行内公式 $x^2 + y^2 = z^2$（光标移出渲染为图、移入显示源码）。\n\n块级公式（同规则，渲染图居中）：\n\n$$\n\\frac{a + b}{\\sqrt{c^2 + 1}} = \\sum_{k=0}^{n} k^2\n$$\n\n```\nfn main() { /* 代码块等宽 */ }\n```\n\n中文混排与 IME 输入：请用中文输入法在此段尾部打字验证候选框跟随。\n\n本页为无路径草稿：可拖入 .md 文件打开；关联文件后可直接拖入 PNG/JPEG 等图片插入正文（Ctrl+S 保存与 Ctrl+E 导出 HTML 仅对关联文件生效）。\n";
 
+/// 读取并解码文档：IO 失败按种类归因（不存在/无权限/其他），解码失败归因非 UTF-8。
+fn load_document(path: &Path) -> Result<(String, bool), platform::OpenFailure> {
+    let bytes = std::fs::read(path).map_err(|e| platform::OpenFailure::from_io(&e))?;
+    decode(&bytes).map_err(platform::OpenFailure::NotUtf8)
+}
+
 fn main() {
     let doc = match std::env::args().nth(1) {
         Some(p) => {
             let path = PathBuf::from(p);
-            match Fs.load(&path).and_then(|b| decode(&b)) {
+            match load_document(&path) {
                 Ok((text, bom)) => Doc {
                     text,
                     path: Some(path),
                     bom,
                     resume: false,
                 },
-                Err(e) => {
-                    eprintln!("无法读取 {}: {e}", path.display());
+                Err(failure) => {
+                    // stderr 保留完整诊断（debug/控制台启动可见）；
+                    // 发布构建无控制台，必须弹可见错误框后再退出
+                    let text = platform::open_failure_text(&path, &failure);
+                    eprintln!("无法读取 {}: {text}", path.display());
+                    platform::show_error("Veil 无法打开文件", &text);
                     std::process::exit(1);
                 }
             }
@@ -42,6 +52,7 @@ fn main() {
         veil_ui::Ports {
             clipboard: clipboard(),
             store: Box::new(Fs),
+            clock: platform::system_clock(),
             math: math_renderer(),
             images: image_loader(),
             assets: asset_store(),

@@ -68,7 +68,7 @@ impl SyntaxColors {
         SyntaxColors {
             keyword: [132, 48, 137],
             string: [3, 106, 78],
-            comment: [120, 120, 120],
+            comment: [105, 105, 105],
             number: [12, 94, 188],
             function: [115, 82, 3],
             type_name: [26, 82, 168],
@@ -129,7 +129,7 @@ impl Theme {
             code_bg: [245, 245, 245, 255],
             sel: [40, 110, 210, 80],
             table_head_bg: [246, 248, 250, 255],
-            grid: [208, 213, 221, 255],
+            grid: [136, 141, 148, 255],
             chrome_bg: [248, 248, 248, 255],
             chrome_border: [208, 213, 221, 255],
             hover: [228, 236, 246, 255],
@@ -144,7 +144,7 @@ impl Theme {
             syntax: SyntaxColors {
                 keyword: [132, 48, 137],   // 紫
                 string: [3, 106, 78],      // 深绿
-                comment: [120, 120, 120],  // 灰
+                comment: [105, 105, 105],  // 灰
                 number: [12, 94, 188],     // 蓝
                 function: [115, 82, 3],    // 棕
                 type_name: [26, 82, 168],  // 蓝
@@ -162,7 +162,7 @@ impl Theme {
             code_bg: [40, 40, 40, 255],
             sel: [70, 130, 220, 110],
             table_head_bg: [42, 42, 42, 255],
-            grid: [70, 74, 80, 255],
+            grid: [112, 116, 122, 255],
             chrome_bg: [38, 38, 38, 255],
             chrome_border: [60, 64, 70, 255],
             hover: [55, 65, 80, 255],
@@ -177,7 +177,7 @@ impl Theme {
             syntax: SyntaxColors {
                 keyword: [197, 134, 192],     // 亮紫
                 string: [125, 191, 153],      // 青绿
-                comment: [120, 120, 120],     // 灰
+                comment: [150, 150, 150],     // 灰
                 number: [104, 166, 232],      // 亮蓝
                 function: [220, 180, 100],    // 金
                 type_name: [120, 170, 230],   // 蓝
@@ -802,6 +802,11 @@ mod tests {
         (hi + 0.05) / (lo + 0.05)
     }
 
+    /// 4 字节色（含 alpha）→ 不透明 RGB：绘制底均为不透明色，对比度只取决于 RGB。
+    fn rgb(c: [u8; 4]) -> [u8; 3] {
+        [c[0], c[1], c[2]]
+    }
+
     #[test]
     fn palettes_meet_text_contrast_targets() {
         for t in [Theme::light(), Theme::dark()] {
@@ -825,6 +830,63 @@ mod tests {
                 t.dark
             );
         }
+    }
+
+    #[test]
+    fn syntax_and_grid_meet_contrast_targets() {
+        // spec「对比度达标」：正文 ≥7:1、次要文本/语法注释 ≥4.5:1、非文本装饰线 ≥3:1，
+        // 明暗两主题同时达标。语法注释出现在代码块（code_bg），也可能落在正文底（bg）；
+        // grid 画表格线/引用竖条/分隔线，均直接叠在 bg 上。
+        for t in [Theme::light(), Theme::dark()] {
+            let bg = rgb(t.bg);
+            let code_bg = rgb(t.code_bg);
+            let grid = rgb(t.grid);
+            let comment = t.syntax.comment;
+
+            let c_fg = contrast(t.fg, bg);
+            assert!(c_fg >= 7.0, "正文/背景对比度不足: dark={} {c_fg:.2}", t.dark);
+
+            let c_muted = contrast(t.muted, bg);
+            assert!(
+                c_muted >= 4.5,
+                "次要文本/背景对比度不足: dark={} {c_muted:.2}",
+                t.dark
+            );
+
+            let c_comment_code = contrast(comment, code_bg);
+            assert!(
+                c_comment_code >= 4.5,
+                "语法注释/code_bg 对比度不足: dark={} {c_comment_code:.2}",
+                t.dark
+            );
+
+            let c_comment_bg = contrast(comment, bg);
+            assert!(
+                c_comment_bg >= 4.5,
+                "语法注释/背景对比度不足: dark={} {c_comment_bg:.2}",
+                t.dark
+            );
+
+            let c_grid = contrast(grid, bg);
+            assert!(
+                c_grid >= 3.0,
+                "grid/背景对比度不足: dark={} {c_grid:.2}",
+                t.dark
+            );
+
+            // 表格线同时压在表头底色上，同样按非文本装饰线门禁校核。
+            let c_grid_head = contrast(grid, rgb(t.table_head_bg));
+            assert!(
+                c_grid_head >= 3.0,
+                "grid/table_head_bg 对比度不足: dark={} {c_grid_head:.2}",
+                t.dark
+            );
+        }
+        // 无主题兜底色板与浅色主题同值，避免两条路径出现不同注释色。
+        assert_eq!(
+            SyntaxColors::default_light().comment,
+            Theme::light().syntax.comment
+        );
     }
 
     #[test]

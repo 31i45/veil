@@ -170,6 +170,7 @@ fn popup_label_truncated_when_too_long() {
         None,
         false,
         ExternalState::None,
+        None,
         0,
         1,
         1,
@@ -379,7 +380,7 @@ fn scrollbar_hit_requires_overflow_and_right_edge() {
 #[test]
 fn status_line_variants() {
     assert_eq!(
-        status_line(None, false, ExternalState::None, false, 0, 1, 1),
+        status_line(None, false, ExternalState::None, false, None, 0, 1, 1),
         ("未命名草稿".into(), "0 字 · 行 1，列 1".into())
     );
     assert_eq!(
@@ -388,12 +389,14 @@ fn status_line_variants() {
             true,
             ExternalState::BackedUp,
             false,
+            None,
             1234,
             12,
             3
         ),
         (
-            "a.md · dir *（外部修改已备份）".into(),
+            // 脏态必须以「未保存」文字表达（`*` 只是标题栏习惯，状态栏不靠它单独表态）
+            "a.md · dir *（外部修改已备份） · 未保存".into(),
             "1234 字 · 行 12，列 3".into()
         )
     );
@@ -403,6 +406,7 @@ fn status_line_variants() {
             false,
             ExternalState::None,
             false,
+            None,
             0,
             2,
             7
@@ -413,20 +417,39 @@ fn status_line_variants() {
 }
 
 #[test]
+fn status_line_shows_saved_time_only_when_clean() {
+    let p = Some(Path::new("a.md"));
+    assert_eq!(
+        status_line(p, false, ExternalState::None, false, Some("14:32"), 0, 1, 1).0,
+        "a.md · 已保存 14:32"
+    );
+    // 源码模式后缀顺序不变，保存态追加在最后
+    assert_eq!(
+        status_line(p, false, ExternalState::None, true, Some("09:05"), 0, 1, 1).0,
+        "a.md（源码模式） · 已保存 09:05"
+    );
+    // 脏态优先：即便已有保存时刻也不得显示「已保存」
+    assert_eq!(
+        status_line(p, true, ExternalState::None, false, Some("14:32"), 0, 1, 1).0,
+        "a.md * · 未保存"
+    );
+}
+
+#[test]
 fn status_line_marks_source_mode() {
     let p = Some(Path::new("a.md"));
     assert_eq!(
-        status_line(p, false, ExternalState::None, true, 0, 1, 1).0,
+        status_line(p, false, ExternalState::None, true, None, 0, 1, 1).0,
         "a.md（源码模式）"
     );
     // 与外部状态共存时追加在最后，关闭时逐字节等于旧输出
     assert_eq!(
-        status_line(p, true, ExternalState::Changed, true, 0, 1, 1).0,
-        "a.md *（外部修改）（源码模式）"
+        status_line(p, true, ExternalState::Changed, true, None, 0, 1, 1).0,
+        "a.md *（外部修改）（源码模式） · 未保存"
     );
     assert_eq!(
-        status_line(p, true, ExternalState::Changed, false, 0, 1, 1).0,
-        "a.md *（外部修改）"
+        status_line(p, true, ExternalState::Changed, false, None, 0, 1, 1).0,
+        "a.md *（外部修改） · 未保存"
     );
 }
 
@@ -434,12 +457,12 @@ fn status_line_marks_source_mode() {
 fn status_line_marks_external_states() {
     let p = Some(Path::new("a.md"));
     assert_eq!(
-        status_line(p, false, ExternalState::Changed, false, 0, 1, 1).0,
+        status_line(p, false, ExternalState::Changed, false, None, 0, 1, 1).0,
         "a.md（外部修改）"
     );
     assert_eq!(
-        status_line(p, true, ExternalState::Missing, false, 0, 1, 1).0,
-        "a.md *（文件缺失）"
+        status_line(p, true, ExternalState::Missing, false, None, 0, 1, 1).0,
+        "a.md *（文件缺失） · 未保存"
     );
 }
 
@@ -488,6 +511,7 @@ fn paint_caches_status_fit_across_frames() {
             Some(&long_path),
             true,
             ExternalState::None,
+            None,
             0,
             1,
             1,
@@ -508,6 +532,7 @@ fn paint_caches_status_fit_across_frames() {
         Some(&long_path),
         true,
         ExternalState::None,
+        None,
         0,
         1,
         1,
@@ -538,6 +563,7 @@ fn paint_draws_menu_status_and_popup() {
         None,
         false,
         ExternalState::None,
+        None,
         0,
         1,
         1,
@@ -571,6 +597,7 @@ fn paint_draws_menu_status_and_popup() {
         None,
         false,
         ExternalState::None,
+        None,
         0,
         1,
         1,
@@ -652,6 +679,7 @@ fn toggle_rows_report_and_paint_checked_state() {
             None,
             false,
             ExternalState::None,
+            None,
             0,
             1,
             1,
@@ -689,6 +717,7 @@ fn paint_uses_dark_palette() {
         None,
         false,
         ExternalState::None,
+        None,
         0,
         1,
         1,
@@ -756,6 +785,7 @@ fn scrollbar_thumb_painted_when_overflowing() {
             None,
             false,
             ExternalState::None,
+            None,
             0,
             1,
             1,

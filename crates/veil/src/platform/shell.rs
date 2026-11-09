@@ -5,10 +5,11 @@
 
 #![allow(non_snake_case)]
 
-use std::ffi::{c_void, OsStr};
-use std::os::windows::ffi::OsStrExt;
+use std::ffi::c_void;
 
 use veil_ui::UrlOpener;
+
+use super::wide;
 
 #[link(name = "shell32")]
 extern "system" {
@@ -27,12 +28,6 @@ const SW_SHOWNORMAL: i32 = 1;
 
 /// 返回值 <= 32 是 ShellExecuteW 约定的错误码区间（> 32 才是成功句柄）。
 const SHELL_EXECUTE_MIN_SUCCESS: isize = 32;
-
-/// UTF-16 + NUL 结尾：Win32 W 系列 API 唯一接受的字符串形态。
-/// 用 OsStr::encode_wide 而非 `str::encode_utf16`，与其它平台层 FFI 保持一致。
-fn wide(s: &str) -> Vec<u16> {
-    OsStr::new(s).encode_wide().chain(std::iter::once(0)).collect()
-}
 
 /// 系统默认程序（默认浏览器/邮件客户端）打开 URL。
 pub struct SystemUrlOpener;

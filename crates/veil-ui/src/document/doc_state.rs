@@ -129,6 +129,9 @@ impl App {
             Ok(()) => {
                 self.editor.mark_saved();
                 self.doc.baseline = data;
+                // 本会话最近一次成功保存的时刻（自动/手工同源）：状态栏「已保存 HH:MM」
+                let hhmm = self.ports.clock.local_hhmm();
+                self.persist_state.last_saved_hhmm = Some(hhmm);
                 self.persist_state.persist.keep_notice_only(); // 备份登记作废，「已备份」提示保留
                 self.persist_state.persist.clear_pending(); // 磁盘已是本版内容：待备份提示作废
                 self.persist_state.persist.set_missing(false); // 删除/不可读状态由本次写入恢复
@@ -144,7 +147,9 @@ impl App {
                 self.update_title();
             }
             Err(e) => {
-                self.ui_state.chrome.notice = format!("保存失败：{e}");
+                // 失败不沉默：保持 dirty、不动 last_saved_hhmm，并给出可行动的下一步
+                self.ui_state.chrome.notice =
+                    format!("保存失败：{e}；可 Ctrl+S 重试，或 Ctrl+Shift+S 另存为");
                 eprintln!("保存失败 {}: {e}", path.display());
             }
         }
@@ -361,6 +366,8 @@ impl App {
                 self.editor.mark_saved();
                 self.doc.path = Some(path.clone());
                 self.doc.baseline = data;
+                let hhmm = self.ports.clock.local_hhmm();
+                self.persist_state.last_saved_hhmm = Some(hhmm);
                 self.persist_state.persist.reset();
                 self.input_state.revs.image_base += 1; // 图片相对基准变化：相关派生缓存键失配
                 self.clear_recovery(); // 旧路径的恢复副本已随另存失效（0b）
@@ -370,7 +377,8 @@ impl App {
                 self.update_title();
             }
             Err(e) => {
-                self.ui_state.chrome.notice = format!("另存为失败：{e}");
+                self.ui_state.chrome.notice =
+                    format!("另存为失败：{e}；可 Ctrl+Shift+S 重试或换一个位置");
                 eprintln!("另存为失败 {}: {e}", path.display());
             }
         }
@@ -508,6 +516,7 @@ impl App {
         self.doc.bom = bom;
         self.doc.baseline = bytes; // 新文件：磁盘内容即基线
         self.persist_state.persist.reset();
+        self.persist_state.last_saved_hhmm = None; // 时间属于上一份文档：打开即作废
         self.note_opened(path.clone()); // 登记最近文件（0b）
         self.clear_recovery(); // 旧文档的恢复快照已随打开失效（0b / 3e 修 B）
         // 新文档：会话与图片基准代次递增，块相关缓存按因果键失配；
@@ -550,6 +559,7 @@ impl App {
         self.doc.bom = false;
         self.doc.baseline = encode("", false); // 空白草稿：基线为空字节
         self.persist_state.persist.reset();
+        self.persist_state.last_saved_hhmm = None; // 新草稿未保存过
         self.clear_recovery(); // 旧文档的恢复快照已随新建失效（0b / 3e 修 B）
         // 新文档：会话与图片基准代次递增，块相关缓存按因果键失配；
         // 行内公式按 tex 内容寻址，跨文档保留

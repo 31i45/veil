@@ -75,6 +75,8 @@ pub enum Action {
     Doc(Intent),
     /// 垂直移动 ±n 视觉行（goal-column 语义在 shell 维护）。
     MoveVertical(i32),
+    /// 按视口翻页（PageUp/PageDown，±1）：滚动量与光标由 shell 按 layout 几何换算。
+    Page(i32),
     /// 垂直扩选 ±n 视觉行（Shift+↑/↓；落点换算同 MoveVertical，仅保留 anchor）。
     SelectVertical(i32),
     MoveLineStart,
@@ -187,6 +189,9 @@ pub fn translate(key: Key, mods: Mods) -> Option<Action> {
         Key::Right => Some(Action::Doc(Intent::MoveRight)),
         Key::Up if mods.shift => Some(Action::SelectVertical(-1)),
         Key::Down if mods.shift => Some(Action::SelectVertical(1)),
+        // Alt+↑/↓ 移动行（AltGr = Ctrl+Alt 不参与，见 ctrl 防护说明）
+        Key::Up if mods.alt && !mods.ctrl => Some(Action::Doc(Intent::MoveLineUp)),
+        Key::Down if mods.alt && !mods.ctrl => Some(Action::Doc(Intent::MoveLineDown)),
         Key::Up => Some(Action::MoveVertical(-1)),
         Key::Down => Some(Action::MoveVertical(1)),
         Key::Home if ctrl && mods.shift => Some(Action::Doc(Intent::SelectDocStart)),
@@ -197,8 +202,12 @@ pub fn translate(key: Key, mods: Mods) -> Option<Action> {
         Key::End if mods.shift => Some(Action::SelectLineEnd),
         Key::Home => Some(Action::MoveLineStart),
         Key::End => Some(Action::MoveLineEnd),
-        // 翻页键只服务浮层/查找栏导航，文档路径无绑定
-        Key::PageUp | Key::PageDown => None,
+        // 翻页键：文档路径按视口翻页（浮层/查找栏导航在 mode 层先行分流）
+        Key::PageUp => Some(Action::Page(-1)),
+        Key::PageDown => Some(Action::Page(1)),
+        // Ctrl+Backspace / Ctrl+Delete：按词删除（词边界复用 Ctrl+←/→）
+        Key::Backspace if ctrl => Some(Action::Doc(Intent::DeleteWordBackward)),
+        Key::Delete if ctrl => Some(Action::Doc(Intent::DeleteWordForward)),
         Key::Backspace => Some(Action::Doc(Intent::DeleteBackward)),
         Key::Delete => Some(Action::Doc(Intent::DeleteForward)),
         Key::Enter => Some(Action::Doc(Intent::Newline)),
@@ -556,6 +565,102 @@ mod tests {
         assert_eq!(
             translate(Key::Tab, shift),
             Some(Action::Doc(Intent::Dedent))
+        );
+    }
+
+    // ---- Task 0.2 键位表快照 / Task 1 改造后的对照基线 ----
+    // 快照先于实现跑绿（改造前行为），Task 1 落地后逐项更新为新行为；
+    // 改动点即：翻页绑定、Ctrl+Backspace/Delete 按词删除、Alt+↑/↓ 行移动。
+    // 未变项（Ctrl+K）保持原断言，用于确认改造未误伤既有键位。
+
+    /// 纯 Alt（非 AltGr）：ctrl=false, alt=true。
+    const ALT: Mods = Mods {
+        ctrl: false,
+        shift: false,
+        alt: true,
+    };
+
+    #[test]
+    fn page_keys_page_the_viewport() {
+        // 改造后：PageUp/PageDown 按视口翻页（改造前恒 None）
+        assert_eq!(translate(Key::PageUp, NONE), Some(Action::Page(-1)));
+        assert_eq!(translate(Key::PageDown, NONE), Some(Action::Page(1)));
+        assert_eq!(translate(Key::PageUp, CTRL), Some(Action::Page(-1)));
+        assert_eq!(translate(Key::PageDown, CTRL), Some(Action::Page(1)));
+    }
+
+    #[test]
+    fn ctrl_backspace_deletes_by_word() {
+        // 改造前：DeleteBackward（逐字）；改造后：DeleteWordBackward
+        assert_eq!(
+            translate(Key::Backspace, CTRL),
+            Some(Action::Doc(Intent::DeleteWordBackward))
+        );
+        assert_eq!(
+            translate(Key::Backspace, NONE),
+            Some(Action::Doc(Intent::DeleteBackward)),
+            "无 Ctrl 仍是逐字退格"
+        );
+    }
+
+    #[test]
+    fn ctrl_delete_forward_deletes_by_word() {
+        // 改造前：DeleteForward（逐字）；改造后：DeleteWordForward
+        assert_eq!(
+            translate(Key::Delete, CTRL),
+            Some(Action::Doc(Intent::DeleteWordForward))
+        );
+        assert_eq!(
+            translate(Key::Delete, NONE),
+            Some(Action::Doc(Intent::DeleteForward)),
+            "无 Ctrl 仍是逐字删除"
+        );
+    }
+
+    #[test]
+    fn alt_up_down_move_lines() {
+        // 改造前：Alt+↑/↓ 等价 MoveVertical；改造后：移动行
+        assert_eq!(
+            translate(Key::Up, ALT),
+            Some(Action::Doc(Intent::MoveLineUp))
+        );
+        assert_eq!(
+            translate(Key::Down, ALT),
+            Some(Action::Doc(Intent::MoveLineDown))
+        );
+        // Shift+Alt 不改变既有 Shift 扩选语义（行移动仅纯 Alt）
+        assert_eq!(
+            translate(
+                Key::Up,
+                Mods {
+                    ctrl: false,
+                    shift: true,
+                    alt: true,
+                }
+            ),
+            Some(Action::SelectVertical(-1))
+        );
+    }
+
+    #[test]
+    fn ctrl_k_inserts_link_unchanged() {
+        // 未变项：Ctrl+K 仍是插入链接（明确不新增 Ctrl+Shift+K 删除行）
+        assert_eq!(
+            translate(Key::K, CTRL),
+            Some(Action::Doc(Intent::InsertLink))
+        );
+        assert_eq!(
+            translate(Key::K, CTRL_SHIFT),
+            Some(Action::Doc(Intent::InsertLink))
+        );
+    }
+
+    #[test]
+    fn text_with_alt_inserts() {
+        // 未变项：非 Ctrl 的 Alt+可打印键仍走文本插入
+        assert_eq!(
+            translate(text("a"), ALT),
+            Some(Action::Doc(Intent::InsertText("a".into())))
         );
     }
 }

@@ -6,7 +6,7 @@
 
 use veil_core::Range;
 
-use crate::geometry::BASE_FONT_SIZE;
+use crate::geometry::{Rect, BASE_FONT_SIZE};
 
 /// 浮栏基准宽（乘 DPI scale）。
 pub const BAR_W: f32 = 360.0;
@@ -20,22 +20,10 @@ pub const PAD: f32 = crate::theme::surface::PADDING;
 pub const GAP: f32 = crate::theme::surface::CONTROL_GAP;
 /// 计数区基准宽（右对齐「i/n」）。
 pub const COUNT_W: f32 = 56.0;
+/// 「区分大小写」小按钮基准宽（`Aa`），位于查询框与计数之间。
+pub const CASE_W: f32 = 28.0;
 /// 替换行按钮基准宽（「替换」/「全部」）。
 pub const REPLACE_BTN_W: f32 = 56.0;
-
-#[derive(Clone, Copy, PartialEq, Debug)]
-pub(crate) struct Rect {
-    pub(crate) x: f32,
-    pub(crate) y: f32,
-    pub(crate) w: f32,
-    pub(crate) h: f32,
-}
-
-impl Rect {
-    pub(crate) fn contains(&self, x: f32, y: f32) -> bool {
-        x >= self.x && x < self.x + self.w && y >= self.y && y < self.y + self.h
-    }
-}
 
 /// 栏内命中目标。`Bar` = 栏内非按钮区域（吞掉点击，不落文档光标）。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -51,6 +39,8 @@ pub(crate) enum Hit {
     ReplaceOne,
     /// 全部替换（单事务）。
     ReplaceAll,
+    /// 「区分大小写」开关（点击即切换并重扫）。
+    ToggleCase,
     Bar,
 }
 
@@ -67,6 +57,8 @@ pub(crate) enum Field {
 pub(crate) struct BarLayout {
     pub(crate) bar: Rect,
     pub(crate) text: Rect,
+    /// 「区分大小写」小按钮（查询框与计数之间）。
+    pub(crate) case: Rect,
     /// 计数文本右缘（右对齐基准）。
     pub(crate) count_right: f32,
     pub(crate) prev: Rect,
@@ -101,15 +93,23 @@ pub(crate) fn layout(right: f32, top: f32, scale: f32) -> BarLayout {
     };
     let text_x = bar.x + PAD * scale;
     let count_right = prev.x - PAD * scale;
+    // 栏宽自右向左：关闭/下一个/上一个 → 计数区 → Aa → 查询文本区。
+    let case = Rect {
+        x: count_right - COUNT_W * scale - CASE_W * scale,
+        y: bar.y,
+        w: CASE_W * scale,
+        h,
+    };
     let text = Rect {
         x: text_x,
         y: bar.y,
-        w: (count_right - COUNT_W * scale - text_x).max(0.0),
+        w: (case.x - text_x).max(0.0),
         h,
     };
     BarLayout {
         bar,
         text,
+        case,
         count_right,
         prev,
         next,
@@ -186,6 +186,8 @@ pub(crate) fn hit(l: &BarLayout, scale: f32, replace_open: bool, x: f32, y: f32)
         Some(Hit::Next)
     } else if l.prev.contains(x, y) {
         Some(Hit::Prev)
+    } else if l.case.contains(x, y) {
+        Some(Hit::ToggleCase)
     } else if l.text.contains(x, y) {
         Some(Hit::QueryText)
     } else {
@@ -251,11 +253,18 @@ fn fold_case(s: &str) -> Option<String> {
 }
 
 /// 全文扫描全部非重叠命中（`match_indices` 语义：`aaa` 中找 `aa` 只命中一处）。
-/// 默认大小写不敏感；折叠会使字节偏移失效时回退大小写敏感——两条路径都保证
-/// 返回的区间是原文字节偏移。
-pub(crate) fn find_all(hay: &str, needle: &str) -> Vec<Range> {
+/// `case_sensitive = false`（默认）走小写折叠路径，与旧实现逐字节一致；折叠会使
+/// 字节偏移失效时回退大小写敏感——两条路径都保证返回原文字节偏移。
+/// `case_sensitive = true` 直接在原文上 `match_indices`，不做任何折叠。
+pub(crate) fn find_all(hay: &str, needle: &str, case_sensitive: bool) -> Vec<Range> {
     if hay.is_empty() || needle.is_empty() {
         return Vec::new();
+    }
+    if case_sensitive {
+        return hay
+            .match_indices(needle)
+            .map(|(i, _)| Range::new(i, i + needle.len()))
+            .collect();
     }
     let (h, n) = match (fold_case(hay), fold_case(needle)) {
         (Some(h), Some(n)) => (h, n),
@@ -277,6 +286,8 @@ pub(crate) struct Search {
     pub(crate) replace: String,
     /// 输入焦点：决定按键与 IME 落到查询串还是替换串。
     pub(crate) focus: Field,
+    /// 区分大小写开关（会话内保持：`clear()` 不重置，默认 false = 旧行为）。
+    pub(crate) case_sensitive: bool,
     /// 全文命中区间（按起点升序，非重叠），绘制高亮与跳转同源。
     pub(crate) matches: Vec<Range>,
     /// 当前命中下标（`matches` 内）。
@@ -297,8 +308,23 @@ impl Search {
 
     /// 查询变化后重算匹配并回到首个命中。
     pub(crate) fn rescan(&mut self, hay: &str) {
-        self.matches = find_all(hay, &self.query);
+        self.matches = find_all(hay, &self.query, self.case_sensitive);
         self.current = 0;
+    }
+
+    /// 命中集合重建后定位文档顺序的下一处（起点不早于 `from`，末尾回绕）。
+    /// 供「替换当前并前进」使用：`from` = 旧命中起点 + 替换串字节长度。
+    pub(crate) fn select_after(&mut self, from: usize) -> Option<Range> {
+        if self.matches.is_empty() {
+            self.current = 0;
+            return None;
+        }
+        self.current = self
+            .matches
+            .iter()
+            .position(|m| m.start >= from)
+            .unwrap_or(0);
+        self.current_match()
     }
 
     pub(crate) fn current_match(&self) -> Option<Range> {
@@ -339,35 +365,65 @@ mod tests {
     fn find_all_is_case_insensitive_with_byte_offsets() {
         // 「Foo foo」F=[0,1) o=[1,2) o=[2,3) 空格 [3,4) f=[4,5)...
         assert_eq!(
-            find_all("Foo foo", "foo"),
+            find_all("Foo foo", "foo", false),
             vec![Range::new(0, 3), Range::new(4, 7)]
         );
         // 换行与多字节混排：「中A中a」中=3 字节
         // 「中A」= 中(3)+A(1)、「中a」= 中(3)+a(1)：大小写不敏感各命中一处
         assert_eq!(
-            find_all("中A中a", "中a"),
+            find_all("中A中a", "中a", false),
             vec![Range::new(0, 4), Range::new(4, 8)]
         );
     }
 
     #[test]
+    fn find_all_case_sensitive_restricts_hit_set() {
+        // 关：Fold 后三处；开：只认小写 foo（一处）
+        assert_eq!(
+            find_all("Foo foo FOO", "foo", false),
+            vec![Range::new(0, 3), Range::new(4, 7), Range::new(8, 11)]
+        );
+        assert_eq!(
+            find_all("Foo foo FOO", "foo", true),
+            vec![Range::new(4, 7)]
+        );
+        // CJK 与大写混排：开时「中A」不再命中「中a」，仅小写一处
+        assert_eq!(
+            find_all("中A中a", "中a", false),
+            vec![Range::new(0, 4), Range::new(4, 8)]
+        );
+        assert_eq!(find_all("中A中a", "中a", true), vec![Range::new(4, 8)]);
+    }
+
+    #[test]
+    fn case_sensitive_defaults_off_and_clear_keeps_it() {
+        let mut s = Search::default();
+        assert!(!s.case_sensitive, "默认关闭 = 改动前的逐字节行为");
+        s.case_sensitive = true;
+        s.matches = vec![Range::new(0, 1)];
+        s.clear();
+        assert!(s.case_sensitive, "会话内保持：clear 不重置开关");
+        assert!(s.matches.is_empty());
+    }
+
+    #[test]
     fn find_all_reports_cjk_and_utf8_offsets() {
         assert_eq!(
-            find_all("中文中文", "中文"),
+            find_all("中文中文", "中文", false),
             vec![Range::new(0, 6), Range::new(6, 12)]
         );
     }
 
     #[test]
     fn empty_needle_or_hay_yields_no_matches() {
-        assert!(find_all("abc", "").is_empty());
-        assert!(find_all("", "a").is_empty());
+        assert!(find_all("abc", "", false).is_empty());
+        assert!(find_all("", "a", false).is_empty());
     }
 
     #[test]
     fn overlapping_occurrences_are_not_reported() {
         // match_indices 非重叠语义（与正则全局匹配一致）
-        assert_eq!(find_all("aaa", "aa"), vec![Range::new(0, 2)]);
+        assert_eq!(find_all("aaa", "aa", false), vec![Range::new(0, 2)]);
     }
 
     #[test]
@@ -375,11 +431,49 @@ mod tests {
         // KELVIN SIGN（U+212A）小写为 k 但字节长度 3 → 1：折叠偏移不可复用
         assert!(fold_case("\u{212A}").is_none());
         assert!(
-            find_all("\u{212A}", "k").is_empty(),
+            find_all("\u{212A}", "k", false).is_empty(),
             "回退大小写敏感，不命中"
         );
         // 混合串仍按原串大小写敏感扫描：仅 ASCII 「k」命中（字节 3）
-        assert_eq!(find_all("\u{212A}k", "k"), vec![Range::new(3, 4)]);
+        assert_eq!(find_all("\u{212A}k", "k", false), vec![Range::new(3, 4)]);
+    }
+
+    #[test]
+    fn replace_then_rescan_selects_next_hit() {
+        // 模拟 Enter 替换当前：原文「ab ab」，把首处 ab 换成 a（1 字节）后重扫。
+        let hay = "ab ab";
+        let mut s = Search {
+            query: "ab".into(),
+            case_sensitive: true,
+            ..Search::default()
+        };
+        s.rescan(hay);
+        let m = s.current_match().expect("初始命中");
+        let from = m.start + 1; // 替换串「a」的字节长度
+        let after = format!("{}a{}", &hay[..m.start], &hay[m.end..]);
+        s.rescan(&after);
+        assert_eq!(
+            s.select_after(from),
+            Some(Range::new(2, 4)),
+            "前进到文档顺序的下一处（光标落点）"
+        );
+        assert_eq!(s.label(), "1/1", "替换后 n/m 同步");
+    }
+
+    #[test]
+    fn select_after_wraps_and_handles_empty() {
+        let mut s = Search {
+            query: "x".into(),
+            matches: vec![Range::new(0, 1), Range::new(4, 5)],
+            ..Search::default()
+        };
+        assert_eq!(s.select_after(1), Some(Range::new(4, 5)));
+        assert_eq!(s.current, 1);
+        assert_eq!(s.label(), "2/2");
+        assert_eq!(s.select_after(5), Some(Range::new(0, 1)), "末尾回绕首处");
+        s.matches.clear();
+        assert_eq!(s.select_after(0), None);
+        assert_eq!(s.current, 0);
     }
 
     #[test]
@@ -426,13 +520,17 @@ mod tests {
         assert_eq!(hit(&l, 1.0, false, nx, ny), Some(Hit::Next));
         let (px, py) = center(l.prev);
         assert_eq!(hit(&l, 1.0, false, px, py), Some(Hit::Prev));
+        let (kx, ky) = center(l.case);
+        assert_eq!(hit(&l, 1.0, false, kx, ky), Some(Hit::ToggleCase));
         assert_eq!(
             hit(&l, 1.0, false, l.text.x + 2.0, cy),
             Some(Hit::QueryText),
             "文本区点击聚焦查询"
         );
         assert_eq!(hit(&l, 1.0, false, l.bar.x - 1.0, cy), None, "栏外不命中");
-        // 查询文本区在计数区左侧
+        // 查询文本区 → Aa → 计数区，自左向右不重叠
+        assert!(l.text.x + l.text.w <= l.case.x + 0.01);
+        assert!(l.case.x + l.case.w <= l.count_right - COUNT_W + 0.01);
         assert!(l.text.x + l.text.w <= l.count_right - COUNT_W + 0.01);
     }
 
@@ -482,6 +580,7 @@ mod tests {
             query: "a".into(),
             replace: "b".into(),
             focus: Field::Replace,
+            case_sensitive: true,
             matches: vec![Range::new(0, 1)],
             current: 1,
             hover: Some(Hit::Next),
@@ -490,6 +589,7 @@ mod tests {
         assert!(s.query.is_empty());
         assert!(s.replace.is_empty(), "替换串随关闭/换文档清空");
         assert_eq!(s.focus, Field::Query);
+        assert!(s.case_sensitive, "大小写开关会话内保持，clear 不重置");
         assert!(s.matches.is_empty());
         assert_eq!(s.current, 0);
         assert_eq!(s.hover, None);

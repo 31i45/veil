@@ -76,6 +76,13 @@ pub trait FileStore {
     }
 }
 
+/// 本地时钟抽象（信任显性化）：状态栏「已保存 HH:MM」的时间来源。
+/// 由产品层注入（Windows 走手写 Win32 `GetLocalTime`），本层不依赖任何系统时间 API，
+/// 测试注入固定时钟即可断言文案。返回值须为两位补零的 `HH:MM`。
+pub trait Clock {
+    fn local_hhmm(&self) -> String;
+}
+
 /// 文件对话框抽象（切片 15）：实现由产品层（veil）注入，本层不依赖具体 GUI 框架。
 /// 取消（用户关闭对话框）返回 None；路径选择成功后由 shell 负责读写与状态切换。
 pub trait FileDialog {
@@ -186,6 +193,8 @@ pub struct Doc {
 pub struct Ports {
     pub clipboard: Box<dyn Clipboard>,
     pub store: Box<dyn FileStore>,
+    /// 本地时钟：状态栏「已保存 HH:MM」的唯一时间来源（测试注入固定值）。
+    pub clock: Box<dyn Clock>,
     pub math: Box<dyn MathRenderer>,
     pub images: Box<dyn ImageLoader>,
     pub assets: Box<dyn AssetStore>,
@@ -242,6 +251,24 @@ pub(crate) struct UIState {
     pub(crate) ctx: crate::view::ctx_menu::CtxMenu,
     /// 写作模式与全文统计（阶段 1）。
     pub(crate) writing: WritingState,
+    /// 窗口焦点（光标表达）：true = 实心插入点，false = 空心框。
+    /// 由 `WindowEvent::Focused` 经 `set_window_focused` 写入，默认聚焦。
+    pub(crate) focused: bool,
+}
+
+impl Default for UIState {
+    fn default() -> Self {
+        Self {
+            modal: None,
+            chrome: Chrome::default(),
+            outline: Outline::default(),
+            search: Search::default(),
+            quick: QuickOpen::default(),
+            ctx: crate::view::ctx_menu::CtxMenu::default(),
+            writing: WritingState::default(),
+            focused: true,
+        }
+    }
 }
 
 /// 写作模式与全文统计（阶段 1）：纯视图开关 + 状态栏派生数字。
@@ -302,6 +329,9 @@ pub(crate) struct PersistState {
     pub(crate) recovery_failed_at: Option<Instant>,
     /// 最近文件（0b）：首元素即会话恢复目标；打开/另存为成功时更新并落盘。
     pub(crate) recent: Vec<PathBuf>,
+    /// 本会话最近一次成功保存的本地时间（`HH:MM`）：状态栏「已保存」文本的唯一来源。
+    /// 只在落盘成功时刷新；失败/打开新文档（None）不得沿用旧值。
+    pub(crate) last_saved_hhmm: Option<String>,
 }
 
 /// 文档真值状态（ADR-009 S6 C2）：路径/编码标记/基线字节。
@@ -341,6 +371,9 @@ pub(crate) struct WindowState {
     pub(crate) visible: bool,
     /// 已获准退出：仅当「关闭意图」真正执行后置 true，事件循环在事件末尾统一消费。
     pub(crate) exit_requested: bool,
+    /// 测试专用窗口尺寸覆盖：headless 测试无 winit 窗口，需要验证超宽窗口排版时注入。
+    #[cfg(test)]
+    pub(crate) test_size: Option<(u32, u32)>,
 }
 impl Default for WindowState {
     fn default() -> Self {
@@ -357,6 +390,8 @@ impl Default for WindowState {
             resize_pending: false,
             visible: true,
             exit_requested: false,
+            #[cfg(test)]
+            test_size: None,
         }
     }
 }
@@ -396,6 +431,7 @@ pub(crate) struct App {
 pub(crate) struct AppPorts {
     pub(crate) clipboard: Box<dyn Clipboard>,
     pub(crate) store: Box<dyn FileStore>,
+    pub(crate) clock: Box<dyn Clock>,
     pub(crate) math: Box<dyn MathRenderer>,
     pub(crate) images: Box<dyn ImageLoader>,
     pub(crate) assets: Box<dyn AssetStore>,
@@ -536,6 +572,7 @@ impl App {
         let mut ports = AppPorts {
             clipboard: ports.clipboard,
             store: ports.store,
+            clock: ports.clock,
             math: ports.math,
             images: ports.images,
             assets: ports.assets,
@@ -595,16 +632,9 @@ impl App {
                 recovery_hash: start.recovery_hash,
                 recovery_failed_at: None,
                 recent: start.recent,
+                last_saved_hhmm: None,
             },
-            ui_state: UIState {
-                modal: None,
-                chrome: Chrome::default(),
-                outline: Outline::default(),
-                search: Search::default(),
-                quick: QuickOpen::default(),
-                ctx: crate::view::ctx_menu::CtxMenu::default(),
-                writing: WritingState::default(),
-            },
+            ui_state: UIState::default(),
         };
         app.ui_state.chrome.notice = if start.notice.is_empty() {
             config_notice
@@ -727,6 +757,11 @@ impl App {
         if let Some(p) = &self.window_state.print {
             return (p.w.max(1), p.h.max(1));
         }
+        // 测试注入的尺寸优先于无窗口默认值（打印语义已在上一分支返回，不受影响）
+        #[cfg(test)]
+        if let Some(size) = self.window_state.test_size {
+            return size;
+        }
         self.window_state
             .window
             .as_ref()
@@ -754,6 +789,15 @@ impl App {
     pub(crate) fn request_redraw(&self) {
         if let Some(w) = &self.window_state.window {
             w.request_redraw();
+        }
+    }
+
+    /// 窗口焦点变化（winit `WindowEvent::Focused`）：写入焦点表达状态，仅在
+    /// 真的变化时请求一次重绘（失焦 → 空心插入点）。不注册任何定时器/周期回调。
+    pub(crate) fn set_window_focused(&mut self, focused: bool) {
+        if self.ui_state.focused != focused {
+            self.ui_state.focused = focused;
+            self.request_redraw();
         }
     }
 
@@ -1007,6 +1051,8 @@ impl ApplicationHandler for App {
             }
             // 窗口重新获得焦点：立即校验系统外观（限频轮询最多滞后 1s，此处消除等待）
             WindowEvent::Focused(focused) => {
+                // 光标焦点表达：失焦改空心框，仅在状态变化时补一次重绘（无定时器）
+                self.set_window_focused(focused);
                 if !focused {
                     self.window_state.visible = false;
                     return;

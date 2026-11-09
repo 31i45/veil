@@ -2,9 +2,12 @@
 
 ![Veil](icons/veil.ico)
 
-[![Version](https://img.shields.io/badge/version-1.2.0-blue.svg)](https://github.com/31i45/veil/releases)
+[![CI](https://github.com/31i45/veil/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/31i45/veil/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/31i45/veil?label=release)](https://github.com/31i45/veil/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Rust](https://img.shields.io/badge/rust-stable-orange.svg)](https://www.rust-lang.org/)
+[![Rust](https://img.shields.io/badge/rust-stable%20%C2%B7%20edition%202021-orange.svg)](https://www.rust-lang.org/)
+[![Platform](https://img.shields.io/badge/platform-Windows%2011%20%C2%B7%20x64-0078d4.svg)](https://github.com/31i45/veil/releases)
+[![Portable](https://img.shields.io/badge/single%20exe%20%C2%B7%20no%20installer%20%C2%B7%20offline-2ea44f.svg)](https://github.com/31i45/veil/releases)
 
 [中文](README.zh-CN.md)
 

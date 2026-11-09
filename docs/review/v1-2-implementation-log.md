@@ -54,6 +54,21 @@ Wave 2 三任务均为纯排版/颜色/接线改动，未触碰输入路由与�
 | keystroke p95 | 6.993 ms @5005 / 11.829 ms @10500 | 回退 ≤5%（基线 6.677 / 12.488） | +4.7% / −5.3%，通过 |
 | 冷启动 | 564.29 ms / 576.97 ms | 回退 ≤20%（基线 520.87 / 533.85） | +8.3% / +8.1%，通过 |
 
+### 5.1 提交后复验（v1.2.0 发布前，2026-11-09）
+
+版本号定稿（workspace `1.2.0`）后重跑五项，数值与命令如下：
+
+| 指标 | 命令 | 结果 |
+|---|---|---|
+| 测试 | `cargo test --workspace` | 1132 passed / 0 failed / 13 ignored（11 个测试二进制） |
+| 静态检查 | `cargo clippy --workspace --all-targets -- -D warnings` | 0 警告 |
+| 体积 | `cargo build --release -p veil` | 6,043,136 B（门禁 6,291,456 B，余量 248,320 B）；`FileVersion` = `ProductVersion` = 1.2.0 |
+| 击键 p95 | `cargo test -p veil-ui --release --lib -- --ignored --nocapture --test-threads=1 perf_keystroke_path` / `… perf_keystroke_10k_blocks` | 6.781 ms（5,005 块）/ 12.379 ms（10,500 块）；基线 6.677 / 12.488 → +1.6% / −0.9% |
+| 冷启动（进程内） | `cargo test -p veil-ui --release --lib -- --ignored --nocapture --test-threads=1 perf_cold_first_edit` | 290.0 ms（app 131.8 + 首编辑 158.2）；预热 130.1 |
+| 冷启动（端到端） | `cargo run --release -p veil --example bench_typing` | 576.46 / 599.98 ms；基线 520.87 / 533.85 → +10.7% / +12.4%（门禁 ≤20%） |
+
+结论：五项全绿，允许发布。冷启动两个口径分开记录——「进程内」用于开发回归，「端到端（含进程创建）」才是用户体感，二者不可混用。
+
 ## 6. 本轮再次确认的「不做项」
 
 以下八条全部**不做**，且理由与竞品是否存在无关：

@@ -2,7 +2,7 @@
 
 ![Veil](icons/veil.ico)
 
-[![Version](https://img.shields.io/badge/version-1.0.0-blue.svg)](https://github.com/31i45/veil/releases)
+[![Version](https://img.shields.io/badge/version-1.2.0-blue.svg)](https://github.com/31i45/veil/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-stable-orange.svg)](https://www.rust-lang.org/)
 
@@ -12,7 +12,7 @@
 
 Veil was born because **Typedown** — my favorite Markdown editor on Windows, bar none — takes **tens of seconds to minutes** to launch, every single time. A WinUI app that starts cold faster than you finish sipping your coffee should not exist, yet here we are.
 
-So I built my own. Pure Rust. No webview, no Chromium, no Electron, no external runtime. Single-file exe. In-app cold start ≈150 ms (dual-metric measurements with command and date are in [Red Numbers](#red-numbers-targets-vs-measured)). **Single-user, single-document, purely offline — no collaboration, ever.**
+So I built my own. Pure Rust. No webview, no Chromium, no Electron, no external runtime. Single-file exe. In-app cold start ≈150 ms (the first open-and-edit adds ≈160 ms; measurements, commands and dates are in [Red Numbers](#red-numbers-targets-vs-measured)). **Single-user, single-document, purely offline — no collaboration, ever.**
 
 ## Download & Run
 
@@ -62,21 +62,28 @@ Three crates, one-way dependency (`veil` → `veil-ui` → `veil-core`, no rever
 15. Opening links: `Ctrl+click` an http/https/mailto link (a mouse gesture, not a new shortcut) to hand it to the system default browser or mail client; the caret does not move. The link context menu starts with "Open in Browser", followed by "Copy Link Address". Protocols outside the allowlist only show a notice; Veil itself makes no network requests
 16. GFM footnotes: `[^id]` references and `[^id]: content` definitions. In rendered view, references show as a link-coloured `[n]`, while definition blocks hide the marker and show "number + content + ↩"; numbers follow first-reference order in the document. `Ctrl+click` a reference to jump to its definition, and `Ctrl+click` the trailing `↩` to jump back to the first reference. Source mode (`Ctrl+/`) shows the raw markup. HTML export emits `<sup>` references and a footnote list at the end (with backlinks)
 17. In-document anchors: `Ctrl+click` `[text](#slug)` to jump to the matching heading; exported headings carry `id="<slug>"`; duplicate headings are de-duplicated as `name`, `name-1` (the same `heading_slug` / `heading_slugs` rules used by export)
+18. Line navigation: `Alt+↑` / `Alt+↓` move the current line (one undo step); `PgUp` / `PgDn` page the viewport while keeping the target column; `Ctrl+Backspace` / `Ctrl+Delete` delete by word and never cross a line break
+19. Find & replace: a "Match case" toggle (off by default, kept for the session); `Enter` replaces the current match and advances, `Ctrl+Enter` replaces all
+20. Readable measure: above 1600 px window width the body column is capped at ~40 full-width characters and centred; H4–H6 indent by level; heading spacing is wider than paragraph spacing
+21. Visible trust: the status bar shows "Saved · HH:MM" (or "Unsaved"); a failed CLI open raises a visible error box and exits with code 1
+22. Caret as focus: solid when the window is focused, hollow when it is not — no timers, no idle wake-ups
 
-## What It Won't Do (v1.0 explicitly out of scope)
+## What It Won't Do (v1.2 explicitly out of scope)
 
 - wgpu / GPU-rendered view (ADR-011: deferred, triggered only if four conditions all trip)
 - Collaborative editing / CRDT (**permanent exclusion — Veil is single-user single-document**)
+- Spell checking
 - Plugin system
-- Mobile
+- Mobile / PWA (desktop exe only)
 - Table visual editing beyond the delivered subset (merge/split cells, column-width drag); content editing, row/column insert/delete and column alignment are supported
-- Mermaid inline rendering
+- Mermaid rendering (Mermaid fenced blocks stay as code, not rendered)
 - A separate rich-text document model: the text stays Markdown, and Ctrl+/ is a view toggle over the same document
 - Any networking: no sync, no update check, no telemetry; external links are handed to the system default program, and Veil itself makes no network requests
+- Competitor-parity items deliberately declined: regex find (the `regex` crate added 1,198,592 B to the exe), auto-pairing of brackets/quotes, a whole-word toggle, `Ctrl+Shift+K` delete-line (`Alt+↑` / `Alt+↓` already covers line operations), ≤120 ms state-transition animations (they would break the zero-timer / no-idle-wake policy), and a separate H5/H6 type scale (indentation expresses level)
 
 ## Build / Run / Test
 
-Requires: Rust stable (edition 2021), Windows 11 23H2+ baseline.
+Requires: Rust stable (edition 2021). Acceptance environment: Windows 11 23H2+. Mica acrylic degrades to a solid colour where it is unavailable. Windows 10 has not been recorded on real hardware and is not claimed as verified.
 
 ```powershell
 cargo build --workspace
@@ -84,19 +91,20 @@ cargo test --workspace
 cargo run -p veil -- <file.md>
 ```
 
-Baseline: 1131 passed / 0 failed / 13 ignored (2026-11-09); `cargo clippy --workspace --all-targets -- -D warnings` zero warnings.
+Baseline: 1132 passed / 0 failed / 13 ignored (2026-11-09); `cargo clippy --workspace --all-targets -- -D warnings` zero warnings.
 
 ## Red Numbers (targets vs measured)
 
-Measured on release build, probe-serialized, re-verified 2026-11-09. Commands: `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo run --release -p veil --example bench_typing`, and `(Get-Item target\release\veil.exe).Length`. Keystroke attribution detail in `docs/review/keystroke-attribution.md`.
+Measured on release build, probe-serialized, re-verified 2026-11-09. Commands: `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo run --release -p veil --example bench_typing`, `cargo test -p veil-ui --release --lib -- --ignored --nocapture --test-threads=1 perf_keystroke_path` (and `perf_keystroke_10k_blocks`), and `(Get-Item target\release\veil.exe).Length`. Keystroke attribution detail in `docs/review/keystroke-attribution.md`.
 
 | Metric | Target | Measured |
 |---|---|---|
 | Cold start (release, `main` → first frame; acceptance口径; 5 runs) | ≤ 300 ms | 145–190 ms (min–max; 2026-11-05, `VEIL_BOOT_LOG` segmented probe) ✅ |
-| Cold start (in-process open + first full layout; p50 / max over 5 runs) | observation only | 520.87 / 533.85 ms (2026-11-09, `cargo run --release -p veil --example bench_typing`) |
+| Cold start (in-process open + first full layout + first edit; p50 / max over 5 runs) | observation only | 290.0 ms (app 131.8 ms + first edit 158.2 ms; 130.1 ms after warm-up; 2026-11-09, `cargo test -p veil-ui --release --lib -- --ignored --nocapture --test-threads=1 perf_cold_first_edit`). Same machine only: repeats vary between 290 and 580 ms because of the OS file cache |
+| Cold start (bench harness, process create → open → first layout; p50 / max) | observation only | 576.46 / 599.98 ms (2026-11-09, `cargo run --release -p veil --example bench_typing`; baseline 520.87 / 533.85 → +10.7% / +12.4%, regression gate ≤ 20%) |
 | Cold start (wall clock, process create → first frame; observation only) | ≤ 300 ms | 450–529 ms (440–470 ms before `main`, process-create overhead on this machine; 2026-10-31) |
 | Cold start (window handle; P2 comparison口径) | — | 30 ms (2026-10-30, `tools/bench/measure.ps1`) |
-| Keystroke→commit p95 on 100 K-word doc | ≤ 16 ms | 3.37 ms / 5.20 ms / 9.25 ms (5.0k / 10.5k / 20.0k blocks; 2026-11-03) ✅ |
+| Keystroke→commit p95 on 100 K-word doc | ≤ 16 ms | 6.781 ms / 12.379 ms (`perf_keystroke_path` 5,005 blocks / `perf_keystroke_10k_blocks` 10,500 blocks; baseline 6.677 / 12.488; 2026-11-09) ✅ |
 | Resident memory, 100 K-word doc (private working set) | ≤ 150 MB | 40.76 MB (2026-11-05) |
 | Installed size (single-file `veil.exe`; no install directory or separate unpacked payload) | ≤ 6 MiB = 6,291,456 B | 6,043,136 B ≈ 5.76 MiB (2026-11-09); margin 248,320 B |
 | `veil-core` unit + property tests | ≥ 80 | 209 |
@@ -123,8 +131,8 @@ Dependency blacklist: `tokio`, `wasmtime`, any webview crate (`webview2-com`/`wr
 
 ## Docs
 
-- `.skills/INSTANCE.md` — single source of truth: all proprietary facts, measured red numbers, decision register
-- `.skills/` — ai-dev-skills methodology instantiation for this project
+- `docs/review/v1-2-implementation-log.md` — v1.2 implementation record: measured numbers, probes, decisions
+- `docs/review/keystroke-attribution.md` — keystroke-to-commit latency attribution
 - `docs/adr/` — Architecture Decision Records:
   - ADR-001 rope selection
   - ADR-002 formula rendering path

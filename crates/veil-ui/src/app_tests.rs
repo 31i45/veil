@@ -5,7 +5,7 @@ use crate::Ports;
 use crate::chrome;
 use crate::chrome::MenuAction;
 use crate::docio::encode;
-use crate::document::block_index::BlockGeom;
+use crate::document::block_index::{gap_after, BlockGeom};
 use crate::document::recovery;
 use crate::document::ExternalState;
 use crate::editor::Intent;
@@ -49,6 +49,18 @@ impl UrlOpener for NoUrl {
 
 fn no_url() -> Box<dyn UrlOpener> {
     Box::new(NoUrl)
+}
+
+/// 固定时钟：状态栏「已保存 HH:MM」的断言全部基于此值，不依赖真实系统时间。
+struct FixedClock;
+impl Clock for FixedClock {
+    fn local_hhmm(&self) -> String {
+        "14:32".into()
+    }
+}
+
+fn fixed_clock() -> Box<dyn Clock> {
+    Box::new(FixedClock)
 }
 
 /// 可编排的 URL 打开端口：记录每次调用的 URL，结果由 `result` 决定（校验失败注入）。
@@ -357,6 +369,7 @@ fn app_clip(html: Option<&str>, plain: Option<&str>) -> App {
         persist_env: persist_env(),
         print: Box::new(NoPrint),
         url_opener: no_url(),
+        clock: fixed_clock(),
     }
 )
 }
@@ -470,6 +483,7 @@ fn app_math(text: &str, fail: bool) -> (App, MathCalls) {
         persist_env: persist_env(),
         print: Box::new(NoPrint),
         url_opener: no_url(),
+        clock: fixed_clock(),
     }
 );
     (a, calls)
@@ -691,6 +705,7 @@ fn app_with_images(
         persist_env: persist_env(),
         print: Box::new(NoPrint),
         url_opener: no_url(),
+        clock: fixed_clock(),
     }
 );
     (a, calls)
@@ -877,6 +892,7 @@ fn app_paste_image(
         persist_env: persist_env(),
         print: Box::new(NoPrint),
         url_opener: no_url(),
+        clock: fixed_clock(),
     }
 );
     PasteFixture { app, calls }
@@ -962,6 +978,7 @@ fn paste_image_files_prefer_file_list_over_path_text() {
         persist_env: persist_env(),
         print: Box::new(NoPrint),
         url_opener: no_url(),
+        clock: fixed_clock(),
     }
 );
     app.paste_clipboard();
@@ -1057,6 +1074,7 @@ fn app_drop(
         persist_env: persist_env(),
         print: Box::new(NoPrint),
         url_opener: no_url(),
+        clock: fixed_clock(),
     }
 );
     DropFixture {
@@ -1993,6 +2011,7 @@ fn app_with(
         persist_env: persist_env(),
         print: Box::new(NoPrint),
         url_opener,
+        clock: fixed_clock(),
     }
 )
 }
@@ -2067,6 +2086,7 @@ fn app_export(text: &str, path: Option<&str>, fail: bool) -> (App, ExportCalls) 
         persist_env: persist_env(),
         print: Box::new(NoPrint),
         url_opener: no_url(),
+        clock: fixed_clock(),
     }
 );
     (a, calls)
@@ -2115,6 +2135,7 @@ fn app_export_with_dialog(
             persist_env: persist_env(),
             print: Box::new(NoPrint),
             url_opener: no_url(),
+            clock: fixed_clock(),
         },
     );
     (a, calls, dialog_calls)
@@ -2542,6 +2563,7 @@ fn app_dialogs(
         persist_env: persist_env(),
         print: Box::new(NoPrint),
         url_opener: no_url(),
+        clock: fixed_clock(),
     }
 );
     (a, calls)
@@ -2970,6 +2992,38 @@ fn wheel_scroll_clamps_to_document_end() {
 }
 
 #[test]
+fn page_keys_move_caret_within_new_viewport() {
+    let store = MemStore::default();
+    let text: String = (0..200).map(|_| "abcdefghij\n").collect();
+    let (mut a, _) = app_dialogs(&text, None, false, &store, None, None);
+    a.ensure_layouts_all();
+    assert!(a.editor.set_caret(3));
+    let vp = a.viewport();
+    assert!(a.doc_height() > vp.h, "长文档可翻页");
+
+    // PageDown：滚动推进，光标随页移动且落在新视口内，列不变
+    a.perform_action(Action::Page(1));
+    assert!(a.window_state.scroll_y > 0.0, "PageDown 推进滚动");
+    let (_, y, h) = a.caret_screen();
+    assert!(
+        y >= vp.y - 0.5 && y + h <= vp.y + vp.h + 0.5,
+        "翻页后光标落在新视口内"
+    );
+    let (_, col) = a.editor.session().line_col(a.editor.caret()).unwrap();
+    assert_eq!(col, 4, "翻页保持原列位置");
+
+    // PageUp：滚动回退，光标仍在新视口内
+    let scrolled = a.window_state.scroll_y;
+    a.perform_action(Action::Page(-1));
+    assert!(a.window_state.scroll_y < scrolled, "PageUp 回退滚动");
+    let (_, y, h) = a.caret_screen();
+    assert!(
+        y >= vp.y - 0.5 && y + h <= vp.y + vp.h + 0.5,
+        "PageUp 后光标仍在视口内"
+    );
+}
+
+#[test]
 fn status_line_reports_caret_line_col() {
     let store = MemStore::default();
     let (mut a, _) = app_dialogs("ab\n中c\n", Some("a.md"), false, &store, None, None);
@@ -2980,12 +3034,99 @@ fn status_line_reports_caret_line_col() {
         a.editor.is_dirty(),
         a.external_state(),
         a.source_mode(),
+        a.persist_state.last_saved_hhmm.as_deref(),
         a.ui_state.writing.words,
         2,
         2,
     );
     assert_eq!(left, "a.md");
     assert_eq!(right, "3 字 · 行 2，列 2");
+}
+
+// ---- 信任显性化：保存态（已保存 HH:MM / 未保存 / 失败可行动提示） ----
+
+/// 手工保存成功：状态栏左文出现注入时钟的「已保存 14:32」，App 记录同一时刻。
+#[test]
+fn manual_save_records_hhmm_and_status_shows_it() {
+    let store = MemStore::default();
+    let (mut a, _) = app_dialogs("ab", Some("a.md"), false, &store, None, None);
+    a.editor.apply(Intent::InsertText("x".into())).unwrap();
+    a.save_now();
+    assert_eq!(a.persist_state.last_saved_hhmm.as_deref(), Some("14:32"));
+    let (left, _) = chrome::status_line(
+        a.doc.path.as_deref(),
+        a.editor.is_dirty(),
+        a.external_state(),
+        a.source_mode(),
+        a.persist_state.last_saved_hhmm.as_deref(),
+        0,
+        1,
+        1,
+    );
+    assert_eq!(left, "a.md · 已保存 14:32");
+}
+
+/// 自动保存成功同样刷新时刻；再次编辑后状态栏立刻回到「未保存」（时间不得掩盖脏态）。
+#[test]
+fn autosave_records_hhmm_and_dirty_says_unsaved() {
+    let store = MemStore::default();
+    let mut a = dirty_app("ab", Some("a.md"), &store);
+    let t0 = Instant::now();
+    a.persist_state.persist.note_activity(t0);
+    a.maybe_autosave(t0 + Duration::from_secs(2));
+    assert!(!a.editor.is_dirty());
+    assert_eq!(a.persist_state.last_saved_hhmm.as_deref(), Some("14:32"));
+
+    a.editor.apply(Intent::InsertText("改".into())).unwrap();
+    let (left, _) = chrome::status_line(
+        a.doc.path.as_deref(),
+        a.editor.is_dirty(),
+        a.external_state(),
+        a.source_mode(),
+        a.persist_state.last_saved_hhmm.as_deref(),
+        0,
+        1,
+        1,
+    );
+    assert!(left.contains("未保存"), "脏态须有明确文字: {left}");
+    assert!(!left.contains("已保存"), "脏态不得再显示已保存: {left}");
+}
+
+/// 保存失败：notice 带原因与可行动提示（Ctrl+S 重试 / 另存为）、文档保持 dirty、
+/// 最近保存时刻不得被失败污染。
+#[test]
+fn save_failure_keeps_dirty_and_keeps_hhmm_stale_free() {
+    let store = MemStore {
+        fail_save: true,
+        ..Default::default()
+    };
+    let (mut a, _) = app_dialogs("ab", Some("a.md"), false, &store, None, None);
+    a.editor.apply(Intent::InsertText("x".into())).unwrap();
+    a.save_now();
+    assert!(a.editor.is_dirty(), "失败不得谎报干净");
+    assert_eq!(a.persist_state.last_saved_hhmm, None, "失败不得刷新时间");
+    let notice = &a.ui_state.chrome.notice;
+    assert!(notice.contains("保存失败"), "{notice}");
+    assert!(
+        notice.contains("Ctrl+S") && notice.contains("另存为"),
+        "失败提示须含可行动下一步: {notice}"
+    );
+}
+
+/// 另存为成功刷新时刻；打开另一份文档时旧时间作废（不得把 A 的时刻显示在 B 上）。
+#[test]
+fn save_as_records_hhmm_and_open_resets_it() {
+    let store = MemStore::default();
+    store
+        .files
+        .borrow_mut()
+        .insert(PathBuf::from("b.md"), b"new".to_vec());
+    let (mut a, _) = app_dialogs("ab", None, false, &store, Some("b.md"), Some("new.md"));
+    a.save_as();
+    assert_eq!(a.persist_state.last_saved_hhmm.as_deref(), Some("14:32"));
+    a.open_via_dialog();
+    assert_eq!(a.doc.path.as_deref(), Some(Path::new("b.md")));
+    assert_eq!(a.persist_state.last_saved_hhmm, None, "换文档后旧时刻作废");
 }
 
 #[test]
@@ -3103,6 +3244,7 @@ fn app_watch(text: &str, path: Option<&str>, store: &MemStore, watch: &FakeWatch
         persist_env: persist_env(),
         print: Box::new(NoPrint),
         url_opener: no_url(),
+        clock: fixed_clock(),
     }
 )
 }
@@ -3221,6 +3363,7 @@ fn app_confirm(
         persist_env: persist_env_with(recovery, session.clone()),
         print: Box::new(NoPrint),
         url_opener: no_url(),
+        clock: fixed_clock(),
     }
 )
 }
@@ -3771,6 +3914,42 @@ fn replace_all_without_matches_does_not_dirty() {
 }
 
 #[test]
+fn enter_in_replace_field_replaces_current_and_advances() {
+    let store = MemStore::default();
+    let mut a = app("a x a x a", None, false, &store);
+    a.ensure_layouts_all();
+    a.open_replace();
+    a.search_input("a");
+    a.search_toggle_field(); // Tab → 替换框
+    a.search_input("b");
+    a.route_key(Key::Enter);
+    assert_eq!(doc_text(&a), "b x a x a", "Enter 替换当前一处");
+    assert_eq!(a.ui_state.search.label(), "1/2", "n/m 重建");
+    assert_eq!(a.editor.caret(), 4, "前进到下一处");
+    a.route_key(Key::Enter);
+    assert_eq!(doc_text(&a), "b x b x a");
+    assert_eq!(a.ui_state.search.label(), "1/1");
+    assert_eq!(a.editor.caret(), 8);
+}
+
+#[test]
+fn ctrl_enter_in_replace_field_replaces_all() {
+    let store = MemStore::default();
+    let mut a = app("a A a", None, false, &store);
+    a.ensure_layouts_all();
+    a.open_replace();
+    a.search_input("a");
+    a.search_toggle_field();
+    a.search_input("b");
+    a.input_state.mods.ctrl = true;
+    a.route_key(Key::Enter);
+    a.input_state.mods.ctrl = false;
+    assert_eq!(doc_text(&a), "b b b", "Ctrl+Enter 全部替换（默认不区分大小写）");
+    assert!(a.ui_state.search.matches.is_empty());
+    assert_eq!(a.ui_state.search.label(), "0/0");
+}
+
+#[test]
 fn replace_row_clicks_run_replace_buttons() {
     let store = MemStore::default();
     let mut a = app("a a", None, false, &store);
@@ -3781,7 +3960,7 @@ fn replace_row_clicks_run_replace_buttons() {
     a.search_input("b");
     let l = a.search_rect().expect("查找栏开启");
     let r = search::replace_layout(&l, a.input_state.scale);
-    let center = |q: search::Rect| (q.x + q.w / 2.0, q.y + q.h / 2.0);
+    let center = |q: crate::geometry::Rect| (q.x + q.w / 2.0, q.y + q.h / 2.0);
     let (x, y) = center(r.one);
     click_at(&mut a, x, y);
     assert_eq!(doc_text(&a), "b a", "「替换」按钮只替换当前命中");
@@ -4033,6 +4212,7 @@ fn save_as_rebinds_watcher() {
         persist_env: persist_env(),
         print: Box::new(NoPrint),
         url_opener: no_url(),
+        clock: fixed_clock(),
     }
 );
     a.save_as();
@@ -4111,6 +4291,7 @@ fn app_theme(config: Box<dyn ConfigStore>, system: Rc<Cell<Option<bool>>>) -> Ap
         persist_env: persist_env(),
         print: Box::new(NoPrint),
         url_opener: no_url(),
+        clock: fixed_clock(),
     }
 )
 }
@@ -4914,9 +5095,10 @@ fn geometry_index_is_monotonic_and_consistent() {
             y
         );
         prev = g.top;
-        y += g.height + PARA_GAP * a.input_state.scale;
+        y += g.height + gap_after(&g.kind) * a.input_state.scale;
     }
-    let want = y - PARA_GAP * a.input_state.scale + MARGIN * a.input_state.scale;
+    let last_gap = a.index.blocks.last().map_or(0.0, |g| gap_after(&g.kind));
+    let want = y - last_gap * a.input_state.scale + MARGIN * a.input_state.scale;
     assert!(
         (a.index.total_h - want).abs() < 1e-3,
         "total_h 应与累计一致: {} vs {}",
@@ -5599,7 +5781,7 @@ fn estimated_height_positive_for_all_block_kinds() {
 }
 
 /// 真实路径性能探针（默认忽略，不参与常规门禁）：
-/// cargo test -p veil-egui --release -- --ignored --nocapture perf_keystroke_path
+/// cargo test -p veil-ui --release -- --ignored --nocapture perf_keystroke_path
 /// 度量 apply + after_edit + paint 的端到端延迟；bench_typing 只测单点 API，
 /// 无法反映视图层真实装配路径，故以此探针作为 P1/P2 的验收依据。
 #[test]
@@ -5835,7 +6017,7 @@ fn perf_index_subsegments() {
 }
 
 /// P1b 验收探针（默认忽略）：构造 5005 块文档 + 第一次编辑的端到端耗时。
-/// cargo test -p veil-egui --release -- --ignored --nocapture perf_cold_first_edit
+/// cargo test -p veil-ui --release -- --ignored --nocapture perf_cold_first_edit
 #[test]
 #[ignore = "性能探针，不参与常规门禁"]
 fn perf_cold_first_edit() {
@@ -5856,7 +6038,7 @@ fn perf_cold_first_edit() {
 
 /// 对照探针（默认忽略）：先完成一次极小排版（等价真实窗口的首帧），
 /// 再测同一「首编辑」路径，用于区分字体懒加载成本与编辑本身成本。
-/// cargo test -p veil-egui --release -- --ignored --nocapture perf_cold_first_edit_prewarmed
+/// cargo test -p veil-ui --release -- --ignored --nocapture perf_cold_first_edit_prewarmed
 #[test]
 #[ignore = "性能探针，不参与常规门禁"]
 fn perf_cold_first_edit_prewarmed() {
@@ -5875,7 +6057,7 @@ fn perf_cold_first_edit_prewarmed() {
 /// 真实生命周期的冷首编辑探针（默认忽略）：App 构造 → 首帧 paint（真实窗口启动必经）
 /// → 用户第一次按键。与 `perf_cold_first_edit`（跳过首帧）对照，用于区分「用户可感知的
 /// 首键延迟」与「字体/字形首次预热成本」。
-/// cargo test -p veil-egui --release -- --ignored --nocapture perf_first_edit_after_first_frame
+/// cargo test -p veil-ui --release -- --ignored --nocapture perf_first_edit_after_first_frame
 #[test]
 #[ignore = "性能探针，不参与常规门禁"]
 fn perf_first_edit_after_first_frame() {
@@ -5897,7 +6079,7 @@ fn perf_first_edit_after_first_frame() {
 }
 
 /// 0a 验收探针（默认忽略）：10MB 单块连续滚轮 300 格后仍须有内容像素。
-/// cargo test -p veil-egui --release -- --ignored --nocapture perf_huge_scroll
+/// cargo test -p veil-ui --release -- --ignored --nocapture perf_huge_scroll
 #[test]
 #[ignore = "性能探针，不参与常规门禁"]
 fn perf_huge_scroll() {
@@ -5930,7 +6112,7 @@ fn perf_huge_scroll() {
 }
 
 /// 0a 验收探针（默认忽略）：1/2/10MB 单块只排前缀，不再整块成形。
-/// cargo test -p veil-egui --release -- --ignored --nocapture perf_huge_block
+/// cargo test -p veil-ui --release -- --ignored --nocapture perf_huge_block
 #[test]
 #[ignore = "性能探针，不参与常规门禁"]
 fn perf_huge_block() {
@@ -6001,6 +6183,7 @@ fn app_persist(
         persist_env: persist_env_with(recovery.clone(), session.clone()),
         print: Box::new(NoPrint),
         url_opener: no_url(),
+        clock: fixed_clock(),
     }
 )
 }
@@ -6054,6 +6237,7 @@ fn app_persist_dialogs(
         persist_env: persist_env_with(recovery.clone(), session.clone()),
         print: Box::new(NoPrint),
         url_opener: no_url(),
+        clock: fixed_clock(),
     }
 )
 }
@@ -6640,7 +6824,7 @@ fn quick_open_takes_ime_text_and_preempts_search() {
 }
 
 /// 10k+ 块大文档击键探针（默认忽略）：验证编辑到上屏 p95 ≤16ms 预算。
-/// cargo test -p veil-egui --release -- --ignored --nocapture perf_keystroke_10k_blocks
+/// cargo test -p veil-ui --release -- --ignored --nocapture perf_keystroke_10k_blocks
 #[test]
 #[ignore = "性能探针，不参与常规门禁"]
 fn perf_keystroke_10k_blocks() {
@@ -6860,6 +7044,26 @@ fn search_open_finds_all_and_walks_matches() {
 }
 
 #[test]
+fn case_toggle_click_rescans_and_updates_label() {
+    let store = MemStore::default();
+    let mut a = app("Foo foo", None, false, &store);
+    a.ensure_layouts_all();
+    a.open_search();
+    a.search_input("foo");
+    assert_eq!(a.ui_state.search.label(), "1/2", "默认不区分大小写");
+    let l = a.search_rect().expect("查找栏开启");
+    let (x, y) = (l.case.x + l.case.w / 2.0, l.case.y + l.case.h / 2.0);
+    click_at(&mut a, x, y);
+    assert!(a.ui_state.search.case_sensitive);
+    assert_eq!(a.ui_state.search.label(), "1/1", "开启后 n/m 立即重算");
+    assert_eq!(a.editor.caret(), 4, "跳到区分大小写后的首个命中");
+    click_at(&mut a, x, y);
+    assert!(!a.ui_state.search.case_sensitive);
+    assert_eq!(a.ui_state.search.label(), "1/2");
+    assert_eq!(a.editor.caret(), 0);
+}
+
+#[test]
 fn search_is_read_only_for_document() {
     let store = MemStore::default();
     let mut a = app("abc\n", None, false, &store);
@@ -6951,7 +7155,7 @@ fn search_bar_clicks_run_buttons_and_swallow_text_area() {
     a.open_search();
     a.search_input("x");
     let l = a.search_rect().expect("查找栏开启");
-    let center = |r: search::Rect| (r.x + r.w / 2.0, r.y + r.h / 2.0);
+    let center = |r: crate::geometry::Rect| (r.x + r.w / 2.0, r.y + r.h / 2.0);
     let (nx, ny) = center(l.next);
     click_at(&mut a, nx, ny);
     assert_eq!(a.ui_state.search.current, 1, "下一个按钮");
@@ -7535,7 +7739,7 @@ fn search_highlights_use_selection_and_hover_colors() {
 
 /// max 峰值定位探针（默认忽略）：拆分 apply / after_edit / paint 耗时，
 /// 并采样最大帧的各环节占比，定位 66ms 峰值来源。
-/// cargo test -p veil-egui --release -- --ignored --nocapture perf_peak_breakdown
+/// cargo test -p veil-ui --release -- --ignored --nocapture perf_peak_breakdown
 #[test]
 #[ignore = "性能探针，不参与常规门禁"]
 fn perf_peak_breakdown() {
@@ -7588,7 +7792,7 @@ fn perf_peak_breakdown() {
 }
 
 /// after_edit 内部子步骤拆分探针（默认忽略）：定位 69ms 峰值具体来自哪个子步骤。
-/// cargo test -p veil-egui --release -- --ignored --nocapture perf_after_edit_breakdown
+/// cargo test -p veil-ui --release -- --ignored --nocapture perf_after_edit_breakdown
 #[test]
 #[ignore = "性能探针，不参与常规门禁"]
 fn perf_after_edit_breakdown() {
@@ -7787,6 +7991,29 @@ fn word_count_tracks_edits_and_undo() {
 }
 
 #[test]
+fn line_move_refreshes_layout_without_further_edit() {
+    let store = MemStore::default();
+    let mut a = app("1one\n2two\n3three\n", None, false, &store);
+    a.ensure_layouts_all();
+    let text_of = |a: &crate::app::App| -> String {
+        a.index
+            .blocks
+            .iter()
+            .map(|g| a.cache.layouts[&g.id].layout_text())
+            .collect()
+    };
+    let before = text_of(&a);
+    assert!(before.find("1one") < before.find("2two"), "{before:?}");
+    // 行移动保持块 id 与行区间不变，布局键必须仍能失配（回归：画面滞后到下次编辑）。
+    a.perform_action(Action::Doc(Intent::MoveLineDown));
+    let after = text_of(&a);
+    assert!(
+        after.find("2two") < after.find("1one"),
+        "行移动后布局应立即反映新顺序，实际 {after:?}"
+    );
+}
+
+#[test]
 fn word_count_skips_markdown_markers() {
     let store = MemStore::default();
     let a = app("# 标题\n\n正文 **加粗** `code`\n", None, false, &store);
@@ -7928,6 +8155,7 @@ fn e2e_table_edit_and_image_paste() {
         persist_env: persist_env(),
         print: Box::new(NoPrint),
         url_opener: no_url(),
+        clock: fixed_clock(),
     }
 );
 
@@ -8119,6 +8347,7 @@ fn app_print(text: &str, print: Box<dyn Print>) -> App {
         persist_env: persist_env(),
         print,
         url_opener: no_url(),
+        clock: fixed_clock(),
     }
 )
 }
@@ -8316,6 +8545,7 @@ fn print_hard_cuts_atomic_block_taller_than_page() {
         persist_env: persist_env(),
         print: Box::new(p),
         url_opener: no_url(),
+        clock: fixed_clock(),
     }
 );
     a.perform_menu(MenuAction::Print);
@@ -9379,5 +9609,141 @@ fn print_ignores_source_mode_and_screen_restores_it() {
         "打印结束回屏幕后恢复源码模式"
     );
     assert!(a.source_mode(), "用户开关未被打印改写");
+}
+
+// ===== 排版（Task 5）：可读列宽上限 / H4–H6 缩进 / 标题段距 =====
+
+/// 超宽窗口：版心被可读列宽钳制，并在窗口内水平居中。
+#[test]
+fn wide_window_caps_content_width_and_centers() {
+    let store = MemStore::default();
+    let mut a = app("正文", None, false, &store);
+    a.window_state.test_size = Some((2560, 800));
+    a.refresh_index();
+    a.ensure_layouts_all();
+    a.recompute_geometry();
+    let scale = a.input_state.scale;
+    let available = 2560.0 - 2.0 * MARGIN * scale - chrome::SCROLL_W * scale;
+    assert!(
+        (a.content_width() - 640.0 * scale).abs() < 0.01,
+        "超宽窗口版心钳到可读列宽: {}",
+        a.content_width()
+    );
+    assert!(
+        (a.content_x() - (MARGIN * scale + (available - 640.0 * scale) / 2.0)).abs() < 0.01,
+        "版心应水平居中: {}",
+        a.content_x()
+    );
+}
+
+/// 窄窗口：上限不生效，content_width / content_x 与改动前公式逐字节一致。
+#[test]
+fn narrow_window_content_width_unchanged_by_readable_cap() {
+    let store = MemStore::default();
+    let mut a = app("正文", None, false, &store);
+    a.window_state.test_size = Some((1200, 800));
+    let scale = a.input_state.scale;
+    let want = (1200.0 - 2.0 * MARGIN * scale - chrome::SCROLL_W * scale).max(32.0);
+    assert!((a.content_width() - want).abs() < 1e-4);
+    assert!((a.content_x() - MARGIN * scale).abs() < 1e-4, "窄窗口不偏移原点");
+}
+
+/// 宽窗口下点击列宽内同一点，命中结果与窄窗口同一相对位置一致
+/// （防止只改绘制、漏改内容坐标系而出现「中心偏移」）。
+#[test]
+fn wide_window_click_hits_same_column_as_narrow() {
+    let store = MemStore::default();
+    let text: String = (0..40).map(|i| char::from(b'0' + (i % 10) as u8)).collect();
+    let mut a = app(&text, None, false, &store);
+    a.ensure_layouts_all();
+    let vp = a.viewport();
+    let y = (vp.y + a.index.blocks[0].top + 5.0) as f64;
+    a.input_state.mouse = PhysicalPosition::new((MARGIN * a.input_state.scale + 100.0) as f64, y);
+    let narrow = a.hit_offset().expect("窄窗口命中");
+
+    a.window_state.test_size = Some((2560, 800));
+    a.refresh_index();
+    a.ensure_layouts_all();
+    a.recompute_geometry();
+    let vp = a.viewport();
+    let wide_x = a.content_x() + 100.0;
+    assert!(wide_x > MARGIN * a.input_state.scale + 100.0, "宽窗口原点应右移");
+    a.input_state.mouse = PhysicalPosition::new(wide_x as f64, (vp.y + a.index.blocks[0].top + 5.0) as f64);
+    let wide = a.hit_offset().expect("宽窗口命中");
+    assert_eq!(wide, narrow, "同列点击应命中同一文档偏移");
+    assert!(narrow > 0 && narrow < text.len(), "命中点须落在行内: {narrow}");
+}
+
+/// H4 非激活：标记区替换为 2 个半角空格缩进，行高与激活态一致；
+/// H1–H3 仍为纯消隐，行为不变。
+#[test]
+fn h4_marker_replaced_by_indent_and_h1_h3_unchanged() {
+    let store = MemStore::default();
+    let mut a = app("#### a\n\n正文", None, false, &store);
+    a.editor.set_caret(a.editor.session().text_len());
+    a.ensure_layouts_all();
+    let h4 = block_id_of(&a, |k| matches!(k, BlockKind::AtxHeading(4)));
+    assert_eq!(a.cache.layouts[&h4].layout_text(), "  a", "H4 应缩进 2 空格");
+    let height = |a: &App| {
+        let g = a.index.blocks.iter().find(|g| g.id == h4).unwrap();
+        a.block_height(g)
+    };
+    let inactive = height(&a);
+    assert!(
+        inactive > BASE_LINE_HEIGHT * a.input_state.scale * 0.9
+            && inactive < BASE_LINE_HEIGHT * a.input_state.scale * 1.5,
+        "缩进占位须保持单行行高: {inactive}"
+    );
+    a.editor.set_caret(0);
+    a.ensure_layouts_all();
+    assert_eq!(a.cache.layouts[&h4].layout_text(), "#### a", "激活态还原源码");
+    assert!((inactive - height(&a)).abs() < 0.01, "显隐切换不得改变行高");
+
+    let mut b = app("### a\n\n正文", None, false, &store);
+    b.editor.set_caret(b.editor.session().text_len());
+    b.ensure_layouts_all();
+    let h3 = block_id_of(&b, |k| matches!(k, BlockKind::AtxHeading(3)));
+    assert_eq!(b.cache.layouts[&h3].layout_text(), "a", "H1–H3 保持纯消隐");
+
+    // H5/H6：缩进随级别递增（4 / 6 空格），同字号靠缩进区分
+    for (src, want) in [("##### a", "    a"), ("###### a", "      a")] {
+        let text = format!("{src}\n\n正文");
+        let mut c = app(&text, None, false, &store);
+        c.editor.set_caret(c.editor.session().text_len());
+        c.ensure_layouts_all();
+        let id = c.index.blocks[0].id;
+        assert_eq!(c.cache.layouts[&id].layout_text(), want, "{src}");
+    }
+}
+
+/// 标题后段距大于正文段距；total_h 与逐块累加（同一 gap_after 真源）一致。
+#[test]
+fn heading_gap_exceeds_paragraph_gap_and_total_h_consistent() {
+    let store = MemStore::default();
+    let mut a = app("## 标题\n\n正文一\n\n正文二", None, false, &store);
+    a.refresh_index();
+    a.ensure_layouts_all();
+    a.recompute_geometry();
+    let scale = a.input_state.scale;
+    let blocks = &a.index.blocks;
+    assert_eq!(blocks.len(), 3);
+    assert!(matches!(blocks[0].kind, BlockKind::AtxHeading(2)));
+    let heading_to_body = blocks[1].top - (blocks[0].top + blocks[0].height);
+    let body_to_body = blocks[2].top - (blocks[1].top + blocks[1].height);
+    assert!(
+        heading_to_body > body_to_body,
+        "标题段距应大于正文段距: {heading_to_body} vs {body_to_body}"
+    );
+    let mut y = MARGIN * scale;
+    for g in blocks {
+        y += g.height + gap_after(&g.kind) * scale;
+    }
+    let last_gap = gap_after(&blocks.last().unwrap().kind);
+    let want = y - last_gap * scale + MARGIN * scale;
+    assert!(
+        (a.index.total_h - want).abs() < 1e-3,
+        "total_h 应与逐块累加一致: {} vs {want}",
+        a.index.total_h
+    );
 }
 

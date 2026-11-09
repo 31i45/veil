@@ -5,7 +5,9 @@ use crate::app::App;
 use crate::chrome::{self, MenuAction};
 use crate::document::block_index::BlockGeom;
 use crate::editor::Intent;
-use crate::geometry::{BASE_FONT_SIZE, BASE_LINE_HEIGHT, MARGIN, PARA_GAP};
+use crate::geometry::{
+    Rect, BASE_FONT_SIZE, BASE_LINE_HEIGHT, MARGIN, PARA_GAP, READABLE_COLS, WIDE_WINDOW,
+};
 use crate::html::html_to_markdown;
 use crate::input::{Action, Key, Mods};
 use crate::mode::{route, Cmd, Mode, TextSink};
@@ -140,7 +142,7 @@ impl App {
             Cmd::SearchBackspace => self.search_backspace(),
             Cmd::SearchPaste => self.search_paste(),
             Cmd::SearchToggleField => self.search_toggle_field(),
-            Cmd::SearchNext => self.search_next(),
+            Cmd::SearchNext => self.search_enter(),
             Cmd::SearchPrev => self.search_prev(),
             Cmd::SearchFirstMatch => self.search_first_match(),
             Cmd::SearchLastMatch => self.search_last_match(),
@@ -211,12 +213,19 @@ impl App {
         match action {
             Action::Doc(intent) => {
                 self.window_state.goal_x = None; // 非垂直移动：重置目标列
+                // 行移动只置换行内容：块的行区间与块 id 均不变，而布局键不含内容指纹，
+                // 不换会话代次会命中旧布局（画面滞后到下一次编辑才刷新）。
+                let line_move = matches!(intent, Intent::MoveLineUp | Intent::MoveLineDown);
                 if let Some(dirty) = self.editor.apply(intent) {
+                    if line_move {
+                        self.input_state.revs.session += 1;
+                    }
                     self.after_edit(dirty);
                 }
             }
             // 垂直移动/扩选：保留 goal_x（连续上下不漂移）
             Action::MoveVertical(delta) => self.move_vertical(delta, false),
+            Action::Page(dir) => self.page_vertical(dir),
             Action::SelectVertical(delta) => self.move_vertical(delta, true),
             Action::MoveLineStart => self.move_line_edge(true, false),
             Action::MoveLineEnd => self.move_line_edge(false, false),
@@ -580,6 +589,70 @@ impl App {
         self.request_redraw();
     }
 
+    /// PageUp/PageDown：按视口翻页（滚动量复用 `chrome::page_scroll`），光标随页移动，
+    /// 保持原列（goal_x）并夹在新视口内。
+    pub(crate) fn page_vertical(&mut self, dir: i32) {
+        if dir == 0 {
+            return;
+        }
+        let vp = self.viewport();
+        let old_scroll = self.window_state.scroll_y;
+        let new_scroll =
+            chrome::page_scroll(vp, self.doc_height(), old_scroll, dir.signum());
+        let caret = self.editor.caret();
+        let Some(bi) = self.caret_block_index() else {
+            self.window_state.scroll_y = new_scroll;
+            self.request_redraw();
+            return;
+        };
+        let (id, range, top) = {
+            let g = &self.index.blocks[bi];
+            (g.id, g.range, g.top)
+        };
+        self.ensure_block(id);
+        let (cx, cy, ch) = {
+            let Some(l) = self.cache.layouts.get(&id) else {
+                return;
+            };
+            self.engine.caret_xy(l, caret - range.start)
+        };
+        let goal = *self.window_state.goal_x.get_or_insert(cx);
+        let line_h = ch.max(1.0);
+        let old_bottom = (old_scroll + vp.h - line_h).max(old_scroll);
+        let base = (top + cy).clamp(old_scroll, old_bottom);
+        let target_y = (base + dir.signum() as f32 * vp.h * 0.9)
+            .clamp(new_scroll, (new_scroll + vp.h - line_h).max(new_scroll));
+        // 目标行所在块（块间空白归入上一块，与 hit_offset 同口径）
+        let ti = self
+            .index
+            .blocks
+            .iter()
+            .rposition(|g| g.top <= target_y)
+            .unwrap_or(0);
+        let (tid, tkind, trange, ttop) = {
+            let g = &self.index.blocks[ti];
+            (g.id, g.kind.clone(), g.range, g.top)
+        };
+        self.ensure_block(tid);
+        let target = if tkind == BlockKind::Table && self.table_shows_grid(tid, &trange) {
+            let Some(t) = self.cache.tables.get(&tid) else {
+                return;
+            };
+            t.hit(goal, (target_y - ttop).clamp(0.0, t.height - 1.0))
+        } else {
+            let Some(l) = self.cache.layouts.get(&tid) else {
+                return;
+            };
+            trange.start + self.engine.hit(l, goal, (target_y - ttop).max(0.0)).min(trange.len())
+        };
+        self.window_state.scroll_y = new_scroll;
+        if !self.editor.set_caret(target) {
+            return;
+        }
+        self.scroll_to_caret();
+        self.request_redraw();
+    }
+
     /// 块内物理坐标 → 文档偏移：表格网格态走单元格命中（落单元格内容起点），
     /// 其余走文本布局命中。
     pub(crate) fn hit_block(
@@ -600,7 +673,7 @@ impl App {
     /// 鼠标位置 → 文档偏移（块间空白归入下一块起始；视口顶部之上归首块）。
     pub(crate) fn hit_offset(&mut self) -> Option<usize> {
         let vp = self.viewport();
-        let x = (self.input_state.mouse.x as f32 - MARGIN * self.input_state.scale).max(0.0);
+        let x = (self.input_state.mouse.x as f32 - self.content_x()).max(0.0);
         let y = (self.input_state.mouse.y as f32 - vp.y + self.window_state.scroll_y).max(0.0);
         let (id, kind, range, top) = {
             let blocks = &self.index.blocks;
@@ -621,7 +694,7 @@ impl App {
     /// （缩进起至尾随空格前）；激活态显源码时点击 `[ ]` 同样可切换。
     pub(crate) fn try_toggle_task(&mut self) -> bool {
         let vp = self.viewport();
-        let x = self.input_state.mouse.x as f32 - MARGIN * self.input_state.scale;
+        let x = self.input_state.mouse.x as f32 - self.content_x();
         let y = self.input_state.mouse.y as f32 - vp.y + self.window_state.scroll_y;
         let (id, kind, range, top) = {
             let blocks = &self.index.blocks;
@@ -1444,6 +1517,10 @@ impl App {
                     self.search_next();
                     return false;
                 }
+                Some(search::Hit::ToggleCase) => {
+                    self.search_toggle_case();
+                    return false;
+                }
                 Some(search::Hit::QueryText) => {
                     self.ui_state.search.focus = search::Field::Query;
                     self.set_ime_area();
@@ -1782,7 +1859,7 @@ impl App {
     }
 
     /// 大纲面板矩形（关闭时 None）：右缘贴滚动条左缘，纵向占满内容视口。
-    pub(crate) fn outline_rect(&self) -> Option<outline::Rect> {
+    pub(crate) fn outline_rect(&self) -> Option<Rect> {
         if !self.ui_state.outline.open {
             return None;
         }
@@ -2078,6 +2155,38 @@ impl App {
         self.request_redraw();
     }
 
+    /// 「区分大小写」开关：翻转后立即重扫（n/m 与光标同步），会话内保持。
+    pub(crate) fn search_toggle_case(&mut self) {
+        if !self.ui_state.search.open {
+            return;
+        }
+        self.ui_state.search.case_sensitive = !self.ui_state.search.case_sensitive;
+        self.search_rescan();
+        self.set_ime_area();
+        self.request_redraw();
+    }
+
+    /// Enter：查询框内 = 下一个命中；替换框内 = 替换当前并前进到下一处
+    /// （复用 `replace_current`），Ctrl+Enter = 全部替换（复用 `replace_all`）。
+    fn search_enter(&mut self) {
+        if self.ui_state.search.focus != search::Field::Replace {
+            self.search_next();
+            return;
+        }
+        if self.input_state.mods.ctrl {
+            self.replace_all();
+            return;
+        }
+        let Some(m) = self.ui_state.search.current_match() else {
+            return;
+        };
+        // 替换串落盘后长度可能变化：以「旧起点 + 新串字节长度」为下一处起点。
+        let from = m.start + self.ui_state.search.replace.len();
+        self.replace_current();
+        self.ui_state.search.select_after(from);
+        self.jump_to_match();
+    }
+
     /// 焦点框追加文本（含 IME 提交）：查询变化才重算匹配并跳首个。
     pub(crate) fn search_input(&mut self, text: &str) {
         if !self.ui_state.search.open || text.is_empty() {
@@ -2353,22 +2462,42 @@ pub(crate) fn map_key_parts(text: Option<&str>, wom: WKey, mods: Mods) -> Option
 // ── 几何编排（原 geometry.rs）：视口区间/块高/光标坐标/Reveal 指纹 ────────────
 
 impl App {
-    pub(crate) fn content_width(&self) -> f32 {
+    /// 版心可用宽（非打印路径）：窗口宽扣除两侧边距、滚动条与大纲面板。
+    fn available_width(&self) -> f32 {
         let (w, _) = self.win_size();
-        // 打印：无滚动条/大纲面板，版心 = 页宽 - 两侧页边距（3b）
-        if self.window_state.print.is_some() {
-            return (w as f32 - 2.0 * MARGIN * self.input_state.scale).max(32.0);
-        }
+        let scale = self.input_state.scale;
         let panel = if self.ui_state.outline.open {
-            outline::PANEL_W * self.input_state.scale
+            outline::PANEL_W * scale
         } else {
             0.0
         };
-        (w as f32
-            - 2.0 * MARGIN * self.input_state.scale
-            - chrome::SCROLL_W * self.input_state.scale
-            - panel)
-            .max(32.0)
+        (w as f32 - 2.0 * MARGIN * scale - chrome::SCROLL_W * scale - panel).max(32.0)
+    }
+
+    pub(crate) fn content_width(&self) -> f32 {
+        let (w, _) = self.win_size();
+        let scale = self.input_state.scale;
+        // 打印：无滚动条/大纲面板，版心 = 页宽 - 两侧页边距（3b），不受可读列宽上限影响
+        if self.window_state.print.is_some() {
+            return (w as f32 - 2.0 * MARGIN * scale).max(32.0);
+        }
+        let available = self.available_width();
+        // 可读列宽上限只在超宽窗口启用；窄窗口与改动前逐字节一致
+        if w as f32 > WIDE_WINDOW * scale {
+            available.min(READABLE_COLS * BASE_FONT_SIZE * scale)
+        } else {
+            available
+        }
+    }
+
+    /// 文档内容坐标系横向原点（物理像素）：打印为左边距；
+    /// 屏幕语义下超宽窗口把版心居中，窄窗口等于左边距。
+    pub(crate) fn content_x(&self) -> f32 {
+        let scale = self.input_state.scale;
+        if self.window_state.print.is_some() {
+            return MARGIN * scale;
+        }
+        MARGIN * scale + ((self.available_width() - self.content_width()) / 2.0).max(0.0)
     }
 
     /// 文档总高（含首尾外边距），滚动条与滚轮钳位依据。
@@ -2459,7 +2588,7 @@ impl App {
         let caret = self.editor.caret();
         let vp = self.viewport();
         let scale = self.input_state.scale;
-        let margin = MARGIN * scale;
+        let margin = self.content_x();
         let line_h = BASE_LINE_HEIGHT * scale;
         let scroll = self.window_state.scroll_y;
         // 严格包含（不用文末回退），先分流「光标在块尾换行之后」的情形

@@ -1,6 +1,6 @@
 // 应用图标（单一真源）：深色圆角蓝底 + 白色「V」，纯代码生成、零二进制资产。
 // 同一份像素两处复用（本文件不能含 `//!` 内部文档注释：build.rs 以 include! 嵌入）：
-// - veil-egui 窗口图标：app.rs 调 `icon_rgba` 喂 winit `with_window_icon`（3e 修 A1，
+// - veil-ui 窗口图标：app.rs 调 `icon_rgba` 喂 winit `with_window_icon`（3e 修 A1，
 //   exe 内嵌 ICO 只管任务栏/文件管理器，标题栏图标必须显式设置）；
 // - veil build.rs 生成 ICO 文件资源：`include!` 本文件后调 `icon_bytes`。
 // 改色/改形只改本文件。

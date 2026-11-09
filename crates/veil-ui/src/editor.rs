@@ -37,6 +37,13 @@ pub enum Intent {
     ToggleWrap(&'static str),
     /// 插入链接（3c-1）：选区作链接文本 `[sel]()`、光标入括号；空选区 `[]()`、光标入方括号。
     InsertLink,
+    /// Alt+↑/↓：选区覆盖的行（无选区则当前行）整体上/下移一行；单撤销步，光标随行移动。
+    MoveLineUp,
+    MoveLineDown,
+    /// Ctrl+Backspace / Ctrl+Delete：按词删除。词边界复用 Ctrl+←/→（`word_left`/`word_right`），
+    /// 遇换行即停（不跨段落边界）。
+    DeleteWordBackward,
+    DeleteWordForward,
     Undo,
     Redo,
 }
@@ -260,6 +267,10 @@ impl Editor {
                 | Intent::Dedent
                 | Intent::ToggleWrap(_)
                 | Intent::InsertLink
+                | Intent::MoveLineUp
+                | Intent::MoveLineDown
+                | Intent::DeleteWordBackward
+                | Intent::DeleteWordForward
                 | Intent::Undo
                 | Intent::Redo
         );
@@ -408,7 +419,8 @@ impl Editor {
                         .expect("选区恒合法");
                     return Some(self.collapse_and_return(ev.dirty_blocks, sel.start + text.len()));
                 }
-                Intent::DeleteBackward | Intent::DeleteForward => {
+                Intent::DeleteBackward | Intent::DeleteForward
+                | Intent::DeleteWordBackward | Intent::DeleteWordForward => {
                     let ev = self
                         .session
                         .apply(Edit::Delete { range: sel })
@@ -433,6 +445,8 @@ impl Editor {
                 | Intent::SelectAll => {}
                 // 缩进选中行：选区保留（落点随行首前缀平移），在主 match 中统一处理
                 Intent::Indent | Intent::Dedent => {}
+                // 行移动：整块重排后按端点逐行映射，选区保留
+                Intent::MoveLineUp | Intent::MoveLineDown => {}
                 // 已于入口分流（穷尽性占位）
                 Intent::ToggleWrap(_) | Intent::InsertLink => {}
             }
@@ -508,6 +522,36 @@ impl Editor {
             }
             Intent::Indent => self.apply_indent(true),
             Intent::Dedent => self.apply_indent(false),
+            Intent::MoveLineUp => self.move_lines(true),
+            Intent::MoveLineDown => self.move_lines(false),
+            Intent::DeleteWordBackward => {
+                let text = self.full_text()?;
+                let line = self.line_bounds(c);
+                let start = word_left(&text, c).max(line.start);
+                if start >= c {
+                    return None;
+                }
+                self.session
+                    .apply(Edit::Delete {
+                        range: Range::new(start, c),
+                    })
+                    .ok()
+                    .map(|e| e.dirty_blocks)
+            }
+            Intent::DeleteWordForward => {
+                let text = self.full_text()?;
+                let line = self.line_bounds(c);
+                let end = word_right(&text, c).min(line.end);
+                if end <= c {
+                    return None;
+                }
+                self.session
+                    .apply(Edit::Delete {
+                        range: Range::new(c, end),
+                    })
+                    .ok()
+                    .map(|e| e.dirty_blocks)
+            }
             Intent::Undo => {
                 let r = self.session.undo().map(|e| e.dirty_blocks);
                 if r.is_some() {
@@ -904,6 +948,99 @@ impl Editor {
             .dirty_blocks;
         self.set_marks(new_caret, new_anchor);
         Some(dirty)
+    }
+
+    /// Alt+↑/↓（行移动）：把选区覆盖的行（无选区则光标所在行）整体上/下移一行。
+    /// 行内容按行序重排、分隔符位置不变——CRLF 与「末行是否带换行」原样保留；
+    /// 整段一次 `Replace` = 单撤销步。端点按 (行, 列) 映射，光标随行移动。
+    fn move_lines(&mut self, up: bool) -> Option<Vec<BlockId>> {
+        let len = self.session.text_len();
+        let text = self.session.text_slice(Range::new(0, len))?;
+        let starts = line_starts(&text);
+        let count = starts.len();
+        let (first, last) = match self.selection() {
+            Some(sel) => {
+                let a = line_index(&starts, sel.start);
+                let mut b = line_index(&starts, sel.end);
+                // 选区终点恰在行首：该行未被选中，不参与移动（主流编辑器语义）
+                if b > a && sel.end == starts[b] {
+                    b -= 1;
+                }
+                (a, b)
+            }
+            None => {
+                let i = line_index(&starts, self.caret());
+                (i, i)
+            }
+        };
+        if up && first == 0 {
+            return None;
+        }
+        if !up && last + 1 >= count {
+            return None;
+        }
+        // 行内容与分隔符分离：分隔符按位置保留（重排只动内容）
+        let mut lines: Vec<&str> = Vec::with_capacity(count);
+        let mut seps: Vec<&str> = Vec::with_capacity(count);
+        for (i, &s) in starts.iter().enumerate() {
+            let e = starts.get(i + 1).copied().unwrap_or(len);
+            let mut ce = e;
+            if ce > s && text.as_bytes()[ce - 1] == b'\n' {
+                ce -= 1;
+                if ce > s && text.as_bytes()[ce - 1] == b'\r' {
+                    ce -= 1;
+                }
+            }
+            lines.push(&text[s..ce]);
+            seps.push(&text[ce..e]);
+        }
+        let (lo, hi, delta) = if up {
+            (first - 1, last, -1isize)
+        } else {
+            (first, last + 1, 1isize)
+        };
+        if up {
+            lines[lo..=hi].rotate_left(1);
+        } else {
+            lines[lo..=hi].rotate_right(1);
+        }
+        let span_start = starts[lo];
+        let span_end = starts.get(hi + 1).copied().unwrap_or(len);
+        let mut seg = String::with_capacity(span_end - span_start);
+        for i in lo..=hi {
+            seg.push_str(lines[i]);
+            seg.push_str(seps[i]);
+        }
+        let (caret, anchor) = (self.caret(), self.anchor_offset());
+        let mut new_text = String::with_capacity(len + seg.len() - (span_end - span_start));
+        new_text.push_str(&text[..span_start]);
+        new_text.push_str(&seg);
+        new_text.push_str(&text[span_end..]);
+        let new_starts = line_starts(&new_text);
+        let span = Range::new(span_start, span_end);
+        let map = |off: usize| -> usize {
+            if off < span.start {
+                off
+            } else if off >= span.end {
+                off + seg.len() - (span.end - span.start)
+            } else {
+                let li = line_index(&starts, off);
+                let col = off - starts[li];
+                let nli = if li >= first && li <= last {
+                    (li as isize + delta) as usize
+                } else {
+                    (li as isize - delta) as usize
+                };
+                new_starts[nli] + col
+            }
+        };
+        let (new_caret, new_anchor) = (map(caret), map(anchor));
+        let ev = self
+            .session
+            .apply(Edit::Replace { range: span, text: seg })
+            .ok()?;
+        self.set_marks(new_caret, new_anchor);
+        Some(ev.dirty_blocks)
     }
 
     /// Enter（C4）：行尾且行首是列表/引用标记时续写下一项（编号递增、任务项给未勾选）；
@@ -2414,5 +2551,142 @@ mod tests {
         // 两侧斜体未被摘除
         assert!(e.session().serialize().starts_with("*a*"));
         assert!(e.session().serialize().ends_with("*b*"));
+    }
+
+    // ---- Task 1：行移动（Alt+↑/↓）与按词删除（Ctrl+Backspace/Delete）----
+
+    #[test]
+    fn move_line_up_swaps_with_previous_and_caret_follows() {
+        let mut e = ed("a\nb\nc", 2); // 光标在 "b" 行首
+        e.apply(Intent::MoveLineUp).unwrap();
+        assert_eq!(e.session().serialize(), "b\na\nc");
+        assert_eq!(e.caret(), 0, "光标随 b 行移到文首");
+        e.apply(Intent::MoveLineDown).unwrap();
+        assert_eq!(e.session().serialize(), "a\nb\nc");
+        assert_eq!(e.caret(), 2, "反向移动光标回到原位置");
+    }
+
+    #[test]
+    fn move_line_down_swaps_with_next() {
+        let mut e = ed("a\nb\nc", 0);
+        e.apply(Intent::MoveLineDown).unwrap();
+        assert_eq!(e.session().serialize(), "b\na\nc");
+        assert_eq!(e.caret(), 2);
+    }
+
+    #[test]
+    fn move_line_at_boundaries_is_noop() {
+        let mut e = ed("a\nb", 0);
+        assert_eq!(e.apply(Intent::MoveLineUp), None, "首行上移无效果");
+        let mut e = ed("a\nb", 3);
+        assert_eq!(e.apply(Intent::MoveLineDown), None, "末行下移无效果");
+    }
+
+    #[test]
+    fn move_line_is_single_undo_step() {
+        let src = "a\nb\nc";
+        let mut e = ed(src, 2);
+        assert!(e.apply(Intent::MoveLineUp).is_some());
+        assert_eq!(e.session().serialize(), "b\na\nc");
+        e.apply(Intent::Undo).unwrap();
+        assert_eq!(e.session().serialize(), src, "一次行移动是单撤销步");
+    }
+
+    #[test]
+    fn move_selected_lines_up_moves_whole_block() {
+        let src = "a\nb\nc\nd";
+        let mut e = sel_ed(src, 2, 5); // 选中 "b\nc"
+        e.apply(Intent::MoveLineUp).unwrap();
+        assert_eq!(e.session().serialize(), "b\nc\na\nd");
+        assert_eq!(e.selection(), Some(Range::new(0, 3)), "选区随行移动");
+    }
+
+    #[test]
+    fn move_lines_round_trip_restores_bytes_cjk() {
+        // 性质：行移动 ×2 再反向 ×2 回到原字节（含 CJK 多行）
+        let src = "第一行\n第二行中文\n第三行\n第四行";
+        let caret = src.find("第四行").unwrap();
+        let mut e = ed(src, caret);
+        e.apply(Intent::MoveLineUp).unwrap();
+        e.apply(Intent::MoveLineUp).unwrap();
+        e.apply(Intent::MoveLineDown).unwrap();
+        e.apply(Intent::MoveLineDown).unwrap();
+        assert_eq!(e.session().serialize(), src);
+        assert_eq!(e.caret(), caret, "光标回到原字节位置");
+    }
+
+    #[test]
+    fn move_line_preserves_crlf_and_missing_final_newline() {
+        // 分隔符按位置保留：CRLF 与「末行无换行」均不得被规范化
+        let mut e = ed("a\r\nb", 3);
+        e.apply(Intent::MoveLineUp).unwrap();
+        assert_eq!(e.session().serialize(), "b\r\na");
+        e.apply(Intent::MoveLineDown).unwrap();
+        assert_eq!(e.session().serialize(), "a\r\nb");
+    }
+
+    #[test]
+    fn ctrl_backspace_deletes_word_and_keeps_caret_at_word_start() {
+        let mut e = ed("foo bar baz", 11);
+        e.apply(Intent::DeleteWordBackward).unwrap();
+        assert_eq!(e.session().serialize(), "foo bar ");
+        assert_eq!(e.caret(), 8);
+        e.apply(Intent::DeleteWordBackward).unwrap();
+        assert_eq!(e.session().serialize(), "foo ");
+        assert_eq!(e.caret(), 4);
+    }
+
+    #[test]
+    fn ctrl_backspace_cjk_uses_word_boundary() {
+        let mut e = ed("中文字符", 12);
+        e.apply(Intent::DeleteWordBackward).unwrap();
+        assert_eq!(e.session().serialize(), "");
+        assert_eq!(e.caret(), 0);
+    }
+
+    #[test]
+    fn repeated_ctrl_backspace_stops_at_line_start() {
+        // 性质：连续按词删除不跨过换行（行首不吞上一行内容）
+        let mut e = ed("foo bar\nbaz", 7);
+        e.apply(Intent::DeleteWordBackward).unwrap(); // "foo "
+        e.apply(Intent::DeleteWordBackward).unwrap(); // 清空首行
+        assert_eq!(e.session().serialize(), "\nbaz");
+        assert_eq!(e.caret(), 0);
+        assert_eq!(
+            e.apply(Intent::DeleteWordBackward),
+            None,
+            "行首按不吞上一行（此处已到文首）"
+        );
+        let mut e = ed("foo\nbar", 4);
+        assert_eq!(
+            e.apply(Intent::DeleteWordBackward),
+            None,
+            "行首按不吞上一行内容"
+        );
+        assert_eq!(e.session().serialize(), "foo\nbar");
+    }
+
+    #[test]
+    fn ctrl_delete_forward_deletes_word_to_line_end() {
+        let mut e = ed("foo bar baz", 4);
+        e.apply(Intent::DeleteWordForward).unwrap();
+        assert_eq!(e.session().serialize(), "foo  baz");
+        assert_eq!(e.caret(), 4);
+
+        let mut e = ed("foo\nbar", 3);
+        assert_eq!(
+            e.apply(Intent::DeleteWordForward),
+            None,
+            "行尾正向删除不吞换行"
+        );
+        assert_eq!(e.session().serialize(), "foo\nbar");
+    }
+
+    #[test]
+    fn word_delete_with_selection_deletes_selection_only() {
+        let mut e = sel_ed("foo bar", 4, 7);
+        e.apply(Intent::DeleteWordBackward).unwrap();
+        assert_eq!(e.session().serialize(), "foo ");
+        assert_eq!(e.caret(), 4);
     }
 }

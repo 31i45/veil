@@ -8,11 +8,15 @@ mod print;
 mod shell;
 #[cfg(windows)]
 mod theme;
+mod clock;
+mod error;
 mod watch;
 #[cfg(windows)]
 mod wic;
 #[cfg(windows)]
 mod windows;
+
+pub use error::{open_failure_text, show_error, OpenFailure};
 
 use std::path::PathBuf;
 
@@ -22,6 +26,13 @@ use veil_ui::{
     ConfigStore, FileDialog, FileWatcher, ImageData, PersistEnv, RecoveryStore, SessionStore,
     SystemTheme, ThemeEnv, WindowEffects,
 };
+
+/// UTF-16 + NUL 结尾：Win32 W 系列 API 唯一接受的字符串形态。
+/// 各 Win32 子模块共用此一份实现（等价于 `OsStr::encode_wide`，但无需额外 trait）。
+#[cfg(windows)]
+fn wide(s: &str) -> Vec<u16> {
+    s.encode_utf16().chain(std::iter::once(0)).collect()
+}
 
 /// 非 PNG 图片解码（阶段 1）：Windows 走 WIC（系统编解码器，覆盖 JPEG/WebP/BMP/GIF/TIFF）；
 /// 其他平台返回可读错误，PNG 路径仍由产品层 png 解码器承担。
@@ -70,6 +81,12 @@ pub fn url_opener() -> Box<dyn veil_ui::UrlOpener> {
     {
         Box::new(NoUrlOpener)
     }
+}
+
+/// 系统时钟装配（信任显性化）：状态栏「已保存 HH:MM」的时间来源。
+/// 与 theme_env 同模式——本层是实现细节，veil-ui 只见 `Clock` trait。
+pub fn system_clock() -> Box<dyn veil_ui::Clock> {
+    Box::new(clock::SystemClock)
 }
 
 /// 文件系统监听：notify 建议实现（事件线程 + 非阻塞通道）。
@@ -264,5 +281,41 @@ mod tests {
         tmp.push(".veil-tmp");
         assert!(!PathBuf::from(tmp).exists(), "临时文件须被 rename 消费");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 空串也必须带 NUL 终止符（Win32 W API 不接受空缓冲）。
+    #[cfg(windows)]
+    #[test]
+    fn wide_empty_string_is_single_terminator() {
+        assert_eq!(wide(""), vec![0u16]);
+    }
+
+    /// 非 ASCII（中文 + 补充平面）按 UTF-16 code unit 展开，末尾补一个 NUL。
+    #[cfg(windows)]
+    #[test]
+    fn wide_encodes_non_ascii_code_units() {
+        let w = wide("a中😀");
+        assert_eq!(w, vec![0x61, 0x4E2D, 0xD83D, 0xDE00, 0]);
+    }
+
+    /// 内嵌 U+0000：实现保留原字符并再补终止符，Win32 实际只读到首个 NUL（下标 1）。
+    #[cfg(windows)]
+    #[test]
+    fn wide_keeps_embedded_nul_before_appended_terminator() {
+        let w = wide("a\0b");
+        assert_eq!(w, vec![0x61, 0, 0x62, 0]);
+        assert_eq!(w.iter().position(|&c| c == 0), Some(1), "首个 NUL 即为 Win32 可见边界");
+    }
+
+    /// 长串：每个 char 的 UTF-16 单元数 + 1 个终止符，不截断、不丢尾部。
+    #[cfg(windows)]
+    #[test]
+    fn wide_long_input_ends_with_single_terminator() {
+        let s = "长".repeat(5_000) + &"x".repeat(1_000);
+        let w = wide(&s);
+        assert_eq!(w.len(), s.encode_utf16().count() + 1);
+        assert_eq!(w.len(), 6_001);
+        assert_eq!(w[0], 0x957F);
+        assert_eq!(*w.last().unwrap(), 0);
     }
 }

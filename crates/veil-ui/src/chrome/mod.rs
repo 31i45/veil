@@ -118,8 +118,8 @@ pub const MENUS: [MenuDef; 3] = [
             ("保存", "Ctrl+S", MenuAction::Save),
             ("另存为…", "Ctrl+Shift+S", MenuAction::SaveAs),
             ("", "", MenuAction::Separator),
-            ("导出 HTML", "Ctrl+E", MenuAction::Export),
-            ("导出 PDF", "Ctrl+Shift+E", MenuAction::ExportPdf),
+            ("导出 HTML…", "Ctrl+E", MenuAction::Export),
+            ("导出 PDF…", "Ctrl+Shift+E", MenuAction::ExportPdf),
             ("打印…", "Ctrl+Shift+P", MenuAction::Print),
             ("", "", MenuAction::Separator),
             ("退出", "", MenuAction::Quit),
@@ -426,13 +426,19 @@ pub fn path_label(p: Option<&Path>) -> String {
     }
 }
 
-/// 状态栏文本：(左, 右)。左 = path_label + 脏标 + 外部变更提示 + 源码模式提示；
+/// 状态栏文本：(左, 右)。左 = path_label + 脏标 + 外部变更提示 + 源码模式提示 + 保存态；
 /// 右 = 全文字数 + 行列。
+///
+/// 保存态是显性文字（不只靠 `*`）：脏 → `· 未保存`；干净且本会话保存过 →
+/// `· 已保存 HH:MM`（时间由注入的 Clock 提供）。外部修改/文件缺失/源码模式后缀
+/// 保持既有顺序与文案，保存态追加在其后。
+#[allow(clippy::too_many_arguments)] // 状态栏聚合字段，调用点只有绘制一处
 pub fn status_line(
     path: Option<&Path>,
     dirty: bool,
     external: ExternalState,
     source_mode: bool,
+    saved_hhmm: Option<&str>,
     words: usize,
     line: usize,
     col: usize,
@@ -449,6 +455,11 @@ pub fn status_line(
     }
     if source_mode {
         left.push_str("（源码模式）");
+    }
+    if dirty {
+        left.push_str(" · 未保存");
+    } else if let Some(hhmm) = saved_hhmm {
+        left.push_str(&format!(" · 已保存 {hhmm}"));
     }
     (left, format!("{words} 字 · 行 {line}，列 {col}"))
 }

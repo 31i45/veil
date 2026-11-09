@@ -265,3 +265,68 @@ unsafe fn decode_impl(path: &Path) -> Result<ImageData, String> {
         height: h,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    /// 每个用例独占一个临时目录（避免并行测试互相覆盖），返回待解码路径。
+    fn temp_input(tag: &str, bytes: &[u8]) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "veil_wic_{tag}_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("input.bin");
+        fs::write(&path, bytes).unwrap();
+        path
+    }
+
+    /// 垃圾字节：解码器拒绝并返回可读 Err（含归因 + HRESULT 诊断），不得 panic。
+    #[test]
+    fn garbage_bytes_yield_readable_error() {
+        let path = temp_input("garbage", b"\x89PNG\r\n\x1a\nthis is not an image payload");
+        let Err(err) = decode_image(&path) else {
+            panic!("垃圾字节必须解码失败");
+        };
+        assert!(err.contains("打开图片解码器"), "错误须归因到解码器: {err}");
+        assert!(err.contains("HRESULT"), "须保留系统诊断: {err}");
+        let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// 空文件：与垃圾字节同路径失败，错误文本可读、不 panic。
+    #[test]
+    fn empty_file_yields_readable_error() {
+        let path = temp_input("empty", b"");
+        let Err(err) = decode_image(&path) else {
+            panic!("空文件必须解码失败");
+        };
+        assert!(err.contains("打开图片解码器"), "错误须归因到解码器: {err}");
+        assert!(err.contains("HRESULT"), "须保留系统诊断: {err}");
+        let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// 不存在的路径：返回可读 Err（而不是静默成功或 panic）。
+    #[test]
+    fn missing_path_yields_readable_error() {
+        let path = std::env::temp_dir().join(format!(
+            "veil_wic_missing_{}_{}.png",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        assert!(!path.exists(), "夹具路径必须不存在");
+        let Err(err) = decode_image(&path) else {
+            panic!("不存在的路径必须失败");
+        };
+        assert!(err.contains("打开图片解码器"), "错误须归因到解码器: {err}");
+        assert!(err.contains("HRESULT"), "须保留系统诊断: {err}");
+    }
+}

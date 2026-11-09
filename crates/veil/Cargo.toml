@@ -13,5 +13,5 @@ latex-rust = { version = "3.0", features = ["png"] }
 png = "0.18"
 # 仅 HTML 导出使用（INSTANCE §6 预算内）；编辑/渲染主链路不经过它
 pulldown-cmark = "0.13"
-# 外部文件监听（切片 16）：事件线程 + 非阻塞通道，策略在 veil-egui
+# 外部文件监听（切片 16）：事件线程 + 非阻塞通道，策略在 veil-ui
 notify = "8"

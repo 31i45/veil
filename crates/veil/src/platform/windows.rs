@@ -13,6 +13,8 @@ use std::path::PathBuf;
 
 use veil_ui::FileDialog;
 
+use super::wide;
+
 type Hwnd = *mut c_void;
 type Hinstance = *mut c_void;
 type Lpstr = *mut u16;
@@ -165,10 +167,6 @@ const FOS_PATHMUSTEXIST: u32 = 0x0000_0800;
 const SIGDN_FILESYSPATH: u32 = 0x8005_8000;
 
 const MAX_PATH_U16: usize = 32_768;
-
-fn wide(s: &str) -> Vec<u16> {
-    s.encode_utf16().chain(std::iter::once(0)).collect()
-}
 
 /// 过滤器串：每对「描述\0模式\0」，整体以额外 \0 结尾。
 fn filter() -> Vec<u16> {

@@ -1513,7 +1513,7 @@ fn block_subs(kind: BlockKind, body: &str, block: Range, caret: usize) -> Vec<Su
             }
         }
         // 标题/围栏：非激活时隐源码标记（与列表/引用/分隔线同一 WYSIWYM 规则）。
-        BlockKind::AtxHeading(_) => heading_subs(body, block, caret),
+        BlockKind::AtxHeading(level) => heading_subs(level, body, block, caret),
         BlockKind::SetextHeading(_) => setext_subs(body, block, caret),
         BlockKind::FencedCode(_) => fenced_subs(body, block, caret),
         _ => Vec::new(),
@@ -1522,14 +1522,20 @@ fn block_subs(kind: BlockKind, body: &str, block: Range, caret: usize) -> Vec<Su
 
 /// ATX 标题：非激活时消隐缩进(≤3) + `#`×1..=6 + 其后空白。
 /// 行内文本与行高不变（只去掉前缀字形），光标进入块即还原源码。
-fn heading_subs(body: &str, block: Range, caret: usize) -> Vec<Sub> {
+/// H4–H6 同字号，标记区改为缩进空格（2 个半角空格/级）以保留层级可辨；
+/// H1–H3 仍有字号差异，保持纯消隐。
+fn heading_subs(level: u8, body: &str, block: Range, caret: usize) -> Vec<Sub> {
     if node_active(block, caret) {
         return Vec::new();
     }
-    atx_marker_end(body)
-        .filter(|&end| end > 0)
-        .map(|end| vec![Sub::elide(0, end)])
-        .unwrap_or_default()
+    let Some(end) = atx_marker_end(body).filter(|&end| end > 0) else {
+        return Vec::new();
+    };
+    if level >= 4 {
+        let indent = usize::from(level - 3) * 2;
+        return vec![Sub::fill(0, end, " ".repeat(indent))];
+    }
+    vec![Sub::elide(0, end)]
 }
 
 /// Setext 标题：非激活时把下划线行（`===` / `---`）换成等长空格。

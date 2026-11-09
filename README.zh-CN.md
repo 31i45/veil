@@ -12,7 +12,7 @@
 
 Veil 的灵感来自 Typedown — Typedown 是我最喜欢的 Windows Markdown 编辑器，没有之一，但是它启动需要几十秒到数分钟，每次都让人崩溃。Typedown 是 WinUI 框架实现的应用，冷启动快过你完成一杯咖啡的时间本该是理所当然的事，但现实并非如此。
 
-所以，我决定自己复刻。纯 Rust 实现，无 webview、无 Chromium/WebView2 进程、无外部运行时依赖。单文件 exe，150 ms 冷启动。**单机单用户 · 纯离线 · 永不协作**。
+所以，我决定自己复刻。纯 Rust 实现，无 webview、无 Chromium/WebView2 进程、无外部运行时依赖。单文件 exe，应用内冷启动 ≈150 ms（双指标与测量命令/日期见[数字红线](#数字红线目标值与实测)）。**单机单用户 · 纯离线 · 永不协作**。
 
 ## 下载与使用
 
@@ -84,22 +84,27 @@ cargo test --workspace
 cargo run -p veil -- <file.md>
 ```
 
-当前 910 项测试全绿（`cargo test --workspace` 910 passed / 0 failed / 12 ignored，2026-11-05 实测），`cargo clippy --workspace --all-targets -- -D warnings` 零警告。
+当前 1131 项测试全绿（`cargo test --workspace` 1131 passed / 0 failed / 13 ignored，2026-11-09 实测），`cargo clippy --workspace --all-targets -- -D warnings` 零警告。
 
 ## 数字红线（目标值与实测）
 
-发布构建、探针串行；击键延迟行已更新为 2026-11-03 最终复测。方法与明细见 `docs/review/keystroke-attribution.md`。
+发布构建、探针串行，2026-11-09 复核。命令：`cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo run --release -p veil --example bench_typing`、`(Get-Item target\release\veil.exe).Length`。方法与明细见 `docs/review/keystroke-attribution.md`。
 
 | 指标 | 目标值 | 实测 |
 |---|---|---|
-| 冷启动（发布构建，`main`→首帧完成；**验收口径**） | ≤ 300 ms | 145–190 ms ✅（2026-10-30 分段实测） |
-| 冷启动（墙钟，进程创建→首帧；环境观察项） | ≤ 300 ms | 450–529 ms（其中 440–470 ms 在 `main` 之前，属本机进程创建段开销） |
+| 冷启动（发布构建，`main`→首帧完成；**验收口径**；5 次） | ≤ 300 ms | 145–190 ms（最小–最大；2026-11-05 `VEIL_BOOT_LOG` 分段探针）✅ |
+| 冷启动（进程内打开 + 首次全量排版；5 次 p50 / max） | 观察项 | 520.87 / 533.85 ms（2026-11-09，`cargo run --release -p veil --example bench_typing`） |
+| 冷启动（墙钟，进程创建→首帧；环境观察项） | ≤ 300 ms | 450–529 ms（其中 440–470 ms 在 `main` 之前，属本机进程创建段开销；2026-10-31） |
+| 冷启动（窗口句柄口径；P2 对比口径） | — | 30 ms（2026-10-30，`tools/bench/measure.ps1`） |
 | 10 万字文档击键→提交上屏延迟 p95 | ≤ 16 ms | 3.37 ms（5.0k 块）/ 5.20 ms（10.5k 块）/ 9.25 ms（20.0k 块）✅（2026-11-03 release headless 分项探针 p95 之和） |
 | 10 万字文档常驻内存（私有工作集） | ≤ 150 MB | 40.76 MB（20 页深滚动后 WorkingSet，2026-11-05 实测） |
-| 安装产物体积（`veil.exe` 单文件） | ≤ 15 MiB | 5,985,280 B ≈ 5.71 MiB（2026-11-06 实测） |
+| 安装产物体积（`veil.exe` 单文件；无安装目录/解压后额外总量） | ≤ 6 MiB = 6,291,456 B | 6,043,136 B ≈ 5.76 MiB（2026-11-09 实测）；余量 248,320 B |
 | `veil-core` 单元+属性测试数 | ≥ 80 | 209 |
 | e2e 断言数 | ≥ 20 | 41（3 个 e2e_ 场景测试：写作闭环打开→保存→重开、表格+图片粘贴落盘、查找替换→崩溃恢复→自清）✅ |
-| Markdown 往返一致率（无编辑时输出 == 输入字节） | 100% | 100% |
+| Markdown 往返一致率（无编辑时输出 == 输入字节；按字节比较） | 100% | 100% |
+| CommonMark 0.31.2 一致性（按用例数；A / C / D 维） | — | A 652/652 · C 652/652 · D 652/652 ✅ |
+| CommonMark 0.31.2 一致性（B 维） | — | B_EXPORT_EXACT 629/652 · B_CANON 630/652（非全通过） |
+| GFM 扩展一致性（Tables / TaskList / Strikethrough；按用例数；A / C / D 维） | — | A 23/23 · C 23/23 · D 23/23 ✅；B_CANON 12/23（11 例 autolinks 仅观测） |
 | `veil-core` 的 GUI/异步运行时依赖数 | 0 | 0 |
 | `veil-ui`+`veil` 直接依赖总数 | ≤ 8 | 8 |
 | workspace 传递依赖总数 | ≤ 200 | 141 |
@@ -131,7 +136,7 @@ cargo run -p veil -- <file.md>
   - ADR-008 依赖升级策略
   - ADR-011 wgpu 延迟引入（v1 不引入，触发式立项）
 - `.trae/specs/release-and-roadmap/v1.1-roadmap.md` — v1.1 详细 roadmap
-- `.trae/specs/release-and-roadmap/v1.2-roadmap.md` — v1.2 候选池（表格可视化、PDF 书签、字体子集化、排版设置）
+- `.trae/specs/release-and-roadmap/v1.2-roadmap.md` — v1.2 候选池（排版设置、PDF 书签、字体子集化）
 - `.trae/specs/release-and-roadmap/v2.0-roadmap.md` — v2.0 详细 roadmap（wgpu 后移四条触发条件同时满足才启动）
 
 ## 许可

@@ -179,7 +179,7 @@ pub fn actual_blocks(s: &Session) -> Vec<B> {
             BlockKind::FencedCode(_) | BlockKind::IndentedCode => B::Pre,
             BlockKind::Math => B::Other,
             BlockKind::Table => B::Table,
-            BlockKind::BlockQuote => B::Quote,
+            BlockKind::BlockQuote | BlockKind::Admonition(_) => B::Quote,
             BlockKind::ThematicBreak => B::Rule,
             BlockKind::LinkRefDef | BlockKind::FootnoteDef => continue,
             BlockKind::HtmlBlock => continue,

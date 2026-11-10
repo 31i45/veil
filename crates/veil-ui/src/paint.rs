@@ -637,7 +637,7 @@ impl App {
             let l = &self.cache.layouts[&id].value;
             if matches!(
                 kind,
-                BlockKind::FencedCode(_) | BlockKind::IndentedCode | BlockKind::HtmlBlock
+                BlockKind::FencedCode(_) | BlockKind::IndentedCode | BlockKind::HtmlBlock | BlockKind::FrontMatter(_)
             ) {
                 let (rw, rh) = {
                     let r = &self.cache.rasters[&id].value;

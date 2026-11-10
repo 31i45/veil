@@ -87,6 +87,10 @@ pub enum BlockKind {
     /// 原始 HTML 块（CommonMark §4.6，类型 1–7）：块内不解析 inline，源码原样渲染。
     /// 类型 1–5 以闭合模式终止；类型 6（块级标签）与 7（完整标签行）以空行终止。
     HtmlBlock,
+    /// Front Matter（Jekyll / Hugo / MkDocs 等）：文档起始处 `---`（YAML）或 `+++`（TOML）
+    /// 围栏，内嵌元数据。块内不解析 inline，body 内容原样保存供视图态渲染为卡片。
+    /// 仅首块（首非空行）命中，中间文档的 `---` 围栏仍按 ThematicBreak 处理。
+    FrontMatter(String),
 }
 
 /// 表格列对齐（GFM 分隔行 `:--` / `--:` / `:-:` 语法）。

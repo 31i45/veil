@@ -14,6 +14,69 @@ pub(super) fn scan_blocks(
 ) -> Vec<(BlockKind, usize, usize)> {
     let mut out = Vec::new();
     let mut line = from_line;
+    // Front Matter：仅文档首行（line == 0）可能命中；增量重扫时 from_line > 0 跳过
+    if line == 0 && line < total {
+        let text = line_text(buf, line);
+        if let Some((ch, flen)) = frontmatter_open(&text) {
+            let start_line = line;
+            let body_start = line + 1;
+            let mut consumed = 1usize;
+            // 扫描闭围栏
+            while line + consumed < total {
+                if frontmatter_close(&line_text(buf, line + consumed), ch, flen) {
+                    consumed += 1;
+                    break;
+                }
+                consumed += 1;
+            }
+            // Front Matter 必须有 body 内容，且 body 须"看起来像 YAML"
+            if consumed > 1 {
+                let body_lines: Vec<String> = (line + body_start..line + consumed - 1)
+                    .map(|l| line_text(buf, l))
+                    .collect();
+                let body_trimmed: Vec<&str> =
+                    body_lines.iter().map(|s| s.trim()).collect();
+                // Body 非空、且非空行须匹配 YAML 模式（key: value / key: / - item / # comment / nested key）
+                let non_empty: Vec<&&str> =
+                    body_trimmed.iter().filter(|s| !s.is_empty()).collect();
+                let looks_like_yaml = !non_empty.is_empty()
+                    && non_empty.iter().all(|s| {
+                        let t = *s;
+                        // key: value 或 key: （允许中文 key，允许缩进）
+                        let trimmed = t.trim_start();
+                        if trimmed.is_empty() {
+                            return true;
+                        }
+                        // - item（列表项）
+                        if trimmed.starts_with("- ") || trimmed == "-" {
+                            return true;
+                        }
+                        // # 注释
+                        if trimmed.starts_with('#') {
+                            return true;
+                        }
+                        // key: 或 key: value（简单 key 后面跟冒号）
+                        // key 可含字母/数字/下划线/短横线/点/中文
+                        let has_colon = trimmed.contains(':');
+                        let key_part = trimmed.split(':').next().unwrap_or("");
+                        let key_valid = !key_part.is_empty()
+                            && key_part
+                                .chars()
+                                .all(|c| c.is_alphanumeric() || c == '_' || c == '-' || c == '.' || !c.is_ascii());
+                        has_colon && key_valid
+                    });
+                if looks_like_yaml {
+                    let body = body_lines.join("\n");
+                    out.push((
+                        BlockKind::FrontMatter(body),
+                        start_line,
+                        start_line + consumed,
+                    ));
+                    line += consumed;
+                }
+            }
+        }
+    }
     while line < total {
         if line_text(buf, line).trim().is_empty() {
             line += 1;
@@ -360,6 +423,44 @@ pub(super) fn fence_close(line: &str, ch: u8, len: usize) -> bool {
 /// 是否为围栏开标记行（含 `~~~`）。
 pub(super) fn is_fence(line: &str) -> bool {
     fence_open(line).is_some()
+}
+
+/// Front Matter 围栏开标记：`---` 或 `+++`（≥3 字符，无 info string、无缩进）。
+/// 返回分隔符字节和长度。只在文档首行命中（调用方约束）。
+fn frontmatter_open(line: &str) -> Option<(u8, usize)> {
+    let t = line.trim_start();
+    let b = t.as_bytes();
+    let ch = *b.first()?;
+    if ch != b'-' && ch != b'+' {
+        return None;
+    }
+    let mut n = 0usize;
+    while b.get(n) == Some(&ch) {
+        n += 1;
+    }
+    if n < 3 {
+        return None;
+    }
+    // Front Matter 围栏后不允许 info string（围栏后必须是空白或行尾）
+    let rest = t[n..].trim();
+    if !rest.is_empty() {
+        return None;
+    }
+    Some((ch, n))
+}
+
+/// Front Matter 闭围栏：同开围栏字符和长度。
+fn frontmatter_close(line: &str, ch: u8, len: usize) -> bool {
+    let t = line.trim();
+    let b = t.as_bytes();
+    if b.first() != Some(&ch) {
+        return false;
+    }
+    let mut n = 0usize;
+    while b.get(n) == Some(&ch) {
+        n += 1;
+    }
+    n >= len && t[n..].trim().is_empty()
 }
 
 /// v0 数学块标记（pandoc 风格 `$$`）：`$$` 独占行 = 开/闭标记（Some(false)）；

@@ -137,6 +137,7 @@ impl Syntax {
                     | BlockKind::ThematicBreak
                     | BlockKind::LinkRefDef
                     | BlockKind::HtmlBlock
+                    | BlockKind::FrontMatter(_)
             ) {
                 continue;
             }
@@ -218,6 +219,7 @@ impl Syntax {
                 | BlockKind::LinkRefDef
                 | BlockKind::FootnoteDef
                 | BlockKind::HtmlBlock
+                | BlockKind::FrontMatter(_)
         ) {
             return Some(Vec::new());
         }

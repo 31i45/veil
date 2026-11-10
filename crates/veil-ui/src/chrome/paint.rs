@@ -138,12 +138,15 @@ impl Chrome {
 
         // 菜单栏
         frame.fill_rect(0, 0, frame.width, menu_h.ceil() as u32, palette::surface_card(theme));
+        let menu_fade = self.menu_fade.view(self.hover_menu);
         for (i, x, w) in menu_bar_rects(scale) {
             // active（已展开）用按下色，hover 用悬停色：六态单源。
+            // hover 走过渡不透明度（S6），active 即时到位。
             let bg = if self.open == Some(i) {
                 Some(state::pressed_bg(theme))
-            } else if self.hover_menu == Some(i) {
-                Some(state::hover_bg(theme))
+            } else if let Some(a) = menu_fade.alpha_of(i) {
+                let h = state::hover_bg(theme);
+                Some([h[0], h[1], h[2], a])
             } else {
                 None
             };
@@ -285,21 +288,26 @@ impl Chrome {
                 theme.chrome_border,
             );
             let pad = crate::theme::surface::padding(scale);
+            let popup_fade = self.popup_fade.view(self.hover_item.map(|(_, i)| i));
             for (i, ix, iy, iw, ih) in &p.items {
                 let Some((label, shortcut, action)) = rows.get(*i) else {
                     continue;
                 };
                 let enabled = action_enabled(*action, flags);
                 // 禁用项不参与高亮（原生菜单语义：置灰且无悬停反馈）
-                if enabled && self.hover_item == Some((open, *i)) {
-                    frame.fill_hover(
-                        ix.round() as i32,
-                        iy.round() as i32,
-                        iw.ceil() as u32,
-                        ih.ceil() as u32,
-                        scale,
-                        state::hover_bg(theme),
-                    );
+                // 悬停高亮走过渡不透明度（S6）。
+                if enabled {
+                    if let Some(a) = popup_fade.alpha_of(*i) {
+                        let h = state::hover_bg(theme);
+                        frame.fill_hover(
+                            ix.round() as i32,
+                            iy.round() as i32,
+                            iw.ceil() as u32,
+                            ih.ceil() as u32,
+                            scale,
+                            [h[0], h[1], h[2], a],
+                        );
+                    }
                 }
                 // 主题项 / 开关项：开启态在右侧显示「当前」（快捷键列复用）
                 let is_current = theme_action_matches(*action, theme.mode)

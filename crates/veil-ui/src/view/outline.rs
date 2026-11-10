@@ -36,6 +36,8 @@ pub(crate) struct Outline {
     pub(crate) open: bool,
     pub(crate) scroll: f32,
     pub(crate) hover: Option<usize>,
+    /// 悬停过渡（S6）：行高亮淡入/淡出，关闭时与无动效版本逐像素一致。
+    pub(crate) fade: crate::anim::Fade,
     pub(crate) entries: Vec<OutlineEntry>,
     /// 上次自动跟随的光标位置：仅光标变化时把当前条目滚入视野，
     /// 避免用户手动滚动大纲时被每帧强制拉回。打开面板时置 None 以重新同步。

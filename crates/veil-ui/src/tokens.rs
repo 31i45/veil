@@ -276,7 +276,7 @@ pub(crate) mod typography {
     pub const MONO_FAMILIES: &[&str] = &["Consolas", "Courier New"];
 }
 
-#[allow(dead_code)] // A9 动效落地前占位
+/// 动效令牌（S1 / S6）：S6 的过渡实现只从这里取时长与缓动。
 pub(crate) mod motion {
     use std::time::Duration;
 

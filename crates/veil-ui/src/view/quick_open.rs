@@ -48,6 +48,8 @@ pub(crate) struct QuickOpen {
     pub(crate) top: usize,
     /// 悬停行（`filtered` 位置）。
     pub(crate) hover: Option<usize>,
+    /// 悬停过渡（S6）：候选行高亮淡入/淡出。
+    pub(crate) fade: crate::anim::Fade,
 }
 
 impl QuickOpen {

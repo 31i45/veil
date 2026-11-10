@@ -32,6 +32,15 @@ extern "system" {
     ) -> i32;
 }
 
+// 系统参数读取（user32）：「动画效果」开关（S6）。
+#[link(name = "user32")]
+extern "system" {
+    fn SystemParametersInfoW(action: u32, param: u32, value: *mut c_void, win_ini: u32) -> i32;
+}
+
+/// SPI_GETCLIENTAREAANIMATION：客户端区动画（「显示动画」开关）。
+const SPI_GETCLIENTAREAANIMATION: u32 = 0x1042;
+
 /// HKEY_CURRENT_USER = (HKEY)0x80000001（64 位指针零扩展）。
 const HKEY_CURRENT_USER: isize = 0x8000_0001u32 as isize;
 const RRF_RT_REG_DWORD: u32 = 0x0000_0010;
@@ -66,6 +75,23 @@ impl SystemTheme for WinSystemTheme {
             return None;
         }
         Some(value == 0)
+    }
+
+    /// 系统「显示动画」关闭时整个界面动效停用（可访问性设置，失败按开启处理）。
+    fn animations_enabled(&mut self) -> bool {
+        let mut enabled: i32 = 1;
+        let rc = unsafe {
+            SystemParametersInfoW(
+                SPI_GETCLIENTAREAANIMATION,
+                0,
+                &mut enabled as *mut i32 as *mut c_void,
+                0,
+            )
+        };
+        if rc == 0 {
+            return true;
+        }
+        enabled != 0
     }
 }
 

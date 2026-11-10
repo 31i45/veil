@@ -45,31 +45,38 @@ pub(super) fn parse_inlines(text: &str, base: usize, refs: &RefMap) -> Vec<Inlin
         backtick_runs: Vec::new(),
     }
     .parse_until(None, true, 0);
-    #[cfg(feature = "bare-url-autolink")]
-    {
-        link_bare_urls(text, base, nodes)
-    }
-    #[cfg(not(feature = "bare-url-autolink"))]
-    {
-        nodes
-    }
+    link_bare_urls(text, base, nodes)
 }
 
 /// 裸 URL 自动成链（GFM 扩展，视图态增强）：
 /// 扫描 `http://` / `https://` / `www.` 前缀，延伸到空白/标点边界，
 /// 跳过已在 Link/Autolink/Code 节点覆盖的区间。不修改源码字节。
-#[cfg(feature = "bare-url-autolink")]
 fn link_bare_urls(
     text: &str,
     base: usize,
     mut nodes: Vec<InlineNode>,
 ) -> Vec<InlineNode> {
-    // 收集已覆盖区间（闭区间 [start, end) 绝对偏移）
-    let mut covered: Vec<(usize, usize)> = Vec::new();
-    for n in &nodes {
-        covered.push((n.range.start, n.range.end));
-        // Link/Code 的 content 也覆盖（裸 URL 不会出现在 content 内因为已经是节点）
+    link_bare_urls_in(text, base, &mut nodes);
+    nodes.sort_by_key(|n| n.range.start);
+    nodes
+}
+
+/// 单层裸 URL 扫描；Emph/Strong/Strikethrough 先递归处理内容区
+/// （其 `content` 为内层文本的绝对区间），容器自身区间在父层已计入覆盖。
+fn link_bare_urls_in(text: &str, base: usize, nodes: &mut Vec<InlineNode>) {
+    for n in nodes.iter_mut() {
+        if matches!(
+            n.kind,
+            InlineKind::Emph | InlineKind::Strong | InlineKind::Strikethrough
+        ) {
+            let c = n.content;
+            let sub = &text[(c.start - base)..(c.end - base)];
+            link_bare_urls_in(sub, c.start, &mut n.children);
+        }
     }
+    // 本层已覆盖区间（[start, end) 绝对偏移）
+    let mut covered: Vec<(usize, usize)> =
+        nodes.iter().map(|n| (n.range.start, n.range.end)).collect();
     covered.sort_unstable();
 
     let bytes = text.as_bytes();
@@ -140,10 +147,14 @@ fn link_bare_urls(
             }
             j += 1;
         }
-        // 去掉末尾标点（URL 不应以标点结尾：`https://example.com.` 的 `.` 不属于 URL）
+        // 去掉末尾标点（GFM：URL 不应以 `.` `,` `;` `:` `!` `?` `*` `_` `~` 结尾；
+        // 成对 `)` 已在上面按括号深度保留，这里只剥「显然不属于 URL」的尾符）
         while j > i + prefix {
             let lb = bytes[j - 1];
-            if lb == b'.' || lb == b',' || lb == b';' || lb == b':' {
+            if matches!(
+                lb,
+                b'.' | b',' | b';' | b':' | b'!' | b'?' | b'*' | b'_' | b'~'
+            ) {
                 j -= 1;
             } else {
                 break;
@@ -164,8 +175,6 @@ fn link_bare_urls(
         }
         i = j;
     }
-    nodes.sort_by_key(|n| n.range.start);
-    nodes
 }
 
 /// CommonMark：反斜杠可转义一切 ASCII 标点（`!` 为 Image 开标记首字符，亦在内）。
@@ -1143,6 +1152,19 @@ mod tests {
         parse_inlines(text, 0, &RefMap::new())
     }
 
+    /// 首个 Link 节点（含嵌套在强调/删除线内的）。
+    fn find_link(ns: &[InlineNode]) -> Option<&InlineNode> {
+        for n in ns {
+            if n.kind == InlineKind::Link {
+                return Some(n);
+            }
+            if let Some(f) = find_link(&n.children) {
+                return Some(f);
+            }
+        }
+        None
+    }
+
     #[test]
     fn strong_basic() {
         assert_eq!(sexp(&parse("a **bold** c")), "Strong[2..10 c=4..8]");
@@ -1348,6 +1370,61 @@ mod tests {
         assert_eq!(
             sexp(&parse("[link](foo(and(bar)))")),
             "Link[0..21 c=1..5 url=7..20]"
+        );
+    }
+
+    #[test]
+    fn bare_url_basic_prefixes() {
+        // W1-5：三种前缀（url 指向源码本身，协议补全在消费侧完成）
+        assert_eq!(sexp(&parse("www.a.com")), "Link[0..9 c=0..9 url=0..9]");
+        assert_eq!(sexp(&parse("http://a.com")), "Link[0..12 c=0..12 url=0..12]");
+        assert_eq!(sexp(&parse("https://a.com")), "Link[0..13 c=0..13 url=0..13]");
+        assert_eq!(sexp(&parse("Visit www.a.com now")), "Link[6..15 c=6..15 url=6..15]");
+    }
+
+    #[test]
+    fn bare_url_trailing_punctuation_stripped() {
+        // GFM：`.` `,` `;` `:` `!` `?` `*` `_` `~` 不属于 URL 尾
+        for (src, end) in [
+            ("www.a.com.", 9usize),
+            ("www.a.com,", 9),
+            ("www.a.com;", 9),
+            ("www.a.com:", 9),
+            ("www.a.com!", 9),
+            ("www.a.com?", 9),
+            ("**www.a.com**", 11),
+            ("_www.a.com_", 10),
+            ("~~www.a.com~~", 11),
+        ] {
+            let ns = parse(src);
+            let link = find_link(&ns).expect(src);
+            assert_eq!(link.url.unwrap().end, end, "{src} 尾部标点应剥离");
+        }
+    }
+
+    #[test]
+    fn bare_url_balanced_parens_kept() {
+        // GFM 规则：成对括号属 URL，未配对的 `)` 终止
+        let ns = parse("www.a.com/x+(b)");
+        let link = ns.iter().find(|n| n.kind == InlineKind::Link).unwrap();
+        assert_eq!(link.url.unwrap().end, 15);
+        let ns = parse("(www.a.com/x)");
+        let link = ns.iter().find(|n| n.kind == InlineKind::Link).unwrap();
+        assert_eq!(link.url.unwrap().end, 12, "外层未配对 `)` 不计入");
+    }
+
+    #[test]
+    fn bare_url_not_inside_code_or_autolink_or_markup() {
+        // 代码段内不成链（已被 Code 节点覆盖）
+        assert_eq!(sexp(&parse("`www.a.com`")), "Code[0..11 c=1..10]");
+        // CommonMark 显式自动链接（`<...>`）由原逻辑处理，裸 URL 不抢
+        assert_eq!(sexp(&parse("<http://a.com>")), "Link[0..14 c=1..13 url=1..13]");
+        // `<...>` 内含空格 → 显式自动链接非法，裸 URL 也不应接管
+        assert_eq!(sexp(&parse("<http://a.com x>")), "");
+        // 已有链接文本内不成链
+        assert_eq!(
+            sexp(&parse("[www.a.com](u)")),
+            "Link[0..14 c=1..10 url=12..13]"
         );
     }
 

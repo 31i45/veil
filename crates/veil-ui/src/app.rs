@@ -155,6 +155,20 @@ pub fn url_is_openable(url: &str) -> bool {
     })
 }
 
+/// 链接目标归一化：GFM 裸链接 `www.example.com` 补全为 `http://www.example.com`。
+///
+/// 为什么需要：裸 URL 成链时 `InlineNode.url` 只能指向源码字节（`Range`），
+/// 无法在解析层合成 `http://` 前缀；而打开链接与导出都要求带协议。
+/// 归一化放在消费点（单一函数），解析层保持「不产生文档之外的内容」。
+pub fn normalize_link_url(url: &str) -> String {
+    let u = url.trim();
+    if u.len() >= 4 && u.as_bytes()[..4].eq_ignore_ascii_case(b"www.") {
+        format!("http://{u}")
+    } else {
+        u.to_string()
+    }
+}
+
 /// 崩溃恢复草稿存储（0b）：单槽字节读写，实现由产品层注入（应用数据目录单文件）。
 /// `save` 须原子（tmp+rename）：恢复文件自身半截比没有更糟。
 /// `load` 在无恢复文件时返回 Err（正常状态）；`clear` 在文件不存在时视为成功。

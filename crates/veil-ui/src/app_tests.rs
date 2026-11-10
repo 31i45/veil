@@ -7518,6 +7518,20 @@ fn url_whitelist_accepts_only_web_and_mail_schemes() {
 }
 
 #[test]
+fn normalize_link_url_adds_http_for_bare_www() {
+    assert_eq!(
+        normalize_link_url("www.example.com/a"),
+        "http://www.example.com/a"
+    );
+    assert_eq!(normalize_link_url("  WWW.Example.com  "), "http://WWW.Example.com");
+    assert_eq!(normalize_link_url("https://a.b"), "https://a.b");
+    assert_eq!(normalize_link_url("mailto:x@y.z"), "mailto:x@y.z");
+    // `wwwx.com` 不是 www 前缀，保持原样（随后仍会被白名单拒绝）
+    assert_eq!(normalize_link_url("wwwx.com"), "wwwx.com");
+    assert!(url_is_openable(&normalize_link_url("www.a.com")));
+}
+
+#[test]
 fn ctrl_click_link_opens_without_touching_document() {
     let calls = Rc::new(RefCell::new(Vec::new()));
     let mut a = link_app(LINK_DOC, &calls, Ok(()));

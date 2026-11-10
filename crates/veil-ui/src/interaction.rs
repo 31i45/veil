@@ -1309,16 +1309,18 @@ impl App {
     /// 协议白名单在此统一校验（不信任文档内容）；`#anchor` 属应用内跳转（另一任务），
     /// 静默忽略，绝不交给系统 shell。失败原因直接写状态栏，不打断编辑。
     pub(crate) fn open_link(&mut self, url: &str) {
-        let target = url.trim();
-        if target.starts_with('#') {
+        let trimmed = url.trim();
+        if trimmed.starts_with('#') {
             return; // 应用内锚点：由后续任务处理，这里不弹提示也不调端口
         }
-        if !crate::url_is_openable(target) {
+        // 裸 `www.` 链接在源码里没有协议，打开前补齐（否则被协议白名单拒绝）
+        let target = crate::normalize_link_url(trimmed);
+        if !crate::url_is_openable(&target) {
             self.ui_state.chrome.notice = format!("无法打开链接：不支持的链接地址 {target}");
             self.request_redraw();
             return;
         }
-        if let Err(e) = self.ports.url_opener.open_url(target) {
+        if let Err(e) = self.ports.url_opener.open_url(&target) {
             self.ui_state.chrome.notice = format!("无法打开链接: {e}");
         }
         self.request_redraw();
@@ -1334,7 +1336,8 @@ impl App {
             CtxAction::SelectAll => self.perform_action(Action::Doc(Intent::SelectAll)),
             CtxAction::CopyLink => {
                 if let Some(u) = self.ui_state.ctx.link.clone() {
-                    self.ports.clipboard.set(&u);
+                    // 复制出去的是可直接使用的目标：`www.` 补全协议
+                    self.ports.clipboard.set(&crate::normalize_link_url(&u));
                 }
             }
             CtxAction::OpenLink => {

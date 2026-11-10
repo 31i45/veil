@@ -14,7 +14,7 @@ use std::path::Path;
 
 use crate::document::ExternalState;
 use crate::theme::ThemeMode;
-use crate::tokens::typography;
+use crate::tokens::{space, typography};
 
 pub(crate) use cache::LabelCache;
 
@@ -251,8 +251,6 @@ pub struct PopupLayout {
     pub h: f32,
     /// (项下标, x, y, w, h)；Separator 项不进 hit rect
     pub items: Vec<(usize, f32, f32, f32, f32)>,
-    /// 分隔线段：(下标, y)；paint.rs 用
-    pub separators: Vec<(usize, f32)>,
 }
 
 /// 弹出菜单宽度上限（1.0× 基准）：专业编辑器菜单一般不超过此值。
@@ -271,7 +269,6 @@ pub fn popup_layout(open: usize, scale: f32, recent: &[String], win_w: f32) -> P
             w: 0.0,
             h: 0.0,
             items: Vec::new(),
-            separators: Vec::new(),
         };
     }
     let x = menu_bar_rects(scale)
@@ -298,15 +295,14 @@ pub fn popup_layout(open: usize, scale: f32, recent: &[String], win_w: f32) -> P
     let cap = POPUP_MAX_W * scale;
     let w = content_w.min(win_limit).min(cap).max(POPUP_MIN_W * scale);
     let item_h = crate::theme::surface::row_height(scale);
-    let sep_h = crate::theme::surface::divider_height(scale);
+    // 分组只用间距，不画分隔线（S3）：8px 落在 4pt 网格上。
+    let sep_h = space::S * scale;
     let top_pad = 4.0 * scale;
     let y = MENU_H * scale;
     let mut cur_y = top_pad;
     let mut items = Vec::new();
-    let mut separators = Vec::new();
     for (i, (_label, _sc, action)) in rows.iter().enumerate() {
         if matches!(action, MenuAction::Separator) {
-            separators.push((i, y + cur_y + sep_h / 2.0));
             cur_y += sep_h;
         } else {
             items.push((i, x, y + cur_y, w, item_h));
@@ -319,7 +315,6 @@ pub fn popup_layout(open: usize, scale: f32, recent: &[String], win_w: f32) -> P
         w,
         h: cur_y + top_pad,
         items,
-        separators,
     }
 }
 

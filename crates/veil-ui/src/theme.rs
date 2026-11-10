@@ -955,7 +955,6 @@ mod tests {
         assert_eq!(surface::corner_radius(2.0), 12.0);
         assert_eq!(surface::row_height(2.0), 56.0);
         assert_eq!(surface::padding(2.0), 24.0);
-        assert_eq!(surface::divider_height(2.0), 8.0);
         assert_eq!(surface::hover_inset(2.0), 6.0);
         assert_eq!(surface::shadow_offset_y(2.0), 4.0);
         assert_eq!(surface::panel_margin(2.0), 16.0);

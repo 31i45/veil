@@ -7,24 +7,33 @@
 use veil_core::Range;
 
 use crate::geometry::Rect;
-use crate::tokens::typography;
+use crate::theme::surface;
+use crate::tokens::{space, typography};
 
 /// 浮栏基准宽（乘 DPI scale）。
-pub const BAR_W: f32 = 360.0;
+pub const BAR_W: f32 = 400.0;
 /// 浮栏基准高。
 pub const BAR_H: f32 = 36.0;
-/// 栏内按钮基准宽（上一个/下一个/关闭）。
-pub const BTN_W: f32 = 30.0;
+/// 栏内按钮基准宽（上一个/下一个/关闭/大小写）。
+pub const BTN_W: f32 = 28.0;
+/// 栏内按钮基准高。
+pub const BTN_H: f32 = 28.0;
+/// 相邻按钮间距（基准值）：4pt 网格。
+pub const BTN_GAP: f32 = space::XS;
+/// 按钮分组间距（基准值）：大小写组与翻页组之间。
+pub const GROUP_GAP: f32 = space::S;
 /// 栏内左右内边距基准值：与全部浮层同一 surface 令牌。
-pub const PAD: f32 = crate::theme::surface::PADDING;
+pub const PAD: f32 = surface::PADDING;
 /// 浮栏与内容视口顶边的间距基准值：与全部浮层同一 surface 令牌。
-pub const GAP: f32 = crate::theme::surface::CONTROL_GAP;
-/// 计数区基准宽（右对齐「i/n」）。
+pub const GAP: f32 = surface::CONTROL_GAP;
+/// 计数区基准宽（右对齐「i/n」，并入输入区右侧）。
 pub const COUNT_W: f32 = 56.0;
-/// 「区分大小写」小按钮基准宽（`Aa`），位于查询框与计数之间。
-pub const CASE_W: f32 = 28.0;
 /// 替换行按钮基准宽（「替换」/「全部」）。
 pub const REPLACE_BTN_W: f32 = 56.0;
+/// 替换行按钮基准高。
+pub const REPLACE_BTN_H: f32 = 28.0;
+/// 查询行与替换行的分组间距（基准值）：取代行间分隔线。
+pub const ROW_GAP: f32 = space::S;
 
 /// 栏内命中目标。`Bar` = 栏内非按钮区域（吞掉点击，不落文档光标）。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -67,7 +76,8 @@ pub(crate) struct BarLayout {
     pub(crate) close: Rect,
 }
 
-/// 浮栏布局：贴内容视口右上角（`right` 已扣除滚动条/大纲面板），按钮自右向左排列。
+/// 浮栏布局：贴内容视口右上角（`right` 已扣除滚动条/大纲面板）。
+/// 按钮自右向左排列、以间距分组；无竖分隔线，计数并入输入区右缘。
 pub(crate) fn layout(right: f32, top: f32, scale: f32) -> BarLayout {
     let w = BAR_W * scale;
     let h = BAR_H * scale;
@@ -78,40 +88,42 @@ pub(crate) fn layout(right: f32, top: f32, scale: f32) -> BarLayout {
         h,
     };
     let bw = BTN_W * scale;
+    let bh = BTN_H * scale;
+    let by = bar.y + (h - bh) / 2.0;
+    let pad = PAD * scale;
+    // 按钮自右向左：关闭 → 下一个 → 上一个 →（分组间距）→ 大小写
     let close = Rect {
-        x: bar.x + w - bw,
-        y: bar.y,
+        x: bar.x + w - pad - bw,
+        y: by,
         w: bw,
-        h,
+        h: bh,
     };
     let next = Rect {
-        x: close.x - bw,
+        x: close.x - bw - BTN_GAP * scale,
         ..close
     };
     let prev = Rect {
-        x: next.x - bw,
+        x: next.x - bw - BTN_GAP * scale,
         ..close
     };
-    let text_x = bar.x + PAD * scale;
-    let count_right = prev.x - PAD * scale;
-    // 栏宽自右向左：关闭/下一个/上一个 → 计数区 → Aa → 查询文本区。
     let case = Rect {
-        x: count_right - COUNT_W * scale - CASE_W * scale,
-        y: bar.y,
-        w: CASE_W * scale,
-        h,
+        x: prev.x - bw - GROUP_GAP * scale,
+        ..close
     };
+    let text_x = bar.x + pad;
+    let text_right = case.x - pad;
     let text = Rect {
         x: text_x,
-        y: bar.y,
-        w: (case.x - text_x).max(0.0),
-        h,
+        y: by,
+        w: (text_right - text_x).max(0.0),
+        h: bh,
     };
     BarLayout {
         bar,
         text,
         case,
-        count_right,
+        // 计数右对齐于输入区右缘（不再独占独立槽位）。
+        count_right: text_right,
         prev,
         next,
         close,
@@ -127,31 +139,34 @@ pub(crate) struct ReplaceLayout {
     pub(crate) all: Rect,
 }
 
-/// 替换行：紧贴查询行下方，按钮贴右缘（与查询行按钮同一右对齐线）。
+/// 替换行：与查询行间隔 `ROW_GAP`（分组用间距，不画横线），按钮贴右缘。
 pub(crate) fn replace_layout(l: &BarLayout, scale: f32) -> ReplaceLayout {
+    let pad = PAD * scale;
     let bw = REPLACE_BTN_W * scale;
+    let bh = REPLACE_BTN_H * scale;
     let row = Rect {
         x: l.bar.x,
-        y: l.bar.y + l.bar.h,
+        y: l.bar.y + l.bar.h + ROW_GAP * scale,
         w: l.bar.w,
         h: l.bar.h,
     };
+    let by = row.y + (row.h - bh) / 2.0;
     let all = Rect {
-        x: row.x + row.w - bw,
-        y: row.y,
+        x: row.x + row.w - pad - bw,
+        y: by,
         w: bw,
-        h: row.h,
+        h: bh,
     };
     let one = Rect {
-        x: all.x - bw,
+        x: all.x - bw - BTN_GAP * scale,
         ..all
     };
-    let text_x = row.x + PAD * scale;
+    let text_x = row.x + pad;
     let text = Rect {
         x: text_x,
-        y: row.y,
-        w: (one.x - PAD * scale - text_x).max(0.0),
-        h: row.h,
+        y: by,
+        w: (one.x - pad - text_x).max(0.0),
+        h: bh,
     };
     ReplaceLayout {
         row,
@@ -161,10 +176,20 @@ pub(crate) fn replace_layout(l: &BarLayout, scale: f32) -> ReplaceLayout {
     }
 }
 
-/// 栏内命中：`None` = 栏外（调用方按普通点击处理）。替换模式下先命中替换行。
+/// 栏内命中：`None` = 栏外（调用方按普通点击处理）。
+/// 替换模式下整张卡片（含两行之间的分组间距）都算栏内。
 pub(crate) fn hit(l: &BarLayout, scale: f32, replace_open: bool, x: f32, y: f32) -> Option<Hit> {
     if replace_open {
         let r = replace_layout(l, scale);
+        let card = Rect {
+            x: l.bar.x,
+            y: l.bar.y,
+            w: l.bar.w,
+            h: r.row.y + r.row.h - l.bar.y,
+        };
+        if !card.contains(x, y) {
+            return None;
+        }
         if r.all.contains(x, y) {
             return Some(Hit::ReplaceAll);
         }
@@ -174,9 +199,22 @@ pub(crate) fn hit(l: &BarLayout, scale: f32, replace_open: bool, x: f32, y: f32)
         if r.text.contains(x, y) {
             return Some(Hit::ReplaceText);
         }
-        if r.row.contains(x, y) {
-            return Some(Hit::Bar);
+        if l.close.contains(x, y) {
+            return Some(Hit::Close);
         }
+        if l.next.contains(x, y) {
+            return Some(Hit::Next);
+        }
+        if l.prev.contains(x, y) {
+            return Some(Hit::Prev);
+        }
+        if l.case.contains(x, y) {
+            return Some(Hit::ToggleCase);
+        }
+        if l.text.contains(x, y) {
+            return Some(Hit::QueryText);
+        }
+        return Some(Hit::Bar);
     }
     if !l.bar.contains(x, y) {
         return None;
@@ -294,6 +332,8 @@ pub(crate) struct Search {
     /// 当前命中下标（`matches` 内）。
     pub(crate) current: usize,
     pub(crate) hover: Option<Hit>,
+    /// 鼠标按下中的按钮（active 态）；松开或关闭时清空。
+    pub(crate) pressed: Option<Hit>,
 }
 
 impl Search {
@@ -305,6 +345,12 @@ impl Search {
         self.matches.clear();
         self.current = 0;
         self.hover = None;
+        self.pressed = None;
+    }
+
+    /// 无命中空态：查询非空但没有任何命中。
+    pub(crate) fn no_matches(&self) -> bool {
+        !self.query.is_empty() && self.matches.is_empty()
     }
 
     /// 查询变化后重算匹配并回到首个命中。
@@ -510,10 +556,14 @@ mod tests {
         assert_eq!(l.bar.x, 800.0 - BAR_W);
         assert_eq!(l.bar.y, 30.0 + GAP);
         assert_eq!(l.bar.x + l.bar.w, 800.0);
-        // 按钮自右向左：关闭 > 下一个 > 上一个
-        assert_eq!(l.close.x + l.close.w, l.bar.x + l.bar.w);
-        assert_eq!(l.next.x + l.next.w, l.close.x);
-        assert_eq!(l.prev.x + l.prev.w, l.next.x);
+        // 按钮自右向左：关闭 > 下一个 > 上一个 >（分组间距）> 大小写
+        assert_eq!(l.close.x + l.close.w, l.bar.x + l.bar.w - PAD);
+        assert_eq!(l.next.x + l.next.w, l.close.x - BTN_GAP);
+        assert_eq!(l.prev.x + l.prev.w, l.next.x - BTN_GAP);
+        assert_eq!(l.case.x + l.case.w, l.prev.x - GROUP_GAP);
+        assert!(l.close.y > l.bar.y, "按钮在行内垂直居中");
+        assert_eq!(l.text.y, l.close.y);
+        assert_eq!(l.text.h, BTN_H);
         let center = |r: Rect| (r.x + r.w / 2.0, r.y + r.h / 2.0);
         let (cx, cy) = center(l.close);
         assert_eq!(hit(&l, 1.0, false, cx, cy), Some(Hit::Close));
@@ -529,22 +579,27 @@ mod tests {
             "文本区点击聚焦查询"
         );
         assert_eq!(hit(&l, 1.0, false, l.bar.x - 1.0, cy), None, "栏外不命中");
-        // 查询文本区 → Aa → 计数区，自左向右不重叠
-        assert!(l.text.x + l.text.w <= l.case.x + 0.01);
-        assert!(l.case.x + l.case.w <= l.count_right - COUNT_W + 0.01);
-        assert!(l.text.x + l.text.w <= l.count_right - COUNT_W + 0.01);
+        // 查询文本区 → Aa → 计数并入输入区右缘，自左向右不重叠
+        assert_eq!(l.text.x + l.text.w, l.case.x - PAD);
+        assert_eq!(l.count_right, l.case.x - PAD);
+        assert!(l.text.x + l.text.w - COUNT_W >= l.text.x, "计数预留在输入区内");
+        assert!((l.text.w - COUNT_W) > 0.0, "输入区放得下计数");
     }
 
     #[test]
     fn replace_row_sits_below_find_row_and_maps_hits() {
         let l = layout(800.0, 30.0, 1.0);
         let r = replace_layout(&l, 1.0);
-        assert_eq!(r.row.y, l.bar.y + l.bar.h);
+        assert_eq!(r.row.y, l.bar.y + l.bar.h + ROW_GAP);
         assert_eq!(r.row.x, l.bar.x);
         assert_eq!(r.row.w, l.bar.w);
-        assert_eq!(r.all.x + r.all.w, l.bar.x + l.bar.w, "按钮贴右缘");
-        assert_eq!(r.one.x + r.one.w, r.all.x);
-        assert!(r.text.x + r.text.w <= r.one.x - PAD + 0.01);
+        assert_eq!(
+            r.all.x + r.all.w,
+            l.bar.x + l.bar.w - PAD,
+            "按钮贴右缘内边距"
+        );
+        assert_eq!(r.one.x + r.one.w, r.all.x - BTN_GAP);
+        assert_eq!(r.text.x + r.text.w, r.one.x - PAD);
         let center = |q: Rect| (q.x + q.w / 2.0, q.y + q.h / 2.0);
         let (ox, oy) = center(r.one);
         assert_eq!(hit(&l, 1.0, true, ox, oy), Some(Hit::ReplaceOne));
@@ -560,6 +615,11 @@ mod tests {
         // 旧按钮命中不受替换行影响
         let (cx, cy) = center(l.close);
         assert_eq!(hit(&l, 1.0, true, cx, cy), Some(Hit::Close));
+        // 两行之间的分组间距属于卡片内部：吞掉点击
+        assert_eq!(
+            hit(&l, 1.0, true, l.bar.x + 4.0, l.bar.y + l.bar.h + ROW_GAP / 2.0),
+            Some(Hit::Bar)
+        );
     }
 
     #[test]
@@ -585,6 +645,7 @@ mod tests {
             matches: vec![Range::new(0, 1)],
             current: 1,
             hover: Some(Hit::Next),
+            pressed: Some(Hit::Next),
         };
         s.clear();
         assert!(s.query.is_empty());
@@ -594,5 +655,6 @@ mod tests {
         assert!(s.matches.is_empty());
         assert_eq!(s.current, 0);
         assert_eq!(s.hover, None);
+        assert_eq!(s.pressed, None);
     }
 }

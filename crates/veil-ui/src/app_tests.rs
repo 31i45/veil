@@ -7671,6 +7671,131 @@ fn menu_find_opens_empty_search_bar() {
 }
 
 #[test]
+fn search_bar_has_one_boundary_and_no_internal_dividers() {
+    let store = MemStore::default();
+    let mut a = app("alpha beta\n", None, false, &store);
+    a.open_replace();
+    a.search_input("a");
+    let (w, h) = a.win_size();
+    let l = a.search_rect().unwrap();
+    let rl = search::replace_layout(&l, a.input_state.scale);
+    let mut f = Frame::new(w, h, a.input_state.theme.bg);
+    a.paint_search(&mut f);
+    let border = [
+        a.input_state.theme.chrome_border[0],
+        a.input_state.theme.chrome_border[1],
+        a.input_state.theme.chrome_border[2],
+    ];
+    // 按钮之间只有间距：分距列不得出现边框色竖线
+    let gap_x = (l.prev.x - search::GROUP_GAP / 2.0).round() as u32;
+    for y in (l.bar.y + 2.0) as u32..(l.bar.y + l.bar.h - 2.0) as u32 {
+        let px = f.get(gap_x, y);
+        assert_ne!([px[0], px[1], px[2]], border, "按钮间不得有竖分隔线");
+    }
+    // 两行之间只有间距：空档整行不得出现边框色横线
+    let gap_y = (rl.row.y - search::ROW_GAP / 2.0).round() as u32;
+    for x in (l.bar.x + 2.0) as u32..(l.bar.x + l.bar.w - 2.0) as u32 {
+        let px = f.get(x, gap_y);
+        assert_ne!([px[0], px[1], px[2]], border, "查询行与替换行之间不得有横线");
+    }
+}
+
+#[test]
+fn search_bar_focus_uses_quiet_field_tint() {
+    let store = MemStore::default();
+    let mut a = app("x\n", None, false, &store);
+    a.open_search();
+    let (w, h) = a.win_size();
+    let l = a.search_rect().unwrap();
+    let mut f = Frame::new(w, h, a.input_state.theme.bg);
+    a.paint_search(&mut f);
+    // 输入区右端为空档（无计数、无字形）：应只剩焦点底色
+    let x = (l.text.x + l.text.w - 6.0) as u32;
+    let y = (l.text.y + l.text.h / 2.0) as u32;
+    let mut t = Frame::new(1, 1, a.input_state.theme.popup_bg);
+    t.fill_rect(
+        0,
+        0,
+        1,
+        1,
+        crate::tokens::state::focus_bg(&a.input_state.theme),
+    );
+    assert_eq!(f.get(x, y), t.get(0, 0), "焦点用输入区安静底色");
+}
+
+#[test]
+fn search_bar_no_match_uses_danger_and_disabled_colors() {
+    let store = MemStore::default();
+    let mut a = app("alpha\n", None, false, &store);
+    a.open_search();
+    a.search_input("zzz");
+    assert!(a.ui_state.search.no_matches());
+    let (w, h) = a.win_size();
+    let l = a.search_rect().unwrap();
+    let mut f = Frame::new(w, h, a.input_state.theme.bg);
+    a.paint_search(&mut f);
+    let theme = a.input_state.theme;
+    let wanted = crate::tokens::state::empty_fg(&theme);
+    let mut found = false;
+    for x in (l.count_right - search::COUNT_W) as u32..l.count_right as u32 {
+        for y in l.text.y as u32..(l.text.y + l.text.h) as u32 {
+            let px = f.get(x, y);
+            if [px[0], px[1], px[2]] == wanted {
+                found = true;
+            }
+        }
+    }
+    assert!(found, "无命中计数使用 danger 色");
+    // 翻页按钮字形应为禁用前景（置灰），不出现正文色
+    let text = theme.text;
+    let bg = theme.popup_bg;
+    let (mut has_ink, mut has_text) = (false, false);
+    for x in l.prev.x as u32..(l.prev.x + l.prev.w) as u32 {
+        for y in l.prev.y as u32..(l.prev.y + l.prev.h) as u32 {
+            let px = f.get(x, y);
+            let rgb = [px[0], px[1], px[2]];
+            if rgb != [bg[0], bg[1], bg[2]] {
+                has_ink = true;
+            }
+            has_text |= rgb == text;
+        }
+    }
+    assert!(has_ink, "无命中时翻页按钮仍绘制（置灰）");
+    assert!(!has_text, "禁用按钮不得使用正文色");
+}
+
+#[test]
+fn search_match_ticks_mark_scrollbar_positions() {
+    let store = MemStore::default();
+    let mut a = app("alpha\nalpha\nalpha\n", None, false, &store);
+    a.open_search();
+    a.search_input("alpha");
+    assert_eq!(a.ui_state.search.matches.len(), 3);
+    let (w, h) = a.win_size();
+    let vp = a.viewport();
+    let mut f = Frame::new(w, h, a.input_state.theme.bg);
+    a.paint_search_ticks(&mut f, vp);
+    let scale = a.input_state.scale;
+    let lane = (chrome::SCROLL_W * scale).ceil() as u32;
+    let x = (w as f32 - lane as f32 + 3.0 * scale).round() as u32;
+    let tick_h = (2.0 * scale).round().max(1.0) as u32;
+    let total = a.editor.session().text_len().max(1);
+    let m = a.ui_state.search.matches[0];
+    let y = (vp.y + (m.start as f32 / total as f32) * vp.h - tick_h as f32 / 2.0).round() as u32;
+    let accent = a.input_state.theme.accent;
+    assert_eq!(
+        f.get(x + 1, y),
+        [accent[0], accent[1], accent[2], 255],
+        "当前命中在滚动条上打 accent 刻度"
+    );
+    // 关闭后不再打刻度
+    a.close_search();
+    let mut g = Frame::new(w, h, a.input_state.theme.bg);
+    a.paint_search_ticks(&mut g, vp);
+    assert_eq!(g.get(x + 1, y), a.input_state.theme.bg);
+}
+
+#[test]
 fn search_bar_paints_overlay_and_clears_on_close() {
     let store = MemStore::default();
     let mut a = app("x\n", None, false, &store);
@@ -9270,7 +9395,7 @@ fn menu_click_on_disabled_item_keeps_menu_open() {
 }
 
 #[test]
-fn file_menu_paints_group_separators_and_recent_block() {
+fn file_menu_groups_by_spacing_without_separator_lines() {
     use crate::theme::{Theme, ThemeMode};
     let store = MemStore::default();
     let mut a = app("ab\n", Some("dir/a.md"), false, &store);
@@ -9287,28 +9412,32 @@ fn file_menu_paints_group_separators_and_recent_block() {
     let recent = a.recent_labels();
     let p = chrome::popup_layout(0, 1.0, &recent, 1000.0);
 
-    // 4 条分隔线：三个静态分组边界 + 最近文件块与「退出」之间
-    assert_eq!(p.separators.len(), 4, "文件菜单应有 4 条分隔线");
-    let border = [theme.chrome_border[0], theme.chrome_border[1], theme.chrome_border[2]];
-    for (_, sy) in &p.separators {
-        let mid = frame.get((p.x + 20.0) as u32, sy.round() as u32);
-        assert_eq!(
-            [mid[0], mid[1], mid[2]],
+    // S3：弹层只有边界线，内部不再画任何分隔线（右侧内边距列只应是面板底色）。
+    let border = [
+        theme.chrome_border[0],
+        theme.chrome_border[1],
+        theme.chrome_border[2],
+    ];
+    let x = (p.x + p.w - 6.0) as u32;
+    for y in (p.y + 2.0) as u32..(p.y + p.h - 2.0) as u32 {
+        let px = frame.get(x, y);
+        assert_ne!(
+            [px[0], px[1], px[2]],
             border,
-            "分隔线像素质点应为边框色（y={sy}）"
-        );
-        // 左右内缩：卡片边框内 1px 起是面板底色，分隔线不得顶到边缘
-        let edge = frame.get(p.x as u32 + 1, sy.round() as u32);
-        assert_eq!(
-            [edge[0], edge[1], edge[2]],
-            [theme.popup_bg[0], theme.popup_bg[1], theme.popup_bg[2]],
-            "分隔线不得顶到面板边缘"
+            "弹层内部不得出现分隔线（y={y}）"
         );
     }
-    // 项行中部不是分隔线色（防止把整行涂成线）
-    let (_, _, iy, _, ih) = p.items[0];
-    let row = frame.get((p.x + 20.0) as u32, (iy + ih / 2.0) as u32);
-    assert_ne!([row[0], row[1], row[2]], border);
+    // 分组只用 8px 间距：文件菜单有 4 个 Separator，行间其余间距为 0。
+    let gaps: Vec<f32> = p
+        .items
+        .windows(2)
+        .map(|w| w[1].2 - (w[0].2 + w[0].4))
+        .collect();
+    assert_eq!(
+        gaps.iter().filter(|g| (**g - 8.0).abs() < 0.01).count(),
+        4,
+        "文件菜单应有 4 个分组间距"
+    );
 }
 
 #[test]

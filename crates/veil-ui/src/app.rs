@@ -468,6 +468,7 @@ pub(crate) struct AppPorts {
     pub(crate) effects: Box<dyn WindowEffects>,
     pub(crate) recovery: Box<dyn RecoveryStore>,
     pub(crate) session: Box<dyn SessionStore>,
+    pub(crate) snapshot: Box<dyn SnapshotStore>,
     pub(crate) print: Box<dyn Print>,
     pub(crate) url_opener: Box<dyn UrlOpener>,
 }
@@ -573,7 +574,7 @@ impl App {
             mut system,
             effects,
         } = ports.theme_env;
-        let PersistEnv { recovery, session, snapshot: _snapshot } = ports.persist_env;
+        let PersistEnv { recovery, session, snapshot } = ports.persist_env;
         // 系统外观读不到（非 Windows/注册表异常）按浅色处理：不影响其它功能
         let system_dark = system.is_dark().unwrap_or(false);
         let (app_config, config_notice) = match config.load() {
@@ -606,6 +607,7 @@ impl App {
             effects,
             recovery,
             session,
+            snapshot,
             print: ports.print,
             url_opener: ports.url_opener,
         };
@@ -905,6 +907,29 @@ impl App {
         self.poll_system_theme(now);
         self.maybe_autosave(now);
         self.maybe_recovery_write(now);
+        self.maybe_snapshot(now);
+    }
+
+    /// 版本历史快照触发（N1）：30 分钟周期，dirty + 有路径才触发。
+    /// 文档哈希 = FNV-1a of 规范化路径（platform 层）；清理由 store.prune 同步完成。
+    fn maybe_snapshot(&mut self, _now: Instant) {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        // 基础条件：dirty + 有路径 + 非 hold + 非 IME
+        if !self.editor.is_dirty()
+            || self.persist_state.persist.hold()
+            || self.editor.preedit().is_some()
+        {
+            return;
+        }
+        let Some(ref path) = self.doc.path else {
+            return;
+        };
+        let text = self.editor.session().serialize();
+        // 快照哈希用 FNV-1a of text（复用 recovery::fnv64）
+        let hash = recovery::fnv64(text.as_bytes());
+        let _ = self.ports.snapshot.save_snapshot(hash, &text);
+        // 触发清理（每次 save 内部已同步调用 prune，但重复调用无害）
+        let _ = self.ports.snapshot.prune(hash, 20);
     }
 
     /// 推进全部悬停过渡（S6）：绘制前调用，paint 只读缓存后的 alpha。

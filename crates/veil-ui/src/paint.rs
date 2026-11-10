@@ -10,7 +10,7 @@ use crate::view::{
 };
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use veil_core::{BlockId, BlockKind, InlineKind, InlineNode, Range};
+use veil_core::{AdmonitionType, BlockId, BlockKind, InlineKind, InlineNode, Range};
 
 /// 专注模式压暗强度：背景色以该 alpha 覆盖非光标块（越大越暗，255 = 全遮）。
 const FOCUS_DIM_ALPHA: u8 = 160;
@@ -65,6 +65,16 @@ pub(crate) fn caret_visual(focused: bool) -> CaretVisual {
         CaretVisual::Solid
     } else {
         CaretVisual::Hollow
+    }
+}
+
+/// Admonition 左竖条颜色：复用主题既有语义色，不新增调色板字段。
+/// Note/Important → 链接蓝；Tip → 主强调色；Warning/Caution → 危险色。
+pub(crate) fn admonition_color(ty: AdmonitionType, theme: &crate::theme::Theme) -> [u8; 3] {
+    match ty {
+        AdmonitionType::Note | AdmonitionType::Important => theme.link,
+        AdmonitionType::Tip => theme.accent,
+        AdmonitionType::Warning | AdmonitionType::Caution => theme.danger,
     }
 }
 
@@ -725,6 +735,18 @@ impl App {
                         (3.0 * scale).max(1.0) as u32,
                         bh,
                         theme.grid,
+                    );
+                }
+                BlockKind::Admonition(ty) => {
+                    // 提示块：左竖条按变体着色（引用灰条 → 语义色），不改变任何字节。
+                    let bh = self.block_height(g) as u32;
+                    let [r, gg, b] = admonition_color(ty, &theme);
+                    frame.fill_rect(
+                        self.content_x() as i32 - (8.0 * scale) as i32,
+                        sy,
+                        (3.0 * scale).max(1.0) as u32,
+                        bh,
+                        [r, gg, b, 255],
                     );
                 }
                 BlockKind::ThematicBreak if !node_active(range, caret) => {

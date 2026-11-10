@@ -43,6 +43,22 @@ const BASELINE_B_CANON_SECTION: &[(&str, usize)] = &[
     ("strikethrough", 2),
 ];
 
+/// 裸 URL 自动成链（W1-5）已实现、而参照实现（pulldown-cmark 0.13 无 GFM
+/// 自动链接，`ENABLE_GFM` 仅含 blockquote tags）未实现的 8 例：`www.` 前缀。
+/// 这些例子的 Suite C/D 与参照不可比，改为断言「至少产出一个链接」，
+/// 参照侧其余 15 例仍按全量门槛校验（基线不变）。
+#[cfg(feature = "bare-url-autolink")]
+const AUTOLINK_DIVERGENT: &[&str] = &[
+    "autolinks_ext-001",
+    "autolinks_ext-002",
+    "autolinks_ext-003",
+    "autolinks_ext-004",
+    "autolinks_ext-005",
+    "autolinks_ext-006",
+    "autolinks_ext-007",
+    "autolinks_ext-008",
+];
+
 const EXAMPLES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/conformance/gfm");
 
 #[test]
@@ -128,21 +144,34 @@ fn gfm_extension_conformance() {
                         short_text(&gfm_canonical(&body_html), 200)
                     ));
                 }
-                if c_ok {
+                // 裸 URL 扩展例：参照无此能力，改为断言「确实成链」并计入通过。
+                #[cfg(feature = "bare-url-autolink")]
+                let divergent = AUTOLINK_DIVERGENT.contains(&id);
+                #[cfg(not(feature = "bare-url-autolink"))]
+                let divergent = false;
+                if divergent {
+                    assert!(counts.link >= 1, "#{id} 裸 URL 未成链（扩展失效）");
+                    c_pass += 1;
+                    entry.4 += 1;
+                    d_pass += 1;
+                    entry.5 += 1;
+                } else if c_ok {
                     c_pass += 1;
                     entry.4 += 1;
                 } else {
                     c_fail.push(format!("#{id} {section}: expected={ec:?} actual={counts:?}"));
                 }
-                if d_ok {
-                    d_pass += 1;
-                    entry.5 += 1;
-                } else {
-                    d_fail.push(format!(
-                        "#{id} {section}: expected=[{}] actual=[{}]",
-                        sig_short(&esig),
-                        sig_short(&asig)
-                    ));
+                if !divergent {
+                    if d_ok {
+                        d_pass += 1;
+                        entry.5 += 1;
+                    } else {
+                        d_fail.push(format!(
+                            "#{id} {section}: expected=[{}] actual=[{}]",
+                            sig_short(&esig),
+                            sig_short(&asig)
+                        ));
+                    }
                 }
             }
         }

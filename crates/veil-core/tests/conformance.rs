@@ -36,17 +36,31 @@ use veil_core::Session;
 ///   「alt 为纯文本」模型视为叶子。
 /// - 产品侧同步修正：类型 6 块级标签表补齐 table/td/tbody 等 18 个规范标签
 ///   （Example 148/160 此前把 `<table>` 行解析成段落）。
-/// - W1-5 裸 URL 自动成链（GFM 扩展）通过 `bare-url-autolink` feature gate 隔离：
-///   产品默认开启，一致性门禁用 `--no-default-features` 编译，不影响基线。
+/// - W1-5 裸 URL 自动成链（GFM 扩展）：`bare-url-autolink` feature 开启时
+///   Example 611（`https://example.com` 裸链接）会多产出一个 Link 节点，
+///   Suite C/D 各 −1（−2 分节计数中的 Autolinks）。这是刻意的 GFM 扩展，
+///   标准 CommonMark 计数在 `--no-default-features` 下保持满值。
 const BASELINE_A: usize = 652;
 const BASELINE_B_EXACT: usize = 629;
 const BASELINE_B_CANON: usize = 630;
+#[cfg(feature = "bare-url-autolink")]
+const BASELINE_C: usize = 651;
+#[cfg(not(feature = "bare-url-autolink"))]
 const BASELINE_C: usize = 652;
 /// 条件基线（仅 A 通过时统计）。
 const BASELINE_B_EXACT_WHEN_A: usize = 629;
+#[cfg(feature = "bare-url-autolink")]
+const BASELINE_C_WHEN_A: usize = 651;
+#[cfg(not(feature = "bare-url-autolink"))]
 const BASELINE_C_WHEN_A: usize = 652;
 /// Suite D 基线（行内结构签名；与 C 同源参照）。
+#[cfg(feature = "bare-url-autolink")]
+const BASELINE_D: usize = 651;
+#[cfg(not(feature = "bare-url-autolink"))]
 const BASELINE_D: usize = 652;
+#[cfg(feature = "bare-url-autolink")]
+const BASELINE_D_WHEN_A: usize = 651;
+#[cfg(not(feature = "bare-url-autolink"))]
 const BASELINE_D_WHEN_A: usize = 652;
 /// 分节 C 基线（0d 参照校正后实测，等于各节总例数）：任何一节只允许改善。
 /// 与 SECTIONS 打印同序（BTreeMap 字典序）。
@@ -256,6 +270,9 @@ fn commonmark_0_31_2_conformance() {
     );
     for &(sec, base) in BASELINE_C_SECTION {
         let got = by_section.get(sec).map_or(0, |e| e.4);
+        // 裸 URL 扩展接管 Example 611（Autolinks 节），该节基线随 feature 下调 1。
+        #[cfg(feature = "bare-url-autolink")]
+        let base = if sec == "Autolinks" { base - 1 } else { base };
         assert!(got >= base, "Suite C 分段退化：{sec} {got} < 基线 {base}");
     }
 }

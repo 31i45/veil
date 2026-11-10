@@ -397,8 +397,8 @@ impl BlockLayout {
         let inside = block.start <= caret && caret <= block.end;
         let rel = if inside { caret - block.start } else { 0 };
         match kind {
-            BlockKind::BlockQuote => {
-                // 引用按行：line=0 即块外，天然区分「块外」与「块内任意行」。
+            BlockKind::BlockQuote | BlockKind::Admonition(_) => {
+                // 引用/提示块按行：line=0 即块外，天然区分「块外」与「块内任意行」。
                 let line = if inside {
                     self.source_newlines.partition_point(|&o| o < rel) as u64 + 1
                 } else {
@@ -1575,6 +1575,7 @@ fn block_subs(kind: BlockKind, body: &str, block: Range, caret: usize) -> Vec<Su
             }
         }
         BlockKind::BlockQuote => quote_line_subs(body, block, caret),
+        BlockKind::Admonition(ty) => admonition_subs(ty, body, block, caret),
         BlockKind::ThematicBreak => {
             if node_active(block, caret) {
                 Vec::new()
@@ -1716,6 +1717,49 @@ fn quote_line_subs(body: &str, block: Range, caret: usize) -> Vec<Sub> {
 fn quote_marker_pos(line: &str) -> Option<usize> {
     let indent = line.len() - line.trim_start_matches([' ', '\t']).len();
     (line.as_bytes().get(indent) == Some(&b'>')).then_some(indent)
+}
+
+/// Admonition 提示块：沿用引用块的逐行 `>` 消隐，并把首行 `[!TYPE]` 标记
+/// 整体替换为可读标签（`Note`/`Tip`/…）。首行激活时保留源码，便于编辑标记。
+fn admonition_subs(
+    ty: veil_core::AdmonitionType,
+    body: &str,
+    block: Range,
+    caret: usize,
+) -> Vec<Sub> {
+    let mut out = quote_line_subs(body, block, caret);
+    let first_len = match body.split_inclusive('\n').next() {
+        Some(l) => l.len(),
+        None => 0,
+    };
+    // 首行激活（caret 落在首行内）→ 显示源码标记，不做替换
+    if block.start <= caret && caret <= block.end && caret - block.start <= first_len {
+        return out;
+    }
+    if let Some((start, end)) = admonition_marker(body) {
+        out.push(Sub::fill(start, end, ty.label()));
+    }
+    out
+}
+
+/// 首行 `> [!TYPE]` 标记的块相对字节区间 `[start, end)`。
+/// 返回 `end` = `]` 之后一字节；标签内容不校验（类由调用方给定）。
+fn admonition_marker(body: &str) -> Option<(usize, usize)> {
+    let line = body.split_inclusive('\n').next()?;
+    let b = line.as_bytes();
+    let indent = line.len() - line.trim_start_matches([' ', '\t']).len();
+    if b.get(indent) != Some(&b'>') {
+        return None;
+    }
+    let mut i = indent + 1;
+    while matches!(b.get(i), Some(b' ' | b'\t')) {
+        i += 1;
+    }
+    if b.get(i) != Some(&b'[') || b.get(i + 1) != Some(&b'!') {
+        return None;
+    }
+    let close = line[i..].find(']')? + i;
+    Some((i, close + 1))
 }
 
 /// 单元格富文本样式段：剥标记坐标 → 可见文本坐标，致密覆盖 `[0, text_len)`。
@@ -2120,6 +2164,74 @@ mod tests {
     }
 
     // ---- B7：标题/围栏源码标记与列表/引用同一显隐规则（非激活消隐） ----
+
+    #[test]
+    fn admonition_marker_becomes_label_when_inactive() {
+        // `> [!NOTE] body`：`>` 隐为空格，`[!NOTE]` 整体替换为可读标签
+        let (_, l) = layout_with_caret("> [!NOTE] body", usize::MAX, 400.0);
+        assert_eq!(l.layout_text(), "  Note body", "非激活：标记 → 标签");
+        assert_eq!(
+            l.layout_text().len(),
+            "> [!NOTE] body".len() - 3,
+            "标签替换为不等长 fill（7B → 4B），映射层按段处理"
+        );
+    }
+
+    #[test]
+    fn admonition_variant_labels_and_alias() {
+        for (src, label) in [
+            ("> [!TIP] x", "Tip"),
+            ("> [!IMPORTANT] x", "Important"),
+            ("> [!WARNING] x", "Warning"),
+            ("> [!WARN] x", "Warning"),
+            ("> [!CAUTION] x", "Caution"),
+        ] {
+            let (_, l) = layout_with_caret(src, usize::MAX, 600.0);
+            assert_eq!(
+                l.layout_text(),
+                format!("  {label} x"),
+                "变体标签: {src}"
+            );
+        }
+    }
+
+    #[test]
+    fn admonition_first_line_active_shows_source() {
+        // 光标落在首行 → 还原源码（含 `[!TYPE]`），便于编辑标记
+        let (_, l) = layout_with_caret("> [!NOTE] body", 5, 400.0);
+        assert_eq!(l.layout_text(), "> [!NOTE] body");
+    }
+
+    #[test]
+    fn admonition_hides_each_line_marker_like_quote() {
+        let src = "> [!TIP] a\n> b";
+        let (_, l) = layout_with_caret(src, usize::MAX, 400.0);
+        assert_eq!(l.layout_text(), "  Tip a\n  b", "两行 `>` 均隐，仅首行标签替换");
+        // 光标在第二行 → 仅第二行显源码，首行仍替换标签
+        let (_, l) = layout_with_caret(src, src.len() - 1, 400.0);
+        assert_eq!(l.layout_text(), "  Tip a\n> b");
+        assert!(l.height >= 2.0 * BASE_LINE_HEIGHT, "两行提示块高不塌缩");
+    }
+
+    #[test]
+    fn admonition_height_stable_across_reveal() {
+        let hidden = layout_with_caret("> [!WARNING] careful", usize::MAX, 400.0).1;
+        let shown = layout_with_caret("> [!WARNING] careful", 5, 400.0).1;
+        assert!(
+            (hidden.height - shown.height).abs() < 0.01,
+            "显隐切换不得改变行高: {} vs {}",
+            hidden.height,
+            shown.height
+        );
+    }
+
+    #[test]
+    fn admonition_marker_only_matched_on_first_line() {
+        // 第二行出现 `[!NOTE]` 不参与替换（仅首行是标记）
+        let src = "> a\n> [!NOTE] b";
+        let (_, l) = layout_with_caret(src, usize::MAX, 400.0);
+        assert_eq!(l.layout_text(), "  a\n  [!NOTE] b");
+    }
 
     #[test]
     fn atx_heading_marker_hidden_when_inactive_and_height_stable() {

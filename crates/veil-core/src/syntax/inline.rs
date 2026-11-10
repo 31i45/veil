@@ -117,16 +117,26 @@ fn link_bare_urls(
             i += prefix;
             continue;
         }
-        // 延伸 URL 到边界（空白/常见标点：空格、控制符、< > ( ) [ ] { } " ' 反引号）
+        // 延伸 URL 到边界：空白/控制符/`<`/`>`/引号/反引号/方括号/花括号即止；
+        // 圆括号按 GFM 规则成对保留（`(business)` 属 URL，未配对的 `)` 终止）。
         let mut j = i + prefix;
+        let mut depth = 0i32;
         while j < bytes.len() {
             let b = bytes[j];
             if b.is_ascii_whitespace()
                 || b < 0x20
-                || matches!(b, b'<' | b'>' | b'(' | b')' | b'[' | b']' | b'{' | b'}'
-                    | b'"' | b'\'' | b'`' | b'.' | b',' | b';' | b'!' | b'?' | b':' | b'\\')
+                || matches!(b, b'<' | b'>' | b'[' | b']' | b'{' | b'}' | b'"' | b'\'' | b'`'
+                    | b'\\')
             {
                 break;
+            }
+            if b == b'(' {
+                depth += 1;
+            } else if b == b')' {
+                if depth == 0 {
+                    break;
+                }
+                depth -= 1;
             }
             j += 1;
         }

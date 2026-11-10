@@ -14,6 +14,6 @@ pub use range::{Bias, MarkId, Range};
 pub use session::{Edit, EditError, Events, Session};
 pub use slug::{heading_slug, heading_slugs};
 pub use syntax::{
-    emphasis_spans, list_signature, task_span, BlockId, BlockKind, CellAlign, EmphasisSpan,
-    InlineKind, InlineNode, Table, TableCell,
+    emphasis_spans, list_signature, task_span, AdmonitionType, BlockId, BlockKind, CellAlign,
+    EmphasisSpan, InlineKind, InlineNode, Table, TableCell,
 };

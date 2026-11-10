@@ -1016,10 +1016,11 @@ impl App {
         } else {
             self.editor.set_caret(off);
             self.window_state.goal_x = None;
-            match self.table_ctx_at(off) {
-                Some(tc) => (CtxKind::Table(tc), None),
-                None => match self.link_at(off) {
-                    Some(url) => (CtxKind::Link, Some(url)),
+            // 优先级：表格内先查 link（单元格 inline）→ 再给 table_ctx → 块级查 link → 块
+            match self.link_at(off) {
+                Some(url) => (CtxKind::Link, Some(url)),
+                None => match self.table_ctx_at(off) {
+                    Some(tc) => (CtxKind::Table(tc), None),
                     None => (CtxKind::Block, None),
                 },
             }
@@ -1083,13 +1084,36 @@ impl App {
     }
 
     /// 命中偏移处的 inline 链接 URL（含标记区命中；引用式链接无 url 区间不识别）。
+    /// 扩展：表格单元格内的 inline 链接也能命中（`block_inlines(Table)` 恒为空，
+    /// 需从 `table.cell.inlines` 逐级检索）。
     fn link_at(&self, offset: usize) -> Option<String> {
         let g = self
             .index
             .blocks
             .iter()
             .find(|g| g.range.start <= offset && offset < g.range.end)?;
-        let nodes = self.editor.session().block_inlines(g.id)?;
+        let nodes = match g.kind {
+            BlockKind::Table => {
+                let tbl = self.editor.session().table(g.id)?;
+                let flat = active_cell_index(&tbl, offset)?;
+                let cell = if flat < tbl.header.len() {
+                    tbl.header.get(flat)?
+                } else {
+                    let mut idx = flat - tbl.header.len();
+                    let mut found: Option<_> = None;
+                    for row in &tbl.rows {
+                        if idx < row.len() {
+                            found = row.get(idx);
+                            break;
+                        }
+                        idx -= row.len();
+                    }
+                    found?
+                };
+                cell.inlines.clone()
+            }
+            _ => self.editor.session().block_inlines(g.id)?,
+        };
         fn find(nodes: &[InlineNode], off: usize) -> Option<&InlineNode> {
             nodes.iter().find_map(|n| {
                 if n.range.start <= off && off < n.range.end {

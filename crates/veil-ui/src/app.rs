@@ -1,6 +1,7 @@
 //! winit + softbuffer 薄壳：事件翻译、脏块重建、帧合成与呈现。
 //! 策略全在 editor/input；本层只做接线与像素搬运（INSTANCE §7 接缝）。
 
+use std::collections::HashMap;
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -265,6 +266,8 @@ pub(crate) struct UIState {
     pub(crate) ctx: crate::view::ctx_menu::CtxMenu,
     /// 写作模式与全文统计（阶段 1）。
     pub(crate) writing: WritingState,
+    /// 表格视图态（B2）：用户拖动的列宽覆盖，纯视图，不写回文档。
+    pub(crate) tables: TableView,
     /// 窗口焦点（光标表达）：true = 实心插入点，false = 空心框。
     /// 由 `WindowEvent::Focused` 经 `set_window_focused` 写入，默认聚焦。
     pub(crate) focused: bool,
@@ -280,7 +283,37 @@ impl Default for UIState {
             quick: QuickOpen::default(),
             ctx: crate::view::ctx_menu::CtxMenu::default(),
             writing: WritingState::default(),
+            tables: TableView::default(),
             focused: true,
+        }
+    }
+}
+
+/// 表格视图态（B2）：列宽覆盖 + 拖动会话。键为块 id，文档切换即清空。
+/// 覆盖只在视图层生效：不写回 Markdown，不进入撤销栈。
+#[derive(Default)]
+pub(crate) struct TableView {
+    /// 块 id → 各列宽（物理像素）；长度必须等于该表列数才被采纳。
+    pub(crate) widths: HashMap<veil_core::BlockId, Vec<f32>>,
+    /// 拖动会话：(块 id, 列下标, 起始鼠标 x, 起始列宽)。
+    pub(crate) drag: Option<(veil_core::BlockId, usize, f32, f32)>,
+}
+
+impl TableView {
+    /// 覆盖内容的 FNV-1a 指纹（0 = 无覆盖）：作为表格缓存键的一部分。
+    pub(crate) fn fingerprint(&self, id: veil_core::BlockId) -> u64 {
+        match self.widths.get(&id) {
+            None => 0,
+            Some(ws) => {
+                let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+                for w in ws {
+                    for b in w.to_bits().to_le_bytes() {
+                        h ^= b as u64;
+                        h = h.wrapping_mul(0x1000_0000_01b3);
+                    }
+                }
+                h
+            }
         }
     }
 }
@@ -1187,7 +1220,10 @@ impl ApplicationHandler for App {
                     }
                     return;
                 }
-                if let Some(off) = self.ui_state.chrome.scroll_drag {
+                if self.ui_state.tables.drag.is_some() {
+                    // 表格列宽拖动（B2）：视图态即时重排，不触碰文档
+                    self.drag_col_to();
+                } else if let Some(off) = self.ui_state.chrome.scroll_drag {
                     // 拖动滚动条：按滑块顶边换算滚动量
                     let vp = self.viewport();
                     let doc_h = self.doc_height();
@@ -1231,6 +1267,7 @@ impl ApplicationHandler for App {
                 self.window_state.dragging = false;
                 self.ui_state.chrome.scroll_drag = None;
                 self.ui_state.search.pressed = None;
+                self.end_col_drag();
             }
             WindowEvent::MouseWheel { delta, .. } => {
                 if self.input_state.mods.ctrl {

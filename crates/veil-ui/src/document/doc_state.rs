@@ -527,6 +527,9 @@ impl App {
         self.window_state.scroll_y = 0.0;
         self.window_state.goal_y = 0.0;
         self.window_state.goal_x = None;
+        // 表格列宽覆盖按块 id 生效：换文档即整体失效（纯视图态，无副作用）
+        self.ui_state.tables.widths.clear();
+        self.ui_state.tables.drag = None;
         self.ui_state.outline.scroll = 0.0;
         self.ui_state.outline.hover = None;
         // 新文档：旧查询的命中偏移全部失效（栏保持打开，查询清空）
@@ -570,6 +573,9 @@ impl App {
         self.window_state.scroll_y = 0.0;
         self.window_state.goal_y = 0.0;
         self.window_state.goal_x = None;
+        // 表格列宽覆盖按块 id 生效：换文档即整体失效（纯视图态，无副作用）
+        self.ui_state.tables.widths.clear();
+        self.ui_state.tables.drag = None;
         self.ui_state.outline.scroll = 0.0;
         self.ui_state.outline.hover = None;
         // 新文档：旧查询的命中偏移全部失效（栏保持打开，查询清空）

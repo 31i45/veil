@@ -491,12 +491,14 @@ impl App {
             }
         }
         for (id, key, t, active, raw_cells) in pending {
+            let widths = self.ui_state.tables.widths.get(&id).cloned();
             let l = self.engine.layout_table_opts(
                 &t,
                 width,
                 fg,
                 active.as_ref().map(|(idx, src)| (*idx, src.as_str())),
                 Some(&raw_cells),
+                widths.as_deref(),
             );
             self.cache.tables.insert(
                 id,
@@ -523,6 +525,7 @@ impl App {
         TableKey {
             base: self.base_key(),
             active,
+            widths: self.ui_state.tables.fingerprint(id),
         }
     }
 

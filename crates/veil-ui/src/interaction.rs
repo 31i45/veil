@@ -1451,6 +1451,74 @@ impl App {
         }
     }
 
+    /// 表格列宽拖动（B2）：在表格内部列分隔线 ±4px 内按下 → 进入拖动会话。
+    /// 纯视图态：不修改文档字节、不进入撤销栈；覆盖按块 id 保存。
+    pub(crate) fn try_start_col_drag(&mut self) -> bool {
+        let vp = self.viewport();
+        let scale = self.input_state.scale;
+        let x = self.input_state.mouse.x as f32 - self.content_x();
+        let y = self.input_state.mouse.y as f32 - vp.y + self.window_state.scroll_y;
+        if x < 0.0 || y < 0.0 {
+            return false;
+        }
+        let (id, kind, top) = {
+            let Some(g) = self.index.blocks.iter().rev().find(|g| g.top <= y) else {
+                return false;
+            };
+            (g.id, g.kind.clone(), g.top)
+        };
+        if !matches!(kind, BlockKind::Table) {
+            return false;
+        }
+        self.ensure_block(id);
+        let Some(t) = self.cache.tables.get(&id) else {
+            return false;
+        };
+        let ly = y - top;
+        if ly > t.height || t.cols.len() < 2 {
+            return false;
+        }
+        let tol = 4.0 * scale;
+        let mut acc = 0.0f32;
+        let mut hit = None;
+        for (i, cw) in t.cols.iter().enumerate() {
+            acc += *cw;
+            // 仅内部边界可拖（最右边界是表宽，等价于整体缩放，不在本项范围）
+            if i + 1 < t.cols.len() && (x - acc).abs() <= tol {
+                hit = Some((i, *cw));
+                break;
+            }
+        }
+        let Some((col, base_w)) = hit else {
+            return false;
+        };
+        let cols = t.cols.clone();
+        self.ui_state.tables.widths.entry(id).or_insert(cols);
+        self.ui_state.tables.drag = Some((id, col, x, base_w));
+        true
+    }
+
+    /// 拖动中：按鼠标位移更新目标列宽（下限 40 逻辑 px），并请求重绘。
+    pub(crate) fn drag_col_to(&mut self) {
+        let Some((id, col, x0, base_w)) = self.ui_state.tables.drag else {
+            return;
+        };
+        let x = self.input_state.mouse.x as f32 - self.content_x();
+        let min = crate::view::table::MIN_COL_WIDTH * self.input_state.scale;
+        let w = (base_w + (x - x0)).max(min);
+        if let Some(ws) = self.ui_state.tables.widths.get_mut(&id) {
+            if let Some(slot) = ws.get_mut(col) {
+                *slot = w;
+            }
+        }
+        self.request_redraw();
+    }
+
+    /// 松开左键：结束列宽拖动会话（覆盖保留）。
+    pub(crate) fn end_col_drag(&mut self) -> bool {
+        self.ui_state.tables.drag.take().is_some()
+    }
+
     /// 左键按下路由（模态 > 右键菜单 > 菜单 > 菜单栏 > 滚动条 > 状态栏 > 正文光标）。
     /// 返回值恒为 false：退出统一由模态结论写 `exit_requested`。
     /// 菜单打开时点击外部只关菜单、不移动光标。
@@ -1642,6 +1710,11 @@ impl App {
                     return false;
                 }
             }
+        }
+        // 表格列宽拖动（B2）：优先于落光标；命中分隔线则吞掉本次点击。
+        if self.try_start_col_drag() {
+            self.request_redraw();
+            return false;
         }
         self.window_state.dragging = true;
         if self.try_toggle_task() {

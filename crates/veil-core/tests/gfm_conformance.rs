@@ -4,13 +4,13 @@
 //! - Suite A 额外把期望侧的生成 `<table>` 识别为表格块（CommonMark 语料里
 //!   `<table>` 只可能是原始 HTML，两侧都不计）。
 //! - Suite B/C/D 的参照仍为 pulldown-cmark 0.13：它支持表格/删除线/任务列表，
-//!   但不支持 GFM 裸 URL/邮箱自动链接（`Options` 无对应开关），故自动链接节的
-//!   C/D 只能验证「两侧都没有」；该能力缺口由 Suite B 逐字节暴露。
+//!   但不支持 GFM 裸 URL/邮箱自动链接（`Options` 无对应开关）；自动链接节的
+//!   C/D 因此与参照不可比，改为断言「至少产出一个链接」（`AUTOLINK_DIVERGENT`）。
 //! - Suite B 用 `gfm_canonical` 抹平 cmark-gfm 规范 HTML 与 pulldown 输出的序列化
 //!   差异（表格 align/style、`<input>` 属性序与自闭合、空 `<tbody>`），只等价化
 //!   不放松结构；原始逐字节 B 仅打印、不作门槛（渲染器不同源）。
-//! - 0d 门槛范围 = §5.4「表格 / 任务列表 / 删除线」三节 12 例（A/C/D 全量 23 例）；
-//!   自动链接扩展 11 例为已知缺口，仅作观测，待后续增量评估。
+//! - 门槛范围 = 全部四节 23 例：§5.4「表格 / 任务列表 / 删除线」12 例 +
+//!   自动链接扩展 11 例（W1-5 解析层与产品导出均已成链）。
 //!
 //! 门禁方向与 CommonMark 一致：只允许改善、不允许退化（`>=` 基线）。
 
@@ -30,23 +30,25 @@ use veil_core::Session;
 /// 基线（2026-10-28 实测；只允许改善）。
 const BASELINE_A: usize = 23;
 /// Suite B 规范化（仅抹平渲染器序列化差异，见 `common::gfm_canonical`）。
-/// 23 例中 11 例为自动链接扩展：产品导出（pulldown-cmark）与 Veil 行内解析器
-/// 均不支持裸 URL/邮箱自动链接，是 0d 计划（§5.4 表格/任务列表/删除线）之外的
-/// 已知缺口，不计入门槛；计划内三节 12/12 全通过。
-const BASELINE_B_CANON: usize = 12;
+/// 23/23：0d 计划内三节 12 例 + 自动链接扩展 11 例（W1-5 解析层 + 导出成链后
+/// 产品导出与 cmark-gfm 语义一致）。
+const BASELINE_B_CANON: usize = 23;
 const BASELINE_C: usize = 23;
 const BASELINE_D: usize = 23;
 /// 0d 计划内三节的 B 规范化基线（§5.4 目标 ≥95%，实测 100%）。
+/// 自动链接节 11/11：裸 URL（任意 scheme / `www.`）与裸邮箱均已成链，
+/// href 协议补全与尾部标点/实体/括号规则与 cmark-gfm 一致。
 const BASELINE_B_CANON_SECTION: &[(&str, usize)] = &[
+    ("autolinks_ext", 11),
     ("tables", 8),
     ("task_list_items", 2),
     ("strikethrough", 2),
 ];
 
-/// 裸 URL 自动成链（W1-5）已实现、而参照实现（pulldown-cmark 0.13 无 GFM
-/// 自动链接，`ENABLE_GFM` 仅含 blockquote tags）未实现的 8 例：`www.` 前缀。
+/// 裸 URL/邮箱自动成链（W1-5）已实现、而参照实现（pulldown-cmark 0.13 无 GFM
+/// 自动链接，`ENABLE_GFM` 仅含 blockquote tags）未实现的 11 例。
 /// 这些例子的 Suite C/D 与参照不可比，改为断言「至少产出一个链接」，
-/// 参照侧其余 15 例仍按全量门槛校验（基线不变）。
+/// 参照侧其余 12 例仍按全量门槛校验（基线不变）。
 /// 产品侧解析行为不再有编译开关，本白名单是唯一差异点。
 const AUTOLINK_DIVERGENT: &[&str] = &[
     "autolinks_ext-001",
@@ -57,6 +59,9 @@ const AUTOLINK_DIVERGENT: &[&str] = &[
     "autolinks_ext-006",
     "autolinks_ext-007",
     "autolinks_ext-008",
+    "autolinks_ext-009",
+    "autolinks_ext-010",
+    "autolinks_ext-011",
 ];
 
 const EXAMPLES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/conformance/gfm");

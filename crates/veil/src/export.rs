@@ -123,7 +123,7 @@ pub fn html_of(
             let text = session.text_slice(range).unwrap_or_default();
             let (offset, content) = heading_content(&kind, &text);
             let nodes = session.block_inlines(id).unwrap_or_default();
-            let rendered = render_footnote_refs(
+            let rendered = render_block_inlines(
                 session,
                 &mut fn_occurrences,
                 content,
@@ -160,7 +160,7 @@ pub fn html_of(
                     }
                 }
                 let rendered =
-                    render_footnote_refs(session, &mut fn_occurrences, &text, start, &nodes);
+                    render_block_inlines(session, &mut fn_occurrences, &text, start, &nodes);
                 pulldown_cmark::html::push_html(
                     &mut body,
                     pulldown_cmark::Parser::new_ext(&format!("{defs}{rendered}"), opts),
@@ -174,9 +174,21 @@ pub fn html_of(
             i += 1;
             continue;
         };
-        let nodes = session.block_inlines(id).unwrap_or_default();
+        // 表格的行内节点不在 block_inlines 上（单元格内解析），单独收集，使表格内的
+        // 裸链接与正文同样成链；其余块直接取块级行内节点。
+        let nodes = if kind == BlockKind::Table {
+            session.table(id).map_or_else(Vec::new, |t| {
+                t.header
+                    .iter()
+                    .chain(t.rows.iter().flatten())
+                    .flat_map(|c| c.inlines.iter().cloned())
+                    .collect()
+            })
+        } else {
+            session.block_inlines(id).unwrap_or_default()
+        };
         let rendered =
-            render_footnote_refs(session, &mut fn_occurrences, &text, range.start, &nodes);
+            render_block_inlines(session, &mut fn_occurrences, &text, range.start, &nodes);
         pulldown_cmark::html::push_html(
             &mut body,
             pulldown_cmark::Parser::new_ext(&format!("{defs}{rendered}"), opts),
@@ -272,23 +284,36 @@ fn collect_footnote_refs(
     }
 }
 
-/// 把块源码里的 `[^id]` 标记替换为 `<sup class="fnref">` 链接。
-/// 只按 core 给出的 FootnoteRef 节点区间改动，代码跨度/围栏代码/图片语法不会
-/// 产出该节点，因此天然不会被误替换；未定义引用（无定义）保留原文。
-/// 同一 id 重复引用时首个保持 `fnref-n`（文末返回链接指向它），后续加 `-{k}`
+/// 收集块内裸链接（GFM 自动链接扩展）：`url` 与 `content` 同指源码本身即为裸链接；
+/// 显式 `[t](u)` / `<...>` / 引用式的 content 指向文本、与 range 不同，不会误判。
+fn collect_bare_links(nodes: &[InlineNode], out: &mut Vec<InlineNode>) {
+    for n in nodes {
+        if n.kind == InlineKind::Link && n.url == Some(n.range) && n.content == n.range {
+            out.push(n.clone());
+        }
+        collect_bare_links(&n.children, out);
+    }
+}
+
+/// 把块源码里的脚注引用与裸链接替换为 raw HTML。
+///
+/// 脚注只按 core 给出的 FootnoteRef 节点区间改动；裸链接只按「url == range」的
+/// Link 节点改动，代码跨度/围栏/图片语法不产出这类节点，天然不会误替换。
+/// 两种替换同处一遍扫描（按起点排序，后到的重叠项丢弃），保证互不踩踏。
+/// 同一脚注 id 重复引用时首个保持 `fnref-n`（文末返回链接指向它），后续加 `-{k}`
 /// 后缀避免 id 重复——与 GitHub 等主流导出的锚点行为一致。
-fn render_footnote_refs(
+fn render_block_inlines(
     session: &Session,
     occurrences: &mut HashMap<String, usize>,
     text: &str,
     base: usize,
     nodes: &[InlineNode],
 ) -> String {
+    // (块内起点, 块内终点, 替换文本)
+    let mut reps: Vec<(usize, usize, String)> = Vec::new();
     let mut refs = Vec::new();
     collect_footnote_refs(session, nodes, &mut refs);
     refs.sort_by_key(|(range, _)| range.start);
-    let mut out = String::with_capacity(text.len());
-    let mut p = 0usize;
     for (range, id) in refs {
         // 「已定义」才替换：core 会给仅被引用的 id 编号，但无定义时导出无法产出
         // 条目，保留原始标记比生成断链更诚实。
@@ -302,10 +327,9 @@ fn render_footnote_refs(
         else {
             continue;
         };
-        if s < p || e > text.len() || !text.is_char_boundary(s) || !text.is_char_boundary(e) {
+        if s >= e || e > text.len() || !text.is_char_boundary(s) || !text.is_char_boundary(e) {
             continue;
         }
-        out.push_str(&text[p..s]);
         let k = occurrences.entry(id).or_insert(0);
         *k += 1;
         let anchor = if *k == 1 {
@@ -313,12 +337,77 @@ fn render_footnote_refs(
         } else {
             format!("fnref-{n}-{k}")
         };
-        out.push_str(&format!(
-            "<sup class=\"fnref\"><a href=\"#fn-{n}\" id=\"{anchor}\">[{n}]</a></sup>"
+        reps.push((
+            s,
+            e,
+            format!("<sup class=\"fnref\"><a href=\"#fn-{n}\" id=\"{anchor}\">[{n}]</a></sup>"),
         ));
+    }
+    let mut links = Vec::new();
+    collect_bare_links(nodes, &mut links);
+    links.sort_by_key(|n| n.range.start);
+    for node in links {
+        let Some(url) = node.url.and_then(|u| session.text_slice(u)) else {
+            continue;
+        };
+        let (Some(s), Some(e)) = (
+            node.range.start.checked_sub(base),
+            node.range.end.checked_sub(base),
+        ) else {
+            continue;
+        };
+        if s >= e || e > text.len() || !text.is_char_boundary(s) || !text.is_char_boundary(e) {
+            continue;
+        }
+        let href = veil_ui::normalize_link_url(&url);
+        reps.push((
+            s,
+            e,
+            format!(
+                "<a href=\"{}\">{}</a>",
+                escape_attr(&href),
+                escape_link_text(&url)
+            ),
+        ));
+    }
+    reps.sort_by_key(|(s, _, _)| *s);
+    let mut out = String::with_capacity(text.len() + 32);
+    let mut p = 0usize;
+    for (s, e, rep) in reps {
+        if s < p {
+            continue; // 区间重叠（理论上不出现）：保留先出现的替换
+        }
+        out.push_str(&text[p..s]);
+        out.push_str(&rep);
         p = e;
     }
     out.push_str(&text[p..]);
+    out
+}
+
+/// href 属性值转义（`&` 与引号必须转义，裸 URL 常见 `?a=1&b=2`）。
+fn escape_attr(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('"', "&quot;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+/// 裸链接可见文本：HTML 转义后再把 markdown 行内标记字符改写为数字实体，
+/// 使交回 pulldown 的源码保持纯文本（URL 里的 `_`/`*`/`[` 不触发强调/链接）。
+fn escape_link_text(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '*' | '_' | '~' | '`' | '[' | ']' | '\\' => {
+                out.push_str(&format!("&#{};", c as u32));
+            }
+            _ => out.push(c),
+        }
+    }
     out
 }
 
@@ -493,6 +582,41 @@ mod tests {
         assert_eq!(
             body_of("done ~~gone~~ keep\n"),
             "<p>done <del>gone</del> keep</p>\n"
+        );
+    }
+
+    #[test]
+    fn bare_links_export_as_anchors() {
+        // GFM 自动链接扩展：`www.` 补 http、任意 scheme 原样、裸邮箱补 mailto；
+        // URL 中的 `&` 在 href 与可见文本里都必须转义
+        assert_eq!(
+            body_of("Visit www.a.com/x, or ftp://a.b/c\n"),
+            "<p>Visit <a href=\"http://www.a.com/x\">www.a.com/x</a>, or \
+             <a href=\"ftp://a.b/c\">ftp://a.b/c</a></p>\n"
+        );
+        assert_eq!(
+            body_of("mail foo@bar.baz\n"),
+            "<p>mail <a href=\"mailto:foo@bar.baz\">foo@bar.baz</a></p>\n"
+        );
+        assert_eq!(
+            body_of("www.a.com/?a=1&b=2\n"),
+            "<p><a href=\"http://www.a.com/?a=1&amp;b=2\">www.a.com/?a=1&amp;b=2</a></p>\n"
+        );
+        // 代码段与显式链接不受影响（后者链接文本照旧、目标不被改写）
+        assert_eq!(
+            body_of("`www.a.com` and [t](u)\n"),
+            "<p><code>www.a.com</code> and <a href=\"u\">t</a></p>\n"
+        );
+    }
+
+    #[test]
+    fn bare_link_in_table_cell_exported() {
+        // 表格单元格的行内节点不在 block_inlines 上，导出侧需单独收集
+        assert_eq!(
+            body_of("| a |\n| - |\n| www.a.com |\n"),
+            "<table><thead><tr><th>a</th></tr></thead><tbody>\n\
+             <tr><td><a href=\"http://www.a.com\">www.a.com</a></td></tr>\n\
+             </tbody></table>\n"
         );
     }
 

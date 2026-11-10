@@ -40,21 +40,25 @@ use veil_core::Session;
 ///   （`https://example.com`）多产出一个 Link 节点，Suite C/D 各 −1。
 ///   这是刻意的 GFM 扩展，不是退化：产品解析行为不再由编译特性开关决定，
 ///   门禁测到的就是发布物；差异处理只在测试侧（见 GFM 白名单）。
+/// - W1-5 P2（自动链接补齐 + 导出成链）：Example 612（`foo@bar.example.com`）
+///   同样按 GFM 扩展成为 `mailto:` 链接，C/D 再各 −1（Autolinks 节 18→17）；
+///   导出侧把裸链接写成 `<a>`，Examples 611/612 与规范「纯文本」期望不符，
+///   Suite B 精确/规范化各 −2、条件基线同步。均为已知 GFM 扩展差异。
 const BASELINE_A: usize = 652;
-const BASELINE_B_EXACT: usize = 629;
-const BASELINE_B_CANON: usize = 630;
-const BASELINE_C: usize = 651;
+const BASELINE_B_EXACT: usize = 627;
+const BASELINE_B_CANON: usize = 628;
+const BASELINE_C: usize = 650;
 /// 条件基线（仅 A 通过时统计）。
-const BASELINE_B_EXACT_WHEN_A: usize = 629;
-const BASELINE_C_WHEN_A: usize = 651;
+const BASELINE_B_EXACT_WHEN_A: usize = 627;
+const BASELINE_C_WHEN_A: usize = 650;
 /// Suite D 基线（行内结构签名；与 C 同源参照）。
-const BASELINE_D: usize = 651;
-const BASELINE_D_WHEN_A: usize = 651;
+const BASELINE_D: usize = 650;
+const BASELINE_D_WHEN_A: usize = 650;
 /// 分节 C 基线（0d 参照校正后实测，等于各节总例数）：任何一节只允许改善。
 /// 与 SECTIONS 打印同序（BTreeMap 字典序）。
 const BASELINE_C_SECTION: &[(&str, usize)] = &[
     ("ATX headings", 18),
-    ("Autolinks", 18),
+    ("Autolinks", 17),
     ("Backslash escapes", 13),
     ("Blank lines", 1),
     ("Block quotes", 25),

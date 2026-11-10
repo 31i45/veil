@@ -155,18 +155,39 @@ pub fn url_is_openable(url: &str) -> bool {
     })
 }
 
-/// 链接目标归一化：GFM 裸链接 `www.example.com` 补全为 `http://www.example.com`。
+/// 链接目标归一化：GFM 裸链接补全为可直接使用的目标——
+/// `www.example.com` → `http://www.example.com`，裸邮箱 → `mailto:…`。
 ///
-/// 为什么需要：裸 URL 成链时 `InlineNode.url` 只能指向源码字节（`Range`），
-/// 无法在解析层合成 `http://` 前缀；而打开链接与导出都要求带协议。
+/// 为什么需要：裸链接成链时 `InlineNode.url` 只能指向源码字节（`Range`），
+/// 无法在解析层合成协议前缀；而打开链接与导出都要求带协议。
 /// 归一化放在消费点（单一函数），解析层保持「不产生文档之外的内容」。
 pub fn normalize_link_url(url: &str) -> String {
     let u = url.trim();
     if u.len() >= 4 && u.as_bytes()[..4].eq_ignore_ascii_case(b"www.") {
         format!("http://{u}")
+    } else if is_bare_email_target(u) {
+        format!("mailto:{u}")
     } else {
         u.to_string()
     }
+}
+
+/// 裸邮箱目标（GFM 自动链接）：`local@domain`，domain 含 `.` 且以字母数字结尾。
+/// 显式 `mailto:` 前缀与含 scheme 的目标不在此列（保持原样）。
+fn is_bare_email_target(u: &str) -> bool {
+    if u.contains("://") || u.chars().any(char::is_whitespace) {
+        return false;
+    }
+    let Some((local, domain)) = u.split_once('@') else {
+        return false;
+    };
+    !local.is_empty()
+        && !local.contains(':')
+        && domain.contains('.')
+        && domain
+            .as_bytes()
+            .last()
+            .is_some_and(|b| b.is_ascii_alphanumeric())
 }
 
 /// 崩溃恢复草稿存储（0b）：单槽字节读写，实现由产品层注入（应用数据目录单文件）。

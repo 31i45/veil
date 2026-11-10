@@ -230,17 +230,143 @@ pub fn export_body(s: &Session) -> String {
                 }
             }
             if let Some(text) = s.text_slice(Range::new(start, end)) {
-                html::push_html(&mut body, Parser::new_ext(&format!("{defs}{text}"), opts));
+                let mut nodes = Vec::new();
+                for (item_id, _, _) in &blocks[i..j] {
+                    if let Some(ns) = s.block_inlines(*item_id) {
+                        nodes.extend(ns);
+                    }
+                }
+                let rendered = inject_bare_links(&text, start, &nodes);
+                html::push_html(
+                    &mut body,
+                    Parser::new_ext(&format!("{defs}{rendered}"), opts),
+                );
             }
             i = j;
             continue;
         }
         if let Some(text) = s.text_slice(range) {
-            html::push_html(&mut body, Parser::new_ext(&format!("{defs}{text}"), opts));
+            let nodes = if kind == BlockKind::Table {
+                s.table(blocks[i].0).map_or_else(Vec::new, |t| {
+                    t.header
+                        .iter()
+                        .chain(t.rows.iter().flatten())
+                        .flat_map(|c| c.inlines.iter().cloned())
+                        .collect()
+                })
+            } else {
+                s.block_inlines(blocks[i].0).unwrap_or_default()
+            };
+            let rendered = inject_bare_links(&text, range.start, &nodes);
+            html::push_html(
+                &mut body,
+                Parser::new_ext(&format!("{defs}{rendered}"), opts),
+            );
         }
         i += 1;
     }
     body
+}
+
+/// 裸链接成链（GFM 自动链接扩展）的导出复刻：把 `url == range` 的 Link 节点替换为
+/// raw `<a href>`。产品侧同逻辑见 `veil/src/export.rs` 的 `render_block_inlines`
+/// （本文件刻意复刻产品路径，不依赖 veil crate）。
+fn inject_bare_links(text: &str, base: usize, nodes: &[InlineNode]) -> String {
+    fn collect(nodes: &[InlineNode], out: &mut Vec<InlineNode>) {
+        for n in nodes {
+            if n.kind == InlineKind::Link && n.url == Some(n.range) && n.content == n.range {
+                out.push(n.clone());
+            }
+            collect(&n.children, out);
+        }
+    }
+    let mut links = Vec::new();
+    collect(nodes, &mut links);
+    links.sort_by_key(|n| n.range.start);
+    let mut out = String::with_capacity(text.len());
+    let mut p = 0usize;
+    for node in links {
+        let Some(url) = node.url.and_then(|u| s_slice(text, base, u)) else {
+            continue;
+        };
+        let (Some(st), Some(en)) = (
+            node.range.start.checked_sub(base),
+            node.range.end.checked_sub(base),
+        ) else {
+            continue;
+        };
+        if st < p || en > text.len() || !text.is_char_boundary(st) || !text.is_char_boundary(en) {
+            continue;
+        }
+        out.push_str(&text[p..st]);
+        out.push_str(&format!(
+            "<a href=\"{}\">{}</a>",
+            escape_attr(&link_href(url)),
+            escape_link_text(url)
+        ));
+        p = en;
+    }
+    out.push_str(&text[p..]);
+    out
+}
+
+/// 从块内文本按绝对区间取切片（越界/非字符边界返回 None）。
+fn s_slice(text: &str, base: usize, r: Range) -> Option<&str> {
+    let s = r.start.checked_sub(base)?;
+    let e = r.end.checked_sub(base)?;
+    if e > text.len() || !text.is_char_boundary(s) || !text.is_char_boundary(e) {
+        return None;
+    }
+    Some(&text[s..e])
+}
+
+/// 产品 `veil_ui::normalize_link_url` 的复刻：`www.` 补 http，裸邮箱补 mailto。
+fn link_href(url: &str) -> String {
+    if url.len() >= 4 && url.as_bytes()[..4].eq_ignore_ascii_case(b"www.") {
+        return format!("http://{url}");
+    }
+    if url.contains("://") || url.chars().any(char::is_whitespace) {
+        return url.to_string();
+    }
+    let Some((local, domain)) = url.split_once('@') else {
+        return url.to_string();
+    };
+    let email = !local.is_empty()
+        && !local.contains(':')
+        && domain.contains('.')
+        && domain
+            .as_bytes()
+            .last()
+            .is_some_and(|b| b.is_ascii_alphanumeric());
+    if email {
+        format!("mailto:{url}")
+    } else {
+        url.to_string()
+    }
+}
+
+fn escape_attr(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('"', "&quot;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+/// 裸链接可见文本：HTML 转义 + markdown 标记字符改数字实体（保持纯文本）。
+fn escape_link_text(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '*' | '_' | '~' | '`' | '[' | ']' | '\\' => {
+                out.push_str(&format!("&#{};", c as u32));
+            }
+            _ => out.push(c),
+        }
+    }
+    out
 }
 
 /// GFM Suite B 的额外等价化：cmark-gfm 规范期望 HTML 与 pulldown-cmark（产品导出

@@ -82,6 +82,30 @@ pub fn show_error(title: &str, text: &str) {
     eprintln!("{title}: {text}");
 }
 
+/// 弹出模态提示框（`/register`、`/unregister` 的结果反馈）。
+#[cfg(windows)]
+pub fn show_info(title: &str, text: &str) {
+    const MB_OK: u32 = 0x0000_0000;
+    const MB_ICONINFORMATION: u32 = 0x0000_0040;
+    let text = super::wide(text);
+    let title = super::wide(title);
+    // SAFETY: 两个指针都指向以 NUL 结尾的 UTF-16 缓冲，调用期间均有效
+    unsafe {
+        MessageBoxW(
+            std::ptr::null_mut(),
+            text.as_ptr(),
+            title.as_ptr(),
+            MB_OK | MB_ICONINFORMATION,
+        );
+    }
+}
+
+/// 非 Windows 兜底：同 `show_error`，保留 stderr 诊断。
+#[cfg(not(windows))]
+pub fn show_info(title: &str, text: &str) {
+    eprintln!("{title}: {text}");
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

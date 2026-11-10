@@ -16,9 +16,15 @@ mod icon {
 }
 use icon::icon_bytes;
 
+/// 文档图标（F1/S9）：由 `icons/Markdown.png` 离线生成的多尺寸 ICO，作为**第二组**图标资源
+/// 以资源 ID `2` 嵌入；注册表 `DefaultIcon` 用负数资源 ID `-2` 引用它（D7②）。
+/// 应用图标仍是资源 `1`，窗口/任务栏外观不变。
+const DOC_ICO: &[u8] = include_bytes!("../../icons/veil-doc.ico");
+
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=../veil-ui/src/icon.rs");
+    println!("cargo:rerun-if-changed=../../icons/veil-doc.ico");
     println!("cargo:rerun-if-env-changed=RC_EXE");
 
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows")
@@ -38,6 +44,7 @@ fn main() {
     let res_file = out.join("veil.res");
     let ico_file = out.join("veil.ico");
     std::fs::write(&ico_file, icon_bytes()).expect("写 veil.ico");
+    std::fs::write(out.join("veil-doc.ico"), DOC_ICO).expect("写 veil-doc.ico");
     std::fs::write(&rc_file, rc_source(&ver, nums)).expect("写 veil.rc");
 
     let status = Command::new(&rc)
@@ -71,6 +78,7 @@ fn rc_source(ver: &str, n: [u32; 4]) -> String {
     format!(
         "#pragma code_page(65001)\n\
          1 ICON \"veil.ico\"\n\
+         2 ICON \"veil-doc.ico\"\n\
          1 VERSIONINFO\n\
          FILEVERSION {a},{b},{c},{d}\n\
          PRODUCTVERSION {a},{b},{c},{d}\n\

@@ -524,6 +524,7 @@ impl App {
         self.input_state.revs.session += 1;
         self.input_state.revs.image_base += 1;
         self.window_state.scroll_y = 0.0;
+        self.window_state.goal_y = 0.0;
         self.window_state.goal_x = None;
         self.ui_state.outline.scroll = 0.0;
         self.ui_state.outline.hover = None;
@@ -566,6 +567,7 @@ impl App {
         self.input_state.revs.session += 1;
         self.input_state.revs.image_base += 1;
         self.window_state.scroll_y = 0.0;
+        self.window_state.goal_y = 0.0;
         self.window_state.goal_x = None;
         self.ui_state.outline.scroll = 0.0;
         self.ui_state.outline.hover = None;

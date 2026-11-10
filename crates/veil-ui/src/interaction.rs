@@ -325,7 +325,10 @@ impl App {
         self.recompute_geometry();
         // 文档高度随缩放变化：滚动位置可能越出新的最大滚动量，钳位
         let max = chrome::max_scroll(self.viewport(), self.doc_height());
-        self.window_state.scroll_y = self.window_state.scroll_y.clamp(0.0, max);
+        self.window_state.goal_y = self.window_state.goal_y.clamp(0.0, max);
+        if !self.window_state.smooth {
+            self.window_state.scroll_y = self.window_state.goal_y;
+        }
         self.set_ime_area();
         self.ui_state.chrome.notice = format!("缩放 {}%", (zoom * 100.0).round() as u32);
         self.request_redraw();
@@ -601,7 +604,10 @@ impl App {
             chrome::page_scroll(vp, self.doc_height(), old_scroll, dir.signum());
         let caret = self.editor.caret();
         let Some(bi) = self.caret_block_index() else {
-            self.window_state.scroll_y = new_scroll;
+            self.window_state.goal_y = new_scroll;
+            if !self.window_state.smooth {
+                self.window_state.scroll_y = self.window_state.goal_y;
+            }
             self.request_redraw();
             return;
         };
@@ -645,7 +651,10 @@ impl App {
             };
             trange.start + self.engine.hit(l, goal, (target_y - ttop).max(0.0)).min(trange.len())
         };
-        self.window_state.scroll_y = new_scroll;
+        self.window_state.goal_y = new_scroll;
+        if !self.window_state.smooth {
+            self.window_state.scroll_y = self.window_state.goal_y;
+        }
         if !self.editor.set_caret(target) {
             return;
         }
@@ -1584,8 +1593,11 @@ impl App {
                     self.ui_state.chrome.scroll_drag = Some(my - ty);
                 } else {
                     let dir = if my < ty { -1 } else { 1 };
-                    self.window_state.scroll_y =
-                        chrome::page_scroll(vp, doc_h, self.window_state.scroll_y, dir);
+                    let new = chrome::page_scroll(vp, doc_h, self.window_state.scroll_y, dir);
+                    self.window_state.goal_y = new;
+                    if !self.window_state.smooth {
+                        self.window_state.scroll_y = self.window_state.goal_y;
+                    }
                     self.set_ime_area();
                     self.request_redraw();
                 }
@@ -1920,7 +1932,11 @@ impl App {
         if let Some(top) = top {
             let vp = self.viewport();
             let max = chrome::max_scroll(vp, self.doc_height());
-            self.window_state.scroll_y = (top - MARGIN * self.input_state.scale).clamp(0.0, max);
+            let target = (top - MARGIN * self.input_state.scale).clamp(0.0, max);
+            self.window_state.goal_y = target;
+            if !self.window_state.smooth {
+                self.window_state.scroll_y = self.window_state.goal_y;
+            }
         }
         self.set_ime_area();
         self.request_redraw();
@@ -1964,7 +1980,11 @@ impl App {
         }
         let vp = self.viewport();
         let max = chrome::max_scroll(vp, self.doc_height());
-        self.window_state.scroll_y = (self.window_state.scroll_y - d).clamp(0.0, max);
+        // B3：写入 goal_y；smooth=false 时 animate() 首帧 goal_y==scroll_y 零开销同步
+        self.window_state.goal_y = (self.window_state.goal_y - d).clamp(0.0, max);
+        if !self.window_state.smooth {
+            self.window_state.scroll_y = self.window_state.goal_y;
+        }
         self.set_ime_area();
         self.request_redraw();
     }

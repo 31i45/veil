@@ -1,0 +1,211 @@
+//! 设计令牌（design tokens）：几何、间距、线宽与动效的唯一定义源。
+//!
+//! 颜色继续由 `theme::Theme` 承担；本模块只收敛与主题无关的标量几何与时间常量。
+//! `surface` 为浮层几何令牌，自 `theme` 原样迁入，调用点经 `theme::surface` 零改动沿用。
+
+/// surface 设计令牌（不可配置）：浮层（右键菜单 / 快速打开 / 大纲 / 搜索条）共用几何。
+/// 所有长度以 1.0× scale 为基准，经取值函数按 scale 线性放大；深/浅主题共用几何，
+/// 仅阴影 alpha 按主题微调（阴影是半透明黑叠加，深底下需稍强才有同等存在感）。
+pub(crate) mod surface {
+    /// 圆角半径（px，1.0× 基准）
+    pub const CORNER_RADIUS: f32 = 6.0;
+    /// 条目行高（px）
+    pub const ROW_HEIGHT: f32 = 28.0;
+    /// 内边距（px）
+    pub const PADDING: f32 = 12.0;
+    /// 分隔线高（px）
+    pub const DIVIDER_HEIGHT: f32 = 4.0;
+    /// 悬停内缩（px）：悬停底色相对条目外边界内缩，形成「浮起」边距
+    pub const HOVER_INSET: f32 = 3.0;
+    /// 面板外边距（px）：浮起卡片与窗口边缘/滚动条之间的间距
+    pub const PANEL_MARGIN: f32 = 8.0;
+    /// 控件间距（px）：同一浮层内相邻控件或与内容视口之间的间隙
+    pub const CONTROL_GAP: f32 = 8.0;
+    /// 文本光标宽（px）
+    pub const CARET_WIDTH: f32 = 2.0;
+    /// 文本光标高（px）
+    pub const CARET_HEIGHT: f32 = 16.0;
+    /// 滚动条拇指最小高度（px）
+    pub const SCROLLBAR_MIN_THUMB: f32 = 24.0;
+    /// 阴影整体向下偏移（px）
+    pub const SHADOW_OFFSET_Y: f32 = 2.0;
+    /// 阴影层（外扩 px, 基础 alpha），自外向内排列：外层大而淡、内层小而浓，
+    /// 叠加大致等效 8px 高斯模糊 + 2px 下移。alpha 总和 72（深色 ×1.25 ≈ 90），
+    /// 远低于「显脏」阈值（浅底上 alpha 和 >140 开始凝成灰团）。
+    pub const SHADOW_LAYERS: &[(f32, u8)] = &[(8.0, 4), (6.0, 8), (4.0, 14), (2.0, 20), (1.0, 26)];
+    /// 深色主题阴影 alpha 增益
+    pub const SHADOW_DARK_GAIN: f32 = 1.25;
+    /// 模态卡片圆角（px）：比普通浮层大一级，强调「应用内对话框」的层级。
+    pub const DIALOG_RADIUS: f32 = 8.0;
+    /// 模态卡片内边距（px）
+    pub const DIALOG_PADDING: f32 = 20.0;
+    /// 模态卡片最小宽度（px）
+    pub const DIALOG_MIN_WIDTH: f32 = 320.0;
+    /// 模态卡片最大宽度（px）
+    pub const DIALOG_MAX_WIDTH: f32 = 520.0;
+    /// 模态按钮高（px）：与 ROW_HEIGHT 同值但语义独立，避免行高一改按钮跟着变。
+    pub const DIALOG_BUTTON_HEIGHT: f32 = 28.0;
+    /// 模态按钮最小宽（px）
+    pub const DIALOG_BUTTON_MIN_WIDTH: f32 = 88.0;
+    /// 模态按钮水平间距（px）
+    pub const DIALOG_BUTTON_GAP: f32 = 8.0;
+    /// 标题与正文间距（px）
+    pub const DIALOG_TITLE_GAP: f32 = 8.0;
+    /// 正文与按钮行间距（px）
+    pub const DIALOG_BODY_GAP: f32 = 20.0;
+    /// 模态卡片距视口边缘的最小留白（px）
+    pub const DIALOG_MARGIN: f32 = 24.0;
+    /// 浅色主题遮罩 alpha（黑）：足以压暗正文又把弹窗推前。
+    pub const SCRIM_ALPHA_LIGHT: u8 = 80;
+    /// 深色主题遮罩 alpha（黑）：深底需更重才有分离感。
+    pub const SCRIM_ALPHA_DARK: u8 = 120;
+
+    pub fn corner_radius(scale: f32) -> f32 {
+        CORNER_RADIUS * scale
+    }
+    pub fn row_height(scale: f32) -> f32 {
+        ROW_HEIGHT * scale
+    }
+    pub fn padding(scale: f32) -> f32 {
+        PADDING * scale
+    }
+    pub fn divider_height(scale: f32) -> f32 {
+        DIVIDER_HEIGHT * scale
+    }
+    pub fn hover_inset(scale: f32) -> f32 {
+        HOVER_INSET * scale
+    }
+    pub fn panel_margin(scale: f32) -> f32 {
+        PANEL_MARGIN * scale
+    }
+    pub fn control_gap(scale: f32) -> f32 {
+        CONTROL_GAP * scale
+    }
+    pub fn caret_width(scale: f32) -> f32 {
+        CARET_WIDTH * scale
+    }
+    pub fn caret_height(scale: f32) -> f32 {
+        CARET_HEIGHT * scale
+    }
+    /// 细滚动条拇指最小高度（大纲等浮层内使用；主滚动条沿用 chrome 的 THUMB_MIN_H）。
+    pub fn scrollbar_min_thumb(scale: f32) -> f32 {
+        SCROLLBAR_MIN_THUMB * scale
+    }
+    pub fn shadow_offset_y(scale: f32) -> f32 {
+        SHADOW_OFFSET_Y * scale
+    }
+    pub fn dialog_radius(scale: f32) -> f32 {
+        DIALOG_RADIUS * scale
+    }
+    pub fn dialog_padding(scale: f32) -> f32 {
+        DIALOG_PADDING * scale
+    }
+    pub fn dialog_min_width(scale: f32) -> f32 {
+        DIALOG_MIN_WIDTH * scale
+    }
+    pub fn dialog_max_width(scale: f32) -> f32 {
+        DIALOG_MAX_WIDTH * scale
+    }
+    pub fn dialog_button_height(scale: f32) -> f32 {
+        DIALOG_BUTTON_HEIGHT * scale
+    }
+    pub fn dialog_button_min_width(scale: f32) -> f32 {
+        DIALOG_BUTTON_MIN_WIDTH * scale
+    }
+    pub fn dialog_button_gap(scale: f32) -> f32 {
+        DIALOG_BUTTON_GAP * scale
+    }
+    pub fn dialog_title_gap(scale: f32) -> f32 {
+        DIALOG_TITLE_GAP * scale
+    }
+    pub fn dialog_body_gap(scale: f32) -> f32 {
+        DIALOG_BODY_GAP * scale
+    }
+    pub fn dialog_margin(scale: f32) -> f32 {
+        DIALOG_MARGIN * scale
+    }
+
+    /// 遮罩 alpha：只随主题明暗切换，不随 scale 变化。
+    pub fn scrim_alpha(dark: bool) -> u8 {
+        if dark {
+            SCRIM_ALPHA_DARK
+        } else {
+            SCRIM_ALPHA_LIGHT
+        }
+    }
+
+    /// 阴影单层 alpha：深色主题按增益放大（钳制 255）。
+    pub fn shadow_alpha(base: u8, dark: bool) -> u8 {
+        if dark {
+            (base as f32 * SHADOW_DARK_GAIN).round().min(255.0) as u8
+        } else {
+            base
+        }
+    }
+}
+
+/// 间距刻度（px，1.0× 基准）：4 的倍数，用于替代散落的间距字面量。
+pub(crate) mod space {
+    pub const XS: f32 = 4.0;
+    #[allow(dead_code)] // 预留：待后续布局迁移消费，当前 paint 仅用到 XS/M/XL
+    pub const S: f32 = 8.0;
+    pub const M: f32 = 12.0;
+    #[allow(dead_code)] // 预留：待后续布局迁移消费
+    pub const L: f32 = 16.0;
+    pub const XL: f32 = 24.0;
+}
+
+/// 线宽刻度（px）：发丝线与分隔线。
+pub(crate) mod stroke {
+    pub const HAIRLINE: f32 = 1.0;
+    pub const DIVIDER: f32 = 1.0;
+}
+
+#[allow(dead_code)] // A9 动效落地前占位
+pub(crate) mod motion {
+    use std::time::Duration;
+
+    /// 快速过渡时长。
+    pub const FAST: Duration = Duration::from_millis(120);
+
+    /// 标准 cubic ease-out：1-(1-t)^3，输入夹到 [0,1]。
+    pub fn ease_out_cubic(t: f32) -> f32 {
+        let t = t.clamp(0.0, 1.0);
+        1.0 - (1.0 - t).powi(3)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::{motion, space, stroke};
+
+    #[test]
+    fn space_tokens_are_multiples_of_four() {
+        for v in [space::XS, space::S, space::M, space::L, space::XL] {
+            assert_eq!(v % 4.0, 0.0, "space 令牌必须是 4 的倍数: {v}");
+        }
+    }
+
+    #[test]
+    #[allow(clippy::assertions_on_constants)] // 令牌为编译期常量，仍按运行时断言校验
+    fn stroke_tokens_are_positive() {
+        assert!(stroke::HAIRLINE > 0.0);
+        assert!(stroke::DIVIDER > 0.0);
+    }
+
+    #[test]
+    fn motion_tokens_are_within_budget() {
+        assert!(motion::FAST <= Duration::from_millis(120));
+    }
+
+    #[test]
+    fn ease_out_cubic_hits_endpoints_and_midpoint() {
+        assert_eq!(motion::ease_out_cubic(0.0), 0.0);
+        assert_eq!(motion::ease_out_cubic(1.0), 1.0);
+        // f32::round 取整到整数（0.875 → 1.0），故先按三位小数取整再比较。
+        let mid = (motion::ease_out_cubic(0.5) * 1000.0).round() / 1000.0;
+        assert!((mid - 0.875).abs() < 1e-6);
+    }
+}

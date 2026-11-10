@@ -2,7 +2,8 @@
 //! 切片 1 栈：winit 直收事件（IME 走 spike 验证路径）+ softbuffer 软件呈现 + cosmic-text 排版。
 //! egui/GL 栈引入前提已由切片 15 推翻：自绘 chrome 与自绘模态，保持零 GUI 框架依赖。
 //! 公共 API 已由 Ports struct 收敛（run/doc 2 参数），不再需要 too_many_arguments 豁免。
-#![allow(clippy::chunks_exact_to_as_chunks)] // 通道展开用 chunks_exact(4) 更直观
+#![allow(clippy::chunks_exact_to_as_chunks)]
+// 通道展开用 chunks_exact(4) 更直观
 // 内部绘制/布局函数参数天然多，在各自模块局部标注 #[allow]，不做全局豁免
 //!
 //! 分层：editor/input/style/frame 纯逻辑零 GUI（机制与策略分离，全部 headless 可测）；
@@ -30,6 +31,7 @@ mod perf;
 mod print;
 mod stats;
 mod theme;
+mod tokens;
 mod view;
 
 #[cfg(test)]

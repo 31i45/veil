@@ -18,7 +18,7 @@ use crate::chrome::{self, Chrome, Viewport};
 use crate::docio::{decode, encode};
 use crate::document::{recovery, session};
 use crate::editor::Editor;
-use crate::geometry::BASE_LINE_HEIGHT;
+use crate::geometry::{clamp_window_geom, ScreenRect, BASE_LINE_HEIGHT};
 use crate::image::{AssetStore, ImageData, ImageLoader};
 use crate::input::Mods;
 use crate::interaction::ZOOM_WHEEL_PX;
@@ -26,6 +26,7 @@ use crate::math::MathRenderer;
 use crate::print::{Print, PrintState};
 use crate::theme::{
     self, Config, ConfigStore, ExportStyle, SystemTheme, Theme, ThemeEnv, ThemeMode, WindowEffects,
+    WindowGeom,
 };
 use crate::view::{
     quick_open, search, Cache, Frame, LayoutEngine, Outline, QuickOpen, Revs, Search,
@@ -147,9 +148,10 @@ pub trait UrlOpener {
 /// 应用内锚点（`#...`）不归本端口处理（由锚点跳转任务负责），调用方须先自行忽略。
 pub fn url_is_openable(url: &str) -> bool {
     let u = url.trim_start();
-    ["http://", "https://", "mailto:"]
-        .iter()
-        .any(|scheme| u.get(..scheme.len()).is_some_and(|h| h.eq_ignore_ascii_case(scheme)))
+    ["http://", "https://", "mailto:"].iter().any(|scheme| {
+        u.get(..scheme.len())
+            .is_some_and(|h| h.eq_ignore_ascii_case(scheme))
+    })
 }
 
 /// 崩溃恢复草稿存储（0b）：单槽字节读写，实现由产品层注入（应用数据目录单文件）。
@@ -371,6 +373,12 @@ pub(crate) struct WindowState {
     pub(crate) visible: bool,
     /// 已获准退出：仅当「关闭意图」真正执行后置 true，事件循环在事件末尾统一消费。
     pub(crate) exit_requested: bool,
+    /// 窗口几何有变更待落盘（3d）：移动/缩放期间只置位不写盘（避免拖动窗口时反复 IO），
+    /// 退出出口统一保存一次后清零。
+    pub(crate) geom_dirty: bool,
+    /// 本次会话的实时几何：与 `config.window` 分开存放，最大化/最小化期间不写入，
+    /// 避免把最大化尺寸覆盖成「上次常规尺寸」。
+    pub(crate) geom: Option<WindowGeom>,
     /// 测试专用窗口尺寸覆盖：headless 测试无 winit 窗口，需要验证超宽窗口排版时注入。
     #[cfg(test)]
     pub(crate) test_size: Option<(u32, u32)>,
@@ -390,6 +398,8 @@ impl Default for WindowState {
             resize_pending: false,
             visible: true,
             exit_requested: false,
+            geom_dirty: false,
+            geom: None,
             #[cfg(test)]
             test_size: None,
         }
@@ -554,10 +564,7 @@ impl App {
         let (app_config, config_notice) = match config.load() {
             Ok(text) => match theme::decode_config(text.as_bytes()) {
                 Ok(p) if p.ignored == 0 => (p.config, String::new()),
-                Ok(p) => (
-                    p.config,
-                    format!("配置有 {} 处无法识别，已忽略", p.ignored),
-                ),
+                Ok(p) => (p.config, format!("配置有 {} 处无法识别，已忽略", p.ignored)),
                 Err(e) => (
                     Config::default(),
                     format!("配置文件无效，已用默认主题: {e}"),
@@ -786,6 +793,23 @@ impl App {
         chrome::viewport(w, h, self.input_state.scale)
     }
 
+    /// 当前窗口的逻辑尺寸（物理尺寸 / 缩放因子）。无窗口、物理尺寸为 0（最小化）
+    /// 或缩放因子非法时返回 None——此时尺寸不可作为可持久化的几何。
+    fn logical_window_size_of(&self) -> Option<(u32, u32)> {
+        let window = self.window_state.window.as_ref()?;
+        let scale = window.scale_factor();
+        if !scale.is_finite() || scale <= 0.0 {
+            return None;
+        }
+        let size = window.inner_size();
+        if size.width == 0 || size.height == 0 {
+            return None;
+        }
+        let w = (size.width as f64 / scale).round().max(1.0) as u32;
+        let h = (size.height as f64 / scale).round().max(1.0) as u32;
+        Some((w, h))
+    }
+
     pub(crate) fn request_redraw(&self) {
         if let Some(w) = &self.window_state.window {
             w.request_redraw();
@@ -874,13 +898,35 @@ impl ApplicationHandler for App {
         if self.window_state.window.is_some() {
             return;
         }
-        let attrs = Window::default_attributes()
+        // 窗口几何（3d）：读回上次退出时的逻辑尺寸 + 物理坐标，先按当前显示器集合夹取，
+        // 避免显示器拔出/分辨率改变后窗口落在屏外。无几何记录时沿用默认 900×700。
+        let screens: Vec<ScreenRect> = event_loop
+            .available_monitors()
+            .map(|m| {
+                let pos = m.position();
+                let size = m.size();
+                ScreenRect {
+                    x: pos.x,
+                    y: pos.y,
+                    w: size.width,
+                    h: size.height,
+                }
+            })
+            .collect();
+        let saved_geom = self.config.window.map(|g| clamp_window_geom(g, &screens));
+        let mut attrs = Window::default_attributes()
             .with_title(self.title_text())
-            .with_inner_size(LogicalSize::new(900.0, 700.0))
+            .with_inner_size(match saved_geom {
+                Some(g) => LogicalSize::new(g.width as f32, g.height as f32),
+                None => LogicalSize::new(900.0, 700.0),
+            })
             // 3e 修 A1：exe 内嵌 ICO 只喂任务栏/文件管理器，标题栏图标须显式设置
             .with_window_icon(Some(
                 Icon::from_rgba(crate::icon::icon_rgba(32), 32, 32).expect("32×32 RGBA 尺寸恒合法"),
             ));
+        if let Some(g) = saved_geom {
+            attrs = attrs.with_position(PhysicalPosition::new(g.x, g.y));
+        }
         let window = match event_loop.create_window(attrs) {
             Ok(w) => Arc::new(w),
             Err(e) => {
@@ -919,9 +965,32 @@ impl ApplicationHandler for App {
                 // 避免让 softbuffer 处理非法尺寸、同时防止 RedrawRequested 驱动
                 // 一个仍沿用旧 frame 的 render → scroll_thumb 在 vp.h=1.0 时 panic。
                 self.window_state.resize_pending = true;
+                // 几何记录（3d）：最大化/最小化（0×0）/非法缩放时的尺寸不是用户想要的大小，
+                // 不更新已存几何，只标记待保存；拖动/缩放期间不写盘。
                 if size.width == 0 || size.height == 0 {
                     self.window_state.visible = false;
                     return;
+                }
+                let maximized = self
+                    .window_state
+                    .window
+                    .as_ref()
+                    .is_some_and(|w| w.is_maximized());
+                if !maximized {
+                    if let Some((width, height)) = self.logical_window_size_of() {
+                        let (x, y) = self
+                            .window_state
+                            .geom
+                            .or(self.config.window)
+                            .map_or((0, 0), |g| (g.x, g.y));
+                        self.window_state.geom = Some(WindowGeom {
+                            width,
+                            height,
+                            x,
+                            y,
+                        });
+                        self.window_state.geom_dirty = true;
+                    }
                 }
                 if let (Some(s), Some(w), Some(h)) = (
                     self.window_state.surface.as_mut(),
@@ -934,6 +1003,21 @@ impl ApplicationHandler for App {
                     self.window_state.visible = true;
                 }
                 self.request_redraw();
+            }
+            // 窗口移动（3d）：只记录物理坐标，尺寸沿用已存值（无记录时取当前逻辑尺寸），
+            // 置脏位待退出时统一落盘。
+            WindowEvent::Moved(pos) => {
+                let (width, height) = self.window_state.geom.or(self.config.window).map_or_else(
+                    || self.logical_window_size_of().unwrap_or((900, 700)),
+                    |g| (g.width, g.height),
+                );
+                self.window_state.geom = Some(WindowGeom {
+                    width,
+                    height,
+                    x: pos.x,
+                    y: pos.y,
+                });
+                self.window_state.geom_dirty = true;
             }
             WindowEvent::ScaleFactorChanged { .. } => {
                 if let Some(w) = &self.window_state.window {
@@ -1075,6 +1159,22 @@ impl ApplicationHandler for App {
         }
         // 唯一退出出口：只有「关闭意图」真正执行后才会置位（模态结论 / 干净关窗）
         if self.window_state.exit_requested {
+            // 几何待存（3d）：拖动/缩放期间只置脏位，退出时统一落盘一次。
+            // 最大化状态下不覆盖已存几何（保留最大化前的常规尺寸）。
+            if self.window_state.geom_dirty {
+                let maximized = self
+                    .window_state
+                    .window
+                    .as_ref()
+                    .is_some_and(|w| w.is_maximized());
+                if !maximized {
+                    if let Some(g) = self.window_state.geom {
+                        self.config.window = Some(g);
+                    }
+                }
+                self.save_config();
+                self.window_state.geom_dirty = false;
+            }
             event_loop.exit();
         }
     }

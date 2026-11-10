@@ -3,9 +3,17 @@
 //! 零 GUI 依赖：解析/序列化/路径推导/主题判定全部为纯函数，headless 可测。
 //! 平台能力（注册表系统外观、DWM 深色标题栏/Mica、配置落盘）以 trait 声明，由产品层注入。
 //!
-//! 配置格式（极简，唯一支持的项写在顶层）：
+//! 配置格式（极简，共 8 个顶层键）：
 //! ```toml
-//! mode = "system"   # system | light | dark
+//! mode = "system"        # system | light | dark
+//! export_margin_mm = 20  # PDF 页边距（毫米）
+//! export_page_numbers = true
+//! export_toc = true
+//! # 以下四项仅在窗口几何已知时成组写入（旧配置不含这些键）
+//! window_width = 1200    # 逻辑宽，480..=8192
+//! window_height = 800    # 逻辑高，360..=8192
+//! window_x = 100         # 物理坐标
+//! window_y = 100
 //! ```
 //! 历史格式的 `[theme]` 段标题行仍被接受但直接跳过，便于旧配置无损升级。
 
@@ -187,146 +195,7 @@ impl Theme {
     }
 }
 
-/// surface 设计令牌（不可配置）：浮层（右键菜单 / 快速打开 / 大纲 / 搜索条）共用几何。
-/// 所有长度以 1.0× scale 为基准，经取值函数按 scale 线性放大；深/浅主题共用几何，
-/// 仅阴影 alpha 按主题微调（阴影是半透明黑叠加，深底下需稍强才有同等存在感）。
-pub(crate) mod surface {
-    /// 圆角半径（px，1.0× 基准）
-    pub const CORNER_RADIUS: f32 = 6.0;
-    /// 条目行高（px）
-    pub const ROW_HEIGHT: f32 = 28.0;
-    /// 内边距（px）
-    pub const PADDING: f32 = 12.0;
-    /// 分隔线高（px）
-    pub const DIVIDER_HEIGHT: f32 = 4.0;
-    /// 悬停内缩（px）：悬停底色相对条目外边界内缩，形成「浮起」边距
-    pub const HOVER_INSET: f32 = 3.0;
-    /// 面板外边距（px）：浮起卡片与窗口边缘/滚动条之间的间距
-    pub const PANEL_MARGIN: f32 = 8.0;
-    /// 控件间距（px）：同一浮层内相邻控件或与内容视口之间的间隙
-    pub const CONTROL_GAP: f32 = 8.0;
-    /// 文本光标宽（px）
-    pub const CARET_WIDTH: f32 = 2.0;
-    /// 文本光标高（px）
-    pub const CARET_HEIGHT: f32 = 16.0;
-    /// 滚动条拇指最小高度（px）
-    pub const SCROLLBAR_MIN_THUMB: f32 = 24.0;
-    /// 阴影整体向下偏移（px）
-    pub const SHADOW_OFFSET_Y: f32 = 2.0;
-    /// 阴影层（外扩 px, 基础 alpha），自外向内排列：外层大而淡、内层小而浓，
-    /// 叠加大致等效 8px 高斯模糊 + 2px 下移。alpha 总和 72（深色 ×1.25 ≈ 90），
-    /// 远低于「显脏」阈值（浅底上 alpha 和 >140 开始凝成灰团）。
-    pub const SHADOW_LAYERS: &[(f32, u8)] = &[(8.0, 4), (6.0, 8), (4.0, 14), (2.0, 20), (1.0, 26)];
-    /// 深色主题阴影 alpha 增益
-    pub const SHADOW_DARK_GAIN: f32 = 1.25;
-    /// 模态卡片圆角（px）：比普通浮层大一级，强调「应用内对话框」的层级。
-    pub const DIALOG_RADIUS: f32 = 8.0;
-    /// 模态卡片内边距（px）
-    pub const DIALOG_PADDING: f32 = 20.0;
-    /// 模态卡片最小宽度（px）
-    pub const DIALOG_MIN_WIDTH: f32 = 320.0;
-    /// 模态卡片最大宽度（px）
-    pub const DIALOG_MAX_WIDTH: f32 = 520.0;
-    /// 模态按钮高（px）：与 ROW_HEIGHT 同值但语义独立，避免行高一改按钮跟着变。
-    pub const DIALOG_BUTTON_HEIGHT: f32 = 28.0;
-    /// 模态按钮最小宽（px）
-    pub const DIALOG_BUTTON_MIN_WIDTH: f32 = 88.0;
-    /// 模态按钮水平间距（px）
-    pub const DIALOG_BUTTON_GAP: f32 = 8.0;
-    /// 标题与正文间距（px）
-    pub const DIALOG_TITLE_GAP: f32 = 8.0;
-    /// 正文与按钮行间距（px）
-    pub const DIALOG_BODY_GAP: f32 = 20.0;
-    /// 模态卡片距视口边缘的最小留白（px）
-    pub const DIALOG_MARGIN: f32 = 24.0;
-    /// 浅色主题遮罩 alpha（黑）：足以压暗正文又把弹窗推前。
-    pub const SCRIM_ALPHA_LIGHT: u8 = 80;
-    /// 深色主题遮罩 alpha（黑）：深底需更重才有分离感。
-    pub const SCRIM_ALPHA_DARK: u8 = 120;
-
-    pub fn corner_radius(scale: f32) -> f32 {
-        CORNER_RADIUS * scale
-    }
-    pub fn row_height(scale: f32) -> f32 {
-        ROW_HEIGHT * scale
-    }
-    pub fn padding(scale: f32) -> f32 {
-        PADDING * scale
-    }
-    pub fn divider_height(scale: f32) -> f32 {
-        DIVIDER_HEIGHT * scale
-    }
-    pub fn hover_inset(scale: f32) -> f32 {
-        HOVER_INSET * scale
-    }
-    pub fn panel_margin(scale: f32) -> f32 {
-        PANEL_MARGIN * scale
-    }
-    pub fn control_gap(scale: f32) -> f32 {
-        CONTROL_GAP * scale
-    }
-    pub fn caret_width(scale: f32) -> f32 {
-        CARET_WIDTH * scale
-    }
-    pub fn caret_height(scale: f32) -> f32 {
-        CARET_HEIGHT * scale
-    }
-    /// 细滚动条拇指最小高度（大纲等浮层内使用；主滚动条沿用 chrome 的 THUMB_MIN_H）。
-    pub fn scrollbar_min_thumb(scale: f32) -> f32 {
-        SCROLLBAR_MIN_THUMB * scale
-    }
-    pub fn shadow_offset_y(scale: f32) -> f32 {
-        SHADOW_OFFSET_Y * scale
-    }
-    pub fn dialog_radius(scale: f32) -> f32 {
-        DIALOG_RADIUS * scale
-    }
-    pub fn dialog_padding(scale: f32) -> f32 {
-        DIALOG_PADDING * scale
-    }
-    pub fn dialog_min_width(scale: f32) -> f32 {
-        DIALOG_MIN_WIDTH * scale
-    }
-    pub fn dialog_max_width(scale: f32) -> f32 {
-        DIALOG_MAX_WIDTH * scale
-    }
-    pub fn dialog_button_height(scale: f32) -> f32 {
-        DIALOG_BUTTON_HEIGHT * scale
-    }
-    pub fn dialog_button_min_width(scale: f32) -> f32 {
-        DIALOG_BUTTON_MIN_WIDTH * scale
-    }
-    pub fn dialog_button_gap(scale: f32) -> f32 {
-        DIALOG_BUTTON_GAP * scale
-    }
-    pub fn dialog_title_gap(scale: f32) -> f32 {
-        DIALOG_TITLE_GAP * scale
-    }
-    pub fn dialog_body_gap(scale: f32) -> f32 {
-        DIALOG_BODY_GAP * scale
-    }
-    pub fn dialog_margin(scale: f32) -> f32 {
-        DIALOG_MARGIN * scale
-    }
-
-    /// 遮罩 alpha：只随主题明暗切换，不随 scale 变化。
-    pub fn scrim_alpha(dark: bool) -> u8 {
-        if dark {
-            SCRIM_ALPHA_DARK
-        } else {
-            SCRIM_ALPHA_LIGHT
-        }
-    }
-
-    /// 阴影单层 alpha：深色主题按增益放大（钳制 255）。
-    pub fn shadow_alpha(base: u8, dark: bool) -> u8 {
-        if dark {
-            (base as f32 * SHADOW_DARK_GAIN).round().min(255.0) as u8
-        } else {
-            base
-        }
-    }
-}
+pub(crate) use crate::tokens::surface;
 
 /// HTML 导出样式快照：把「当前主题」压缩为导出所需的最小颜色集合。
 ///
@@ -384,7 +253,16 @@ impl ExportStyle {
     }
 }
 
-/// 配置内容：主题模式 + PDF 导出设置。
+/// 窗口几何（逻辑宽高 + 物理坐标），由 UI 层在启动/退出时读写。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct WindowGeom {
+    pub width: u32,
+    pub height: u32,
+    pub x: i32,
+    pub y: i32,
+}
+
+/// 配置内容：主题模式 + PDF 导出设置 + 窗口几何。
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Config {
     pub mode: ThemeMode,
@@ -394,6 +272,8 @@ pub struct Config {
     pub export_page_numbers: bool,
     /// PDF 目录页。
     pub export_toc: bool,
+    /// 上次退出时的窗口几何；首次运行或配置缺失时为 `None`。
+    pub window: Option<WindowGeom>,
 }
 
 impl Default for Config {
@@ -403,6 +283,7 @@ impl Default for Config {
             export_margin_mm: 20.0,
             export_page_numbers: true,
             export_toc: true,
+            window: None,
         }
     }
 }
@@ -410,14 +291,21 @@ impl Default for Config {
 impl Config {
     /// 生成配置文件文本（写入即此格式；`parse_config(to_toml())` 恒等往返）。
     pub fn to_toml(self) -> String {
-        format!(
+        let mut text = format!(
             "# Veil 配置（自动生成）\n# mode: system（跟随系统）| light | dark\nmode = \"{}\"\n\
              export_margin_mm = {}\nexport_page_numbers = {}\nexport_toc = {}\n",
             self.mode.as_str(),
             self.export_margin_mm,
             self.export_page_numbers,
             self.export_toc
-        )
+        );
+        if let Some(w) = self.window {
+            text.push_str(&format!(
+                "window_width = {}\nwindow_height = {}\nwindow_x = {}\nwindow_y = {}\n",
+                w.width, w.height, w.x, w.y
+            ));
+        }
+        text
     }
 }
 
@@ -428,11 +316,20 @@ pub struct ConfigParse {
     pub ignored: usize,
 }
 
-/// 极简配置解析：只认顶层 `mode` 键，其余条目计数忽略。
+/// 极简配置解析：识别顶层 `mode`/`export_margin_mm`/`export_page_numbers`/`export_toc`
+/// 与成组的窗口键 `window_width`/`window_height`/`window_x`/`window_y`，其余条目计数忽略。
+/// 窗口键必须四个齐全且宽 ≥480、高 ≥360（均 ≤8192）才产出几何；只出现一部分或值非法时不产出，
+/// 已出现（含非法）的窗口键各计一次 `ignored`（完全不含窗口键的旧配置不计数）。
 /// 段标题行（如历史格式 `[theme]`）不承载配置项，直接跳过；
 /// 同一键重复出现时后者生效（无歧义地覆盖）。
 pub fn parse_config(text: &str) -> ConfigParse {
     let mut out = ConfigParse::default();
+    // 窗口键先逐个收集，循环结束后再成组判定（见函数尾）。
+    let mut win_seen = [false; 4]; // width / height / x / y 是否出现过
+    let mut win_w = None;
+    let mut win_h = None;
+    let mut win_x = None;
+    let mut win_y = None;
     for raw in text.lines() {
         let line = strip_comment(raw).trim();
         if line.is_empty() {
@@ -463,10 +360,46 @@ pub fn parse_config(text: &str) -> ConfigParse {
                 Some(v) => out.config.export_toc = v,
                 None => out.ignored += 1,
             },
+            "window_width" => {
+                win_seen[0] = true;
+                win_w = parse_window_size(value, 480);
+            }
+            "window_height" => {
+                win_seen[1] = true;
+                win_h = parse_window_size(value, 360);
+            }
+            "window_x" => {
+                win_seen[2] = true;
+                win_x = value.parse::<i32>().ok();
+            }
+            "window_y" => {
+                win_seen[3] = true;
+                win_y = value.parse::<i32>().ok();
+            }
             _ => out.ignored += 1,
         }
     }
+    out.config.window = match (win_w, win_h, win_x, win_y) {
+        (Some(width), Some(height), Some(x), Some(y)) => Some(WindowGeom {
+            width,
+            height,
+            x,
+            y,
+        }),
+        _ => {
+            out.ignored += win_seen.iter().filter(|seen| **seen).count();
+            None
+        }
+    };
     out
+}
+
+/// 窗口宽高（逻辑像素）：只接受 `min..=8192` 的整数（宽 480、高 360）。
+fn parse_window_size(v: &str, min: u32) -> Option<u32> {
+    match v.parse::<u32>() {
+        Ok(n) if (min..=8192).contains(&n) => Some(n),
+        _ => None,
+    }
 }
 
 /// TOML 布尔字面量（只接受裸 `true`/`false`）。
@@ -710,13 +643,74 @@ mod tests {
                 export_margin_mm: 12.5,
                 export_page_numbers: false,
                 export_toc: true,
+                window: None,
             };
             let text = cfg.to_toml();
             assert!(!text.contains("[theme]"), "新版配置不再写段标题");
+            assert!(!text.contains("window_"), "无几何时不写窗口键");
             let p = parse(&text);
             assert_eq!(p.config, cfg);
             assert_eq!(p.ignored, 0, "自产配置不得含无法识别条目");
         }
+    }
+
+    #[test]
+    fn config_round_trips_window_geometry() {
+        let cfg = Config {
+            mode: ThemeMode::Dark,
+            export_margin_mm: 15.0,
+            export_page_numbers: false,
+            export_toc: true,
+            window: Some(WindowGeom {
+                width: 1200,
+                height: 800,
+                x: -40,
+                y: 60,
+            }),
+        };
+        let p = parse(&cfg.to_toml());
+        assert_eq!(p.config, cfg);
+        assert_eq!(p.ignored, 0);
+    }
+
+    #[test]
+    fn legacy_config_without_window_keys_has_no_geometry() {
+        let p = parse(
+            "mode = \"light\"\nexport_margin_mm = 10\nexport_page_numbers = false\nexport_toc = false\n",
+        );
+        assert_eq!(p.config.window, None);
+        assert_eq!(p.ignored, 0);
+    }
+
+    #[test]
+    fn partial_window_keys_are_ignored_as_a_group() {
+        let p = parse("window_width = 1200\nwindow_height = 800\n");
+        assert_eq!(p.config.window, None);
+        assert_eq!(p.ignored, 2, "已出现的两个窗口键各计一次");
+    }
+
+    #[test]
+    fn out_of_range_window_width_is_ignored() {
+        let p = parse("window_width = 0\n");
+        assert_eq!(p.config.window, None);
+        assert_eq!(p.ignored, 1, "只出现 width：非法值计一次");
+    }
+
+    #[test]
+    fn minimum_window_size_is_480_by_360() {
+        let ok = parse("window_width = 480\nwindow_height = 360\nwindow_x = 0\nwindow_y = 0\n");
+        assert_eq!(
+            ok.config.window,
+            Some(WindowGeom {
+                width: 480,
+                height: 360,
+                x: 0,
+                y: 0
+            })
+        );
+        let bad = parse("window_width = 480\nwindow_height = 359\nwindow_x = 0\nwindow_y = 0\n");
+        assert_eq!(bad.config.window, None);
+        assert_eq!(bad.ignored, 4, "四键齐全但 height 越界：整组计四次");
     }
 
     #[test]
@@ -731,14 +725,15 @@ mod tests {
 
     #[test]
     fn invalid_export_values_are_ignored_and_keep_defaults() {
-        let p = parse(
-            "export_margin_mm = abc\nexport_page_numbers = \"true\"\nexport_toc = yes\n",
-        );
+        let p = parse("export_margin_mm = abc\nexport_page_numbers = \"true\"\nexport_toc = yes\n");
         assert_eq!(p.ignored, 3);
         assert_eq!(p.config, Config::default());
         // 负/非有限边距同样拒绝
         assert_eq!(parse("export_margin_mm = -1").ignored, 1);
-        assert_eq!(parse("export_margin_mm = inf").config.export_margin_mm, 20.0);
+        assert_eq!(
+            parse("export_margin_mm = inf").config.export_margin_mm,
+            20.0
+        );
     }
 
     #[test]
@@ -844,7 +839,11 @@ mod tests {
             let comment = t.syntax.comment;
 
             let c_fg = contrast(t.fg, bg);
-            assert!(c_fg >= 7.0, "正文/背景对比度不足: dark={} {c_fg:.2}", t.dark);
+            assert!(
+                c_fg >= 7.0,
+                "正文/背景对比度不足: dark={} {c_fg:.2}",
+                t.dark
+            );
 
             let c_muted = contrast(t.muted, bg);
             assert!(
@@ -905,10 +904,18 @@ mod tests {
         // 且填充色在卡片底上要能看出边界（否则白卡上的主按钮会「消失」）。
         for t in [Theme::light(), Theme::dark()] {
             let c = contrast(t.accent_text, t.accent);
-            assert!(c >= 4.5, "accent_text/accent 对比度不足: dark={} {c:.2}", t.dark);
+            assert!(
+                c >= 4.5,
+                "accent_text/accent 对比度不足: dark={} {c:.2}",
+                t.dark
+            );
             let popup = [t.popup_bg[0], t.popup_bg[1], t.popup_bg[2]];
             let edge = contrast(t.accent, popup);
-            assert!(edge >= 2.0, "accent/popup 边界对比不足: dark={} {edge:.2}", t.dark);
+            assert!(
+                edge >= 2.0,
+                "accent/popup 边界对比不足: dark={} {edge:.2}",
+                t.dark
+            );
         }
     }
 

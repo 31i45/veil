@@ -21,8 +21,8 @@ Veil 版本迭代记录。每个版本的详细修复清单见对应 git tag 的
 - 文档口径统一：测试基线、体积、依赖数改为实测值；`.md` 关联章节改为 `/register` 流程
 
 ### Notes
-- release exe 6,100,480 B（门禁 ≤ 6,291,456 B，余量 190,976 B）
-- `cargo test --workspace` 1170 passed / 0 failed / 13 ignored；`cargo clippy --workspace --all-targets -- -D warnings` 零警告
+- release 体积分两档：运行时代码（非图标）6,048,424 B（门禁 ≤ 6,291,456 B = 6 MiB）；合计 exe 6,105,088 B（门禁 ≤ 6,348,120 B = 6 MiB 代码 + 55 KB 图标）。两个图标资源合计 56,664 B（`veil.ico` 32,054 + `veil-doc.ico` 24,610），是窗口/任务栏图标与 `.md` 关联必需功能，不计入代码门禁
+- `cargo test --workspace` 1178 passed / 0 failed / 13 ignored；`cargo clippy --workspace --all-targets -- -D warnings` 零警告
 - workspace 传递依赖 117（门禁 ≤ 200）
 - 真机走查（2026-11-10）：主界面、查找栏、文件菜单（含最近文件）、未保存确认模态、视图菜单、大纲面板渲染正常，无遮挡或错位；动效时序由单元测试覆盖，未做逐帧截图取证
 

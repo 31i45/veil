@@ -192,6 +192,9 @@ pub fn translate(key: Key, mods: Mods) -> Option<Action> {
         // Alt+↑/↓ 移动行（AltGr = Ctrl+Alt 不参与，见 ctrl 防护说明）
         Key::Up if mods.alt && !mods.ctrl => Some(Action::Doc(Intent::MoveLineUp)),
         Key::Down if mods.alt && !mods.ctrl => Some(Action::Doc(Intent::MoveLineDown)),
+        // Shift+Alt+↑/↓ 复制行（纯 Alt 留给 move，Shift 区分复制；AltGr 同样被 ctrl 防护拦截）
+        Key::Up if mods.alt && mods.shift && !mods.ctrl => Some(Action::Doc(Intent::DuplicateLineUp)),
+        Key::Down if mods.alt && mods.shift && !mods.ctrl => Some(Action::Doc(Intent::DuplicateLineDown)),
         Key::Up => Some(Action::MoveVertical(-1)),
         Key::Down => Some(Action::MoveVertical(1)),
         Key::Home if ctrl && mods.shift => Some(Action::Doc(Intent::SelectDocStart)),

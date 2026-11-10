@@ -40,6 +40,11 @@ pub enum Intent {
     /// Alt+↑/↓：选区覆盖的行（无选区则当前行）整体上/下移一行；单撤销步，光标随行移动。
     MoveLineUp,
     MoveLineDown,
+    /// Shift+Alt+↑/↓：选区覆盖的行（无选区则当前行）整体复制到上/下一行位置；
+    /// 原行保留；up 时新块插在原块之前（光标跳到新块首行），down 时插在原块之后。
+    /// 边界：up 时首行上为空操作；down 时末行下可插（不同于 MoveLine）。单撤销步、CRLF 原样保留。
+    DuplicateLineUp,
+    DuplicateLineDown,
     /// Ctrl+Backspace / Ctrl+Delete：按词删除。词边界复用 Ctrl+←/→（`word_left`/`word_right`），
     /// 遇换行即停（不跨段落边界）。
     DeleteWordBackward,
@@ -269,6 +274,8 @@ impl Editor {
                 | Intent::InsertLink
                 | Intent::MoveLineUp
                 | Intent::MoveLineDown
+                | Intent::DuplicateLineUp
+                | Intent::DuplicateLineDown
                 | Intent::DeleteWordBackward
                 | Intent::DeleteWordForward
                 | Intent::Undo
@@ -445,8 +452,8 @@ impl Editor {
                 | Intent::SelectAll => {}
                 // 缩进选中行：选区保留（落点随行首前缀平移），在主 match 中统一处理
                 Intent::Indent | Intent::Dedent => {}
-                // 行移动：整块重排后按端点逐行映射，选区保留
-                Intent::MoveLineUp | Intent::MoveLineDown => {}
+                // 行移动 / 行复制：整块重排或插入后按端点逐行映射，选区保留
+                Intent::MoveLineUp | Intent::MoveLineDown | Intent::DuplicateLineUp | Intent::DuplicateLineDown => {}
                 // 已于入口分流（穷尽性占位）
                 Intent::ToggleWrap(_) | Intent::InsertLink => {}
             }
@@ -524,6 +531,8 @@ impl Editor {
             Intent::Dedent => self.apply_indent(false),
             Intent::MoveLineUp => self.move_lines(true),
             Intent::MoveLineDown => self.move_lines(false),
+            Intent::DuplicateLineUp => self.duplicate_lines(true),
+            Intent::DuplicateLineDown => self.duplicate_lines(false),
             Intent::DeleteWordBackward => {
                 let text = self.full_text()?;
                 let line = self.line_bounds(c);
@@ -1038,6 +1047,102 @@ impl Editor {
         let ev = self
             .session
             .apply(Edit::Replace { range: span, text: seg })
+            .ok()?;
+        self.set_marks(new_caret, new_anchor);
+        Some(ev.dirty_blocks)
+    }
+
+    /// Shift+Alt+↑/↓（行复制）：选区覆盖的行（无选区则当前行）整体复制一份。
+    /// up：副本插在原块**之前**；down：副本插在原块**之后**（允许末行下插，与 MoveLine down 不同）。
+    /// 光标跳到新副本块首行第一列；CRLF / 末行换行原样保留；整段一次 `Replace` = 单撤销步。
+    fn duplicate_lines(&mut self, up: bool) -> Option<Vec<BlockId>> {
+        let len = self.session.text_len();
+        let text = self.session.text_slice(Range::new(0, len))?;
+        let starts = line_starts(&text);
+        let count = starts.len();
+        let (first, last) = match self.selection() {
+            Some(sel) => {
+                let a = line_index(&starts, sel.start);
+                let mut b = line_index(&starts, sel.end);
+                if b > a && sel.end == starts[b] {
+                    b -= 1;
+                }
+                (a, b)
+            }
+            None => {
+                let i = line_index(&starts, self.caret());
+                (i, i)
+            }
+        };
+        // 边界：up 时首行上无位置可插；down 时末行下**可以**插（复制不是移动）
+        if up && first == 0 {
+            return None;
+        }
+        if !up && count == 0 {
+            return None;
+        }
+        // 行内容与分隔符分离（与 move_lines 同一路径，确保 CRLF 原样保留）
+        let mut lines: Vec<&str> = Vec::with_capacity(count);
+        let mut seps: Vec<&str> = Vec::with_capacity(count);
+        for (i, &s) in starts.iter().enumerate() {
+            let e = starts.get(i + 1).copied().unwrap_or(len);
+            let mut ce = e;
+            if ce > s && text.as_bytes()[ce - 1] == b'\n' {
+                ce -= 1;
+                if ce > s && text.as_bytes()[ce - 1] == b'\r' {
+                    ce -= 1;
+                }
+            }
+            lines.push(&text[s..ce]);
+            seps.push(&text[ce..e]);
+        }
+        // 构造要插入的副本块（= 原段行内容 + 分隔符）；此处**不**处理末尾换行，
+        // 因为 original + insert 之间可能需要额外补一个 sep（见下）
+        let mut insert_block = String::new();
+        for i in first..=last {
+            insert_block.push_str(lines[i]);
+            insert_block.push_str(seps[i]);
+        }
+        let span_start = starts[first];
+        let span_end = starts.get(last + 1).copied().unwrap_or(len);
+        let original_span_len = span_end - span_start;
+        // 被复制块最后一行没有换行时，original 与 insert 之间需要补一个 sep——
+        // 否则两者会连成一行（"b"+"b"="bb"）。sep 风格跟随文件：有任何 "\r\n" 就用 CRLF。
+        let sep_between = if seps[last].is_empty() {
+            let is_crlf = seps.contains(&"\r\n");
+            if is_crlf { "\r\n" } else { "\n" }
+        } else {
+            ""
+        };
+        // up：副本在前（insert + sep + original）；down：副本在后（original + sep + insert）
+        let replacement = if up {
+            format!("{}{}{}", insert_block, sep_between, &text[span_start..span_end])
+        } else {
+            format!("{}{}{}", &text[span_start..span_end], sep_between, insert_block)
+        };
+        // 替换后净新增字节数（替换长度 - 原 span 长度）
+        let net_added = replacement.len() - original_span_len;
+        let anchor = self.anchor_offset();
+        // 光标映射策略：复制是整段插入，原文本中 off >= span_start（up）或 >= span_end（down）
+        // 的位置全部右移 net_added。但 caret 单独处理——VS Code 风格：跳到新副本块首行首列
+        // up：新副本在原块之前 → span_start 不变
+        // down：新副本在 original + sep_between 之后 → span_end + sep_between.len()
+        let anchor_map = |off: usize| -> usize {
+            let before = if up { span_start } else { span_end };
+            if off < before {
+                off
+            } else {
+                off + net_added
+            }
+        };
+        let new_anchor = anchor_map(anchor);
+        let new_caret = if up { span_start } else { span_end + sep_between.len() };
+        let ev = self
+            .session
+            .apply(Edit::Replace {
+                range: Range::new(span_start, span_end),
+                text: replacement,
+            })
             .ok()?;
         self.set_marks(new_caret, new_anchor);
         Some(ev.dirty_blocks)
@@ -2623,6 +2728,91 @@ mod tests {
         assert_eq!(e.session().serialize(), "b\r\na");
         e.apply(Intent::MoveLineDown).unwrap();
         assert_eq!(e.session().serialize(), "a\r\nb");
+    }
+
+    // ---- Task 1：行复制（Shift+Alt+↑/↓）----
+
+    #[test]
+    fn duplicate_line_up_copies_and_caret_jumps_to_new_row() {
+        // 光标在行 1（"b"），Shift+Alt+↑：副本插到"b"**上方**
+        let mut e = ed("a\nb\nc", 2);
+        e.apply(Intent::DuplicateLineUp).unwrap();
+        assert_eq!(e.session().serialize(), "a\nb\nb\nc");
+        assert_eq!(e.caret(), 2, "光标跳到新副本首行首列");
+    }
+
+    #[test]
+    fn duplicate_line_down_copies_and_caret_jumps_to_new_row() {
+        // 光标在行 1（"b"），Shift+Alt+↓：副本插到"b"**下方**
+        let mut e = ed("a\nb\nc", 2);
+        e.apply(Intent::DuplicateLineDown).unwrap();
+        assert_eq!(e.session().serialize(), "a\nb\nb\nc");
+        assert_eq!(e.caret(), 4, "光标跳到新副本首行首列");
+    }
+
+    #[test]
+    fn duplicate_line_selection_copies_entire_block() {
+        // 选中跨两行（"b\nc"），Shift+Alt+↓：新块完整复制原两行
+        let src = "a\nb\nc\nd";
+        let mut e = sel_ed(src, 2, 5); // 选中 "b\nc"
+        e.apply(Intent::DuplicateLineDown).unwrap();
+        assert_eq!(e.session().serialize(), "a\nb\nc\nb\nc\nd");
+        // 光标应跳到新复制块首行第一列
+        assert_eq!(e.caret(), 6);
+    }
+
+    #[test]
+    fn duplicate_line_up_at_first_row_is_noop() {
+        let mut e = ed("a\nb", 0);
+        assert_eq!(
+            e.apply(Intent::DuplicateLineUp),
+            None,
+            "首行向上复制无效果"
+        );
+        assert_eq!(e.session().serialize(), "a\nb");
+    }
+
+    #[test]
+    fn duplicate_line_down_at_last_row_is_allowed() {
+        // 与 MoveLine down 不同：末行下可以插副本
+        let mut e = ed("a\nb", 3); // 光标在 b 行首
+        assert!(e.apply(Intent::DuplicateLineDown).is_some());
+        assert_eq!(e.session().serialize(), "a\nb\nb");
+        assert_eq!(e.caret(), 4);
+    }
+
+    #[test]
+    fn duplicate_line_preserves_crlf_and_missing_final_newline() {
+        // CRLF 原样保留
+        let mut e = ed("a\r\nb", 3);
+        e.apply(Intent::DuplicateLineDown).unwrap();
+        assert_eq!(e.session().serialize(), "a\r\nb\r\nb");
+        // 末行无换行也原样保留
+        let mut e = ed("a\nb", 3);
+        e.apply(Intent::DuplicateLineDown).unwrap();
+        assert_eq!(e.session().serialize(), "a\nb\nb");
+    }
+
+    #[test]
+    fn duplicate_line_is_single_undo_step() {
+        let src = "a\nb\nc";
+        let mut e = ed(src, 2);
+        e.apply(Intent::DuplicateLineDown).unwrap();
+        assert_eq!(e.session().serialize(), "a\nb\nb\nc");
+        e.apply(Intent::Undo).unwrap();
+        assert_eq!(e.session().serialize(), src, "一次复制是单撤销步");
+    }
+
+    #[test]
+    fn duplicate_line_round_trip_restores_bytes_cjk() {
+        // CJK 多行复制 × Undo 必须逐字节回原
+        let src = "第一行\n第二行中文\n第三行\n第四行";
+        let caret = src.find("第三行").unwrap();
+        let mut e = ed(src, caret);
+        e.apply(Intent::DuplicateLineDown).unwrap();
+        e.apply(Intent::Undo).unwrap();
+        assert_eq!(e.session().serialize(), src);
+        assert_eq!(e.caret(), caret, "光标回到原字节位置");
     }
 
     #[test]

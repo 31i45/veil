@@ -8,6 +8,7 @@ mod print;
 mod shell;
 #[cfg(windows)]
 mod theme;
+mod assoc;
 mod clock;
 mod error;
 mod watch;
@@ -16,7 +17,8 @@ mod wic;
 #[cfg(windows)]
 mod windows;
 
-pub use error::{open_failure_text, show_error, OpenFailure};
+pub use assoc::{parse_command, run as run_assoc};
+pub use error::{open_failure_text, show_error, show_info, OpenFailure};
 
 use std::path::PathBuf;
 

@@ -20,7 +20,19 @@ fn load_document(path: &Path) -> Result<(String, bool), platform::OpenFailure> {
 }
 
 fn main() {
-    let doc = match std::env::args().nth(1) {
+    let arg = std::env::args().nth(1);
+    // `/register`、`/unregister`（C2/D7②）：只有显式开关才碰注册表
+    if let Some(cmd) = arg.as_deref().and_then(platform::parse_command) {
+        match platform::run_assoc(cmd) {
+            Ok(text) => platform::show_info("Veil 文件关联", &text),
+            Err(e) => {
+                platform::show_error("Veil 文件关联失败", &e);
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+    let doc = match arg {
         Some(p) => {
             let path = PathBuf::from(p);
             match load_document(&path) {

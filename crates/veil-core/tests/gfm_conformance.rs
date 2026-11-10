@@ -47,7 +47,7 @@ const BASELINE_B_CANON_SECTION: &[(&str, usize)] = &[
 /// 自动链接，`ENABLE_GFM` 仅含 blockquote tags）未实现的 8 例：`www.` 前缀。
 /// 这些例子的 Suite C/D 与参照不可比，改为断言「至少产出一个链接」，
 /// 参照侧其余 15 例仍按全量门槛校验（基线不变）。
-#[cfg(feature = "bare-url-autolink")]
+/// 产品侧解析行为不再有编译开关，本白名单是唯一差异点。
 const AUTOLINK_DIVERGENT: &[&str] = &[
     "autolinks_ext-001",
     "autolinks_ext-002",
@@ -145,10 +145,7 @@ fn gfm_extension_conformance() {
                     ));
                 }
                 // 裸 URL 扩展例：参照无此能力，改为断言「确实成链」并计入通过。
-                #[cfg(feature = "bare-url-autolink")]
                 let divergent = AUTOLINK_DIVERGENT.contains(&id);
-                #[cfg(not(feature = "bare-url-autolink"))]
-                let divergent = false;
                 if divergent {
                     assert!(counts.link >= 1, "#{id} 裸 URL 未成链（扩展失效）");
                     c_pass += 1;

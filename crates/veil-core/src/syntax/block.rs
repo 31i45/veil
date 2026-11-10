@@ -162,7 +162,7 @@ pub(super) fn scan_one(buf: &Buffer, line: usize, total: usize) -> (BlockKind, u
         let first_content = text.trim_start_matches('>').trim_start();
         if let Some(inner) = first_content.strip_prefix("[!") {
             if let Some(close) = inner.find(']') {
-                if let Some(ty) = AdmonitionType::from_str(&inner[..close]) {
+                if let Some(ty) = AdmonitionType::parse(&inner[..close]) {
                     return (BlockKind::Admonition(ty), n);
                 }
             }

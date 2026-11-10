@@ -16,7 +16,9 @@ mod model;
 
 pub use block::{list_signature, task_span};
 pub(crate) use model::Block;
-pub use model::{BlockId, BlockKind, CellAlign, InlineKind, InlineNode, Table, TableCell};
+pub use model::{
+    AdmonitionType, BlockId, BlockKind, CellAlign, InlineKind, InlineNode, Table, TableCell,
+};
 
 use crate::buffer::Buffer;
 use crate::range::Range;

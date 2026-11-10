@@ -17,7 +17,8 @@ pub enum AdmonitionType {
 }
 
 impl AdmonitionType {
-    pub fn from_str(s: &str) -> Option<Self> {
+    /// 解析变体名（大小写不敏感；`WARN` 为 `WARNING` 的别名）。
+    pub fn parse(s: &str) -> Option<Self> {
         match s.to_ascii_uppercase().as_str() {
             "NOTE" => Some(Self::Note),
             "TIP" => Some(Self::Tip),

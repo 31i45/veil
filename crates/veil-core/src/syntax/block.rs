@@ -2,7 +2,7 @@
 //! 分隔线 / 段落（GFM 其余块留待后续增量）。
 
 use super::inline::parse_inlines;
-use super::model::{BlockKind, CellAlign, InlineKind, InlineNode, TableCell};
+use super::model::{AdmonitionType, BlockKind, CellAlign, InlineKind, InlineNode, TableCell};
 use crate::buffer::Buffer;
 use crate::range::Range;
 
@@ -94,7 +94,17 @@ pub(super) fn scan_one(buf: &Buffer, line: usize, total: usize) -> (BlockKind, u
         return (BlockKind::ThematicBreak, 1);
     }
     if quote_marker_pos(&text).is_some() {
-        return (BlockKind::BlockQuote, quote_lines(buf, line, total));
+        let n = quote_lines(buf, line, total);
+        // GFM Admonition：引用块首行 `> [!TYPE]` 变体
+        let first_content = text.trim_start_matches('>').trim_start();
+        if let Some(inner) = first_content.strip_prefix("[!") {
+            if let Some(close) = inner.find(']') {
+                if let Some(ty) = AdmonitionType::from_str(&inner[..close]) {
+                    return (BlockKind::Admonition(ty), n);
+                }
+            }
+        }
+        return (BlockKind::BlockQuote, n);
     }
     // 列表项由 scan_next 的区域扫描接管，此处不再处理
     if let Some(n) = table_rows(buf, line, total) {

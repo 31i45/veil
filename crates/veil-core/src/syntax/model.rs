@@ -5,6 +5,39 @@
 
 use crate::range::Range;
 
+/// GFM Admonition 五种类型（`> [!NOTE]` / `> [!TIP]` / `> [!IMPORTANT]` /
+/// `> [!WARNING]` / `> [!CAUTION]`）。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AdmonitionType {
+    Note,
+    Tip,
+    Important,
+    Warning,
+    Caution,
+}
+
+impl AdmonitionType {
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s.to_ascii_uppercase().as_str() {
+            "NOTE" => Some(Self::Note),
+            "TIP" => Some(Self::Tip),
+            "IMPORTANT" => Some(Self::Important),
+            "WARNING" | "WARN" => Some(Self::Warning),
+            "CAUTION" => Some(Self::Caution),
+            _ => None,
+        }
+    }
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Note => "Note",
+            Self::Tip => "Tip",
+            Self::Important => "Important",
+            Self::Warning => "Warning",
+            Self::Caution => "Caution",
+        }
+    }
+}
+
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum BlockKind {
     Paragraph,
@@ -38,6 +71,10 @@ pub enum BlockKind {
     /// 续行并入，`---` 等可打断段落者除外）。inline 逐行解析标记后内容，
     /// 懒续行从行首解析。
     BlockQuote,
+    /// GFM Admonition / 提示块：`> [!TYPE] 标题` 首行，后续 `>` 行组成正文。
+    /// 五种类型 NOTE/TIP/IMPORTANT/WARNING/CAUTION 对应不同视觉样式；
+    /// 本质是引用块的首行变体，inline 解析同 BlockQuote。
+    Admonition(AdmonitionType),
     /// 分隔线：`---` / `***` / `___`（同字符 ≥ 3，其间可夹空白）。无 inline。
     ThematicBreak,
     /// 链接引用定义（`[label]: dest "title"`，可多行）：注册进文档引用表，

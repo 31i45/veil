@@ -26,13 +26,18 @@ Veil 的灵感来自 Typedown — Typedown 是我最喜欢的 Windows Markdown �
 
 ## 把 .md 文件关联到 Veil
 
-Veil 是便携单文件程序，不写注册表，因此无法自动把自己注册为 `.md` 的默认打开方式。手动关联步骤：
+Veil 保持便携：启动路径从不碰注册表。关联需要显式开关，且只写当前用户：
+
+```powershell
+veil.exe /register     # 写入当前用户 ProgID + 内嵌文档图标，加入「打开方式」，只填空位
+veil.exe /unregister   # 只撤销 /register 创建、且当前值仍属于自己的项
+```
+
+`/register` 不抢默认应用：只填空位，绝不改写 `UserChoice`。要让 `.md` 双击默认由 Veil 打开，请在「设置 → 应用 → 默认应用」中选择 Veil（Windows 不允许程序自行设为默认）。移动 `veil.exe` 后，在旧路径 `/unregister`、新路径 `/register`；也可以手动关联：
 
 1. 右键任意 `.md` 文件，选择 **打开方式** → **选择其他应用**。
 2. 选择 **更多应用** → **在这台电脑上查找其他应用**，选中你的 `veil.exe`。
 3. 勾选 **始终使用此应用打开 .md 文件**。
-
-如果之后移动了 `veil.exe`，请在新位置重复上述步骤。
 
 ## 架构
 
@@ -70,6 +75,7 @@ Veil 是便携单文件程序，不写注册表，因此无法自动把自己注
 20. 可读行宽：窗口宽度 >1600 px 时正文列约 40 个全角字宽并居中；H4–H6 按层级缩进；标题段距大于正文段距
 21. 状态可见：状态栏显示「已保存 · HH:MM」（或「未保存」）；CLI 打开失败弹出可见错误框并以退出码 1 结束
 22. 光标表达焦点：窗口聚焦时实心、失焦时空心，零定时器、零空闲唤醒
+23. 状态过渡：菜单栏、菜单项、大纲、快速打开、右键菜单、查找栏与对话框按钮的悬停/按下高亮以 120 ms ease-out cubic 淡入淡出；仅在动画进行中推进，空闲路径仍然零定时器、不唤醒进程；系统关闭「显示动画」时直接跳到终态
 
 ## 非目标（v1.2 明确不做）
 
@@ -82,7 +88,7 @@ Veil 是便携单文件程序，不写注册表，因此无法自动把自己注
 - Mermaid 渲染（Mermaid 围栏块保持为代码，不做渲染）
 - 独立富文本文档模型：正文始终是 Markdown，`Ctrl+/` 只是同一文档的视图切换
 - 任何网络功能：无同步、无更新检查、无遥测；外部链接交给系统默认程序打开，Veil 自身不发起网络请求
-- 竞品对齐项明确不做：正则查找（`regex` 实测使 exe 净增 1,198,592 B）、括号/引号自动配对、全词匹配开关、`Ctrl+Shift+K` 删除行（`Alt+↑` / `Alt+↓` 已覆盖行级操作）、≤120 ms 状态过渡动画（与零定时器/无空闲唤醒策略冲突）、独立 H5/H6 字阶（层级用缩进表达）
+- 竞品对齐项明确不做：正则查找（`regex` 实测使 exe 净增 1,198,592 B）、括号/引号自动配对、全词匹配开关、`Ctrl+Shift+K` 删除行（`Alt+↑` / `Alt+↓` 已覆盖行级操作）、独立 H5/H6 字阶（层级用缩进表达）
 
 ## 构建 / 运行 / 测试
 
@@ -94,11 +100,11 @@ cargo test --workspace
 cargo run -p veil -- <file.md>
 ```
 
-当前 1132 项测试全绿（`cargo test --workspace` 1132 passed / 0 failed / 13 ignored，2026-11-09 实测），`cargo clippy --workspace --all-targets -- -D warnings` 零警告。
+当前 1170 项测试全绿（`cargo test --workspace` 1170 passed / 0 failed / 13 ignored，2026-11-10 实测），`cargo clippy --workspace --all-targets -- -D warnings` 零警告。
 
 ## 数字红线（目标值与实测）
 
-发布构建、探针串行，2026-11-09 复核。命令：`cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo run --release -p veil --example bench_typing`、`cargo test -p veil-ui --release --lib -- --ignored --nocapture --test-threads=1 perf_keystroke_path`（10,500 块用 `perf_keystroke_10k_blocks`）、`(Get-Item target\release\veil.exe).Length`。方法与明细见 `docs/review/keystroke-attribution.md`。
+发布构建、探针串行；性能项 2026-11-09 复核，测试与体积项 2026-11-10 复核。命令：`cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo run --release -p veil --example bench_typing`、`cargo test -p veil-ui --release --lib -- --ignored --nocapture --test-threads=1 perf_keystroke_path`（10,500 块用 `perf_keystroke_10k_blocks`）、`(Get-Item target\release\veil.exe).Length`。方法与明细见 `docs/review/keystroke-attribution.md`。
 
 | 指标 | 目标值 | 实测 |
 |---|---|---|
@@ -109,7 +115,7 @@ cargo run -p veil -- <file.md>
 | 冷启动（窗口句柄口径；P2 对比口径） | — | 30 ms（2026-10-30，`tools/bench/measure.ps1`） |
 | 10 万字文档击键→提交上屏延迟 p95 | ≤ 16 ms | 6.781 ms / 12.379 ms（`perf_keystroke_path` 5,005 块 / `perf_keystroke_10k_blocks` 10,500 块；基线 6.677 / 12.488；2026-11-09）✅ |
 | 10 万字文档常驻内存（私有工作集） | ≤ 150 MB | 40.76 MB（20 页深滚动后 WorkingSet，2026-11-05 实测） |
-| 安装产物体积（`veil.exe` 单文件；无安装目录/解压后额外总量） | ≤ 6 MiB = 6,291,456 B | 6,043,136 B ≈ 5.76 MiB（2026-11-09 实测）；余量 248,320 B |
+| 安装产物体积（`veil.exe` 单文件；无安装目录/解压后额外总量） | ≤ 6 MiB = 6,291,456 B | 6,100,480 B ≈ 5.82 MiB（2026-11-10 实测）；余量 190,976 B |
 | `veil-core` 单元+属性测试数 | ≥ 80 | 209 |
 | e2e 断言数 | ≥ 20 | 41（3 个 e2e_ 场景测试：写作闭环打开→保存→重开、表格+图片粘贴落盘、查找替换→崩溃恢复→自清）✅ |
 | Markdown 往返一致率（无编辑时输出 == 输入字节；按字节比较） | 100% | 100% |
@@ -118,7 +124,7 @@ cargo run -p veil -- <file.md>
 | GFM 扩展一致性（Tables / TaskList / Strikethrough；按用例数；A / C / D 维） | — | A 23/23 · C 23/23 · D 23/23 ✅；B_CANON 12/23（11 例 autolinks 仅观测） |
 | `veil-core` 的 GUI/异步运行时依赖数 | 0 | 0 |
 | `veil-ui`+`veil` 直接依赖总数 | ≤ 8 | 8 |
-| workspace 传递依赖总数 | ≤ 200 | 141 |
+| workspace 传递依赖总数 | ≤ 200 | 117 |
 
 ## 同机对比（P2 公开基准，2026-10-30）
 

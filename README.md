@@ -26,13 +26,18 @@ Grab `veil.exe` from [Releases](https://github.com/31i45/veil/releases). There i
 
 ## Open .md Files with Veil
 
-Veil is a portable single-file app and does not write to the registry, so it cannot register itself as the `.md` handler. To make `.md` open in Veil:
+Veil stays portable: startup never touches the registry. Association is opt-in through one explicit switch:
+
+```powershell
+veil.exe /register     # write per-user ProgID + embedded document icon, add Veil to "Open with", fill empty .md entries
+veil.exe /unregister   # undo only what /register created and still owns
+```
+
+`/register` never steals an existing default: it fills empty slots only and never rewrites `UserChoice`. To make double-clicking `.md` open in Veil, pick Veil under **Settings → Apps → Default apps** (Windows forbids programs from setting themselves as the default). If you move `veil.exe` afterwards, run `/unregister` from the old path and `/register` from the new one — or associate manually:
 
 1. Right-click any `.md` file and choose **Open with** → **Choose another app**.
 2. Choose **More apps** → **Look for another app on this PC**, then select your `veil.exe`.
 3. Tick **Always use this app to open .md files**.
-
-If you move `veil.exe` afterwards, repeat these steps from the new location.
 
 ## Architecture
 
@@ -70,6 +75,7 @@ Three crates, one-way dependency (`veil` → `veil-ui` → `veil-core`, no rever
 20. Readable measure: above 1600 px window width the body column is capped at ~40 full-width characters and centred; H4–H6 indent by level; heading spacing is wider than paragraph spacing
 21. Visible trust: the status bar shows "Saved · HH:MM" (or "Unsaved"); a failed CLI open raises a visible error box and exits with code 1
 22. Caret as focus: solid when the window is focused, hollow when it is not — no timers, no idle wake-ups
+23. State transitions: hover/press highlights in the menu bar, menus, outline, Quick Open, context menu, find bar and dialog buttons cross-fade over 120 ms (ease-out cubic); the fade advances only while it runs, so the idle path still schedules no timers and never wakes the process. Fades are skipped entirely when Windows "Show animations" is off
 
 ## What It Won't Do (v1.2 explicitly out of scope)
 
@@ -82,7 +88,7 @@ Three crates, one-way dependency (`veil` → `veil-ui` → `veil-core`, no rever
 - Mermaid rendering (Mermaid fenced blocks stay as code, not rendered)
 - A separate rich-text document model: the text stays Markdown, and Ctrl+/ is a view toggle over the same document
 - Any networking: no sync, no update check, no telemetry; external links are handed to the system default program, and Veil itself makes no network requests
-- Competitor-parity items deliberately declined: regex find (the `regex` crate added 1,198,592 B to the exe), auto-pairing of brackets/quotes, a whole-word toggle, `Ctrl+Shift+K` delete-line (`Alt+↑` / `Alt+↓` already covers line operations), ≤120 ms state-transition animations (they would break the zero-timer / no-idle-wake policy), and a separate H5/H6 type scale (indentation expresses level)
+- Competitor-parity items deliberately declined: regex find (the `regex` crate added 1,198,592 B to the exe), auto-pairing of brackets/quotes, a whole-word toggle, `Ctrl+Shift+K` delete-line (`Alt+↑` / `Alt+↓` already covers line operations), and a separate H5/H6 type scale (indentation expresses level)
 
 ## Build / Run / Test
 
@@ -94,11 +100,11 @@ cargo test --workspace
 cargo run -p veil -- <file.md>
 ```
 
-Baseline: 1132 passed / 0 failed / 13 ignored (2026-11-09); `cargo clippy --workspace --all-targets -- -D warnings` zero warnings.
+Baseline: 1170 passed / 0 failed / 13 ignored (2026-11-10); `cargo clippy --workspace --all-targets -- -D warnings` zero warnings.
 
 ## Red Numbers (targets vs measured)
 
-Measured on release build, probe-serialized, re-verified 2026-11-09. Commands: `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo run --release -p veil --example bench_typing`, `cargo test -p veil-ui --release --lib -- --ignored --nocapture --test-threads=1 perf_keystroke_path` (and `perf_keystroke_10k_blocks`), and `(Get-Item target\release\veil.exe).Length`. Keystroke attribution detail in `docs/review/keystroke-attribution.md`.
+Measured on release build, probe-serialized; performance rows re-verified 2026-11-09, test and size rows 2026-11-10. Commands: `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo run --release -p veil --example bench_typing`, `cargo test -p veil-ui --release --lib -- --ignored --nocapture --test-threads=1 perf_keystroke_path` (and `perf_keystroke_10k_blocks`), and `(Get-Item target\release\veil.exe).Length`. Keystroke attribution detail in `docs/review/keystroke-attribution.md`.
 
 | Metric | Target | Measured |
 |---|---|---|
@@ -109,7 +115,7 @@ Measured on release build, probe-serialized, re-verified 2026-11-09. Commands: `
 | Cold start (window handle; P2 comparison口径) | — | 30 ms (2026-10-30, `tools/bench/measure.ps1`) |
 | Keystroke→commit p95 on 100 K-word doc | ≤ 16 ms | 6.781 ms / 12.379 ms (`perf_keystroke_path` 5,005 blocks / `perf_keystroke_10k_blocks` 10,500 blocks; baseline 6.677 / 12.488; 2026-11-09) ✅ |
 | Resident memory, 100 K-word doc (private working set) | ≤ 150 MB | 40.76 MB (2026-11-05) |
-| Installed size (single-file `veil.exe`; no install directory or separate unpacked payload) | ≤ 6 MiB = 6,291,456 B | 6,043,136 B ≈ 5.76 MiB (2026-11-09); margin 248,320 B |
+| Installed size (single-file `veil.exe`; no install directory or separate unpacked payload) | ≤ 6 MiB = 6,291,456 B | 6,100,480 B ≈ 5.82 MiB (2026-11-10); margin 190,976 B |
 | `veil-core` unit + property tests | ≥ 80 | 209 |
 | E2E assertions | ≥ 20 | 41 (3 e2e scenarios: open→save→reopen, table+image paste, find/replace→crash recovery→self-clean) ✅ |
 | Markdown roundtrip (no edits: output == input bytes; byte comparison) | 100% | 100% |
@@ -118,7 +124,7 @@ Measured on release build, probe-serialized, re-verified 2026-11-09. Commands: `
 | GFM extension conformance (Tables / TaskList / Strikethrough; by test cases; dimension A / C / D) | — | A 23/23 · C 23/23 · D 23/23 ✅; B_CANON 12/23 (11 autolink cases observed only) |
 | `veil-core` GUI/async runtime deps | 0 | 0 |
 | `veil-ui` + `veil` direct deps | ≤ 8 | 8 |
-| Workspace transitive deps | ≤ 200 | 141 |
+| Workspace transitive deps | ≤ 200 | 117 |
 
 ## Same-machine Comparison (P2 public baseline, 2026-10-30)
 

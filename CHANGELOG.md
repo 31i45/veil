@@ -2,6 +2,30 @@
 
 Veil 版本迭代记录。每个版本的详细修复清单见对应 git tag 的 commit log。
 
+## Unreleased
+
+「设计统一」：令牌单源、表面层级、状态过渡与便携文件关联。
+
+### Added
+- 文件关联 `veil.exe /register` / `/unregister`（F1+S9+C2）：写当前用户 ProgID、内嵌文档图标（资源 ID 2，`DefaultIcon` 用 `"<exe>",-2` 引用，不分发外置 `.ico`）、把 Veil 加入「打开方式」并只补 `.md` 空位；`/unregister` 只删自己创建且当前值仍属于自己的项。`UserChoice` 从不触碰，默认应用仍需在系统设置中选择
+- 窗口几何记忆（P3）：`config.toml` 新增 `window_width` / `window_height` / `window_x` / `window_y`，启动恢复上次位置与尺寸；越界坐标夹回可见区，最大化不覆盖常规尺寸
+- 状态过渡动效（S6/A9）：菜单栏、菜单项、大纲、快速打开、右键菜单、查找栏与对话框按钮的悬停/按下高亮以 120 ms ease-out cubic 淡入淡出（仅透明度）；关闭时瞬时到位
+- 动效跟随系统：产品层读取 `SPI_GETCLIENTAREAANIMATION`（「显示动画」），关闭时不做过渡；仅动画进行中按帧调度重绘，空闲路径仍零定时器、不唤醒进程
+- 设计令牌：`tokens::palette`（`surface_base` / `surface_card` / `surface_popup` 等表面单一入口）、`tokens::state` 交互六态、`tokens::space` / `stroke` / `motion`；`Theme::surface(SurfaceLevel)` 显式表达 Base / Card / Popup 三层
+
+### Changed
+- 浮层收敛为单线：只保留边界线，分组改用间距，不再叠加多重线条
+- 查找浮栏改版：按钮与计数重排，补无命中空态与滚动条命中刻度
+- 字体显式指定：UI 雅黑 13 px、正文 16 px、代码 Consolas 14 px，修复中西文混排的字体不一致
+- README 徽章改为 CI 状态 + 动态 Release，并补 Platform / Portable 两枚契约徽章
+- 文档口径统一：测试基线、体积、依赖数改为实测值；`.md` 关联章节改为 `/register` 流程
+
+### Notes
+- release exe 6,100,480 B（门禁 ≤ 6,291,456 B，余量 190,976 B）
+- `cargo test --workspace` 1170 passed / 0 failed / 13 ignored；`cargo clippy --workspace --all-targets -- -D warnings` 零警告
+- workspace 传递依赖 117（门禁 ≤ 200）
+- 真机走查（2026-11-10）：主界面、查找栏、文件菜单（含最近文件）、未保存确认模态、视图菜单、大纲面板渲染正常，无遮挡或错位；动效时序由单元测试覆盖，未做逐帧截图取证
+
 ## v1.2.0
 
 「手感与表达」：行级操作、可读行宽、状态可见性与焦点表达。

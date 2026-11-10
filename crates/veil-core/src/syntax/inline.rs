@@ -35,7 +35,7 @@ const MAX_INLINE_DEPTH: usize = 16;
 
 /// 解析一段文本的 inline 节点，偏移以 `base` 为基准（文档字节偏移）。
 pub(super) fn parse_inlines(text: &str, base: usize, refs: &RefMap) -> Vec<InlineNode> {
-    InlineParser {
+    let nodes = InlineParser {
         s: text,
         base,
         refs,
@@ -44,7 +44,118 @@ pub(super) fn parse_inlines(text: &str, base: usize, refs: &RefMap) -> Vec<Inlin
         resolved_prefix: Vec::new(),
         backtick_runs: Vec::new(),
     }
-    .parse_until(None, true, 0)
+    .parse_until(None, true, 0);
+    #[cfg(feature = "bare-url-autolink")]
+    {
+        link_bare_urls(text, base, nodes)
+    }
+    #[cfg(not(feature = "bare-url-autolink"))]
+    {
+        nodes
+    }
+}
+
+/// 裸 URL 自动成链（GFM 扩展，视图态增强）：
+/// 扫描 `http://` / `https://` / `www.` 前缀，延伸到空白/标点边界，
+/// 跳过已在 Link/Autolink/Code 节点覆盖的区间。不修改源码字节。
+#[cfg(feature = "bare-url-autolink")]
+fn link_bare_urls(
+    text: &str,
+    base: usize,
+    mut nodes: Vec<InlineNode>,
+) -> Vec<InlineNode> {
+    // 收集已覆盖区间（闭区间 [start, end) 绝对偏移）
+    let mut covered: Vec<(usize, usize)> = Vec::new();
+    for n in &nodes {
+        covered.push((n.range.start, n.range.end));
+        // Link/Code 的 content 也覆盖（裸 URL 不会出现在 content 内因为已经是节点）
+    }
+    covered.sort_unstable();
+
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        let prefix = if bytes[i..].starts_with(b"https://") {
+            8usize
+        } else if bytes[i..].starts_with(b"http://") {
+            7usize
+        } else if bytes[i..].starts_with(b"www.") {
+            4usize
+        } else {
+            i += 1;
+            continue;
+        };
+        // 检查位置是否已被覆盖
+        let abs_start = base + i;
+        if covered.iter().any(|&(s, e)| s <= abs_start && abs_start < e) {
+            i += prefix;
+            continue;
+        }
+        // 检查是否在 `<...>` 内（CommonMark autolink / 原始 HTML 标签）：
+        // 向前扫描 ≤50 字节，若存在未匹配的 '<' 说明仍在尖括号作用域，
+        // 裸 URL 不应从这里抢链接（由 try_autolink/HTML 逻辑接管，可能因空格/
+        // 非法字符拒绝，拒绝后该位置应保持纯文本）
+        let mut lt_count = 0i32;
+        let mut checked = 0usize;
+        let mut k = i;
+        while k > 0 && checked < 50 {
+            k -= 1;
+            checked += 1;
+            match bytes[k] {
+                b'>' => lt_count -= 1,
+                b'<' => {
+                    lt_count += 1;
+                    break;
+                }
+                _ => {}
+            }
+            if lt_count < 0 {
+                lt_count = 0;
+            }
+        }
+        if lt_count > 0 {
+            i += prefix;
+            continue;
+        }
+        // 延伸 URL 到边界（空白/常见标点：空格、控制符、< > ( ) [ ] { } " ' 反引号）
+        let mut j = i + prefix;
+        while j < bytes.len() {
+            let b = bytes[j];
+            if b.is_ascii_whitespace()
+                || b < 0x20
+                || matches!(b, b'<' | b'>' | b'(' | b')' | b'[' | b']' | b'{' | b'}'
+                    | b'"' | b'\'' | b'`' | b'.' | b',' | b';' | b'!' | b'?' | b':' | b'\\')
+            {
+                break;
+            }
+            j += 1;
+        }
+        // 去掉末尾标点（URL 不应以标点结尾：`https://example.com.` 的 `.` 不属于 URL）
+        while j > i + prefix {
+            let lb = bytes[j - 1];
+            if lb == b'.' || lb == b',' || lb == b';' || lb == b':' {
+                j -= 1;
+            } else {
+                break;
+            }
+        }
+        if j > i + prefix {
+            let abs_end = base + j;
+            let url_range = Range::new(abs_start, abs_end);
+            let node = InlineNode {
+                kind: InlineKind::Link,
+                range: Range::new(abs_start, abs_end),
+                content: Range::new(abs_start, abs_end),
+                url: Some(url_range),
+                children: Vec::new(),
+            };
+            nodes.push(node);
+            covered.push((abs_start, abs_end));
+        }
+        i = j;
+    }
+    nodes.sort_by_key(|n| n.range.start);
+    nodes
 }
 
 /// CommonMark：反斜杠可转义一切 ASCII 标点（`!` 为 Image 开标记首字符，亦在内）。

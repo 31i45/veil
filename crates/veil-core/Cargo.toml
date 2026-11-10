@@ -3,6 +3,13 @@ name = "veil-core"
 edition.workspace = true
 version.workspace = true
 
+[features]
+# W1-5 裸 URL/邮箱自动成链（GFM 扩展，视图态增强）。
+# 默认开启；一致性门禁（CommonMark 0.31.2 / GFM autolinks_ext）通过
+# --no-default-features 关闭，避免对 pulldown-cmark 参照的行内事件计数产生偏差。
+default = ["bare-url-autolink"]
+bare-url-autolink = []
+
 [dependencies]
 # ADR-001：rope 实现，mark 语义在本 crate 内自封装，不向外暴露 rope 类型。
 # grapheme 导航由 rope 内置（prev/next_grapheme_offset），无需 unicode-segmentation。

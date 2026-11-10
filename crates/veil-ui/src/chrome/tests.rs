@@ -3,6 +3,7 @@
 use super::*;
 use crate::document::ExternalState;
 use crate::theme::Theme;
+use crate::tokens::palette;
 use crate::view::{Frame, LayoutEngine};
 
 fn vp() -> Viewport {
@@ -575,17 +576,17 @@ fn paint_draws_menu_status_and_popup() {
         &[],
         MenuFlags::default(),
     );
-    assert_eq!(frame.get(0, 0), theme.chrome_bg, "菜单栏底色");
+    assert_eq!(frame.get(0, 0), palette::surface_card(&theme), "菜单栏底色");
     let status_y = 200 - STATUS_H as i32;
     assert_eq!(
         frame.get(299, (status_y + 5) as u32),
-        theme.chrome_bg,
+        palette::surface_card(&theme),
         "状态栏底色（采样点避开弹层投影）"
     );
     let p = popup_layout(0, 1.0, &[], 1000.0);
     assert_eq!(
         frame.get((p.x + p.w / 2.0) as u32, (p.y + p.h / 2.0) as u32),
-        theme.popup_bg,
+        palette::surface_popup(&theme),
         "弹窗底色"
     );
     assert!(!chrome.labels.is_empty());
@@ -729,8 +730,8 @@ fn paint_uses_dark_palette() {
         &[],
         MenuFlags::default(),
     );
-    assert_eq!(frame.get(0, 0), theme.chrome_bg, "深色菜单栏");
-    assert_eq!(theme.chrome_bg, [38, 38, 38, 255]);
+    assert_eq!(frame.get(0, 0), palette::surface_card(&theme), "深色菜单栏");
+    assert_eq!(palette::surface_card(&theme), [38, 38, 38, 255]);
 }
 
 #[test]
@@ -804,7 +805,7 @@ fn scrollbar_thumb_painted_when_overflowing() {
     let y = (v.y + 10.0) as u32;
 
     let idle = draw(&mut chrome).get(x, y);
-    assert_ne!(idle, theme.chrome_bg, "溢出时滑块必须可见");
+    assert_ne!(idle, palette::surface_card(&theme), "溢出时滑块必须可见");
     assert_ne!(idle, theme.thumb, "常态滑块为半透明，悬停才满不透明");
 
     chrome.scroll_hover = true;

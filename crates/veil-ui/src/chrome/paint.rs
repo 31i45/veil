@@ -10,7 +10,7 @@ use super::{
 };
 use crate::document::ExternalState;
 use crate::theme::Theme;
-use crate::tokens::{space, state, stroke};
+use crate::tokens::{palette, space, state, stroke};
 use crate::view::{Frame, LayoutEngine};
 
 /// 文本排版宽度：UI 字阶（13px）排版后取文末光标的 x（单行 = 总宽）。
@@ -137,7 +137,7 @@ impl Chrome {
         let status_h = STATUS_H * scale;
 
         // 菜单栏
-        frame.fill_rect(0, 0, frame.width, menu_h.ceil() as u32, theme.chrome_bg);
+        frame.fill_rect(0, 0, frame.width, menu_h.ceil() as u32, palette::surface_card(theme));
         for (i, x, w) in menu_bar_rects(scale) {
             // active（已展开）用按下色，hover 用悬停色：六态单源。
             let bg = if self.open == Some(i) {
@@ -181,7 +181,7 @@ impl Chrome {
             status_y as i32,
             frame.width,
             status_h.ceil() as u32,
-            theme.chrome_bg,
+            palette::surface_card(theme),
         );
         frame.fill_rect(
             0,
@@ -255,7 +255,7 @@ impl Chrome {
                 vp.y as i32,
                 (SCROLL_W * scale).ceil() as u32,
                 vp.h.ceil() as u32,
-                theme.chrome_bg,
+                palette::surface_card(theme),
             );
             let tw = ((SCROLL_W - space::XS) * scale).max(1.0);
             let active = self.scroll_hover || self.scroll_drag.is_some();
@@ -281,7 +281,7 @@ impl Chrome {
                 p.h.ceil() as u32,
                 scale,
                 theme.dark,
-                theme.popup_bg,
+                palette::surface_popup(theme),
                 theme.chrome_border,
             );
             let pad = crate::theme::surface::padding(scale);

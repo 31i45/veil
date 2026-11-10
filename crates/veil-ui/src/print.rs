@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 
 use crate::app::App;
 use crate::theme::NativeWindow;
+use crate::tokens::palette;
 use crate::view::Frame;
 use veil_core::{BlockKind, Range};
 
@@ -296,7 +297,7 @@ impl PrintSession<'_> {
             };
             (p.w, p.h)
         };
-        let bg = self.app.input_state.theme.bg;
+        let bg = palette::surface_base(&self.app.input_state.theme);
         let scale = self.app.input_state.scale;
         let pad = (12.0 * scale).round() as i32;
         let gap = (6.0 * scale).max(1.0);

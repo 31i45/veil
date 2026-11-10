@@ -580,8 +580,8 @@ impl App {
             .window_state
             .frame
             .take()
-            .unwrap_or_else(|| Frame::new(w, h, self.input_state.theme.bg));
-        frame.reset(w, h, self.input_state.theme.bg);
+            .unwrap_or_else(|| Frame::new(w, h, crate::tokens::palette::surface_base(&self.input_state.theme)));
+        frame.reset(w, h, crate::tokens::palette::surface_base(&self.input_state.theme));
         let scale = self.input_state.scale;
         let theme = self.input_state.theme;
         let vp = self.viewport();
@@ -649,7 +649,7 @@ impl App {
                     sy - 2,
                     rw + 8,
                     rh + 4,
-                    theme.code_bg,
+                    crate::tokens::palette::code_bg(&theme),
                 );
             }
             // 查找命中高亮（P3-3）：全部命中用 hover 色，当前命中用选区色；打印不画
@@ -748,7 +748,10 @@ impl App {
         // 只读视觉，不动真值与派生缓存；当前块保持原样，光标随后绘制仍清晰。打印不压暗。
         if self.window_state.print.is_none() && self.ui_state.writing.focus {
             let focused = self.caret_block_index().map(|i| self.index.blocks[i].id);
-            let dim = [theme.bg[0], theme.bg[1], theme.bg[2], FOCUS_DIM_ALPHA];
+            let dim = {
+                let bg = crate::tokens::palette::surface_base(&theme);
+                [bg[0], bg[1], bg[2], FOCUS_DIM_ALPHA]
+            };
             for g in &self.index.blocks[vis_focus] {
                 if focused == Some(g.id) {
                     continue;
@@ -958,7 +961,7 @@ impl App {
             panel.h.ceil() as u32,
             scale,
             theme.dark,
-            theme.popup_bg,
+            crate::tokens::palette::surface_popup(&theme),
             theme.chrome_border,
         );
         for row in outline::visible_rows(panel, count, self.ui_state.outline.scroll, scale) {
@@ -1058,17 +1061,18 @@ impl App {
         // 内缩 1px 避开卡片圆角边框；分隔线与条目文字起止对齐（不顶到卡片边）
         let head_h = (outline::HEAD_H * scale).ceil() as u32;
         let r = crate::theme::surface::corner_radius(scale);
+        let popup_bg = crate::tokens::palette::surface_popup(&theme);
         frame.fill_rounded_rect(
             x + 1,
             y + 1,
             w.saturating_sub(2),
             head_h,
             (r - 1.0).max(0.0),
-            theme.popup_bg,
+            popup_bg,
         );
         let sq = r.ceil().max(1.0) as i32;
         let hi = y + head_h as i32;
-        frame.fill_rect(x + 1, hi - sq, w.saturating_sub(2), sq as u32, theme.popup_bg);
+        frame.fill_rect(x + 1, hi - sq, w.saturating_sub(2), sq as u32, popup_bg);
         frame.fill_rect(
             (panel.x + outline::PAD * scale).round() as i32,
             hi - 1,
@@ -1167,7 +1171,7 @@ impl App {
             total_h,
             scale,
             theme.dark,
-            theme.popup_bg,
+            crate::tokens::palette::surface_popup(&theme),
             theme.chrome_border,
         );
         // S4 focus：焦点字段用安静底色表达（不再画 accent 下划线）。
@@ -1498,7 +1502,7 @@ impl App {
         let py = l.panel.y.round() as i32;
         let pw = l.panel.w.ceil() as u32;
         let ph = l.panel.h.ceil() as u32;
-        frame.fill_surface_card(px, py, pw, ph, scale, theme.dark, theme.popup_bg, theme.chrome_border);
+        frame.fill_surface_card(px, py, pw, ph, scale, theme.dark, crate::tokens::palette::surface_popup(&theme), theme.chrome_border);
         // 输入行与候选行的分隔线：左右内缩与输入区文字对齐（不顶到卡片边）
         frame.fill_rect(
             (px as f32 + pad).round() as i32,
@@ -1702,7 +1706,7 @@ impl App {
         let py = l.y.round() as i32;
         let pw = l.w.ceil() as u32;
         let ph = l.h.ceil() as u32;
-        frame.fill_surface_card(px, py, pw, ph, scale, theme.dark, theme.popup_bg, theme.chrome_border);
+        frame.fill_surface_card(px, py, pw, ph, scale, theme.dark, crate::tokens::palette::surface_popup(&theme), theme.chrome_border);
         let hover = self.ui_state.ctx.hover;
         // S3：只有卡片边界线；分组间距由布局提供，不再绘制分隔线。
         for (i, off) in &l.rows {
@@ -1760,7 +1764,10 @@ impl App {
             vp.y.round() as i32,
             vp.w.ceil() as u32,
             vp.h.ceil() as u32,
-            [theme.bg[0], theme.bg[1], theme.bg[2], DROP_DIM_ALPHA],
+            {
+                let bg = crate::tokens::palette::surface_base(&theme);
+                [bg[0], bg[1], bg[2], DROP_DIM_ALPHA]
+            },
         );
         let pad = (12.0 * scale).round() as u32;
         let Some(lab) =
@@ -1775,7 +1782,7 @@ impl App {
         let bh = lab.h + pad * 2;
         let bx = (vp.x + (vp.w - bw as f32) / 2.0).round() as i32;
         let by = (vp.y + (vp.h - bh as f32) / 2.0).round() as i32;
-        frame.fill_surface_card(bx, by, bw, bh, scale, theme.dark, theme.popup_bg, theme.chrome_border);
+        frame.fill_surface_card(bx, by, bw, bh, scale, theme.dark, crate::tokens::palette::surface_popup(&theme), theme.chrome_border);
         frame.blit(
             &lab.pixels,
             lab.w,
@@ -1810,7 +1817,7 @@ impl App {
                 top,
                 t.width.ceil() as u32,
                 first.height.ceil() as u32,
-                theme.table_head_bg,
+                crate::tokens::palette::table_head_bg(&theme),
             );
         }
         for c in &t.cells {

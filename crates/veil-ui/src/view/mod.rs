@@ -12,7 +12,7 @@ pub(crate) mod outline;
 pub(crate) mod quick_open;
 pub(crate) mod search;
 mod style;
-mod table;
+pub(crate) mod table;
 
 pub use crate::geometry::{BASE_FONT_SIZE, BASE_LINE_HEIGHT};
 pub(crate) use cache::{Cache, LayoutKey, Memo, Revs, TableKey};

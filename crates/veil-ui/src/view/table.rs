@@ -21,7 +21,7 @@ use crate::geometry::{BASE_FONT_SIZE, BASE_LINE_HEIGHT};
 const CELL_PAD_X: f32 = 8.0;
 const CELL_PAD_Y: f32 = 5.0;
 /// 列宽收缩下限（基准字号下）：再窄会把文本挤成逐字折行。
-const MIN_COL_WIDTH: f32 = 40.0;
+pub(crate) const MIN_COL_WIDTH: f32 = 40.0;
 
 /// 表格行几何（网格坐标，原点为表格左上角）。
 pub struct TableRow {
@@ -103,7 +103,7 @@ impl LayoutEngine {
         color: [u8; 3],
         active: Option<(usize, &str)>,
     ) -> TableLayout {
-        self.layout_table_opts(table, width, color, active, None)
+        self.layout_table_opts(table, width, color, active, None, None)
     }
 
     /// 带纯文本覆盖的表格排版。`raw_cells`：flat 索引 → 源码原文，
@@ -116,6 +116,7 @@ impl LayoutEngine {
         color: [u8; 3],
         active: Option<(usize, &str)>,
         raw_cells: Option<&HashMap<usize, String>>,
+        widths: Option<&[f32]>,
     ) -> TableLayout {
         let scale = self.scale_factor();
         let metrics = Metrics::new(BASE_FONT_SIZE * scale, BASE_LINE_HEIGHT * scale);
@@ -188,6 +189,22 @@ impl LayoutEngine {
             let k = width / total;
             for w in &mut cols {
                 *w = (*w * k).max(MIN_COL_WIDTH * scale);
+            }
+        }
+        // 用户拖动列宽（B2，纯视图态）：长度匹配即覆盖内在宽；
+        // 总宽超出可用宽时按比例压回（无横向滚动，避免裁切）。
+        if let Some(ov) = widths {
+            if ov.len() == ncols {
+                for (w, o) in cols.iter_mut().zip(ov) {
+                    *w = o.max(MIN_COL_WIDTH * scale);
+                }
+                let t: f32 = cols.iter().sum();
+                if t > width && t > 0.0 {
+                    let k = width / t;
+                    for w in &mut cols {
+                        *w *= k;
+                    }
+                }
             }
         }
         let table_w: f32 = cols.iter().sum();
@@ -560,6 +577,56 @@ mod tests {
     }
 
     #[test]
+    fn column_widths_override_honored() {
+        // B2：用户拖动后的列宽覆盖优先于内在宽（总宽不超版心时原样采纳）
+        let s = Session::open("| a | wide-content |\n| --- | --- |\n| c | d |\n");
+        let (id, _, _) = s.blocks()[0];
+        let table = s.table(id).unwrap();
+        let natural = LayoutEngine::new().layout_table(&table, 600.0, [0, 0, 0], None);
+        let ov = [120.0f32, 260.0f32];
+        let l = LayoutEngine::new().layout_table_opts(
+            &table,
+            600.0,
+            [0, 0, 0],
+            None,
+            None,
+            Some(&ov),
+        );
+        assert_ne!(natural.cols, l.cols, "覆盖必须改变列宽");
+        assert!((l.cols[0] - 120.0).abs() < 0.5 && (l.cols[1] - 260.0).abs() < 0.5);
+        assert!((l.width - 380.0).abs() < 1.0, "表宽 = 列宽之和: {}", l.width);
+    }
+
+    #[test]
+    fn column_widths_override_clamps_and_len_mismatch_ignored() {
+        let s = Session::open("| a | b |\n| --- | --- |\n| c | d |\n");
+        let (id, _, _) = s.blocks()[0];
+        let table = s.table(id).unwrap();
+        // 长度不匹配：忽略覆盖，退回内在宽
+        let ignored = LayoutEngine::new().layout_table_opts(
+            &table,
+            600.0,
+            [0, 0, 0],
+            None,
+            None,
+            Some(&[100.0]),
+        );
+        let natural = LayoutEngine::new().layout_table(&table, 600.0, [0, 0, 0], None);
+        assert_eq!(ignored.cols, natural.cols);
+        // 超窄覆盖被下限托住，且总宽不超版心
+        let tiny = LayoutEngine::new().layout_table_opts(
+            &table,
+            600.0,
+            [0, 0, 0],
+            None,
+            None,
+            Some(&[1.0, 1.0]),
+        );
+        assert!(tiny.cols.iter().all(|w| *w >= MIN_COL_WIDTH - 0.5), "{:?}", tiny.cols);
+        assert!(tiny.width <= 600.0 + 1.0);
+    }
+
+    #[test]
     fn columns_follow_content_width() {
         let l = layout("| a | wide-content |\n| --- | --- |\n| c | d |\n", 600.0);
         assert_eq!(l.cols.len(), 2);
@@ -814,7 +881,7 @@ mod tests {
         let mut raw_cells = HashMap::new();
         raw_cells.insert(0usize, raw);
         let narrow = LayoutEngine::new()
-            .layout_table_opts(&table, 90.0, [0, 0, 0], None, Some(&raw_cells));
+            .layout_table_opts(&table, 90.0, [0, 0, 0], None, Some(&raw_cells), None);
         assert_eq!(narrow.cells.len(), 2);
         assert!(narrow.height > 0.0);
         assert!(!narrow.cells[0].pixels.is_empty(), "降级格仍须正常光栅");

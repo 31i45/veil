@@ -17,6 +17,9 @@
 //   （CommonMark：alt = 纯文本内容）。引用式图片 `![alt][label]` / `![alt][]` / `![alt]`
 //   同引用式链接（0c P0-1）。
 // - Strikethrough（GFM `~~`）仍为朴素最近配对，不参与 delimiter-run（GFM 语料另计）。
+// - 裸链接（GFM 自动链接扩展，W1-5）：`scheme://` / `www.` URL 与 `local@domain`
+//   邮箱在解析后追加 Link 节点（url 指向源码本身，协议/`mailto:` 由消费侧补全）；
+//   尾部标点、`&entity;`、未配对 `)` 按 GFM 规则排除，代码/显式链接/尖括号内不接管。
 // - `\` 转义全部 ASCII 标点（CommonMark；0c P1 起由 v0 白名单扩展）。
 // - Unicode 标点判定：ASCII 精确命中规范集合；非 ASCII 以「非字母数字且非空白」
 //   近似 P/S 类（零依赖取舍：CJK 标点、货币符号均正确，仅 Mn/Cf 等记号类字符
@@ -48,9 +51,12 @@ pub(super) fn parse_inlines(text: &str, base: usize, refs: &RefMap) -> Vec<Inlin
     link_bare_urls(text, base, nodes)
 }
 
-/// 裸 URL 自动成链（GFM 扩展，视图态增强）：
-/// 扫描 `http://` / `https://` / `www.` 前缀，延伸到空白/标点边界，
-/// 跳过已在 Link/Autolink/Code 节点覆盖的区间。不修改源码字节。
+/// 裸 URL / 裸邮箱自动成链（GFM 自动链接扩展，视图态增强）。
+/// URL 前缀为任意 `scheme://`（scheme = `[A-Za-z][A-Za-z0-9+.-]{1,31}`）或 `www.`；
+/// 邮箱为 `local@domain`（domain 至少一个点、末字符为字母数字）。
+/// 扫描到空白/`<` 为止，再按 GFM 规则剥尾部标点（`&entity;` 整体排除、
+/// 尾部 `)` 按括号收支剥离），跳过已由 Code/Link/Autolink 覆盖的区间。
+/// 不修改源码字节（协议补全在消费侧完成）。
 fn link_bare_urls(
     text: &str,
     base: usize,
@@ -61,7 +67,7 @@ fn link_bare_urls(
     nodes
 }
 
-/// 单层裸 URL 扫描；Emph/Strong/Strikethrough 先递归处理内容区
+/// 单层裸链接扫描；Emph/Strong/Strikethrough 先递归处理内容区
 /// （其 `content` 为内层文本的绝对区间），容器自身区间在父层已计入覆盖。
 fn link_bare_urls_in(text: &str, base: usize, nodes: &mut Vec<InlineNode>) {
     for n in nodes.iter_mut() {
@@ -82,99 +88,210 @@ fn link_bare_urls_in(text: &str, base: usize, nodes: &mut Vec<InlineNode>) {
     let bytes = text.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
-        let prefix = if bytes[i..].starts_with(b"https://") {
-            8usize
-        } else if bytes[i..].starts_with(b"http://") {
-            7usize
-        } else if bytes[i..].starts_with(b"www.") {
-            4usize
-        } else {
+        if bytes[i] == b'@' {
+            if let Some((s, e)) = scan_bare_email(bytes, i) {
+                if !is_covered(&covered, base + s) && !inside_angle(bytes, s) {
+                    push_bare_link(nodes, &mut covered, base, s, e);
+                    i = e;
+                    continue;
+                }
+            }
+            i += 1;
+            continue;
+        }
+        let Some(prefix) = url_prefix(bytes, i) else {
             i += 1;
             continue;
         };
-        // 检查位置是否已被覆盖
+        // 词内不接管（`xhttp://` 不是自动链接）；CJK 等非 ASCII 前缀照常成链
+        if !at_token_boundary(bytes, i) {
+            i += 1;
+            continue;
+        }
         let abs_start = base + i;
-        if covered.iter().any(|&(s, e)| s <= abs_start && abs_start < e) {
-            i += prefix;
+        if is_covered(&covered, abs_start) || inside_angle(bytes, i) {
+            i += 1;
             continue;
         }
-        // 检查是否在 `<...>` 内（CommonMark autolink / 原始 HTML 标签）：
-        // 向前扫描 ≤50 字节，若存在未匹配的 '<' 说明仍在尖括号作用域，
-        // 裸 URL 不应从这里抢链接（由 try_autolink/HTML 逻辑接管，可能因空格/
-        // 非法字符拒绝，拒绝后该位置应保持纯文本）
-        let mut lt_count = 0i32;
-        let mut checked = 0usize;
-        let mut k = i;
-        while k > 0 && checked < 50 {
-            k -= 1;
-            checked += 1;
-            match bytes[k] {
-                b'>' => lt_count -= 1,
-                b'<' => {
-                    lt_count += 1;
-                    break;
-                }
-                _ => {}
-            }
-            if lt_count < 0 {
-                lt_count = 0;
-            }
-        }
-        if lt_count > 0 {
-            i += prefix;
-            continue;
-        }
-        // 延伸 URL 到边界：空白/控制符/`<`/`>`/引号/反引号/方括号/花括号即止；
-        // 圆括号按 GFM 规则成对保留（`(business)` 属 URL，未配对的 `)` 终止）。
-        let mut j = i + prefix;
-        let mut depth = 0i32;
-        while j < bytes.len() {
-            let b = bytes[j];
-            if b.is_ascii_whitespace()
-                || b < 0x20
-                || matches!(b, b'<' | b'>' | b'[' | b']' | b'{' | b'}' | b'"' | b'\'' | b'`'
-                    | b'\\')
-            {
-                break;
-            }
-            if b == b'(' {
-                depth += 1;
-            } else if b == b')' {
-                if depth == 0 {
-                    break;
-                }
-                depth -= 1;
-            }
-            j += 1;
-        }
-        // 去掉末尾标点（GFM：URL 不应以 `.` `,` `;` `:` `!` `?` `*` `_` `~` 结尾；
-        // 成对 `)` 已在上面按括号深度保留，这里只剥「显然不属于 URL」的尾符）
-        while j > i + prefix {
-            let lb = bytes[j - 1];
-            if matches!(
-                lb,
-                b'.' | b',' | b';' | b':' | b'!' | b'?' | b'*' | b'_' | b'~'
-            ) {
-                j -= 1;
-            } else {
-                break;
-            }
-        }
+        let j = url_end(bytes, i, prefix);
         if j > i + prefix {
-            let abs_end = base + j;
-            let url_range = Range::new(abs_start, abs_end);
-            let node = InlineNode {
-                kind: InlineKind::Link,
-                range: Range::new(abs_start, abs_end),
-                content: Range::new(abs_start, abs_end),
-                url: Some(url_range),
-                children: Vec::new(),
-            };
-            nodes.push(node);
-            covered.push((abs_start, abs_end));
+            push_bare_link(nodes, &mut covered, base, i, j);
         }
-        i = j;
+        i = j.max(i + 1);
     }
+}
+
+/// 位置是否落在既有节点（Code/Link/Autolink 等）覆盖的区间内。
+fn is_covered(covered: &[(usize, usize)], abs: usize) -> bool {
+    covered.iter().any(|&(s, e)| s <= abs && abs < e)
+}
+
+/// 位置是否处于未闭合的 `<...>` 内（CommonMark autolink / 原始 HTML 标签）：
+/// 向前扫描 ≤50 字节，若存在未匹配的 `<` 说明仍在尖括号作用域。裸链接不应从
+/// 这里抢链接——由 try_autolink/HTML 逻辑接管，可能因空格/非法字符拒绝，
+/// 拒绝后该位置应保持纯文本。注意 `<` 本身允许出现在 URL 中作为终止符，
+/// 故仅在当前位置之前判定。
+fn inside_angle(bytes: &[u8], pos: usize) -> bool {
+    let mut lt_count = 0i32;
+    let mut checked = 0usize;
+    let mut k = pos;
+    while k > 0 && checked < 50 {
+        k -= 1;
+        checked += 1;
+        match bytes[k] {
+            b'>' => lt_count -= 1,
+            b'<' => {
+                lt_count += 1;
+                break;
+            }
+            _ => {}
+        }
+        if lt_count < 0 {
+            lt_count = 0;
+        }
+    }
+    lt_count > 0
+}
+
+/// 裸 URL 前缀长度（`www.` 或 `scheme://`）。scheme 规则同 CommonMark：
+/// `[A-Za-z][A-Za-z0-9+.-]{1,31}`，故总长 2..=32 后接 `://`。
+fn url_prefix(bytes: &[u8], i: usize) -> Option<usize> {
+    if bytes[i..].starts_with(b"www.") {
+        return Some(4);
+    }
+    if !bytes[i].is_ascii_alphabetic() {
+        return None;
+    }
+    let mut k = i + 1;
+    while k < bytes.len()
+        && k - i < 32
+        && (bytes[k].is_ascii_alphanumeric() || matches!(bytes[k], b'+' | b'.' | b'-'))
+    {
+        k += 1;
+    }
+    if !(2..=32).contains(&(k - i)) || !bytes[k..].starts_with(b"://") {
+        return None;
+    }
+    Some(k - i + 3)
+}
+
+/// 自动链接的左边界：不能紧贴字母数字或 scheme 字符（否则只是普通单词的一部分）。
+fn at_token_boundary(bytes: &[u8], i: usize) -> bool {
+    i == 0
+        || !(bytes[i - 1].is_ascii_alphanumeric() || matches!(bytes[i - 1], b'+' | b'.' | b'-'))
+}
+
+/// URL 终点：扫到空白/控制符/`<`，随后按 GFM 规则剥除尾部：
+/// - `?!.,:*_~'\"` 反复剥；
+/// - 尾部 `&name;`（name 全字母）整体排除；
+/// - 尾部 `)` 按全串括号收支剥离（`(business))+ok` 的 `)` 中段不受影响）。
+fn url_end(bytes: &[u8], i: usize, prefix: usize) -> usize {
+    let mut j = i + prefix;
+    while j < bytes.len() {
+        let b = bytes[j];
+        if b.is_ascii_whitespace() || b < 0x20 || b == b'<' {
+            break;
+        }
+        j += 1;
+    }
+    while j > i + prefix {
+        let lb = bytes[j - 1];
+        if matches!(
+            lb,
+            b'.' | b',' | b':' | b'!' | b'?' | b'*' | b'_' | b'~' | b'\'' | b'"'
+        ) {
+            j -= 1;
+            continue;
+        }
+        if lb == b';' {
+            let mut k = j - 1;
+            while k > i + prefix && bytes[k - 1].is_ascii_alphabetic() {
+                k -= 1;
+            }
+            if k < j - 1 && bytes[k - 1] == b'&' {
+                j = k - 1; // `&name;` 属实体样式，整体排除
+            } else {
+                j -= 1;
+            }
+            continue;
+        }
+        break;
+    }
+    let mut opens = 0i32;
+    let mut closes = 0i32;
+    for &b in &bytes[i..j] {
+        match b {
+            b'(' => opens += 1,
+            b')' => closes += 1,
+            _ => {}
+        }
+    }
+    while closes > opens && j > i + prefix && bytes[j - 1] == b')' {
+        j -= 1;
+        closes -= 1;
+    }
+    j
+}
+
+/// 裸邮箱候选：`at` 指向 `@`。local 反向取 `[alnum .!#$%&'*+/=?^_`{|}~-]`，
+/// 首尾须为字母数字；domain 正向取 `[alnum ._-]`，剥句末句点后要求至少一个点、
+/// 末字符为字母数字（因此 `a@b.c-` / `a@b.c_` 整体不成链）。
+fn scan_bare_email(bytes: &[u8], at: usize) -> Option<(usize, usize)> {
+    let mut s = at;
+    while s > 0 && is_email_local_byte(bytes[s - 1]) {
+        s -= 1;
+    }
+    if s == at || !bytes[s].is_ascii_alphanumeric() || !bytes[at - 1].is_ascii_alphanumeric() {
+        return None;
+    }
+    // scheme 前缀（`mailto:foo@bar.baz`）或路径分隔符后的片段不当作裸邮箱
+    if s > 0 && matches!(bytes[s - 1], b':' | b'/' | b'\\' | b'@') {
+        return None;
+    }
+    let mut end = at + 1;
+    while end < bytes.len()
+        && (bytes[end].is_ascii_alphanumeric() || matches!(bytes[end], b'.' | b'-' | b'_'))
+    {
+        end += 1;
+    }
+    while end > at + 1 && bytes[end - 1] == b'.' {
+        end -= 1;
+    }
+    let domain = &bytes[at + 1..end];
+    if !domain.contains(&b'.') || !domain[domain.len() - 1].is_ascii_alphanumeric() {
+        return None;
+    }
+    let labels_ok = domain.split(|&b| b == b'.').all(|l| {
+        !l.is_empty()
+            && l.len() <= 63
+            && l[0].is_ascii_alphanumeric()
+            && l.iter().all(|c| c.is_ascii_alphanumeric() || *c == b'-')
+    });
+    labels_ok.then_some((s, end))
+}
+
+/// 裸邮箱 local 部分允许的字节（GFM atext + `.`）。
+fn is_email_local_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b".!#$%&'*+/=?^_`{|}~-".contains(&b)
+}
+
+/// 追加裸链接节点并登记覆盖区间（`url` 与 `content` 同指源码本身）。
+fn push_bare_link(
+    nodes: &mut Vec<InlineNode>,
+    covered: &mut Vec<(usize, usize)>,
+    base: usize,
+    s: usize,
+    e: usize,
+) {
+    let range = Range::new(base + s, base + e);
+    nodes.push(InlineNode {
+        kind: InlineKind::Link,
+        range,
+        content: range,
+        url: Some(range),
+        children: Vec::new(),
+    });
+    covered.push((range.start, range.end));
 }
 
 /// CommonMark：反斜杠可转义一切 ASCII 标点（`!` 为 Image 开标记首字符，亦在内）。
@@ -1426,6 +1543,60 @@ mod tests {
             sexp(&parse("[www.a.com](u)")),
             "Link[0..14 c=1..10 url=12..13]"
         );
+    }
+
+    #[test]
+    fn bare_url_unbalanced_parens_stripped_after_suffix() {
+        // GFM：扫到空白后才按括号收支剥尾部 `)`；中段未配对 `)` 不影响
+        let ns = parse("www.a.com/x+(b))+ok");
+        let link = ns.iter().find(|n| n.kind == InlineKind::Link).unwrap();
+        assert_eq!(link.url.unwrap().end, 19, "尾部 `ok` 属 URL，中段 `)` 保留");
+        let ns = parse("www.a.com/x+(b)))");
+        let link = ns.iter().find(|n| n.kind == InlineKind::Link).unwrap();
+        assert_eq!(link.url.unwrap().end, 15, "多出的两个 `)` 应剔除");
+    }
+
+    #[test]
+    fn bare_url_entity_tail_excluded() {
+        // `&hl;` 是实体样式，整体排除；正常 `&x=y` 保留
+        let ns = parse("www.a.com/?q=a&hl;");
+        let link = ns.iter().find(|n| n.kind == InlineKind::Link).unwrap();
+        assert_eq!(&"www.a.com/?q=a&hl;"[..link.url.unwrap().end], "www.a.com/?q=a");
+        let ns = parse("www.a.com/?q=a&hl=en");
+        let link = ns.iter().find(|n| n.kind == InlineKind::Link).unwrap();
+        assert_eq!(link.url.unwrap().end, 20);
+    }
+
+    #[test]
+    fn bare_url_any_scheme() {
+        // 任意 `scheme://`（含 ftp）都成链；scheme 至少 2 字符
+        let ns = parse("ftp://foo.bar.baz");
+        let link = ns.iter().find(|n| n.kind == InlineKind::Link).unwrap();
+        assert_eq!(link.url.unwrap().end, 17);
+        assert_eq!(sexp(&parse("m://x.y")), "");
+        // `www.` 紧贴单词内部不接管
+        assert_eq!(sexp(&parse("awww.a.com")), "");
+    }
+
+    #[test]
+    fn bare_email_autolink() {
+        for src in ["foo@bar.baz", "hello+xyz@mail.example", "a.b-c_d@a.b"] {
+            let ns = parse(src);
+            let link = ns.iter().find(|n| n.kind == InlineKind::Link).unwrap();
+            assert_eq!(link.url.unwrap().end, src.len(), "{src} 应整体成链");
+        }
+        // 域名含 `+` 非法；尾部 `-` / `_` 非法；句末 `.` 不属于链接
+        for src in ["hello@mail+xyz.example", "a.b-c_d@a.b-", "a.b-c_d@a.b_", "foo@bar"] {
+            assert_eq!(sexp(&parse(src)), "", "{src} 不应成链");
+        }
+        let ns = parse("a.b-c_d@a.b.");
+        let link = ns.iter().find(|n| n.kind == InlineKind::Link).unwrap();
+        assert_eq!(link.url.unwrap().end, 11);
+        // 代码段/尖括号内不接管
+        assert_eq!(sexp(&parse("`foo@bar.baz`")), "Code[0..13 c=1..12]");
+        assert_eq!(sexp(&parse("<foo@bar.baz>")), "Link[0..13 c=1..12 url=1..12]");
+        // 已有 scheme 前缀（`mailto:`）不当作裸邮箱
+        assert_eq!(sexp(&parse("mailto:foo@bar.baz")), "");
     }
 
     #[test]

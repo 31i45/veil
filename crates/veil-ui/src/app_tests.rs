@@ -7528,6 +7528,10 @@ fn normalize_link_url_adds_http_for_bare_www() {
     assert_eq!(normalize_link_url("mailto:x@y.z"), "mailto:x@y.z");
     // `wwwx.com` 不是 www 前缀，保持原样（随后仍会被白名单拒绝）
     assert_eq!(normalize_link_url("wwwx.com"), "wwwx.com");
+    // 裸邮箱补 mailto（GFM 自动链接）
+    assert_eq!(normalize_link_url("foo@bar.baz"), "mailto:foo@bar.baz");
+    assert_eq!(normalize_link_url("mailto:x@y.z"), "mailto:x@y.z");
+    assert_eq!(normalize_link_url("foo@bar"), "foo@bar");
     assert!(url_is_openable(&normalize_link_url("www.a.com")));
 }
 

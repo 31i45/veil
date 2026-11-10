@@ -346,7 +346,14 @@ pub(crate) struct PersistState {
     /// 本会话最近一次成功保存的本地时间（`HH:MM`）：状态栏「已保存」文本的唯一来源。
     /// 只在落盘成功时刷新；失败/打开新文档（None）不得沿用旧值。
     pub(crate) last_saved_hhmm: Option<String>,
+    /// 下次定时快照的最早时刻；None = 尚未开始计时（首次 dirty 即触发）。
+    /// 节流窗口 30 min；保存成功后立即触发一次快照并重置 deadline。
+    pub(crate) snapshot_deadline: Option<Instant>,
 }
+
+/// 快照节流间隔：默认 30 分钟（Autosave 2s 是"即时落盘"，快照是"版本历史"，
+/// 两者职责不同；节流避免每次 keystroke 写盘）。
+const SNAPSHOT_INTERVAL_MIN: u64 = 30;
 
 /// 文档真值状态（ADR-009 S6 C2）：路径/编码标记/基线字节。
 pub(crate) struct DocState {
@@ -663,6 +670,7 @@ impl App {
                 recovery_failed_at: None,
                 recent: start.recent,
                 last_saved_hhmm: None,
+                snapshot_deadline: None,
             },
             ui_state: UIState::default(),
         };
@@ -916,9 +924,9 @@ impl App {
         self.maybe_snapshot(now);
     }
 
-    /// 版本历史快照触发（N1）：30 分钟周期，dirty + 有路径才触发。
-    /// 文档哈希 = FNV-1a of 规范化路径（platform 层）；清理由 store.prune 同步完成。
-    fn maybe_snapshot(&mut self, _now: Instant) {
+    /// 版本历史快照触发（N1）：30 分钟节流 + 保存后立即触发。
+    /// dirty + 有路径 + 非 hold + 非 IME 基础条件不变；节流避免每次 tick 写盘。
+    fn maybe_snapshot(&mut self, now: Instant) {
         // 基础条件：dirty + 有路径 + 非 hold + 非 IME
         if !self.editor.is_dirty()
             || self.persist_state.persist.hold()
@@ -927,12 +935,19 @@ impl App {
         {
             return;
         }
+        // 节流：deadline 未到则跳过（None = 首次 dirty 立即触发）
+        if let Some(deadline) = self.persist_state.snapshot_deadline {
+            if now < deadline {
+                return;
+            }
+        }
         let text = self.editor.session().serialize();
-        // 快照哈希用 FNV-1a of text（复用 recovery::fnv64）
         let hash = recovery::fnv64(text.as_bytes());
         let _ = self.ports.snapshot.save_snapshot(hash, &text);
-        // 触发清理（每次 save 内部已同步调用 prune，但重复调用无害）
         let _ = self.ports.snapshot.prune(hash, 20);
+        // 重置节流 deadline
+        self.persist_state.snapshot_deadline =
+            Some(now + Duration::from_secs(SNAPSHOT_INTERVAL_MIN * 60));
     }
 
     /// 推进全部悬停过渡（S6）：绘制前调用，paint 只读缓存后的 alpha。

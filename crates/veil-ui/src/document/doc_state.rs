@@ -244,6 +244,7 @@ impl App {
         }
         self.persist_state.recovery_hash = None;
         self.persist_state.recovery_failed_at = None;
+        self.persist_state.snapshot_deadline = None;
     }
 
     /// 打开/另存为成功时登记最近文件并持久化（0b）。写失败不阻断主流程。

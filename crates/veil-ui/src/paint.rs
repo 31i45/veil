@@ -588,10 +588,9 @@ impl App {
         // 窗口缩放/文档变短后滚动量可能越界：绘制前统一钳位（滚动条与内容同源）。
         // 打印中跳过：滚动即分页断点，末页可越过 max_scroll（页尾留空由帧底色承担）。
         if self.window_state.print.is_none() {
-            self.window_state.scroll_y = self
-                .window_state
-                .scroll_y
-                .clamp(0.0, chrome::max_scroll(vp, self.doc_height()));
+            let max = chrome::max_scroll(vp, self.doc_height());
+            self.window_state.scroll_y = self.window_state.scroll_y.clamp(0.0, max);
+            self.window_state.goal_y = self.window_state.goal_y.clamp(0.0, max);
         }
         // 打印中不画选区：输出为文档最终形态，不含任何交互态
         let sel = if self.window_state.print.is_none() {
@@ -1930,20 +1929,22 @@ impl App {
     pub(crate) fn scroll_to_caret(&mut self) {
         let vp = self.viewport();
         let (_, cy, ch) = self.caret_screen();
+        let max = chrome::max_scroll(vp, self.doc_height());
+        let mut target = self.window_state.goal_y;
         if self.ui_state.writing.typewriter {
             // 打字机模式（阶段 1）：光标行固定在视口上部锚点，行中心对齐锚点；
             // 文档首尾处仍由下方钳位兜底（无法再居中时贴边）
-            let target = vp.y + vp.h * TYPEWRITER_ANCHOR;
-            self.window_state.scroll_y += cy + ch / 2.0 - target;
+            let anchor = vp.y + vp.h * TYPEWRITER_ANCHOR;
+            target += cy + ch / 2.0 - anchor;
         } else if cy < vp.y {
-            self.window_state.scroll_y += cy - vp.y - MARGIN * self.input_state.scale;
+            target += cy - vp.y - MARGIN * self.input_state.scale;
         } else if cy + ch > vp.y + vp.h {
-            self.window_state.scroll_y += cy + ch - (vp.y + vp.h) + MARGIN * self.input_state.scale;
+            target += cy + ch - (vp.y + vp.h) + MARGIN * self.input_state.scale;
         }
-        self.window_state.scroll_y = self
-            .window_state
-            .scroll_y
-            .clamp(0.0, chrome::max_scroll(vp, self.doc_height()));
+        self.window_state.goal_y = target.clamp(0.0, max);
+        if !self.window_state.smooth {
+            self.window_state.scroll_y = self.window_state.goal_y;
+        }
     }
 
     /// Ctrl+Enter：在 caret 所在表格末尾追加一个空 body 行。返回 true 表示已处理。

@@ -368,6 +368,10 @@ pub(crate) struct WindowState {
     /// 跨帧复用的像素缓冲（P2）：尺寸不变时零分配，绘制结束整块拷入 surface。
     pub(crate) frame: Option<Frame>,
     pub(crate) scroll_y: f32,
+    /// 平滑滚动目标（B3）：on_wheel/PageUp/PageDown/Home/End 写 goal_y，animate() 插值。
+    /// 默认 smooth=false 时 goal_y=scroll_y，无插值开销。
+    pub(crate) goal_y: f32,
+    pub(crate) smooth: bool,
     /// 垂直移动的目标列（goal column），上下移动时保持。
     pub(crate) goal_x: Option<f32>,
     /// 左键按住中：CursorMoved 转化为拖选（扩选）。
@@ -404,6 +408,8 @@ impl Default for WindowState {
             surface: None,
             frame: None,
             scroll_y: 0.0,
+            goal_y: 0.0,
+            smooth: false,
             goal_x: None,
             dragging: false,
             last_click: None,
@@ -913,17 +919,14 @@ impl App {
     /// 版本历史快照触发（N1）：30 分钟周期，dirty + 有路径才触发。
     /// 文档哈希 = FNV-1a of 规范化路径（platform 层）；清理由 store.prune 同步完成。
     fn maybe_snapshot(&mut self, _now: Instant) {
-        use std::time::{SystemTime, UNIX_EPOCH};
         // 基础条件：dirty + 有路径 + 非 hold + 非 IME
         if !self.editor.is_dirty()
             || self.persist_state.persist.hold()
             || self.editor.preedit().is_some()
+            || self.doc.path.is_none()
         {
             return;
         }
-        let Some(ref path) = self.doc.path else {
-            return;
-        };
         let text = self.editor.session().serialize();
         // 快照哈希用 FNV-1a of text（复用 recovery::fnv64）
         let hash = recovery::fnv64(text.as_bytes());
@@ -953,6 +956,15 @@ impl App {
             let hovered = m.state.hovered;
             m.state.fade.tick(now, hovered);
         }
+        // B3 平滑滚动：默认关（smooth=false），goal_y 直接等于 scroll_y，零开销。
+        if self.window_state.smooth {
+            let diff = self.window_state.goal_y - self.window_state.scroll_y;
+            if diff.abs() > 0.5 {
+                self.window_state.scroll_y += diff * 0.25; // ease-out，~4 帧到位
+            } else {
+                self.window_state.scroll_y = self.window_state.goal_y;
+            }
+        }
     }
 
     /// 是否仍有悬停过渡在跑（事件循环据此按帧继续重绘）。
@@ -964,6 +976,8 @@ impl App {
             || ui.ctx.fade.running()
             || ui.chrome.anim_running()
             || ui.modal.as_ref().is_some_and(|m| m.state.fade.running())
+            || (self.window_state.smooth
+                && (self.window_state.goal_y - self.window_state.scroll_y).abs() > 0.5)
     }
 
     /// 动效总开关（S6）：系统「显示动画」关闭时全部立即到位（逐像素同无动效版本）。
@@ -1162,12 +1176,15 @@ impl ApplicationHandler for App {
                     // 拖动滚动条：按滑块顶边换算滚动量
                     let vp = self.viewport();
                     let doc_h = self.doc_height();
-                    self.window_state.scroll_y = chrome::scroll_from_thumb(
+                    self.window_state.goal_y = chrome::scroll_from_thumb(
                         vp,
                         doc_h,
                         self.input_state.mouse.y as f32 - off,
                         self.input_state.scale,
                     );
+                    if !self.window_state.smooth {
+                        self.window_state.scroll_y = self.window_state.goal_y;
+                    }
                     self.set_ime_area();
                     self.request_redraw();
                 } else if self.window_state.dragging {

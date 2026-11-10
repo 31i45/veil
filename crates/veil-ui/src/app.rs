@@ -170,11 +170,23 @@ pub trait SessionStore {
     fn save(&mut self, text: &str) -> Result<(), String>;
 }
 
-/// 持久化能力打包（0b）：崩溃恢复 + 会话/最近文件。与 ThemeEnv 同模式，
+/// 版本历史快照存储（N1）：多槽、按文档分目录、原子写。
+/// 实现由产品层注入；snapshot_text 是 Markdown 源码纯文本。
+pub trait SnapshotStore {
+    /// 保存一份快照，返回 unix 毫秒时间戳作槽名；失败不 panic。
+    fn save_snapshot(&mut self, doc_hash: u64, snapshot_text: &str) -> Result<u64, String>;
+    /// 列出某文档的所有快照时间戳（升序）。
+    fn list_snapshots(&mut self, doc_hash: u64) -> Result<Vec<u64>, String>;
+    /// 删除某文档最旧的 N 槽（清理策略调用）。
+    fn prune(&mut self, doc_hash: u64, keep_newest: usize) -> Result<usize, String>;
+}
+
+/// 持久化能力打包（0b）：崩溃恢复 + 会话/最近文件 + 版本快照。与 ThemeEnv 同模式，
 /// 避免 run/App::new 参数继续膨胀。
 pub struct PersistEnv {
     pub recovery: Box<dyn RecoveryStore>,
     pub session: Box<dyn SessionStore>,
+    pub snapshot: Box<dyn SnapshotStore>,
 }
 
 /// 待编辑文档：产品层从 CLI 参数或默认样例构造。
@@ -561,7 +573,7 @@ impl App {
             mut system,
             effects,
         } = ports.theme_env;
-        let PersistEnv { recovery, session } = ports.persist_env;
+        let PersistEnv { recovery, session, snapshot: _snapshot } = ports.persist_env;
         // 系统外观读不到（非 Windows/注册表异常）按浅色处理：不影响其它功能
         let system_dark = system.is_dark().unwrap_or(false);
         let (app_config, config_notice) = match config.load() {

@@ -26,7 +26,7 @@ use std::path::PathBuf;
 use veil_ui::NativeWindow;
 use veil_ui::{
     ConfigStore, FileDialog, FileWatcher, ImageData, PersistEnv, RecoveryStore, SessionStore,
-    SystemTheme, ThemeEnv, WindowEffects,
+    SnapshotStore, SystemTheme, ThemeEnv, WindowEffects,
 };
 
 /// UTF-16 + NUL 结尾：Win32 W 系列 API 唯一接受的字符串形态。
@@ -211,9 +211,91 @@ impl SessionStore for FsSession {
     }
 }
 
-/// 持久化能力装配（0b）：恢复草稿 + 会话/最近文件，同一数据目录下两个文件。
+/// 版本历史快照目录（N1）：`<数据目录>/snapshots/<doc_hash_hex>/`
+/// 每槽是一个 `<unix_ms>.md` 纯文本文件，原子写（tmp+rename）。
+pub struct FsSnapshotStore {
+    /// 数据目录下的 snapshots 根目录（不存在时首次 save 自动创建）。
+    root: PathBuf,
+    /// 清理阈值：每文档保留最近 N 槽，默认 20。
+    keep_newest: usize,
+}
+
+impl FsSnapshotStore {
+    pub fn new(root: PathBuf) -> Self {
+        Self {
+            root,
+            keep_newest: 20,
+        }
+    }
+    fn dir_of(&self, doc_hash: u64) -> PathBuf {
+        self.root.join(format!("{doc_hash:016x}"))
+    }
+}
+
+impl SnapshotStore for FsSnapshotStore {
+    fn save_snapshot(&mut self, doc_hash: u64, snapshot_text: &str) -> Result<u64, String> {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .map_err(|e| e.to_string())?;
+        let dir = self.dir_of(doc_hash);
+        std::fs::create_dir_all(&dir).map_err(|e| format!("创建快照目录失败: {e}"))?;
+        let path = dir.join(format!("{ts:016x}.md"));
+        // 原子写：tmp → rename
+        let tmp = path.with_extension("md.tmp");
+        std::fs::write(&tmp, snapshot_text).map_err(|e| format!("写快照失败: {e}"))?;
+        std::fs::rename(&tmp, &path).map_err(|e| format!("替换快照失败: {e}"))?;
+        // 触发清理（同步，<1ms，最多删 keep_newest+1 个文件）
+        let _ = self.prune(doc_hash, self.keep_newest);
+        Ok(ts)
+    }
+    fn list_snapshots(&mut self, doc_hash: u64) -> Result<Vec<u64>, String> {
+        let dir = self.dir_of(doc_hash);
+        let mut out = Vec::new();
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            return Ok(out);
+        };
+        for entry in rd.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if let Some(stem) = name.strip_suffix(".md") {
+                if let Ok(ts) = u64::from_str_radix(stem, 16) {
+                    out.push(ts);
+                }
+            }
+        }
+        out.sort();
+        Ok(out)
+    }
+    fn prune(&mut self, doc_hash: u64, keep_newest: usize) -> Result<usize, String> {
+        let dir = self.dir_of(doc_hash);
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            return Ok(0);
+        };
+        let mut entries: Vec<(u64, PathBuf)> = Vec::new();
+        for entry in rd.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if let Some(stem) = name.strip_suffix(".md") {
+                if let Ok(ts) = u64::from_str_radix(stem, 16) {
+                    entries.push((ts, entry.path()));
+                }
+            }
+        }
+        entries.sort_by_key(|(ts, _)| *ts); // 升序 → 最旧在前
+        let to_remove = entries.len().saturating_sub(keep_newest);
+        for (_, p) in entries.iter().take(to_remove) {
+            let _ = std::fs::remove_file(p);
+        }
+        Ok(to_remove)
+    }
+}
+
+/// 持久化能力装配（0b）：恢复草稿 + 会话/最近文件 + 版本快照，同一数据目录下。
 pub fn persist_env() -> PersistEnv {
     let dir = veil_ui::data_dir();
+    let root = dir.as_ref().map(|d| d.join("snapshots")).unwrap_or_default();
     PersistEnv {
         recovery: Box::new(FsRecovery {
             path: dir.as_ref().map(|d| d.join("recovery.dat")),
@@ -221,6 +303,7 @@ pub fn persist_env() -> PersistEnv {
         session: Box::new(FsSession {
             path: dir.as_ref().map(|d| d.join("session.txt")),
         }),
+        snapshot: Box::new(FsSnapshotStore::new(root)),
     }
 }
 

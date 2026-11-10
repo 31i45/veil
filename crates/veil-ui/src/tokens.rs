@@ -1,6 +1,6 @@
-//! 设计令牌（design tokens）：几何、间距、线宽与动效的唯一定义源。
+//! 设计令牌（design tokens）：几何、间距、线宽、字阶与动效的唯一定义源。
 //!
-//! 颜色继续由 `theme::Theme` 承担；本模块只收敛与主题无关的标量几何与时间常量。
+//! 颜色继续由 `theme::Theme` 承担；本模块只收敛与主题无关的标量几何、字阶与时间常量。
 //! `surface` 为浮层几何令牌，自 `theme` 原样迁入，调用点经 `theme::surface` 零改动沿用。
 
 /// surface 设计令牌（不可配置）：浮层（右键菜单 / 快速打开 / 大纲 / 搜索条）共用几何。
@@ -161,6 +161,30 @@ pub(crate) mod stroke {
     pub const DIVIDER: f32 = 1.0;
 }
 
+/// 字阶与字体族（D8）：UI 13 / 正文 16 / 代码 14。
+///
+/// 字号以 1.0× scale 为基准，调用方按 scale 线性放大。H1–H6 属内容排版，
+/// 由 `block_scale` 相对正文字号派生，不占用本模块的 UI 字阶。
+pub(crate) mod typography {
+    /// UI 字号（菜单栏、状态栏、浮层、模态）。
+    pub const UI_SIZE: f32 = 13.0;
+    /// UI 行高（单行浮层/标签）。
+    pub const UI_LINE_HEIGHT: f32 = 18.0;
+    /// 正文字号（正文块与表格单元格）。
+    pub const BODY_SIZE: f32 = 16.0;
+    /// 正文行高。
+    pub const BODY_LINE_HEIGHT: f32 = 22.0;
+    /// 代码块字号（正文的 0.875 倍）。
+    pub const CODE_SIZE: f32 = 14.0;
+    /// 代码块字号相对正文的倍率：字号与行高同比缩放。
+    pub const CODE_SCALE: f32 = CODE_SIZE / BODY_SIZE;
+
+    /// 无衬线族回退链（按序探测存在性）。
+    pub const SANS_FAMILIES: &[&str] = &["Microsoft YaHei UI", "Segoe UI"];
+    /// 等宽族回退链（按序探测存在性）。
+    pub const MONO_FAMILIES: &[&str] = &["Consolas", "Courier New"];
+}
+
 #[allow(dead_code)] // A9 动效落地前占位
 pub(crate) mod motion {
     use std::time::Duration;
@@ -179,7 +203,26 @@ pub(crate) mod motion {
 mod tests {
     use std::time::Duration;
 
-    use super::{motion, space, stroke};
+    use super::{motion, space, stroke, typography};
+
+    #[test]
+    #[allow(clippy::assertions_on_constants)] // 令牌为编译期常量，仍按运行时断言校验
+    fn type_scale_is_ui_body_code() {
+        assert_eq!(typography::UI_SIZE, 13.0);
+        assert_eq!(typography::BODY_SIZE, 16.0);
+        assert_eq!(typography::CODE_SIZE, 14.0);
+        assert!((typography::CODE_SCALE - 0.875).abs() < 1e-6);
+        assert!(typography::UI_LINE_HEIGHT > typography::UI_SIZE);
+        assert!(typography::BODY_LINE_HEIGHT > typography::BODY_SIZE);
+    }
+
+    #[test]
+    fn font_fallbacks_are_ordered_and_non_empty() {
+        assert_eq!(typography::SANS_FAMILIES[0], "Microsoft YaHei UI");
+        assert_eq!(typography::MONO_FAMILIES[0], "Consolas");
+        assert!(typography::SANS_FAMILIES.len() >= 2);
+        assert!(typography::MONO_FAMILIES.len() >= 2);
+    }
 
     #[test]
     fn space_tokens_are_multiples_of_four() {

@@ -13,10 +13,10 @@ use crate::theme::Theme;
 use crate::tokens::{space, stroke};
 use crate::view::{Frame, LayoutEngine};
 
-/// 文本排版宽度：preedit 排版后取文末光标的 x（单行 = 总宽）。
+/// 文本排版宽度：UI 字阶（13px）排版后取文末光标的 x（单行 = 总宽）。
 /// 纯测量路径，不经标签缓存（S1）。
 pub(super) fn measure_w(engine: &mut LayoutEngine, text: &str) -> f32 {
-    let layout = engine.layout_preedit(text);
+    let layout = engine.layout_ui(text);
     engine.caret_xy(&layout, layout.layout_text().len()).0
 }
 
@@ -53,7 +53,7 @@ pub(super) fn ellipsize_middle(engine: &mut LayoutEngine, text: &str, avail: f32
 
 impl Chrome {
     /// 状态栏左文适配（S1）：超宽时中段省略为 head…tail（尾多留，路径文件名优先可见）。
-    /// 结果按 (原文, 可用宽, scale) 缓存；测量走 layout_preedit，不污染标签缓存。
+    /// 结果按 (原文, 可用宽, scale) 缓存；测量走 layout_ui，不污染标签缓存。
     fn fit_middle(
         &mut self,
         engine: &mut LayoutEngine,

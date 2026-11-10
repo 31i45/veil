@@ -81,9 +81,11 @@ pub fn clamp_window_geom(geom: WindowGeom, screens: &[ScreenRect]) -> WindowGeom
 }
 
 /// 正文字号（物理像素，缩放因子由调用方在 metrics/坐标上乘入）。
-pub const BASE_FONT_SIZE: f32 = 16.0;
+/// 单一来源：`tokens::typography::BODY_SIZE`。
+pub const BASE_FONT_SIZE: f32 = crate::tokens::typography::BODY_SIZE;
 /// 正文行高（物理像素）。
-pub const BASE_LINE_HEIGHT: f32 = 22.0;
+/// 单一来源：`tokens::typography::BODY_LINE_HEIGHT`。
+pub const BASE_LINE_HEIGHT: f32 = crate::tokens::typography::BODY_LINE_HEIGHT;
 /// 内容区左右边距（物理像素）。
 pub const MARGIN: f32 = 16.0;
 /// 块间垂直间距（物理像素）。

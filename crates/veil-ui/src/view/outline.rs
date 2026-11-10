@@ -6,7 +6,8 @@
 
 use veil_core::BlockId;
 
-use crate::geometry::{Rect, BASE_FONT_SIZE};
+use crate::geometry::Rect;
+use crate::tokens::typography;
 
 /// 面板基准宽（乘 DPI scale）。
 pub const PANEL_W: f32 = 240.0;
@@ -156,9 +157,9 @@ pub(crate) fn hit_row(
 pub(crate) fn fit_label(text: &str, max_w: f32, scale: f32) -> String {
     let width_of = |c: char| {
         if c.is_ascii() {
-            BASE_FONT_SIZE * 0.55 * scale
+            typography::UI_SIZE * 0.55 * scale
         } else {
-            BASE_FONT_SIZE * scale
+            typography::UI_SIZE * scale
         }
     };
     if text.chars().map(width_of).sum::<f32>() <= max_w {

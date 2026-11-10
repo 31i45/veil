@@ -6,7 +6,8 @@
 
 use veil_core::Range;
 
-use crate::geometry::{Rect, BASE_FONT_SIZE};
+use crate::geometry::Rect;
+use crate::tokens::typography;
 
 /// 浮栏基准宽（乘 DPI scale）。
 pub const BAR_W: f32 = 360.0;
@@ -201,9 +202,9 @@ pub(crate) fn text_width(text: &str, scale: f32) -> f32 {
     text.chars()
         .map(|c| {
             if c.is_ascii() {
-                BASE_FONT_SIZE * 0.6 * scale
+                typography::UI_SIZE * 0.6 * scale
             } else {
-                BASE_FONT_SIZE * scale
+                typography::UI_SIZE * scale
             }
         })
         .sum()
@@ -214,14 +215,14 @@ pub(crate) fn fit_query(text: &str, max_w: f32, scale: f32) -> String {
     if text_width(text, scale) <= max_w {
         return text.to_string();
     }
-    let avail = (max_w - BASE_FONT_SIZE * scale).max(0.0);
+    let avail = (max_w - typography::UI_SIZE * scale).max(0.0);
     let mut tail: Vec<char> = Vec::new();
     let mut w = 0.0;
     for c in text.chars().rev() {
         let cw = if c.is_ascii() {
-            BASE_FONT_SIZE * 0.6 * scale
+            typography::UI_SIZE * 0.6 * scale
         } else {
-            BASE_FONT_SIZE * scale
+            typography::UI_SIZE * scale
         };
         if w + cw > avail {
             break;

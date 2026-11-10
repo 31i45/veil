@@ -112,10 +112,13 @@ fn file_menu_injects_recent_before_quit() {
         Some(MenuAction::OpenRecent(1))
     );
     assert_eq!(action_at(0, rows.len(), &recent), None);
-    // 高度随项数增长：两项行高 + 一条分隔线
+    // 高度随项数增长：两项行高 + 一个分组间距（无分隔线）
     let p0 = popup_layout(0, 1.0, &[], 1000.0);
     let p1 = popup_layout(0, 1.0, &recent, 1000.0);
-    assert_eq!(p1.h - p0.h, 2.0 * crate::theme::surface::ROW_HEIGHT + 4.0);
+    assert_eq!(
+        p1.h - p0.h,
+        2.0 * crate::theme::surface::ROW_HEIGHT + crate::tokens::space::S
+    );
     for (i, ix, iy, iw, ih) in &p1.items {
         assert_eq!(
             hit_popup_item(ix + iw / 2.0, iy + ih / 2.0, 0, 1.0, &recent, 1000.0),

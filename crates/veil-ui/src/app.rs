@@ -1108,6 +1108,7 @@ impl ApplicationHandler for App {
             } => {
                 self.window_state.dragging = false;
                 self.ui_state.chrome.scroll_drag = None;
+                self.ui_state.search.pressed = None;
             }
             WindowEvent::MouseWheel { delta, .. } => {
                 if self.input_state.mods.ctrl {

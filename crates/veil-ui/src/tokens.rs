@@ -13,8 +13,6 @@ pub(crate) mod surface {
     pub const ROW_HEIGHT: f32 = 28.0;
     /// 内边距（px）
     pub const PADDING: f32 = 12.0;
-    /// 分隔线高（px）
-    pub const DIVIDER_HEIGHT: f32 = 4.0;
     /// 悬停内缩（px）：悬停底色相对条目外边界内缩，形成「浮起」边距
     pub const HOVER_INSET: f32 = 3.0;
     /// 面板外边距（px）：浮起卡片与窗口边缘/滚动条之间的间距
@@ -68,9 +66,6 @@ pub(crate) mod surface {
     }
     pub fn padding(scale: f32) -> f32 {
         PADDING * scale
-    }
-    pub fn divider_height(scale: f32) -> f32 {
-        DIVIDER_HEIGHT * scale
     }
     pub fn hover_inset(scale: f32) -> f32 {
         HOVER_INSET * scale
@@ -155,10 +150,48 @@ pub(crate) mod space {
     pub const XL: f32 = 24.0;
 }
 
-/// 线宽刻度（px）：发丝线与分隔线。
+/// 线宽刻度（px）：浮层与 chrome 的唯一边界线。
 pub(crate) mod stroke {
     pub const HAIRLINE: f32 = 1.0;
-    pub const DIVIDER: f32 = 1.0;
+}
+
+/// 交互状态矩阵（S4）：六态的单一颜色来源。
+///
+/// 各 `paint_*` 只从这里取状态色，不再自行挑 `theme.*`，保证同一状态在
+/// 查找浮栏、菜单与状态栏处处一致。
+pub(crate) mod state {
+    use crate::theme::Theme;
+
+    /// hover：指针悬停在可交互控件上。
+    pub fn hover_bg(theme: &Theme) -> [u8; 4] {
+        theme.hover
+    }
+
+    /// active：控件按下，或当前活动项（已展开的菜单标题）。
+    pub fn pressed_bg(theme: &Theme) -> [u8; 4] {
+        theme.sel
+    }
+
+    /// focus：输入焦点所在字段的安静底色（比 hover 更轻，不额外画线）。
+    pub fn focus_bg(theme: &Theme) -> [u8; 4] {
+        let h = theme.hover;
+        [h[0], h[1], h[2], 170]
+    }
+
+    /// disabled：不可用控件的前景。
+    pub fn disabled_fg(theme: &Theme) -> [u8; 3] {
+        theme.muted
+    }
+
+    /// selected：开启/选中态前景。
+    pub fn selected_fg(theme: &Theme) -> [u8; 3] {
+        theme.accent
+    }
+
+    /// empty：无结果/空态前景。
+    pub fn empty_fg(theme: &Theme) -> [u8; 3] {
+        theme.danger
+    }
 }
 
 /// 字阶与字体族（D8）：UI 13 / 正文 16 / 代码 14。
@@ -203,7 +236,7 @@ pub(crate) mod motion {
 mod tests {
     use std::time::Duration;
 
-    use super::{motion, space, stroke, typography};
+    use super::{motion, space, state, stroke, typography};
 
     #[test]
     #[allow(clippy::assertions_on_constants)] // 令牌为编译期常量，仍按运行时断言校验
@@ -235,7 +268,19 @@ mod tests {
     #[allow(clippy::assertions_on_constants)] // 令牌为编译期常量，仍按运行时断言校验
     fn stroke_tokens_are_positive() {
         assert!(stroke::HAIRLINE > 0.0);
-        assert!(stroke::DIVIDER > 0.0);
+    }
+
+    #[test]
+    fn state_matrix_has_single_source_and_distinct_states() {
+        let light = crate::theme::Theme::light();
+        let dark = crate::theme::Theme::dark();
+        assert_eq!(state::hover_bg(&light), light.hover);
+        assert_eq!(state::pressed_bg(&light), light.sel);
+        assert_eq!(state::focus_bg(&light)[3], 170, "focus 比 hover 更轻");
+        assert_eq!(state::disabled_fg(&light), light.muted);
+        assert_eq!(state::selected_fg(&light), light.accent);
+        assert_eq!(state::empty_fg(&light), light.danger);
+        assert_ne!(state::hover_bg(&dark), state::pressed_bg(&dark));
     }
 
     #[test]

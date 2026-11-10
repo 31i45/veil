@@ -819,6 +819,8 @@ impl App {
                 &recent,
                 flags,
             );
+            // L2 命中刻度：滚动条之后绘制，叠在轨道/滑块上（只作位置提示）
+            self.paint_search_ticks(&mut frame, vp);
         }
         // 应用内模态：覆盖菜单栏与状态栏的最后一层；打印帧不含遮罩
         if self.ui_state.modal.is_some() && self.window_state.print.is_none() {
@@ -1139,8 +1141,9 @@ impl App {
         }
     }
 
-    /// 查找栏（P3-3）：底色 → 按钮悬停底色 → 边框/分隔线 → 查询文本/IME 组合串
-    /// → 计数 → 按钮字形；替换模式（Ctrl+H）多一行替换输入与「替换」/「全部」。
+    /// 查找栏（P3-3）：一张卡片（唯一一条边界线）→ 焦点字段底色 → 按钮
+    /// hover/active 底色 → 查询文本/IME → 计数 → 按钮字形。替换模式（Ctrl+H）
+    /// 在下方多一行替换输入；两行之间只用间距分组，不画任何内部分隔线（S3）。
     /// 栏不透明覆盖内容；标签复用 chrome 位图缓存（随主题失效）。
     pub(crate) fn paint_search(&mut self, frame: &mut Frame) {
         let Some(l) = self.search_rect() else {
@@ -1155,57 +1158,76 @@ impl App {
         let bx = bar.x.round() as i32;
         let by = bar.y.round() as i32;
         let bw = bar.w.ceil() as u32;
-        let bh = bar.h.ceil() as u32;
         let bottom = rl.map_or(bar.y + bar.h, |r| r.row.y + r.row.h).round() as i32;
         let total_h = (bottom - by).max(1) as u32;
-        let sep_y = (bar.y + bar.h).round() as i32;
-        frame.fill_surface_card(bx, by, bw, total_h, scale, theme.dark, theme.popup_bg, theme.chrome_border);
-        // 按钮悬停底色（两行按钮同一枚举）
-        let mut hovers = vec![
+        frame.fill_surface_card(
+            bx,
+            by,
+            bw,
+            total_h,
+            scale,
+            theme.dark,
+            theme.popup_bg,
+            theme.chrome_border,
+        );
+        // S4 focus：焦点字段用安静底色表达（不再画 accent 下划线）。
+        let field_radius = (crate::theme::surface::corner_radius(scale) - 2.0 * scale).max(0.0);
+        let paint_field = |frame: &mut Frame, r: Rect| {
+            frame.fill_rounded_rect(
+                r.x.round() as i32,
+                r.y.round() as i32,
+                r.w.ceil() as u32,
+                r.h.ceil() as u32,
+                field_radius,
+                crate::tokens::state::focus_bg(&theme),
+            );
+        };
+        if search.focus == search::Field::Query {
+            paint_field(frame, l.text);
+        }
+        if let Some(r) = rl {
+            if search.focus == search::Field::Replace {
+                paint_field(frame, r.text);
+            }
+        }
+        // S4 hover / active：六态矩阵是唯一色源。
+        let mut buttons = vec![
             (search::Hit::Prev, l.prev),
             (search::Hit::Next, l.next),
             (search::Hit::Close, l.close),
             (search::Hit::ToggleCase, l.case),
         ];
         if let Some(r) = rl {
-            hovers.push((search::Hit::ReplaceOne, r.one));
-            hovers.push((search::Hit::ReplaceAll, r.all));
+            buttons.push((search::Hit::ReplaceOne, r.one));
+            buttons.push((search::Hit::ReplaceAll, r.all));
         }
-        for (hit, r) in hovers {
-            if search.hover == Some(hit) {
-                frame.fill_hover(
-                    r.x.round() as i32,
-                    r.y.round() as i32,
-                    r.w.ceil() as u32,
-                    r.h.ceil() as u32,
-                    scale,
-                    theme.hover,
-                );
-            }
-        }
-        // 栏内分隔线（1px）：替换行与按钮间，左右内缩与输入区文字对齐
-        //（卡片外框由 fill_surface_card 提供）
-        if replace {
-            let pad = crate::theme::surface::padding(scale);
-            frame.fill_rect(
-                (bx as f32 + pad).round() as i32,
-                sep_y,
-                (bw as f32 - 2.0 * pad).max(1.0) as u32,
-                1,
-                theme.chrome_border,
-            );
-        }
-        for r in [l.prev, l.next, l.close, l.case] {
-            frame.fill_rect(
+        for (hit, r) in buttons {
+            let color = if search.pressed == Some(hit) {
+                crate::tokens::state::pressed_bg(&theme)
+            } else if search.hover == Some(hit) {
+                crate::tokens::state::hover_bg(&theme)
+            } else {
+                continue;
+            };
+            frame.fill_hover(
                 r.x.round() as i32,
-                r.y.round() as i32 + 1,
-                1,
-                bh.saturating_sub(2),
-                theme.chrome_border,
+                r.y.round() as i32,
+                r.w.ceil() as u32,
+                r.h.ceil() as u32,
+                scale,
+                color,
             );
         }
         let mid = bar.y + bar.h / 2.0;
         let text_y = |h: u32| (mid - h as f32 / 2.0).round() as i32;
+        // 计数并入输入区右侧：查询文本可用宽度先扣除计数占位。
+        let count = search.label();
+        let count_w = if count.is_empty() {
+            0.0
+        } else {
+            search::COUNT_W * scale
+        };
+        let query_avail = (l.text.w - count_w).max(0.0);
         // 查询文本：空串显示占位提示；非空保留尾部（正在输入的一端）
         // 光标 x 只跟随真实查询文本（占位提示不计入）：空串时落在输入区左端，
         // 有文本时落在文本末端——两者共同表达「插入点」，占位文案不参与定位。
@@ -1228,7 +1250,7 @@ impl App {
                 }
             }
         } else {
-            let shown = search::fit_query(&search.query, l.text.w, scale);
+            let shown = search::fit_query(&search.query, query_avail, scale);
             if let Some(lab) = self.ui_state.chrome.labels.get_or_insert(
                 &mut self.engine,
                 &shown,
@@ -1273,18 +1295,7 @@ impl App {
                 );
             }
         }
-        // 查询行焦点下划线：与替换是否展开无关，焦点在查询框即画。
-        // 用 accent 2px 表达焦点（低对比边框色在浅色底上几乎不可见）。
-        if focus == search::Field::Query {
-            frame.fill_rect(
-                l.text.x.round() as i32,
-                (bar.y + bar.h).round() as i32 - 2,
-                l.text.w.ceil() as u32,
-                2,
-                [theme.accent[0], theme.accent[1], theme.accent[2], 255],
-            );
-        }
-        // 替换行：文本框 → 焦点下划线 → IME 组合串 → 两个按钮字形
+        // 替换行：文本框 → IME 组合串 → 两个按钮字形（焦点底色已在卡片后绘制）
         if let Some(r) = rl {
             let rmid = r.row.y + r.row.h / 2.0;
             let rtext_y = |h: u32| (rmid - h as f32 / 2.0).round() as i32;
@@ -1349,30 +1360,18 @@ impl App {
                     );
                 }
             }
-            // 替换行焦点下划线：仅焦点在替换框时画（accent 2px，与查询行一致）
-            if focus == search::Field::Replace {
-                frame.fill_rect(
-                    r.text.x.round() as i32,
-                    (r.row.y + r.row.h).round() as i32 - 2,
-                    r.text.w.ceil() as u32,
-                    2,
-                    [theme.accent[0], theme.accent[1], theme.accent[2], 255],
-                );
-            }
             for (btn, glyph) in [(r.one, "替换"), (r.all, "全部")] {
-                frame.fill_rect(
-                    btn.x.round() as i32,
-                    btn.y.round() as i32 + 1,
-                    1,
-                    bh.saturating_sub(2),
-                    theme.chrome_border,
-                );
-                if let Some(lab) = self.ui_state.chrome.labels.get_or_insert(
-                    &mut self.engine,
-                    glyph,
-                    theme.text,
-                    scale,
-                ) {
+                let color = if search.matches.is_empty() {
+                    crate::tokens::state::disabled_fg(&theme)
+                } else {
+                    theme.text
+                };
+                if let Some(lab) =
+                    self.ui_state
+                        .chrome
+                        .labels
+                        .get_or_insert(&mut self.engine, glyph, color, scale)
+                {
                     let x = btn.x + (btn.w - lab.w as f32) / 2.0;
                     let y = btn.y + (btn.h - lab.h as f32) / 2.0;
                     frame.blit(
@@ -1385,22 +1384,26 @@ impl App {
                 }
             }
         }
-        // 计数「i/n」（右对齐；空查询不显示）
-        let count = search.label();
+        // 计数「i/n」：右对齐于输入区右缘；无命中用 danger 表达空态。
         if !count.is_empty() {
-            if let Some(lab) = self.ui_state.chrome.labels.get_or_insert(
-                &mut self.engine,
-                &count,
-                theme.muted,
-                scale,
-            ) {
+            let color = if search.no_matches() {
+                crate::tokens::state::empty_fg(&theme)
+            } else {
+                theme.muted
+            };
+            if let Some(lab) = self
+                .ui_state
+                .chrome
+                .labels
+                .get_or_insert(&mut self.engine, &count, color, scale)
+            {
                 let x = (l.count_right - lab.w as f32).round() as i32;
                 frame.blit(&lab.pixels, lab.w, lab.h, x, text_y(lab.h));
             }
         }
-        // 「区分大小写」开关字形：开启时用 accent 令牌表达选中态（悬停底色另行绘制）。
+        // 「区分大小写」开关字形：开启时用选中态前景（悬停底色另行绘制）。
         let case_color = if search.case_sensitive {
-            theme.accent
+            crate::tokens::state::selected_fg(&theme)
         } else {
             theme.text
         };
@@ -1420,12 +1423,21 @@ impl App {
                 y.round() as i32,
             );
         }
-        // 查询行按钮字形（居中）
-        for (r, glyph) in [(l.prev, "‹"), (l.next, "›"), (l.close, "×")] {
+        // 查询行按钮字形（居中）：无命中时翻页按钮为禁用前景。
+        let page_color = if search.matches.is_empty() {
+            crate::tokens::state::disabled_fg(&theme)
+        } else {
+            theme.text
+        };
+        for (r, glyph, color) in [
+            (l.prev, "‹", page_color),
+            (l.next, "›", page_color),
+            (l.close, "×", theme.text),
+        ] {
             if let Some(lab) = self.ui_state.chrome.labels.get_or_insert(
                 &mut self.engine,
                 glyph,
-                theme.text,
+                color,
                 scale,
             ) {
                 let x = r.x + (r.w - lab.w as f32) / 2.0;
@@ -1438,6 +1450,38 @@ impl App {
                     y.round() as i32,
                 );
             }
+        }
+    }
+
+    /// L2 命中刻度：查找打开且有命中时，在主滚动条轨道标出命中位置。
+    /// 只作位置提示，不改变滚动/命中语义；按视口像素高度采样，避免长文档
+    /// 上千命中逐条绘制；当前命中最后绘制并用 accent 强调。
+    pub(crate) fn paint_search_ticks(&mut self, frame: &mut Frame, vp: crate::chrome::Viewport) {
+        let search = &self.ui_state.search;
+        if !search.open || search.matches.is_empty() {
+            return;
+        }
+        let total = self.editor.session().text_len().max(1);
+        let scale = self.input_state.scale;
+        let theme = self.input_state.theme;
+        let lane = (crate::chrome::SCROLL_W * scale).ceil() as u32;
+        let w = lane.saturating_sub((6.0 * scale) as u32).max(1);
+        let x = (frame.width as f32 - lane as f32 + 3.0 * scale).round() as i32;
+        let h = (2.0 * scale).round().max(1.0) as u32;
+        let tick_y = |start: usize| {
+            let t = start.min(total) as f32 / total as f32;
+            (vp.y + t * vp.h - h as f32 / 2.0).round() as i32
+        };
+        let stride = (search.matches.len() as f32 / vp.h.max(1.0)).ceil().max(1.0) as usize;
+        for (i, m) in search.matches.iter().enumerate().step_by(stride) {
+            if i == search.current {
+                continue;
+            }
+            frame.fill_rect(x, tick_y(m.start), w, h, theme.thumb);
+        }
+        if let Some(m) = search.matches.get(search.current) {
+            let a = theme.accent;
+            frame.fill_rect(x, tick_y(m.start), w, h, [a[0], a[1], a[2], 255]);
         }
     }
 
@@ -1660,16 +1704,7 @@ impl App {
         let ph = l.h.ceil() as u32;
         frame.fill_surface_card(px, py, pw, ph, scale, theme.dark, theme.popup_bg, theme.chrome_border);
         let hover = self.ui_state.ctx.hover;
-        // 分组分隔线：左右内缩，与文字起止对齐
-        for sy in &l.seps {
-            frame.fill_rect(
-                (l.x + l.pad).round() as i32,
-                (l.y + sy).round() as i32,
-                (l.w - 2.0 * l.pad).max(1.0) as u32,
-                1,
-                theme.chrome_border,
-            );
-        }
+        // S3：只有卡片边界线；分组间距由布局提供，不再绘制分隔线。
         for (i, off) in &l.rows {
             let Some((label, _)) = items.get(*i) else {
                 continue;
@@ -1682,7 +1717,7 @@ impl App {
                     pw,
                     l.item_h.ceil() as u32,
                     scale,
-                    theme.hover,
+                    crate::tokens::state::hover_bg(&theme),
                 );
             }
             if let Some(lab) = self.ui_state.chrome.labels.get_or_insert(

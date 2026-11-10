@@ -1,7 +1,7 @@
 //! 右键上下文菜单（2f）：选区/链接/块三类上下文的项集、几何与命中。
 //! 纯模型与几何：不绘制（paint.rs 消费布局）、不执行（interaction.rs 分发动作）。
 
-use crate::tokens::typography;
+use crate::tokens::{space, typography};
 
 /// 上下文菜单动作：执行映射在 interaction.rs（复用既有剪贴板/插入路径）。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -174,10 +174,8 @@ pub(crate) struct Layout {
     pub(crate) pad: f32,
     /// 面板内边距（上下各一份），命中与绘制共用。
     pub(crate) top_pad: f32,
-    /// (项下标, 相对面板顶部的 y 偏移)；分隔线不在此列。
+    /// (项下标, 相对面板顶部的 y 偏移)；分隔符不在此列。
     pub(crate) rows: Vec<(usize, f32)>,
-    /// 分隔线中线相对面板顶部的偏移。
-    pub(crate) seps: Vec<f32>,
 }
 
 pub(crate) fn layout(
@@ -191,7 +189,8 @@ pub(crate) fn layout(
     let pad = crate::theme::surface::padding(scale);
     let top_pad = 4.0 * scale;
     let item_h = crate::theme::surface::row_height(scale);
-    let sep_h = crate::theme::surface::divider_height(scale);
+    // 分组只用间距，不画分隔线（S3）。
+    let sep_h = space::S * scale;
     let widest = items
         .iter()
         .filter(|(_, a)| *a != CtxAction::Separator)
@@ -200,10 +199,8 @@ pub(crate) fn layout(
     let w = (widest + 2.0 * pad).max(120.0 * scale);
     let mut cur = top_pad;
     let mut rows = Vec::with_capacity(items.len());
-    let mut seps = Vec::new();
     for (i, (_, a)) in items.iter().enumerate() {
         if *a == CtxAction::Separator {
-            seps.push(cur + sep_h / 2.0);
             cur += sep_h;
         } else {
             rows.push((i, cur));
@@ -222,7 +219,6 @@ pub(crate) fn layout(
         pad,
         top_pad,
         rows,
-        seps,
     }
 }
 
@@ -422,12 +418,19 @@ mod tests {
             None,
             "面板外无命中"
         );
-        // 分隔线中线上无命中
-        for sy in &l.seps {
-            assert_eq!(hit(&l, l.x + 2.0, l.y + sy), None, "分隔线无命中");
-        }
-        // 面板高度 = 上内边距 + 可点项行高 + 分隔线占位 + 下内边距
-        let expect = 2.0 * l.top_pad + l.item_h * l.rows.len() as f32 + 4.0 * l.seps.len() as f32;
-        assert!((l.h - expect).abs() < 0.01, "高度包含分隔线占位");
+        // 分组只用 8px 间距：分隔符两侧的行间空档为 8px
+        let seps = items
+            .iter()
+            .filter(|(_, a)| *a == CtxAction::Separator)
+            .count();
+        let gaps = l
+            .rows
+            .windows(2)
+            .filter(|w| (w[1].1 - (w[0].1 + l.item_h) - 8.0).abs() < 0.01)
+            .count();
+        assert_eq!(gaps, seps, "每个分隔符对应一个 8px 分组间距");
+        // 面板高度 = 上内边距 + 可点项行高 + 分组间距 + 下内边距
+        let expect = 2.0 * l.top_pad + l.item_h * l.rows.len() as f32 + 8.0 * seps as f32;
+        assert!((l.h - expect).abs() < 0.01, "高度包含分组间距");
     }
 }

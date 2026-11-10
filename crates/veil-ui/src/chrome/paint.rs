@@ -10,7 +10,7 @@ use super::{
 };
 use crate::document::ExternalState;
 use crate::theme::Theme;
-use crate::tokens::{space, stroke};
+use crate::tokens::{space, state, stroke};
 use crate::view::{Frame, LayoutEngine};
 
 /// 文本排版宽度：UI 字阶（13px）排版后取文末光标的 x（单行 = 总宽）。
@@ -139,13 +139,21 @@ impl Chrome {
         // 菜单栏
         frame.fill_rect(0, 0, frame.width, menu_h.ceil() as u32, theme.chrome_bg);
         for (i, x, w) in menu_bar_rects(scale) {
-            if self.open == Some(i) || self.hover_menu == Some(i) {
+            // active（已展开）用按下色，hover 用悬停色：六态单源。
+            let bg = if self.open == Some(i) {
+                Some(state::pressed_bg(theme))
+            } else if self.hover_menu == Some(i) {
+                Some(state::hover_bg(theme))
+            } else {
+                None
+            };
+            if let Some(color) = bg {
                 frame.fill_rect(
                     x.round() as i32,
                     1,
                     w.ceil() as u32,
                     (menu_h - 1.0).max(1.0) as u32,
-                    theme.hover,
+                    color,
                 );
             }
             self.draw_left(
@@ -200,8 +208,24 @@ impl Chrome {
         let avail = right_edge - right_w - left_x - space::M * scale;
         let left_fitted = self.fit_middle(engine, &left, avail, scale);
         let left_w = measure_w(engine, &left_fitted);
-        self.draw_left(frame, engine, &left_fitted, left_x, mid, theme.muted, scale);
-        self.draw_right(frame, engine, &right, right_edge, mid, theme.muted, scale);
+        self.draw_left(
+            frame,
+            engine,
+            &left_fitted,
+            left_x,
+            mid,
+            state::disabled_fg(theme),
+            scale,
+        );
+        self.draw_right(
+            frame,
+            engine,
+            &right,
+            right_edge,
+            mid,
+            state::disabled_fg(theme),
+            scale,
+        );
         if !self.notice.is_empty() {
             // 通知只在中段空白内绘制：避让左右文本，空间不足则直接不画
             let gap = crate::theme::surface::control_gap(scale);
@@ -213,7 +237,7 @@ impl Chrome {
                 let fitted = self.fit_middle(engine, &notice, avail_notice, scale);
                 if let Some(l) = self
                     .labels
-                    .get_or_insert(engine, &fitted, theme.muted, scale)
+                    .get_or_insert(engine, &fitted, state::disabled_fg(theme), scale)
                 {
                     let x = x0 + (avail_notice - l.w as f32) / 2.0;
                     let y = mid - l.h as f32 / 2.0;
@@ -261,16 +285,6 @@ impl Chrome {
                 theme.chrome_border,
             );
             let pad = crate::theme::surface::padding(scale);
-            // 分隔线：左右内缩与菜单项文字起止对齐（不顶到弹层边框）
-            for (_, sy) in &p.separators {
-                frame.fill_rect(
-                    (p.x + pad).round() as i32,
-                    sy.round() as i32,
-                    (p.w - 2.0 * pad).max(1.0) as u32,
-                    stroke::DIVIDER as u32,
-                    theme.chrome_border,
-                );
-            }
             for (i, ix, iy, iw, ih) in &p.items {
                 let Some((label, shortcut, action)) = rows.get(*i) else {
                     continue;
@@ -284,17 +298,13 @@ impl Chrome {
                         iw.ceil() as u32,
                         ih.ceil() as u32,
                         scale,
-                        theme.hover,
+                        state::hover_bg(theme),
                     );
                 }
                 // 主题项 / 开关项：开启态在右侧显示「当前」（快捷键列复用）
-                let hint = if theme_action_matches(*action, theme.mode)
-                    || action_checked(*action, flags)
-                {
-                    "当前"
-                } else {
-                    shortcut
-                };
+                let is_current = theme_action_matches(*action, theme.mode)
+                    || action_checked(*action, flags);
+                let hint = if is_current { "当前" } else { shortcut };
                 // 标签可用宽 = 行内宽 - 左右内边距 - 右侧提示占位
                 let inner = iw - 2.0 * pad;
                 let hint_w = if hint.is_empty() {
@@ -308,7 +318,11 @@ impl Chrome {
                 } else {
                     label.to_string()
                 };
-                let label_color = if enabled { theme.text } else { theme.muted };
+                let label_color = if enabled {
+                    theme.text
+                } else {
+                    state::disabled_fg(theme)
+                };
                 self.draw_left(
                     frame,
                     engine,
@@ -325,7 +339,11 @@ impl Chrome {
                         hint,
                         ix + iw - pad,
                         iy + ih / 2.0,
-                        theme.muted,
+                        if is_current {
+                            state::selected_fg(theme)
+                        } else {
+                            state::disabled_fg(theme)
+                        },
                         scale,
                     );
                 }

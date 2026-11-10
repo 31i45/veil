@@ -1504,7 +1504,13 @@ impl App {
         }
         // 查找栏（P3-3）：浮在内容之上，先于滚动条/大纲/正文命中
         if let Some(l) = self.search_rect() {
-            match search::hit(&l, scale, self.ui_state.search.replace_open, mx, my) {
+            let hit = search::hit(&l, scale, self.ui_state.search.replace_open, mx, my);
+            // active 态：按下即记录，松开（app.rs 的 Released 分支）清空。
+            if let Some(h) = hit {
+                self.ui_state.search.pressed = Some(h);
+                self.request_redraw();
+            }
+            match hit {
                 Some(search::Hit::Close) => {
                     self.close_search();
                     return false;

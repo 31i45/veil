@@ -132,11 +132,12 @@ impl SessionStore for FakeSession {
     }
 }
 
-/// 既有测试的默认持久化环境：空恢复槽 + 空会话（不产生任何恢复行为）。
+/// 既有测试的默认持久化环境：空恢复槽 + 空会话 + 空快照。
 fn persist_env() -> PersistEnv {
     PersistEnv {
         recovery: Box::new(FakeRecovery::default()),
         session: Box::new(FakeSession::default()),
+        snapshot: Box::new(FakeSnapshot),
     }
 }
 
@@ -145,7 +146,15 @@ fn persist_env_with(recovery: FakeRecovery, session: FakeSession) -> PersistEnv 
     PersistEnv {
         recovery: Box::new(recovery),
         session: Box::new(session),
+        snapshot: Box::new(FakeSnapshot),
     }
+}
+
+struct FakeSnapshot;
+impl SnapshotStore for FakeSnapshot {
+    fn save_snapshot(&mut self, _: u64, _: &str) -> Result<u64, String> { Ok(0) }
+    fn list_snapshots(&mut self, _: u64) -> Result<Vec<u64>, String> { Ok(Vec::new()) }
+    fn prune(&mut self, _: u64, _: usize) -> Result<usize, String> { Ok(0) }
 }
 
 /// 不加载任何图片（既有测试的默认注入）：所有图片降级 alt 文本。

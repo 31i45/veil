@@ -40,7 +40,7 @@ mod app_tests;
 
 pub use app::{
     run, url_is_openable, Clipboard, Clock, Doc, Exporter, FileDialog, FileEvent, FileStore,
-    FileWatcher, PersistEnv, Ports, RecoveryStore, SessionStore, UrlOpener,
+    FileWatcher, PersistEnv, Ports, RecoveryStore, SessionStore, SnapshotStore, UrlOpener,
 };
 pub use chrome::path_label;
 pub use docio::decode;

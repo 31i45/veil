@@ -54,6 +54,21 @@ pub(crate) enum Hit {
     Bar,
 }
 
+impl Hit {
+    /// 过渡动画槽位（S6）：顺序与绘制侧按钮序列一致；非按钮目标不参与动效。
+    pub(crate) fn anim_index(self) -> Option<usize> {
+        Some(match self {
+            Hit::Prev => 0,
+            Hit::Next => 1,
+            Hit::Close => 2,
+            Hit::ToggleCase => 3,
+            Hit::ReplaceOne => 4,
+            Hit::ReplaceAll => 5,
+            Hit::QueryText | Hit::ReplaceText | Hit::Bar => return None,
+        })
+    }
+}
+
 /// 查找栏内当前输入焦点：查询串或替换串。
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub(crate) enum Field {
@@ -334,6 +349,8 @@ pub(crate) struct Search {
     pub(crate) hover: Option<Hit>,
     /// 鼠标按下中的按钮（active 态）；松开或关闭时清空。
     pub(crate) pressed: Option<Hit>,
+    /// 悬停过渡（S6）：按钮 hover 底色淡入/淡出（active 按下色不参与）。
+    pub(crate) fade: crate::anim::Fade,
 }
 
 impl Search {
@@ -646,6 +663,7 @@ mod tests {
             current: 1,
             hover: Some(Hit::Next),
             pressed: Some(Hit::Next),
+            ..Default::default()
         };
         s.clear();
         assert!(s.query.is_empty());

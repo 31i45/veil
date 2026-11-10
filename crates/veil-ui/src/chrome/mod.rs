@@ -11,7 +11,9 @@ mod cache;
 mod paint;
 
 use std::path::Path;
+use std::time::Instant;
 
+use crate::anim::Fade;
 use crate::document::ExternalState;
 use crate::theme::ThemeMode;
 use crate::tokens::{space, typography};
@@ -477,6 +479,10 @@ pub struct Chrome {
     /// 状态栏左文中段省略结果缓存（S1）：键 = (原文, 可用宽 bits, scale bits)。
     /// 打字期右文变而左文/窗口不变，命中避免每帧二分重排。
     pub(crate) status_fit: std::collections::HashMap<(String, u32, u32), String>,
+    /// 菜单栏项悬停过渡（S6）。
+    pub(crate) menu_fade: Fade,
+    /// 弹出菜单项悬停过渡（S6）。
+    pub(crate) popup_fade: Fade,
 }
 
 impl Chrome {
@@ -505,6 +511,25 @@ impl Chrome {
     pub fn clear_label_cache(&mut self) {
         self.labels.clear();
         self.status_fit.clear();
+    }
+
+    /// 推进 chrome 悬停过渡（S6）：菜单栏项与弹出菜单项各一条。
+    pub(crate) fn anim_tick(&mut self, now: Instant) {
+        self.menu_fade.tick(now, self.hover_menu);
+        // 弹出项下标在同一打开菜单内唯一，直接作为过渡槽标识。
+        self.popup_fade
+            .tick(now, self.hover_item.map(|(_, i)| i));
+    }
+
+    /// 是否仍有过渡在跑。
+    pub(crate) fn anim_running(&self) -> bool {
+        self.menu_fade.running() || self.popup_fade.running()
+    }
+
+    /// 动效开关（系统「显示动画」）：关闭后悬停立即到位。
+    pub(crate) fn set_animations(&mut self, on: bool) {
+        self.menu_fade.set_enabled(on);
+        self.popup_fade.set_enabled(on);
     }
 }
 

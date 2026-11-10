@@ -115,6 +115,8 @@ pub(crate) struct CtxMenu {
     pub(crate) x: f32,
     pub(crate) y: f32,
     pub(crate) hover: Option<usize>,
+    /// 悬停过渡（S6）：菜单项高亮淡入/淡出。
+    pub(crate) fade: crate::anim::Fade,
     pub(crate) link: Option<String>,
     /// 表格上下文（打开时刻定；执行结构操作时读行列信息）。
     pub(crate) table: Option<TableCtx>,

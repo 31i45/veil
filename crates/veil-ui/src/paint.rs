@@ -964,10 +964,16 @@ impl App {
             crate::tokens::palette::surface_popup(&theme),
             theme.chrome_border,
         );
+        let fade = self
+            .ui_state
+            .outline
+            .fade
+            .view(self.ui_state.outline.hover);
         for row in outline::visible_rows(panel, count, self.ui_state.outline.scroll, scale) {
             let is_current = current == Some(row.index);
             // 当前条目与悬停同底色：只画一次，避免重复叠加变暗。
-            if is_current || self.ui_state.outline.hover == Some(row.index) {
+            // 悬停高亮走过渡不透明度（S6）；当前条目是派生状态，始终满值。
+            if is_current {
                 frame.fill_hover(
                     x,
                     row.y.round() as i32,
@@ -975,6 +981,15 @@ impl App {
                     row.h.ceil() as u32,
                     scale,
                     theme.hover,
+                );
+            } else if let Some(a) = fade.alpha_of(row.index) {
+                frame.fill_hover(
+                    x,
+                    row.y.round() as i32,
+                    w,
+                    row.h.ceil() as u32,
+                    scale,
+                    [theme.hover[0], theme.hover[1], theme.hover[2], a],
                 );
             }
             if is_current {
@@ -1157,6 +1172,13 @@ impl App {
         let theme = self.input_state.theme;
         let search = &self.ui_state.search;
         let replace = search.replace_open;
+        // 过渡目标与 animate 侧同源：pressed 优先，其次 hover。
+        let fade = search.fade.view(
+            search
+                .pressed
+                .or(search.hover)
+                .and_then(search::Hit::anim_index),
+        );
         let rl = replace.then(|| search::replace_layout(&l, scale));
         let bar = l.bar;
         let bx = bar.x.round() as i32;
@@ -1205,12 +1227,15 @@ impl App {
             buttons.push((search::Hit::ReplaceOne, r.one));
             buttons.push((search::Hit::ReplaceAll, r.all));
         }
-        for (hit, r) in buttons {
+        for (idx, (hit, r)) in buttons.into_iter().enumerate() {
+            // active（按下）即时到位；hover 走过渡不透明度（S6）。
             let color = if search.pressed == Some(hit) {
-                crate::tokens::state::pressed_bg(&theme)
-            } else if search.hover == Some(hit) {
-                crate::tokens::state::hover_bg(&theme)
+                Some(crate::tokens::state::pressed_bg(&theme))
             } else {
+                let h = crate::tokens::state::hover_bg(&theme);
+                fade.alpha_of(idx).map(|a| [h[0], h[1], h[2], a])
+            };
+            let Some(color) = color else {
                 continue;
             };
             frame.fill_hover(
@@ -1608,11 +1633,13 @@ impl App {
         }
 
         // 候选行：底色 → 来源提示（右对齐）→ 文件名（左对齐，避让提示后截断）
+        // 选中行是键盘派生状态、始终满值；悬停行走过渡不透明度（S6）。
+        let fade = self.ui_state.quick.fade.view(hover);
         for (slot, label, hint, recent) in visible {
             let Some(row) = l.rows.get(slot - top) else {
                 continue;
             };
-            if slot == selected || hover == Some(slot) {
+            if slot == selected {
                 frame.fill_hover(
                     row.x.round() as i32,
                     row.y.round() as i32,
@@ -1620,6 +1647,15 @@ impl App {
                     row.h.ceil() as u32,
                     scale,
                     theme.hover,
+                );
+            } else if let Some(a) = fade.alpha_of(slot) {
+                frame.fill_hover(
+                    row.x.round() as i32,
+                    row.y.round() as i32,
+                    row.w.ceil() as u32,
+                    row.h.ceil() as u32,
+                    scale,
+                    [theme.hover[0], theme.hover[1], theme.hover[2], a],
                 );
             }
             if label.is_empty() {
@@ -1708,20 +1744,22 @@ impl App {
         let ph = l.h.ceil() as u32;
         frame.fill_surface_card(px, py, pw, ph, scale, theme.dark, crate::tokens::palette::surface_popup(&theme), theme.chrome_border);
         let hover = self.ui_state.ctx.hover;
+        let fade = self.ui_state.ctx.fade.view(hover);
         // S3：只有卡片边界线；分组间距由布局提供，不再绘制分隔线。
         for (i, off) in &l.rows {
             let Some((label, _)) = items.get(*i) else {
                 continue;
             };
             let iy = l.y + off;
-            if hover == Some(*i) {
+            if let Some(a) = fade.alpha_of(*i) {
+                let h = crate::tokens::state::hover_bg(&theme);
                 frame.fill_hover(
                     px,
                     iy.round() as i32,
                     pw,
                     l.item_h.ceil() as u32,
                     scale,
-                    crate::tokens::state::hover_bg(&theme),
+                    [h[0], h[1], h[2], a],
                 );
             }
             if let Some(lab) = self.ui_state.chrome.labels.get_or_insert(

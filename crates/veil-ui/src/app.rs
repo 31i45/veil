@@ -379,6 +379,8 @@ pub(crate) struct WindowState {
     /// 本次会话的实时几何：与 `config.window` 分开存放，最大化/最小化期间不写入，
     /// 避免把最大化尺寸覆盖成「上次常规尺寸」。
     pub(crate) geom: Option<WindowGeom>,
+    /// 悬停过渡上一帧时刻（S6）：按 ~60fps 限频重绘，避免窗口空转。
+    pub(crate) anim_last_frame: Option<Instant>,
     /// 测试专用窗口尺寸覆盖：headless 测试无 winit 窗口，需要验证超宽窗口排版时注入。
     #[cfg(test)]
     pub(crate) test_size: Option<(u32, u32)>,
@@ -400,6 +402,7 @@ impl Default for WindowState {
             exit_requested: false,
             geom_dirty: false,
             geom: None,
+            anim_last_frame: None,
             #[cfg(test)]
             test_size: None,
         }
@@ -891,6 +894,53 @@ impl App {
         self.maybe_autosave(now);
         self.maybe_recovery_write(now);
     }
+
+    /// 推进全部悬停过渡（S6）：绘制前调用，paint 只读缓存后的 alpha。
+    /// 目标项全部来自现有交互态，事件侧无需额外接线。
+    pub(crate) fn animate(&mut self, now: Instant) {
+        let ui = &mut self.ui_state;
+        let outline = ui.outline.hover;
+        ui.outline.fade.tick(now, outline);
+        let search = ui
+            .search
+            .pressed
+            .or(ui.search.hover)
+            .and_then(search::Hit::anim_index);
+        ui.search.fade.tick(now, search);
+        let quick = ui.quick.hover;
+        ui.quick.fade.tick(now, quick);
+        let ctx = ui.ctx.hover;
+        ui.ctx.fade.tick(now, ctx);
+        ui.chrome.anim_tick(now);
+        if let Some(m) = ui.modal.as_mut() {
+            let hovered = m.state.hovered;
+            m.state.fade.tick(now, hovered);
+        }
+    }
+
+    /// 是否仍有悬停过渡在跑（事件循环据此按帧继续重绘）。
+    pub(crate) fn anim_running(&self) -> bool {
+        let ui = &self.ui_state;
+        ui.outline.fade.running()
+            || ui.search.fade.running()
+            || ui.quick.fade.running()
+            || ui.ctx.fade.running()
+            || ui.chrome.anim_running()
+            || ui.modal.as_ref().is_some_and(|m| m.state.fade.running())
+    }
+
+    /// 动效总开关（S6）：系统「显示动画」关闭时全部立即到位（逐像素同无动效版本）。
+    pub(crate) fn set_animations(&mut self, on: bool) {
+        let ui = &mut self.ui_state;
+        ui.outline.fade.set_enabled(on);
+        ui.search.fade.set_enabled(on);
+        ui.quick.fade.set_enabled(on);
+        ui.ctx.fade.set_enabled(on);
+        ui.chrome.set_animations(on);
+        if let Some(m) = ui.modal.as_mut() {
+            m.state.fade.set_enabled(on);
+        }
+    }
 }
 
 impl ApplicationHandler for App {
@@ -949,6 +999,9 @@ impl ApplicationHandler for App {
         self.set_ime_area();
         self.window_state.window = Some(window);
         self.apply_window_effects();
+        // 动效开关（S6）：系统「显示动画」关闭时悬停高亮立即到位。
+        let animations = self.ports.system.animations_enabled();
+        self.set_animations(animations);
         self.request_redraw();
     }
 
@@ -1132,6 +1185,8 @@ impl ApplicationHandler for App {
             WindowEvent::RedrawRequested => {
                 // 先合并执行待处理尺寸变化，再绘制（一帧一次）
                 self.apply_pending_resize();
+                // 悬停过渡推进到当前时刻（S6）：绘制侧只读 alpha。
+                self.animate(Instant::now());
                 self.paint();
             }
             // 窗口重新获得焦点：立即校验系统外观（限频轮询最多滞后 1s，此处消除等待）
@@ -1214,6 +1269,21 @@ impl ApplicationHandler for App {
         if self.doc.path.is_some() {
             let watch_at = now + WATCH_POLL;
             next = Some(next.map_or(watch_at, |t| t.min(watch_at)));
+        }
+        // 悬停过渡（S6）：按 ~60fps 推进；帧点未到只登记唤醒，不空转重绘。
+        if self.anim_running() {
+            let due = self
+                .window_state
+                .anim_last_frame
+                .map_or(now, |t| t + crate::anim::FRAME);
+            if now >= due {
+                self.window_state.anim_last_frame = Some(now);
+                self.request_redraw();
+                let frame_at = now + crate::anim::FRAME;
+                next = Some(next.map_or(frame_at, |t| t.min(frame_at)));
+            } else {
+                next = Some(next.map_or(due, |t| t.min(due)));
+            }
         }
         event_loop.set_control_flow(match next {
             Some(t) => ControlFlow::WaitUntil(t),

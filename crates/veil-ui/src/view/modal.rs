@@ -94,6 +94,8 @@ impl ModalSpec {
 pub(crate) struct ModalState {
     pub(crate) focused: usize,
     pub(crate) hovered: Option<usize>,
+    /// 悬停过渡（S6）：按钮底色淡入/淡出。
+    pub(crate) fade: crate::anim::Fade,
 }
 
 impl ModalState {
@@ -107,6 +109,7 @@ impl ModalState {
         Self {
             focused,
             hovered: None,
+            fade: crate::anim::Fade::default(),
         }
     }
 
@@ -336,6 +339,7 @@ fn paint_buttons(
 ) {
     let radius = surface::corner_radius(scale);
     let line_h = BASE_LINE_HEIGHT * scale;
+    let fade = state.fade.view(state.hovered);
     for (i, button) in spec.buttons.iter().enumerate() {
         let Some(&rect) = layout.buttons.get(i) else {
             continue;
@@ -347,7 +351,7 @@ fn paint_buttons(
         let y = rect.y.round() as i32;
         let w = rect.w.round() as u32;
         let h = rect.h.round() as u32;
-        let hovered = state.hovered == Some(i);
+        let hover_alpha = fade.alpha_of(i);
         let focused = state.focused == i;
         match button.role {
             ButtonRole::Primary => {
@@ -370,12 +374,23 @@ fn paint_buttons(
                     )
                 };
                 stroke_rounded(frame, x, y, w, h, radius, border, palette::surface_popup(theme));
-                if hovered {
+                if let Some(a) = hover_alpha {
                     // 叠在描边内层，3px 内缩不会盖住 1px 边框。
-                    frame.fill_hover(x, y, w, h, scale, theme.hover);
+                    frame.fill_hover(
+                        x,
+                        y,
+                        w,
+                        h,
+                        scale,
+                        [theme.hover[0], theme.hover[1], theme.hover[2], a],
+                    );
                 }
                 if focused {
-                    let inner = if hovered { theme.hover } else { palette::surface_popup(theme) };
+                    let inner = if hover_alpha.is_some() {
+                        theme.hover
+                    } else {
+                        palette::surface_popup(theme)
+                    };
                     focus_ring(frame, rect, radius, theme.accent, inner);
                 }
                 draw_button_text(frame, text, &button.label, fg, rect, line_h);

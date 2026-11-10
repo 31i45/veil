@@ -547,6 +547,12 @@ pub struct NativeWindow {
 /// 读取失败返回 None（按浅色处理，不影响其它功能）。
 pub trait SystemTheme {
     fn is_dark(&mut self) -> Option<bool>;
+
+    /// 系统是否启用界面动画（Windows「显示动画」设置，S6）。
+    /// 默认 true：不关心此能力的实现无需改动；产品层读系统设置覆盖。
+    fn animations_enabled(&mut self) -> bool {
+        true
+    }
 }
 
 /// 窗口系统外观效果：深色标题栏与 Mica 背景材质。失败静默——内容区始终绘制不透明底色，

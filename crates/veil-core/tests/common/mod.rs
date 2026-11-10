@@ -181,7 +181,7 @@ pub fn actual_blocks(s: &Session) -> Vec<B> {
             BlockKind::Table => B::Table,
             BlockKind::BlockQuote | BlockKind::Admonition(_) => B::Quote,
             BlockKind::ThematicBreak => B::Rule,
-            BlockKind::LinkRefDef | BlockKind::FootnoteDef => continue,
+            BlockKind::LinkRefDef | BlockKind::FootnoteDef | BlockKind::FrontMatter(_) => continue,
             BlockKind::HtmlBlock => continue,
             BlockKind::ListItem { .. } => unreachable!("列表项已在上方处理"),
         };

@@ -443,7 +443,7 @@ fn fnv(h: &mut u64, v: u64) {
 /// 块级字号相对正文的额外倍率：代码块 14/16，其余 1.0。
 fn kind_scale(kind: &BlockKind) -> f32 {
     match kind {
-        BlockKind::FencedCode(_) | BlockKind::IndentedCode | BlockKind::HtmlBlock => {
+        BlockKind::FencedCode(_) | BlockKind::IndentedCode | BlockKind::HtmlBlock | BlockKind::FrontMatter(_) => {
             typography::CODE_SCALE
         }
         _ => 1.0,
@@ -1778,7 +1778,7 @@ pub(super) fn attrs_of(kind: BlockKind, st: Style, link_color: [u8; 3]) -> Attrs
     let a = if st.mono
         || matches!(
             kind,
-            BlockKind::FencedCode(_) | BlockKind::IndentedCode | BlockKind::HtmlBlock
+            BlockKind::FencedCode(_) | BlockKind::IndentedCode | BlockKind::HtmlBlock | BlockKind::FrontMatter(_)
         )
     {
         a.family(Family::Monospace)

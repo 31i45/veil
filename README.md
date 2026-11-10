@@ -115,7 +115,8 @@ Measured on release build, probe-serialized; performance rows re-verified 2026-1
 | Cold start (window handle; P2 comparison口径) | — | 30 ms (2026-10-30, `tools/bench/measure.ps1`) |
 | Keystroke→commit p95 on 100 K-word doc | ≤ 16 ms | 6.781 ms / 12.379 ms (`perf_keystroke_path` 5,005 blocks / `perf_keystroke_10k_blocks` 10,500 blocks; baseline 6.677 / 12.488; 2026-11-09) ✅ |
 | Resident memory, 100 K-word doc (private working set) | ≤ 150 MB | 40.76 MB (2026-11-05) |
-| Installed size (single-file `veil.exe`; no install directory or separate unpacked payload) | ≤ 6 MiB = 6,291,456 B | 6,100,480 B ≈ 5.82 MiB (2026-11-10); margin 190,976 B |
+| Installed size — code + data (non-icon) | ≤ 6 MiB = 6,291,456 B | 6,048,424 B (exe minus 56,664 B icon resources; 2026-11-10 Phase A Exit) |
+| Installed size — total single-file `veil.exe` | ≤ 6,348,120 B ≈ 6.05 MiB (6 MiB code + 55 KB icons) | 6,105,088 B ≈ 5.82 MiB (2026-11-10 Phase A Exit); margin 243,032 B |
 | `veil-core` unit + property tests | ≥ 80 | 209 |
 | E2E assertions | ≥ 20 | 41 (3 e2e scenarios: open→save→reopen, table+image paste, find/replace→crash recovery→self-clean) ✅ |
 | Markdown roundtrip (no edits: output == input bytes; byte comparison) | 100% | 100% |

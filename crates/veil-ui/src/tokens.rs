@@ -27,12 +27,20 @@ pub(crate) mod surface {
     pub const SCROLLBAR_MIN_THUMB: f32 = 24.0;
     /// 阴影整体向下偏移（px）
     pub const SHADOW_OFFSET_Y: f32 = 2.0;
-    /// 阴影层（外扩 px, 基础 alpha），自外向内排列：外层大而淡、内层小而浓，
+    /// Low 档阴影层（轻浮层：菜单/查找栏）：外扩 px + 基础 alpha，自外向内排列。
     /// 叠加大致等效 8px 高斯模糊 + 2px 下移。alpha 总和 72（深色 ×1.25 ≈ 90），
     /// 远低于「显脏」阈值（浅底上 alpha 和 >140 开始凝成灰团）。
     pub const SHADOW_LAYERS: &[(f32, u8)] = &[(8.0, 4), (6.0, 8), (4.0, 14), (2.0, 20), (1.0, 26)];
-    /// 深色主题阴影 alpha 增益
+    /// Low 档深色主题阴影 alpha 增益
     pub const SHADOW_DARK_GAIN: f32 = 1.25;
+    /// High 档阴影层（模态对话框）：比 Low 档多两层、外扩更大、alpha 更浓，
+    /// 强化「应用内对话框」层级，叠加大致等效 10px 高斯模糊。
+    #[allow(dead_code)] // 模态对话框 paint 改造后消费
+    pub const HIGH_SHADOW_LAYERS: &[(f32, u8)] =
+        &[(10.0, 4), (8.0, 6), (6.0, 10), (4.0, 16), (3.0, 22), (2.0, 28), (1.0, 34)];
+    /// High 档深色主题阴影 alpha 增益（模态在深底上需更强存在感）
+    #[allow(dead_code)] // 同上
+    pub const HIGH_SHADOW_DARK_GAIN: f32 = 1.35;
     /// 模态卡片圆角（px）：比普通浮层大一级，强调「应用内对话框」的层级。
     pub const DIALOG_RADIUS: f32 = 8.0;
     /// 模态卡片内边距（px）
@@ -129,10 +137,20 @@ pub(crate) mod surface {
         }
     }
 
-    /// 阴影单层 alpha：深色主题按增益放大（钳制 255）。
+    /// Low 档阴影单层 alpha：深色主题按增益放大（钳制 255）。
     pub fn shadow_alpha(base: u8, dark: bool) -> u8 {
         if dark {
             (base as f32 * SHADOW_DARK_GAIN).round().min(255.0) as u8
+        } else {
+            base
+        }
+    }
+
+    /// High 档阴影单层 alpha：模态专用，深色增益更强。
+    #[allow(dead_code)] // 模态对话框 paint 改造后消费
+    pub fn high_shadow_alpha(base: u8, dark: bool) -> u8 {
+        if dark {
+            (base as f32 * HIGH_SHADOW_DARK_GAIN).round().min(255.0) as u8
         } else {
             base
         }
@@ -153,6 +171,46 @@ pub(crate) mod space {
 /// 线宽刻度（px）：浮层与 chrome 的唯一边界线。
 pub(crate) mod stroke {
     pub const HAIRLINE: f32 = 1.0;
+}
+
+/// Surface 底色语义层（S5 + S7）：Theme 三档 surface 的单一入口。
+///
+/// 所有 paint_* 必须从这里取底色；不得直接访问 `theme.bg` / `theme.chrome_bg` /
+/// `theme.popup_bg` / `theme.table_head_bg` / `theme.code_bg`。
+///
+/// 映射表：
+/// | 语义 | Theme 字段 | 使用场景 |
+/// |---|---|---|
+/// | Base | bg | 页面/窗口底层背景 |
+/// | Card | chrome_bg | chrome 区条带、表头、代码块（比 Base 深一层但不弹起） |
+/// | Popup | popup_bg | 浮层/弹出/模态（带阴影弹起） |
+pub(crate) mod palette {
+    use crate::theme::Theme;
+
+    /// Base 档（页面底层）：正文区、chrome 底层。
+    pub fn surface_base(theme: &Theme) -> [u8; 4] {
+        theme.bg
+    }
+
+    /// Card 档：chrome 区条带（表头、菜单栏底）。
+    pub fn surface_card(theme: &Theme) -> [u8; 4] {
+        theme.chrome_bg
+    }
+
+    /// Popup 档（浮层）：菜单、查找栏、模态对话框。
+    pub fn surface_popup(theme: &Theme) -> [u8; 4] {
+        theme.popup_bg
+    }
+
+    /// 代码块底色：Card 档的特化（需要和正文拉开一点色差），独立访问器。
+    pub fn code_bg(theme: &Theme) -> [u8; 4] {
+        theme.code_bg
+    }
+
+    /// 表头底色：Card 档特化（表格列头比 Card 稍浅），独立访问器。
+    pub fn table_head_bg(theme: &Theme) -> [u8; 4] {
+        theme.table_head_bg
+    }
 }
 
 /// 交互状态矩阵（S4）：六态的单一颜色来源。
@@ -295,5 +353,35 @@ mod tests {
         // f32::round 取整到整数（0.875 → 1.0），故先按三位小数取整再比较。
         let mid = (motion::ease_out_cubic(0.5) * 1000.0).round() / 1000.0;
         assert!((mid - 0.875).abs() < 1e-6);
+    }
+
+    #[test]
+    #[allow(clippy::assertions_on_constants)]
+    fn high_shadow_layers_are_seven_layers_and_have_stronger_dark_gain() {
+        use super::surface::{HIGH_SHADOW_DARK_GAIN, HIGH_SHADOW_LAYERS, SHADOW_DARK_GAIN};
+        assert_eq!(HIGH_SHADOW_LAYERS.len(), 7, "High 档阴影必须 7 层");
+        assert!(HIGH_SHADOW_DARK_GAIN > SHADOW_DARK_GAIN, "High 档 dark 增益 > Low 档");
+    }
+
+    #[test]
+    fn high_shadow_alpha_clamps_at_255() {
+        use super::surface::high_shadow_alpha;
+        // 深色 + 大 base → 钳制到 255
+        assert_eq!(high_shadow_alpha(200, true), 255);
+        // 浅色不变
+        assert_eq!(high_shadow_alpha(20, false), 20);
+    }
+
+    #[test]
+    fn palette_module_maps_theme_fields_correctly() {
+        use super::palette;
+        use crate::theme::Theme;
+        for t in [Theme::light(), Theme::dark()] {
+            assert_eq!(palette::surface_base(&t), t.bg);
+            assert_eq!(palette::surface_card(&t), t.chrome_bg);
+            assert_eq!(palette::surface_popup(&t), t.popup_bg);
+            assert_eq!(palette::code_bg(&t), t.code_bg);
+            assert_eq!(palette::table_head_bg(&t), t.table_head_bg);
+        }
     }
 }

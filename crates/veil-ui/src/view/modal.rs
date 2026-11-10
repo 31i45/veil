@@ -7,6 +7,7 @@
 use crate::geometry::{Rect, BASE_LINE_HEIGHT};
 use crate::input::Key;
 use crate::theme::{surface, Theme};
+use crate::tokens::palette;
 use crate::view::Frame;
 
 /// 按钮横向前后留白（px）：文字两侧各留 12，保证按钮不像贴字。
@@ -319,7 +320,7 @@ fn paint_card(frame: &mut Frame, scale: f32, theme: &Theme, card: Rect) {
     frame.fill_shadow(x, y, w, h, r, scale, theme.dark);
     frame.fill_rounded_rect(x, y, w, h, r, theme.chrome_border);
     if w > 2 && h > 2 {
-        frame.fill_rounded_rect(x + 1, y + 1, w - 2, h - 2, (r - 1.0).max(0.0), theme.popup_bg);
+        frame.fill_rounded_rect(x + 1, y + 1, w - 2, h - 2, (r - 1.0).max(0.0), palette::surface_popup(theme));
     }
 }
 
@@ -368,13 +369,13 @@ fn paint_buttons(
                         theme.text,
                     )
                 };
-                stroke_rounded(frame, x, y, w, h, radius, border, theme.popup_bg);
+                stroke_rounded(frame, x, y, w, h, radius, border, palette::surface_popup(theme));
                 if hovered {
                     // 叠在描边内层，3px 内缩不会盖住 1px 边框。
                     frame.fill_hover(x, y, w, h, scale, theme.hover);
                 }
                 if focused {
-                    let inner = if hovered { theme.hover } else { theme.popup_bg };
+                    let inner = if hovered { theme.hover } else { palette::surface_popup(theme) };
                     focus_ring(frame, rect, radius, theme.accent, inner);
                 }
                 draw_button_text(frame, text, &button.label, fg, rect, line_h);
@@ -824,29 +825,31 @@ mod tests {
         let mut text = FakeText::new();
         let l = layout(vp, 1.0, &s, &mut text);
         let st = ModalState::new(&s);
-        let mut frame = Frame::new(vp.w as u32, vp.h as u32, theme.bg);
+        let mut frame = Frame::new(vp.w as u32, vp.h as u32, palette::surface_base(&theme));
         paint(&mut frame, vp, 1.0, &theme, &s, &st, &l, &mut text);
 
         // 1) 视口角落 = bg 与黑遮罩混合（比 bg 暗）
         let alpha = surface::scrim_alpha(theme.dark) as u32;
         let corner = frame.get(0, 0);
+        let bg = palette::surface_base(&theme);
         for ch in 0..3 {
-            let expect = (theme.bg[ch] as u32 * (255 - alpha) / 255) as u8;
+            let expect = (bg[ch] as u32 * (255 - alpha) / 255) as u8;
             assert!(
                 (corner[ch] as i32 - expect as i32).abs() <= 1,
                 "遮罩混合值不符: got {corner:?} expect {expect} dark={}",
                 theme.dark
             );
-            assert!(corner[ch] < theme.bg[ch], "遮罩应压暗底色");
+            assert!(corner[ch] < bg[ch], "遮罩应压暗底色");
         }
 
         // 2) 卡片中心 = popup_bg（文字与按钮都不覆盖此点）
         let cx = (l.card.x + l.card.w * 0.5).round() as u32;
         let cy = (l.card.y + l.card.h * 0.5).round() as u32;
         let card_px = frame.get(cx, cy);
+        let popup = palette::surface_popup(&theme);
         assert_eq!(
             [card_px[0], card_px[1], card_px[2]],
-            [theme.popup_bg[0], theme.popup_bg[1], theme.popup_bg[2]],
+            [popup[0], popup[1], popup[2]],
             "卡片中心应为 popup_bg dark={}",
             theme.dark
         );
@@ -857,13 +860,13 @@ mod tests {
         let outside = frame.get(ox, oy);
         assert_ne!(
             [outside[0], outside[1], outside[2]],
-            [theme.popup_bg[0], theme.popup_bg[1], theme.popup_bg[2]],
+            [popup[0], popup[1], popup[2]],
             "圆角外侧不应是卡片色"
         );
         assert!(
-            outside[0] < theme.bg[0]
-                || outside[1] < theme.bg[1]
-                || outside[2] < theme.bg[2],
+            outside[0] < bg[0]
+                || outside[1] < bg[1]
+                || outside[2] < bg[2],
             "圆角外侧应被遮罩/阴影压暗"
         );
 

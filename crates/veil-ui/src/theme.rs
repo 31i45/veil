@@ -86,6 +86,9 @@ impl SyntaxColors {
 }
 
 /// 调色板：正文/ chrome / 交互态全套颜色。浅色值与原硬编码常量逐字节一致（视觉不回退）。
+///
+/// **约束**：本结构体所有字段必须为颜色值（[u8; 3] / [u8; 4]）。几何令牌归 `tokens::surface`；
+/// 新增字段必须是颜色，不得引入 `corner_radius`、`shadow_offset` 等几何量。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Theme {
     pub mode: ThemeMode,
@@ -115,7 +118,34 @@ pub struct Theme {
     pub syntax: SyntaxColors,
 }
 
+/// Surface 底色三档语义（S5）：Theme 的底色字段按层级归为 Base / Card / Popup。
+///
+/// | 档 | Theme 字段 | 含义 |
+/// |---|---|---|
+/// | Base | bg | 页面/窗口底层背景 |
+/// | Card | chrome_bg | chrome 区条带、表头（不弹起） |
+/// | Popup | popup_bg | 浮层、弹出、模态（带阴影弹起） |
+///
+/// 代码块底色（code_bg）与表头底色（table_head_bg）是 Card 档的特化，
+/// 不归本枚举直接映射——调用方按需经 `tokens::palette::code_bg` / `table_head_bg` 取。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[allow(dead_code)] // API 预留：paint 层仍经 palette 模块消费，SurfaceLevel 后续批次会有更多使用点
+pub enum SurfaceLevel {
+    Base,
+    Card,
+    Popup,
+}
+
 impl Theme {
+    /// 按档取 surface 底色。
+    #[allow(dead_code)] // 同 SurfaceLevel：后续批次消费
+    pub fn surface(&self, level: SurfaceLevel) -> [u8; 4] {
+        match level {
+            SurfaceLevel::Base => self.bg,
+            SurfaceLevel::Card => self.chrome_bg,
+            SurfaceLevel::Popup => self.popup_bg,
+        }
+    }
     /// 按模式与系统外观解析出最终调色板（System 跟随传入的系统态）。
     pub fn of(mode: ThemeMode, system_dark: bool) -> Self {
         let dark = match mode {
@@ -944,6 +974,30 @@ mod tests {
             assert!(
                 c_text_hover >= 3.0,
                 "text/hover 对比度不足: dark={} {c_text_hover:.2}",
+                t.dark
+            );
+        }
+    }
+
+    #[test]
+    fn surface_levels_map_to_correct_fields() {
+        // S5 语义层门禁：SurfaceLevel 三档必须精确映射到 Theme 字段。
+        for t in [Theme::light(), Theme::dark()] {
+            assert_eq!(t.surface(SurfaceLevel::Base), t.bg);
+            assert_eq!(t.surface(SurfaceLevel::Card), t.chrome_bg);
+            assert_eq!(t.surface(SurfaceLevel::Popup), t.popup_bg);
+            // Card 档对比度门禁：text/muted 必须在 chrome_bg 上 ≥4.5
+            let card = [t.chrome_bg[0], t.chrome_bg[1], t.chrome_bg[2]];
+            let c_text = contrast(t.text, card);
+            let c_muted = contrast(t.muted, card);
+            assert!(
+                c_text >= 4.5,
+                "Card text/chrome_bg 对比度不足: dark={} {c_text:.2}",
+                t.dark
+            );
+            assert!(
+                c_muted >= 4.5,
+                "Card muted/chrome_bg 对比度不足: dark={} {c_muted:.2}",
                 t.dark
             );
         }

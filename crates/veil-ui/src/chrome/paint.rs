@@ -10,6 +10,7 @@ use super::{
 };
 use crate::document::ExternalState;
 use crate::theme::Theme;
+use crate::tokens::{space, stroke};
 use crate::view::{Frame, LayoutEngine};
 
 /// 文本排版宽度：preedit 排版后取文末光标的 x（单行 = 总宽）。
@@ -31,7 +32,11 @@ pub(super) fn ellipsize_middle(engine: &mut LayoutEngine, text: &str, avail: f32
     let build = |keep: usize| -> String {
         let head = keep / 2;
         let tail = keep - head; // 尾 >= 头：文件名/扩展名优先可见
-        let tail_start = if tail == 0 { text.len() } else { offs[n - tail] };
+        let tail_start = if tail == 0 {
+            text.len()
+        } else {
+            offs[n - tail]
+        };
         format!("{}…{}", &text[..offs[head]], &text[tail_start..])
     };
     let (mut lo, mut hi) = (0usize, n); // build(lo) 可放下、build(hi) 放不下
@@ -49,7 +54,13 @@ pub(super) fn ellipsize_middle(engine: &mut LayoutEngine, text: &str, avail: f32
 impl Chrome {
     /// 状态栏左文适配（S1）：超宽时中段省略为 head…tail（尾多留，路径文件名优先可见）。
     /// 结果按 (原文, 可用宽, scale) 缓存；测量走 layout_preedit，不污染标签缓存。
-    fn fit_middle(&mut self, engine: &mut LayoutEngine, text: &str, avail: f32, scale: f32) -> String {
+    fn fit_middle(
+        &mut self,
+        engine: &mut LayoutEngine,
+        text: &str,
+        avail: f32,
+        scale: f32,
+    ) -> String {
         let key = (text.to_string(), avail.to_bits(), scale.to_bits());
         if let Some(hit) = self.status_fit.get(&key) {
             return hit.clone();
@@ -147,7 +158,13 @@ impl Chrome {
                 scale,
             );
         }
-        frame.fill_rect(0, menu_h as i32 - 1, frame.width, 1, theme.chrome_border);
+        frame.fill_rect(
+            0,
+            menu_h as i32 - 1,
+            frame.width,
+            stroke::HAIRLINE as u32,
+            theme.chrome_border,
+        );
 
         // 状态栏
         let status_y = win_h - status_h;
@@ -158,7 +175,13 @@ impl Chrome {
             status_h.ceil() as u32,
             theme.chrome_bg,
         );
-        frame.fill_rect(0, status_y as i32, frame.width, 1, theme.chrome_border);
+        frame.fill_rect(
+            0,
+            status_y as i32,
+            frame.width,
+            stroke::HAIRLINE as u32,
+            theme.chrome_border,
+        );
         let mid = status_y + status_h / 2.0;
         let (left, right) = status_line(
             path,
@@ -171,10 +194,10 @@ impl Chrome {
             col,
         );
         // S1：右侧字数行列优先完整固定，左文超宽时中段省略（head…tail），杜绝左右重叠。
-        let right_edge = win_w - SCROLL_W * scale - 12.0 * scale;
-        let left_x = 12.0 * scale;
+        let right_edge = win_w - SCROLL_W * scale - space::M * scale;
+        let left_x = space::M * scale;
         let right_w = measure_w(engine, &right);
-        let avail = right_edge - right_w - left_x - 12.0 * scale;
+        let avail = right_edge - right_w - left_x - space::M * scale;
         let left_fitted = self.fit_middle(engine, &left, avail, scale);
         let left_w = measure_w(engine, &left_fitted);
         self.draw_left(frame, engine, &left_fitted, left_x, mid, theme.muted, scale);
@@ -185,10 +208,13 @@ impl Chrome {
             let x0 = left_x + left_w + gap;
             let x1 = right_edge - right_w - gap;
             let avail_notice = x1 - x0;
-            if avail_notice >= 24.0 * scale {
+            if avail_notice >= space::XL * scale {
                 let notice = self.notice.clone();
                 let fitted = self.fit_middle(engine, &notice, avail_notice, scale);
-                if let Some(l) = self.labels.get_or_insert(engine, &fitted, theme.muted, scale) {
+                if let Some(l) = self
+                    .labels
+                    .get_or_insert(engine, &fitted, theme.muted, scale)
+                {
                     let x = x0 + (avail_notice - l.w as f32) / 2.0;
                     let y = mid - l.h as f32 / 2.0;
                     frame.blit(&l.pixels, l.w, l.h, x.round() as i32, y.round() as i32);
@@ -207,7 +233,7 @@ impl Chrome {
                 vp.h.ceil() as u32,
                 theme.chrome_bg,
             );
-            let tw = ((SCROLL_W - 4.0) * scale).max(1.0);
+            let tw = ((SCROLL_W - space::XS) * scale).max(1.0);
             let active = self.scroll_hover || self.scroll_drag.is_some();
             let alpha = if active { 255 } else { 170 };
             frame.fill_rounded_rect(
@@ -241,7 +267,7 @@ impl Chrome {
                     (p.x + pad).round() as i32,
                     sy.round() as i32,
                     (p.w - 2.0 * pad).max(1.0) as u32,
-                    1,
+                    stroke::DIVIDER as u32,
                     theme.chrome_border,
                 );
             }
@@ -274,7 +300,7 @@ impl Chrome {
                 let hint_w = if hint.is_empty() {
                     0.0
                 } else {
-                    24.0 * scale + measure_w(engine, hint)
+                    space::XL * scale + measure_w(engine, hint)
                 };
                 let avail = (inner - hint_w).max(0.0);
                 let shown = if measure_w(engine, label) > avail {

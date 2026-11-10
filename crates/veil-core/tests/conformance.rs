@@ -36,6 +36,8 @@ use veil_core::Session;
 ///   「alt 为纯文本」模型视为叶子。
 /// - 产品侧同步修正：类型 6 块级标签表补齐 table/td/tbody 等 18 个规范标签
 ///   （Example 148/160 此前把 `<table>` 行解析成段落）。
+/// - W1-5 裸 URL 自动成链（GFM 扩展）通过 `bare-url-autolink` feature gate 隔离：
+///   产品默认开启，一致性门禁用 `--no-default-features` 编译，不影响基线。
 const BASELINE_A: usize = 652;
 const BASELINE_B_EXACT: usize = 629;
 const BASELINE_B_CANON: usize = 630;

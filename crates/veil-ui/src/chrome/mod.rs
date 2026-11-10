@@ -13,8 +13,8 @@ mod paint;
 use std::path::Path;
 
 use crate::document::ExternalState;
-use crate::geometry::BASE_FONT_SIZE;
 use crate::theme::ThemeMode;
+use crate::tokens::typography;
 
 pub(crate) use cache::LabelCache;
 
@@ -177,9 +177,9 @@ fn text_width(text: &str, scale: f32) -> f32 {
     text.chars()
         .map(|c| {
             if c.is_ascii() {
-                BASE_FONT_SIZE * ASCII_ADVANCE_RATIO * scale
+                typography::UI_SIZE * ASCII_ADVANCE_RATIO * scale
             } else {
-                BASE_FONT_SIZE * scale
+                typography::UI_SIZE * scale
             }
         })
         .sum()

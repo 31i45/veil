@@ -1,7 +1,7 @@
 //! 右键上下文菜单（2f）：选区/链接/块三类上下文的项集、几何与命中。
 //! 纯模型与几何：不绘制（paint.rs 消费布局）、不执行（interaction.rs 分发动作）。
 
-use crate::geometry::BASE_FONT_SIZE;
+use crate::tokens::typography;
 
 /// 上下文菜单动作：执行映射在 interaction.rs（复用既有剪贴板/插入路径）。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -156,9 +156,9 @@ fn text_width(text: &str, scale: f32) -> f32 {
     text.chars()
         .map(|c| {
             if c.is_ascii() {
-                BASE_FONT_SIZE * 0.52 * scale
+                typography::UI_SIZE * 0.52 * scale
             } else {
-                BASE_FONT_SIZE * scale
+                typography::UI_SIZE * scale
             }
         })
         .sum()

@@ -1259,7 +1259,7 @@ impl App {
         if focus == search::Field::Query || !replace {
             if let Some(pre) = self.editor.preedit() {
                 let text = pre.text.clone();
-                let pl = self.engine.layout_preedit(&text);
+                let pl = self.engine.layout_ui(&text);
                 let (px, w, h) = self.engine.rasterize(&pl, theme.fg);
                 let x0 = (l.text.x + qw).min((l.text.x + l.text.w - w as f32).max(l.text.x));
                 let y0 = mid - h as f32 / 2.0;
@@ -1335,7 +1335,7 @@ impl App {
             if focus == search::Field::Replace {
                 if let Some(pre) = self.editor.preedit() {
                     let text = pre.text.clone();
-                    let pl = self.engine.layout_preedit(&text);
+                    let pl = self.engine.layout_ui(&text);
                     let (px, w, h) = self.engine.rasterize(&pl, theme.fg);
                     let x0 = (r.text.x + rw).min((r.text.x + r.text.w - w as f32).max(r.text.x));
                     let y0 = rmid - h as f32 / 2.0;
@@ -1526,7 +1526,7 @@ impl App {
         }
         if let Some(pre) = self.editor.preedit() {
             let text = pre.text.clone();
-            let pl = self.engine.layout_preedit(&text);
+            let pl = self.engine.layout_ui(&text);
             let (pxs, w, h) = self.engine.rasterize(&pl, theme.fg);
             let x0 = (l.input.x + pad + qw)
                 .min((l.input.x + l.input.w - pad - w as f32).max(l.input.x + pad));

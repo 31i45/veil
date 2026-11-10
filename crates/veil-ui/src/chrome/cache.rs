@@ -34,7 +34,7 @@ impl LabelCache {
     ) -> Option<&CachedLabel> {
         let key = label_key(scale, text, color);
         if !self.map.contains_key(&key) {
-            let layout = engine.layout_preedit(text);
+            let layout = engine.layout_ui(text);
             let (pixels, w, h) = engine.rasterize(&layout, color);
             self.map.insert(key.clone(), CachedLabel { pixels, w, h });
         }

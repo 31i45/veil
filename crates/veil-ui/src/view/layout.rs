@@ -20,6 +20,7 @@ use super::linebreak;
 use super::style::{style_spans, Style};
 use crate::geometry::{BASE_FONT_SIZE, BASE_LINE_HEIGHT};
 use crate::theme::{SyntaxColors, Theme};
+use crate::tokens::typography;
 
 /// 行内资源键：占位图与位图缓存之间的寻址键（切片 8/13 共用占位机制）。
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -439,6 +440,53 @@ fn fnv(h: &mut u64, v: u64) {
     *h = (*h ^ v).wrapping_mul(0x0100_0000_01b3);
 }
 
+/// 块级字号相对正文的额外倍率：代码块 14/16，其余 1.0。
+fn kind_scale(kind: &BlockKind) -> f32 {
+    match kind {
+        BlockKind::FencedCode(_) | BlockKind::IndentedCode | BlockKind::HtmlBlock => {
+            typography::CODE_SCALE
+        }
+        _ => 1.0,
+    }
+}
+
+/// 按序返回第一个可用族：探测函数由调用方注入，便于无系统字体依赖地测试。
+fn pick_family<'a>(
+    candidates: &'a [&'a str],
+    available: impl Fn(&str) -> bool,
+) -> Option<&'a str> {
+    candidates.iter().copied().find(|name| available(name))
+}
+
+/// 创建字体系统并显式指定 generic family（D8）。
+///
+/// cosmic-text 的默认族（Open Sans / Noto Sans Mono）在 Windows 上通常不存在，
+/// 汉字会走各自回退，造成「`#` 与汉字不同族」。这里按 `typography` 的回退链
+/// 探测存在的族后显式设置；候选全部缺失时保持 fontdb 默认。
+fn new_font_system() -> FontSystem {
+    let mut fs = FontSystem::new();
+    let (sans, mono) = {
+        let db = fs.db_mut();
+        let pick = |candidates: &'static [&'static str]| {
+            pick_family(candidates, |name| {
+                db.faces()
+                    .any(|f| f.families.iter().any(|(fam, _)| fam == name))
+            })
+        };
+        (
+            pick(typography::SANS_FAMILIES),
+            pick(typography::MONO_FAMILIES),
+        )
+    };
+    let db = fs.db_mut();
+    if let Some(family) = sans {
+        db.set_sans_serif_family(family);
+    }
+    if let Some(family) = mono {
+        db.set_monospace_family(family);
+    }
+    fs
+}
 pub struct LayoutEngine {
     font_system: FontSystem,
     swash: SwashCache,
@@ -459,7 +507,7 @@ impl Default for LayoutEngine {
 impl LayoutEngine {
     pub fn new() -> Self {
         LayoutEngine {
-            font_system: FontSystem::new(),
+            font_system: new_font_system(),
             swash: SwashCache::new(),
             scale: 1.0,
             syntax: SyntaxColors::default_light(),
@@ -499,8 +547,29 @@ impl LayoutEngine {
     /// IME preedit 小串布局（不换行、默认样式、无消隐）。
     /// 与正文同套排版规则：kinsoku 胶水 + 中西文间距经 build_layout_text 注入，
     /// OffsetMap 保证组合串内光标偏移（IME 报告的原文档坐标）正确映射。
+    /// 文档内 IME preedit 小串布局（不换行、默认样式、无消隐），正文 16px 字阶。
+    /// 与正文同套排版规则：kinsoku 胶水 + 中西文间距经 build_layout_text 注入，
+    /// OffsetMap 保证组合串内光标偏移（IME 报告的原文档坐标）正确映射。
     pub fn layout_preedit(&mut self, text: &str) -> BlockLayout {
-        let metrics = Metrics::new(BASE_FONT_SIZE * self.scale, BASE_LINE_HEIGHT * self.scale);
+        self.layout_single(
+            text,
+            typography::BODY_SIZE * self.scale,
+            typography::BODY_LINE_HEIGHT * self.scale,
+        )
+    }
+
+    /// UI 单行排版（菜单/状态栏/浮层/模态及其中 IME 组合串）：UI 13px 字阶。
+    pub(crate) fn layout_ui(&mut self, text: &str) -> BlockLayout {
+        self.layout_single(
+            text,
+            typography::UI_SIZE * self.scale,
+            typography::UI_LINE_HEIGHT * self.scale,
+        )
+    }
+
+    /// 单行排版：不做块级替换与消隐，只按给定字号/行高成形。
+    fn layout_single(&mut self, text: &str, size: f32, line_height: f32) -> BlockLayout {
+        let metrics = Metrics::new(size, line_height);
         let block = Range {
             start: 0,
             end: text.len(),
@@ -533,7 +602,7 @@ impl LayoutEngine {
 
     /// 单行文本度量（宽, 高）：仅 shape 不 rasterize，供浮层/模态按内容定宽与折行。
     pub(crate) fn measure(&mut self, text: &str) -> (f32, f32) {
-        let layout = self.layout_preedit(text);
+        let layout = self.layout_ui(text);
         let w = layout
             .buffer
             .layout_runs()
@@ -586,7 +655,8 @@ impl LayoutEngine {
         let full = text.strip_suffix('\n').unwrap_or(text);
         // 单块上限（v0）：只排前缀，超出部分不参与成形/光栅，避免内存放大
         let (body, mut truncated) = cap_body(full);
-        let scale = block_scale(kind.clone()) * self.scale;
+        // 代码块 14px、行高同比；标题等在正文基础上放大。
+        let scale = kind_scale(&kind) * block_scale(kind.clone()) * self.scale;
         let metrics = Metrics::new(BASE_FONT_SIZE * scale, BASE_LINE_HEIGHT * scale);
         // NBSP 占位段：NBSP 为 2 字节，个数 = 图宽 / NBSP 宽四舍五入（误差 ≤ 半个 NBSP）。
         let nbsp_w = if imgs.is_empty() {
@@ -1766,6 +1836,59 @@ mod tests {
         assert_eq!(eng.hit(&l, x + 0.1, y + 1.0), 5, "光标 x 命中应回原偏移");
     }
 
+    #[test]
+    fn pick_family_prefers_first_available_and_falls_back() {
+        let sans = typography::SANS_FAMILIES;
+        assert_eq!(
+            pick_family(sans, |n| n == "Microsoft YaHei UI"),
+            Some("Microsoft YaHei UI")
+        );
+        assert_eq!(pick_family(sans, |n| n == "Segoe UI"), Some("Segoe UI"));
+        assert_eq!(pick_family(sans, |_| false), None);
+    }
+
+    #[test]
+    fn ui_text_is_smaller_than_body_preedit() {
+        let mut eng = LayoutEngine::new();
+        let ui = eng.layout_ui("Aa中");
+        let body = eng.layout_preedit("Aa中");
+        assert!((ui.height - typography::UI_LINE_HEIGHT).abs() < 0.5);
+        assert!((body.height - typography::BODY_LINE_HEIGHT).abs() < 0.5);
+        assert!(ui.height < body.height);
+    }
+
+    #[test]
+    fn code_block_is_smaller_than_paragraph() {
+        let mut eng = LayoutEngine::new();
+        let text = "let x = 1;";
+        let block = Range {
+            start: 0,
+            end: text.len(),
+        };
+        let cod = eng.layout_block(
+            BlockKind::FencedCode(None),
+            text,
+            block,
+            &[],
+            500.0,
+            usize::MAX,
+            &[],
+            false,
+        );
+        let par = eng.layout_block(
+            BlockKind::Paragraph,
+            text,
+            block,
+            &[],
+            500.0,
+            usize::MAX,
+            &[],
+            false,
+        );
+        let expected = typography::BODY_LINE_HEIGHT * typography::CODE_SCALE;
+        assert!((cod.height - expected).abs() < 0.5);
+        assert!(cod.height < par.height);
+    }
     #[test]
     fn caret_advances_monotonically() {
         let (eng, l, ..) = layout_of("abcdef", 400.0);

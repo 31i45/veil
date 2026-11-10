@@ -6,7 +6,8 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::geometry::{Rect, BASE_FONT_SIZE};
+use crate::geometry::Rect;
+use crate::tokens::typography;
 
 /// 浮层基准宽（乘 DPI scale）。
 pub const PANEL_W: f32 = 520.0;
@@ -268,14 +269,14 @@ pub(crate) fn hit(l: &Layout, top: usize, count: usize, x: f32, y: f32) -> Optio
     (top + slot < count).then_some(top + slot)
 }
 
-/// 近似文本宽度：CJK 全角按字号、ASCII 按 0.6 字号（只服务截断/布局，不参与光栅）。
+/// 近似文本宽度：CJK 全角按 UI 字号、ASCII 按 0.6 字号（只服务截断/布局，不参与光栅）。
 pub(crate) fn text_width(text: &str, scale: f32) -> f32 {
     text.chars()
         .map(|c| {
             if c.is_ascii() {
-                BASE_FONT_SIZE * 0.6 * scale
+                typography::UI_SIZE * 0.6 * scale
             } else {
-                BASE_FONT_SIZE * scale
+                typography::UI_SIZE * scale
             }
         })
         .sum()
@@ -286,14 +287,14 @@ pub(crate) fn fit_label(text: &str, max_w: f32, scale: f32) -> String {
     if text_width(text, scale) <= max_w {
         return text.to_string();
     }
-    let avail = (max_w - BASE_FONT_SIZE * scale).max(0.0);
+    let avail = (max_w - typography::UI_SIZE * scale).max(0.0);
     let mut out = String::new();
     let mut w = 0.0;
     for c in text.chars() {
         let cw = if c.is_ascii() {
-            BASE_FONT_SIZE * 0.6 * scale
+            typography::UI_SIZE * 0.6 * scale
         } else {
-            BASE_FONT_SIZE * scale
+            typography::UI_SIZE * scale
         };
         if w + cw > avail {
             break;

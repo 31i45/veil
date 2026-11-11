@@ -1,12 +1,14 @@
-//! 帧合成：背景/块内容/表格网格/选区/光标与 preedit 绘制。所有输入为
+//! 帧合成：背景/块内容/选区/光标与 preedit 绘制。所有输入为
 //! 已排版的几何与缓存，本文件不触发重新排版（除 paint 开头的两遍收敛）。
+//! 查找栏与表格网格的绘制片段在 `view::search_view` / `view::table_view`。
 
 use crate::app::App;
 use crate::chrome;
-use crate::geometry::{Rect, BASE_LINE_HEIGHT, MARGIN};
+use crate::geometry::{Rect, MARGIN};
+use crate::view::table::CellMath;
 use crate::view::{
-    ctx_menu, node_active, outline, oversize_notice, quick_open, search, BlockLayout, Frame,
-    InlineAsset, InlineImg, LayoutEngine, LayoutKey, Memo, TableKey,
+    cell_math_spans, ctx_menu, node_active, outline, oversize_notice, quick_open, search,
+    BlockLayout, Frame, InlineAsset, InlineImg, LayoutEngine, LayoutKey, Memo, TableKey,
 };
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -20,6 +22,66 @@ const TYPEWRITER_ANCHOR: f32 = 0.42;
 
 /// 拖放悬停压暗强度（阶段 1）：内容区背景覆盖，突出居中提示条。
 const DROP_DIM_ALPHA: u8 = 120;
+
+/// 链接悬停浮层（N5）：视口边留白 / 锚点上方间距（逻辑像素，乘 scale）。
+const LINK_TIP_EDGE: f32 = 8.0;
+const LINK_TIP_GAP: f32 = 24.0;
+
+/// 链接浮层可用文本宽（物理像素）：视口宽减去两侧留白与内边距。
+pub(crate) fn link_tip_max_text_w(vp: crate::chrome::Viewport, scale: f32) -> f32 {
+    let pad = crate::theme::surface::padding(scale);
+    (vp.w - 2.0 * (LINK_TIP_EDGE * scale + pad)).max(1.0)
+}
+
+fn link_tip_char_w(c: char, scale: f32) -> f32 {
+    if c.is_ascii() {
+        crate::tokens::typography::UI_SIZE * 0.52 * scale
+    } else {
+        crate::tokens::typography::UI_SIZE * scale
+    }
+}
+
+/// 按视口宽截断单行 URL：放不下时保留前缀并追加省略号。
+pub(crate) fn truncate_link_tip(text: &str, max_w: f32, scale: f32) -> (String, f32) {
+    let w: f32 = text.chars().map(|c| link_tip_char_w(c, scale)).sum();
+    if w <= max_w {
+        return (text.to_string(), w);
+    }
+    let ell_w = link_tip_char_w('…', scale);
+    let mut out = String::new();
+    let mut w = 0.0;
+    for c in text.chars() {
+        let cw = link_tip_char_w(c, scale);
+        if w + cw + ell_w > max_w {
+            break;
+        }
+        out.push(c);
+        w += cw;
+    }
+    out.push('…');
+    (out, w + ell_w)
+}
+
+/// 链接浮层矩形：锚点上方 24px，水平以锚点为中心，四边夹取在视口内。
+/// 上方放不下时改到锚点下方（仍夹取），保证整卡可见且不越界。
+pub(crate) fn link_tip_rect(
+    w: f32,
+    h: f32,
+    anchor_x: f32,
+    anchor_y: f32,
+    vp: crate::chrome::Viewport,
+    scale: f32,
+) -> Rect {
+    let edge = LINK_TIP_EDGE * scale;
+    let gap = LINK_TIP_GAP * scale;
+    let max_x = (vp.x + vp.w - edge - w).max(vp.x + edge);
+    let x = (anchor_x - w / 2.0).clamp(vp.x + edge, max_x);
+    let mut y = anchor_y - gap - h;
+    if y < vp.y + edge {
+        y = (anchor_y + gap).min((vp.y + vp.h - edge - h).max(vp.y + edge));
+    }
+    Rect { x, y, w, h }
+}
 
 /// 模态文本接缝：度量走 engine（不栅格化），绘制走 chrome 标签位图缓存。
 struct ModalText<'a> {
@@ -79,6 +141,39 @@ pub(crate) fn admonition_color(ty: AdmonitionType, theme: &crate::theme::Theme) 
 }
 
 impl App {
+    /// 行内公式图：tex 内容寻址缓存；未命中时渲染并写缓存，失败记入失败表并返回 None
+    /// （调用方降级为源码/文本显示，正文与表格单元格共用同一策略与缓存）。
+    fn inline_math_image(&mut self, tex: &str) -> Option<&crate::math::MathImage> {
+        let key = self.inline_key();
+        let dpi_q = self.dpi_q();
+        if self.cache.inline_failed(tex, dpi_q) {
+            return None;
+        }
+        if self.cache.inline_math(tex, key).is_none() {
+            let scale = self.input_state.scale;
+            let fg = self.input_state.theme.fg;
+            match self.ports.math.render(tex, false, scale, fg) {
+                Ok(img) => {
+                    self.cache
+                        .inline_math
+                        .insert(tex.to_owned(), Memo { key, value: img });
+                }
+                Err(e) => {
+                    eprintln!("行内公式渲染失败（降级为源码显示）: {e}");
+                    self.cache.inline_failed.insert(
+                        tex.to_owned(),
+                        Memo {
+                            key: dpi_q,
+                            value: (),
+                        },
+                    );
+                    return None;
+                }
+            }
+        }
+        self.cache.inline_math(tex, key)
+    }
+
     /// 补齐缺失布局（键命中则零开销）。Reveal 激活已并入布局键，光标移动后
     /// 指纹失配即自动重排，无需另设失效调用（ADR-009 决策四）。
     /// 行内公式（切片 8）：块内非激活 Math 节点渲染出图（tex 内容寻址缓存），
@@ -132,42 +227,14 @@ impl App {
             }
             pending.push((id, kind, range, text, inlines, maths, images));
         }
-        let scale = self.input_state.scale;
-        let fg = self.input_state.theme.fg;
-        let inline_key = self.inline_key();
-        let dpi_q = self.dpi_q();
         let image_base = self.input_state.revs.image_base;
         for (id, kind, range, text, inlines, maths, images) in pending {
             let mut imgs = Vec::new();
             for (nrange, tex) in maths {
-                if self.cache.inline_failed(&tex, dpi_q) {
-                    continue; // 失败记忆：降级源码（Reveal 消隐态）显示
-                }
-                if self.cache.inline_math(&tex, inline_key).is_none() {
-                    match self.ports.math.render(&tex, false, scale, fg) {
-                        Ok(img) => {
-                            self.cache.inline_math.insert(
-                                tex.clone(),
-                                Memo {
-                                    key: inline_key,
-                                    value: img,
-                                },
-                            );
-                        }
-                        Err(e) => {
-                            eprintln!("行内公式渲染失败（降级为源码显示）: {e}");
-                            self.cache.inline_failed.insert(
-                                tex.clone(),
-                                Memo {
-                                    key: dpi_q,
-                                    value: (),
-                                },
-                            );
-                            continue;
-                        }
-                    }
-                }
-                let img = &self.cache.inline_math[&tex].value;
+                // 失败记忆/渲染失败 → 降级源码（Reveal 消隐态）显示，不每帧重试。
+                let Some(img) = self.inline_math_image(&tex) else {
+                    continue;
+                };
                 imgs.push(InlineImg {
                     range: nrange,
                     key: InlineAsset::Math(tex),
@@ -441,7 +508,7 @@ impl App {
         Some((
             self.content_x() + cell.x,
             vp.y + doc_top - self.window_state.scroll_y + cell.y,
-            BASE_LINE_HEIGHT * scale,
+            self.engine.doc_line_height() * scale,
         ))
     }
 
@@ -487,10 +554,13 @@ impl App {
                 // 含 `[^id]` 的单元格按纯文本降级：core 的 cell.text 已剥掉 `[^`/`]`，
                 // 这里取源码原文交给网格（不编号、不着色），避免「引用的 id 混进正文」。
                 let raw_cells = footnote_cell_sources(self.editor.session(), &t);
-                pending.push((id, key, t, active, raw_cells));
+                // 非活动格内联公式：先收可见区间与 TeX，渲染放到下面的循环（&mut self）。
+                let seeds = table_cell_math_seeds(self.editor.session(), &t, key.active);
+                pending.push((id, key, t, active, raw_cells, seeds));
             }
         }
-        for (id, key, t, active, raw_cells) in pending {
+        for (id, key, t, active, raw_cells, seeds) in pending {
+            let maths = self.cell_math_assets(seeds);
             let widths = self.ui_state.tables.widths.get(&id).cloned();
             let l = self.engine.layout_table_opts(
                 &t,
@@ -498,6 +568,7 @@ impl App {
                 fg,
                 active.as_ref().map(|(idx, src)| (*idx, src.as_str())),
                 Some(&raw_cells),
+                (!maths.is_empty()).then_some(&maths),
                 widths.as_deref(),
             );
             self.cache.tables.insert(
@@ -508,6 +579,34 @@ impl App {
                 },
             );
         }
+    }
+
+    /// 表格单元格内联公式：渲染（复用 inline_math 缓存）并整理成排版输入。
+    /// 渲染失败/已失败记忆的公式跳过 → 该格降级为可见文本（与正文一致）。
+    fn cell_math_assets(
+        &mut self,
+        seeds: HashMap<usize, Vec<CellMathSeed>>,
+    ) -> HashMap<usize, Vec<CellMath>> {
+        let mut out = HashMap::new();
+        for (flat, list) in seeds {
+            let mut items = Vec::with_capacity(list.len());
+            for seed in list {
+                let Some(img) = self.inline_math_image(&seed.tex) else {
+                    continue;
+                };
+                let (w, h) = (img.width, img.height);
+                items.push(CellMath {
+                    range: seed.range,
+                    tex: seed.tex,
+                    w,
+                    h,
+                });
+            }
+            if !items.is_empty() {
+                out.insert(flat, items);
+            }
+        }
+        out
     }
 
     /// 表格网格缓存键：基础键 + 活动单元格（flat 索引；None = 全部富文本）。
@@ -789,7 +888,7 @@ impl App {
         let notice_x = self.content_x().round() as i32;
         for (sy, bh, full) in oversize {
             let notice = oversize_notice(full);
-            let mid = sy as f32 + bh - BASE_LINE_HEIGHT * scale / 2.0;
+            let mid = sy as f32 + bh - self.engine.doc_line_height() * scale / 2.0;
             if let Some(l) = self.ui_state.chrome.labels.get_or_insert(
                 &mut self.engine,
                 &notice,
@@ -823,6 +922,8 @@ impl App {
             self.paint_quick(&mut frame);
             // 右键菜单（2f）：浮在全部内容浮层之上、chrome 之前
             self.paint_ctx_menu(&mut frame);
+            // 链接悬停提示（N5）：正文之后、chrome 之前的轻量浮层
+            self.paint_link_tooltip(&mut frame);
             // 拖放悬停提示（阶段 1）：浮在最上层内容装饰
             self.paint_drop_hint(&mut frame);
             // chrome 最后绘制（不透明覆盖内容；滚动条区保留给状态栏行列）
@@ -1184,360 +1285,6 @@ impl App {
         }
     }
 
-    /// 查找栏（P3-3）：一张卡片（唯一一条边界线）→ 焦点字段底色 → 按钮
-    /// hover/active 底色 → 查询文本/IME → 计数 → 按钮字形。替换模式（Ctrl+H）
-    /// 在下方多一行替换输入；两行之间只用间距分组，不画任何内部分隔线（S3）。
-    /// 栏不透明覆盖内容；标签复用 chrome 位图缓存（随主题失效）。
-    pub(crate) fn paint_search(&mut self, frame: &mut Frame) {
-        let Some(l) = self.search_rect() else {
-            return;
-        };
-        let scale = self.input_state.scale;
-        let theme = self.input_state.theme;
-        let search = &self.ui_state.search;
-        let replace = search.replace_open;
-        // 过渡目标与 animate 侧同源：pressed 优先，其次 hover。
-        let fade = search.fade.view(
-            search
-                .pressed
-                .or(search.hover)
-                .and_then(search::Hit::anim_index),
-        );
-        let rl = replace.then(|| search::replace_layout(&l, scale));
-        let bar = l.bar;
-        let bx = bar.x.round() as i32;
-        let by = bar.y.round() as i32;
-        let bw = bar.w.ceil() as u32;
-        let bottom = rl.map_or(bar.y + bar.h, |r| r.row.y + r.row.h).round() as i32;
-        let total_h = (bottom - by).max(1) as u32;
-        frame.fill_surface_card(
-            bx,
-            by,
-            bw,
-            total_h,
-            scale,
-            theme.dark,
-            crate::tokens::palette::surface_popup(&theme),
-            theme.chrome_border,
-        );
-        // S4 focus：焦点字段用安静底色表达（不再画 accent 下划线）。
-        let field_radius = (crate::theme::surface::corner_radius(scale) - 2.0 * scale).max(0.0);
-        let paint_field = |frame: &mut Frame, r: Rect| {
-            frame.fill_rounded_rect(
-                r.x.round() as i32,
-                r.y.round() as i32,
-                r.w.ceil() as u32,
-                r.h.ceil() as u32,
-                field_radius,
-                crate::tokens::state::focus_bg(&theme),
-            );
-        };
-        if search.focus == search::Field::Query {
-            paint_field(frame, l.text);
-        }
-        if let Some(r) = rl {
-            if search.focus == search::Field::Replace {
-                paint_field(frame, r.text);
-            }
-        }
-        // S4 hover / active：六态矩阵是唯一色源。
-        let mut buttons = vec![
-            (search::Hit::Prev, l.prev),
-            (search::Hit::Next, l.next),
-            (search::Hit::Close, l.close),
-            (search::Hit::ToggleCase, l.case),
-        ];
-        if let Some(r) = rl {
-            buttons.push((search::Hit::ReplaceOne, r.one));
-            buttons.push((search::Hit::ReplaceAll, r.all));
-        }
-        for (idx, (hit, r)) in buttons.into_iter().enumerate() {
-            // active（按下）即时到位；hover 走过渡不透明度（S6）。
-            let color = if search.pressed == Some(hit) {
-                Some(crate::tokens::state::pressed_bg(&theme))
-            } else {
-                let h = crate::tokens::state::hover_bg(&theme);
-                fade.alpha_of(idx).map(|a| [h[0], h[1], h[2], a])
-            };
-            let Some(color) = color else {
-                continue;
-            };
-            frame.fill_hover(
-                r.x.round() as i32,
-                r.y.round() as i32,
-                r.w.ceil() as u32,
-                r.h.ceil() as u32,
-                scale,
-                color,
-            );
-        }
-        let mid = bar.y + bar.h / 2.0;
-        let text_y = |h: u32| (mid - h as f32 / 2.0).round() as i32;
-        // 计数并入输入区右侧：查询文本可用宽度先扣除计数占位。
-        let count = search.label();
-        let count_w = if count.is_empty() {
-            0.0
-        } else {
-            search::COUNT_W * scale
-        };
-        let query_avail = (l.text.w - count_w).max(0.0);
-        // 查询文本：空串显示占位提示；非空保留尾部（正在输入的一端）
-        // 光标 x 只跟随真实查询文本（占位提示不计入）：空串时落在输入区左端，
-        // 有文本时落在文本末端——两者共同表达「插入点」，占位文案不参与定位。
-        let mut qw = 0.0;
-        if search.query.is_empty() {
-            if self.editor.preedit().is_none() {
-                if let Some(lab) = self.ui_state.chrome.labels.get_or_insert(
-                    &mut self.engine,
-                    "查找",
-                    theme.muted,
-                    scale,
-                ) {
-                    frame.blit(
-                        &lab.pixels,
-                        lab.w,
-                        lab.h,
-                        l.text.x.round() as i32,
-                        text_y(lab.h),
-                    );
-                }
-            }
-        } else {
-            let shown = search::fit_query(&search.query, query_avail, scale);
-            if let Some(lab) = self.ui_state.chrome.labels.get_or_insert(
-                &mut self.engine,
-                &shown,
-                theme.text,
-                scale,
-            ) {
-                qw = lab.w as f32;
-                frame.blit(
-                    &lab.pixels,
-                    lab.w,
-                    lab.h,
-                    l.text.x.round() as i32,
-                    text_y(lab.h),
-                );
-            }
-        }
-        let focus = search.focus;
-        // 查询框光标：聚焦 + 无 IME preedit → 可见文本末端画 2×ch 竖线
-        if focus == search::Field::Query && self.editor.preedit().is_none() {
-            let cx = (l.text.x + qw).round() as i32;
-            let cw = crate::theme::surface::caret_width(scale).round().max(1.0) as u32;
-            let ch = crate::theme::surface::caret_height(scale);
-            let cy = (mid - ch / 2.0).round() as i32;
-            frame.fill_rect(cx, cy, cw, ch as u32, [theme.fg[0], theme.fg[1], theme.fg[2], 255]);
-        }
-        // IME 组合串：贴在查询文本之后（贴右缘钳位），下划线同文档 preedit；
-        // 替换模式下焦点在替换框时由替换行负责绘制
-        if focus == search::Field::Query || !replace {
-            if let Some(pre) = self.editor.preedit() {
-                let text = pre.text.clone();
-                let pl = self.engine.layout_ui(&text);
-                let (px, w, h) = self.engine.rasterize(&pl, theme.fg);
-                let x0 = (l.text.x + qw).min((l.text.x + l.text.w - w as f32).max(l.text.x));
-                let y0 = mid - h as f32 / 2.0;
-                frame.blit(&px, w, h, x0.round() as i32, y0.round() as i32);
-                frame.fill_rect(
-                    x0.round() as i32,
-                    (y0 + h as f32) as i32 - 1,
-                    w,
-                    1,
-                    [theme.fg[0], theme.fg[1], theme.fg[2], 255],
-                );
-            }
-        }
-        // 替换行：文本框 → IME 组合串 → 两个按钮字形（焦点底色已在卡片后绘制）
-        if let Some(r) = rl {
-            let rmid = r.row.y + r.row.h / 2.0;
-            let rtext_y = |h: u32| (rmid - h as f32 / 2.0).round() as i32;
-            let mut rw = 0.0;
-            if search.replace.is_empty() {
-                if !(focus == search::Field::Replace && self.editor.preedit().is_some()) {
-                    if let Some(lab) = self.ui_state.chrome.labels.get_or_insert(
-                        &mut self.engine,
-                        "替换为",
-                        theme.muted,
-                        scale,
-                    ) {
-                        frame.blit(
-                            &lab.pixels,
-                            lab.w,
-                            lab.h,
-                            r.text.x.round() as i32,
-                            rtext_y(lab.h),
-                        );
-                    }
-                }
-            } else {
-                let shown = search::fit_query(&search.replace, r.text.w, scale);
-                if let Some(lab) = self.ui_state.chrome.labels.get_or_insert(
-                    &mut self.engine,
-                    &shown,
-                    theme.text,
-                    scale,
-                ) {
-                    rw = lab.w as f32;
-                    frame.blit(
-                        &lab.pixels,
-                        lab.w,
-                        lab.h,
-                        r.text.x.round() as i32,
-                        rtext_y(lab.h),
-                    );
-                }
-            }
-            // 替换框光标：聚焦 + 无 IME preedit → 可见文本末端画 2×ch 竖线
-            if focus == search::Field::Replace && self.editor.preedit().is_none() {
-                let cx = (r.text.x + rw).round() as i32;
-                let cw = crate::theme::surface::caret_width(scale).round().max(1.0) as u32;
-                let ch = crate::theme::surface::caret_height(scale);
-                let cy = (rmid - ch / 2.0).round() as i32;
-                frame.fill_rect(cx, cy, cw, ch as u32, [theme.fg[0], theme.fg[1], theme.fg[2], 255]);
-            }
-            if focus == search::Field::Replace {
-                if let Some(pre) = self.editor.preedit() {
-                    let text = pre.text.clone();
-                    let pl = self.engine.layout_ui(&text);
-                    let (px, w, h) = self.engine.rasterize(&pl, theme.fg);
-                    let x0 = (r.text.x + rw).min((r.text.x + r.text.w - w as f32).max(r.text.x));
-                    let y0 = rmid - h as f32 / 2.0;
-                    frame.blit(&px, w, h, x0.round() as i32, y0.round() as i32);
-                    frame.fill_rect(
-                        x0.round() as i32,
-                        (y0 + h as f32) as i32 - 1,
-                        w,
-                        1,
-                        [theme.fg[0], theme.fg[1], theme.fg[2], 255],
-                    );
-                }
-            }
-            for (btn, glyph) in [(r.one, "替换"), (r.all, "全部")] {
-                let color = if search.matches.is_empty() {
-                    crate::tokens::state::disabled_fg(&theme)
-                } else {
-                    theme.text
-                };
-                if let Some(lab) =
-                    self.ui_state
-                        .chrome
-                        .labels
-                        .get_or_insert(&mut self.engine, glyph, color, scale)
-                {
-                    let x = btn.x + (btn.w - lab.w as f32) / 2.0;
-                    let y = btn.y + (btn.h - lab.h as f32) / 2.0;
-                    frame.blit(
-                        &lab.pixels,
-                        lab.w,
-                        lab.h,
-                        x.round() as i32,
-                        y.round() as i32,
-                    );
-                }
-            }
-        }
-        // 计数「i/n」：右对齐于输入区右缘；无命中用 danger 表达空态。
-        if !count.is_empty() {
-            let color = if search.no_matches() {
-                crate::tokens::state::empty_fg(&theme)
-            } else {
-                theme.muted
-            };
-            if let Some(lab) = self
-                .ui_state
-                .chrome
-                .labels
-                .get_or_insert(&mut self.engine, &count, color, scale)
-            {
-                let x = (l.count_right - lab.w as f32).round() as i32;
-                frame.blit(&lab.pixels, lab.w, lab.h, x, text_y(lab.h));
-            }
-        }
-        // 「区分大小写」开关字形：开启时用选中态前景（悬停底色另行绘制）。
-        let case_color = if search.case_sensitive {
-            crate::tokens::state::selected_fg(&theme)
-        } else {
-            theme.text
-        };
-        if let Some(lab) =
-            self.ui_state
-                .chrome
-                .labels
-                .get_or_insert(&mut self.engine, "Aa", case_color, scale)
-        {
-            let x = l.case.x + (l.case.w - lab.w as f32) / 2.0;
-            let y = l.case.y + (l.case.h - lab.h as f32) / 2.0;
-            frame.blit(
-                &lab.pixels,
-                lab.w,
-                lab.h,
-                x.round() as i32,
-                y.round() as i32,
-            );
-        }
-        // 查询行按钮字形（居中）：无命中时翻页按钮为禁用前景。
-        let page_color = if search.matches.is_empty() {
-            crate::tokens::state::disabled_fg(&theme)
-        } else {
-            theme.text
-        };
-        for (r, glyph, color) in [
-            (l.prev, "‹", page_color),
-            (l.next, "›", page_color),
-            (l.close, "×", theme.text),
-        ] {
-            if let Some(lab) = self.ui_state.chrome.labels.get_or_insert(
-                &mut self.engine,
-                glyph,
-                color,
-                scale,
-            ) {
-                let x = r.x + (r.w - lab.w as f32) / 2.0;
-                let y = r.y + (r.h - lab.h as f32) / 2.0;
-                frame.blit(
-                    &lab.pixels,
-                    lab.w,
-                    lab.h,
-                    x.round() as i32,
-                    y.round() as i32,
-                );
-            }
-        }
-    }
-
-    /// L2 命中刻度：查找打开且有命中时，在主滚动条轨道标出命中位置。
-    /// 只作位置提示，不改变滚动/命中语义；按视口像素高度采样，避免长文档
-    /// 上千命中逐条绘制；当前命中最后绘制并用 accent 强调。
-    pub(crate) fn paint_search_ticks(&mut self, frame: &mut Frame, vp: crate::chrome::Viewport) {
-        let search = &self.ui_state.search;
-        if !search.open || search.matches.is_empty() {
-            return;
-        }
-        let total = self.editor.session().text_len().max(1);
-        let scale = self.input_state.scale;
-        let theme = self.input_state.theme;
-        let lane = (crate::chrome::SCROLL_W * scale).ceil() as u32;
-        let w = lane.saturating_sub((6.0 * scale) as u32).max(1);
-        let x = (frame.width as f32 - lane as f32 + 3.0 * scale).round() as i32;
-        let h = (2.0 * scale).round().max(1.0) as u32;
-        let tick_y = |start: usize| {
-            let t = start.min(total) as f32 / total as f32;
-            (vp.y + t * vp.h - h as f32 / 2.0).round() as i32
-        };
-        let stride = (search.matches.len() as f32 / vp.h.max(1.0)).ceil().max(1.0) as usize;
-        for (i, m) in search.matches.iter().enumerate().step_by(stride) {
-            if i == search.current {
-                continue;
-            }
-            frame.fill_rect(x, tick_y(m.start), w, h, theme.thumb);
-        }
-        if let Some(m) = search.matches.get(search.current) {
-            let a = theme.accent;
-            frame.fill_rect(x, tick_y(m.start), w, h, [a[0], a[1], a[2], 255]);
-        }
-    }
-
     /// 快速打开浮层（阶段 1）：面板边框 → 输入行 → 候选行（选中/悬停底色、
     /// 文件名与来源提示）。面板不透明覆盖内容与查找栏；标签复用 chrome 位图缓存。
     pub(crate) fn paint_quick(&mut self, frame: &mut Frame) {
@@ -1744,6 +1491,45 @@ impl App {
         }
     }
 
+    /// 链接悬停浮层（N5）：鼠标上方 24px 的单行 URL 卡片，超宽按视口截断。
+    /// 纯视觉、不拦截鼠标事件；模态/右键菜单期间不绘制。
+    pub(crate) fn paint_link_tooltip(&mut self, frame: &mut Frame) {
+        if self.ui_state.modal.is_some() || self.ui_state.ctx.open {
+            return;
+        }
+        let Some((url, ax, ay)) = self.ui_state.hover_link.clone() else {
+            return;
+        };
+        let scale = self.input_state.scale;
+        let theme = self.input_state.theme;
+        let vp = self.viewport();
+        let pad = crate::theme::surface::padding(scale).round() as u32;
+        let (text, _) = truncate_link_tip(&url, link_tip_max_text_w(vp, scale), scale);
+        let Some(lab) =
+            self.ui_state
+                .chrome
+                .labels
+                .get_or_insert(&mut self.engine, &text, theme.text, scale)
+        else {
+            return;
+        };
+        let w = lab.w + 2 * pad;
+        let h = lab.h + 2 * pad;
+        let r = link_tip_rect(w as f32, h as f32, ax, ay, vp, scale);
+        let (rx, ry) = (r.x.round() as i32, r.y.round() as i32);
+        frame.fill_surface_card(
+            rx,
+            ry,
+            r.w.ceil() as u32,
+            r.h.ceil() as u32,
+            scale,
+            theme.dark,
+            crate::tokens::palette::surface_popup(&theme),
+            theme.chrome_border,
+        );
+        frame.blit(&lab.pixels, lab.w, lab.h, rx + pad as i32, ry + pad as i32);
+    }
+
     /// 右键上下文菜单（2f）：面板 → 悬停底色 → 项标签。瞬态浮层：
     /// 只读视觉，不触碰文档真值与缓存；标签位图复用 chrome 缓存。
     pub(crate) fn paint_ctx_menu(&mut self, frame: &mut Frame) {
@@ -1852,62 +1638,6 @@ impl App {
             bx + pad as i32,
             (by + pad as i32) + ((bh - pad * 2 - lab.h) / 2) as i32,
         );
-    }
-
-    /// 绘制表格网格：活动单元格底色 → 表头底色 → 单元格文本 → 网格线（先底后字，线压边）。
-    /// 活动单元格由排版键记录的 `active` 判定，光标绘制复用既有 `paint_caret_and_preedit` 路径。
-    /// 选区跨网格态表格时不画高亮（同数学块 v0 已知简化）。
-    pub(crate) fn paint_table(&self, frame: &mut Frame, id: BlockId, top: i32) {
-        let Some(t) = self.cache.table(id, self.table_key(id)) else {
-            return;
-        };
-        let x0 = self.content_x() as i32;
-        let theme = self.input_state.theme;
-
-        // 活动单元格：排版键已记录 caret 命中的格（源码态显示），画选中色底色
-        if let Some(cell_layout) = t.active.and_then(|idx| t.cells.get(idx)) {
-            let cx = x0 + cell_layout.x.round() as i32;
-            let cy = top + cell_layout.y.round() as i32;
-            let cw = cell_layout.w.round().max(1.0) as u32;
-            let ch = cell_layout.h.round().max(1.0) as u32;
-            frame.fill_rect(cx, cy, cw, ch, theme.sel);
-        }
-
-        if let Some(first) = t.rows.first() {
-            frame.fill_rect(
-                x0,
-                top,
-                t.width.ceil() as u32,
-                first.height.ceil() as u32,
-                crate::tokens::palette::table_head_bg(&theme),
-            );
-        }
-        for c in &t.cells {
-            let cy = top + c.y.round() as i32;
-            if cy + c.pixel_h as i32 <= 0 || cy >= frame.height as i32 {
-                continue; // 行在视口外
-            }
-            frame.blit(&c.pixels, c.pixel_w, c.pixel_h, x0 + c.x.round() as i32, cy);
-        }
-        let w = t.width.ceil().max(1.0) as u32;
-        let h = t.height.ceil().max(1.0) as u32;
-        let mut x: f32 = 0.0;
-        for cw in &t.cols {
-            frame.fill_rect(x0 + x.round() as i32, top, 1, h, theme.grid);
-            x += cw;
-        }
-        let right = t.width.round().max(1.0) as i32;
-        frame.fill_rect(x0 + right - 1, top, 1, h, theme.grid);
-        frame.fill_rect(x0, top, w, 1, theme.grid);
-        for r in &t.rows {
-            frame.fill_rect(
-                x0,
-                top + (r.top + r.height).round() as i32 - 1,
-                w,
-                1,
-                theme.grid,
-            );
-        }
     }
 
     pub(crate) fn paint_caret_and_preedit(&mut self, frame: &mut Frame) {
@@ -2062,6 +1792,55 @@ fn footnote_cell_sources(
                 if has_ref(&cell.inlines) {
                     if let Some(src) = session.text_slice(cell.range) {
                         out.insert(idx, src);
+                    }
+                }
+            }
+            idx += 1;
+        }
+    }
+    out
+}
+
+/// 单元格内联公式种子：剥标记后可见文本区间 + TeX 源码（渲染前的纯数据）。
+struct CellMathSeed {
+    range: Range,
+    tex: String,
+}
+
+/// 收集非活动单元格的 Math 节点：可见文本坐标（与 `cell.text` 同口径）+ TeX。
+/// 活动格显源码，不参与；无 Math 或映射不可用（字节分歧）时该格不入表。
+fn table_cell_math_seeds(
+    session: &veil_core::Session,
+    tbl: &veil_core::Table,
+    active: u32,
+) -> HashMap<usize, Vec<CellMathSeed>> {
+    fn has_math(nodes: &[InlineNode]) -> bool {
+        nodes
+            .iter()
+            .any(|n| n.kind == InlineKind::Math || has_math(&n.children))
+    }
+    let mut out = HashMap::new();
+    let cols = tbl.aligns.len();
+    let mut idx = 0usize;
+    for cells in std::iter::once(&tbl.header).chain(tbl.rows.iter()) {
+        for col in 0..cols {
+            if let Some(cell) = cells.get(col) {
+                if active as usize != idx && has_math(&cell.inlines) {
+                    if let Some(spans) = cell_math_spans(cell.range, cell.text.len(), &cell.inlines)
+                    {
+                        let seeds: Vec<CellMathSeed> = spans
+                            .into_iter()
+                            .filter_map(|(s, e, content)| {
+                                let tex = session.text_slice(content)?;
+                                Some(CellMathSeed {
+                                    range: Range::new(s, e),
+                                    tex,
+                                })
+                            })
+                            .collect();
+                        if !seeds.is_empty() {
+                            out.insert(idx, seeds);
+                        }
                     }
                 }
             }

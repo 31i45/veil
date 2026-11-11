@@ -1797,6 +1797,7 @@ impl App {
                 self.ui_state.ctx.hover = h;
                 self.request_redraw();
             }
+            self.set_hover_link(None, x, y);
             return; // 右键菜单打开时其余悬停不更新
         }
         if self.ui_state.chrome.scroll_hover {
@@ -1882,6 +1883,46 @@ impl App {
             self.ui_state.quick.hover = qrow;
             self.request_redraw();
         }
+        // 链接悬停（N5）：正文与表格单元格内的 Link 节点即时显示完整目标 URL。
+        // 模态/拖动（含表格列宽）不显示；选区覆盖链接、鼠标移出正文区同样清除。
+        let inside = x >= vp.x && x < vp.x + vp.w && y >= vp.y && y < vp.y + vp.h;
+        let link = if !inside
+            || self.ui_state.modal.is_some()
+            || self.window_state.dragging
+            || self.ui_state.tables.drag.is_some()
+        {
+            None
+        } else {
+            let off = self.hit_offset();
+            off.and_then(|off| {
+                let selected = self
+                    .editor
+                    .selection()
+                    .is_some_and(|s| s.start <= off && off < s.end);
+                if selected {
+                    None
+                } else {
+                    self.link_at(off)
+                }
+            })
+            .map(|u| crate::normalize_link_url(&u))
+        };
+        self.set_hover_link(link, x, y);
+    }
+
+    /// 写入链接悬停态：URL 未变不重绘（鼠标在链接内移动保留首次锚点，
+    /// 浮层位置稳定）；进入/离开/换链接才请求重绘。无定时器。
+    fn set_hover_link(&mut self, url: Option<String>, x: f32, y: f32) {
+        let same = match (&url, &self.ui_state.hover_link) {
+            (None, None) => true,
+            (Some(u), Some((cur, _, _))) => u == cur,
+            _ => false,
+        };
+        if same {
+            return;
+        }
+        self.ui_state.hover_link = url.map(|u| (u, x, y));
+        self.request_redraw();
     }
 
     /// 切换大纲面板：版心宽变化等价一次 resize，布局/表格键随宽度量化值失配。

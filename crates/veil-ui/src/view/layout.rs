@@ -19,7 +19,7 @@ use super::highlight::{highlight, to_styles};
 use super::linebreak;
 use super::style::{style_spans, Style};
 use crate::geometry::{BASE_FONT_SIZE, BASE_LINE_HEIGHT};
-use crate::theme::{SyntaxColors, Theme};
+use crate::theme::{DocFontFamily, SyntaxColors, Theme};
 use crate::tokens::typography;
 
 /// 行内资源键：占位图与位图缓存之间的寻址键（切片 8/13 共用占位机制）。
@@ -458,6 +458,18 @@ fn pick_family<'a>(
     candidates.iter().copied().find(|name| available(name))
 }
 
+/// 正文字体族 → cosmic family：
+/// `system` 不设 family（沿用既有回退链）；`sans`/`serif` 显式指定中文字族；
+/// `mono` 用通用等宽族。仅正文/表格文本走这里，UI chrome 不受影响。
+pub(super) fn doc_family(font: DocFontFamily) -> Option<Family<'static>> {
+    match font {
+        DocFontFamily::System => None,
+        DocFontFamily::Sans => Some(Family::Name("Microsoft YaHei")),
+        DocFontFamily::Serif => Some(Family::Name("SimSun")),
+        DocFontFamily::Mono => Some(Family::Monospace),
+    }
+}
+
 /// 创建字体系统并显式指定 generic family（D8）。
 ///
 /// cosmic-text 的默认族（Open Sans / Noto Sans Mono）在 Windows 上通常不存在，
@@ -492,6 +504,12 @@ pub struct LayoutEngine {
     swash: SwashCache,
     /// DPI 缩放：metrics 统一乘此值，布局单位保持物理像素。
     scale: f32,
+    /// 正文字号基准（物理像素，未乘 scale）；配置读入后可覆盖默认值。
+    doc_font_size: f32,
+    /// 正文行高基准（物理像素，未乘 scale）；配置读入后可覆盖默认值。
+    doc_line_height: f32,
+    /// 正文字体族（仅正文/表格文本生效，UI chrome 恒用既有字阶）。
+    doc_font: DocFontFamily,
     /// 代码块语法高亮色板（随主题切换更新）。
     syntax: SyntaxColors,
     /// 链接前景色（随主题切换更新）。
@@ -510,9 +528,42 @@ impl LayoutEngine {
             font_system: new_font_system(),
             swash: SwashCache::new(),
             scale: 1.0,
+            doc_font_size: BASE_FONT_SIZE,
+            doc_line_height: BASE_LINE_HEIGHT,
+            doc_font: DocFontFamily::System,
             syntax: SyntaxColors::default_light(),
             link_color: Theme::light().link,
         }
+    }
+
+    /// 设置正文排版参数（字号/行高为物理像素基准，字体族）。
+    ///
+    /// 启动读配置后调用一次，必须在任何排版之前完成；派生缓存键只含版心宽/DPI/主题等，
+    /// 本参数在会话内固定，故无需额外失效（详见 view::cache 的键说明）。
+    pub fn set_doc_typography(
+        &mut self,
+        font_size: f32,
+        line_height: f32,
+        font: DocFontFamily,
+    ) {
+        self.doc_font_size = font_size.max(1.0);
+        self.doc_line_height = line_height.max(1.0);
+        self.doc_font = font;
+    }
+
+    /// 正文字号基准（物理像素，未乘 scale）。
+    pub(crate) fn doc_font_size(&self) -> f32 {
+        self.doc_font_size
+    }
+
+    /// 正文行高基准（物理像素，未乘 scale）。
+    pub(crate) fn doc_line_height(&self) -> f32 {
+        self.doc_line_height
+    }
+
+    /// 当前正文字体族（表格单元格排版复用）。
+    pub(crate) fn doc_font(&self) -> DocFontFamily {
+        self.doc_font
     }
 
     /// 更新语法高亮色板（主题切换时调用）。
@@ -544,17 +595,15 @@ impl LayoutEngine {
         &mut self.font_system
     }
 
-    /// IME preedit 小串布局（不换行、默认样式、无消隐）。
-    /// 与正文同套排版规则：kinsoku 胶水 + 中西文间距经 build_layout_text 注入，
-    /// OffsetMap 保证组合串内光标偏移（IME 报告的原文档坐标）正确映射。
-    /// 文档内 IME preedit 小串布局（不换行、默认样式、无消隐），正文 16px 字阶。
+    /// 文档内 IME preedit 小串布局（不换行、默认样式、无消隐），正文字阶。
     /// 与正文同套排版规则：kinsoku 胶水 + 中西文间距经 build_layout_text 注入，
     /// OffsetMap 保证组合串内光标偏移（IME 报告的原文档坐标）正确映射。
     pub fn layout_preedit(&mut self, text: &str) -> BlockLayout {
         self.layout_single(
             text,
-            typography::BODY_SIZE * self.scale,
-            typography::BODY_LINE_HEIGHT * self.scale,
+            self.doc_font_size * self.scale,
+            self.doc_line_height * self.scale,
+            doc_family(self.doc_font),
         )
     }
 
@@ -564,11 +613,18 @@ impl LayoutEngine {
             text,
             typography::UI_SIZE * self.scale,
             typography::UI_LINE_HEIGHT * self.scale,
+            None,
         )
     }
 
     /// 单行排版：不做块级替换与消隐，只按给定字号/行高成形。
-    fn layout_single(&mut self, text: &str, size: f32, line_height: f32) -> BlockLayout {
+    fn layout_single(
+        &mut self,
+        text: &str,
+        size: f32,
+        line_height: f32,
+        family: Option<Family<'static>>,
+    ) -> BlockLayout {
         let metrics = Metrics::new(size, line_height);
         let block = Range {
             start: 0,
@@ -577,7 +633,11 @@ impl LayoutEngine {
         let (layout_text, map, line_bases, source_newlines) =
             build_layout_text(text, block, &[], usize::MAX, &[], true, false);
         let mut buffer = Buffer::new(&mut self.font_system, metrics);
-        buffer.set_text(&layout_text, &Attrs::new(), Shaping::Advanced, None);
+        let attrs = match family {
+            Some(family) => Attrs::new().family(family),
+            None => Attrs::new(),
+        };
+        buffer.set_text(&layout_text, &attrs, Shaping::Advanced, None);
         buffer.set_size(None, None);
         buffer.shape_until_scroll(&mut self.font_system, false);
         let height = buffer
@@ -655,9 +715,9 @@ impl LayoutEngine {
         let full = text.strip_suffix('\n').unwrap_or(text);
         // 单块上限（v0）：只排前缀，超出部分不参与成形/光栅，避免内存放大
         let (body, mut truncated) = cap_body(full);
-        // 代码块 14px、行高同比；标题等在正文基础上放大。
+        // 标题/代码块字号按既有比例从正文字号派生。
         let scale = kind_scale(&kind) * block_scale(kind.clone()) * self.scale;
-        let metrics = Metrics::new(BASE_FONT_SIZE * scale, BASE_LINE_HEIGHT * scale);
+        let metrics = Metrics::new(self.doc_font_size * scale, self.doc_line_height * scale);
         // NBSP 占位段：NBSP 为 2 字节，个数 = 图宽 / NBSP 宽四舍五入（误差 ≤ 半个 NBSP）。
         let nbsp_w = if imgs.is_empty() {
             1.0
@@ -730,7 +790,7 @@ impl LayoutEngine {
             .collect();
         img_ranges.sort_by_key(|r| (r.start, r.end));
         let mut buffer = Buffer::new(&mut self.font_system, metrics);
-        let default_attrs = attrs_of(kind.clone(), Style::default(), self.link_color);
+        let default_attrs = attrs_of(kind.clone(), Style::default(), self.link_color, self.doc_font);
         // style_spans 产出文档坐标，经映射转 layout 坐标；整体落入消隐/占位区的 span 零宽丢弃。
         // 占位 NBSP 区无样式来源，显式补默认样式 span（cosmic 排版文本 = 各 span 顺次拼接，
         // 覆盖必须完备且有序）；指针序即 layout 偏移序。
@@ -750,7 +810,7 @@ impl LayoutEngine {
         for &(s, e, st) in &style_segments {
             let (ls, le) = (map.doc_to_layout(s), map.doc_to_layout(e));
             if ls < le {
-                spans.push((&layout_text[ls..le], attrs_of(kind.clone(), st, self.link_color)));
+                spans.push((&layout_text[ls..le], attrs_of(kind.clone(), st, self.link_color, self.doc_font)));
             }
         }
         // 装饰 span：前缀 `n. `（muted）与块末 `↩`（链接色）由插入段产生，
@@ -763,7 +823,7 @@ impl LayoutEngine {
                     color: footnotes.map(FootnoteCtx::muted),
                     ..Default::default()
                 };
-                spans.push((&layout_text[ls..le], attrs_of(kind.clone(), st, self.link_color)));
+                spans.push((&layout_text[ls..le], attrs_of(kind.clone(), st, self.link_color, self.doc_font)));
             }
         }
         if decor.suffix_len > 0 {
@@ -774,7 +834,7 @@ impl LayoutEngine {
                     link: true,
                     ..Default::default()
                 };
-                spans.push((&layout_text[ls..le], attrs_of(kind.clone(), st, self.link_color)));
+                spans.push((&layout_text[ls..le], attrs_of(kind.clone(), st, self.link_color, self.doc_font)));
             }
         }
         for im in &kept {
@@ -799,7 +859,7 @@ impl LayoutEngine {
         // 面积上限与排版同源：先按「最宽视觉行 × 块高」预估光栅像素，
         // 超限就截短块高并标记降级。几何与光栅必须一致，否则绘制会在块尾留白。
         let notice_h = if truncated {
-            BASE_LINE_HEIGHT * self.scale
+            self.doc_line_height * self.scale
         } else {
             0.0
         };
@@ -880,7 +940,8 @@ impl LayoutEngine {
     }
 
     /// NBSP 占位宽度：同 metrics 下排 8 个 NBSP 求均值。字体缺字形时退化 1px 防除零。
-    fn measure_nbsp(&mut self, metrics: Metrics) -> f32 {
+    /// 表格公式占位复用同一口径，保证两处视觉一致。
+    pub(crate) fn measure_nbsp(&mut self, metrics: Metrics) -> f32 {
         let probe = "\u{A0}\u{A0}\u{A0}\u{A0}\u{A0}\u{A0}\u{A0}\u{A0}";
         let mut b = Buffer::new(&mut self.font_system, metrics);
         b.set_text(probe, &Attrs::new(), Shaping::Advanced, None);
@@ -1802,7 +1863,50 @@ pub(crate) fn cell_style_spans(
     Some(out)
 }
 
-pub(super) fn attrs_of(kind: BlockKind, st: Style, link_color: [u8; 3]) -> Attrs<'static> {
+/// 单元格内 Math 节点的可见文本区间：返回 `(可见起点, 可见终点, TeX 内容区间)`。
+/// 与 `cell_style_spans` 共用 `collect_elide` + `OffsetMap`，坐标口径与 `cell.text` 一致
+/// （`$x^2$` → `x^2`）。字节映射不可用（如 `\|` 转义改写长度）时返回 None，
+/// 调用方降级为纯文本、不画公式图。
+pub(crate) fn cell_math_spans(
+    cell_range: Range,
+    text_len: usize,
+    inlines: &[InlineNode],
+) -> Option<Vec<(usize, usize, Range)>> {
+    let mut elide: Vec<(usize, usize)> = Vec::new();
+    collect_elide(inlines, cell_range, usize::MAX, &mut elide);
+    let subs: Vec<Sub> = elide.into_iter().map(|(s, e)| Sub::elide(s, e)).collect();
+    let (map, _) = OffsetMap::from_spans(cell_range.len(), &subs);
+    if map.layout_len != text_len {
+        return None;
+    }
+    fn walk(
+        nodes: &[InlineNode],
+        cell_range: Range,
+        map: &OffsetMap,
+        out: &mut Vec<(usize, usize, Range)>,
+    ) {
+        for n in nodes {
+            if n.kind == InlineKind::Math {
+                let s = map.doc_to_layout(n.range.start.saturating_sub(cell_range.start));
+                let e = map.doc_to_layout(n.range.end.saturating_sub(cell_range.start));
+                if s < e {
+                    out.push((s, e, n.content));
+                }
+            }
+            walk(&n.children, cell_range, map, out);
+        }
+    }
+    let mut out = Vec::new();
+    walk(inlines, cell_range, &map, &mut out);
+    Some(out)
+}
+
+pub(super) fn attrs_of(
+    kind: BlockKind,
+    st: Style,
+    link_color: [u8; 3],
+    doc_font: DocFontFamily,
+) -> Attrs<'static> {
     let a = Attrs::new();
     let a = if st.bold
         || matches!(
@@ -1819,6 +1923,7 @@ pub(super) fn attrs_of(kind: BlockKind, st: Style, link_color: [u8; 3]) -> Attrs
     } else {
         a
     };
+    // 代码/行内代码恒用等宽族；其余正文/表格文本按配置的字体族（system 不设）。
     let a = if st.mono
         || matches!(
             kind,
@@ -1826,6 +1931,8 @@ pub(super) fn attrs_of(kind: BlockKind, st: Style, link_color: [u8; 3]) -> Attrs
         )
     {
         a.family(Family::Monospace)
+    } else if let Some(family) = doc_family(doc_font) {
+        a.family(family)
     } else {
         a
     };
@@ -2068,14 +2175,16 @@ mod tests {
         assert!(style_at(link_at).link && !style_at(body_at).link);
         for theme in [Theme::light(), Theme::dark()] {
             let want = Color::rgb(theme.link[0], theme.link[1], theme.link[2]);
-            let link_attrs = attrs_of(kind.clone(), style_at(link_at), theme.link);
+            let link_attrs =
+                attrs_of(kind.clone(), style_at(link_at), theme.link, DocFontFamily::System);
             assert_eq!(
                 link_attrs.color_opt,
                 Some(want),
                 "链接字符应使用主题链接色: dark={}",
                 theme.dark
             );
-            let body_attrs = attrs_of(kind.clone(), style_at(body_at), theme.link);
+            let body_attrs =
+                attrs_of(kind.clone(), style_at(body_at), theme.link, DocFontFamily::System);
             assert_eq!(body_attrs.color_opt, None, "正文不得使用链接色");
             assert_ne!(theme.link, theme.fg, "链接色与正文前景色必须可区分");
         }
@@ -2090,6 +2199,38 @@ mod tests {
         assert_eq!(eng.link_color, Theme::light().link);
         eng.set_link_color(Theme::dark().link);
         assert_eq!(eng.link_color, Theme::dark().link);
+    }
+
+    #[test]
+    fn doc_typography_scales_body_but_leaves_ui_untouched() {
+        let text = "正文一行";
+        let layout = |engine: &mut LayoutEngine| {
+            engine
+                .layout_block(
+                    BlockKind::Paragraph,
+                    text,
+                    Range::new(0, text.len()),
+                    &[],
+                    400.0,
+                    usize::MAX,
+                    &[],
+                    false,
+                )
+                .height
+        };
+        let mut def = LayoutEngine::new();
+        let def_h = layout(&mut def);
+        let ui_def = def.measure("菜单");
+        let mut big = LayoutEngine::new();
+        big.set_doc_typography(18.0, 27.0, DocFontFamily::Serif);
+        let big_h = layout(&mut big);
+        let ui_big = big.measure("菜单");
+        assert!(
+            big_h > def_h,
+            "18px 正文块应高于默认 16px：{big_h} vs {def_h}"
+        );
+        assert!(big_h >= 27.0 - 0.5, "块高应使用配置行高：{big_h}");
+        assert_eq!(ui_big, ui_def, "UI 文本度量不受正文排版配置影响");
     }
 
     #[test]

@@ -7,7 +7,7 @@ use std::collections::HashSet;
 use veil_core::{BlockId, BlockKind, Range, Session};
 
 use crate::app::App;
-use crate::geometry::{BASE_LINE_HEIGHT, MARGIN, PARA_GAP};
+use crate::geometry::{MARGIN, PARA_GAP};
 
 /// 单块几何缓存：块清单一次枚举后复用，避免每次击键反复全量枚举（P1a）。
 pub(crate) struct BlockGeom {
@@ -76,6 +76,7 @@ impl App {
     pub(crate) fn geom_fill(&mut self, blocks: Vec<(BlockId, BlockKind, Range)>) {
         let scale = self.input_state.scale;
         let chars_per_line = self.chars_per_line();
+        let line_h = self.engine.doc_line_height();
         let base = self.base_key();
         let rev = self.input_state.revs.session;
         let can_reuse = self.index.est_scale == scale
@@ -95,7 +96,7 @@ impl App {
                 {
                     p.est_h
                 }
-                _ => estimate_h(self.editor.session(), range, chars_per_line, scale),
+                _ => estimate_h(self.editor.session(), range, chars_per_line, scale, line_h),
             };
             next.push(BlockGeom {
                 id,
@@ -137,12 +138,18 @@ impl App {
 }
 
 /// 廉价估算高度：块内行数 × 折行数取大（不切片、不建 String）。
-/// 仅依赖 `range`（块内行数与字节长度）与字符宽度/缩放。
-fn estimate_h(session: &Session, range: Range, chars_per_line: f32, scale: f32) -> f32 {
+/// 仅依赖 `range`（块内行数与字节长度）、字符宽度/缩放与正文字号基准行高。
+fn estimate_h(
+    session: &Session,
+    range: Range,
+    chars_per_line: f32,
+    scale: f32,
+    line_h: f32,
+) -> f32 {
     let start_line = session.line_of_offset(range.start);
     let end_line = session.line_of_offset(range.end);
     let hard_lines = (end_line - start_line) as f32 + 1.0;
     let byte_len = (range.end - range.start) as f32;
     let wrapped = (byte_len / chars_per_line.max(1.0)).ceil().max(1.0);
-    hard_lines.max(wrapped) * BASE_LINE_HEIGHT * scale
+    hard_lines.max(wrapped) * line_h * scale
 }

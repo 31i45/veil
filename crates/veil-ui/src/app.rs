@@ -306,6 +306,9 @@ pub(crate) struct UIState {
     /// 窗口焦点（光标表达）：true = 实心插入点，false = 空心框。
     /// 由 `WindowEvent::Focused` 经 `set_window_focused` 写入，默认聚焦。
     pub(crate) focused: bool,
+    /// 链接悬停浮层（N5）：(归一化目标 URL, 锚点屏幕 x, y)；None = 不显示。
+    /// 由 `update_hover` 每次鼠标移动即时重算，无定时器。
+    pub(crate) hover_link: Option<(String, f32, f32)>,
 }
 
 impl Default for UIState {
@@ -320,6 +323,7 @@ impl Default for UIState {
             writing: WritingState::default(),
             tables: TableView::default(),
             focused: true,
+            hover_link: None,
         }
     }
 }
@@ -711,7 +715,10 @@ impl App {
                 export_style,
             },
             config: app_config,
-            window_state: WindowState::default(),
+            window_state: WindowState {
+                smooth: app_config.smooth_scroll,
+                ..WindowState::default()
+            },
             editor,
             engine: LayoutEngine::new(),
             index: BlockIndex::default(),
@@ -749,6 +756,12 @@ impl App {
         };
         app.engine.set_syntax_colors(app.input_state.theme.syntax);
         app.engine.set_link_color(app.input_state.theme.link);
+        // 正文排版（字号/行高/字体族）：必须在首次排版前设置；缓存此时为空，无需失效。
+        app.engine.set_doc_typography(
+            app.config.doc_font_size,
+            app.config.doc_line_height,
+            app.config.doc_font_family,
+        );
         app.refresh_index();
         app.recompute_geometry();
         // 启动即登记最近文件（CLI 打开/会话恢复/崩溃恢复路径统一入口）

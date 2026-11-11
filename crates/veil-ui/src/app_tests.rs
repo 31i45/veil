@@ -4423,6 +4423,39 @@ fn startup_applies_export_config_and_saves_all_keys() {
 }
 
 #[test]
+fn startup_applies_doc_typography_and_smooth_scroll() {
+    let cfg = MemConfig::default();
+    *cfg.text.borrow_mut() = Some(
+        "doc_font_family = \"serif\"\ndoc_font_size = 18\ndoc_line_height = 27\nsmooth_scroll = true\n"
+            .into(),
+    );
+    let mut a = app_theme(Box::new(cfg), Rc::new(Cell::new(Some(false))));
+    assert!(a.window_state.smooth, "平滑滚动按配置开启");
+    assert_eq!(a.config.doc_font_family, theme::DocFontFamily::Serif);
+    assert_eq!(a.config.doc_font_size, 18.0);
+    assert_eq!(a.config.doc_line_height, 27.0);
+    // 正文块排版使用配置值（默认 16/22 → 18/27）
+    let text = "正文一行";
+    let h = a
+        .engine
+        .layout_block(
+            BlockKind::Paragraph,
+            text,
+            Range::new(0, text.len()),
+            &[],
+            400.0,
+            usize::MAX,
+            &[],
+            false,
+        )
+        .height;
+    assert!(h >= 27.0 - 0.5, "正文块行高应使用配置值：{h}");
+    // UI chrome 度量保持 UI 字阶（13/18），不受正文配置影响
+    let (_, ui_h) = a.engine.measure("菜单");
+    assert!((ui_h - 18.0).abs() < 0.5, "UI 行高应保持不变：{ui_h}");
+}
+
+#[test]
 fn config_save_failure_keeps_theme_and_notices() {
     let sys = Rc::new(Cell::new(Some(false)));
     let mut a = app_theme(Box::new(FailSaveConfig), sys);
@@ -7533,6 +7566,101 @@ fn normalize_link_url_adds_http_for_bare_www() {
     assert_eq!(normalize_link_url("mailto:x@y.z"), "mailto:x@y.z");
     assert_eq!(normalize_link_url("foo@bar"), "foo@bar");
     assert!(url_is_openable(&normalize_link_url("www.a.com")));
+}
+
+#[test]
+fn link_hover_shows_normalized_url_and_clears_on_leave() {
+    let store = MemStore::default();
+    let mut a = app("[站点](www.example.com)\n", None, false, &store);
+    let (x, y) = point_at_doc(&mut a, 1);
+    a.input_state.mouse = PhysicalPosition::new(x as f64, y as f64);
+    a.update_hover();
+    let (url, _, _) = a.ui_state.hover_link.clone().expect("链接文字上应出提示");
+    assert_eq!(url, "http://www.example.com", "浮层显示归一化目标");
+    // 移到菜单栏（正文区外）→ 立即清除，无延迟
+    a.input_state.mouse = PhysicalPosition::new(x as f64, 2.0);
+    a.update_hover();
+    assert!(a.ui_state.hover_link.is_none());
+}
+
+#[test]
+fn link_hover_hits_table_cell_link() {
+    let store = MemStore::default();
+    let mut a = app(
+        "p\n\n| [站点](www.example.com) | b |\n| --- | --- |\n| c | d |\n",
+        None,
+        false,
+        &store,
+    );
+    a.ensure_layouts_all();
+    a.ensure_tables();
+    let (id, top) = {
+        let g = a
+            .index
+            .blocks
+            .iter()
+            .find(|g| g.kind == BlockKind::Table)
+            .expect("应有表格块");
+        (g.id, g.top)
+    };
+    let cell = &a.cache.tables[&id].cells[0];
+    let vp = a.viewport();
+    let x = a.content_x() + cell.x + 2.0;
+    let y = vp.y + top - a.window_state.scroll_y + cell.y + cell.h / 2.0;
+    a.input_state.mouse = PhysicalPosition::new(x as f64, y as f64);
+    a.update_hover();
+    assert_eq!(
+        a.ui_state.hover_link.as_ref().map(|t| t.0.as_str()),
+        Some("http://www.example.com"),
+        "表格单元格内链接同样触发"
+    );
+    // 移到表格外空白（首段）→ 清除
+    a.input_state.mouse = PhysicalPosition::new(x as f64, (vp.y + 1.0) as f64);
+    a.update_hover();
+    assert!(a.ui_state.hover_link.is_none());
+}
+
+#[test]
+fn link_hover_ignores_code_and_plain_text() {
+    let store = MemStore::default();
+    // 行内代码里的 URL 不是 Link 节点
+    let mut a = app("`https://example.com`\n", None, false, &store);
+    let (x, y) = point_at_doc(&mut a, 1);
+    a.input_state.mouse = PhysicalPosition::new(x as f64, y as f64);
+    a.update_hover();
+    assert!(a.ui_state.hover_link.is_none(), "行内代码不应触发");
+
+    // 代码块里的 URL 同样不触发
+    let mut b = app("```\nhttps://example.com\n```\n", None, false, &store);
+    let (x, y) = point_at_doc(&mut b, 5);
+    b.input_state.mouse = PhysicalPosition::new(x as f64, y as f64);
+    b.update_hover();
+    assert!(b.ui_state.hover_link.is_none(), "代码块不应触发");
+
+    // 普通文本（无链接节点）
+    let mut c = app("普通文本\n", None, false, &store);
+    let (x, y) = point_at_doc(&mut c, 1);
+    c.input_state.mouse = PhysicalPosition::new(x as f64, y as f64);
+    c.update_hover();
+    assert!(c.ui_state.hover_link.is_none(), "普通文本不应触发");
+}
+
+#[test]
+fn link_tooltip_truncates_long_url_and_clamps_to_viewport() {
+    let vp = chrome::Viewport {
+        x: 0.0,
+        y: 20.0,
+        w: 240.0,
+        h: 180.0,
+    };
+    let long = "https://example.com/very/long/path/that/never/ends";
+    let max = crate::paint::link_tip_max_text_w(vp, 1.0);
+    let (text, tw) = crate::paint::truncate_link_tip(long, max, 1.0);
+    assert!(text.ends_with('…'), "超宽 URL 尾部省略");
+    assert!(tw <= max + 0.01, "截断后宽度受视口约束");
+    let r = crate::paint::link_tip_rect(tw + 12.0, 24.0, 238.0, 22.0, vp, 1.0);
+    assert!(r.x >= vp.x && r.x + r.w <= vp.x + vp.w + 0.01, "水平不越界");
+    assert!(r.y >= vp.y && r.y + r.h <= vp.y + vp.h + 0.01, "垂直不越界");
 }
 
 #[test]

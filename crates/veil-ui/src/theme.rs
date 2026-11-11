@@ -3,12 +3,16 @@
 //! 零 GUI 依赖：解析/序列化/路径推导/主题判定全部为纯函数，headless 可测。
 //! 平台能力（注册表系统外观、DWM 深色标题栏/Mica、配置落盘）以 trait 声明，由产品层注入。
 //!
-//! 配置格式（极简，共 8 个顶层键）：
+//! 配置格式（极简，共 12 个顶层键）：
 //! ```toml
 //! mode = "system"        # system | light | dark
 //! export_margin_mm = 20  # PDF 页边距（毫米）
 //! export_page_numbers = true
 //! export_toc = true
+//! doc_font_family = "system"  # system | sans | serif | mono
+//! doc_font_size = 16     # 正文基准字号（物理像素），夹取 10..=32
+//! doc_line_height = 22   # 正文基准行高（物理像素），夹取 字号..=字号×3
+//! smooth_scroll = false  # 平滑滚动开关
 //! # 以下四项仅在窗口几何已知时成组写入（旧配置不含这些键）
 //! window_width = 1200    # 逻辑宽，480..=8192
 //! window_height = 800    # 逻辑高，360..=8192
@@ -227,6 +231,40 @@ impl Theme {
 
 pub(crate) use crate::tokens::surface;
 
+/// 正文字体族（保持 `Copy`：只存枚举，排版时映射到 `&'static str` / 通用族）。
+///
+/// `System` 不显式设置 family，沿用既有字体回退链（视觉不变）。
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum DocFontFamily {
+    #[default]
+    System,
+    Sans,
+    Serif,
+    Mono,
+}
+
+impl DocFontFamily {
+    /// 配置值解析（严格小写，与 `as_str` 严格互逆）。
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "system" => Some(DocFontFamily::System),
+            "sans" => Some(DocFontFamily::Sans),
+            "serif" => Some(DocFontFamily::Serif),
+            "mono" => Some(DocFontFamily::Mono),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DocFontFamily::System => "system",
+            DocFontFamily::Sans => "sans",
+            DocFontFamily::Serif => "serif",
+            DocFontFamily::Mono => "mono",
+        }
+    }
+}
+
 /// HTML 导出样式快照：把「当前主题」压缩为导出所需的最小颜色集合。
 ///
 /// 为什么单独一个结构：`Theme` 是渲染内部细节（含 chrome/选区/滚动条等导出用不到的色），
@@ -292,7 +330,27 @@ pub struct WindowGeom {
     pub y: i32,
 }
 
-/// 配置内容：主题模式 + PDF 导出设置 + 窗口几何。
+/// 正文字号默认值（物理像素基准）：单一来源 `tokens::typography::BODY_SIZE`。
+const DEFAULT_DOC_FONT_SIZE: f32 = crate::tokens::typography::BODY_SIZE;
+/// 正文行高默认值（物理像素基准）：单一来源 `tokens::typography::BODY_LINE_HEIGHT`。
+const DEFAULT_DOC_LINE_HEIGHT: f32 = crate::tokens::typography::BODY_LINE_HEIGHT;
+/// 正文字号允许范围（物理像素基准）。
+const DOC_FONT_SIZE_MIN: f32 = 10.0;
+const DOC_FONT_SIZE_MAX: f32 = 32.0;
+/// 字体族值最大长度：超长视为无法识别（防止恶意/损坏配置）。
+const DOC_FONT_FAMILY_MAX_LEN: usize = 64;
+
+/// 正文字号夹取：10..=32。
+fn clamp_font_size(v: f32) -> f32 {
+    v.clamp(DOC_FONT_SIZE_MIN, DOC_FONT_SIZE_MAX)
+}
+
+/// 正文行高夹取：字号..=字号×3（保证行高不小于字号、又不至于过分稀疏）。
+fn clamp_line_height(v: f32, size: f32) -> f32 {
+    v.clamp(size, size * 3.0)
+}
+
+/// 配置内容：主题模式 + PDF 导出设置 + 正文排版 + 窗口几何。
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Config {
     pub mode: ThemeMode,
@@ -302,6 +360,14 @@ pub struct Config {
     pub export_page_numbers: bool,
     /// PDF 目录页。
     pub export_toc: bool,
+    /// 正文字体族（仅作用于正文/表格文本，UI chrome 不变）。
+    pub doc_font_family: DocFontFamily,
+    /// 正文字号（物理像素基准，夹取 10..=32）。
+    pub doc_font_size: f32,
+    /// 正文行高（物理像素基准，夹取 字号..=字号×3）。
+    pub doc_line_height: f32,
+    /// 平滑滚动开关（默认关，保持既有行为）。
+    pub smooth_scroll: bool,
     /// 上次退出时的窗口几何；首次运行或配置缺失时为 `None`。
     pub window: Option<WindowGeom>,
 }
@@ -313,6 +379,10 @@ impl Default for Config {
             export_margin_mm: 20.0,
             export_page_numbers: true,
             export_toc: true,
+            doc_font_family: DocFontFamily::System,
+            doc_font_size: DEFAULT_DOC_FONT_SIZE,
+            doc_line_height: DEFAULT_DOC_LINE_HEIGHT,
+            smooth_scroll: false,
             window: None,
         }
     }
@@ -323,11 +393,17 @@ impl Config {
     pub fn to_toml(self) -> String {
         let mut text = format!(
             "# Veil 配置（自动生成）\n# mode: system（跟随系统）| light | dark\nmode = \"{}\"\n\
-             export_margin_mm = {}\nexport_page_numbers = {}\nexport_toc = {}\n",
+             export_margin_mm = {}\nexport_page_numbers = {}\nexport_toc = {}\n\
+             doc_font_family = \"{}\"\ndoc_font_size = {}\ndoc_line_height = {}\n\
+             smooth_scroll = {}\n",
             self.mode.as_str(),
             self.export_margin_mm,
             self.export_page_numbers,
-            self.export_toc
+            self.export_toc,
+            self.doc_font_family.as_str(),
+            self.doc_font_size,
+            self.doc_line_height,
+            self.smooth_scroll
         );
         if let Some(w) = self.window {
             text.push_str(&format!(
@@ -346,14 +422,20 @@ pub struct ConfigParse {
     pub ignored: usize,
 }
 
-/// 极简配置解析：识别顶层 `mode`/`export_margin_mm`/`export_page_numbers`/`export_toc`
+/// 极简配置解析：识别顶层 `mode`/`export_*`、正文排版键
+/// `doc_font_family`/`doc_font_size`/`doc_line_height`/`smooth_scroll`
 /// 与成组的窗口键 `window_width`/`window_height`/`window_x`/`window_y`，其余条目计数忽略。
+/// 排版数值越界按夹取处理（不计数），类型/字面量非法才计入 ignored；
+/// 字号先夹 10..=32，行高再按「字号..=字号×3」夹取（与键出现顺序无关）。
 /// 窗口键必须四个齐全且宽 ≥480、高 ≥360（均 ≤8192）才产出几何；只出现一部分或值非法时不产出，
 /// 已出现（含非法）的窗口键各计一次 `ignored`（完全不含窗口键的旧配置不计数）。
 /// 段标题行（如历史格式 `[theme]`）不承载配置项，直接跳过；
 /// 同一键重复出现时后者生效（无歧义地覆盖）。
 pub fn parse_config(text: &str) -> ConfigParse {
     let mut out = ConfigParse::default();
+    // 排版数值先收集原值，循环结束后统一夹取（避免行高早于字号出现时口径漂移）。
+    let mut font_size: Option<f32> = None;
+    let mut line_height: Option<f32> = None;
     // 窗口键先逐个收集，循环结束后再成组判定（见函数尾）。
     let mut win_seen = [false; 4]; // width / height / x / y 是否出现过
     let mut win_w = None;
@@ -390,6 +472,25 @@ pub fn parse_config(text: &str) -> ConfigParse {
                 Some(v) => out.config.export_toc = v,
                 None => out.ignored += 1,
             },
+            "doc_font_family" => match unquote(value)
+                .filter(|s| s.len() <= DOC_FONT_FAMILY_MAX_LEN)
+                .and_then(DocFontFamily::parse)
+            {
+                Some(f) => out.config.doc_font_family = f,
+                None => out.ignored += 1,
+            },
+            "doc_font_size" => match value.parse::<f32>() {
+                Ok(v) if v.is_finite() => font_size = Some(v),
+                _ => out.ignored += 1,
+            },
+            "doc_line_height" => match value.parse::<f32>() {
+                Ok(v) if v.is_finite() => line_height = Some(v),
+                _ => out.ignored += 1,
+            },
+            "smooth_scroll" => match parse_bool(value) {
+                Some(v) => out.config.smooth_scroll = v,
+                None => out.ignored += 1,
+            },
             "window_width" => {
                 win_seen[0] = true;
                 win_w = parse_window_size(value, 480);
@@ -409,6 +510,13 @@ pub fn parse_config(text: &str) -> ConfigParse {
             _ => out.ignored += 1,
         }
     }
+    // 排版数值：缺省/非法用默认值，越界夹取（不产生 ignored）。
+    let size = clamp_font_size(font_size.unwrap_or(DEFAULT_DOC_FONT_SIZE));
+    out.config.doc_font_size = size;
+    out.config.doc_line_height = clamp_line_height(
+        line_height.unwrap_or(DEFAULT_DOC_LINE_HEIGHT),
+        size,
+    );
     out.config.window = match (win_w, win_h, win_x, win_y) {
         (Some(width), Some(height), Some(x), Some(y)) => Some(WindowGeom {
             width,
@@ -679,7 +787,7 @@ mod tests {
                 export_margin_mm: 12.5,
                 export_page_numbers: false,
                 export_toc: true,
-                window: None,
+                ..Config::default()
             };
             let text = cfg.to_toml();
             assert!(!text.contains("[theme]"), "新版配置不再写段标题");
@@ -703,6 +811,7 @@ mod tests {
                 x: -40,
                 y: 60,
             }),
+            ..Config::default()
         };
         let p = parse(&cfg.to_toml());
         assert_eq!(p.config, cfg);
@@ -770,6 +879,98 @@ mod tests {
             parse("export_margin_mm = inf").config.export_margin_mm,
             20.0
         );
+    }
+
+    #[test]
+    fn doc_typography_keys_round_trip_and_default_when_missing() {
+        // 四键齐全往返
+        let cfg = Config {
+            doc_font_family: DocFontFamily::Serif,
+            doc_font_size: 18.0,
+            doc_line_height: 27.0,
+            smooth_scroll: true,
+            ..Config::default()
+        };
+        let text = cfg.to_toml();
+        for key in [
+            "doc_font_family",
+            "doc_font_size",
+            "doc_line_height",
+            "smooth_scroll",
+        ] {
+            assert!(text.contains(key), "序列化必须包含 {key}");
+        }
+        let p = parse(&text);
+        assert_eq!(p.config, cfg);
+        assert_eq!(p.ignored, 0);
+        // 旧配置缺四键 → 全部取默认值且不产生 ignored
+        let p = parse("mode = \"dark\"\n");
+        assert_eq!(p.config.doc_font_family, DocFontFamily::System);
+        assert_eq!(p.config.doc_font_size, 16.0);
+        assert_eq!(p.config.doc_line_height, 22.0);
+        assert!(!p.config.smooth_scroll);
+        assert_eq!(p.ignored, 0);
+        // 字体族四值严格互逆
+        for f in [
+            DocFontFamily::System,
+            DocFontFamily::Sans,
+            DocFontFamily::Serif,
+            DocFontFamily::Mono,
+        ] {
+            assert_eq!(DocFontFamily::parse(f.as_str()), Some(f));
+        }
+    }
+
+    #[test]
+    fn doc_typography_values_are_clamped_never_panic() {
+        // 字号下限/上限
+        let p = parse("doc_font_size = 0\ndoc_line_height = 0\n");
+        assert_eq!((p.config.doc_font_size, p.config.doc_line_height), (10.0, 10.0));
+        assert_eq!(p.ignored, 0, "越界是夹取而非忽略");
+        let p = parse("doc_font_size = 999\ndoc_line_height = 99999\n");
+        assert_eq!((p.config.doc_font_size, p.config.doc_line_height), (32.0, 96.0));
+        assert_eq!(p.ignored, 0);
+        // 行高小于字号 → 抬到字号；超过 3×字号 → 压到 3×
+        assert_eq!(parse("doc_font_size = 20\ndoc_line_height = 5").config.doc_line_height, 20.0);
+        assert_eq!(
+            parse("doc_font_size = 20\ndoc_line_height = 100").config.doc_line_height,
+            60.0
+        );
+        // 与键出现顺序无关（行高先出现也按最终字号夹取）
+        let p = parse("doc_line_height = 100\ndoc_font_size = 20\n");
+        assert_eq!((p.config.doc_font_size, p.config.doc_line_height), (20.0, 60.0));
+        // 非数值：忽略并回落默认
+        let p = parse("doc_font_size = abc\ndoc_line_height = inf\n");
+        assert_eq!((p.config.doc_font_size, p.config.doc_line_height), (16.0, 22.0));
+        assert_eq!(p.ignored, 2);
+    }
+
+    #[test]
+    fn unknown_or_overlong_font_family_is_ignored() {
+        // 未知值 / 超长值 / 裸值均不可识别，回落默认且计数
+        let overlong = format!("doc_font_family = \"{}\"", "x".repeat(65));
+        for text in [
+            "doc_font_family = \"fantasy\"".to_string(),
+            overlong,
+            "doc_font_family = system".to_string(),
+        ] {
+            let p = parse(&text);
+            assert_eq!(p.config.doc_font_family, DocFontFamily::System, "{text}");
+            assert_eq!(p.ignored, 1, "{text}");
+        }
+        // 合法值（含 64 长度内的已知值）正常读取
+        let p = parse("doc_font_family = \"mono\"");
+        assert_eq!(p.config.doc_font_family, DocFontFamily::Mono);
+        assert_eq!(p.ignored, 0);
+    }
+
+    #[test]
+    fn smooth_scroll_bool_invalid_falls_back_to_default() {
+        assert!(parse("smooth_scroll = true").config.smooth_scroll);
+        assert!(!parse("smooth_scroll = false").config.smooth_scroll);
+        let p = parse("smooth_scroll = \"true\"");
+        assert!(!p.config.smooth_scroll);
+        assert_eq!(p.ignored, 1);
     }
 
     #[test]

@@ -101,7 +101,7 @@ cargo test --workspace
 cargo run -p veil -- <file.md>
 ```
 
-当前 1476 项测试全绿（`cargo test --workspace` 1476 passed / 0 failed / 14 ignored，2026-11-13 v1.4 远程图片实测），`cargo clippy --workspace --all-targets -- -D warnings` 零警告。
+当前 1478 项测试全绿（`cargo test --workspace` 1478 passed / 0 failed / 14 ignored，2026-11-13 v1.4 远程图片 + details PDF 修复实测），`cargo clippy --workspace --all-targets -- -D warnings` 零警告。
 
 ## 数字红线（目标值与实测）
 

@@ -101,7 +101,7 @@ cargo test --workspace
 cargo run -p veil -- <file.md>
 ```
 
-Baseline: 1476 passed / 0 failed / 14 ignored (2026-11-13, v1.4 remote images); `cargo clippy --workspace --all-targets -- -D warnings` zero warnings.
+Baseline: 1478 passed / 0 failed / 14 ignored (2026-11-13, v1.4 remote images + details PDF fix); `cargo clippy --workspace --all-targets -- -D warnings` zero warnings.
 
 ## Red Numbers (targets vs measured)
 

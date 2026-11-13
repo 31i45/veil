@@ -1,5 +1,8 @@
 # Veil v1.0 发布规范化 + v1.1/v2.0 Roadmap - Spec
 
+> 2026-11-13 更新：`icon.rs` 已不再是图标的像素真源，改用 `icons/` 下的位图 + 多尺寸 ICO，
+> 由 `build.rs` 以 `include_bytes!` 嵌入；见 `.trae/specs/redesign-app-icon-veil-metaphor/`。
+
 ## Overview
 - **Summary**: 规范 Veil v1.0.0 发布产物的位置与一致性（版本号、LICENSE、CHANGELOG、图标），重打一份干净 release，并用 v1.1 / v2.0 详细 roadmap 固化降级项与架构演进路径。
 - **Purpose**: 当前虽然门禁六条件全过且已打 `v1.0.0` tag，但发布规范上存在版本号不一致（tag v1.0.0 vs Cargo.toml 0.1.0）、LICENSE/CHANGELOG 缺失、无独立 ico、无一键发布脚本等问题，影响对外可交付性；同时 v1.1/v2.0 的候选项只散落在 walkthrough 台账，缺乏优先级、排期与触发条件的集中管理。

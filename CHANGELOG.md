@@ -15,12 +15,13 @@ Veil 版本迭代记录。每个版本的详细修复清单见对应 git tag 的
 - 设计令牌：`tokens::palette`（`surface_base` / `surface_card` / `surface_popup` 等表面单一入口）、`tokens::state` 交互六态、`tokens::space` / `stroke` / `motion`；`Theme::surface(SurfaceLevel)` 显式表达 Base / Card / Popup 三层
 
 ### Changed
+- 图标体系改为图片真源：应用图标重做为「白页 + 面纱垂坠 V」；文档图标 ≥32px 严格复刻 `icons/Markdown.png`，≤24px 用同色系简化徽标；两套各 7 档（16/20/24/32/48/64/256）在 `icons/` 下由 `build.rs` 以 `include_bytes!` 嵌入，`icon.rs` 只保留窗口图标 RGBA。体积数字见 README 门禁表
 - 浮层收敛为单线：只保留边界线，分组改用间距，不再叠加多重线条
 - 查找浮栏改版：按钮与计数重排，补无命中空态与滚动条命中刻度
 - 字体显式指定：UI 雅黑 13 px、正文 16 px、代码 Consolas 14 px，修复中西文混排的字体不一致
 - README 徽章改为 CI 状态 + 动态 Release，并补 Platform / Portable 两枚契约徽章
 - 文档口径统一：测试基线、体积、依赖数改为实测值；`.md` 关联章节改为 `/register` 流程
-- 体积门禁临时统一为单一 release exe ≤ 10 MiB（10,485,760 B）；代码/图标分档暂停，Wave 5 结束后重新裁定。当前 exe 7,056,896 B（基线 6,914,048 B，+142,848 B）
+- 体积门禁临时统一为单一 release exe ≤ 10 MiB（10,485,760 B）；代码/图标分档暂停，Wave 5 结束后重新裁定。当前值与基线口径以 README「体积门禁」表为唯一真源，本文不再重复记录
 
 ### Fixed
 - 代码块（fenced / indented / HTML / Front Matter）与行内代码的中文不再是空心/描边：根因是等宽路径用 generic `Family::Monospace`，摇字体时先耗尽等宽候选，本机命中旧 CJK 等宽字体 MS Gothic；改为显式等宽族名（探测到的 Consolas），Han 因此回到脚本回退的 `Microsoft YaHei UI`，与正文同族，Latin 仍为 Consolas

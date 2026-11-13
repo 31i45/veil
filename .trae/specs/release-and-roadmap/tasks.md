@@ -12,7 +12,7 @@
 - **Acceptance Criteria Addressed**: AC-1, AC-2
 - **Test Requirements**:
   - `rule` TR-1.1: `grep version Cargo.toml` 输出包含 `1.0.0`（不包含 `0.1.0`）；Evidence: git diff 确认
-  - `rule` TR-1.2: `Test-Path icons\veil.ico` 返回 True，且文件大小在 15–30 KB（四档 BMP-DIB 帧约 22 KB）；Evidence: PowerShell 输出
+  - `rule` TR-1.2: `Test-Path icons\veil.ico` 返回 True，且文件大小在 40–55 KB（7 档帧，含 256px PNG 帧）；Evidence: PowerShell 输出
 - **Completion Evidence**:
   - TR-1.1: 根 `Cargo.toml` 版本行显示 `workspace.package.version = "1.0.0"`，grep 输出仅含 1.0.0；veil crate `crates/veil/Cargo.toml` 中 `version.workspace = true`（继承 1.0.0）
   - TR-1.2: `icons/veil.ico` 文件存在，大小 32054 字节，满足 15–30 KB 区间

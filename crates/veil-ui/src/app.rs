@@ -1418,7 +1418,7 @@ impl App {
             })
             // 3e 修 A1：exe 内嵌 ICO 只喂任务栏/文件管理器，标题栏图标须显式设置
             .with_window_icon(Some(
-                Icon::from_rgba(crate::icon::icon_rgba(32), 32, 32).expect("32×32 RGBA 尺寸恒合法"),
+                Icon::from_rgba(crate::icon::icon_rgba(), 32, 32).expect("32×32 RGBA 尺寸恒合法"),
             ));
         if let Some(g) = saved_geom {
             attrs = attrs.with_position(PhysicalPosition::new(g.x, g.y));

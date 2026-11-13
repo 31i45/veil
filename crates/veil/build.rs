@@ -8,18 +8,15 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// 图标像素与 ICO 编码的单一真源在 veil-ui/src/icon.rs（窗口图标与文件资源共用）；
-/// build script 不能依赖 workspace crate，故以 include! 复用同一份代码。
-/// 应用图标（资源 ID 1）与文档图标（资源 ID 2）均由 icon.rs 纯代码生成。
-#[allow(dead_code)] // icon_rgba 仅 GUI 侧使用
-mod icon {
-    include!("../veil-ui/src/icon.rs");
-}
-use icon::{doc_icon_bytes, icon_bytes};
+/// 图标以设计稿为唯一真源（icons/ 下的多尺寸 ICO）：
+/// 资源 ID 1 = 应用图标（面纱垂坠 V），资源 ID 2 = 文档图标（M↓ 折页）。
+const APP_ICO: &[u8] = include_bytes!("../../icons/veil.ico");
+const DOC_ICO: &[u8] = include_bytes!("../../icons/veil-doc.ico");
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
-    println!("cargo:rerun-if-changed=../veil-ui/src/icon.rs");
+    println!("cargo:rerun-if-changed=../../icons/veil.ico");
+    println!("cargo:rerun-if-changed=../../icons/veil-doc.ico");
     println!("cargo:rerun-if-env-changed=RC_EXE");
 
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows")
@@ -38,8 +35,8 @@ fn main() {
     let rc_file = out.join("veil.rc");
     let res_file = out.join("veil.res");
     let ico_file = out.join("veil.ico");
-    std::fs::write(&ico_file, icon_bytes()).expect("写 veil.ico");
-    std::fs::write(out.join("veil-doc.ico"), doc_icon_bytes()).expect("写 veil-doc.ico");
+    std::fs::write(&ico_file, APP_ICO).expect("写 veil.ico");
+    std::fs::write(out.join("veil-doc.ico"), DOC_ICO).expect("写 veil-doc.ico");
     std::fs::write(&rc_file, rc_source(&ver, nums)).expect("写 veil.rc");
 
     let status = Command::new(&rc)

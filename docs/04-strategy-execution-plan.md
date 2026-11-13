@@ -430,6 +430,9 @@ B 用 `gfm_canonical` 抹平 cmark-gfm 与 pulldown 的序列化差异（align/s
   - 应用图标（ICON 资源）同由 build.rs 生成（16/32/48/64 四档 BMP-DIB 帧，圆角蓝底
     + 白色 V，代码绘制抗锯齿，不入库二进制资产、不引 zlib）：Explorer/任务栏/标题栏
     均显示品牌图标（winit 无显式 set_icon 时取 exe 资源）。
+    > 2026-11-13 起该实现已被**图片真源方案**取代：两套图标在 `icons/` 下为 7 档 ICO
+    >（16/20/24/32/48/64/256），`build.rs` 以 `include_bytes!` 嵌入，详见
+    > `.trae/specs/redesign-app-icon-veil-metaphor/`。上句为当日历史记录，保留不改。
   - PE 校验：subsystem=2（GUI），冷启动冒烟 pid 就绪、Responding=True，体积
     5,805,568 B ≈ 5.54 MiB（≤15 MiB 红线内）；`ExtractAssociatedIcon` 取回 32×32 图标正常。
   - **更新策略**：单文件手动替换（下载新版 exe 覆盖），无自动更新检查（无网络输入点，

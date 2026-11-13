@@ -1453,8 +1453,10 @@ impl App {
             // L2 命中刻度：滚动条之后绘制，叠在轨道/滑块上（只作位置提示）
             self.paint_search_ticks(&mut frame, vp);
         }
-        // 应用内模态：覆盖菜单栏与状态栏的最后一层；打印帧不含遮罩
-        if self.ui_state.modal.is_some() && self.window_state.print.is_none() {
+        // 应用内设置模态（优先级高于普通 modal）：覆盖菜单栏与状态栏的最后一层；打印帧不含遮罩
+        if self.ui_state.settings.is_some() && self.window_state.print.is_none() {
+            self.paint_settings(&mut frame);
+        } else if self.ui_state.modal.is_some() && self.window_state.print.is_none() {
             self.paint_modal(&mut frame);
         }
         // 视口驱动缓存回收：paint 帧末尾把 rasters/layouts/tables 从"全部累积"剪到
@@ -1552,6 +1554,69 @@ impl App {
             scale,
         };
         crate::view::modal::paint(frame, vp, scale, &theme, &spec, &state, &layout, &mut text);
+    }
+
+    /// 设置模态布局：全屏视口 + ModalText。
+    pub(crate) fn settings_layout(&mut self) -> crate::view::settings::SettingsLayout {
+        let (w, h) = self.win_size();
+        let vp = Rect {
+            x: 0.0,
+            y: 0.0,
+            w: w as f32,
+            h: h as f32,
+        };
+        let scale = self.input_state.scale;
+        let Some(s) = self.ui_state.settings.as_ref() else {
+            return crate::view::settings::SettingsLayout {
+                card: Rect { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
+                fields: Vec::new(),
+                buttons: Vec::new(),
+                button_ids: Vec::new(),
+                window_geom_clear: None,
+            };
+        };
+        let mut text = ModalText {
+            labels: &mut self.ui_state.chrome.labels,
+            engine: &mut self.engine,
+            scale,
+        };
+        crate::view::settings::layout(vp, scale, &s.form, &mut text, &s.buttons)
+    }
+
+    /// 设置模态绘制：遮罩 + 卡片 + 字段 + 按钮。
+    fn paint_settings(&mut self, frame: &mut Frame) {
+        // 先取 win_size 和 layout（避免与后续的 settings 可变借用冲突）
+        let (w, h) = self.win_size();
+        let layout = self.settings_layout();
+        let scale = self.input_state.scale;
+        let theme = self.input_state.theme;
+        let vp = Rect {
+            x: 0.0,
+            y: 0.0,
+            w: w as f32,
+            h: h as f32,
+        };
+        let Some(s) = self.ui_state.settings.as_mut() else {
+            return;
+        };
+        // 缓存 layout 到 settings state，便于后续交互（命中判定复用同一几何）
+        s.layout = Some(layout.clone());
+        let mut text = ModalText {
+            labels: &mut self.ui_state.chrome.labels,
+            engine: &mut self.engine,
+            scale,
+        };
+        crate::view::settings::paint(
+            frame,
+            vp,
+            scale,
+            &theme,
+            &s.form,
+            &s.state,
+            &layout,
+            &s.buttons,
+            &mut text,
+        );
     }
 
     /// 大纲面板（P3-2）：底色 → 条目（含悬停底色）→ 标题区（后画，覆盖上溢行）。
@@ -2479,6 +2544,7 @@ impl App {
         let caret_color = [fg[0], fg[1], fg[2], 255];
         if let Some(pre) = self.editor.preedit() {
             // preedit：排版小串 → 位图贴在光标处 + 下划线；光标移至组合串内光标位
+            // IME 组合期间强制显示光标（tick 也会保持 cursor_visible = true 兜底）。
             let text = pre.text.clone();
             let l = self.engine.layout_preedit(&text);
             let (px, w, h) = self.engine.rasterize(&l, fg);
@@ -2493,6 +2559,8 @@ impl App {
             let inner = pre.cursor.map(|(s, _)| s).unwrap_or(0);
             let (ix, _, _) = self.engine.caret_xy(&l, inner);
             frame.fill_rect((cx + ix) as i32, cy as i32, 1, ch as u32, caret_color);
+        } else if !self.cursor_visible {
+            // 光标闪烁熄灭：跳过绘制（光标高/位置不变，仅视觉消失半周期）。
         } else if caret_visual(self.ui_state.focused) == CaretVisual::Solid {
             frame.fill_rect(cx as i32, cy as i32, 2, ch as u32, caret_color);
         } else {

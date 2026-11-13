@@ -279,7 +279,9 @@ fn menu_definitions_cover_shortcuts() {
             MenuAction::ToggleFocus,
             MenuAction::ToggleTypewriter,
             MenuAction::Separator,
-            MenuAction::ToggleRemoteImages
+            MenuAction::ToggleRemoteImages,
+            MenuAction::Separator,
+            MenuAction::Settings,
         ]
     );
 }
@@ -792,6 +794,7 @@ fn theme_menu_marks_current_mode() {
             MenuAction::ToggleFocus,
             MenuAction::ToggleTypewriter,
             MenuAction::ToggleRemoteImages,
+            MenuAction::Settings,
         ]
     );
     assert!(theme_action_matches(

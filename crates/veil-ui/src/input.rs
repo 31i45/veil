@@ -52,6 +52,9 @@ pub enum Key {
     Equal,
     /// 逻辑/物理键 `/`（仅 Ctrl 组合映射；无 ctrl 的 `/` 文本由 Text 变体承载）。
     Slash,
+    /// 逻辑/物理键 `,`（仅 Ctrl 组合映射；无 ctrl 的 `,` 文本由 Text 变体承载）。
+    #[expect(dead_code, reason = "预留给 Ctrl+, 快捷键，尚未接线")]
+    Comma,
     /// Escape：关闭菜单（切片 15）。
     Escape,
     /// F11：全屏切换（3c-3；不需要修饰键）。
@@ -128,6 +131,8 @@ pub enum Action {
     ZoomReset,
     /// 全屏切换（3c-3，F11）：无边框全屏；窗口操作由 shell 完成。纯视图动作。
     ToggleFullscreen,
+    /// 打开设置模态（Ctrl+,）：配置项全部持久化到 config.toml；模态在 App 层处理。
+    OpenSettings,
 }
 
 pub fn translate(key: Key, mods: Mods) -> Option<Action> {
@@ -187,6 +192,8 @@ pub fn translate(key: Key, mods: Mods) -> Option<Action> {
         Key::Digit0 | Key::Minus | Key::Equal => None, // 无 ctrl 的符号文本由 Text 变体承载
         Key::Slash if ctrl => Some(Action::OpenSourceMode),
         Key::Slash => None, // 无 ctrl 的 `/` 文本由 Text 变体承载
+        Key::Comma if ctrl => Some(Action::OpenSettings),
+        Key::Comma => None, // 无 ctrl 的 `,` 文本由 Text 变体承载
         // Ctrl+Shift+←/→ 按词扩选；Ctrl+←/→ 按词移动；Shift+方向为字符级扩选。
         Key::Left if ctrl && mods.shift => Some(Action::Doc(Intent::SelectWordLeft)),
         Key::Right if ctrl && mods.shift => Some(Action::Doc(Intent::SelectWordRight)),

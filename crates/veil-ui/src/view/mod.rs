@@ -13,6 +13,7 @@ pub(crate) mod modal;
 pub(crate) mod outline;
 pub(crate) mod quick_open;
 pub(crate) mod search;
+pub(crate) mod settings;
 mod search_strategy;
 mod search_view;
 mod style;

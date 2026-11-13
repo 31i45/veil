@@ -1,7 +1,10 @@
 //! 编辑器交互策略核心：光标（mark）、IME preedit 视图态、文档级意图应用。
 //! 纯逻辑、零 GUI 依赖；像素级命中与坐标换算属 layout 层（机制与策略分离，INSTANCE §0）。
 
-use veil_core::{emphasis_spans, Bias, BlockId, Edit, InlineKind, MarkId, Range, Session};
+use veil_core::{
+    emphasis_spans, generate_toc, is_toc_marker, Bias, BlockId, BlockKind, Edit, InlineKind,
+    MarkId, Range, Session,
+};
 
 /// 文档级意图（input 层翻译产出；视觉行内移动/点击由 shell 经 layout 直接换算偏移，
 /// 不走这里）。preedit 激活期间一切意图被忽略——组合期按键归 IME 所有。
@@ -222,6 +225,31 @@ impl Editor {
             .and_then(|s| s.as_bytes().first().copied())
     }
 
+    /// 读取指定字节偏移处的单个字符；越界返回 None。
+    fn char_at(&self, byte: usize) -> Option<char> {
+        let text = self.session.text_slice(Range::new(byte, byte + 1))?;
+        text.chars().next()
+    }
+
+    fn is_open_bracket(c: char) -> bool {
+        matches!(c, '(' | '[' | '{' | '"' | '\'')
+    }
+
+    fn is_close_bracket(c: char) -> bool {
+        matches!(c, ')' | ']' | '}' | '"' | '\'')
+    }
+
+    fn matching_close(open: char) -> Option<char> {
+        match open {
+            '(' => Some(')'),
+            '[' => Some(']'),
+            '{' => Some('}'),
+            '"' => Some('"'),
+            '\'' => Some('\''),
+            _ => None,
+        }
+    }
+
     pub fn preedit(&self) -> Option<&Preedit> {
         self.preedit.as_ref()
     }
@@ -292,6 +320,7 @@ impl Editor {
         let r = self.apply_inner(intent);
         if mutating && r.is_some() {
             self.dirty = true;
+            self.refresh_toc_if_needed();
         }
         r
     }
@@ -433,6 +462,26 @@ impl Editor {
         if let Some(sel) = self.selection() {
             match intent {
                 Intent::InsertText(text) => {
+                    // 选区包裹：输入单字符开括号时，用 open + 选区文本 + close 包裹选中内容。
+                    if text.chars().count() == 1 {
+                        let ch = text.chars().next().unwrap();
+                        if let Some(close) = Self::matching_close(ch) {
+                            let selected_text = self
+                                .session
+                                .text_slice(sel)
+                                .expect("选区恒合法");
+                            let wrap = format!("{ch}{selected_text}{close}");
+                            let ev = self
+                                .session
+                                .apply(Edit::Replace {
+                                    range: sel,
+                                    text: wrap,
+                                })
+                                .expect("选区恒合法");
+                            let new_caret = sel.start + 1 + selected_text.len() + 1;
+                            return Some(self.collapse_and_return(ev.dirty_blocks, new_caret));
+                        }
+                    }
                     let at = sel.start + text.len();
                     let ev = self
                         .session
@@ -490,6 +539,43 @@ impl Editor {
         }
         match intent {
             Intent::InsertText(text) => {
+                // 单字符拦截：括号/引号自动配对、右括号跳过、双开跳过。
+                if text.chars().count() == 1 {
+                    let ch = text.chars().next().unwrap();
+
+                    // 自动配对：开括号 → 插入 open+close，光标落在中间
+                    if let Some(close) = Self::matching_close(ch) {
+                        // 转义保护：前一个字节是 `\` 则跳过配对
+                        let escaped = if c == 0 {
+                            false
+                        } else {
+                            self.byte_at(c - 1) == Some(b'\\')
+                        };
+                        if !escaped {
+                            // 双开跳过：光标后紧邻同字符（比如已在 `(|)` 之间再打 `(`）
+                            let next_byte = self.byte_at(c);
+                            if next_byte != Some(ch as u8) {
+                                let insert = format!("{ch}{close}");
+                                let dirty = self
+                                    .session
+                                    .apply(Edit::Insert { at: c, text: insert })
+                                    .expect("caret 恒合法")
+                                    .dirty_blocks;
+                                let new_caret = c + ch.len_utf8();
+                                self.collapse_to(new_caret);
+                                return Some(dirty);
+                            }
+                        }
+                    }
+
+                    // 右括号跳过：光标后已存在该右括号 → 纯光标移动，不插入
+                    if Self::is_close_bracket(ch) && self.byte_at(c) == Some(ch as u8) {
+                        let new_caret = c + ch.len_utf8();
+                        self.collapse_to(new_caret);
+                        return Some(Vec::new());
+                    }
+                }
+
                 let dirty = self
                     .session
                     .apply(Edit::Insert { at: c, text })
@@ -502,6 +588,19 @@ impl Editor {
             }
             Intent::DeleteBackward => {
                 let prev = self.session.prev_grapheme(c)?;
+                // 反向删自动配对：光标前是开括号且光标后是匹配闭括号 → 两者一起删。
+                if let (Some(prev_ch), Some(next_ch)) = (self.char_at(prev), self.char_at(c)) {
+                    if Self::is_open_bracket(prev_ch) && Self::matching_close(prev_ch) == Some(next_ch) {
+                        let end = c + next_ch.len_utf8();
+                        return self
+                            .session
+                            .apply(Edit::Delete {
+                                range: Range::new(prev, end),
+                            })
+                            .ok()
+                            .map(|e| self.collapse_and_return(e.dirty_blocks, prev));
+                    }
+                }
                 // CRLF 视为一个换行单位：删到行尾 `\n` 时连同前面的 `\r` 一起删，
                 // 否则会留下孤立 `\r`（破坏源码真值与后续行级判定）
                 let mut start = prev;
@@ -607,6 +706,76 @@ impl Editor {
             }
             // 已于入口分流（穷尽性占位）
             Intent::ToggleWrap(_) | Intent::InsertLink => unreachable!("入口已分流"),
+        }
+    }
+
+    /// [TOC] 自动刷新：编辑完成后若文档含 TOC 标记段落，且当前光标/选区不在其区间内，
+    /// 则根据该标记之后的所有标题重新生成 Markdown 有序列表并原地替换。
+    /// 光标离开 TOC 块才替换 → 符合 Obsidian 的「静态插入」语义，避免用户在 TOC 块内
+    /// 编辑时被立即覆盖。替换本身不再产生新的 TOC 标记 → 不触发第二次刷新。
+    ///
+    /// 扫描 O(n) 块，典型文档 O(1) 命中；且仅在 `is_toc_marker` 为真时才取 heading，
+    /// 空文档 / 不含 `[TOC]` 的文档零额外开销。
+    #[allow(dead_code)]
+    fn refresh_toc_if_needed(&mut self) {
+        let blocks = self.session.blocks();
+        let caret = self.caret();
+        let sel = self.selection();
+
+        // 1. 收集所有 TOC 标记段落 (id, range)
+        let toc_blocks: Vec<(BlockId, Range)> = blocks
+            .iter()
+            .filter(|(_, kind, _)| matches!(kind, BlockKind::Paragraph))
+            .filter_map(|(id, _, range)| {
+                let text = self.session.text_slice(*range)?;
+                is_toc_marker(&text).then_some((*id, *range))
+            })
+            .collect();
+        if toc_blocks.is_empty() {
+            return;
+        }
+
+        // 2. 对每个 TOC 标记：光标/选区是否在其内 → 是则跳过
+        for (_toc_id, toc_range) in &toc_blocks {
+            let caret_in = caret >= toc_range.start && caret <= toc_range.end;
+            let sel_in = sel.is_some_and(|s| {
+                s.start < toc_range.end && s.end > toc_range.start
+            });
+            if caret_in || sel_in {
+                continue;
+            }
+
+            // 3. 收集 toc_range.end 之后的所有 heading（按文档顺序）
+            let after_headings: Vec<(u8, String)> = blocks
+                .iter()
+                .filter(|(_, kind, range)| {
+                    range.start >= toc_range.end
+                        && matches!(
+                            kind,
+                            BlockKind::AtxHeading(_) | BlockKind::SetextHeading(_)
+                        )
+                })
+                .filter_map(|(id, _, _)| self.session.heading(*id))
+                .collect();
+
+            let generated =
+                generate_toc(after_headings.iter().map(|(l, t)| (*l, t.as_str())));
+
+            // 4. 与现有内容比较；相同则跳过（避免空换脏/空进撤销栈）
+            let existing = match self.session.text_slice(*toc_range) {
+                Some(t) => t,
+                None => continue,
+            };
+            if generated == existing {
+                continue;
+            }
+
+            // 5. 原地替换：整段一次 Replace，单撤销步；块区间将由重解析自动更新
+            let _ = self.session.apply(Edit::Replace {
+                range: *toc_range,
+                text: generated,
+            });
+            self.dirty = true;
         }
     }
 
@@ -2934,5 +3103,142 @@ mod tests {
         e.apply(Intent::DeleteWordBackward).unwrap();
         assert_eq!(e.session().serialize(), "foo ");
         assert_eq!(e.caret(), 4);
+    }
+
+    // ---- 自动配对（Task C）----
+
+    #[test]
+    fn auto_pair_parentheses() {
+        let mut e = Editor::new("");
+        e.apply(Intent::InsertText("(".into())).unwrap();
+        assert_eq!(e.session().serialize(), "()");
+        assert_eq!(e.caret(), 1);
+    }
+
+    #[test]
+    fn auto_pair_brackets() {
+        let mut e = Editor::new("");
+        e.apply(Intent::InsertText("[".into())).unwrap();
+        assert_eq!(e.session().serialize(), "[]");
+        assert_eq!(e.caret(), 1);
+    }
+
+    #[test]
+    fn auto_pair_braces() {
+        let mut e = Editor::new("");
+        e.apply(Intent::InsertText("{".into())).unwrap();
+        assert_eq!(e.session().serialize(), "{}");
+        assert_eq!(e.caret(), 1);
+    }
+
+    #[test]
+    fn auto_pair_double_quote() {
+        let mut e = Editor::new("");
+        e.apply(Intent::InsertText("\"".into())).unwrap();
+        assert_eq!(e.session().serialize(), "\"\"");
+        assert_eq!(e.caret(), 1);
+    }
+
+    #[test]
+    fn auto_pair_single_quote() {
+        let mut e = Editor::new("");
+        e.apply(Intent::InsertText("'".into())).unwrap();
+        assert_eq!(e.session().serialize(), "''");
+        assert_eq!(e.caret(), 1);
+    }
+
+    #[test]
+    fn auto_pair_skip_when_prev_char_is_backslash() {
+        let mut e = Editor::new("\\");
+        assert!(e.set_caret(1));
+        e.apply(Intent::InsertText("(".into())).unwrap();
+        // 不应配对，文本应为 "\(" 而非 "\()"
+        assert_eq!(e.session().serialize(), "\\(");
+        assert_eq!(e.caret(), 2);
+    }
+
+    #[test]
+    fn close_bracket_skip_moves_caret() {
+        let mut e = Editor::new("()");
+        assert!(e.set_caret(1)); // 光标在 "(" 和 ")" 之间
+        e.apply(Intent::InsertText(")".into())).unwrap();
+        assert_eq!(e.session().serialize(), "()"); // 文本不变
+        assert_eq!(e.caret(), 2); // 光标跳到结尾
+    }
+
+    #[test]
+    fn double_open_skips_extra_close() {
+        // 光标处是同开括号 → 只插入不配对，避免出现 spurious 配对
+        let mut e = Editor::new("((x");
+        assert!(e.set_caret(1)); // 光标处是第二个 "("
+        e.apply(Intent::InsertText("(".into())).unwrap();
+        // 光标处已有 "(" → 只插入，不配对 → "(((x"
+        assert_eq!(e.session().serialize(), "(((x");
+        assert_eq!(e.caret(), 2);
+    }
+
+    #[test]
+    fn selection_wrap_with_parentheses() {
+        let mut e = sel_ed("abc", 0, 3);
+        e.apply(Intent::InsertText("(".into())).unwrap();
+        assert_eq!(e.session().serialize(), "(abc)");
+        assert_eq!(e.caret(), 5); // 闭括号之后
+    }
+
+    #[test]
+    fn selection_wrap_with_brackets() {
+        let mut e = sel_ed("abc", 0, 3);
+        e.apply(Intent::InsertText("[".into())).unwrap();
+        assert_eq!(e.session().serialize(), "[abc]");
+        assert_eq!(e.caret(), 5);
+    }
+
+    #[test]
+    fn backspace_deletes_auto_pair_together() {
+        // 键入 "(" → "()" 光标在中间 → Backspace → 两个一起删
+        let mut e = Editor::new("");
+        e.apply(Intent::InsertText("(".into())).unwrap();
+        assert_eq!(e.session().serialize(), "()");
+        assert_eq!(e.caret(), 1);
+        e.apply(Intent::DeleteBackward).unwrap();
+        assert_eq!(e.session().serialize(), "");
+        assert_eq!(e.caret(), 0);
+    }
+
+    #[test]
+    fn backspace_does_not_delete_non_matching_pair() {
+        // 光标在 "(" 之后、 "]" 之前 → Backspace 只删 "("
+        let mut e = Editor::new("a(]b");
+        assert!(e.set_caret(2));
+        e.apply(Intent::DeleteBackward).unwrap();
+        assert_eq!(e.session().serialize(), "a]b");
+        assert_eq!(e.caret(), 1);
+    }
+
+    #[test]
+    fn ime_preedit_skips_auto_pair() {
+        let mut e = Editor::new("");
+        e.set_preedit("x".into(), None);
+        // preedit 激活 → apply 返回 None，配对逻辑也被跳过（由 L403 守卫）
+        assert_eq!(e.apply(Intent::InsertText("(".into())), None);
+        assert_eq!(e.session().serialize(), "");
+    }
+
+    #[test]
+    fn auto_pair_not_confused_by_nested_brackets() {
+        // 键入 "[" → "[]"，光标在中间；再键入 "(" → "()" 自动配对插在光标处 → "[()]"
+        let mut e = Editor::new("");
+        e.apply(Intent::InsertText("[".into())).unwrap();
+        assert_eq!(e.session().serialize(), "[]");
+        assert_eq!(e.caret(), 1);
+        e.apply(Intent::InsertText("(".into())).unwrap();
+        assert_eq!(e.session().serialize(), "[()]");
+        // 现在光标在 "(" 和 ")" 之间（位置2），光标处是 ")"
+        assert_eq!(e.caret(), 2);
+        // 将光标移到 ")" 和 "]" 之间（位置3），然后键入 "]" → 跳过
+        assert!(e.set_caret(3));
+        e.apply(Intent::InsertText("]".into())).unwrap();
+        assert_eq!(e.session().serialize(), "[()]"); // 文本不变
+        assert_eq!(e.caret(), 4); // 光标到末尾
     }
 }

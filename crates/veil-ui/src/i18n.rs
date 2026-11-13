@@ -84,6 +84,7 @@ keys! {
     MenuViewFocusMode => "menu.view.focus_mode", "专注模式";
     MenuViewTypewriterMode => "menu.view.typewriter_mode", "打字机模式";
     MenuViewBlockRemoteImages => "menu.view.block_remote_images", "阻止远程图片";
+    MenuViewSettings => "menu.view.settings", "设置…";
 
     // ---- 快捷键提示（菜单右侧列） ----
     ShortcutNew => "shortcut.new", "Ctrl+N";
@@ -114,6 +115,7 @@ keys! {
     ShortcutZoomReset => "shortcut.zoom_reset", "Ctrl+0";
     ShortcutFullscreen => "shortcut.fullscreen", "F11";
     ShortcutSourceMode => "shortcut.source_mode", "Ctrl+/";
+    ShortcutSettings => "shortcut.settings", "Ctrl+,";
 
     // ---- 窗口标题 / 状态栏 ----
     WindowTitle => "title.window", "veil — {}";
@@ -227,6 +229,7 @@ keys! {
     BtnConfirm => "button.confirm", "确定";
     BtnReload => "button.reload", "重新加载";
     BtnKeepCurrent => "button.keep_current", "保留当前";
+    BtnRestoreDefaults => "button.restore_defaults", "恢复默认";
 
     // ---- 保存 / 打开 / 导出 失败与提示 ----
     NoticeWatchUnavailable => "notice.watch_unavailable", "文件监听不可用: {}";
@@ -477,6 +480,31 @@ keys! {
     WicConvertPixels => "wic.convert_pixels", "转换像素格式";
     WicReadSize => "wic.read_size", "读取图片尺寸";
     WicReadPixels => "wic.read_pixels", "读取图片像素";
+
+    // ---- 设置模态 ----
+    ModalSettingsTitle => "modal.settings.title", "设置";
+    SettingsThemeMode => "settings.theme_mode", "主题模式";
+    SettingsFollowSystem => "settings.follow_system", "跟随系统";
+    SettingsLight => "settings.light", "浅色";
+    SettingsDark => "settings.dark", "深色";
+    SettingsDocFontSize => "settings.doc_font_size", "正文字号（10–32）";
+    SettingsDocFontFamily => "settings.doc_font_family", "正文字体族";
+    SettingsFontSystem => "settings.font_system", "系统默认";
+    SettingsFontSans => "settings.font_sans", "无衬线";
+    SettingsFontSerif => "settings.font_serif", "衬线";
+    SettingsFontMono => "settings.font_mono", "等宽";
+    SettingsSmoothScroll => "settings.smooth_scroll", "平滑滚动";
+    SettingsAllowRemoteImages => "settings.allow_remote_images", "允许远程图片";
+    SettingsBlockRemoteImages => "settings.block_remote_images", "阻止远程图片";
+    SettingsWindowGeom => "settings.window_geom", "上次窗口几何";
+    SettingsWindowGeomNone => "settings.window_geom_none", "（未记录）";
+    SettingsResetWindowGeom => "settings.reset_window_geom", "清除（下次启动重置）";
+    SettingsExportPageNumbers => "settings.export_page_numbers", "导出 PDF 时显示页码";
+    SettingsExportToc => "settings.export_toc", "导出 PDF 时包含目录页";
+    SettingsExportMarginMm => "settings.export_margin_mm", "导出 PDF 页边距（毫米，0–50）";
+    SettingsTabWidth => "settings.tab_width", "制表符宽度（2 或 4）";
+    NoticeSettingsSaved => "notice.settings_saved", "设置已保存";
+    NoticeSettingsSaveFailed => "notice.settings_save_failed", "设置保存失败：{}";
 }
 
 /// 语言表：`code` 为 BCP 47 风格标签；`entries` 为空表示尚未翻译，回退到下一份表。

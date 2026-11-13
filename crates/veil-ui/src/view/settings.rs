@@ -3,7 +3,12 @@
 //! 独立于 modal.rs：后者只处理「静态文本 + OK/Cancel」类弹窗；设置表单有 10+ 个
 //! 可编辑控件（radio / toggle / number input / dropdown / 只读展示），需要独立的
 //! 布局、绘制和交互路径。
-#![allow(dead_code, unused_variables, clippy::if_same_then_else, clippy::unnecessary_map_or)]
+#![allow(
+    dead_code,
+    unused_variables,
+    clippy::if_same_then_else,
+    clippy::unnecessary_map_or
+)]
 
 use crate::geometry::Rect;
 use crate::i18n::{t, Key};
@@ -66,9 +71,7 @@ pub(crate) enum FieldValue {
 impl SettingsField {
     pub(crate) fn value_is_valid(&self) -> bool {
         match (&self.kind, &self.value) {
-            (FieldKind::Number(range), FieldValue::Number(v)) => {
-                *v >= range.min && *v <= range.max
-            }
+            (FieldKind::Number(range), FieldValue::Number(v)) => *v >= range.min && *v <= range.max,
             _ => true,
         }
     }
@@ -126,9 +129,7 @@ impl SettingsForm {
             SettingsField {
                 label: Key::SettingsWindowGeom,
                 kind: FieldKind::WindowGeom,
-                value: FieldValue::Geom(cfg.window.map(|w| {
-                    (w.width, w.height, w.x, w.y)
-                })),
+                value: FieldValue::Geom(cfg.window.map(|w| (w.width, w.height, w.x, w.y))),
                 buffer: None,
                 read_only: true,
             },
@@ -241,6 +242,9 @@ pub(crate) const BTN_OK: u16 = 1;
 pub(crate) const BTN_RESET_DEFAULTS: u16 = 2;
 pub(crate) const BTN_CANCEL: u16 = 3;
 
+/// 键盘焦点顺序：OK → Cancel → Restore Defaults（值为 buttons() 中的索引）。
+const BUTTON_TAB_ORDER: [usize; 3] = [0, 2, 1];
+
 /// 控件矩形：用于命中判定和键盘导航。
 #[derive(Clone, Debug)]
 pub(crate) struct FieldRects {
@@ -267,7 +271,11 @@ pub(crate) fn buttons() -> Vec<ModalButton> {
             t(Key::BtnRestoreDefaults).to_string(),
             ButtonRole::Secondary,
         ),
-        ModalButton::new(BTN_CANCEL, t(Key::BtnCancel).to_string(), ButtonRole::Secondary),
+        ModalButton::new(
+            BTN_CANCEL,
+            t(Key::BtnCancel).to_string(),
+            ButtonRole::Secondary,
+        ),
     ]
 }
 
@@ -315,7 +323,11 @@ pub(crate) fn layout(
         })
         .collect();
     let buttons_w = widths.iter().sum::<f32>()
-        + if widths.len() > 1 { gap * (widths.len() - 1) as f32 } else { 0.0 };
+        + if widths.len() > 1 {
+            gap * (widths.len() - 1) as f32
+        } else {
+            0.0
+        };
 
     let desired = (title_w).max(inner_w).max(buttons_w) + 2.0 * p;
 
@@ -371,12 +383,21 @@ pub(crate) fn layout(
     // 按钮排布（自右向左）
     let y = card.y + card.h - p - bh;
     let mut button_rects: Vec<Rect> = vec![
-        Rect { x: 0.0, y, w: 0.0, h: bh };
+        Rect {
+            x: 0.0,
+            y,
+            w: 0.0,
+            h: bh
+        };
         buttons.len()
     ];
     let ids: Vec<u16> = buttons.iter().map(|b| b.id).collect();
     let mut cursor_x = card.x + card.w - p;
-    let gaps = if buttons.len() > 1 { gap * (buttons.len() - 1) as f32 } else { 0.0 };
+    let gaps = if buttons.len() > 1 {
+        gap * (buttons.len() - 1) as f32
+    } else {
+        0.0
+    };
     let avail_buttons = ((card.w - 2.0 * p) - gaps).max(0.0);
     let sum: f32 = widths.iter().sum();
     let fitted: Vec<f32> = if sum > avail_buttons && sum > 0.0 {
@@ -427,20 +448,16 @@ pub(crate) struct SettingsState {
 impl SettingsState {
     pub(crate) fn new(form: &SettingsForm) -> Self {
         // 初始焦点落在第一个非只读字段上；没有则落在第一个按钮。
-        let focused_field = form
-            .fields
-            .iter()
-            .position(|f| !f.read_only)
-            .unwrap_or(0);
+        let first_editable = form.fields.iter().position(|f| !f.read_only);
         Self {
-            focused_field,
-            focused_button: None,
+            focused_field: first_editable.unwrap_or(0),
+            focused_button: first_editable.is_none().then_some(BUTTON_TAB_ORDER[0]),
             hovered_button: None,
             hovered_clear: false,
         }
     }
 
-    /// Tab 循环：在非只读字段间循环；Shift+Tab 反向。
+    /// Tab 循环：非只读字段 → OK → Cancel → Restore Defaults；Shift+Tab 反向。
     pub(crate) fn tab(&mut self, form: &SettingsForm, shift: bool) {
         let non_readonly: Vec<usize> = form
             .fields
@@ -449,24 +466,38 @@ impl SettingsState {
             .filter(|(_, f)| !f.read_only)
             .map(|(i, _)| i)
             .collect();
-        if non_readonly.is_empty() {
-            return;
-        }
-        let cur_pos = non_readonly
-            .iter()
-            .position(|&i| i == self.focused_field)
-            .unwrap_or(0);
-        let next = if shift {
-            (cur_pos + non_readonly.len() - 1) % non_readonly.len()
-        } else {
-            (cur_pos + 1) % non_readonly.len()
+        let cur_pos = match self.focused_button {
+            Some(button) => {
+                non_readonly.len()
+                    + BUTTON_TAB_ORDER
+                        .iter()
+                        .position(|&index| index == button)
+                        .unwrap_or(0)
+            }
+            None => non_readonly
+                .iter()
+                .position(|&i| i == self.focused_field)
+                .unwrap_or(0),
         };
-        self.focused_field = non_readonly[next];
-        self.focused_button = None;
+        let total = non_readonly.len() + BUTTON_TAB_ORDER.len();
+        let next = if shift {
+            (cur_pos + total - 1) % total
+        } else {
+            (cur_pos + 1) % total
+        };
+        if next < non_readonly.len() {
+            self.focused_field = non_readonly[next];
+            self.focused_button = None;
+        } else {
+            self.focused_button = Some(BUTTON_TAB_ORDER[next - non_readonly.len()]);
+        }
     }
 
     /// 字段值切换：toggle / radio / dropdown 点击或空格键触发。
     pub(crate) fn toggle_field(&mut self, form: &mut SettingsForm) {
+        if self.focused_button.is_some() {
+            return;
+        }
         let Some(f) = form.fields.get_mut(self.focused_field) else {
             return;
         };
@@ -507,6 +538,9 @@ impl SettingsState {
 
     /// 数字输入框按键（用于数字输入的 +/- 调整）。
     pub(crate) fn adjust_number(&mut self, form: &mut SettingsForm, delta: f32) {
+        if self.focused_button.is_some() {
+            return;
+        }
         let Some(f) = form.fields.get_mut(self.focused_field) else {
             return;
         };
@@ -573,6 +607,7 @@ impl SettingsState {
                     }
                 } else {
                     self.focused_field = i;
+                    self.focused_button = None;
                     self.toggle_field(form);
                 }
                 return None;
@@ -582,11 +617,7 @@ impl SettingsState {
     }
 
     /// 悬停更新
-    pub(crate) fn on_hover(
-        &mut self,
-        mouse: (f32, f32),
-        layout: &SettingsLayout,
-    ) -> bool {
+    pub(crate) fn on_hover(&mut self, mouse: (f32, f32), layout: &SettingsLayout) -> bool {
         let prev_btn = self.hovered_button;
         let prev_clear = self.hovered_clear;
 
@@ -638,17 +669,31 @@ impl SettingsState {
                 self.adjust_number(form, 1.0);
                 None
             }
-            InputKey::Left if form.fields.get(self.focused_field).map_or(false, |f| matches!(f.kind, FieldKind::Number(_))) => {
+            InputKey::Left
+                if form
+                    .fields
+                    .get(self.focused_field)
+                    .map_or(false, |f| matches!(f.kind, FieldKind::Number(_))) =>
+            {
                 self.adjust_number(form, -1.0);
                 None
             }
-            InputKey::Right if form.fields.get(self.focused_field).map_or(false, |f| matches!(f.kind, FieldKind::Number(_))) => {
+            InputKey::Right
+                if form
+                    .fields
+                    .get(self.focused_field)
+                    .map_or(false, |f| matches!(f.kind, FieldKind::Number(_))) =>
+            {
                 self.adjust_number(form, 1.0);
                 None
             }
             InputKey::Text(t) if t == " " => {
-                self.toggle_field(form);
-                None
+                if let Some(i) = self.focused_button {
+                    layout.button_ids.get(i).copied()
+                } else {
+                    self.toggle_field(form);
+                    None
+                }
             }
             _ => None,
         }
@@ -700,17 +745,28 @@ pub(crate) fn paint(
     let _ = body_top; // body_top 通过 layout.fields 的 label rects 承载
 
     for (i, (f, fr)) in form.fields.iter().zip(layout.fields.iter()).enumerate() {
-        let is_focused = state.focused_field == i;
+        let is_focused = state.focused_button.is_none() && state.focused_field == i;
         paint_field_label(frame, text, f, fr, theme);
         paint_field_control(frame, text, f, fr, theme, scale, is_focused);
     }
 
     // 窗口几何 "清除" 按钮
     if let Some(r) = layout.window_geom_clear.as_ref() {
-        let wg_field = form.fields.iter().find(|f| matches!(f.kind, FieldKind::WindowGeom));
+        let wg_field = form
+            .fields
+            .iter()
+            .find(|f| matches!(f.kind, FieldKind::WindowGeom));
         match wg_field {
             Some(f) if matches!(&f.value, FieldValue::Geom(Some(_))) => {
-                paint_buttonish(frame, text, t(Key::SettingsResetWindowGeom), theme, r, scale, state.hovered_clear);
+                paint_buttonish(
+                    frame,
+                    text,
+                    t(Key::SettingsResetWindowGeom),
+                    theme,
+                    r,
+                    scale,
+                    state.hovered_clear,
+                );
             }
             _ => {
                 paint_clear_stub(frame, theme, r);
@@ -782,7 +838,15 @@ fn paint_field_control(
     }
 
     // 非只读：画控件底（描边 + 焦点环）
-    let border_color = if is_focused { theme.accent } else { [theme.chrome_border[0], theme.chrome_border[1], theme.chrome_border[2]] };
+    let border_color = if is_focused {
+        theme.accent
+    } else {
+        [
+            theme.chrome_border[0],
+            theme.chrome_border[1],
+            theme.chrome_border[2],
+        ]
+    };
     stroke_frame(frame, c, cr, border_color, palette::surface_popup(theme));
 
     // 控件值文本
@@ -833,13 +897,7 @@ fn field_value_display(f: &SettingsField) -> String {
     }
 }
 
-fn stroke_frame(
-    frame: &mut Frame,
-    r: Rect,
-    radius: f32,
-    border: [u8; 3],
-    bg: [u8; 4],
-) {
+fn stroke_frame(frame: &mut Frame, r: Rect, radius: f32, border: [u8; 3], bg: [u8; 4]) {
     let x = r.x.round() as i32;
     let y = r.y.round() as i32;
     let w = r.w.max(0.0).round() as u32;
@@ -865,12 +923,7 @@ fn focus_ring(frame: &mut Frame, r: Rect, radius: f32, color: [u8; 3], inner: [u
     }
 }
 
-fn paint_card(
-    frame: &mut Frame,
-    scale: f32,
-    theme: &crate::theme::Theme,
-    card: Rect,
-) {
+fn paint_card(frame: &mut Frame, scale: f32, theme: &crate::theme::Theme, card: Rect) {
     let x = card.x.round() as i32;
     let y = card.y.round() as i32;
     let w = card.w.max(0.0).round() as u32;
@@ -902,8 +955,12 @@ fn paint_buttons(
     let radius = surface::corner_radius(scale);
     let line_h = typography::UI_LINE_HEIGHT * scale;
     for (i, button) in buttons.iter().enumerate() {
-        let Some(&rect) = layout.buttons.get(i) else { continue };
-        if rect.w <= 0.0 || rect.h <= 0.0 { continue; }
+        let Some(&rect) = layout.buttons.get(i) else {
+            continue;
+        };
+        if rect.w <= 0.0 || rect.h <= 0.0 {
+            continue;
+        }
         let x = rect.x.round() as i32;
         let y = rect.y.round() as i32;
         let w = rect.w.round() as u32;
@@ -912,7 +969,14 @@ fn paint_buttons(
         let focused = state.focused_button == Some(i);
         match button.role {
             ButtonRole::Primary => {
-                frame.fill_rounded_rect(x, y, w, h, radius, [theme.accent[0], theme.accent[1], theme.accent[2], 255]);
+                frame.fill_rounded_rect(
+                    x,
+                    y,
+                    w,
+                    h,
+                    radius,
+                    [theme.accent[0], theme.accent[1], theme.accent[2], 255],
+                );
                 let fg = theme.accent_text;
                 if focused {
                     let inner = [theme.accent[0], theme.accent[1], theme.accent[2], 255];
@@ -924,12 +988,23 @@ fn paint_buttons(
                 let (border, fg) = if button.role == ButtonRole::Danger {
                     (theme.danger, theme.danger)
                 } else {
-                    ([theme.chrome_border[0], theme.chrome_border[1], theme.chrome_border[2]], theme.text)
+                    (
+                        [
+                            theme.chrome_border[0],
+                            theme.chrome_border[1],
+                            theme.chrome_border[2],
+                        ],
+                        theme.text,
+                    )
                 };
                 stroke_frame(frame, rect, radius, border, palette::surface_popup(theme));
                 if hovered {
                     frame.fill_hover(
-                        x, y, w, h, scale,
+                        x,
+                        y,
+                        w,
+                        h,
+                        scale,
                         [theme.hover[0], theme.hover[1], theme.hover[2], 128],
                     );
                 }
@@ -963,7 +1038,19 @@ fn paint_clear_stub(frame: &mut Frame, theme: &crate::theme::Theme, r: &Rect) {
     let w = r.w.round() as u32;
     let h = r.h.round() as u32;
     // 画灰底禁用态
-    frame.fill_rounded_rect(x, y, w, h, 2.0, [theme.chrome_border[0], theme.chrome_border[1], theme.chrome_border[2], 255]);
+    frame.fill_rounded_rect(
+        x,
+        y,
+        w,
+        h,
+        2.0,
+        [
+            theme.chrome_border[0],
+            theme.chrome_border[1],
+            theme.chrome_border[2],
+            255,
+        ],
+    );
     _ = palette::surface_popup(theme);
 }
 
@@ -981,10 +1068,24 @@ fn paint_buttonish(
     let w = r.w.round() as u32;
     let h = r.h.round() as u32;
     let cr = surface::corner_radius(scale);
-    stroke_frame(frame, *r, cr, [theme.chrome_border[0], theme.chrome_border[1], theme.chrome_border[2]], palette::surface_popup(theme));
+    stroke_frame(
+        frame,
+        *r,
+        cr,
+        [
+            theme.chrome_border[0],
+            theme.chrome_border[1],
+            theme.chrome_border[2],
+        ],
+        palette::surface_popup(theme),
+    );
     if hovered {
         frame.fill_hover(
-            x, y, w, h, scale,
+            x,
+            y,
+            w,
+            h,
+            scale,
             [theme.hover[0], theme.hover[1], theme.hover[2], 128],
         );
     }
@@ -993,4 +1094,301 @@ fn paint_buttonish(
     let tx = r.x + (r.w - tw) * 0.5;
     let ty = r.y + (r.h - line_h) * 0.5;
     text.draw(frame, label, theme.text, tx as i32, ty as i32);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::input::Mods;
+
+    const EPSILON: f32 = 0.001;
+
+    /// 确定性文本度量：只影响宽度，不在几何测试中绘制像素。
+    struct FakeText;
+
+    impl Text for FakeText {
+        fn width(&mut self, s: &str) -> f32 {
+            s.chars().count() as f32 * 8.0
+        }
+
+        fn draw(&mut self, _frame: &mut Frame, _s: &str, _color: [u8; 3], _x: i32, _y: i32) {}
+    }
+
+    fn viewport(width: f32, height: f32) -> Rect {
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            w: width,
+            h: height,
+        }
+    }
+
+    fn layout_for(vp: Rect, form: &SettingsForm) -> SettingsLayout {
+        let mut text = FakeText;
+        layout(vp, 1.0, form, &mut text, &buttons())
+    }
+
+    fn default_form() -> SettingsForm {
+        SettingsForm::from_config(&Config::default())
+    }
+
+    fn rectangles(layout: &SettingsLayout) -> Vec<Rect> {
+        let mut rects = vec![layout.card];
+        for field in &layout.fields {
+            rects.push(field.label);
+            rects.push(field.control);
+        }
+        rects.extend(layout.buttons.iter().copied());
+        rects.extend(layout.window_geom_clear);
+        rects
+    }
+
+    fn assert_layout_fits(vp: Rect, layout: &SettingsLayout) {
+        for rect in rectangles(layout) {
+            assert!(
+                rect.x >= vp.x && rect.y >= vp.y,
+                "矩形起点越过视口上/左缘: {rect:?}, viewport={vp:?}"
+            );
+            assert!(
+                rect.x + rect.w <= vp.x + vp.w + EPSILON
+                    && rect.y + rect.h <= vp.y + vp.h + EPSILON,
+                "矩形终点越过视口下/右缘: {rect:?}, viewport={vp:?}"
+            );
+        }
+    }
+
+    fn editable_indices(form: &SettingsForm) -> Vec<usize> {
+        form.fields
+            .iter()
+            .enumerate()
+            .filter(|(_, field)| !field.read_only)
+            .map(|(index, _)| index)
+            .collect()
+    }
+
+    #[test]
+    fn field_rows_are_strictly_separated() {
+        let form = default_form();
+        let layout = layout_for(viewport(1280.0, 800.0), &form);
+
+        for (index, pair) in layout.fields.windows(2).enumerate() {
+            let previous = &pair[0];
+            let next = &pair[1];
+            assert!(
+                next.control.y > previous.control.y + previous.control.h,
+                "控件行 {index} 与 {} 重叠",
+                index + 1
+            );
+            assert!(
+                next.label.y > previous.label.y + previous.label.h,
+                "标签行 {index} 与 {} 重叠",
+                index + 1
+            );
+        }
+    }
+
+    #[test]
+    fn every_rectangle_fits_at_minimum_typical_and_large_sizes() {
+        let form = default_form();
+        for (width, height) in [(800.0, 600.0), (1280.0, 800.0), (1920.0, 1080.0)] {
+            let vp = viewport(width, height);
+            let layout = layout_for(vp, &form);
+            assert_layout_fits(vp, &layout);
+        }
+    }
+
+    #[test]
+    fn action_buttons_have_clickable_target_sizes() {
+        let form = default_form();
+        let layout = layout_for(viewport(1280.0, 800.0), &form);
+
+        assert_eq!(layout.button_ids, [BTN_OK, BTN_RESET_DEFAULTS, BTN_CANCEL]);
+        for (id, rect) in layout.button_ids.iter().zip(&layout.buttons) {
+            assert!(rect.w >= 80.0, "按钮 {id} 宽度不足: {rect:?}");
+            assert!(rect.h >= 28.0, "按钮 {id} 高度不足: {rect:?}");
+        }
+    }
+
+    #[test]
+    fn extreme_font_values_keep_labels_and_controls_contained() {
+        let config = Config {
+            doc_font_size: 32.0,
+            doc_font_family: DocFontFamily::Serif,
+            ..Config::default()
+        };
+        let form = SettingsForm::from_config(&config);
+        let vp = viewport(1280.0, 800.0);
+        let layout = layout_for(vp, &form);
+        assert_layout_fits(vp, &layout);
+
+        let mut text = FakeText;
+        for key in [Key::SettingsDocFontSize, Key::SettingsDocFontFamily] {
+            let index = form
+                .fields
+                .iter()
+                .position(|field| field.label == key)
+                .expect("测试字段必须存在");
+            let field = &form.fields[index];
+            let rects = &layout.fields[index];
+            assert!(
+                text.width(t(field.label)) <= rects.label.w + EPSILON,
+                "字段标签超出标签矩形: {key:?}"
+            );
+            assert!(
+                text.width(&field_value_display(field)) <= rects.control.w + EPSILON,
+                "字段值超出控件矩形: {key:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn light_and_dark_modes_have_identical_geometry() {
+        let light_config = Config {
+            mode: ThemeMode::Light,
+            ..Config::default()
+        };
+        let dark_config = Config {
+            mode: ThemeMode::Dark,
+            ..Config::default()
+        };
+        let light_form = SettingsForm::from_config(&light_config);
+        let dark_form = SettingsForm::from_config(&dark_config);
+        let vp = viewport(1280.0, 800.0);
+
+        let light = layout_for(vp, &light_form);
+        let dark = layout_for(vp, &dark_form);
+        assert_eq!(rectangles(&light), rectangles(&dark));
+        assert_eq!(light.button_ids, dark.button_ids);
+    }
+
+    fn focus_button(state: &mut SettingsState, layout: &SettingsLayout, id: u16) {
+        state.focused_button = Some(
+            layout
+                .button_ids
+                .iter()
+                .position(|&candidate| candidate == id)
+                .expect("测试按钮必须存在"),
+        );
+    }
+
+    #[test]
+    fn tab_moves_through_editable_fields_before_buttons() {
+        let form = default_form();
+        let editable = editable_indices(&form);
+        let mut state = SettingsState::new(&form);
+        assert_eq!(state.focused_field, editable[0]);
+
+        for &expected in editable.iter().skip(1) {
+            state.tab(&form, false);
+            assert_eq!(state.focused_field, expected);
+            assert_eq!(state.focused_button, None);
+        }
+        state.tab(&form, false);
+        assert_eq!(state.focused_button, Some(BUTTON_TAB_ORDER[0]));
+    }
+
+    #[test]
+    fn shift_tab_reverses_fields_and_action_buttons() {
+        let form = default_form();
+        let editable = editable_indices(&form);
+        let layout = layout_for(viewport(1280.0, 800.0), &form);
+        let mut state = SettingsState::new(&form);
+
+        for expected_id in [BTN_RESET_DEFAULTS, BTN_CANCEL, BTN_OK] {
+            state.tab(&form, true);
+            let expected = layout
+                .button_ids
+                .iter()
+                .position(|&id| id == expected_id)
+                .expect("测试按钮必须存在");
+            assert_eq!(state.focused_button, Some(expected));
+        }
+        for &expected in editable.iter().rev() {
+            state.tab(&form, true);
+            assert_eq!(state.focused_field, expected);
+            assert_eq!(state.focused_button, None);
+        }
+
+        state.tab(&form, true);
+        let reset = layout
+            .button_ids
+            .iter()
+            .position(|&id| id == BTN_RESET_DEFAULTS)
+            .expect("Restore Defaults 按钮必须存在");
+        assert_eq!(state.focused_button, Some(reset));
+    }
+
+    #[test]
+    fn tab_order_also_includes_every_action_button() {
+        let form = default_form();
+        let editable = editable_indices(&form);
+        let layout = layout_for(viewport(1280.0, 800.0), &form);
+        let expected_stops = editable.len() + layout.buttons.len();
+        let mut state = SettingsState::new(&form);
+        let mut actual_stops = 1;
+
+        for &expected in editable.iter().skip(1) {
+            state.tab(&form, false);
+            actual_stops += 1;
+            assert_eq!(state.focused_field, expected);
+            assert_eq!(state.focused_button, None);
+        }
+        for expected_id in [BTN_OK, BTN_CANCEL, BTN_RESET_DEFAULTS] {
+            state.tab(&form, false);
+            actual_stops += 1;
+            let expected = layout
+                .button_ids
+                .iter()
+                .position(|&id| id == expected_id)
+                .expect("测试按钮必须存在");
+            assert_eq!(state.focused_button, Some(expected));
+        }
+        assert_eq!(actual_stops, expected_stops);
+
+        state.tab(&form, false);
+        assert_eq!(state.focused_field, editable[0]);
+        assert_eq!(state.focused_button, None);
+    }
+
+    #[test]
+    fn enter_activates_focused_ok_button() {
+        let mut form = default_form();
+        let layout = layout_for(viewport(1280.0, 800.0), &form);
+        let mut state = SettingsState::new(&form);
+        focus_button(&mut state, &layout, BTN_OK);
+
+        assert_eq!(
+            state.on_key(&InputKey::Enter, Mods::default(), &mut form, &layout),
+            Some(BTN_OK)
+        );
+    }
+
+    #[test]
+    fn enter_activates_focused_cancel_button() {
+        let mut form = default_form();
+        let layout = layout_for(viewport(1280.0, 800.0), &form);
+        let mut state = SettingsState::new(&form);
+        focus_button(&mut state, &layout, BTN_CANCEL);
+
+        assert_eq!(
+            state.on_key(&InputKey::Enter, Mods::default(), &mut form, &layout),
+            Some(BTN_CANCEL)
+        );
+    }
+
+    #[test]
+    fn space_activates_focused_button() {
+        let mut form = default_form();
+        let layout = layout_for(viewport(1280.0, 800.0), &form);
+        let mut state = SettingsState::new(&form);
+        let space = InputKey::Text(" ".into());
+
+        for id in [BTN_OK, BTN_CANCEL, BTN_RESET_DEFAULTS] {
+            focus_button(&mut state, &layout, id);
+            assert_eq!(
+                state.on_key(&space, Mods::default(), &mut form, &layout),
+                Some(id)
+            );
+        }
+    }
 }

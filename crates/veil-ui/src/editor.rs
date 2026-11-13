@@ -96,14 +96,31 @@ impl Editor {
         let anchor = session
             .create_mark(0, Bias::Left)
             .expect("空文档 offset 0 恒合法");
-        Editor {
+        let mut editor = Editor {
             session,
             caret,
             anchor,
             preedit: None,
             dirty: false,
             line_ending: detect_line_ending(text),
+        };
+        editor.refresh_toc_force();
+        if editor.dirty {
+            // 加载期生成不属于用户编辑；新会话同时清除刷新产生的撤销历史。
+            let generated = editor.session.serialize();
+            let mut session = Session::open_with_callouts(&generated, callouts);
+            let caret = session
+                .create_mark(0, Bias::Right)
+                .expect("空文档 offset 0 恒合法");
+            let anchor = session
+                .create_mark(0, Bias::Left)
+                .expect("空文档 offset 0 恒合法");
+            editor.session = session;
+            editor.caret = caret;
+            editor.anchor = anchor;
+            editor.dirty = false;
         }
+        editor
     }
 
     /// 自上次 `mark_saved` 以来内容是否被修改（保存与标题脏标的判定依据）。
@@ -718,6 +735,14 @@ impl Editor {
     /// 空文档 / 不含 `[TOC]` 的文档零额外开销。
     #[allow(dead_code)]
     fn refresh_toc_if_needed(&mut self) {
+        self.refresh_toc(false);
+    }
+
+    fn refresh_toc_force(&mut self) {
+        self.refresh_toc(true);
+    }
+
+    fn refresh_toc(&mut self, force: bool) {
         let blocks = self.session.blocks();
         let caret = self.caret();
         let sel = self.selection();
@@ -741,7 +766,7 @@ impl Editor {
             let sel_in = sel.is_some_and(|s| {
                 s.start < toc_range.end && s.end > toc_range.start
             });
-            if caret_in || sel_in {
+            if !force && (caret_in || sel_in) {
                 continue;
             }
 
@@ -1758,6 +1783,29 @@ mod tests {
         e
     }
 
+    #[test]
+    fn toc_is_generated_on_load_with_caret_inside_marker() {
+        let e = Editor::new("[TOC]\n\n# Hello\n\n# World");
+        let text = e.session().serialize();
+        assert!(text.contains("1. [Hello](#hello)"));
+        assert!(text.contains("1. [World](#world)"));
+        assert!(!text.contains("[TOC]"));
+    }
+
+    #[test]
+    fn toc_generation_on_load_does_not_set_dirty() {
+        let e = Editor::new("[TOC]\n\n# Hello\n\n# World");
+        assert!(!e.is_dirty());
+    }
+
+    #[test]
+    fn toc_generation_on_load_cannot_be_undone() {
+        let mut e = Editor::new("[TOC]\n\n# Hello\n\n# World");
+        assert_eq!(e.session().undo_depth(), 0);
+        assert_eq!(e.apply(Intent::Undo), None);
+        assert!(!e.session().serialize().contains("[TOC]"));
+    }
+
     // ---- CRLF 编辑一致性（阶段 2 源码真值：不引入隐式规范化）----
 
     #[test]
@@ -1915,6 +1963,39 @@ mod tests {
         assert!(!e.set_caret(1)); // 「中」内部
         assert!(!e.set_caret(4)); // 越界
         assert_eq!(e.caret(), 0); // 原光标不动
+    }
+
+    #[test]
+    fn preedit_blocks_delete_backward() {
+        let mut e = ed("hello", 5);
+        e.preedit = Some(Preedit {
+            text: "ime".into(),
+            cursor: None,
+        });
+        assert_eq!(e.apply(Intent::DeleteBackward), None);
+        assert_eq!(e.session().serialize(), "hello");
+    }
+
+    #[test]
+    fn preedit_blocks_insert_text_no_autopair() {
+        let mut e = Editor::new("");
+        e.preedit = Some(Preedit {
+            text: "ime".into(),
+            cursor: None,
+        });
+        assert_eq!(e.apply(Intent::InsertText("(".into())), None);
+        assert_eq!(e.session().serialize(), "");
+    }
+
+    #[test]
+    fn preedit_blocks_insert_text_no_modification() {
+        let mut e = Editor::new("");
+        e.preedit = Some(Preedit {
+            text: "ime".into(),
+            cursor: None,
+        });
+        assert_eq!(e.apply(Intent::InsertText("hello".into())), None);
+        assert_eq!(e.session().serialize(), "");
     }
 
     #[test]

@@ -3,26 +3,25 @@
 
 use crate::app::App;
 use crate::chrome::{self, MenuAction};
-use crate::document::block_index::BlockGeom;
+use crate::document::block_index::{gap_after, gap_between, BlockGeom};
 use crate::editor::Intent;
-use crate::geometry::{
-    Rect, BASE_FONT_SIZE, BASE_LINE_HEIGHT, MARGIN, PARA_GAP, READABLE_COLS, WIDE_WINDOW,
-};
+use crate::geometry::{Rect, BASE_FONT_SIZE, BASE_LINE_HEIGHT, MARGIN, READABLE_COLS, WIDE_WINDOW};
 use crate::html::html_to_markdown;
+use crate::i18n::{t, tf, Key as I18nKey};
 use crate::input::{Action, Key, Mods};
 use crate::mode::{route, Cmd, Mode, TextSink};
 use crate::paint::{
-    active_cell_index, table_cell_start, table_delete_column, table_delete_row, table_insert_column,
-    table_insert_row, table_set_align,
+    active_cell_index, table_cell_start, table_delete_column, table_delete_row,
+    table_insert_column, table_insert_row, table_set_align,
 };
 use crate::theme::ThemeMode;
-use crate::view::{ctx_menu, outline, quick_open, search};
 use crate::view::ctx_menu::{CtxAction, CtxKind, TableCtx};
+use crate::view::{ctx_menu, history, inline_details_spans, outline, quick_open, search};
 use std::path::Path;
 use std::time::{Duration, Instant};
 use veil_core::{
-    heading_slug, heading_slugs, task_span, BlockId, BlockKind, CellAlign, InlineKind, InlineNode,
-    Range,
+    heading_slug, heading_slugs, task_span, BlockContainer, BlockId, BlockKind, CellAlign, HtmlTag,
+    InlineKind, InlineNode, Range,
 };
 use winit::event::ElementState;
 use winit::keyboard::{Key as WKey, KeyCode, NamedKey, PhysicalKey};
@@ -118,12 +117,8 @@ impl App {
         );
         match cmd {
             Cmd::Ignore => {}
-            Cmd::OpenQuick => self.open_quick(),
-            Cmd::CloseMenu => {
-                self.ui_state.chrome.close();
-                self.ui_state.ctx.close();
-                self.request_redraw();
-            }
+            Cmd::OpenQuick => self.toggle_quick(),
+            Cmd::CloseMenu => self.close_top_panel(),
             Cmd::MenuMove(d) => self.menu_move(d),
             Cmd::MenuSwitch(d) => self.menu_switch(d),
             Cmd::MenuAccept => self.menu_accept(),
@@ -146,6 +141,10 @@ impl App {
             Cmd::SearchPrev => self.search_prev(),
             Cmd::SearchFirstMatch => self.search_first_match(),
             Cmd::SearchLastMatch => self.search_last_match(),
+            // 版本历史：导航/恢复/关闭（预览只读，动作自带重绘）
+            Cmd::HistoryClose => self.close_history(),
+            Cmd::HistoryMove(d) => self.history_step(d),
+            Cmd::HistoryRestore => self.history_restore_selected(),
             Cmd::Edit(Action::Doc(Intent::Indent)) if !self.editor.preedit().is_some() => {
                 if !self.tab_next_cell() {
                     self.perform_action(Action::Doc(Intent::Indent));
@@ -174,12 +173,21 @@ impl App {
     /// IME 组合串：唯一存储在 `Editor`，落点由 `TextSink` 决定绘制位置
     /// （文档行内 / 查找栏）。组合期按键由 `route` 让给 IME。
     pub(crate) fn ime_preedit(&mut self, text: String, cursor: Option<(usize, usize)>) {
+        if self.ui_state.modal.is_some() || self.mode() == Mode::History {
+            return; // 模态独占输入；只读预览不显示组合串
+        }
         self.editor.set_preedit(text, cursor);
         self.request_redraw();
     }
 
-    /// IME 提交：按落点分流——菜单打开时吞掉，查找栏进查询串，否则进文档。
+    /// IME 提交：按落点分流——模态转键盘助记符，菜单吞掉，查找栏进查询串，否则进文档。
     pub(crate) fn ime_commit(&mut self, text: String) {
+        // Windows 下普通字母也可能经 IME Commit 到达（例如中文输入法处于英文模式）。
+        // 必须复用模态键盘路由，不能绕过它直接写正文。
+        if self.ui_state.modal.is_some() {
+            self.route_key(Key::Text(text));
+            return;
+        }
         match self.text_sink() {
             TextSink::Quick => {
                 self.editor.clear_preedit();
@@ -190,8 +198,8 @@ impl App {
                 self.search_input(&text);
             }
             TextSink::Doc => {
-                if self.mode() == Mode::Menu {
-                    return; // 菜单打开：吞掉输入
+                if matches!(self.mode(), Mode::Menu | Mode::History) {
+                    return; // 菜单/版本历史：吞掉输入，预览保持只读
                 }
                 let dirty = self.editor.commit_ime(text);
                 self.after_edit(dirty);
@@ -213,8 +221,8 @@ impl App {
         match action {
             Action::Doc(intent) => {
                 self.window_state.goal_x = None; // 非垂直移动：重置目标列
-                // 行移动只置换行内容：块的行区间与块 id 均不变，而布局键不含内容指纹，
-                // 不换会话代次会命中旧布局（画面滞后到下一次编辑才刷新）。
+                                                 // 行移动只置换行内容：块的行区间与块 id 均不变，而布局键不含内容指纹，
+                                                 // 不换会话代次会命中旧布局（画面滞后到下一次编辑才刷新）。
                 let line_move = matches!(intent, Intent::MoveLineUp | Intent::MoveLineDown);
                 if let Some(dirty) = self.editor.apply(intent) {
                     if line_move {
@@ -238,18 +246,17 @@ impl App {
             Action::SaveAs => self.save_as(),
             Action::Open => self.open_via_dialog(),
             Action::New => self.new_draft(),
-            Action::QuickOpen => self.open_quick(),
-            Action::CloseMenu => {
-                self.ui_state.chrome.close();
-                self.ui_state.ctx.close();
-            }
-            Action::ToggleOutline => self.toggle_outline(),
-            Action::ToggleSourceMode => self.toggle_source_mode(),
+            Action::NewWindow => self.window_state.new_window_requested = true,
+            Action::QuickOpen => self.toggle_quick(),
+            Action::CloseMenu => self.close_top_panel(),
+            Action::OpenOutline => self.toggle_outline(),
+            Action::OpenSourceMode => self.toggle_source_mode(),
             Action::Export => self.export_now(),
             Action::ExportPdf => self.export_pdf(),
             Action::Print => self.print_document(),
-            Action::Find => self.open_search(),
-            Action::Replace => self.open_replace(),
+            Action::VersionHistory => self.toggle_history(),
+            Action::Find => self.toggle_search(),
+            Action::Replace => self.toggle_replace(),
             Action::InsertImage => self.insert_image_via_dialog(),
             Action::ZoomIn => self.zoom_step(1),
             Action::ZoomOut => self.zoom_step(-1),
@@ -269,9 +276,9 @@ impl App {
         w.set_fullscreen(on.then_some(winit::window::Fullscreen::Borderless(None)));
         self.window_state.fullscreen = on;
         self.ui_state.chrome.notice = if on {
-            "全屏（F11 退出）"
+            t(I18nKey::NoticeFullscreenOn)
         } else {
-            "已退出全屏"
+            t(I18nKey::NoticeFullscreenOff)
         }
         .into();
         self.request_redraw();
@@ -330,7 +337,10 @@ impl App {
             self.window_state.scroll_y = self.window_state.goal_y;
         }
         self.set_ime_area();
-        self.ui_state.chrome.notice = format!("缩放 {}%", (zoom * 100.0).round() as u32);
+        self.ui_state.chrome.notice = tf(
+            I18nKey::NoticeZoom,
+            &[&((zoom * 100.0).round() as u32).to_string()],
+        );
         self.request_redraw();
     }
 
@@ -378,7 +388,7 @@ impl App {
     /// 草稿（无关联文件）拒绝（无写入基准），文档不变、不置脏；落盘失败同样保持原样并提示。
     pub(crate) fn insert_image_data(&mut self, img: &crate::image::ImageData) {
         let Some(doc) = self.doc.path.clone() else {
-            self.ui_state.chrome.notice = "图片粘贴需要关联文件（草稿无落盘目录）".into();
+            self.ui_state.chrome.notice = t(I18nKey::NoticeImagePasteNeedsFile).into();
             eprintln!("图片粘贴需要关联文件（草稿无落盘目录）");
             self.request_redraw();
             return;
@@ -386,7 +396,7 @@ impl App {
         match self.ports.assets.save_pasted_image(&doc, img) {
             Ok(rel) => self.insert_paste(&self.image_paragraph_markup(&rel)),
             Err(e) => {
-                self.ui_state.chrome.notice = format!("图片落盘失败：{e}");
+                self.ui_state.chrome.notice = tf(I18nKey::NoticeImageSaveFailed, &[&e.to_string()]);
                 eprintln!("图片落盘失败（文档未改动）: {e}");
                 self.request_redraw();
             }
@@ -400,7 +410,8 @@ impl App {
             match self.ports.images.load(path) {
                 Ok(img) => self.insert_image_data(&img),
                 Err(e) => {
-                    self.ui_state.chrome.notice = format!("图片读取失败：{e}");
+                    self.ui_state.chrome.notice =
+                        tf(I18nKey::NoticeImageReadFailed, &[&e.to_string()]);
                     eprintln!("图片读取失败（文档未改动）{}: {e}", path.display());
                     self.request_redraw();
                 }
@@ -408,11 +419,11 @@ impl App {
         }
     }
 
-    /// 插入图片入口（2f）：菜单「插入图片…」→ 系统对话框选图 → 插入相对路径链接。
+    /// 插入图片入口（2f）：菜单「插入图片」→ 系统对话框选图 → 插入相对路径链接。
     /// 草稿（无关联文件）拒绝（无相对路径基准）；非图片扩展名拒绝；取消无副作用。
     pub(crate) fn insert_image_via_dialog(&mut self) {
         let Some(doc) = self.doc.path.clone() else {
-            self.ui_state.chrome.notice = "插入图片需要关联文件（草稿无相对路径基准）".into();
+            self.ui_state.chrome.notice = t(I18nKey::NoticeInsertImageNeedsFile).into();
             self.request_redraw();
             return;
         };
@@ -420,7 +431,7 @@ impl App {
             return;
         };
         if !crate::image::is_image_path(&img) {
-            self.ui_state.chrome.notice = "所选文件不是支持的图片格式".into();
+            self.ui_state.chrome.notice = t(I18nKey::NoticeUnsupportedImage).into();
             self.request_redraw();
             return;
         }
@@ -438,8 +449,12 @@ impl App {
     /// 落点 = 拖拽期间的鼠标位置（未命中正文时沿用当前光标）。
     pub(crate) fn drop_file(&mut self, path: std::path::PathBuf) {
         self.input_state.drop_file = None;
+        if self.ui_state.modal.is_some() {
+            return; // 模态独占：拖放不改变文档，也不叠加打开意图
+        }
         // 拖放是文档级动作：先收起浮层/菜单，避免编辑与浮层共存
         self.close_quick();
+        self.close_search();
         self.ui_state.chrome.close();
         if !crate::image::is_image_path(&path) {
             self.open_path(path);
@@ -449,7 +464,7 @@ impl App {
         match self.ports.images.load(&path) {
             Ok(img) => self.insert_image_data(&img),
             Err(e) => {
-                self.ui_state.chrome.notice = format!("图片读取失败：{e}");
+                self.ui_state.chrome.notice = tf(I18nKey::NoticeImageReadFailed, &[&e.to_string()]);
                 eprintln!("图片读取失败（文档未改动）{}: {e}", path.display());
                 self.request_redraw();
             }
@@ -526,11 +541,10 @@ impl App {
 
     pub(crate) fn move_vertical(&mut self, delta: i32, extend: bool) {
         let caret = self.editor.caret();
-        let Some(bi) = self
-            .index
-            .blocks
-            .iter()
-            .position(|g| g.range.start <= caret && caret <= g.range.end)
+        let Some(bi) =
+            self.index.blocks.iter().position(|g| {
+                !self.block_hidden(g) && g.range.start <= caret && caret <= g.range.end
+            })
         else {
             return;
         };
@@ -554,12 +568,14 @@ impl App {
             let l = &self.cache.layouts[&id];
             range.start + self.engine.hit(l, goal, target_y_local)
         } else {
+            // B3：折叠 details 的隐藏子块不接收光标——上下移动跳过整组。
             let next_i = if delta < 0 {
-                bi.checked_sub(1)
-            } else if bi + 1 < self.index.blocks.len() {
-                Some(bi + 1)
+                (0..bi)
+                    .rev()
+                    .find(|&i| !self.block_hidden(&self.index.blocks[i]))
             } else {
-                None
+                (bi + 1..self.index.blocks.len())
+                    .find(|&i| !self.block_hidden(&self.index.blocks[i]))
             };
             let Some(ni) = next_i else {
                 return;
@@ -600,8 +616,7 @@ impl App {
         }
         let vp = self.viewport();
         let old_scroll = self.window_state.scroll_y;
-        let new_scroll =
-            chrome::page_scroll(vp, self.doc_height(), old_scroll, dir.signum());
+        let new_scroll = chrome::page_scroll(vp, self.doc_height(), old_scroll, dir.signum());
         let caret = self.editor.caret();
         let Some(bi) = self.caret_block_index() else {
             self.window_state.goal_y = new_scroll;
@@ -649,7 +664,11 @@ impl App {
             let Some(l) = self.cache.layouts.get(&tid) else {
                 return;
             };
-            trange.start + self.engine.hit(l, goal, (target_y - ttop).max(0.0)).min(trange.len())
+            trange.start
+                + self
+                    .engine
+                    .hit(l, goal, (target_y - ttop).max(0.0))
+                    .min(trange.len())
         };
         self.window_state.goal_y = new_scroll;
         if !self.window_state.smooth {
@@ -684,13 +703,26 @@ impl App {
         let vp = self.viewport();
         let x = (self.input_state.mouse.x as f32 - self.content_x()).max(0.0);
         let y = (self.input_state.mouse.y as f32 - vp.y + self.window_state.scroll_y).max(0.0);
+        // 文末输入空间（B5）：点击末块下方的留白 → 光标直接落文档末尾，
+        // 而不是被末块的行尾钳制吸到最后一行的某个字上。
+        if let Some(last) = self
+            .index
+            .blocks
+            .iter()
+            .rev()
+            .find(|g| !self.block_hidden(g))
+        {
+            if y >= last.top + self.block_height(last) {
+                return Some(self.editor.session().text_len());
+            }
+        }
         let (id, kind, range, top) = {
             let blocks = &self.index.blocks;
             let g = blocks
                 .iter()
                 .rev()
-                .find(|g| g.top <= y)
-                .or_else(|| blocks.first())?;
+                .find(|g| !self.block_hidden(g) && g.top <= y)
+                .or_else(|| blocks.iter().find(|g| !self.block_hidden(g)))?;
             (g.id, g.kind.clone(), g.range, g.top)
         };
         // 命中块可能尚未布局：先按需补齐再读缓存
@@ -710,8 +742,8 @@ impl App {
             let Some(g) = blocks
                 .iter()
                 .rev()
-                .find(|g| g.top <= y)
-                .or_else(|| blocks.first())
+                .find(|g| !self.block_hidden(g) && g.top <= y)
+                .or_else(|| blocks.iter().find(|g| !self.block_hidden(g)))
             else {
                 return false;
             };
@@ -918,12 +950,14 @@ impl App {
     pub(crate) fn perform_menu(&mut self, action: MenuAction) -> bool {
         match action {
             MenuAction::New => self.new_draft(),
+            MenuAction::NewWindow => self.window_state.new_window_requested = true,
             MenuAction::Open => self.open_via_dialog(),
             MenuAction::Save => self.save_now(),
             MenuAction::SaveAs => self.save_as(),
             MenuAction::Export => self.export_now(),
             MenuAction::ExportPdf => self.export_pdf(),
             MenuAction::Print => self.print_document(),
+            MenuAction::VersionHistory => self.toggle_history(),
             MenuAction::Undo => {
                 if let Some(dirty) = self.editor.apply(Intent::Undo) {
                     self.window_state.goal_x = None;
@@ -951,15 +985,15 @@ impl App {
             MenuAction::ZoomReset => self.zoom_reset(),
             MenuAction::ToggleFullscreen => self.toggle_fullscreen(),
             MenuAction::ToggleOutline => self.toggle_outline(),
-            MenuAction::Find => self.open_search(),
-            MenuAction::Replace => self.open_replace(),
+            MenuAction::Find => self.toggle_search(),
+            MenuAction::Replace => self.toggle_replace(),
             MenuAction::InsertImage => self.insert_image_via_dialog(),
             MenuAction::ToggleBold => self.perform_action(Action::Doc(Intent::ToggleWrap("**"))),
             MenuAction::ToggleItalic => self.perform_action(Action::Doc(Intent::ToggleWrap("*"))),
             MenuAction::InsertLink => self.perform_action(Action::Doc(Intent::InsertLink)),
             MenuAction::OpenRecent(i) => self.open_recent(i),
-            MenuAction::QuickOpen => self.open_quick(),
-            MenuAction::Separator => {},
+            MenuAction::QuickOpen => self.toggle_quick(),
+            MenuAction::Separator => {}
             MenuAction::Quit => self.confirm_close(),
         }
         self.request_redraw();
@@ -1006,7 +1040,7 @@ impl App {
         if self.ui_state.modal.is_some() {
             return; // 模态优先：不叠加右键菜单
         }
-        if self.ui_state.quick.open || self.ui_state.search.open {
+        if self.ui_state.quick.open || self.ui_state.search.open || self.ui_state.history.open {
             return; // 模态浮层优先：不叠加右键菜单
         }
         if my < vp.y || my >= vp.y + vp.h {
@@ -1020,21 +1054,54 @@ impl App {
             .editor
             .selection()
             .is_some_and(|s| s.start <= off && off < s.end);
-        let (kind, link) = if in_sel {
-            (CtxKind::Selection, None)
+        let (kind, link, mermaid_body, insert_start) = if in_sel {
+            (CtxKind::Selection, None, None, None)
         } else {
             self.editor.set_caret(off);
             self.window_state.goal_x = None;
-            // 优先级：表格内先查 link（单元格 inline）→ 再给 table_ctx → 块级查 link → 块
+            // 优先级：表格内先查 link（单元格 inline）→ 再给 table_ctx →
+            // mermaid 围栏块（带专用菜单）→ 块级查 link → 普通块
             match self.link_at(off) {
-                Some(url) => (CtxKind::Link, Some(url)),
+                Some(url) => (CtxKind::Link, Some(url), None, None),
                 None => match self.table_ctx_at(off) {
-                    Some(tc) => (CtxKind::Table(tc), None),
-                    None => (CtxKind::Block, None),
+                    Some(tc) => (CtxKind::Table(tc), None, None, None),
+                    None => match self.mermaid_block_info_at(off) {
+                        Some((body, body_start)) if mermaid_body_is_empty(&body) => {
+                            // 空块右键也把光标落到 body 起点：模板项只在这里有意义，
+                            // 落在点击位置会破坏围栏结构。
+                            self.editor.set_caret(body_start);
+                            (
+                                CtxKind::MermaidEmptyBlock,
+                                None,
+                                Some(body),
+                                Some(body_start),
+                            )
+                        }
+                        Some((body, _)) => (CtxKind::MermaidBlock, None, Some(body), None),
+                        None => {
+                            // Details 块优先于普通块：右键菜单给折叠/展开项。
+                            // B3：命中 details 子块时同样归到所属头块，菜单行为一致。
+                            let details_kind = self
+                                .index
+                                .blocks
+                                .iter()
+                                .find(|g| g.range.start <= off && off <= g.range.end)
+                                .and_then(|g| {
+                                    if matches!(&g.kind, BlockKind::Details { .. }) {
+                                        Some(g.id)
+                                    } else {
+                                        g.details_parent
+                                    }
+                                })
+                                .map(CtxKind::Details);
+                            (details_kind.unwrap_or(CtxKind::Block), None, None, None)
+                        }
+                    },
                 },
             }
         };
-        self.ui_state.ctx.open_at(mx, my, kind, link);
+        self.ui_state.ctx.open_at(mx, my, kind, link, mermaid_body);
+        self.ui_state.ctx.mermaid_insert_start = insert_start;
         self.set_ime_area();
         self.request_redraw();
     }
@@ -1042,9 +1109,10 @@ impl App {
     /// 偏移所在表格的行列上下文：命中单元格直接取，竖线/分隔行取同一行最近单元格。
     /// 表头（及分隔行）`body_row` 为 None，只给列操作。
     fn table_ctx_at(&self, off: usize) -> Option<TableCtx> {
-        let g = self.index.blocks.iter().find(|g| {
-            g.kind == BlockKind::Table && g.range.start <= off && off <= g.range.end
-        })?;
+        let g =
+            self.index.blocks.iter().find(|g| {
+                g.kind == BlockKind::Table && g.range.start <= off && off <= g.range.end
+            })?;
         let tbl = self.editor.session().table(g.id)?;
         let ncols = tbl.aligns.len().max(1);
         if let Some(flat) = active_cell_index(&tbl, off) {
@@ -1092,16 +1160,284 @@ impl App {
         })
     }
 
-    /// 命中偏移处的 inline 链接 URL（含标记区命中；引用式链接无 url 区间不识别）。
-    /// 扩展：表格单元格内的 inline 链接也能命中（`block_inlines(Table)` 恒为空，
-    /// 需从 `table.cell.inlines` 逐级检索）。
-    fn link_at(&self, offset: usize) -> Option<String> {
+    /// 偏移是否命中 mermaid 围栏代码块：命中返回 (剥掉围栏的 body 源码, body 绝对起点)。
+    /// body 起点 = 开围栏行换行之后；无换行（未闭合且无 body）时返回 None。
+    fn mermaid_block_info_at(&self, off: usize) -> Option<(String, usize)> {
+        let g = self.index.blocks.iter().find(|g| {
+            g.range.start <= off
+                && off <= g.range.end
+                && matches!(
+                    &g.kind,
+                    BlockKind::FencedCode(Some(l)) if l.eq_ignore_ascii_case("mermaid")
+                )
+        })?;
+        let (_, body) = self.editor.session().fenced_code_source(g.id)?;
+        let src = self.editor.session().text_slice(g.range)?;
+        let first_nl = src.find('\n')?;
+        Some((body, g.range.start + first_nl + 1))
+    }
+
+    /// 左键命中空 mermaid 块：光标落到该块 body 起点，并在鼠标处打开仅含
+    /// 三条模板项的菜单。返回 true 表示本次点击已被消费。
+    fn try_open_mermaid_empty_menu(&mut self) -> bool {
+        // 源码模式展示原始围栏、不出现卡片头与提示行：点击必须保持普通落光标，
+        // 否则用户改源码时会被菜单劫持（与 Wave 5「源码模式无叠加」一致）。
+        if self.source_mode() {
+            return false;
+        }
+        let Some(off) = self.hit_offset() else {
+            return false;
+        };
+        // 块间距点击也会被 hit_offset 归入上一块末尾；空块左键会弹菜单，
+        // 因此要求点击 y 落在该块视觉高度内，避免块后空白误触。
+        let vp = self.viewport();
+        let y = self.input_state.mouse.y as f32 - vp.y + self.window_state.scroll_y;
+        let inside = self
+            .index
+            .blocks
+            .iter()
+            .find(|g| {
+                g.range.start <= off
+                    && off <= g.range.end
+                    && matches!(
+                        &g.kind,
+                        BlockKind::FencedCode(Some(l)) if l.eq_ignore_ascii_case("mermaid")
+                    )
+            })
+            .is_some_and(|g| y >= g.top && y < g.top + self.block_height(g));
+        if !inside {
+            return false;
+        }
+        let Some((body, body_start)) = self.mermaid_block_info_at(off) else {
+            return false;
+        };
+        if !mermaid_body_is_empty(&body) {
+            return false;
+        }
+        // 与普通鼠标单击落光标一致：先断组，模板插入才会成为独立撤销步。
+        self.editor.break_undo_group();
+        if !self.editor.set_caret(body_start) {
+            return false;
+        }
+        self.window_state.goal_x = None;
+        let (mx, my) = (
+            self.input_state.mouse.x as f32,
+            self.input_state.mouse.y as f32,
+        );
+        self.ui_state
+            .ctx
+            .open_at(mx, my, CtxKind::MermaidEmptyBlock, None, Some(body));
+        self.ui_state.ctx.mermaid_insert_start = Some(body_start);
+        self.set_ime_area();
+        self.request_redraw();
+        true
+    }
+
+    /// 行内 `<details>` 的 summary 点击（B3）：命中 summary 可见文本 → 切换折叠。
+    /// 纯视图态：不移动光标、不写文档字节、不产生撤销步。
+    fn try_toggle_inline_details_on_click(&mut self) -> bool {
+        let Some(off) = self.hit_offset() else {
+            return false;
+        };
+        let Some((id, range, is_block_details)) = self
+            .index
+            .blocks
+            .iter()
+            .find(|g| !self.block_hidden(g) && g.range.start <= off && off < g.range.end)
+            .map(|g| (g.id, g.range, matches!(g.kind, BlockKind::Details { .. })))
+        else {
+            return false;
+        };
+        // 块级 details 头块另有折叠入口；这里只处理块内行内 details。
+        // （头块自身的 `<details>` 未闭合，inline 解析可能产出 Details 节点，
+        //  若不排除会误把点击记到「行内折叠」集合里，块级点击就失效了。）
+        if is_block_details {
+            return false;
+        }
+        let text = self.editor.session().text_slice(range).unwrap_or_default();
+        if !text.contains("<details") {
+            return false;
+        }
+        let Some(nodes) = self.editor.session().block_inlines(id) else {
+            return false;
+        };
+        let spans = inline_details_spans(&nodes, range);
+        for s in spans {
+            let Some((ss, se)) = s.summary else { continue };
+            let (abs_s, abs_e) = (range.start + ss, range.start + se);
+            if abs_s <= off && off < abs_e {
+                let key = (id, s.key);
+                if !self.ui_state.expanded_inline_details.remove(&key) {
+                    self.ui_state.expanded_inline_details.insert(key);
+                } else {
+                    // 收起：光标若在正文内（隐藏区）则移到 summary 文本起点。
+                    let caret = self.editor.caret();
+                    let body = (range.start + s.body.0, range.start + s.body.1);
+                    if body.0 <= caret && caret < body.1 {
+                        self.editor.set_caret(abs_s);
+                    }
+                }
+                // 折叠态进入排版键：重算几何 + 重绘（缓存按基础键自然失配）。
+                self.recompute_geometry();
+                self.request_redraw();
+                return true;
+            }
+        }
+        false
+    }
+
+    /// B3 兜底：光标落在 details 隐藏区（任意路径：撤销/搜索/跳转）时展开归属。
+    /// 行内 details 的正文若包含光标，同样展开该行内 details。
+    pub(crate) fn sync_details_at_caret(&mut self) {
+        let caret = self.effective_caret();
+        // 光标停在 details 闭标签行（纯 chrome，不属于任何块）：非选区状态下
+        // 吸附到前一个可见块末尾，避免「光标悬空 / 画到文档尾」。
+        if self.editor.selection().is_none()
+            && !self
+                .index
+                .blocks
+                .iter()
+                .any(|g| g.range.start <= caret && caret <= g.range.end)
+        {
+            let snap = {
+                let s = self.editor.session();
+                let line = s.line_of_offset(caret);
+                let ls = s.offset_of_line(line);
+                let le = s.offset_of_line(line + 1);
+                let is_close = s
+                    .text_slice(veil_core::Range::new(ls, le))
+                    .is_some_and(|t| t.to_ascii_lowercase().contains("</details"));
+                if is_close {
+                    self.index
+                        .blocks
+                        .iter()
+                        .rev()
+                        .find(|g| g.range.end <= ls && !self.block_hidden(g))
+                        .and_then(|g| {
+                            s.text_slice(g.range)
+                                .map(|t| g.range.start + t.trim_end_matches(['\n', '\r']).len())
+                        })
+                } else {
+                    None
+                }
+            };
+            if let Some(target) = snap {
+                self.editor.set_caret(target);
+                return;
+            }
+        }
+        let (id, range, hidden) = {
+            let Some(g) = self
+                .index
+                .blocks
+                .iter()
+                .find(|g| g.range.start <= caret && caret < g.range.end)
+                .or_else(|| {
+                    self.index
+                        .blocks
+                        .iter()
+                        .rev()
+                        .find(|g| g.range.start <= caret)
+                })
+            else {
+                return;
+            };
+            (g.id, g.range, self.block_hidden(g))
+        };
+        if hidden {
+            let mut p = self
+                .index
+                .blocks
+                .iter()
+                .find(|b| b.id == id)
+                .and_then(|b| b.details_parent);
+            let mut changed = false;
+            while let Some(pid) = p {
+                changed |= self.ui_state.expanded_details.insert(pid);
+                p = self
+                    .index
+                    .blocks
+                    .iter()
+                    .find(|b| b.id == pid)
+                    .and_then(|h| h.details_parent);
+            }
+            if changed {
+                self.recompute_geometry();
+            }
+            return;
+        }
+        let text = self.editor.session().text_slice(range).unwrap_or_default();
+        if !text.contains("<details") {
+            return;
+        }
+        let Some(nodes) = self.editor.session().block_inlines(id) else {
+            return;
+        };
+        let mut changed = false;
+        for s in inline_details_spans(&nodes, range) {
+            let body = (range.start + s.body.0, range.start + s.body.1);
+            if body.0 <= caret && caret < body.1 {
+                changed |= self.ui_state.expanded_inline_details.insert((id, s.key));
+            }
+        }
+        if changed {
+            self.recompute_geometry();
+        }
+    }
+
+    /// Details 块折叠/展开：命中 Details 块 → 根据展开态和 y 位置决定是否切换。
+    /// 收起态：整块可视区（仅 summary 一行）点击都触发展开；
+    /// 展开态：只 summary 行（y ∈ [top, top + line_h)）触发收起，正文区落光标。
+    /// 返回 true 表示本次点击已被折叠逻辑消费（不走后续 point_caret）。
+    fn try_toggle_details_on_click(&mut self) -> bool {
+        if self.try_toggle_inline_details_on_click() {
+            return true;
+        }
+        let Some(off) = self.hit_offset() else {
+            return false;
+        };
+        let Some(g) = self
+            .index
+            .blocks
+            .iter()
+            .find(|g| g.range.start <= off && off <= g.range.end)
+        else {
+            return false;
+        };
+        let BlockKind::Details { .. } = &g.kind else {
+            return false;
+        };
+        let is_expanded = self.ui_state.expanded_details.contains(&g.id);
+        let vp = self.viewport();
+        let y = self.input_state.mouse.y as f32 - vp.y + self.window_state.scroll_y;
+        let block_h = self.block_height(g);
+        if !(y >= g.top && y < g.top + block_h) {
+            return false; // 点击在块后间距或更下方 → 不折叠
+        }
+        if !is_expanded {
+            // 收起态：点击整块（只有一行可视）= 展开
+            self.toggle_details(g.id);
+            return true;
+        }
+        // 展开态：点击在 summary 行 = 收起，否则落光标。
+        // y / g.top 是物理像素，`doc_line_height` 是逻辑基准，必须乘 scale；
+        // 否则非 100% DPI 下 summary 行会被判成正文区，点击无法收起。
+        let line_h = self.engine.doc_line_height() * self.input_state.scale;
+        if y < g.top + line_h {
+            self.toggle_details(g.id);
+            return true;
+        }
+        false
+    }
+
+    /// 命中偏移所在块的 inline 节点（表格按单元格取，其余取块 inlines）。
+    fn inlines_at_offset(&self, offset: usize) -> Option<Vec<InlineNode>> {
         let g = self
             .index
             .blocks
             .iter()
             .find(|g| g.range.start <= offset && offset < g.range.end)?;
-        let nodes = match g.kind {
+        match g.kind {
             BlockKind::Table => {
                 let tbl = self.editor.session().table(g.id)?;
                 let flat = active_cell_index(&tbl, offset)?;
@@ -1119,10 +1455,17 @@ impl App {
                     }
                     found?
                 };
-                cell.inlines.clone()
+                Some(cell.inlines.clone())
             }
-            _ => self.editor.session().block_inlines(g.id)?,
-        };
+            _ => self.editor.session().block_inlines(g.id),
+        }
+    }
+
+    /// 命中偏移处的 inline 链接 URL（含标记区命中；引用式链接无 url 区间不识别）。
+    /// 扩展：表格单元格内的 inline 链接也能命中（`block_inlines(Table)` 恒为空，
+    /// 需从 `table.cell.inlines` 逐级检索）。
+    fn link_at(&self, offset: usize) -> Option<String> {
+        let nodes = self.inlines_at_offset(offset)?;
         fn find(nodes: &[InlineNode], off: usize) -> Option<&InlineNode> {
             nodes.iter().find_map(|n| {
                 if n.range.start <= off && off < n.range.end {
@@ -1137,6 +1480,31 @@ impl App {
         }
         let url = find(&nodes, offset)?.url?;
         self.editor.session().text_slice(url)
+    }
+
+    /// 命中偏移处的 `<abbr title="…">` 文本（悬停提示内容）。表格单元格同样支持；
+    /// 空 title 不产出提示（HTML 语义上等同于无提示）。
+    fn abbr_title_at(&self, offset: usize) -> Option<String> {
+        let nodes = self.inlines_at_offset(offset)?;
+        fn find(nodes: &[InlineNode], off: usize) -> Option<&str> {
+            nodes.iter().find_map(|n| {
+                if n.range.start <= off && off < n.range.end {
+                    if let InlineKind::Html {
+                        tag: HtmlTag::Abbr,
+                        attrs,
+                    } = &n.kind
+                    {
+                        if let Some(t) = attrs.title.as_deref().filter(|t| !t.is_empty()) {
+                            return Some(t);
+                        }
+                    }
+                    find(&n.children, off)
+                } else {
+                    None
+                }
+            })
+        }
+        find(&nodes, offset).map(str::to_owned)
     }
 
     /// 命中偏移处的脚注引用 id（`[^id]` 的整段 `range` 包含判定）。
@@ -1213,7 +1581,7 @@ impl App {
         match def {
             Some(def) => self.jump_to_offset(def.start),
             None => {
-                self.ui_state.chrome.notice = "未找到脚注定义".to_string();
+                self.ui_state.chrome.notice = t(I18nKey::NoticeFootnoteDefMissing).to_string();
                 self.request_redraw();
             }
         }
@@ -1259,7 +1627,7 @@ impl App {
         match target {
             Some(start) => self.jump_to_offset(start),
             None => {
-                self.ui_state.chrome.notice = "未找到脚注引用".to_string();
+                self.ui_state.chrome.notice = t(I18nKey::NoticeFootnoteRefMissing).to_string();
                 self.request_redraw();
             }
         }
@@ -1299,7 +1667,7 @@ impl App {
         match target {
             Some(start) => self.jump_to_offset(start),
             None => {
-                self.ui_state.chrome.notice = "未找到锚点".to_string();
+                self.ui_state.chrome.notice = t(I18nKey::NoticeAnchorMissing).to_string();
                 self.request_redraw();
             }
         }
@@ -1316,12 +1684,12 @@ impl App {
         // 裸 `www.` 链接在源码里没有协议，打开前补齐（否则被协议白名单拒绝）
         let target = crate::normalize_link_url(trimmed);
         if !crate::url_is_openable(&target) {
-            self.ui_state.chrome.notice = format!("无法打开链接：不支持的链接地址 {target}");
+            self.ui_state.chrome.notice = tf(I18nKey::NoticeLinkUnsupported, &[&target]);
             self.request_redraw();
             return;
         }
         if let Err(e) = self.ports.url_opener.open_url(&target) {
-            self.ui_state.chrome.notice = format!("无法打开链接: {e}");
+            self.ui_state.chrome.notice = tf(I18nKey::NoticeLinkFailed, &[&e.to_string()]);
         }
         self.request_redraw();
     }
@@ -1355,8 +1723,80 @@ impl App {
             | CtxAction::TableAlignLeft
             | CtxAction::TableAlignCenter
             | CtxAction::TableAlignRight => self.apply_table_action(action),
+            // Mermaid v0：预览 / 复制源码 / 复制链接（读 ctx.mermaid_body）
+            CtxAction::MermaidPreview
+            | CtxAction::MermaidCopySource
+            | CtxAction::MermaidCopyLink => {
+                let Some(body) = self.ui_state.ctx.mermaid_body.clone() else {
+                    return;
+                };
+                match action {
+                    CtxAction::MermaidPreview => {
+                        let url = veil_core::mermaid_live_url(&body);
+                        let _ = self.ports.url_opener.open_url(&url);
+                    }
+                    CtxAction::MermaidCopySource => {
+                        self.ports.clipboard.set(&body);
+                    }
+                    CtxAction::MermaidCopyLink => {
+                        let url = veil_core::mermaid_live_url(&body);
+                        self.ports.clipboard.set(&url);
+                    }
+                    _ => unreachable!(),
+                }
+            }
+            // Mermaid v0：插入预设模板到当前光标位置（空块时为 body 起点）
+            CtxAction::MermaidInsertFlowchart => {
+                self.insert_mermaid_template(veil_core::FLOWCHART_TEMPLATE);
+            }
+            CtxAction::MermaidInsertSequence => {
+                self.insert_mermaid_template(veil_core::SEQUENCE_TEMPLATE);
+            }
+            CtxAction::MermaidInsertClass => {
+                self.insert_mermaid_template(veil_core::CLASS_TEMPLATE);
+            }
+            // Details 块折叠 / 展开：从 ctx.details_id 拿目标块 id（打开时由 CtxKind 注入）。
+            CtxAction::FoldDetails => {
+                if let Some(id) = self.ui_state.ctx.details_id {
+                    if self.ui_state.expanded_details.contains(&id) {
+                        self.toggle_details(id);
+                    }
+                }
+            }
+            CtxAction::UnfoldDetails => {
+                if let Some(id) = self.ui_state.ctx.details_id {
+                    if !self.ui_state.expanded_details.contains(&id) {
+                        self.toggle_details(id);
+                    }
+                }
+            }
         }
         self.request_redraw();
+    }
+
+    /// 插入 mermaid 模板：非空块沿用「在光标处插入」；空块插入 body 起点，
+    /// 若插入点后紧跟闭合围栏/注释（非换行）则补一个换行，避免模板末行与
+    /// 围栏粘连。光标最终停在模板正文末尾，整次插入为单个撤销步。
+    fn insert_mermaid_template(&mut self, template: &str) {
+        let Some(start) = self.ui_state.ctx.mermaid_insert_start else {
+            self.perform_action(Action::Doc(Intent::InsertText(template.into())));
+            return;
+        };
+        let len = self.editor.session().text_len();
+        let next = if start < len {
+            self.editor
+                .session()
+                .text_slice(Range::new(start, start + 1))
+        } else {
+            None
+        };
+        let needs_nl = start < len && !matches!(next.as_deref(), Some("\n") | Some("\r"));
+        let mut text = String::from(template);
+        if needs_nl {
+            text.push('\n');
+        }
+        self.perform_action(Action::Doc(Intent::InsertText(text)));
+        self.editor.set_caret(start + template.len());
     }
 
     /// 表格结构操作（B2）：按打开菜单时的行列上下文生成新源码，经唯一门面
@@ -1370,9 +1810,7 @@ impl App {
             .index
             .blocks
             .iter()
-            .find(|g| {
-                g.kind == BlockKind::Table && g.range.start <= caret && caret <= g.range.end
-            })
+            .find(|g| g.kind == BlockKind::Table && g.range.start <= caret && caret <= g.range.end)
             .map(|g| g.range)
         else {
             return;
@@ -1439,10 +1877,9 @@ impl App {
             CtxAction::TableInsertColumnLeft => (tc.body_row.map_or(0, |r| 2 + r), tc.col),
             CtxAction::TableInsertColumnRight => (tc.body_row.map_or(0, |r| 2 + r), tc.col + 1),
             // 删除列 → 当前行删除后的同序（末列时取新的末列）
-            CtxAction::TableDeleteColumn => (
-                tc.body_row.map_or(0, |r| 2 + r),
-                tc.col.min(tc.ncols - 2),
-            ),
+            CtxAction::TableDeleteColumn => {
+                (tc.body_row.map_or(0, |r| 2 + r), tc.col.min(tc.ncols - 2))
+            }
             _ => return,
         };
         let caret_in_block = table_cell_start(&new_src, line, col);
@@ -1477,6 +1914,8 @@ impl App {
         let Some(t) = self.cache.tables.get(&id) else {
             return false;
         };
+        // 容器内表格：列边界相对网格原点，命中前扣除缩进。
+        let lx = x - t.x;
         let ly = y - top;
         if ly > t.height || t.cols.len() < 2 {
             return false;
@@ -1487,7 +1926,7 @@ impl App {
         for (i, cw) in t.cols.iter().enumerate() {
             acc += *cw;
             // 仅内部边界可拖（最右边界是表宽，等价于整体缩放，不在本项范围）
-            if i + 1 < t.cols.len() && (x - acc).abs() <= tol {
+            if i + 1 < t.cols.len() && (lx - acc).abs() <= tol {
                 hit = Some((i, *cw));
                 break;
             }
@@ -1497,7 +1936,7 @@ impl App {
         };
         let cols = t.cols.clone();
         self.ui_state.tables.widths.entry(id).or_insert(cols);
-        self.ui_state.tables.drag = Some((id, col, x, base_w));
+        self.ui_state.tables.drag = Some((id, col, lx, base_w));
         true
     }
 
@@ -1508,6 +1947,8 @@ impl App {
         };
         let x = self.input_state.mouse.x as f32 - self.content_x();
         let min = crate::view::table::MIN_COL_WIDTH * self.input_state.scale;
+        let indent = self.cache.tables.get(&id).map_or(0.0, |m| m.value.x);
+        let x = x - indent;
         let w = (base_w + (x - x0)).max(min);
         if let Some(ws) = self.ui_state.tables.widths.get_mut(&id) {
             if let Some(slot) = ws.get_mut(col) {
@@ -1547,6 +1988,19 @@ impl App {
         let scale = self.input_state.scale;
         let vp = self.viewport();
         let win_w = vp.w;
+        // 版本历史（B8a）：左侧列表 + 正文区只读预览；面板内外点击都不落正文光标
+        if self.ui_state.history.open {
+            let l = self.history_layout();
+            let count = self.ui_state.history.entries.len();
+            let top = history::first_visible(self.ui_state.history.scroll, scale);
+            match history::hit(&l, top, count, mx, my, scale) {
+                history::Hit::Row(i) => self.history_select(i),
+                history::Hit::Action(a) => self.history_action(a),
+                history::Hit::Background | history::Hit::Outside => {}
+            }
+            self.request_redraw();
+            return false;
+        }
         // 右键菜单打开中：命中项执行；其余位置（含面板内空白）关闭并吞掉
         if self.ui_state.ctx.open {
             let l = self.ctx_layout();
@@ -1589,6 +2043,9 @@ impl App {
             return false;
         }
         if let Some(m) = chrome::hit_menu_bar(mx, my, scale) {
+            // 菜单与快速打开/查找栏互斥：开启菜单前先收掉轻量浮层
+            self.close_quick();
+            self.close_search();
             self.ui_state.chrome.toggle(m);
             self.request_redraw();
             return false;
@@ -1719,6 +2176,18 @@ impl App {
             self.request_redraw();
             return false;
         }
+        // 空 Mermaid 块提示点击：空块没有其它点击语义（无正文可选、非表格、
+        // 无任务框），因此允许点击整块卡片（含提示行）触发模板菜单；非空块
+        // 仍走普通落光标/双击选词，分支顺序不变。
+        if self.try_open_mermaid_empty_menu() {
+            return false;
+        }
+        // Details 块折叠/展开：收起态点击整块 = 展开（唯一交互入口）；
+        // 展开态点击 summary 行 = 收起（y ∈ [top, top + line_h)），
+        // 正文区点击照常落光标。优先级高于 point_caret。
+        if self.try_toggle_details_on_click() {
+            return false;
+        }
         self.window_state.dragging = true;
         if self.try_toggle_task() {
             self.window_state.dragging = false; // 方框切换：不进入拖选
@@ -1800,14 +2269,45 @@ impl App {
             self.set_hover_link(None, x, y);
             return; // 右键菜单打开时其余悬停不更新
         }
+        if self.ui_state.history.open {
+            let l = self.history_layout();
+            let count = self.ui_state.history.entries.len();
+            let top = history::first_visible(self.ui_state.history.scroll, self.input_state.scale);
+            let h = history::hit(&l, top, count, x, y, self.input_state.scale);
+            let hover = match h {
+                history::Hit::Row(i) => Some(i),
+                _ => None,
+            };
+            let action = match h {
+                history::Hit::Action(a) => Some(a),
+                _ => None,
+            };
+            if self.ui_state.history.hover != hover || self.ui_state.history.hover_action != action
+            {
+                self.ui_state.history.hover = hover;
+                self.ui_state.history.hover_action = action;
+                self.request_redraw();
+            }
+            self.ui_state.chrome.hover_menu = None;
+            self.ui_state.chrome.hover_item = None;
+            self.set_hover_link(None, x, y);
+            return; // 历史面板打开：不更新正文/其它面板悬停
+        }
         if self.ui_state.chrome.scroll_hover {
             self.ui_state.chrome.scroll_hover = false;
         }
         let menu = chrome::hit_menu_bar(x, y, self.input_state.scale);
         let item = self.ui_state.chrome.open.and_then(|open| {
             let recent = self.recent_labels();
-            chrome::hit_popup_item(x, y, open, self.input_state.scale, &recent, self.viewport().w)
-                .map(|i| (open, i))
+            chrome::hit_popup_item(
+                x,
+                y,
+                open,
+                self.input_state.scale,
+                &recent,
+                self.viewport().w,
+            )
+            .map(|i| (open, i))
         });
         if self.ui_state.chrome.hover_menu != menu || self.ui_state.chrome.hover_item != item {
             self.ui_state.chrome.hover_menu = menu;
@@ -1823,8 +2323,7 @@ impl App {
         match is_recent_hover {
             Some(chrome::MenuAction::OpenRecent(idx)) if idx < recent_paths.len() => {
                 if self.ui_state.chrome.saved_notice.is_none() {
-                    self.ui_state.chrome.saved_notice =
-                        Some(self.ui_state.chrome.notice.clone());
+                    self.ui_state.chrome.saved_notice = Some(self.ui_state.chrome.notice.clone());
                 }
                 self.ui_state.chrome.notice = recent_paths[idx].display().to_string();
             }
@@ -1883,10 +2382,11 @@ impl App {
             self.ui_state.quick.hover = qrow;
             self.request_redraw();
         }
-        // 链接悬停（N5）：正文与表格单元格内的 Link 节点即时显示完整目标 URL。
-        // 模态/拖动（含表格列宽）不显示；选区覆盖链接、鼠标移出正文区同样清除。
+        // 悬停提示（N5）：正文与表格单元格内的 Link 节点显示完整目标 URL；
+        // `<abbr title>` 显示 title 文本（同一浮层样式）。模态/拖动（含表格列宽）不显示；
+        // 选区覆盖、鼠标移出正文区同样清除。
         let inside = x >= vp.x && x < vp.x + vp.w && y >= vp.y && y < vp.y + vp.h;
-        let link = if !inside
+        let tip = if !inside
             || self.ui_state.modal.is_some()
             || self.window_state.dragging
             || self.ui_state.tables.drag.is_some()
@@ -1903,11 +2403,12 @@ impl App {
                     None
                 } else {
                     self.link_at(off)
+                        .map(|u| crate::normalize_link_url(&u))
+                        .or_else(|| self.abbr_title_at(off))
                 }
             })
-            .map(|u| crate::normalize_link_url(&u))
         };
-        self.set_hover_link(link, x, y);
+        self.set_hover_link(tip, x, y);
     }
 
     /// 写入链接悬停态：URL 未变不重绘（鼠标在链接内移动保留首次锚点，
@@ -1967,7 +2468,14 @@ impl App {
             // 专注 / 打字机互斥（同为「写作模式」，同开语义混乱）
             self.ui_state.writing.typewriter = false;
         }
-        self.ui_state.chrome.notice = format!("专注模式：{}", if on { "开" } else { "关" });
+        self.ui_state.chrome.notice = tf(
+            I18nKey::NoticeFocusMode,
+            &[if on {
+                t(I18nKey::ToggleOn)
+            } else {
+                t(I18nKey::ToggleOff)
+            }],
+        );
         self.request_redraw();
     }
 
@@ -1982,7 +2490,14 @@ impl App {
             self.scroll_to_caret();
             self.set_ime_area();
         }
-        self.ui_state.chrome.notice = format!("打字机模式：{}", if on { "开" } else { "关" });
+        self.ui_state.chrome.notice = tf(
+            I18nKey::NoticeTypewriterMode,
+            &[if on {
+                t(I18nKey::ToggleOn)
+            } else {
+                t(I18nKey::ToggleOff)
+            }],
+        );
         self.request_redraw();
     }
 
@@ -2095,6 +2610,31 @@ impl App {
                 return;
             }
         }
+        if self.ui_state.history.open {
+            let panel = history::panel_rect(
+                Rect {
+                    x: self.viewport().x,
+                    y: self.viewport().y,
+                    w: self.viewport().w,
+                    h: self.viewport().h,
+                },
+                self.input_state.scale,
+            );
+            let (x, y) = (
+                self.input_state.mouse.x as f32,
+                self.input_state.mouse.y as f32,
+            );
+            if x >= panel.x && x < panel.x + panel.w && y >= panel.y && y < panel.y + panel.h {
+                let max = history::max_scroll(
+                    panel,
+                    self.ui_state.history.entries.len(),
+                    self.input_state.scale,
+                );
+                self.ui_state.history.scroll = (self.ui_state.history.scroll - d).clamp(0.0, max);
+                self.request_redraw();
+                return;
+            }
+        }
         let vp = self.viewport();
         let max = chrome::max_scroll(vp, self.doc_height());
         // B3：写入 goal_y；smooth=false 时 animate() 首帧 goal_y==scroll_y 零开销同步
@@ -2126,6 +2666,7 @@ impl App {
 
     /// 打开浮层（Ctrl+P / 菜单）：关闭菜单与查找栏，重建候选（最近文件 + 当前目录）。
     pub(crate) fn open_quick(&mut self) {
+        self.close_history(); // 浮层互斥：任何时刻只有一个导航面板
         self.ui_state.chrome.close();
         self.ui_state.ctx.close();
         if self.ui_state.search.open {
@@ -2171,6 +2712,61 @@ impl App {
         self.editor.clear_preedit();
         self.set_ime_area();
         self.request_redraw();
+    }
+
+    /// 快速打开 toggle（Ctrl+P）：已开则关，未开则开。
+    pub(crate) fn toggle_quick(&mut self) {
+        if self.ui_state.quick.open {
+            self.close_quick();
+        } else {
+            self.open_quick();
+        }
+    }
+
+    /// 按 Esc 优先级关闭面板：快速打开 > 替换栏 > 查找栏 > 大纲面板 > 源码模式。
+    /// 无面板打开时关闭菜单和右键菜单（兜底）。全屏不受 Esc 影响。
+    pub(crate) fn close_top_panel(&mut self) {
+        if self.ui_state.quick.open {
+            self.close_quick();
+            return;
+        }
+        if self.ui_state.search.open && self.ui_state.search.replace_open {
+            self.close_search();
+            return;
+        }
+        if self.ui_state.search.open {
+            self.close_search();
+            return;
+        }
+        if self.ui_state.outline.open {
+            self.toggle_outline();
+            return;
+        }
+        if self.input_state.source_mode {
+            self.toggle_source_mode();
+            return;
+        }
+        self.ui_state.chrome.close();
+        self.ui_state.ctx.close();
+        self.request_redraw();
+    }
+
+    /// 查找栏 toggle（Ctrl+F）：已开则关，未开则开。
+    pub(crate) fn toggle_search(&mut self) {
+        if self.ui_state.search.open {
+            self.close_search();
+        } else {
+            self.open_search();
+        }
+    }
+
+    /// 替换栏 toggle（Ctrl+H）：已开 replace_open 则关整个 search，否则打开替换。
+    pub(crate) fn toggle_replace(&mut self) {
+        if self.ui_state.search.open && self.ui_state.search.replace_open {
+            self.close_search();
+        } else {
+            self.open_replace();
+        }
     }
 
     /// 过滤串追加（含 IME 提交）：重算候选并回到首项。
@@ -2266,6 +2862,7 @@ impl App {
             self.request_redraw();
             return;
         }
+        self.close_history(); // 浮层互斥：任何时刻只有一个导航面板
         self.close_quick();
         self.ui_state.chrome.close();
         self.ui_state.ctx.close();
@@ -2280,6 +2877,7 @@ impl App {
     /// 打开查找替换栏（Ctrl+H / 菜单）：首次打开焦点落在查询串（先输词再 Tab 到替换，
     /// 避免首字进替换框导致「无命中、看似无响应」）；栏已开时只展开替换行并聚焦替换串。
     pub(crate) fn open_replace(&mut self) {
+        self.close_history(); // 浮层互斥：任何时刻只有一个导航面板
         self.close_quick();
         self.ui_state.chrome.close();
         self.ui_state.ctx.close();
@@ -2510,10 +3108,21 @@ impl App {
         if !self.editor.set_caret(m.start) {
             return;
         }
+        // B3：命中位于折叠 details 内 → 自动展开（块级组或行内 details），
+        // 否则命中高亮画不出来、光标落在隐藏区。
+        self.sync_details_at_caret();
         self.window_state.goal_x = None;
         self.after_edit(Vec::new()); // 补齐可见/光标块布局并滚动入视口
         self.set_ime_area();
     }
+}
+
+/// 空 mermaid 块判定：body trim 后为空，或所有非空行都以 `%%` 开头（纯注释块）。
+/// 与 `view/layout.rs::fenced_subs` 的提示行判定保持同口径。
+fn mermaid_body_is_empty(body: &str) -> bool {
+    body.lines()
+        .map(str::trim)
+        .all(|l| l.is_empty() || l.starts_with("%%"))
 }
 
 /// 解析脚注定义块首行 `[^id]: ` 的 id。
@@ -2615,6 +3224,7 @@ pub(crate) fn map_key_parts(text: Option<&str>, wom: WKey, mods: Mods) -> Option
         WKey::Character(c) if c.as_str().eq_ignore_ascii_case("a") => Some(Key::A),
         WKey::Character(c) if c.as_str().eq_ignore_ascii_case("n") => Some(Key::N),
         WKey::Character(c) if c.as_str().eq_ignore_ascii_case("p") => Some(Key::P),
+        WKey::Character(c) if c.as_str().eq_ignore_ascii_case("r") => Some(Key::R),
         WKey::Character(c) if c.as_str().eq_ignore_ascii_case("b") => Some(Key::B),
         WKey::Character(c) if c.as_str().eq_ignore_ascii_case("i") => Some(Key::I),
         WKey::Character(c) if c.as_str().eq_ignore_ascii_case("k") => Some(Key::K),
@@ -2629,7 +3239,7 @@ pub(crate) fn map_key_parts(text: Option<&str>, wom: WKey, mods: Mods) -> Option
 // ── 几何编排（原 geometry.rs）：视口区间/块高/光标坐标/Reveal 指纹 ────────────
 
 impl App {
-    /// 版心可用宽（非打印路径）：窗口宽扣除两侧边距、滚动条与大纲面板。
+    /// 版心可用宽（非打印路径）：窗口宽扣除两侧边距、滚动条、大纲与版本历史面板。
     fn available_width(&self) -> f32 {
         let (w, _) = self.win_size();
         let scale = self.input_state.scale;
@@ -2638,7 +3248,12 @@ impl App {
         } else {
             0.0
         };
-        (w as f32 - 2.0 * MARGIN * scale - chrome::SCROLL_W * scale - panel).max(32.0)
+        let left = if self.ui_state.history.open {
+            history::PANEL_W * scale
+        } else {
+            0.0
+        };
+        (w as f32 - 2.0 * MARGIN * scale - chrome::SCROLL_W * scale - panel - left).max(32.0)
     }
 
     pub(crate) fn content_width(&self) -> f32 {
@@ -2664,7 +3279,112 @@ impl App {
         if self.window_state.print.is_some() {
             return MARGIN * scale;
         }
-        MARGIN * scale + ((self.available_width() - self.content_width()) / 2.0).max(0.0)
+        MARGIN * scale
+            + ((self.available_width() - self.content_width()) / 2.0).max(0.0)
+            + if self.ui_state.history.open {
+                history::PANEL_W * scale
+            } else {
+                0.0
+            }
+    }
+
+    /// 容器内表格的水平缩进（物理像素）：引用每层一级、列表按内容列。
+    /// 与正文同源缩放：外层引用条在版心左侧 8px，表格内容随层右移。
+    pub(crate) fn table_indent(&self, container: BlockContainer) -> f32 {
+        let scale = self.input_state.scale;
+        (f32::from(container.quote_depth) * crate::tokens::doc::QUOTE_STEP
+            + f32::from(container.list_indent) * crate::tokens::doc::LIST_STEP)
+            * scale
+    }
+
+    /// 行内图片可用的最大宽度（B4）：版心宽扣除容器内边距
+    /// （引用/列表缩进 + details 卡片内边距），至少 32px。
+    pub(crate) fn image_max_width(&self, container: BlockContainer, width: f32) -> f32 {
+        let pad = self.table_indent(container)
+            + if container.details {
+                crate::tokens::doc::DETAILS_PAD * self.input_state.scale
+            } else {
+                0.0
+            };
+        (width - pad).max(32.0)
+    }
+
+    /// 是否因祖先 details 折叠而不可见（B3）。几何重算期间块表被临时取走，
+    /// 此时回退到预计算的 `details_hidden`；其余时候沿归属链实时判定，
+    /// 保证视图态在几何重算之外被直接修改（测试/交互）也立即正确。
+    pub(crate) fn block_hidden(&self, g: &BlockGeom) -> bool {
+        if self.window_state.print.is_some() {
+            return false;
+        }
+        if g.container.details_depth == 0 {
+            return false;
+        }
+        if self.index.blocks.is_empty() {
+            return g.details_hidden;
+        }
+        let mut parent = g.details_parent;
+        if parent.is_none() {
+            let want = g.container.details_depth - 1;
+            parent = self
+                .index
+                .blocks
+                .iter()
+                .rev()
+                .filter(|b| b.range.start < g.range.start)
+                .find(|b| {
+                    matches!(b.kind, BlockKind::Details { .. }) && b.container.details_depth == want
+                })
+                .map(|b| b.id);
+        }
+        while let Some(id) = parent {
+            if !self.ui_state.expanded_details.contains(&id) {
+                return true;
+            }
+            parent = self
+                .index
+                .blocks
+                .iter()
+                .find(|b| b.id == id)
+                .and_then(|h| h.details_parent);
+        }
+        false
+    }
+
+    /// details 卡片需额外覆盖的子块高度（B3：所有层级更深的后续块）。
+    /// 按块高 + 与几何一致的段距累加（隐藏子块高度 0、组内段距 0），
+    /// 不依赖子块 `top` 是否已重算，视图态变化后可立即取到正确高度。
+    pub(crate) fn details_children_height(&self, g: &BlockGeom) -> f32 {
+        let Some(i) = self.index.blocks.iter().position(|b| b.id == g.id) else {
+            return 0.0;
+        };
+        let scale = self.input_state.scale;
+        let mut total = 0.0;
+        // 首子块与头块之间同样有段距（见 gap_between 的头块→首子块分支）。
+        let mut prev: Option<&BlockGeom> = Some(g);
+        for next in &self.index.blocks[i + 1..] {
+            if next.container.details_depth <= g.container.details_depth {
+                break;
+            }
+            if self.block_hidden(next) {
+                continue; // 折叠子块整组 0 高，也不贡献段距
+            }
+            if let Some(p) = prev {
+                let blank = self.blank_lines_in_gap(p.range, next.range);
+                total += gap_between(
+                    &p.kind,
+                    p.range,
+                    p.container,
+                    &next.kind,
+                    next.range,
+                    next.container,
+                    blank,
+                    self.engine.doc_line_height(),
+                ) * scale;
+            }
+            total += self.block_height(next);
+            prev = Some(next);
+        }
+        total
     }
 
     /// 文档总高（含首尾外边距），滚动条与滚轮钳位依据。
@@ -2679,6 +3399,23 @@ impl App {
     /// 文本布局缺失（键失配或视口外未排版）时回退廉价估算高度。
     /// 数学/表格分别取渲染图与网格高度（键校验与绘制同源）。
     pub(crate) fn block_height(&self, g: &BlockGeom) -> f32 {
+        // B3：折叠 details 的隐藏子块不渲染、不占高度（不是光栅裁剪）。
+        if self.block_hidden(g) {
+            return 0.0;
+        }
+        // Details 头块折叠态：只显示 summary 单行 + ▼/▶ 箭头。折叠态是纯 UI 状态，
+        // 不参与 layout 缓存 key；直接在 block_height 层面钳高度，避免缓存污染。
+        // 打印态恒展开（用户想看完整内容），跳过折叠钳制。
+        if let BlockKind::Details { .. } = &g.kind {
+            if self.window_state.print.is_none()
+                && !self.ui_state.expanded_details.contains(&g.id)
+                // 光标进入头块时按 WYSIWYM 显示源码（多行），不做单行裁剪。
+                && !crate::view::node_active(g.range, self.effective_caret())
+            {
+                // 物理像素：doc_line_height 是逻辑像素基准，几何与文本光栅都乘 scale
+                return (self.engine.doc_line_height() * self.input_state.scale).round();
+            }
+        }
         if g.kind == BlockKind::Math && self.math_shows_image(g.id, &g.range) {
             return self
                 .cache
@@ -2724,11 +3461,12 @@ impl App {
     }
 
     /// 光标前紧邻的尾换行个数（0/1/≥2，按字素回退，多字节字符安全）。
-    /// 1 = 同段软换行；≥2 = 段落分隔（markdown 折叠多余空行）。
+    /// 1 = 同段软换行；≥2 = 段落分隔（markdown 折叠多余空行时的空段落）。
+    /// 上限 64：仅用于光标锚定与空行高度累计，避免病态输入逐字素回溯。
     fn trailing_newlines(&self, caret: usize) -> usize {
         let mut n = 0;
         let mut c = caret;
-        while n < 2 {
+        while n < 64 {
             let Some(p) = self.editor.session().prev_grapheme(c) else {
                 break;
             };
@@ -2790,12 +3528,18 @@ impl App {
             // 1 个尾换行 = 同段下一视觉行；≥2 = 新段顶边（块底 + 段距）。
             if caret == end && caret > start && self.trailing_newlines(caret) > 0 {
                 let nl = self.trailing_newlines(caret);
+                let kind = self.index.blocks[i].kind.clone();
                 self.ensure_block(id);
                 if let Some(l) = self.cache.layouts.get(&id) {
+                    // 空行高度（B5）：Enter×1 = 同段下一视觉行（块底）；
+                    // Enter×n（n≥2）= 块底 + 段距 + (n-1) 个满行高，与
+                    // `gap_between` 的空行累计一致，提交前后光标不跳变。
                     let y = if nl == 1 {
                         top + l.height
                     } else {
-                        top + l.height + PARA_GAP * scale
+                        top + l.height
+                            + (gap_after(&kind) + (nl - 1) as f32 * self.engine.doc_line_height())
+                                * scale
                     };
                     return (margin, vp.y + y - scroll, line_h);
                 }
@@ -2816,7 +3560,14 @@ impl App {
         if let Some(last) = self.index.blocks.last() {
             let top = last.top;
             let h = self.block_height(last);
-            return (margin, vp.y + top + h + PARA_GAP * scale - scroll, line_h);
+            let gap = gap_after(&last.kind);
+            // 末块之后仍有尾换行（块区间不含尾部空行）：每个空行占 1 行高（B5）。
+            let blank = self.blank_lines_in_gap(last.range, Range::new(caret, caret)) as f32;
+            return (
+                margin,
+                vp.y + top + h + (gap + blank * self.engine.doc_line_height()) * scale - scroll,
+                line_h,
+            );
         }
         (margin, vp.y + margin - scroll, line_h)
     }

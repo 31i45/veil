@@ -21,13 +21,14 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use veil_core::{CellAlign, Range, Table, TableCell};
 
-use super::layout::{cell_style_spans, LayoutEngine};
+use super::layout::{cell_style_spans, LayoutEngine, OverKind, UnderKind};
 use super::style::Style;
 use super::table_view::glyph_anchor;
 
 /// 单元格水平/垂直内边距（基准字号下），随 DPI 缩放。
-const CELL_PAD_X: f32 = 8.0;
-const CELL_PAD_Y: f32 = 5.0;
+/// 单一来源：`tokens::doc::TABLE_PAD_X` / `TABLE_PAD_Y`。
+const CELL_PAD_X: f32 = crate::tokens::doc::TABLE_PAD_X;
+const CELL_PAD_Y: f32 = crate::tokens::doc::TABLE_PAD_Y;
 /// 列宽收缩下限（基准字号下）：再窄会把文本挤成逐字折行。
 pub(crate) const MIN_COL_WIDTH: f32 = 40.0;
 
@@ -57,6 +58,25 @@ struct PendingMath {
     tex: String,
 }
 
+/// 表格单元格内联图片（输入）：已加载的位图 + 自然尺寸（无 URL，失败已在上层过滤）。
+pub(crate) struct CellImgAsset {
+    pub w: u32,
+    pub h: u32,
+    pub pixels: Vec<u8>,
+}
+
+/// 单元格内联图片（输出）：相对单元格内容原点的绘制位置与显示尺寸。
+/// `pixel_w/pixel_h` 为位图自然尺寸（绘制时按显示尺寸最近邻缩放）。
+pub(crate) struct TableCellImg {
+    pub x: f32,
+    pub y: f32,
+    pub w: u32,
+    pub h: u32,
+    pub pixel_w: u32,
+    pub pixel_h: u32,
+    pub pixels: Vec<u8>,
+}
+
 /// 表格行几何（网格坐标，原点为表格左上角）。
 pub struct TableRow {
     pub top: f32,
@@ -80,6 +100,12 @@ pub struct TableCellLayout {
     pub pixel_h: u32,
     /// 非活动格内联公式（相对内容原点）；空 = 无公式或活动格（源码态）。
     pub maths: Vec<TableCellMath>,
+    /// 非活动格内联图片（相对内容原点，水平并排）；空 = 无图或活动格。
+    pub(crate) images: Vec<TableCellImg>,
+    /// 非活动格行内前置装饰（相对内容原点的物理矩形；与正文同语义）。
+    pub(crate) under: Vec<(f32, f32, f32, f32, UnderKind)>,
+    /// 非活动格行内后置装饰（abbr 虚线下划线）。
+    pub(crate) over: Vec<(f32, f32, f32, f32, OverKind)>,
 }
 
 /// 表格网格排版结果（随块缓存；宽度/DPI/内容/活动格变化时重建）。
@@ -90,6 +116,8 @@ pub struct TableLayout {
     pub cells: Vec<TableCellLayout>,
     pub width: f32,
     pub height: f32,
+    /// 容器（引用条/列表项/details）内的水平缩进（物理像素，相对版心原点）。
+    pub x: f32,
     /// 活动单元格 flat 索引（源码态文本）；None = 全部富文本。
     pub active: Option<usize>,
 }
@@ -100,6 +128,8 @@ impl TableLayout {
         if self.cells.is_empty() || self.cols.is_empty() {
             return 0;
         }
+        // 容器内表格整体右移：命中先把坐标换回网格原点。
+        let x = (x - self.x).max(0.0);
         let row = self
             .rows
             .iter()
@@ -139,10 +169,7 @@ fn math_placeholders(text: &str, maths: &[CellMath], nbsp_w: f32) -> (String, Ve
     let mut sorted: Vec<&CellMath> = maths.iter().collect();
     sorted.sort_by_key(|m| (m.range.start, m.range.end));
     for m in sorted {
-        let (s, e) = (
-            m.range.start.min(text.len()),
-            m.range.end.min(text.len()),
-        );
+        let (s, e) = (m.range.start.min(text.len()), m.range.end.min(text.len()));
         if s < cursor || e <= s {
             continue; // 防御：区间须有序且不重叠
         }
@@ -163,6 +190,74 @@ fn math_placeholders(text: &str, maths: &[CellMath], nbsp_w: f32) -> (String, Ve
     (out, pending)
 }
 
+/// `<br>` / `<br/>` / `<BR>` / `<BR/>` → `\n`。
+///
+/// GFM 允许表格单元格内嵌原始 HTML `<br>` 做硬换行；core 的 cell.text 不会剥离它
+/// （InlineKind 无 Html 变体），故保留在可见文本里。本函数把四种大小写/闭合变体
+/// 统一替换为单个 `\n`，并按替换位置重映射样式段坐标，使后续 `wrap_cell_text`
+/// 的硬行拆分与富文本叠加一致。
+#[allow(clippy::type_complexity)]
+fn preprocess_line_breaks(
+    text: &str,
+    styles: Option<&[(usize, usize, Style)]>,
+) -> (String, Option<Vec<(usize, usize, Style)>>) {
+    // 替换计划：按起始位置升序，记录每个替换造成的位移差（Δ = new_len - old_len）。
+    // `<br>` → `\n`:  4→1 → Δ=-3
+    // `<br/>` → `\n`: 5→1 → Δ=-4
+    // 大写变体同长度，Δ 相同。
+    let patterns: &[&str] = &["<br/>", "<BR/>", "<br>", "<BR>"]; // 长的先匹配
+    let mut changes: Vec<(usize, isize)> = Vec::new();
+    for &pat in patterns {
+        let mut from = 0usize;
+        while let Some(off) = text[from..].find(pat) {
+            let abs = from + off;
+            // 检查是否与已记录替换重叠（长的先匹配 → 按起始位置升序）
+            if changes.last().is_none_or(|&(s, _)| abs >= s) {
+                let delta = 1isize - pat.len() as isize;
+                changes.push((abs, delta));
+            }
+            from = abs + pat.len();
+            if from >= text.len() {
+                break;
+            }
+        }
+    }
+    if changes.is_empty() {
+        return (text.to_owned(), styles.map(|s| s.to_vec()));
+    }
+    // 按起始位置升序排序（上面 patterns 迭代顺序可能不是自然升序）
+    changes.sort_by_key(|&(s, _)| s);
+
+    // 构建替换后的文本
+    let mut out = String::with_capacity(text.len() + changes.len());
+    let mut cursor = 0usize;
+    for &(start, delta) in &changes {
+        out.push_str(&text[cursor..start]);
+        out.push('\n');
+        cursor = start + (1 - delta as usize); // 跳过被替换的 pattern 长度
+    }
+    out.push_str(&text[cursor..]);
+
+    // 重映射样式段：对每个 (s, e) 减去所有 start < pos 的累计 Δ
+    let remap = |pos: usize| -> usize {
+        let mut acc = 0isize;
+        for &(s, d) in &changes {
+            if s < pos {
+                acc += d;
+            } else {
+                break; // 已按 start 升序
+            }
+        }
+        (pos as isize + acc).max(0) as usize
+    };
+    let new_styles = styles.map(|list| {
+        list.iter()
+            .map(|&(s, e, ref st)| (remap(s), remap(e), *st))
+            .collect()
+    });
+    (out, new_styles)
+}
+
 impl LayoutEngine {
     /// 表格排版 + 单元格光栅化。`width` 为版心可用宽（物理像素），`color` 为正文色。
     /// `active` = 活动单元格 flat 索引及其源码文本（显示标记，列宽按源码测量）。
@@ -174,7 +269,7 @@ impl LayoutEngine {
         color: [u8; 3],
         active: Option<(usize, &str)>,
     ) -> TableLayout {
-        self.layout_table_opts(table, width, color, active, None, None, None)
+        self.layout_table_opts(table, width, color, active, None, None, None, None)
     }
 
     /// 带纯文本覆盖与公式占位的表格排版。`raw_cells`：flat 索引 → 源码原文，
@@ -182,6 +277,8 @@ impl LayoutEngine {
     /// 渲染态要求保留原文，且不编号、不着色（纯文本降级）。
     /// `maths`：flat 索引 → 该格内联公式（仅非活动格），可见文本区间在排版前
     /// 替换为 NBSP 占位（宽≈图宽），排版后按占位首字形定位供视图层 blit。
+    /// `images`：flat 索引 → 该格内联图片（仅非活动格，已加载自然尺寸位图），
+    /// 排版后水平并排置于文本右侧。
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn layout_table_opts(
         &mut self,
@@ -192,12 +289,10 @@ impl LayoutEngine {
         raw_cells: Option<&HashMap<usize, String>>,
         maths: Option<&HashMap<usize, Vec<CellMath>>>,
         widths: Option<&[f32]>,
+        images: Option<&HashMap<usize, Vec<CellImgAsset>>>,
     ) -> TableLayout {
         let scale = self.scale_factor();
-        let metrics = Metrics::new(
-            self.doc_font_size() * scale,
-            self.doc_line_height() * scale,
-        );
+        let metrics = Metrics::new(self.doc_font_size() * scale, self.doc_line_height() * scale);
         let pad_x = CELL_PAD_X * scale;
         let pad_y = CELL_PAD_Y * scale;
         let ncols = table.aligns.len();
@@ -221,7 +316,7 @@ impl LayoutEngine {
                 let cell = row.get(c);
                 let active_src = active.and_then(|(idx, src)| (idx == flat).then_some(src));
                 let raw = raw_cells.and_then(|m| m.get(&flat));
-                let (text, styles, cell_maths) = match active_src {
+                let (raw_text, raw_styles, cell_maths) = match active_src {
                     Some(src) => (Cow::Borrowed(src), None, Vec::new()),
                     // 脚注引用单元格：源码原文 + 无样式（不编号、不着色）。
                     None => match (cell, raw) {
@@ -246,6 +341,13 @@ impl LayoutEngine {
                         (None, _) => (Cow::Borrowed(""), None, Vec::new()),
                     },
                 };
+                // `<br>` → `\n` 预处理（活动格源码态不做，避免用户看见被改写）。
+                let (text, styles) = if active_src.is_some() {
+                    (raw_text, raw_styles)
+                } else {
+                    let (t, s) = preprocess_line_breaks(raw_text.as_ref(), raw_styles.as_deref());
+                    (Cow::Owned(t), s)
+                };
                 row_in.push(CellInput {
                     text,
                     styles,
@@ -258,7 +360,9 @@ impl LayoutEngine {
         }
 
         // 第一遍：内在宽度（不折行），列宽 = 该列最宽单元格 + 两侧内边距。
+        // 单元格图片总宽也算入内在宽（多图水平并排 + 2px 间距）。
         let mut cols = vec![0.0f32; ncols];
+        let mut flat = 0usize;
         for (row, bold) in &inputs {
             for (c, cell) in row.iter().enumerate() {
                 let (_, cell_w, _) = self.shape_cell(
@@ -270,7 +374,19 @@ impl LayoutEngine {
                     CellAlign::None,
                     link_color,
                 );
-                cols[c] = cols[c].max(cell_w);
+                let img_w = images
+                    .and_then(|m| m.get(&flat))
+                    .map(|list| {
+                        if list.is_empty() {
+                            0.0
+                        } else {
+                            list.iter().map(|img| img.w as f32).sum::<f32>()
+                                + 2.0 * (list.len() - 1) as f32 // 图片间 2px 间距
+                        }
+                    })
+                    .unwrap_or(0.0);
+                cols[c] = cols[c].max(cell_w.max(img_w));
+                flat += 1;
             }
         }
         for w in &mut cols {
@@ -305,6 +421,7 @@ impl LayoutEngine {
         let mut rows = Vec::with_capacity(grid.len());
         let mut cells = Vec::with_capacity(grid.len() * ncols);
         let mut y = 0.0;
+        let mut flat = 0usize;
         for (row, bold) in &inputs {
             let mut shaped = Vec::with_capacity(ncols);
             let mut row_h = metrics.line_height;
@@ -312,7 +429,7 @@ impl LayoutEngine {
                 let cell = &row[c];
                 let wrap_w = (*col_w - 2.0 * pad_x).max(1.0);
                 let probes: Vec<usize> = cell.maths.iter().map(|m| m.range.start).collect();
-                let (buffer, _, h, anchors) = self.shape_cell_probed(
+                let (buffer, _, h, anchors, decor) = self.shape_cell_probed(
                     metrics,
                     cell.text.as_ref(),
                     cell.styles.as_deref(),
@@ -338,16 +455,75 @@ impl LayoutEngine {
                         });
                     }
                 }
+                // 图片（水平并排置于文本右侧）。
+                // 先求 buffer 内文本的最大行宽作为图片起始 x。
+                let img_list = images.and_then(|m| m.get(&flat));
+                let placed_imgs = if let Some(list) = img_list {
+                    if list.is_empty() {
+                        Vec::new()
+                    } else {
+                        let mut max_text_w = 0.0f32;
+                        for run in buffer.layout_runs() {
+                            for g in run.glyphs {
+                                max_text_w = max_text_w.max(g.x + g.w);
+                            }
+                        }
+                        let mut px = if max_text_w > 0.0 {
+                            max_text_w + 2.0
+                        } else {
+                            0.0
+                        };
+                        let mut out = Vec::with_capacity(list.len());
+                        for img in list {
+                            // B4：单元格内图片限高 1.5×行高，且不超出单元格剩余宽度；
+                            // 等比缩放、只缩不放，位图仍按自然尺寸缓存。
+                            let avail_w = (wrap_w - px).max(1.0);
+                            let (dw, dh) = super::layout::fit_size_box(
+                                img.w,
+                                img.h,
+                                avail_w,
+                                crate::tokens::doc::IMG_TABLE_LINES * metrics.line_height,
+                            );
+                            content_h = content_h.max(dh as f32);
+                            out.push(TableCellImg {
+                                x: px,
+                                y: 0.0,
+                                w: dw,
+                                h: dh,
+                                pixel_w: img.w,
+                                pixel_h: img.h,
+                                pixels: img.pixels.clone(),
+                            });
+                            px += dw as f32 + 2.0;
+                        }
+                        out
+                    }
+                } else {
+                    Vec::new()
+                };
                 row_h = row_h.max(content_h);
-                shaped.push((buffer, h, content_h, cell.doc_start, placed));
+                shaped.push((
+                    buffer,
+                    h,
+                    content_h,
+                    cell.doc_start,
+                    placed,
+                    placed_imgs,
+                    decor,
+                ));
+                flat += 1;
             }
             rows.push(TableRow {
                 top: y,
                 height: row_h + 2.0 * pad_y,
             });
             let mut x = 0.0;
-            for (c, (buffer, text_h, h, doc_start, maths)) in shaped.into_iter().enumerate() {
-                let (pixels, pixel_w, pixel_h) = self.rasterize_buffer(&buffer, text_h, color);
+            for (c, (buffer, text_h, h, doc_start, maths, imgs, decor)) in
+                shaped.into_iter().enumerate()
+            {
+                // 与正文同一光栅化入口：sub/sup 按字形起点施加基线偏移。
+                let (pixels, pixel_w, pixel_h) =
+                    self.rasterize_buffer_scripts(&buffer, text_h, color, &decor.scripts);
                 let col_w = cols[c];
                 cells.push(TableCellLayout {
                     x: x + pad_x,
@@ -359,6 +535,9 @@ impl LayoutEngine {
                     pixel_w,
                     pixel_h,
                     maths,
+                    images: imgs,
+                    under: decor.under,
+                    over: decor.over,
                 });
                 x += col_w;
             }
@@ -371,6 +550,7 @@ impl LayoutEngine {
             cells,
             width: table_w,
             height: y,
+            x: 0.0,
             active: active.map(|(idx, _)| idx),
         }
     }
@@ -404,10 +584,15 @@ mod tests {
             None,
             None,
             Some(&ov),
+            None,
         );
         assert_ne!(natural.cols, l.cols, "覆盖必须改变列宽");
         assert!((l.cols[0] - 120.0).abs() < 0.5 && (l.cols[1] - 260.0).abs() < 0.5);
-        assert!((l.width - 380.0).abs() < 1.0, "表宽 = 列宽之和: {}", l.width);
+        assert!(
+            (l.width - 380.0).abs() < 1.0,
+            "表宽 = 列宽之和: {}",
+            l.width
+        );
     }
 
     #[test]
@@ -424,6 +609,7 @@ mod tests {
             None,
             None,
             Some(&[100.0]),
+            None,
         );
         let natural = LayoutEngine::new().layout_table(&table, 600.0, [0, 0, 0], None);
         assert_eq!(ignored.cols, natural.cols);
@@ -436,6 +622,7 @@ mod tests {
             None,
             None,
             Some(&[1.0, 1.0]),
+            None,
         );
         assert!(
             tiny.cols.iter().all(|w| *w >= MIN_COL_WIDTH - 0.5),
@@ -599,8 +786,16 @@ mod tests {
         assert_eq!(raw, "a [^n] b", "源码区间应保留脚注标记");
         let mut raw_cells = HashMap::new();
         raw_cells.insert(0usize, raw);
-        let narrow = LayoutEngine::new()
-            .layout_table_opts(&table, 90.0, [0, 0, 0], None, Some(&raw_cells), None, None);
+        let narrow = LayoutEngine::new().layout_table_opts(
+            &table,
+            90.0,
+            [0, 0, 0],
+            None,
+            Some(&raw_cells),
+            None,
+            None,
+            None,
+        );
         assert_eq!(narrow.cells.len(), 2);
         assert!(narrow.height > 0.0);
         assert!(!narrow.cells[0].pixels.is_empty(), "降级格仍须正常光栅");
@@ -622,12 +817,9 @@ mod tests {
         } else {
             &table.rows[0][flat - table.header.len()]
         };
-        let spans = crate::view::layout::cell_math_spans(
-            cell.range,
-            cell.text.len(),
-            &cell.inlines,
-        )
-        .expect("公式格应可映射");
+        let spans =
+            crate::view::layout::cell_math_spans(cell.range, cell.text.len(), &cell.inlines)
+                .expect("公式格应可映射");
         let items = spans
             .iter()
             .map(|&(vs, ve, content)| CellMath {
@@ -664,6 +856,7 @@ mod tests {
             None,
             None,
             Some(&maths),
+            None,
             None,
         );
         let plain = LayoutEngine::new().layout_table(&table, 600.0, [0, 0, 0], None);
@@ -721,6 +914,7 @@ mod tests {
             None,
             Some(&maths),
             None,
+            None,
         );
         let narrow = LayoutEngine::new().layout_table_opts(
             &table,
@@ -729,6 +923,7 @@ mod tests {
             None,
             None,
             Some(&maths),
+            None,
             None,
         );
         assert_eq!(narrow.cells[0].maths.len(), 1, "折行后公式仍须定位");
@@ -762,5 +957,43 @@ mod tests {
             "图片格与纯 alt 文本格的光栅宽度应一致"
         );
         assert!(l.cells[0].maths.is_empty());
+    }
+
+    #[test]
+    fn table_image_height_capped_to_one_and_half_lines() {
+        // B4：单元格图片限高 1.5×行高，等比缩放；位图缓存保持自然尺寸。
+        use std::collections::HashMap;
+        let doc = "| a | b |\n| --- | --- |\n| c | d |\n";
+        let s = Session::open(doc);
+        let (id, _, _) = s.blocks()[0];
+        let table = s.table(id).unwrap();
+        let mut images: HashMap<usize, Vec<CellImgAsset>> = HashMap::new();
+        images.insert(
+            0,
+            vec![CellImgAsset {
+                w: 100,
+                h: 200,
+                pixels: vec![0; 100 * 200 * 4],
+            }],
+        );
+        let l = LayoutEngine::new().layout_table_opts(
+            &table,
+            600.0,
+            [0, 0, 0],
+            None,
+            None,
+            None,
+            None,
+            Some(&images),
+        );
+        let img = &l.cells[0].images[0];
+        let cap = crate::tokens::doc::IMG_TABLE_LINES * crate::geometry::BASE_LINE_HEIGHT;
+        assert!(
+            (img.h as f32) <= cap + 0.5,
+            "单元格图片高度须 ≤ 1.5 行: {} > {cap}",
+            img.h
+        );
+        assert_eq!((img.pixel_w, img.pixel_h), (100, 200), "位图保持自然尺寸");
+        assert!(l.cells[0].h >= img.h as f32, "行高须容纳图片");
     }
 }

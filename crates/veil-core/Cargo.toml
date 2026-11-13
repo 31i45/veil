@@ -7,6 +7,9 @@ version.workspace = true
 # ADR-001：rope 实现，mark 语义在本 crate 内自封装，不向外暴露 rope 类型。
 # grapheme 导航由 rope 内置（prev/next_grapheme_offset），无需 unicode-segmentation。
 lapce-xi-rope = "0.4"
+# Mermaid v0：flate2 生成 mermaid.live 预览 URL（pako gzip deflate 格式）。
+# flate2 已被 miniz_oxide 传递依赖覆盖，体积增量为 0。
+flate2 = "1"
 
 [dev-dependencies]
 # CommonMark 一致性门禁（tests/conformance.rs）Suite B 复刻产品导出路径；与产品同版本。

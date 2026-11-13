@@ -1,0 +1,1040 @@
+//! 原生 PDF 导出（Wave 4）：绘制原语 + Type0/CIDFontType2 + ToUnicode CMap + 多级书签。
+//!
+//! 本模块只负责「页面上的绘制指令 → PDF 字节」，版面由 `pdf_layout` 产出；
+//! 两者分离让换行/分页可纯逻辑单测，不必依赖真实字体光栅。
+//!
+//! 依赖边界：pdf-writer / ttf-parser / subsetter 仅本模块使用。
+//! 字体来源：运行时从 `C:\Windows\Fonts\` 读取 simhei.ttf → msyh.ttc → simsun.ttc 链。
+
+#![allow(clippy::manual_find)]
+
+use std::collections::{BTreeSet, HashMap};
+use std::path::Path;
+
+use pdf_writer::types::{CidFontType, FontFlags};
+use pdf_writer::{Name, Pdf, Rect, Ref, Str};
+
+use veil_ui::i18n::{t, tf, Key};
+
+/// A4 默认尺寸（pt，72 pt / inch）。
+pub const A4_WIDTH: f32 = 595.28;
+pub const A4_HEIGHT: f32 = 841.89;
+
+/// 字体链候选（Windows 字体，按优先级）。
+/// 优先 msyh（微软雅黑）：与应用预览的中文 UI 字体一致，且拉丁字母为比例宽度；
+/// simhei 仅作兜底——它的拉丁字母是半角等宽（全 500），会让 i/l 显空、W/m 显挤。
+#[cfg(windows)]
+const FONT_CANDIDATES: &[&str] = &[
+    r"C:\Windows\Fonts\msyh.ttc",   // 微软雅黑
+    r"C:\Windows\Fonts\Deng.ttf",   // 等线
+    r"C:\Windows\Fonts\simhei.ttf", // 黑体（兜底）
+    r"C:\Windows\Fonts\simsun.ttc",
+];
+
+#[cfg(not(windows))]
+const FONT_CANDIDATES: &[&str] = &[];
+
+/// 页面顶部起算的 Y → PDF 坐标系 Y（原点在左下角）。
+pub fn y_from_top(top_pt: f32) -> f32 {
+    A4_HEIGHT - top_pt
+}
+
+/// 找一个可用的 Windows CJK 字体路径。
+#[cfg(windows)]
+pub fn find_cjk_font() -> Option<&'static str> {
+    for p in FONT_CANDIDATES {
+        if Path::new(p).exists() {
+            return Some(p);
+        }
+    }
+    None
+}
+
+#[cfg(not(windows))]
+pub fn find_cjk_font() -> Option<&'static str> {
+    None
+}
+
+// =============================================================================
+// 度量
+// =============================================================================
+
+/// 版面度量接口：换行与列宽只依赖这三个量，单测可注入假实现。
+pub trait TextMetrics {
+    /// 单字宽度（pt）。
+    fn width_of(&self, c: char, size: f32) -> f32;
+
+    fn text_width(&self, s: &str, size: f32) -> f32 {
+        s.chars().map(|c| self.width_of(c, size)).sum()
+    }
+
+    /// 单行行高（含行距）。
+    fn line_height(&self, size: f32) -> f32 {
+        size * 1.55
+    }
+
+    /// 基线距行顶距离。
+    fn ascent(&self, size: f32) -> f32 {
+        size * 0.88
+    }
+}
+
+/// 只读字体度量（不子集化）：版面阶段用，避免为测宽而子集化整篇字符。
+pub struct FontMetrics {
+    widths: HashMap<char, f32>,
+    /// 缺字回退宽度（em 比例）。
+    fallback: f32,
+    pub ascent_ratio: f32,
+}
+
+impl FontMetrics {
+    /// `chars` 应覆盖文档全部字符（含书签标题），未覆盖字符走回退宽度。
+    pub fn load(font_path: &Path, chars: impl IntoIterator<Item = char>) -> Result<Self, String> {
+        let bytes = std::fs::read(font_path).map_err(|e| {
+            tf(
+                Key::ErrFontRead,
+                &[&font_path.display().to_string(), &e.to_string()],
+            )
+        })?;
+        let face = ttf_parser::Face::parse(&bytes, 0)
+            .map_err(|e| tf(Key::ErrFontParse, &[&e.to_string()]))?;
+        let upem = face.units_per_em().max(1) as f32;
+        let scale = 1000.0 / upem;
+
+        let mut widths = HashMap::new();
+        for c in chars {
+            if widths.contains_key(&c) {
+                continue;
+            }
+            let w = face
+                .glyph_index(c)
+                .and_then(|gid| face.glyph_hor_advance(gid))
+                .map(|a| a as f32 * scale)
+                .unwrap_or(600.0);
+            widths.insert(c, w);
+        }
+
+        Ok(Self {
+            widths,
+            fallback: 600.0,
+            // YaHei 的 ascender 含大量上行留白（2167/2048≈1.06），直接使用会把基线压低；
+            // 钳到 0.72–0.92 与常见排版基线一致。
+            ascent_ratio: (face.ascender() as f32 * scale / 1000.0).clamp(0.72, 0.92),
+        })
+    }
+}
+
+impl TextMetrics for FontMetrics {
+    fn width_of(&self, c: char, size: f32) -> f32 {
+        let units = self.widths.get(&c).copied().unwrap_or(self.fallback);
+        units * size / 1000.0
+    }
+
+    fn ascent(&self, size: f32) -> f32 {
+        self.ascent_ratio * size
+    }
+}
+
+// =============================================================================
+// 绘制原语
+// =============================================================================
+
+/// 已解码位图（RGB8，行主序）。`px_to_pt` 把像素换算为排版点数（图片按 96dpi，公式按渲染 dpi）。
+#[derive(Clone)]
+pub struct ImageData {
+    pub w: u32,
+    pub h: u32,
+    pub rgb: Vec<u8>,
+    /// 图顶到基线的像素数（行内公式对齐用）。
+    pub baseline_px: f32,
+    pub px_to_pt: f32,
+}
+
+impl ImageData {
+    pub fn pt_w(&self) -> f32 {
+        self.w as f32 * self.px_to_pt
+    }
+
+    pub fn pt_h(&self) -> f32 {
+        self.h as f32 * self.px_to_pt
+    }
+
+    pub fn baseline_pt(&self) -> f32 {
+        self.baseline_px * self.px_to_pt
+    }
+}
+
+/// 一段同一样式的文本。`x`/`y` 为页面顶部起算，`y` 是基线。
+#[derive(Clone, Debug)]
+pub struct TextRun {
+    pub x: f32,
+    pub y: f32,
+    pub size: f32,
+    pub text: String,
+    pub bold: bool,
+    pub italic: bool,
+    pub underline: bool,
+    pub strike: bool,
+    pub highlight: Option<[u8; 3]>,
+    pub color: [u8; 3],
+}
+
+#[derive(Clone, Debug)]
+pub enum DrawOp {
+    Text(TextRun),
+    Rect {
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        color: [u8; 3],
+    },
+    Line {
+        x1: f32,
+        y1: f32,
+        x2: f32,
+        y2: f32,
+        width: f32,
+        color: [u8; 3],
+    },
+    Image {
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        id: usize,
+    },
+}
+
+/// 书签条目。`level` 为标题级别（1–6），用于构建父子树。
+#[derive(Clone, Debug)]
+pub struct OutlineItem {
+    pub title: String,
+    pub level: u8,
+    pub page_idx: usize,
+    pub top_y: f32,
+}
+
+// =============================================================================
+// ToUnicode CMap
+// =============================================================================
+
+/// 构建 ToUnicode CMap（CMapType 2，bfchar 格式）。
+/// UTF-16 代理对（Emoji U+1F600+）用 4 字节 dest 编码。
+fn build_to_unicode_cmap(cid_to_char: &[char]) -> Vec<u8> {
+    let mut out = String::new();
+
+    let mut bmp: Vec<(u16, u16)> = Vec::new();
+    let mut astral: Vec<(u16, String)> = Vec::new();
+
+    for (cid, &c) in cid_to_char.iter().enumerate() {
+        if c == '\0' {
+            continue;
+        }
+        let code = c as u32;
+        if code <= 0xFFFF {
+            bmp.push((cid as u16, code as u16));
+        } else {
+            let hi = 0xD800u32 + ((code - 0x10000) >> 10);
+            let lo = 0xDC00u32 + ((code - 0x10000) & 0x3FF);
+            astral.push((cid as u16, format!("{hi:04X}{lo:04X}")));
+        }
+    }
+
+    out.push_str("/CIDInit /ProcSet findresource begin\n");
+    out.push_str("12 dict begin begincmap\n");
+    out.push_str("/CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def\n");
+    out.push_str("/CMapName /Adobe-Identity-UCS def /CMapType 2 def\n");
+    out.push_str("1 begincodespacerange <0000> <FFFF> endcodespacerange\n");
+
+    // 规范限制：单个 beginbfchar 块最多 100 条映射。
+    for chunk in bmp.chunks(100) {
+        out.push_str(&format!("{} beginbfchar\n", chunk.len()));
+        for (cid, code) in chunk {
+            out.push_str(&format!("<{cid:04X}> <{code:04X}>\n"));
+        }
+        out.push_str("endbfchar\n");
+    }
+
+    for chunk in astral.chunks(100) {
+        out.push_str(&format!("{} beginbfchar\n", chunk.len()));
+        for (cid, hex_pair) in chunk {
+            out.push_str(&format!("<{cid:04X}> <{hex_pair}>\n"));
+        }
+        out.push_str("endbfchar\n");
+    }
+
+    out.push_str("endcmap CMapName currentdict /CMap defineresource pop end end\n");
+    out.into_bytes()
+}
+
+// =============================================================================
+// 字体资源
+// =============================================================================
+
+/// 字体资源：CID 映射 + 子集化字节 + 度量。
+pub struct FontResource {
+    pub char_to_cid: HashMap<char, u16>,
+    pub cid_to_char: Vec<char>,
+    pub subset_bytes: Vec<u8>,
+    pub font_bbox: [f32; 4],
+    pub ascent: f32,
+    pub descent: f32,
+    pub base_name: String,
+    widths: HashMap<char, f32>,
+}
+
+impl FontResource {
+    /// 从字体文件加载并子集化。`required_chars` = 所有页面与书签用到的字符。
+    pub fn load_and_subset(
+        font_path: &Path,
+        required_chars: impl IntoIterator<Item = char>,
+        no_subset: bool,
+    ) -> Result<Self, String> {
+        let font_bytes = std::fs::read(font_path).map_err(|e| {
+            tf(
+                Key::ErrFontRead,
+                &[&font_path.display().to_string(), &e.to_string()],
+            )
+        })?;
+        let face = ttf_parser::Face::parse(&font_bytes, 0)
+            .map_err(|e| tf(Key::ErrFontParse, &[&e.to_string()]))?;
+
+        let mut all_chars: BTreeSet<char> = BTreeSet::new();
+        all_chars.insert(' ');
+        for c in ' '..='~' {
+            all_chars.insert(c);
+        }
+        for c in required_chars {
+            all_chars.insert(c);
+        }
+
+        // 单一策略：subsetter remap + CID = remap 后编号 + Identity CIDToGIDMap
+        let mut remapper = subsetter::GlyphRemapper::new();
+        remapper.remap(0);
+        let mut gid_to_cid: HashMap<u16, u16> = HashMap::new();
+        gid_to_cid.insert(0, 0);
+        let mut char_to_cid: HashMap<char, u16> = HashMap::new();
+        char_to_cid.insert('\0', 0);
+
+        for &c in &all_chars {
+            if let Some(gid) = face.glyph_index(c) {
+                let old = gid.0;
+                let cid = if let Some(&existing) = gid_to_cid.get(&old) {
+                    existing
+                } else {
+                    let new_cid = remapper.remap(old);
+                    gid_to_cid.insert(old, new_cid);
+                    new_cid
+                };
+                char_to_cid.insert(c, cid);
+            }
+        }
+
+        let subset_bytes = if no_subset {
+            font_bytes.clone()
+        } else {
+            subsetter::subset(&font_bytes, 0, &remapper)
+                .map_err(|e| tf(Key::ErrFontSubset, &[&e.to_string()]))?
+        };
+
+        let max_cid = char_to_cid.values().copied().max().unwrap_or(0);
+        let mut cid_to_char: Vec<char> = vec!['\0'];
+        cid_to_char.resize(max_cid as usize + 1, '\0');
+        for (&c, &cid) in &char_to_cid {
+            let idx = cid as usize;
+            if idx < cid_to_char.len() {
+                cid_to_char[idx] = c;
+            }
+        }
+
+        let units_per_em = face.units_per_em() as f32;
+        let scale = 1000.0 / units_per_em;
+        let bb = face.global_bounding_box();
+
+        // 度量：CID 字体用同一份字符集
+        let mut widths = HashMap::new();
+        for &c in char_to_cid.keys() {
+            if c == '\0' {
+                continue;
+            }
+            let w = face
+                .glyph_index(c)
+                .and_then(|gid| face.glyph_hor_advance(gid))
+                .map(|a| a as f32 * scale)
+                .unwrap_or(600.0);
+            widths.insert(c, w);
+        }
+
+        let base_name = font_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("CJKFont")
+            .to_string();
+
+        Ok(Self {
+            char_to_cid,
+            cid_to_char,
+            subset_bytes,
+            font_bbox: [
+                bb.x_min as f32 * scale,
+                bb.y_min as f32 * scale,
+                bb.x_max as f32 * scale,
+                bb.y_max as f32 * scale,
+            ],
+            ascent: face.ascender() as f32 * scale,
+            descent: face.descender() as f32 * scale,
+            base_name,
+            widths,
+        })
+    }
+
+    /// 把字符串编码成 Identity-H 的 hex CID 串 `<CID1CID2...>`。
+    pub fn encode_cid_hex(&self, text: &str) -> String {
+        let hex: String = text
+            .chars()
+            .map(|c| {
+                let cid = self.cid_of(c);
+                format!("{cid:04X}")
+            })
+            .collect();
+        format!("<{hex}>")
+    }
+
+    /// 字符 → CID。字体无该字形时回退到 `?`（仍有 ToUnicode 与正确步进），
+    /// 避免落到 CID 0/.notdef 造成「无字 + 宽度按 1em」的静默错位。
+    pub fn cid_of(&self, c: char) -> u16 {
+        if let Some(&cid) = self.char_to_cid.get(&c) {
+            return cid;
+        }
+        self.char_to_cid.get(&'?').copied().unwrap_or(0)
+    }
+
+    /// 按 CID 顺序的宽度数组（1000 单位），供 CIDFont 的 `/W` 使用。
+    pub fn widths_by_cid(&self) -> Vec<f32> {
+        self.cid_to_char
+            .iter()
+            .map(|&c| {
+                if c == '\0' {
+                    1000.0
+                } else {
+                    self.widths.get(&c).copied().unwrap_or(1000.0)
+                }
+            })
+            .collect()
+    }
+}
+
+impl TextMetrics for FontResource {
+    fn width_of(&self, c: char, size: f32) -> f32 {
+        self.widths.get(&c).copied().unwrap_or(600.0) * size / 1000.0
+    }
+}
+
+// =============================================================================
+// PDF 渲染
+// =============================================================================
+
+fn color_cmd(c: [u8; 3], stroke: bool) -> String {
+    let f = |v: u8| v as f32 / 255.0;
+    format!(
+        "{:.3} {:.3} {:.3} {}",
+        f(c[0]),
+        f(c[1]),
+        f(c[2]),
+        if stroke { "RG" } else { "rg" }
+    )
+}
+
+fn content_stream(page: &[DrawOp], font: &FontResource) -> Vec<u8> {
+    let mut out = String::new();
+    for op in page {
+        match op {
+            DrawOp::Rect { x, y, w, h, color } => {
+                out.push_str(&format!(
+                    "{} {x:.2} {:.2} {w:.2} {h:.2} re f\n",
+                    color_cmd(*color, false),
+                    y_from_top(y + h)
+                ));
+            }
+            DrawOp::Line {
+                x1,
+                y1,
+                x2,
+                y2,
+                width,
+                color,
+            } => {
+                out.push_str(&format!(
+                    "{} {:.2} w {x1:.2} {:.2} m {x2:.2} {:.2} l S\n",
+                    color_cmd(*color, true),
+                    width,
+                    y_from_top(*y1),
+                    y_from_top(*y2)
+                ));
+            }
+            DrawOp::Image { x, y, w, h, id } => {
+                out.push_str(&format!(
+                    "q {w:.2} 0 0 {h:.2} {x:.2} {:.2} cm /Im{id} Do Q\n",
+                    y_from_top(y + h)
+                ));
+            }
+            DrawOp::Text(t) => {
+                if let Some(bg) = t.highlight {
+                    let tw = font.text_width(&t.text, t.size);
+                    out.push_str(&format!(
+                        "{} {:.2} {:.2} {:.2} {:.2} re f\n",
+                        color_cmd(bg, false),
+                        t.x,
+                        y_from_top(t.y + t.size * 0.28),
+                        tw,
+                        t.size * 1.28
+                    ));
+                }
+                let tm = if t.italic {
+                    format!("1 0 0.24 1 {:.2} {:.2} Tm", t.x, y_from_top(t.y))
+                } else {
+                    format!("1 0 0 1 {:.2} {:.2} Tm", t.x, y_from_top(t.y))
+                };
+                out.push_str("BT\n");
+                out.push_str(&format!("/F1 {:.2} Tf\n", t.size));
+                out.push_str(&format!("{}\n", color_cmd(t.color, false)));
+                if t.bold {
+                    // 用「填充+描边」加粗，避免二次绘制造成笔画重影。
+                    out.push_str(&format!("{}\n", color_cmd(t.color, true)));
+                    out.push_str(&format!("{:.2} w 2 Tr\n", t.size * 0.028));
+                }
+                out.push_str(&format!("{tm}\n"));
+                out.push_str(&format!("{} Tj\n", font.encode_cid_hex(&t.text)));
+                if t.bold {
+                    out.push_str("0 Tr\n");
+                }
+                out.push_str("ET\n");
+
+                let tw = font.text_width(&t.text, t.size);
+                if t.underline {
+                    out.push_str(&format!(
+                        "{} {:.2} w {:.2} {:.2} m {:.2} {:.2} l S\n",
+                        color_cmd(t.color, true),
+                        0.6,
+                        t.x,
+                        y_from_top(t.y + t.size * 0.14),
+                        t.x + tw,
+                        y_from_top(t.y + t.size * 0.14)
+                    ));
+                }
+                if t.strike {
+                    let y = y_from_top(t.y + t.size * 0.32);
+                    out.push_str(&format!(
+                        "{} {:.2} w {:.2} {y:.2} m {:.2} {y:.2} l S\n",
+                        color_cmd(t.color, true),
+                        0.6,
+                        t.x,
+                        t.x + tw
+                    ));
+                }
+            }
+        }
+    }
+    out.into_bytes()
+}
+
+/// 把版面渲染为完整 PDF 字节。
+pub fn render_pages(
+    pages: &[Vec<DrawOp>],
+    images: &[ImageData],
+    outline: &[OutlineItem],
+    font_path: &Path,
+) -> Result<Vec<u8>, String> {
+    if pages.is_empty() {
+        return Err(t(Key::PrintErrNoExportPages).into());
+    }
+
+    let mut chars: Vec<char> = Vec::new();
+    for p in pages {
+        for op in p {
+            if let DrawOp::Text(t) = op {
+                chars.extend(t.text.chars());
+            }
+        }
+    }
+    for o in outline {
+        chars.extend(o.title.chars());
+    }
+    let font = FontResource::load_and_subset(font_path, chars, false)?;
+
+    let mut pdf = Pdf::new();
+
+    let page_tree_id = Ref::new(2);
+    let font_desc_ref = Ref::new(5);
+    let cid_font_ref = Ref::new(6);
+    let type0_ref = Ref::new(7);
+    let tu_cmap_ref = Ref::new(8);
+    let font_stream_ref = Ref::new(9);
+
+    // 页面引用与内容流引用依次分配
+    let mut next_ref: i32 = 10;
+    let mut page_refs: Vec<Ref> = Vec::new();
+    let mut content_refs: Vec<Ref> = Vec::new();
+    for _ in pages {
+        page_refs.push(Ref::new(next_ref));
+        next_ref += 1;
+        content_refs.push(Ref::new(next_ref));
+        next_ref += 1;
+    }
+
+    // 图片 XObject 引用
+    let image_refs: Vec<Ref> = images
+        .iter()
+        .map(|_| {
+            let r = Ref::new(next_ref);
+            next_ref += 1;
+            r
+        })
+        .collect();
+
+    for (i, page) in pages.iter().enumerate() {
+        let mut used: BTreeSet<usize> = BTreeSet::new();
+        for op in page {
+            if let DrawOp::Image { id, .. } = op {
+                used.insert(*id);
+            }
+        }
+
+        let mut page_obj = pdf.page(page_refs[i]);
+        page_obj
+            .parent(page_tree_id)
+            .media_box(Rect::new(0.0, 0.0, A4_WIDTH, A4_HEIGHT))
+            .contents(content_refs[i]);
+
+        let mut res = page_obj.insert(Name(b"Resources")).dict();
+        {
+            let mut fonts = res.insert(Name(b"Font")).dict();
+            fonts.pair(Name(b"F1"), type0_ref);
+        }
+        if !used.is_empty() && !image_refs.is_empty() {
+            let mut xobj = res.insert(Name(b"XObject")).dict();
+            for id in used {
+                if id < image_refs.len() {
+                    let name = format!("Im{id}");
+                    xobj.pair(Name(name.as_bytes()), image_refs[id]);
+                }
+            }
+        }
+        drop(res);
+        drop(page_obj);
+
+        let content = content_stream(page, &font);
+        pdf.stream(content_refs[i], content.as_ref());
+    }
+
+    pdf.pages(page_tree_id)
+        .kids(page_refs.iter().copied())
+        .count(page_refs.len() as i32);
+
+    // —— 图片对象 ——
+    for (i, img) in images.iter().enumerate() {
+        let mut x = pdf.image_xobject(image_refs[i], &img.rgb);
+        x.width(img.w as i32)
+            .height(img.h as i32)
+            .color_space_name(Name(b"DeviceRGB"))
+            .bits_per_component(8);
+    }
+
+    // —— 字体 ——
+    let base_name_bytes = font.base_name.as_bytes();
+    pdf.font_descriptor(font_desc_ref)
+        .name(Name(base_name_bytes))
+        .flags(FontFlags::NON_SYMBOLIC)
+        .bbox(Rect::new(
+            font.font_bbox[0],
+            font.font_bbox[1],
+            font.font_bbox[2],
+            font.font_bbox[3],
+        ))
+        .italic_angle(0.0)
+        .ascent(font.ascent)
+        .descent(font.descent)
+        .stem_v(80.0)
+        .font_file2(font_stream_ref);
+
+    let widths = font.widths_by_cid();
+    let mut cid = pdf.cid_font(cid_font_ref);
+    cid.subtype(CidFontType::Type2)
+        .base_font(Name(base_name_bytes))
+        .system_info(pdf_writer::types::SystemInfo {
+            registry: Str(b"Adobe"),
+            ordering: Str(b"Identity"),
+            supplement: 0,
+        })
+        .font_descriptor(font_desc_ref)
+        .default_width(1000.0)
+        .cid_to_gid_map_predefined(Name(b"Identity"));
+    // 不写 /W 时所有字形按 /DW=1000 步进，ASCII 会整体越出版心。
+    cid.widths().consecutive(0, widths.iter().copied());
+    drop(cid);
+
+    pdf.stream(font_stream_ref, &font.subset_bytes);
+
+    let cmap = build_to_unicode_cmap(&font.cid_to_char);
+    pdf.stream(tu_cmap_ref, &cmap);
+
+    let mut d = pdf.indirect(type0_ref).dict();
+    d.pair(Name(b"Type"), Name(b"Font"));
+    d.pair(Name(b"Subtype"), Name(b"Type0"));
+    d.pair(Name(b"BaseFont"), Name(base_name_bytes));
+    d.pair(Name(b"Encoding"), Name(b"Identity-H"));
+    d.insert(Name(b"DescendantFonts"))
+        .array()
+        .push()
+        .primitive(cid_font_ref);
+    d.pair(Name(b"ToUnicode"), tu_cmap_ref);
+    drop(d);
+
+    // —— 书签（多级）——
+    let outline_root_ref = if !outline.is_empty() {
+        let root_ref = Ref::new(next_ref);
+        next_ref += 1;
+        let item_refs: Vec<Ref> = outline
+            .iter()
+            .map(|_| {
+                let r = Ref::new(next_ref);
+                next_ref += 1;
+                r
+            })
+            .collect();
+
+        let mut children: Vec<Vec<usize>> = vec![Vec::new(); outline.len()];
+        let mut roots: Vec<usize> = Vec::new();
+        let mut parent_of: Vec<Option<usize>> = vec![None; outline.len()];
+        let mut stack: Vec<usize> = Vec::new();
+        for i in 0..outline.len() {
+            while let Some(&top) = stack.last() {
+                if outline[top].level >= outline[i].level {
+                    stack.pop();
+                } else {
+                    break;
+                }
+            }
+            parent_of[i] = stack.last().copied();
+            match stack.last() {
+                Some(&p) => children[p].push(i),
+                None => roots.push(i),
+            }
+            stack.push(i);
+        }
+
+        // 兄弟链：prev/next 只在同一父级内连边
+        let mut prev_of: Vec<Option<usize>> = vec![None; outline.len()];
+        let mut next_of: Vec<Option<usize>> = vec![None; outline.len()];
+        for group in children.iter().chain(std::iter::once(&roots)) {
+            for w in group.windows(2) {
+                next_of[w[0]] = Some(w[1]);
+                prev_of[w[1]] = Some(w[0]);
+            }
+        }
+
+        for (i, entry) in outline.iter().enumerate() {
+            let page_idx = entry.page_idx.min(page_refs.len() - 1);
+            let page_ref = page_refs[page_idx];
+            let pdf_y = y_from_top(entry.top_y);
+
+            let parent_ref = parent_of[i].map(|p| item_refs[p]).unwrap_or(root_ref);
+
+            let mut item = pdf.outline_item(item_refs[i]);
+            item.title(pdf_writer::TextStr(&entry.title));
+            item.parent(parent_ref);
+            if let Some(p) = prev_of[i] {
+                item.prev(item_refs[p]);
+            }
+            if let Some(n) = next_of[i] {
+                item.next(item_refs[n]);
+            }
+            if !children[i].is_empty() {
+                let first = item_refs[children[i][0]];
+                let last = item_refs[*children[i].last().unwrap()];
+                item.first(first);
+                item.last(last);
+                item.count(children[i].len() as i32);
+            }
+            item.dest().page(page_ref).xyz(0.0, pdf_y, Some(1.0));
+            drop(item);
+        }
+
+        let mut root = pdf.outline(root_ref);
+        if let Some(&first) = roots.first() {
+            root.first(item_refs[first]);
+        }
+        if let Some(&last) = roots.last() {
+            root.last(item_refs[last]);
+        }
+        root.count(roots.len() as i32);
+        drop(root);
+
+        Some(root_ref)
+    } else {
+        None
+    };
+
+    let catalog_id = Ref::new(1);
+    let mut catalog = pdf.catalog(catalog_id);
+    catalog.pages(page_tree_id);
+    if let Some(ref r) = outline_root_ref {
+        catalog.outlines(*r);
+    }
+    drop(catalog);
+
+    Ok(pdf.finish())
+}
+
+// =============================================================================
+// 单元测试
+// =============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a4_dimensions_are_correct() {
+        assert!((A4_WIDTH - 595.28).abs() < 0.01);
+        assert!((A4_HEIGHT - 841.89).abs() < 0.01);
+    }
+
+    #[test]
+    fn y_from_top_inverts_correctly() {
+        assert!((y_from_top(0.0) - A4_HEIGHT).abs() < 0.01);
+        assert!((y_from_top(A4_HEIGHT) - 0.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn to_unicode_cmap_formats_correctly() {
+        let cid_to_char = vec!['\0', 'A', '中', '\0', '文', '😀'];
+        let cmap = build_to_unicode_cmap(&cid_to_char);
+        let s = String::from_utf8_lossy(&cmap);
+        assert!(s.contains("/CIDSystemInfo"));
+        assert!(s.contains("beginbfchar"));
+        assert!(s.contains("<0001> <0041>"));
+        assert!(s.contains("<0002> <4E2D>"));
+        assert!(s.contains("<0004> <6587>"));
+        assert!(
+            s.contains("<0005> <D83DDE00>"),
+            "BMP 外字符应映射为 UTF-16 代理对"
+        );
+    }
+
+    #[test]
+    fn to_unicode_cmap_chunks_by_100() {
+        // 120 个 BMP 字符应拆成 100 + 20 两个块，单块不得超过规范上限。
+        let chars: Vec<char> = (0x4E00u32..0x4E00 + 120)
+            .filter_map(char::from_u32)
+            .collect();
+        let mut cid_to_char = vec!['\0'];
+        cid_to_char.extend(chars);
+        let s = String::from_utf8_lossy(&build_to_unicode_cmap(&cid_to_char)).to_string();
+        assert!(s.contains("100 beginbfchar"));
+        assert!(s.contains("20 beginbfchar"));
+    }
+
+    #[test]
+    fn cid_fallback_and_widths_by_cid() {
+        let mut char_to_cid = HashMap::new();
+        char_to_cid.insert('\0', 0u16);
+        char_to_cid.insert('?', 1u16);
+        let mut widths = HashMap::new();
+        widths.insert('?', 500.0f32);
+        let font = FontResource {
+            char_to_cid,
+            cid_to_char: vec!['\0', '?'],
+            subset_bytes: Vec::new(),
+            font_bbox: [0.0; 4],
+            ascent: 800.0,
+            descent: -200.0,
+            base_name: "t".into(),
+            widths,
+        };
+        // 无字形字符不得落到 CID 0/.notdef（否则宽度按 1em 且无 ToUnicode）。
+        assert_eq!(font.cid_of('😀'), 1);
+        assert_eq!(font.encode_cid_hex("A"), "<0001>");
+        // /W 数组按 CID 顺序：CID 0 用 1000，CID 1 用真实 500。
+        assert_eq!(font.widths_by_cid(), vec![1000.0, 500.0]);
+    }
+
+    #[test]
+    fn content_stream_emits_ops() {
+        let font = FontResource {
+            char_to_cid: HashMap::new(),
+            cid_to_char: vec!['\0'],
+            subset_bytes: Vec::new(),
+            font_bbox: [0.0; 4],
+            ascent: 800.0,
+            descent: -200.0,
+            base_name: "t".into(),
+            widths: HashMap::new(),
+        };
+        let page = vec![
+            DrawOp::Rect {
+                x: 10.0,
+                y: 20.0,
+                w: 30.0,
+                h: 40.0,
+                color: [255, 0, 0],
+            },
+            DrawOp::Text(TextRun {
+                x: 50.0,
+                y: 100.0,
+                size: 11.0,
+                text: "A".into(),
+                bold: true,
+                italic: false,
+                underline: true,
+                strike: false,
+                highlight: Some([240, 240, 240]),
+                color: [0, 0, 0],
+            }),
+        ];
+        let s = String::from_utf8_lossy(&content_stream(&page, &font)).to_string();
+        assert!(s.contains("re f"), "矩形应输出 re f");
+        assert!(s.contains("BT") && s.contains("Tj"), "文本应输出 BT/Tj");
+        assert!(s.contains("Tm"), "文本应使用 Tm 定位");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn font_candidates_exist_on_windows() {
+        assert!(find_cjk_font().is_some(), "Windows 上应有可用 CJK 字体");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn render_pages_produces_valid_pdf_with_outline() {
+        let font_path = find_cjk_font().unwrap();
+        let pages = vec![
+            vec![DrawOp::Text(TextRun {
+                x: 56.0,
+                y: 80.0,
+                size: 22.0,
+                text: "第一章 引言".into(),
+                bold: true,
+                italic: false,
+                underline: false,
+                strike: false,
+                highlight: None,
+                color: [0, 0, 0],
+            })],
+            vec![DrawOp::Text(TextRun {
+                x: 56.0,
+                y: 80.0,
+                size: 18.0,
+                text: "第二章 实现".into(),
+                bold: true,
+                italic: false,
+                underline: false,
+                strike: false,
+                highlight: None,
+                color: [0, 0, 0],
+            })],
+        ];
+        let outline = vec![
+            OutlineItem {
+                title: "第一章 引言".into(),
+                level: 1,
+                page_idx: 0,
+                top_y: 64.0,
+            },
+            OutlineItem {
+                title: "第二章 实现".into(),
+                level: 2,
+                page_idx: 1,
+                top_y: 64.0,
+            },
+        ];
+        let bytes = render_pages(&pages, &[], &outline, Path::new(font_path)).expect("应产出 PDF");
+        assert!(bytes.starts_with(b"%PDF-"));
+        assert!(bytes.ends_with(b"%%EOF"));
+        let s = String::from_utf8_lossy(&bytes);
+        assert!(s.contains("/Type0"));
+        assert!(s.contains("/CIDFontType2"));
+        assert!(s.contains("/ToUnicode"));
+        assert!(s.contains("/Outlines"));
+        assert!(s.contains("/First"), "书签应有 first（层级树）");
+        assert!(s.contains("/Dest"));
+    }
+
+    /// B7：H1/H2/H3 中文书签的 PDF 目录对象必须形成正确层级树，
+    /// 标题文本按 UTF-16BE 写入（不丢中文），页数/书签数与输入一致。
+    #[cfg(windows)]
+    #[test]
+    fn pdf_outline_nests_h1_h2_h3_and_keeps_chinese_titles() {
+        let font_path = find_cjk_font().unwrap();
+        let page = |t: &str| {
+            vec![DrawOp::Text(TextRun {
+                x: 56.0,
+                y: 80.0,
+                size: 18.0,
+                text: t.into(),
+                bold: true,
+                italic: false,
+                underline: false,
+                strike: false,
+                highlight: None,
+                color: [0, 0, 0],
+            })]
+        };
+        let pages = vec![page("第一章 引言"), page("1.1 背景")];
+        let outline = vec![
+            OutlineItem {
+                title: "第一章 引言".into(),
+                level: 1,
+                page_idx: 0,
+                top_y: 64.0,
+            },
+            OutlineItem {
+                title: "1.1 背景".into(),
+                level: 2,
+                page_idx: 1,
+                top_y: 64.0,
+            },
+            OutlineItem {
+                title: "1.1.1 细节".into(),
+                level: 3,
+                page_idx: 1,
+                top_y: 200.0,
+            },
+            OutlineItem {
+                title: "1.2 目标".into(),
+                level: 2,
+                page_idx: 1,
+                top_y: 320.0,
+            },
+        ];
+        let bytes = render_pages(&pages, &[], &outline, Path::new(font_path)).expect("应产出 PDF");
+        let s = String::from_utf8_lossy(&bytes).to_uppercase();
+        assert_eq!(s.matches("/TITLE").count(), outline.len(), "书签数=标题数");
+        assert_eq!(
+            s.matches("/MEDIABOX").count(),
+            pages.len(),
+            "页数=页面对象数"
+        );
+        // UTF-16BE（pdf_writer 带 BOM）：中文标题的码元必须原样出现，书签不乱码。
+        for title in ["第一章 引言", "1.1 背景", "1.1.1 细节", "1.2 目标"] {
+            let hex: String = title
+                .encode_utf16()
+                .map(|u| format!("{u:04X}"))
+                .collect::<Vec<_>>()
+                .join("");
+            assert!(
+                s.contains(&hex),
+                "书签标题 {title:?} 必须以 UTF-16BE 写入，缺失 {hex}"
+            );
+        }
+        // 层级树：H1 下有 2 个 H2；第一个 H2 下有 1 个 H3。
+        assert!(s.contains("/COUNT 2"), "H1 应有 2 个直接子书签");
+        assert!(s.contains("/COUNT 1"), "H2/H3 应有 1 个直接子书签");
+        assert!(
+            s.matches("/PARENT").count() >= outline.len(),
+            "每个书签须有父节点"
+        );
+        assert!(s.contains("/DEST"), "书签须带跳转目标");
+    }
+}

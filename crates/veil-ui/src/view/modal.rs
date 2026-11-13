@@ -4,14 +4,24 @@
 //! 菜单/大纲共享 `theme::surface` 令牌；文本度量与栅格化经 `Text` 接缝注入，
 //! 本模块只依赖 `Frame` 的像素原语，headless 可测。
 
-use crate::geometry::{Rect, BASE_LINE_HEIGHT};
+use crate::geometry::Rect;
 use crate::input::Key;
 use crate::theme::{surface, Theme};
-use crate::tokens::palette;
+use crate::tokens::{palette, typography};
 use crate::view::Frame;
 
 /// 按钮横向前后留白（px）：文字两侧各留 12，保证按钮不像贴字。
 const BUTTON_PAD_X: f32 = 12.0;
+
+/// 弹窗语义类型：决定标题色与标题左侧徽标；几何/按钮/间距完全共用。
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub(crate) enum ModalKind {
+    /// 普通确认/信息弹窗。
+    #[default]
+    Normal,
+    /// 失败/错误态：危险色标题 + 警示徽标，必须配可操作出口。
+    Error,
+}
 
 /// 按钮语义角色：决定填充/描边/文字色，避免调用方在绘制层分支。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -51,6 +61,15 @@ impl ModalButton {
         self.mnemonic = Some(c.to_ascii_lowercase());
         self
     }
+
+    /// 上屏文字：助记符既参与按键匹配，也以半角大写括号后缀上屏（如「保存 (S)」），
+    /// 否则用户无从得知该按哪个字母；布局测宽与绘制共用本方法以保证两者一致。
+    pub(crate) fn display_label(&self) -> String {
+        match self.mnemonic {
+            Some(c) => format!("{} ({})", self.label, c.to_ascii_uppercase()),
+            None => self.label.clone(),
+        }
+    }
 }
 
 /// 模态内容规格：标题、正文与按钮序列，打开后不变（瞬态弹窗）。
@@ -59,6 +78,7 @@ pub(crate) struct ModalSpec {
     pub(crate) title: String,
     pub(crate) message: String,
     pub(crate) buttons: Vec<ModalButton>,
+    pub(crate) kind: ModalKind,
 }
 
 impl ModalSpec {
@@ -71,6 +91,19 @@ impl ModalSpec {
             title: title.into(),
             message: message.into(),
             buttons,
+            kind: ModalKind::Normal,
+        }
+    }
+
+    /// 错误态弹窗：同一套卡片/按钮/间距，只是标题色与徽标走危险语义。
+    pub(crate) fn error(
+        title: impl Into<String>,
+        message: impl Into<String>,
+        buttons: Vec<ModalButton>,
+    ) -> Self {
+        Self {
+            kind: ModalKind::Error,
+            ..Self::new(title, message, buttons)
         }
     }
 
@@ -115,7 +148,7 @@ impl ModalState {
 
     /// 键盘处理：返回要执行的按钮 id（焦点移动键返回 None）。
     /// 文本接缝：`Text(" ")` 即 Space（shell 已把 NamedKey::Space 折成文本），
-    /// `Text("s")`/`Text("n")` 按标签助记符命中。
+    /// `Text("s")` 等按标签助记符命中；IME 组合态下只有逻辑键（`Key::S` 等）时同样命中。
     pub(crate) fn on_key(&mut self, key: &Key, shift: bool, spec: &ModalSpec) -> Option<u16> {
         match key {
             Key::Enter => spec.primary_id(),
@@ -146,18 +179,32 @@ impl ModalState {
                 if c == ' ' {
                     return spec.buttons.get(self.focused).map(|b| b.id);
                 }
-                let hit = spec
-                    .buttons
-                    .iter()
-                    .position(|b| mnemonic_of(b).is_some_and(|m| m == c.to_ascii_lowercase()));
-                if let Some(i) = hit {
-                    self.focused = i;
-                    return spec.buttons.get(i).map(|b| b.id);
-                }
-                None
+                self.mnemonic(c, spec)
             }
+            // IME 组合态/切换瞬间字母没有文本，只到逻辑键；弹窗期间同样按助记符处理。
+            Key::S => self.mnemonic('s', spec),
+            Key::N => self.mnemonic('n', spec),
+            Key::C => self.mnemonic('c', spec),
+            Key::R => self.mnemonic('r', spec),
+            Key::K => self.mnemonic('k', spec),
+            Key::A => self.mnemonic('a', spec),
+            Key::O => self.mnemonic('o', spec),
             _ => None,
         }
+    }
+
+    /// 助记符命中：移动焦点并返回按钮 id；未命中返回 None（按键被弹窗吞掉）。
+    fn mnemonic(&mut self, c: char, spec: &ModalSpec) -> Option<u16> {
+        let c = c.to_ascii_lowercase();
+        let hit = spec
+            .buttons
+            .iter()
+            .position(|b| mnemonic_of(b).is_some_and(|m| m == c));
+        if let Some(i) = hit {
+            self.focused = i;
+            return spec.buttons.get(i).map(|b| b.id);
+        }
+        None
     }
 
     /// 悬停更新：返回是否有变化（App 据此决定是否重绘）。
@@ -182,6 +229,14 @@ impl ModalState {
 pub(crate) trait Text {
     fn width(&mut self, s: &str) -> f32;
     fn draw(&mut self, frame: &mut Frame, s: &str, color: [u8; 3], x: i32, y: i32);
+    /// 标题度量：默认与正文同宽（纯几何测试无需区分字阶）。
+    fn title_width(&mut self, s: &str) -> f32 {
+        self.width(s)
+    }
+    /// 标题绘制：默认落到正文路径。
+    fn draw_title(&mut self, frame: &mut Frame, s: &str, color: [u8; 3], x: i32, y: i32) {
+        self.draw(frame, s, color, x, y)
+    }
 }
 
 /// 模态几何：卡片与按钮矩形。按钮 id 随几何一起保存，点击命中无需再传 spec。
@@ -196,11 +251,18 @@ pub(crate) struct ModalLayout {
 /// 纯几何：卡片在视口居中，宽度按标题/正文实测宽度自适应并夹在 [min,max] 与视口内。
 pub(crate) fn layout(vp: Rect, scale: f32, spec: &ModalSpec, text: &mut dyn Text) -> ModalLayout {
     let p = surface::dialog_padding(scale);
-    let line_h = BASE_LINE_HEIGHT * scale;
+    let title_line_h = surface::dialog_title_line_height(scale);
+    let body_line_h = surface::dialog_body_line_height(scale);
     let bh = surface::dialog_button_height(scale);
     let gap = surface::dialog_button_gap(scale);
 
-    let title_w = text.width(&spec.title);
+    let title_w = text.title_width(&spec.title);
+    // 错误态标题左侧有徽标：宽度与折行起点都要让出这段视觉标记。
+    let icon_w = if spec.kind == ModalKind::Error {
+        surface::dialog_icon_size(scale) + surface::dialog_icon_gap(scale)
+    } else {
+        0.0
+    };
     let body_w = spec
         .message
         .split('\n')
@@ -213,7 +275,7 @@ pub(crate) fn layout(vp: Rect, scale: f32, spec: &ModalSpec, text: &mut dyn Text
         } else {
             0.0
         };
-    let desired = title_w.max(body_w).max(buttons_w) + 2.0 * p;
+    let desired = (title_w + icon_w).max(body_w).max(buttons_w) + 2.0 * p;
 
     let margin = surface::dialog_margin(scale);
     let max_vp_w = (vp.w - 2.0 * margin).max(0.0);
@@ -225,15 +287,15 @@ pub(crate) fn layout(vp: Rect, scale: f32, spec: &ModalSpec, text: &mut dyn Text
     let max_vp_h = (vp.h - 2.0 * margin).max(0.0);
     let has_body = !spec.message.is_empty();
     let fixed_h = 2.0 * p
-        + line_h
+        + title_line_h
         + bh
         + if has_body {
             surface::dialog_title_gap(scale) + surface::dialog_body_gap(scale)
         } else {
             0.0
         };
-    let max_lines = if has_body && line_h > 0.0 {
-        ((max_vp_h - fixed_h).max(0.0) / line_h).floor() as usize
+    let max_lines = if has_body && body_line_h > 0.0 {
+        ((max_vp_h - fixed_h).max(0.0) / body_line_h).floor() as usize
     } else {
         0
     };
@@ -242,7 +304,7 @@ pub(crate) fn layout(vp: Rect, scale: f32, spec: &ModalSpec, text: &mut dyn Text
     } else {
         Vec::new()
     };
-    let body_h = lines.len() as f32 * line_h;
+    let body_h = lines.len() as f32 * body_line_h;
     let card_h = (fixed_h + body_h).min(max_vp_h);
 
     let card = Rect {
@@ -252,10 +314,19 @@ pub(crate) fn layout(vp: Rect, scale: f32, spec: &ModalSpec, text: &mut dyn Text
         h: card_h,
     };
     let (buttons, ids) = place_buttons(card, &widths, spec, scale);
-    ModalLayout {
-        card,
-        buttons,
-        ids,
+    ModalLayout { card, buttons, ids }
+}
+
+/// 错误态徽标的几何：贴卡片内边距，垂直居中于标题行。
+pub(crate) fn icon_rect(card: Rect, scale: f32) -> Rect {
+    let p = surface::dialog_padding(scale);
+    let size = surface::dialog_icon_size(scale);
+    let title_line_h = surface::dialog_title_line_height(scale);
+    Rect {
+        x: card.x + p,
+        y: card.y + p + (title_line_h - size) * 0.5,
+        w: size,
+        h: size,
     }
 }
 
@@ -282,35 +353,72 @@ pub(crate) fn paint(
 
     let card = layout.card;
     let p = surface::dialog_padding(scale);
-    let line_h = BASE_LINE_HEIGHT * scale;
-    text.draw(
+    let title_line_h = surface::dialog_title_line_height(scale);
+    let body_line_h = surface::dialog_body_line_height(scale);
+    let mut title_x = card.x + p;
+    if spec.kind == ModalKind::Error {
+        let icon = icon_rect(card, scale);
+        paint_error_icon(frame, icon, theme);
+        title_x += surface::dialog_icon_size(scale) + surface::dialog_icon_gap(scale);
+    }
+    let title_color = if spec.kind == ModalKind::Error {
+        theme.danger
+    } else {
+        theme.text
+    };
+    text.draw_title(
         frame,
         &spec.title,
-        theme.text,
-        (card.x + p) as i32,
+        title_color,
+        title_x as i32,
         (card.y + p) as i32,
     );
 
     let has_body = !spec.message.is_empty();
     if has_body {
-        let body_top = card.y + p + line_h + surface::dialog_title_gap(scale);
+        let body_top = card.y + p + title_line_h + surface::dialog_title_gap(scale);
         let bh = surface::dialog_button_height(scale);
-        let body_bottom =
-            card.y + card.h - p - bh - surface::dialog_body_gap(scale);
-        let max_lines = if line_h > 0.0 {
-            ((body_bottom - body_top).max(0.0) / line_h).floor() as usize
+        let body_bottom = card.y + card.h - p - bh - surface::dialog_body_gap(scale);
+        let max_lines = if body_line_h > 0.0 {
+            ((body_bottom - body_top).max(0.0) / body_line_h).floor() as usize
         } else {
             0
         };
         let inner_w = (card.w - 2.0 * p).max(0.0);
         let lines = visible_lines(wrap_text(&spec.message, inner_w, text), max_lines);
         for (i, line) in lines.iter().enumerate() {
-            let y = body_top + i as f32 * line_h;
+            let y = body_top + i as f32 * body_line_h;
             text.draw(frame, line, theme.muted, (card.x + p) as i32, y as i32);
         }
     }
 
     paint_buttons(frame, scale, theme, spec, state, layout, text);
+}
+
+/// 错误徽标：危险色实心圆 + 反色感叹号（纯像素原语，与卡片同源，不引入图标依赖）。
+fn paint_error_icon(frame: &mut Frame, icon: Rect, theme: &Theme) {
+    let x = icon.x.round() as i32;
+    let y = icon.y.round() as i32;
+    let w = icon.w.round().max(2.0) as u32;
+    let h = icon.h.round().max(2.0) as u32;
+    let r = (w.min(h) as f32) * 0.5;
+    frame.fill_rounded_rect(
+        x,
+        y,
+        w,
+        h,
+        r,
+        [theme.danger[0], theme.danger[1], theme.danger[2], 255],
+    );
+    let mark = theme.accent_text;
+    let bar_w = (w as f32 * 0.11).round().max(2.0) as u32;
+    let bar_h = (h as f32 * 0.42).round().max(3.0) as u32;
+    let cx = x + (w / 2) as i32 - (bar_w / 2) as i32;
+    let top = y + (h as f32 * 0.22).round() as i32;
+    frame.fill_rect(cx, top, bar_w, bar_h, [mark[0], mark[1], mark[2], 255]);
+    let dot = (w as f32 * 0.12).round().max(2.0) as u32;
+    let dot_y = top + bar_h as i32 + (h as f32 * 0.10).round() as i32;
+    frame.fill_rect(cx, dot_y, dot, dot, [mark[0], mark[1], mark[2], 255]);
 }
 
 /// 卡片：8px 圆角 + 投影 + 1px 边框；不复用固定 6px 的 `fill_surface_card`。
@@ -323,7 +431,14 @@ fn paint_card(frame: &mut Frame, scale: f32, theme: &Theme, card: Rect) {
     frame.fill_shadow(x, y, w, h, r, scale, theme.dark);
     frame.fill_rounded_rect(x, y, w, h, r, theme.chrome_border);
     if w > 2 && h > 2 {
-        frame.fill_rounded_rect(x + 1, y + 1, w - 2, h - 2, (r - 1.0).max(0.0), palette::surface_popup(theme));
+        frame.fill_rounded_rect(
+            x + 1,
+            y + 1,
+            w - 2,
+            h - 2,
+            (r - 1.0).max(0.0),
+            palette::surface_popup(theme),
+        );
     }
 }
 
@@ -338,7 +453,7 @@ fn paint_buttons(
     text: &mut dyn Text,
 ) {
     let radius = surface::corner_radius(scale);
-    let line_h = BASE_LINE_HEIGHT * scale;
+    let line_h = typography::UI_LINE_HEIGHT * scale;
     let fade = state.fade.view(state.hovered);
     for (i, button) in spec.buttons.iter().enumerate() {
         let Some(&rect) = layout.buttons.get(i) else {
@@ -362,18 +477,31 @@ fn paint_buttons(
                     // Primary 底色就是 accent，焦点环改用反色才可见。
                     focus_ring(frame, rect, radius, fg, fill);
                 }
-                draw_button_text(frame, text, &button.label, fg, rect, line_h);
+                draw_button_text(frame, text, &button.display_label(), fg, rect, line_h);
             }
             ButtonRole::Danger | ButtonRole::Secondary => {
                 let (border, fg) = if button.role == ButtonRole::Danger {
                     (theme.danger, theme.danger)
                 } else {
                     (
-                        [theme.chrome_border[0], theme.chrome_border[1], theme.chrome_border[2]],
+                        [
+                            theme.chrome_border[0],
+                            theme.chrome_border[1],
+                            theme.chrome_border[2],
+                        ],
                         theme.text,
                     )
                 };
-                stroke_rounded(frame, x, y, w, h, radius, border, palette::surface_popup(theme));
+                stroke_rounded(
+                    frame,
+                    x,
+                    y,
+                    w,
+                    h,
+                    radius,
+                    border,
+                    palette::surface_popup(theme),
+                );
                 if let Some(a) = hover_alpha {
                     // 叠在描边内层，3px 内缩不会盖住 1px 边框。
                     frame.fill_hover(
@@ -393,7 +521,7 @@ fn paint_buttons(
                     };
                     focus_ring(frame, rect, radius, theme.accent, inner);
                 }
-                draw_button_text(frame, text, &button.label, fg, rect, line_h);
+                draw_button_text(frame, text, &button.display_label(), fg, rect, line_h);
             }
         }
     }
@@ -413,14 +541,7 @@ fn stroke_rounded(
 ) {
     frame.fill_rounded_rect(x, y, w, h, radius, [color[0], color[1], color[2], 255]);
     if w > 2 && h > 2 {
-        frame.fill_rounded_rect(
-            x + 1,
-            y + 1,
-            w - 2,
-            h - 2,
-            (radius - 1.0).max(0.0),
-            bg,
-        );
+        frame.fill_rounded_rect(x + 1, y + 1, w - 2, h - 2, (radius - 1.0).max(0.0), bg);
     }
 }
 
@@ -461,7 +582,7 @@ fn natural_button_widths(spec: &ModalSpec, scale: f32, text: &mut dyn Text) -> V
     let pad = 2.0 * BUTTON_PAD_X * scale;
     spec.buttons
         .iter()
-        .map(|b| (text.width(&b.label) + pad).max(min_w))
+        .map(|b| (text.width(&b.display_label()) + pad).max(min_w))
         .collect()
 }
 
@@ -480,11 +601,7 @@ fn place_buttons(
         return (Vec::new(), Vec::new());
     }
     let inner_w = (card.w - 2.0 * p).max(0.0);
-    let gaps = if n > 1 {
-        gap * (n - 1) as f32
-    } else {
-        0.0
-    };
+    let gaps = if n > 1 { gap * (n - 1) as f32 } else { 0.0 };
     let avail = (inner_w - gaps).max(0.0);
     let sum: f32 = widths.iter().sum();
     let fitted: Vec<f32> = if sum > avail && sum > 0.0 {
@@ -553,7 +670,11 @@ fn wrap_text(message: &str, max_w: f32, text: &mut dyn Text) -> Vec<String> {
             if line_w + cw > max_w && byte_idx > start {
                 let split = last_space.filter(|&s| s > start).unwrap_or(byte_idx);
                 out.push(para[start..split].trim_end().to_string());
-                start = if split == byte_idx { byte_idx } else { split + 1 };
+                start = if split == byte_idx {
+                    byte_idx
+                } else {
+                    split + 1
+                };
                 line_w = 0.0;
                 last_space = None;
                 for (i, c) in para[start..byte_idx].char_indices() {
@@ -586,6 +707,8 @@ mod tests {
     struct FakeText {
         char_w: f32,
         line_h: f32,
+        colors: Vec<[u8; 3]>,
+        texts: Vec<String>,
     }
 
     impl FakeText {
@@ -593,6 +716,8 @@ mod tests {
             Self {
                 char_w: 8.0,
                 line_h: 18.0,
+                colors: Vec::new(),
+                texts: Vec::new(),
             }
         }
     }
@@ -604,7 +729,15 @@ mod tests {
 
         fn draw(&mut self, frame: &mut Frame, s: &str, color: [u8; 3], x: i32, y: i32) {
             if !s.is_empty() {
-                frame.fill_rect(x, y, 1, self.line_h as u32, [color[0], color[1], color[2], 255]);
+                self.colors.push(color);
+                self.texts.push(s.to_string());
+                frame.fill_rect(
+                    x,
+                    y,
+                    1,
+                    self.line_h as u32,
+                    [color[0], color[1], color[2], 255],
+                );
             }
         }
     }
@@ -612,7 +745,7 @@ mod tests {
     fn buttons() -> Vec<ModalButton> {
         vec![
             ModalButton::new(1, "保存", ButtonRole::Primary).with_mnemonic('s'),
-            ModalButton::new(2, "不保存", ButtonRole::Danger).with_mnemonic('n'),
+            ModalButton::new(2, "不保存", ButtonRole::Danger).with_mnemonic('c'),
             ModalButton::new(3, "取消", ButtonRole::Secondary),
         ]
     }
@@ -647,8 +780,14 @@ mod tests {
         let right = vp.x + vp.w - (l.card.x + l.card.w);
         let top = l.card.y - vp.y;
         let bottom = vp.y + vp.h - (l.card.y + l.card.h);
-        assert!((left - right).abs() < 0.01, "左右留白不等: {left} vs {right}");
-        assert!((top - bottom).abs() < 0.01, "上下留白不等: {top} vs {bottom}");
+        assert!(
+            (left - right).abs() < 0.01,
+            "左右留白不等: {left} vs {right}"
+        );
+        assert!(
+            (top - bottom).abs() < 0.01,
+            "上下留白不等: {top} vs {bottom}"
+        );
     }
 
     #[test]
@@ -682,14 +821,24 @@ mod tests {
         let s = spec();
         let mut text = FakeText::new();
         let base = layout(
-            Rect { x: 0.0, y: 0.0, w: 1200.0, h: 900.0 },
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 1200.0,
+                h: 900.0,
+            },
             1.0,
             &s,
             &mut text,
         );
         for scale in [1.5f32, 2.0] {
             let big = layout(
-                Rect { x: 0.0, y: 0.0, w: 1200.0 * scale, h: 900.0 * scale },
+                Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    w: 1200.0 * scale,
+                    h: 900.0 * scale,
+                },
                 scale,
                 &s,
                 &mut text,
@@ -745,7 +894,7 @@ mod tests {
         assert!(lines.len() > 1, "超长正文应折成多行");
         assert!(lines.iter().all(|line| text.width(line) <= inner_w + 0.01));
 
-        let line_h = BASE_LINE_HEIGHT;
+        let line_h = surface::dialog_body_line_height(1.0);
         let fixed_h = p * 2.0
             + line_h
             + surface::dialog_button_height(1.0)
@@ -769,7 +918,11 @@ mod tests {
         assert_eq!(st.focused, 0, "初始焦点落在主按钮");
         assert_eq!(st.on_key(&Key::Enter, false, &s), Some(1));
 
-        assert_eq!(st.on_key(&Key::Escape, false, &s), Some(3), "Esc 取最后一个 Secondary");
+        assert_eq!(
+            st.on_key(&Key::Escape, false, &s),
+            Some(3),
+            "Esc 取最后一个 Secondary"
+        );
 
         assert_eq!(st.on_key(&Key::Tab, false, &s), None);
         assert_eq!(st.focused, 1);
@@ -782,10 +935,26 @@ mod tests {
 
         assert_eq!(st.on_key(&Key::Text("s".into()), false, &s), Some(1));
         assert_eq!(st.focused, 0);
-        assert_eq!(st.on_key(&Key::Text("n".into()), false, &s), Some(2));
+        assert_eq!(st.on_key(&Key::Text("c".into()), false, &s), Some(2));
         assert_eq!(st.focused, 1);
-        assert_eq!(st.on_key(&Key::Text(" ".into()), false, &s), Some(2), "Space 激活焦点按钮");
+        assert_eq!(
+            st.on_key(&Key::Text(" ".into()), false, &s),
+            Some(2),
+            "Space 激活焦点按钮"
+        );
         assert_eq!(st.on_key(&Key::Left, false, &s), None, "其它键不产生动作");
+
+        // 中文输入法启用时字母没有 Text，只到逻辑键；弹窗仍须响应助记符。
+        assert_eq!(st.on_key(&Key::S, false, &s), Some(1));
+        assert_eq!(st.focused, 0);
+        assert_eq!(st.on_key(&Key::C, false, &s), Some(2));
+        assert_eq!(st.focused, 1);
+        assert_eq!(
+            st.on_key(&Key::X, false, &s),
+            None,
+            "规格未声明 x 助记符时按键被吞掉"
+        );
+        assert_eq!(st.focused, 1, "未命中不改焦点");
 
         let no_secondary = ModalSpec::new(
             "确认",
@@ -800,8 +969,92 @@ mod tests {
             "没有主按钮。",
             vec![ModalButton::new(8, "删除", ButtonRole::Danger).with_mnemonic('d')],
         );
-        assert_eq!(no_primary.primary_id(), Some(8), "无 Primary 时取最后一个按钮");
+        assert_eq!(
+            no_primary.primary_id(),
+            Some(8),
+            "无 Primary 时取最后一个按钮"
+        );
         assert_eq!(ModalState::new(&no_primary).focused, 0);
+    }
+
+    /// 助记符必须以半角大写括号后缀上屏，否则用户不知道按哪个字母；无声明则原样。
+    #[test]
+    fn mnemonic_suffix_is_displayed_on_buttons() {
+        let bs = buttons();
+        assert_eq!(bs[0].display_label(), "保存 (S)");
+        assert_eq!(bs[1].display_label(), "不保存 (C)");
+        assert_eq!(bs[2].display_label(), "取消", "未声明助记符不加后缀");
+    }
+
+    /// 提示后缀参与测宽：带助记符的按钮不窄于同组未声明助记符的版本，
+    /// 且仍满足「在卡片内、互不重叠」的既有约束。
+    #[test]
+    fn hinted_buttons_widen_and_stay_inside_card() {
+        let hinted = spec();
+        let plain = ModalSpec {
+            buttons: buttons()
+                .into_iter()
+                .map(|b| ModalButton {
+                    mnemonic: None,
+                    ..b
+                })
+                .collect(),
+            ..spec()
+        };
+        let mut text = FakeText {
+            char_w: 12.0,
+            ..FakeText::new()
+        };
+        let l_hinted = layout(vp(), 1.0, &hinted, &mut text);
+        let l_plain = layout(vp(), 1.0, &plain, &mut text);
+        assert_eq!(l_hinted.buttons.len(), l_plain.buttons.len());
+        for (h, p) in l_hinted.buttons.iter().zip(&l_plain.buttons) {
+            assert!(
+                h.w >= p.w - 0.01,
+                "带提示的按钮不应更窄: {} vs {}",
+                h.w,
+                p.w
+            );
+        }
+        for b in &l_hinted.buttons {
+            assert!(b.x >= l_hinted.card.x - 0.01, "按钮越过卡片左缘");
+            assert!(
+                b.x + b.w <= l_hinted.card.x + l_hinted.card.w + 0.01,
+                "按钮越过卡片右缘"
+            );
+        }
+        for pair in l_hinted.buttons.windows(2) {
+            assert!(
+                pair[0].x + pair[0].w <= pair[1].x + 0.01,
+                "按钮重叠: {:?} vs {:?}",
+                pair[0],
+                pair[1]
+            );
+        }
+    }
+
+    /// 绘制路径必须真的把「标签 (S)」交给文本接缝，而不是只度量不画。
+    #[test]
+    fn paint_draws_mnemonic_hint() {
+        let theme = Theme::light();
+        let s = spec();
+        let vp = vp();
+        let mut text = FakeText::new();
+        let l = layout(vp, 1.0, &s, &mut text);
+        let st = ModalState::new(&s);
+        let mut frame = Frame::new(vp.w as u32, vp.h as u32, palette::surface_base(&theme));
+        let mut paint_text = FakeText::new();
+        paint(&mut frame, vp, 1.0, &theme, &s, &st, &l, &mut paint_text);
+        assert!(
+            paint_text.texts.iter().any(|t| t.contains("(S)")),
+            "主按钮须绘制 (S) 提示: {:?}",
+            paint_text.texts
+        );
+        assert!(
+            paint_text.texts.iter().any(|t| t.contains("(C)")),
+            "危险按钮须绘制 (C) 提示: {:?}",
+            paint_text.texts
+        );
     }
 
     #[test]
@@ -825,7 +1078,10 @@ mod tests {
 
         assert!(st.on_hover(c, &l), "进入按钮应返回变化");
         assert!(!st.on_hover(c, &l), "同位置重复不应重绘");
-        assert!(st.on_hover((vp().x + 1.0, vp().y + 1.0), &l), "离开按钮应返回变化");
+        assert!(
+            st.on_hover((vp().x + 1.0, vp().y + 1.0), &l),
+            "离开按钮应返回变化"
+        );
         assert!(!st.on_hover((vp().x + 1.0, vp().y + 1.0), &l));
     }
 
@@ -879,9 +1135,7 @@ mod tests {
             "圆角外侧不应是卡片色"
         );
         assert!(
-            outside[0] < bg[0]
-                || outside[1] < bg[1]
-                || outside[2] < bg[2],
+            outside[0] < bg[0] || outside[1] < bg[1] || outside[2] < bg[2],
             "圆角外侧应被遮罩/阴影压暗"
         );
 
@@ -906,5 +1160,100 @@ mod tests {
     #[test]
     fn paint_layers_hold_for_dark_theme() {
         pixel_case(Theme::dark());
+    }
+
+    /// 错误态与普通弹窗同源：同一卡片几何，只在标题色与徽标上体现危险语义；
+    /// 徽标必须让出标题横向空间，不得压字。
+    #[test]
+    fn error_modal_uses_danger_title_and_icon_without_overlapping_text() {
+        let theme = Theme::light();
+        let vp = Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 480.0,
+            h: 320.0,
+        };
+        let spec = ModalSpec::error(
+            "打开失败",
+            "文件不存在或已被移动。可重试或重新选择文件。",
+            vec![
+                ModalButton::new(1, "重试", ButtonRole::Primary),
+                ModalButton::new(2, "重新选择", ButtonRole::Secondary),
+                ModalButton::new(3, "取消", ButtonRole::Secondary),
+            ],
+        );
+        assert_eq!(spec.kind, ModalKind::Error);
+        let mut text = FakeText::new();
+        let l = layout(vp, 1.0, &spec, &mut text);
+        let st = ModalState::new(&spec);
+        let mut frame = Frame::new(vp.w as u32, vp.h as u32, palette::surface_base(&theme));
+        let mut paint_text = FakeText::new();
+        paint(&mut frame, vp, 1.0, &theme, &spec, &st, &l, &mut paint_text);
+
+        // 徽标在卡片内且为危险色实心圆（采样圆内左上区域，避开反色感叹号）。
+        let icon = icon_rect(l.card, 1.0);
+        assert!(icon.x >= l.card.x && icon.x + icon.w <= l.card.x + l.card.w);
+        assert!(icon.y >= l.card.y && icon.y + icon.h <= l.card.y + l.card.h);
+        let px = frame.get(icon.x as u32 + 3, icon.y as u32 + 3);
+        assert_eq!(
+            [px[0], px[1], px[2]],
+            theme.danger,
+            "错误徽标必须引用主题危险色"
+        );
+        // 标题色 = 危险色；且标题起点在徽标右侧（不压徽标）。
+        assert!(
+            paint_text.colors.contains(&theme.danger),
+            "错误标题必须用危险色绘制"
+        );
+        let title_x = l.card.x
+            + surface::dialog_padding(1.0)
+            + surface::dialog_icon_size(1.0)
+            + surface::dialog_icon_gap(1.0);
+        assert!(title_x >= icon.x + icon.w, "标题必须让出徽标横向空间");
+    }
+
+    /// 错误弹窗的按钮层级：主操作/取消/危险三种角色都来自同一组令牌与主题色。
+    #[test]
+    fn modal_button_roles_map_to_theme_tokens() {
+        let theme = Theme::light();
+        let vp = Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 480.0,
+            h: 320.0,
+        };
+        let spec = ModalSpec::new(
+            "确认",
+            "删除后不可恢复。",
+            vec![
+                ModalButton::new(1, "确定", ButtonRole::Primary),
+                ModalButton::new(2, "删除", ButtonRole::Danger),
+                ModalButton::new(3, "取消", ButtonRole::Secondary),
+            ],
+        );
+        let mut text = FakeText::new();
+        let l = layout(vp, 1.0, &spec, &mut text);
+        let st = ModalState::new(&spec);
+        let mut frame = Frame::new(vp.w as u32, vp.h as u32, palette::surface_base(&theme));
+        let mut paint_text = FakeText::new();
+        paint(&mut frame, vp, 1.0, &theme, &spec, &st, &l, &mut paint_text);
+        // Primary = accent 填充；Danger = danger 描边；Secondary = chrome_border 描边。
+        let sample_border = |i: usize, y_off: u32| {
+            let b = &l.buttons[i];
+            frame.get(b.x as u32 + b.w as u32 / 2, b.y as u32 + y_off)
+        };
+        let primary = sample_border(0, 0);
+        assert_eq!([primary[0], primary[1], primary[2]], theme.accent);
+        let danger = sample_border(1, 0);
+        assert_eq!([danger[0], danger[1], danger[2]], theme.danger);
+        let secondary = sample_border(2, 0);
+        assert_eq!(
+            [secondary[0], secondary[1], secondary[2]],
+            [
+                theme.chrome_border[0],
+                theme.chrome_border[1],
+                theme.chrome_border[2]
+            ]
+        );
     }
 }

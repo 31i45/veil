@@ -40,6 +40,8 @@ pub enum Key {
     N,
     /// 逻辑键 p（无论是否带 ctrl；用于 Ctrl+P 快速打开、Ctrl+Shift+P 打印与文本分流）。
     P,
+    /// 逻辑键 r（无论是否带 ctrl；仅用于模态助记符「重新加载」，非模态不绑定快捷键）。
+    R,
     /// 逻辑键 b/i/k（无论是否带 ctrl；用于 Ctrl+B/I/K 行内格式与文本分流，3c-1）。
     B,
     I,
@@ -96,22 +98,26 @@ pub enum Action {
     Open,
     /// 新建（Ctrl+N）：以空白草稿替换当前文档（脏文档拒绝）。
     New,
+    /// 新建独立窗口（Ctrl+Shift+N）：不改变当前文档。
+    NewWindow,
     /// 快速打开（Ctrl+P）：浮层过滤最近文件与当前目录 Markdown 文件。
     QuickOpen,
     /// 插入图片（Ctrl+Shift+I）：弹系统文件对话框选图并以 Typora 独占段落插入。
     InsertImage,
     /// 关闭菜单（Esc）：纯视图动作。
     CloseMenu,
-    /// 切换大纲面板（Ctrl+Shift+O）：纯视图动作。
-    ToggleOutline,
-    /// 切换源码模式（Ctrl+/）：全文按 Markdown 源码排版；纯视图动作。
-    ToggleSourceMode,
+    /// 打开/关闭大纲面板（Ctrl+Shift+O）：已开时关闭；纯视图动作。
+    OpenOutline,
+    /// 打开/关闭源码模式（Ctrl+/）：全文按 Markdown 源码排版；纯视图动作。
+    OpenSourceMode,
     /// 导出 HTML（Ctrl+E）：由 shell 经 `Exporter` trait 完成（此处不产文档意图）。
     Export,
     /// 直接导出 PDF（Ctrl+Shift+E）：无打印对话框，由 shell 经 `Print` trait 完成。
     ExportPdf,
     /// 打印（Ctrl+Shift+P）：系统打印对话框（含预览），由 shell 经 `Print` trait 完成。
     Print,
+    /// 版本历史（Ctrl+Shift+H）：左侧快照列表 + 正文区只读预览；纯视图动作。
+    VersionHistory,
     /// 打开文档内查找栏（Ctrl+F）：纯视图动作。
     Find,
     /// 打开查找栏并展开替换行（Ctrl+H）：纯视图动作。
@@ -146,7 +152,7 @@ pub fn translate(key: Key, mods: Mods) -> Option<Action> {
         Key::S if ctrl && mods.shift => Some(Action::SaveAs),
         Key::S if ctrl => Some(Action::Save),
         Key::S => None, // 无 ctrl 的 s 文本由 Text 变体承载
-        Key::O if ctrl && mods.shift => Some(Action::ToggleOutline),
+        Key::O if ctrl && mods.shift => Some(Action::OpenOutline),
         Key::O if ctrl => Some(Action::Open),
         Key::O => None, // 无 ctrl 的 o 文本由 Text 变体承载
         Key::Escape => Some(Action::CloseMenu),
@@ -156,15 +162,18 @@ pub fn translate(key: Key, mods: Mods) -> Option<Action> {
         Key::E => None, // 无 ctrl 的 e 文本由 Text 变体承载
         Key::F if ctrl => Some(Action::Find),
         Key::F => None, // 无 ctrl 的 f 文本由 Text 变体承载
+        Key::H if ctrl && mods.shift => Some(Action::VersionHistory),
         Key::H if ctrl => Some(Action::Replace),
         Key::H => None, // 无 ctrl 的 h 文本由 Text 变体承载
         Key::A if ctrl => Some(Action::Doc(Intent::SelectAll)),
         Key::A => None, // 无 ctrl 的 a 文本由 Text 变体承载
+        Key::N if ctrl && mods.shift => Some(Action::NewWindow),
         Key::N if ctrl => Some(Action::New),
         Key::N => None, // 无 ctrl 的 n 文本由 Text 变体承载
         Key::P if ctrl && mods.shift => Some(Action::Print),
         Key::P if ctrl => Some(Action::QuickOpen),
         Key::P => None, // 无 ctrl 的 p 文本由 Text 变体承载
+        Key::R => None, // 仅模态助记符使用；非模态不新增快捷键（Ctrl+R 亦无动作）
         Key::B if ctrl => Some(Action::Doc(Intent::ToggleWrap("**"))),
         Key::B => None, // 无 ctrl 的 b 文本由 Text 变体承载
         Key::I if ctrl && mods.shift => Some(Action::InsertImage),
@@ -176,7 +185,7 @@ pub fn translate(key: Key, mods: Mods) -> Option<Action> {
         Key::Minus if ctrl => Some(Action::ZoomOut),
         Key::Digit0 if ctrl => Some(Action::ZoomReset),
         Key::Digit0 | Key::Minus | Key::Equal => None, // 无 ctrl 的符号文本由 Text 变体承载
-        Key::Slash if ctrl => Some(Action::ToggleSourceMode),
+        Key::Slash if ctrl => Some(Action::OpenSourceMode),
         Key::Slash => None, // 无 ctrl 的 `/` 文本由 Text 变体承载
         // Ctrl+Shift+←/→ 按词扩选；Ctrl+←/→ 按词移动；Shift+方向为字符级扩选。
         Key::Left if ctrl && mods.shift => Some(Action::Doc(Intent::SelectWordLeft)),
@@ -193,8 +202,12 @@ pub fn translate(key: Key, mods: Mods) -> Option<Action> {
         Key::Up if mods.alt && !mods.ctrl => Some(Action::Doc(Intent::MoveLineUp)),
         Key::Down if mods.alt && !mods.ctrl => Some(Action::Doc(Intent::MoveLineDown)),
         // Shift+Alt+↑/↓ 复制行（纯 Alt 留给 move，Shift 区分复制；AltGr 同样被 ctrl 防护拦截）
-        Key::Up if mods.alt && mods.shift && !mods.ctrl => Some(Action::Doc(Intent::DuplicateLineUp)),
-        Key::Down if mods.alt && mods.shift && !mods.ctrl => Some(Action::Doc(Intent::DuplicateLineDown)),
+        Key::Up if mods.alt && mods.shift && !mods.ctrl => {
+            Some(Action::Doc(Intent::DuplicateLineUp))
+        }
+        Key::Down if mods.alt && mods.shift && !mods.ctrl => {
+            Some(Action::Doc(Intent::DuplicateLineDown))
+        }
         Key::Up => Some(Action::MoveVertical(-1)),
         Key::Down => Some(Action::MoveVertical(1)),
         Key::Home if ctrl && mods.shift => Some(Action::Doc(Intent::SelectDocStart)),
@@ -303,8 +316,8 @@ mod tests {
 
     #[test]
     fn source_mode_toggle_binding() {
-        // Ctrl+/ 切换源码模式；无 ctrl 的 `/` 是普通文本（由 Text 变体承载）
-        assert_eq!(translate(Key::Slash, CTRL), Some(Action::ToggleSourceMode));
+        // Ctrl+/ 打开/关闭源码模式；无 ctrl 的 `/` 是普通文本（由 Text 变体承载）
+        assert_eq!(translate(Key::Slash, CTRL), Some(Action::OpenSourceMode));
         assert_eq!(translate(Key::Slash, NONE), None);
         assert_eq!(translate(Key::Slash, ALT_GR), None);
     }
@@ -476,7 +489,7 @@ mod tests {
 
     #[test]
     fn outline_toggle_binding() {
-        assert_eq!(translate(Key::O, CTRL_SHIFT), Some(Action::ToggleOutline));
+        assert_eq!(translate(Key::O, CTRL_SHIFT), Some(Action::OpenOutline));
         assert_eq!(translate(Key::O, NONE), None);
     }
 
@@ -511,6 +524,7 @@ mod tests {
     #[test]
     fn new_binding() {
         assert_eq!(translate(Key::N, CTRL), Some(Action::New));
+        assert_eq!(translate(Key::N, CTRL_SHIFT), Some(Action::NewWindow));
         assert_eq!(translate(Key::N, NONE), None); // 无 ctrl 的 n 由 Text 变体承载
     }
 

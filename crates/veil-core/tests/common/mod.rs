@@ -35,9 +35,24 @@ pub fn pulldown_blocks(md: &str) -> Vec<B> {
                     Tag::CodeBlock(_) if depth == 0 => out.push(B::Pre),
                     // 容器：只有 depth==0 才作为顶层块 push；嵌套容器（Quote 内部的 List、
                     // List 内部的嵌套 List 等）不应出现在顶层序列里。depth 自增在外层。
-                    Tag::BlockQuote(_) => { if depth == 0 { out.push(B::Quote); } depth += 1; }
-                    Tag::List(_) => { if depth == 0 { out.push(B::List); } depth += 1; }
-                    Tag::Table(_) => { if depth == 0 { out.push(B::Table); } depth += 1; }
+                    Tag::BlockQuote(_) => {
+                        if depth == 0 {
+                            out.push(B::Quote);
+                        }
+                        depth += 1;
+                    }
+                    Tag::List(_) => {
+                        if depth == 0 {
+                            out.push(B::List);
+                        }
+                        depth += 1;
+                    }
+                    Tag::Table(_) => {
+                        if depth == 0 {
+                            out.push(B::Table);
+                        }
+                        depth += 1;
+                    }
                     Tag::HtmlBlock => {} // 原始 HTML 块两侧都不计
                     _ => {}
                 }
@@ -155,23 +170,42 @@ fn skip_container(lines: &[&str], mut i: usize, close: &str) -> usize {
 /// `<ul>`/`<ol>` 对齐；0c P0-3：标记变化如 `-`→`+` / `.`→`)` 起新列表，见
 /// Example 301/302）。续块（首行无合法标记，签名为 None）静默随前项归并。
 /// LinkRefDef 无 HTML 输出，跳过（规范期望序列中定义行不对应任何顶层块）。
+/// 注：`BlockKind::ListItem.depth` 是「缩进列 / 2」的视觉深度，不是结构嵌套层级
+/// （见 block.rs §v0 取舍）：缩进 1–3 列的顶层列表同样得到 depth ≥ 1，用
+/// depth == 0 判定顶层会把 Example 4/108/271/287/288/290/291 的缩进顶层列表漏计。
+/// 顶层/嵌套改按 CommonMark 几何判定——子项缩进 ≥ 父项内容列才属嵌套（Ex 297 的
+/// `10) foo` 内容列 4，后继 3 空格 `- bar` 仍是顶层新列表）。
 pub fn actual_blocks(s: &Session) -> Vec<B> {
     let mut out = Vec::new();
+    // 当前顶层列表签名（None = 无活跃顶层列表）
     let mut cur_sig: Option<(bool, u8)> = None;
+    // 开放列表项栈：(内容列, 签名)；仅用于判定后继项是嵌套还是同层/顶层
+    let mut stack: Vec<(usize, (bool, u8))> = Vec::new();
     for (_, kind, range) in s.blocks() {
         if let BlockKind::ListItem { .. } = kind {
             let text = s.text_slice(range).unwrap_or_default();
             let first = text.split_inclusive('\n').next().unwrap_or(&text);
-            // 首行有合法标记：签名同前项则续列归并，否则开新 List；
-            // 续块（None）随前项归并（保持当前签名上下文，不产生新块）
-            if let Some(sig) = veil_core::list_signature(first) {
-                if cur_sig != Some(sig) {
-                    cur_sig = Some(sig);
-                    out.push(B::List);
+            let Some((indent, content_col, sig)) = list_geom(first) else {
+                // 续块（首行无合法标记）随前项归并，不产生新块
+                continue;
+            };
+            // 关闭缩进不足的开放项
+            while let Some(&(col, _)) = stack.last() {
+                if indent >= col {
+                    break;
                 }
+                stack.pop();
             }
+            if stack.is_empty() && cur_sig != Some(sig) {
+                // 顶层项且标记签名变化（`-`→`+` / `.`→`)`）→ 开新 List（Ex 301/302）
+                cur_sig = Some(sig);
+                out.push(B::List);
+            }
+            // 嵌套子项（含不同标记）归属当前顶层 List，不产生新块
+            stack.push((content_col, sig));
             continue;
         }
+        stack.clear();
         cur_sig = None;
         let b = match kind {
             BlockKind::Paragraph => B::P,
@@ -179,15 +213,88 @@ pub fn actual_blocks(s: &Session) -> Vec<B> {
             BlockKind::FencedCode(_) | BlockKind::IndentedCode => B::Pre,
             BlockKind::Math => B::Other,
             BlockKind::Table => B::Table,
-            BlockKind::BlockQuote | BlockKind::Admonition(_) => B::Quote,
+            BlockKind::BlockQuote | BlockKind::Admonition(_) | BlockKind::Callout(_) => B::Quote,
             BlockKind::ThematicBreak => B::Rule,
-            BlockKind::LinkRefDef | BlockKind::FootnoteDef | BlockKind::FrontMatter(_) => continue,
+            BlockKind::LinkRefDef
+            | BlockKind::FootnoteDef
+            | BlockKind::FrontMatter(_)
+            | BlockKind::Details { .. } => continue,
             BlockKind::HtmlBlock => continue,
             BlockKind::ListItem { .. } => unreachable!("列表项已在上方处理"),
         };
         out.push(b);
     }
     out
+}
+
+/// 列表项首行几何（测试侧简化版 `block.rs::list_mark`）：
+/// 返回 `(缩进列, 内容列, 签名)`；无合法标记返回 None。Tab 按 4 列制表位展开。
+fn list_geom(line: &str) -> Option<(usize, usize, (bool, u8))> {
+    let b = line.as_bytes();
+    let mut i = 0usize;
+    let mut col = 0usize;
+    while i < b.len() {
+        match b[i] {
+            b' ' => {
+                col += 1;
+                i += 1;
+            }
+            b'\t' => {
+                col += 4 - (col % 4);
+                i += 1;
+            }
+            _ => break,
+        }
+    }
+    let indent = col;
+    let (ordered, marker, marker_len) = if b.get(i)?.is_ascii_digit() {
+        let start = i;
+        while i < b.len() && b[i].is_ascii_digit() && (i - start) < 9 {
+            i += 1;
+        }
+        let marker = match b.get(i)? {
+            b'.' => b'.',
+            b')' => b')',
+            _ => return None,
+        };
+        i += 1;
+        (true, marker, i - start)
+    } else {
+        let marker = match b.get(i)? {
+            b'-' => b'-',
+            b'*' => b'*',
+            b'+' => b'+',
+            _ => return None,
+        };
+        i += 1;
+        (false, marker, 1usize)
+    };
+    // 标记后须为空白或行尾（`-tag` 非列表）
+    let mut spaces = 0usize;
+    while i < b.len() {
+        match b[i] {
+            b' ' => {
+                spaces += 1;
+                i += 1;
+            }
+            b'\t' => {
+                spaces += 4 - ((indent + marker_len + spaces) % 4);
+                i += 1;
+            }
+            _ => break,
+        }
+    }
+    // 标记后须为空白或行尾（`-tag` 非列表）；`\r`/`\n` 视为行尾
+    if i < b.len() && spaces == 0 && !matches!(b[i], b'\r' | b'\n') {
+        return None;
+    }
+    let blank = line[i..].trim().is_empty();
+    let content_col = if blank || spaces >= 5 {
+        indent + marker_len + 1
+    } else {
+        indent + marker_len + spaces
+    };
+    Some((indent, content_col, (ordered, marker)))
 }
 
 /// 产品导出路径的分段渲染：连续列表项合并为一段源码，其余块逐块渲染。
@@ -580,8 +687,14 @@ pub fn actual_inline(s: &Session) -> Counts {
                 InlineKind::Link => c.link += 1,
                 InlineKind::Image => c.image += 1,
                 InlineKind::Strikethrough => c.del += 1,
+                // 高亮在 CommonMark/GFM 参照侧无对应事件：不计数，子节点照常递归。
+                InlineKind::Highlight => {}
                 InlineKind::Math => {}
                 InlineKind::FootnoteRef => {}
+                // Task 3-5：Html 标签在既有 inline 计数中不单独统计，子节点由递归覆盖
+                InlineKind::Html { .. }
+                | InlineKind::HtmlSelfClosed { .. }
+                | InlineKind::HtmlLiteral => {}
             }
             walk(&n.children, c);
         }
@@ -611,17 +724,29 @@ pub fn actual_inline_structure(s: &Session) -> Vec<(&'static str, usize)> {
     fn walk(nodes: &[InlineNode], depth: usize, out: &mut Vec<(&'static str, usize)>) {
         for n in nodes {
             let kind = match n.kind {
-                InlineKind::Strong => "strong",
-                InlineKind::Emph => "em",
-                InlineKind::Code => "code",
-                InlineKind::Link => "link",
-                InlineKind::Image => "image",
-                InlineKind::Strikethrough => "del",
-                InlineKind::Math => continue,
-                InlineKind::FootnoteRef => continue,
+                InlineKind::Strong => Some("strong"),
+                InlineKind::Emph => Some("em"),
+                InlineKind::Code => Some("code"),
+                InlineKind::Link => Some("link"),
+                InlineKind::Image => Some("image"),
+                InlineKind::Strikethrough => Some("del"),
+                // 高亮是 Veil 扩展，参照侧无标签：作为透明容器（子节点同深度）。
+                InlineKind::Highlight => None,
+                InlineKind::Math | InlineKind::FootnoteRef => None,
+                // 行内 HTML 在参照侧是 raw HTML 事件：标签自身不计数，子节点按原深度透视
+                // （与 Suite C 的 `actual_inline` 递归口径一致，否则 `<del>*foo*</del>`
+                // 的子 Emphasis 会被整棵跳过）。
+                InlineKind::Html { .. }
+                | InlineKind::HtmlSelfClosed { .. }
+                | InlineKind::HtmlLiteral => None,
             };
-            out.push((kind, depth));
-            walk(&n.children, depth + 1, out);
+            match kind {
+                Some(k) => {
+                    out.push((k, depth));
+                    walk(&n.children, depth + 1, out);
+                }
+                None => walk(&n.children, depth, out),
+            }
         }
     }
     let mut out = Vec::new();

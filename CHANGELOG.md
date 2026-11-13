@@ -7,6 +7,7 @@ Veil 版本迭代记录。每个版本的详细修复清单见对应 git tag 的
 「设计统一」：令牌单源、表面层级、状态过渡与便携文件关联。
 
 ### Added
+- 原生 PDF 排版保真（Wave 4）：导出不再直出 Markdown 源码，改为按字形宽度换行、H1–H6 分级字号、列表/引用/Admonition/代码块/表格排版、图片与公式嵌入、页边距、页脚 `n / total`、目录页与 H1–H6 多级书签；图片/公式失败自动降级为 alt/源码，无字体时回退 GDI
 - 文件关联 `veil.exe /register` / `/unregister`（F1+S9+C2）：写当前用户 ProgID、内嵌文档图标（资源 ID 2，`DefaultIcon` 用 `"<exe>",-2` 引用，不分发外置 `.ico`）、把 Veil 加入「打开方式」并只补 `.md` 空位；`/unregister` 只删自己创建且当前值仍属于自己的项。`UserChoice` 从不触碰，默认应用仍需在系统设置中选择
 - 窗口几何记忆（P3）：`config.toml` 新增 `window_width` / `window_height` / `window_x` / `window_y`，启动恢复上次位置与尺寸；越界坐标夹回可见区，最大化不覆盖常规尺寸
 - 状态过渡动效（S6/A9）：菜单栏、菜单项、大纲、快速打开、右键菜单、查找栏与对话框按钮的悬停/按下高亮以 120 ms ease-out cubic 淡入淡出（仅透明度）；关闭时瞬时到位
@@ -19,12 +20,37 @@ Veil 版本迭代记录。每个版本的详细修复清单见对应 git tag 的
 - 字体显式指定：UI 雅黑 13 px、正文 16 px、代码 Consolas 14 px，修复中西文混排的字体不一致
 - README 徽章改为 CI 状态 + 动态 Release，并补 Platform / Portable 两枚契约徽章
 - 文档口径统一：测试基线、体积、依赖数改为实测值；`.md` 关联章节改为 `/register` 流程
+- 体积门禁临时统一为单一 release exe ≤ 10 MiB（10,485,760 B）；代码/图标分档暂停，Wave 5 结束后重新裁定。当前 exe 7,056,896 B（基线 6,914,048 B，+142,848 B）
+
+### Fixed
+- 代码块（fenced / indented / HTML / Front Matter）与行内代码的中文不再是空心/描边：根因是等宽路径用 generic `Family::Monospace`，摇字体时先耗尽等宽候选，本机命中旧 CJK 等宽字体 MS Gothic；改为显式等宽族名（探测到的 Consolas），Han 因此回到脚本回退的 `Microsoft YaHei UI`，与正文同族，Latin 仍为 Consolas
+- 空 Mermaid 块（含纯注释块）的「点击插入模板」提示现在可点击：左键命中后在鼠标处弹出三条模板项（流程图/时序图/类图），选择后插入到该块 body 起点并把光标定位到插入内容之后，单次 undo 可整体回退
 
 ### Notes
-- release 体积分两档：运行时代码（非图标）6,048,424 B（门禁 ≤ 6,291,456 B = 6 MiB）；合计 exe 6,105,088 B（门禁 ≤ 6,348,120 B = 6 MiB 代码 + 55 KB 图标）。两个图标资源合计 56,664 B（`veil.ico` 32,054 + `veil-doc.ico` 24,610），是窗口/任务栏图标与 `.md` 关联必需功能，不计入代码门禁
-- `cargo test --workspace` 1178 passed / 0 failed / 13 ignored；`cargo clippy --workspace --all-targets -- -D warnings` 零警告
+- 历史体积口径（Phase A 基线，仅存档；当前门禁与实测见上）：发布产物曾分两档——运行时代码（非图标）6,048,424 B（门禁 ≤ 6,291,456 B = 6 MiB）、合计 exe 6,105,088 B（门禁 ≤ 6,348,120 B）；两个图标资源合计 56,664 B（`veil.ico` 32,054 + `veil-doc.ico` 24,610），是窗口/任务栏图标与 `.md` 关联必需功能，不计入代码门禁
+- `cargo test --workspace` 1293 passed / 0 failed / 14 ignored；`cargo clippy --workspace --all-targets -- -D warnings` 零警告
 - workspace 传递依赖 117（门禁 ≤ 200）
 - 真机走查（2026-11-10）：主界面、查找栏、文件菜单（含最近文件）、未保存确认模态、视图菜单、大纲面板渲染正常，无遮挡或错位；动效时序由单元测试覆盖，未做逐帧截图取证
+
+### 战略级推翻（2026-11-12）
+- 推翻 D10⑤「HTML 白名单不做」裁决，改立项 Wave 7 N10-C 顶流行内 HTML 白名单（零脚本、零外链、纯行内 + 块级折叠）。根因：用户定调「Veil 要做顶流 Markdown 软件，所有细节必须完美」，要求对齐 Typedown / Obsidian / Notion 行为。
+- 战略级推翻的处理规范：**不得静默改写已勾选项**（如 plan-remaining-backlog SubTask 2.3），必须新建推翻 SubTask（已建 2.4）与主台账 D10 子条目，保留历史 + 明确新范围 + 交叉引用。
+- 实现入口：`.trae/specs/extend-n10-top-tier-html/spec.md`
+
+### Wave 7 · 顶流行内 HTML 白名单（2026-11-12）
+- 顶流锚点下实施 10 类行内 HTML：kbd/sub/sup/mark/abbr/code/a（成对）+ br/img（自闭合）+ details/summary（块级折叠）
+- 三通道语义拉平：预览/打印/PDF/HTML 导出对白名单内标签一致；export 强制剥 script/style、白名单外 escape；remote img 降级占位 + alt
+- 解析：InlineKind 新增 Html/HtmlSelfClosed/HtmlLiteral、BlockKind 新增 Details（默认收起、open 属性自动展开、视图态折叠）
+- UI：paint 层 draw_kbd_frame 描边+圆角、draw_mark_bg 浅黄底；layout sub/sup 字号 0.75 + 基线偏移；br 硬换行；ctx_menu 新增 FoldDetails/UnfoldDetails
+- 单测：veil-core 新增 10 个 inline HTML 解析测试 + 6 个 details 块解析测试；veil-ui 新增 8 个 UI 层测试；real_world_check 差异 7 篇（阈值 18），均为预期 Front Matter / Pre 折叠 / sample.md Other 块
+- 体积：release exe 7,031,808 B（Wave 6 基线 6,988,800 B → +43 KB；历史基线 6,914,048 B → +117,760 B；门禁 10 MiB）
+
+### 真机走查修复（2026-11-12，Wave 7 N10 + N9 复验）
+- 行内 HTML 装饰（kbd/mark/abbr/sub-sup/code/pre）改为按下标偏移正确绘制，不再只覆盖首段，并覆盖表格单元格路径；abbr 改点线并在悬停时显示 title tooltip；`<img>` 行内改为占位/缩略图，块级单行 `<img>` 不再当源码卡
+- 表格单元格内 `<br>` 正常换行；块级 `<details>` 展开正文可见、折叠行高不再裁切、卡片底色不遮字
+- 行内代码中文不再多出反引号、不插空格；中置 Front Matter 不再丢行
+- 导出修复：编号标题不再被当有序列表输出、行内 `<a href>` 不再丢失、交叉标签不再畸形，并补齐 kbd/mark/abbr/details/summary/img 的导出 CSS
+- 体积：release exe 6,988,800 B → **7,056,896 B**（+68,096 B，门禁 10,485,760 B 内）
 
 ## v1.2.0
 

@@ -77,8 +77,16 @@ pub struct Editor {
 }
 
 impl Editor {
+    /// 默认构造（无自定义 Callout 配置）：测试与不需要配置的调用方使用。
+    #[allow(dead_code)]
     pub fn new(text: &str) -> Self {
-        let mut session = Session::open(text);
+        Self::new_with_callouts(text, &veil_core::CalloutRegistry::default())
+    }
+
+    /// 带自定义 Callout 配置的构造：解析期据此把 `> [!NAME]` 分类为 Callout。
+    /// 配置只影响块种类，不影响字节（往返仍恒等）。
+    pub fn new_with_callouts(text: &str, callouts: &veil_core::CalloutRegistry) -> Self {
+        let mut session = Session::open_with_callouts(text, callouts);
         let caret = session
             .create_mark(0, Bias::Right)
             .expect("空文档 offset 0 恒合法");
@@ -330,6 +338,23 @@ impl Editor {
         Some(ev.dirty_blocks)
     }
 
+    /// 版本历史恢复（B8a）：整篇替换为快照文本，单个撤销事务（Ctrl+Z 可回退）。
+    /// 光标落到文首；成功即置脏标——恢复是写入编辑器缓冲区，不直接覆盖磁盘。
+    pub(crate) fn replace_all_text(&mut self, text: &str) -> Option<Vec<BlockId>> {
+        let len = self.session.text_len();
+        self.session.break_undo_group();
+        let ev = self
+            .session
+            .apply(Edit::Replace {
+                range: Range::new(0, len),
+                text: text.into(),
+            })
+            .ok()?;
+        self.dirty = true;
+        self.set_caret(0);
+        Some(ev.dirty_blocks)
+    }
+
     /// 查找替换·单次：替换某个命中区间（一步事务），光标落在替换文本之后。
     pub(crate) fn replace_range(&mut self, range: Range, text: &str) -> Option<Vec<BlockId>> {
         let ev = self
@@ -426,8 +451,10 @@ impl Editor {
                         .expect("选区恒合法");
                     return Some(self.collapse_and_return(ev.dirty_blocks, sel.start + text.len()));
                 }
-                Intent::DeleteBackward | Intent::DeleteForward
-                | Intent::DeleteWordBackward | Intent::DeleteWordForward => {
+                Intent::DeleteBackward
+                | Intent::DeleteForward
+                | Intent::DeleteWordBackward
+                | Intent::DeleteWordForward => {
                     let ev = self
                         .session
                         .apply(Edit::Delete { range: sel })
@@ -453,7 +480,10 @@ impl Editor {
                 // 缩进选中行：选区保留（落点随行首前缀平移），在主 match 中统一处理
                 Intent::Indent | Intent::Dedent => {}
                 // 行移动 / 行复制：整块重排或插入后按端点逐行映射，选区保留
-                Intent::MoveLineUp | Intent::MoveLineDown | Intent::DuplicateLineUp | Intent::DuplicateLineDown => {}
+                Intent::MoveLineUp
+                | Intent::MoveLineDown
+                | Intent::DuplicateLineUp
+                | Intent::DuplicateLineDown => {}
                 // 已于入口分流（穷尽性占位）
                 Intent::ToggleWrap(_) | Intent::InsertLink => {}
             }
@@ -764,7 +794,8 @@ impl Editor {
                 return Some(self.collapse_and_return(ev.dirty_blocks, rs + (ce - cs)));
             }
             // 多行选区 / 无结构命中：沿用「首尾整串 marker」判定
-            let enclosed = text.len() >= 2 * m && text.starts_with(marker) && text.ends_with(marker);
+            let enclosed =
+                text.len() >= 2 * m && text.starts_with(marker) && text.ends_with(marker);
             let double_wrapped = enclosed && m == 1 && {
                 let inner = &text[m..text.len() - m];
                 inner.starts_with(marker) && inner.ends_with(marker)
@@ -818,8 +849,7 @@ impl Editor {
         // run 边界——绝不从更长/残缺的串里抠出两个字符。
         let b = text.as_bytes();
         if m <= c && c + m <= b.len() {
-            let left_ok =
-                b[c - m..c].iter().all(|&x| x == ch) && (c == m || b[c - m - 1] != ch);
+            let left_ok = b[c - m..c].iter().all(|&x| x == ch) && (c == m || b[c - m - 1] != ch);
             let right_ok =
                 b[c..c + m].iter().all(|&x| x == ch) && (c + m == b.len() || b[c + m] != ch);
             if left_ok && right_ok {
@@ -1046,7 +1076,10 @@ impl Editor {
         let (new_caret, new_anchor) = (map(caret), map(anchor));
         let ev = self
             .session
-            .apply(Edit::Replace { range: span, text: seg })
+            .apply(Edit::Replace {
+                range: span,
+                text: seg,
+            })
             .ok()?;
         self.set_marks(new_caret, new_anchor);
         Some(ev.dirty_blocks)
@@ -1110,15 +1143,29 @@ impl Editor {
         // 否则两者会连成一行（"b"+"b"="bb"）。sep 风格跟随文件：有任何 "\r\n" 就用 CRLF。
         let sep_between = if seps[last].is_empty() {
             let is_crlf = seps.contains(&"\r\n");
-            if is_crlf { "\r\n" } else { "\n" }
+            if is_crlf {
+                "\r\n"
+            } else {
+                "\n"
+            }
         } else {
             ""
         };
         // up：副本在前（insert + sep + original）；down：副本在后（original + sep + insert）
         let replacement = if up {
-            format!("{}{}{}", insert_block, sep_between, &text[span_start..span_end])
+            format!(
+                "{}{}{}",
+                insert_block,
+                sep_between,
+                &text[span_start..span_end]
+            )
         } else {
-            format!("{}{}{}", &text[span_start..span_end], sep_between, insert_block)
+            format!(
+                "{}{}{}",
+                &text[span_start..span_end],
+                sep_between,
+                insert_block
+            )
         };
         // 替换后净新增字节数（替换长度 - 原 span 长度）
         let net_added = replacement.len() - original_span_len;
@@ -1136,7 +1183,11 @@ impl Editor {
             }
         };
         let new_anchor = anchor_map(anchor);
-        let new_caret = if up { span_start } else { span_end + sep_between.len() };
+        let new_caret = if up {
+            span_start
+        } else {
+            span_end + sep_between.len()
+        };
         let ev = self
             .session
             .apply(Edit::Replace {
@@ -1156,9 +1207,7 @@ impl Editor {
             None => true,
             // `\r\n` 按 UAX#29 是一个字素簇；单独 `\r` 或 `\n` 也属行尾
             Some(next) => matches!(
-                self.session
-                    .text_slice(Range::new(caret, next))
-                    .as_deref(),
+                self.session.text_slice(Range::new(caret, next)).as_deref(),
                 Some("\n" | "\r" | "\r\n")
             ),
         };
@@ -2384,7 +2433,11 @@ mod tests {
         assert_eq!(e.session().serialize(), "a****b");
         assert_eq!(e.caret(), 3, "光标居中于标记对");
         e.apply(Intent::ToggleWrap("**")).unwrap();
-        assert_eq!(e.session().serialize(), "ab", "光标在标记对中再按一次删除标记对");
+        assert_eq!(
+            e.session().serialize(),
+            "ab",
+            "光标在标记对中再按一次删除标记对"
+        );
         assert_eq!(e.caret(), 1);
     }
 
@@ -2554,11 +2607,18 @@ mod tests {
 
         let mut e = ed(src, 0);
         let dirty = e
-            .replace_table_block(Range::new(0, src.len()), new_src.to_string(), caret_in_block)
+            .replace_table_block(
+                Range::new(0, src.len()),
+                new_src.to_string(),
+                caret_in_block,
+            )
             .expect("表格追加行应成功");
 
         assert!(!dirty.is_empty(), "追加行必须返回脏块");
-        assert!(e.is_dirty(), "表格结构编辑必须置脏标（自动保存/崩溃恢复依赖）");
+        assert!(
+            e.is_dirty(),
+            "表格结构编辑必须置脏标（自动保存/崩溃恢复依赖）"
+        );
         assert_eq!(e.session().serialize(), new_src);
         assert_eq!(e.caret(), caret_in_block, "光标落在新行首单元格");
         assert!(
@@ -2764,11 +2824,7 @@ mod tests {
     #[test]
     fn duplicate_line_up_at_first_row_is_noop() {
         let mut e = ed("a\nb", 0);
-        assert_eq!(
-            e.apply(Intent::DuplicateLineUp),
-            None,
-            "首行向上复制无效果"
-        );
+        assert_eq!(e.apply(Intent::DuplicateLineUp), None, "首行向上复制无效果");
         assert_eq!(e.session().serialize(), "a\nb");
     }
 

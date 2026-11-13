@@ -4,7 +4,7 @@
 use crate::buffer::Buffer;
 use crate::history::{History, PrimEdit, Transaction};
 use crate::range::{Bias, MarkId, Range};
-use crate::syntax::{Block, BlockId, BlockKind, InlineNode, Syntax, Table};
+use crate::syntax::{Block, BlockContainer, BlockId, BlockKind, InlineNode, Syntax, Table};
 
 /// 一次文本变更。
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -39,6 +39,18 @@ impl Session {
     pub fn open(text: &str) -> Self {
         let buf = Buffer::new(text);
         let syntax = Syntax::new(&buf);
+        Session {
+            buf,
+            syntax,
+            history: History::default(),
+        }
+    }
+
+    /// 带自定义 Callout 配置的打开入口（产品层读 `callouts.json` 后注入）。
+    /// 配置只影响 `> [!NAME]` 的分类结果，不改变任何字节。
+    pub fn open_with_callouts(text: &str, callouts: &crate::CalloutRegistry) -> Self {
+        let buf = Buffer::new(text);
+        let syntax = Syntax::new_with_callouts(&buf, callouts);
         Session {
             buf,
             syntax,
@@ -191,6 +203,11 @@ impl Session {
         self.syntax.math_source(&self.buf, block)
     }
 
+    /// 围栏代码块的 (lang, body)（剥开闭 ``` 行）。非围栏块/未知 id 返回 None。
+    pub fn fenced_code_source(&self, block: BlockId) -> Option<(Option<String>, String)> {
+        self.syntax.fenced_code_source(&self.buf, block)
+    }
+
     /// 标题块派生数据：(级别, 可见文本)。非标题块/未知 id 返回 None。
     pub fn heading(&self, block: BlockId) -> Option<(u8, String)> {
         self.syntax.heading(&self.buf, block)
@@ -199,6 +216,16 @@ impl Session {
     /// GFM 表格派生数据（列对齐 + 单元格文本/区间）。非表格块/未知 id 返回 None。
     pub fn table(&self, block: BlockId) -> Option<Table> {
         self.syntax.table(&self.buf, block)
+    }
+
+    /// 表格实际字节区间（Details 内表格的块区间可能吞入尾部闭标签行）。
+    pub fn table_span(&self, block: BlockId) -> Option<Range> {
+        self.syntax.table_span(&self.buf, block)
+    }
+
+    /// 块容器上下文（仅容器内表格非默认；渲染缩进/引用条与导出包裹用）。
+    pub fn block_container(&self, block: BlockId) -> BlockContainer {
+        self.syntax.block_container(block)
     }
 
     /// 脚注编号（1 起，按文档顺序首次引用）。未被引用或未知 id 返回 None。
@@ -259,12 +286,9 @@ impl Session {
         let old_end_line = self.buf.line_of_offset(end);
         let deleted_now = self.buf.edit(prim.start, end, &prim.deleted);
         let new_end_line = self.buf.line_of_offset(prim.start + prim.deleted.len());
-        let dirty = self.syntax.reparse(
-            &self.buf,
-            old_start_line,
-            old_end_line,
-            new_end_line,
-        );
+        let dirty = self
+            .syntax
+            .reparse(&self.buf, old_start_line, old_end_line, new_end_line);
         let inverse = Transaction {
             prim: PrimEdit {
                 start: prim.start,
@@ -320,6 +344,45 @@ mod tests {
         assert!(s.undo().is_none());
     }
 
+    // ===== B3：details 子块增量解析 =====
+
+    #[test]
+    fn details_child_edit_keeps_container_and_round_trips() {
+        let doc = "p\n\n<details>\n<summary>S</summary>\n## t\n\n- a\n</details>\n\nq\n";
+        let mut s = Session::open(doc);
+        let at = s.serialize().find("- a").unwrap() + 3;
+        s.apply(insert(at, "X")).unwrap();
+        assert_eq!(s.serialize(), doc.replacen("- a", "- aX", 1));
+        let raw = s.syntax.blocks();
+        let li = raw
+            .iter()
+            .find(|b| matches!(b.kind, BlockKind::ListItem { .. }))
+            .expect("列表子块");
+        assert_eq!(li.container.details_depth, 1, "子块归属不能因增量重扫丢失");
+        assert!(raw
+            .iter()
+            .any(|b| matches!(b.kind, BlockKind::AtxHeading(2))));
+        assert_ranges_consistent(&s);
+        s.undo().unwrap();
+        assert_eq!(s.serialize(), doc, "字节往返差为 0");
+    }
+
+    #[test]
+    fn details_closing_line_edit_rescans_from_header() {
+        let doc = "<details>\n<summary>S</summary>\npara\n</details>\n";
+        let mut s = Session::open(doc);
+        let at = s.serialize().find("</details>").unwrap();
+        // 在闭标签行首插入空行：闭标签行不属于任何块，仍需回走到 details 头块重扫。
+        s.apply(insert(at, "\n")).unwrap();
+        let raw = s.syntax.blocks();
+        let p = raw
+            .iter()
+            .find(|b| matches!(b.kind, BlockKind::Paragraph))
+            .expect("正文段落");
+        assert_eq!(p.container.details_depth, 1);
+        assert_ranges_consistent(&s);
+    }
+
     // ===== 块字节区间：基本自洽 / 编辑序列 / 开头平移 =====
 
     /// 含中文多字节、列表、引用、表格、公式、围栏代码的多块文档。
@@ -360,16 +423,23 @@ mod tests {
                 b.range
             );
             assert!(b.range.start >= prev_end, "块区间重叠：{b:?}");
+            let gap = &text[prev_end..b.range.start];
+            // B3：块级 details 的闭标签行是纯 chrome，不属于任何块（与空白同等）。
+            let gap_is_details_close = gap
+                .lines()
+                .all(|l| l.trim().is_empty() || l.to_ascii_lowercase().contains("</details"));
             assert!(
-                text[prev_end..b.range.start]
-                    .chars()
-                    .all(|c| c.is_whitespace()),
+                gap.chars().all(|c| c.is_whitespace()) || gap_is_details_close,
                 "块间空隙含非空白内容"
             );
             prev_end = b.range.end;
         }
+        let tail = &text[prev_end..];
         assert!(
-            text[prev_end..].chars().all(|c| c.is_whitespace()),
+            tail.chars().all(|c| c.is_whitespace())
+                || tail
+                    .lines()
+                    .all(|l| l.trim().is_empty() || l.to_ascii_lowercase().contains("</details")),
             "文末空隙含非空白内容"
         );
     }

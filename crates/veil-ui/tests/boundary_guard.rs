@@ -24,7 +24,7 @@ fn veil_core_dependencies_stay_minimal() {
         .collect();
     assert_eq!(
         names,
-        ["lapce-xi-rope"],
+        ["lapce-xi-rope", "flate2"],
         "veil-core 依赖面变化需先过 ADR-001（内核不得引入 GUI/异步运行时）"
     );
 }

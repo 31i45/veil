@@ -9,6 +9,7 @@ use std::sync::mpsc::{channel, Receiver};
 
 use notify::event::{ModifyKind, RenameMode};
 use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use veil_ui::i18n::{t, tf, Key};
 use veil_ui::{FileEvent, FileWatcher};
 
 pub struct NotifyWatcher {
@@ -50,14 +51,19 @@ impl FileWatcher for NotifyWatcher {
         let watcher = self
             .watcher
             .as_mut()
-            .ok_or_else(|| "文件监听初始化失败".to_string())?;
+            .ok_or_else(|| t(Key::ErrWatchInit).to_string())?;
         let dir = match path.parent() {
             Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
             _ => PathBuf::from("."),
         };
         watcher
             .watch(&dir, RecursiveMode::NonRecursive)
-            .map_err(|e| format!("{e}（监听 {}）", dir.display()))?;
+            .map_err(|e| {
+                tf(
+                    Key::ErrWatchPath,
+                    &[&e.to_string(), &dir.display().to_string()],
+                )
+            })?;
         self.canonical = path.canonicalize().ok();
         self.target = Some(path.to_path_buf());
         Ok(())

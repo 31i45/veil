@@ -32,9 +32,39 @@ impl LabelCache {
         color: [u8; 3],
         scale: f32,
     ) -> Option<&CachedLabel> {
-        let key = label_key(scale, text, color);
+        self.get_or_insert_styled(engine, text, color, scale, false)
+    }
+
+    /// 模态标题位图：字号/字重与正文不同，键加前缀避免与普通 UI 文本串味。
+    pub(crate) fn get_or_insert_title(
+        &mut self,
+        engine: &mut LayoutEngine,
+        text: &str,
+        color: [u8; 3],
+        scale: f32,
+    ) -> Option<&CachedLabel> {
+        self.get_or_insert_styled(engine, text, color, scale, true)
+    }
+
+    fn get_or_insert_styled(
+        &mut self,
+        engine: &mut LayoutEngine,
+        text: &str,
+        color: [u8; 3],
+        scale: f32,
+        title: bool,
+    ) -> Option<&CachedLabel> {
+        let key = if title {
+            format!("t|{}", label_key(scale, text, color))
+        } else {
+            label_key(scale, text, color)
+        };
         if !self.map.contains_key(&key) {
-            let layout = engine.layout_ui(text);
+            let layout = if title {
+                engine.layout_ui_title(text)
+            } else {
+                engine.layout_ui(text)
+            };
             let (pixels, w, h) = engine.rasterize(&layout, color);
             self.map.insert(key.clone(), CachedLabel { pixels, w, h });
         }

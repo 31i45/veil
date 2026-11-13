@@ -66,7 +66,7 @@ Three crates, one-way dependency (`veil` → `veil-ui` → `veil-core`, no rever
 11. Table editing: Tab / Shift+Tab navigate cells (last cell wraps back to first); Ctrl+Enter appends empty row at table tail; the right-click menu inserts/deletes rows and columns and sets column alignment (left / center / right, separator row only); each structural change is one undo step
 12. Fenced code blocks: syntax highlighting for 16 languages (keywords / strings / comments / numbers / types), implemented as a pure-Rust line-state machine — no `syntect`
 13. Source mode: Ctrl+/ shows the full Markdown source (tables and math blocks included); toggling keeps caret and scroll position; print and export always use the rendered view
-14. PDF export: Ctrl+Shift+E or File → Export PDF writes `<stem>.pdf` beside the document (name collisions become ` (2)`, ` (3)`); optional TOC page, page numbers and margin (default 20 mm) via `config.toml`; relies on the system "Microsoft Print to PDF". Unsaved drafts first ask for an output location (cancelling aborts); a missing PDF printer falls back to the system print dialog with a notice. Known limits: no PDF bookmarks, no font subsetting
+14. PDF export: Ctrl+Shift+E or File → Export PDF writes `<stem>.pdf` beside the document (name collisions become ` (2)`, ` (3)`); optional TOC page, page numbers and margin (default 20 mm) via `config.toml`. Native PDF output (multi-level bookmarks, CJK font subsetting, heading/table/image/math layout) with fallback to the system "Microsoft Print to PDF". Unsaved drafts first ask for an output location (cancelling aborts).
 15. Opening links: `Ctrl+click` an http/https/mailto link (a mouse gesture, not a new shortcut) to hand it to the system default browser or mail client; the caret does not move. The link context menu starts with "Open in Browser", followed by "Copy Link Address". Protocols outside the allowlist only show a notice; Veil itself makes no network requests
 16. GFM footnotes: `[^id]` references and `[^id]: content` definitions. In rendered view, references show as a link-coloured `[n]`, while definition blocks hide the marker and show "number + content + ↩"; numbers follow first-reference order in the document. `Ctrl+click` a reference to jump to its definition, and `Ctrl+click` the trailing `↩` to jump back to the first reference. Source mode (`Ctrl+/`) shows the raw markup. HTML export emits `<sup>` references and a footnote list at the end (with backlinks)
 17. In-document anchors: `Ctrl+click` `[text](#slug)` to jump to the matching heading; exported headings carry `id="<slug>"`; duplicate headings are de-duplicated as `name`, `name-1` (the same `heading_slug` / `heading_slugs` rules used by export)
@@ -100,7 +100,7 @@ cargo test --workspace
 cargo run -p veil -- <file.md>
 ```
 
-Baseline: 1170 passed / 0 failed / 13 ignored (2026-11-10); `cargo clippy --workspace --all-targets -- -D warnings` zero warnings.
+Baseline: 1459 passed / 0 failed / 14 ignored (2026-11-13); `cargo clippy --workspace --all-targets -- -D warnings` zero warnings.
 
 ## Red Numbers (targets vs measured)
 
@@ -115,8 +115,8 @@ Measured on release build, probe-serialized; performance rows re-verified 2026-1
 | Cold start (window handle; P2 comparison口径) | — | 30 ms (2026-10-30, `tools/bench/measure.ps1`) |
 | Keystroke→commit p95 on 100 K-word doc | ≤ 16 ms | 6.781 ms / 12.379 ms (`perf_keystroke_path` 5,005 blocks / `perf_keystroke_10k_blocks` 10,500 blocks; baseline 6.677 / 12.488; 2026-11-09) ✅ |
 | Resident memory, 100 K-word doc (private working set) | ≤ 150 MB | 40.76 MB (2026-11-05) |
-| Installed size — code + data (non-icon) | ≤ 6 MiB = 6,291,456 B | 6,048,424 B (exe minus 56,664 B icon resources; 2026-11-10 Phase A Exit) |
-| Installed size — total single-file `veil.exe` | ≤ 6,348,120 B ≈ 6.05 MiB (6 MiB code + 55 KB icons) | 6,105,088 B ≈ 5.82 MiB (2026-11-10 Phase A Exit); margin 243,032 B |
+| Installed size — code + data (non-icon) | ≤ 6 MiB (Phase A baseline; superseded by the Wave 3/4 PDF export gate allowance) | 7,273,414 B (exe minus 47,162 B icons; 2026-11-13 B9 final check + UI revision) |
+| Installed size — total single-file `veil.exe` | ≤ 10 MiB = 10,485,760 B (Wave 4 authorization; every increment must be recorded) | 7,320,576 B ≈ 6.98 MiB (2026-11-13 B9 final check + UI revision; +331,776 B vs Wave 6 baseline 6,988,800 B; +406,528 B vs historical baseline 6,914,048 B); margin 3,165,184 B |
 | `veil-core` unit + property tests | ≥ 80 | 209 |
 | E2E assertions | ≥ 20 | 41 (3 e2e scenarios: open→save→reopen, table+image paste, find/replace→crash recovery→self-clean) ✅ |
 | Markdown roundtrip (no edits: output == input bytes; byte comparison) | 100% | 100% |

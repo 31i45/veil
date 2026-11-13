@@ -3,12 +3,14 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 #![allow(clippy::chunks_exact_to_as_chunks)] // 通道展开用 chunks_exact(4/3/2) 更直观
 
+mod cli;
 mod export;
 mod platform;
 
 use std::path::{Path, PathBuf};
 
-use veil_ui::{decode, Doc, FileStore, ImageData, MathImage};
+use veil_ui::i18n::{t, tf, Key};
+use veil_ui::{decode, Doc, FileStore, ImageData, MathImage, StartupError};
 
 /// 无 CLI 参数时的示例文档，覆盖全部渲染路径：标题/粗体/斜体/代码/链接/行内公式/展示公式/代码块/中文。
 const SAMPLE: &str = "# Veil 切片 8\n\n支持 **粗体**、*斜体*、`行内代码`、[链接](https://example.com) 与行内公式 $x^2 + y^2 = z^2$（光标移出渲染为图、移入显示源码）。\n\n块级公式（同规则，渲染图居中）：\n\n$$\n\\frac{a + b}{\\sqrt{c^2 + 1}} = \\sum_{k=0}^{n} k^2\n$$\n\n```\nfn main() { /* 代码块等宽 */ }\n```\n\n中文混排与 IME 输入：请用中文输入法在此段尾部打字验证候选框跟随。\n\n本页为无路径草稿：可拖入 .md 文件打开；关联文件后可直接拖入 PNG/JPEG 等图片插入正文（Ctrl+S 保存与 Ctrl+E 导出 HTML 仅对关联文件生效）。\n";
@@ -20,48 +22,164 @@ fn load_document(path: &Path) -> Result<(String, bool), platform::OpenFailure> {
 }
 
 fn main() {
-    let arg = std::env::args().nth(1);
-    // `/register`、`/unregister`（C2/D7②）：只有显式开关才碰注册表
-    if let Some(cmd) = arg.as_deref().and_then(platform::parse_command) {
+    let raw_args: Vec<String> = std::env::args().skip(1).collect();
+    // `/register`、`/unregister`（C2/D7②）：只有显式开关才碰注册表。
+    if let Some(cmd) = raw_args
+        .first()
+        .map(String::as_str)
+        .and_then(platform::parse_command)
+    {
         match platform::run_assoc(cmd) {
-            Ok(text) => platform::show_info("Veil 文件关联", &text),
+            Ok(text) => platform::show_info(t(Key::AssocTitle), &text),
             Err(e) => {
-                platform::show_error("Veil 文件关联失败", &e);
+                platform::show_error(t(Key::AssocFailedTitle), &e);
                 std::process::exit(1);
             }
         }
         return;
     }
-    let doc = match arg {
-        Some(p) => {
-            let path = PathBuf::from(p);
-            match load_document(&path) {
-                Ok((text, bom)) => Doc {
-                    text,
-                    path: Some(path),
-                    bom,
-                    resume: false,
-                },
-                Err(failure) => {
-                    // stderr 保留完整诊断（debug/控制台启动可见）；
-                    // 发布构建无控制台，必须弹可见错误框后再退出
-                    let text = platform::open_failure_text(&path, &failure);
-                    eprintln!("无法读取 {}: {text}", path.display());
-                    platform::show_error("Veil 无法打开文件", &text);
+    let launch = match cli::parse(raw_args) {
+        Ok(launch) => launch,
+        Err(message) => {
+            platform::show_error(t(Key::MainOpenFailedTitle), &message);
+            std::process::exit(2);
+        }
+    };
+    let (initial_path, initial_sample) = match &launch {
+        cli::Launch::Default => (None, true),
+        cli::Launch::Open(path) | cli::Launch::NewWindow(Some(path)) => {
+            let path = match cli::absolute_path(path) {
+                Ok(path) => path,
+                Err(message) => {
+                    platform::show_error(t(Key::MainOpenFailedTitle), &message);
+                    std::process::exit(2);
+                }
+            };
+            (Some(path), false)
+        }
+        cli::Launch::NewWindow(None) => (None, false),
+    };
+
+    let (primary, requests) = match platform::ipc::acquire() {
+        Ok(platform::ipc::Instance::Secondary) => {
+            let request = platform::ipc::IpcRequest::NewWindow(initial_path);
+            if let Err(message) = platform::ipc::send(&request) {
+                platform::show_error(t(Key::MainOpenFailedTitle), &message);
+                std::process::exit(1);
+            }
+            return;
+        }
+        Ok(platform::ipc::Instance::Primary(primary)) => {
+            let requests = match primary.listen() {
+                Ok(requests) => requests,
+                Err(message) => {
+                    platform::show_error(t(Key::MainOpenFailedTitle), &message);
                     std::process::exit(1);
+                }
+            };
+            (Some(primary), Some(requests))
+        }
+        Err(message) => {
+            platform::show_error(t(Key::MainOpenFailedTitle), &message);
+            std::process::exit(1);
+        }
+    };
+
+    let doc = if let Some(path) = initial_path {
+        match load_document(&path) {
+            Ok((text, bom)) => Doc {
+                text,
+                path: Some(path),
+                bom,
+                resume: false,
+                open_error: None,
+            },
+            // 读取失败不弹原生框：以空白草稿开窗，首帧由应用内错误模态告知（可重试/换文件/关闭）
+            Err(failure) => {
+                let message = platform::open_failure_text(&path, &failure);
+                eprintln!("无法读取 {}: {message}", path.display());
+                Doc {
+                    text: String::new(),
+                    path: None,
+                    bom: false,
+                    resume: false,
+                    open_error: Some(StartupError {
+                        path,
+                        title: t(Key::MainOpenFailedTitle).to_string(),
+                        message,
+                    }),
                 }
             }
         }
-        None => Doc {
-            text: SAMPLE.to_owned(),
+    } else {
+        Doc {
+            text: if initial_sample {
+                SAMPLE.to_owned()
+            } else {
+                String::new()
+            },
             path: None,
             bom: false,
-            resume: true,
-        },
+            resume: initial_sample,
+            open_error: None,
+        }
     };
-    if let Err(e) = veil_ui::run(
+
+    let doc_requests = requests.map(|requests| {
+        let (tx, rx) = std::sync::mpsc::channel();
+        if let Err(e) = std::thread::Builder::new()
+            .name("veil-document-loader".into())
+            .spawn(move || {
+                while let Ok(platform::ipc::IpcRequest::NewWindow(path)) = requests.recv() {
+                    let doc = match path {
+                        Some(path) => match load_document(&path) {
+                            Ok((text, bom)) => Doc {
+                                text,
+                                path: Some(path),
+                                bom,
+                                resume: false,
+                                open_error: None,
+                            },
+                            // 失败也照常开新窗口，由首帧应用内模态告知（不再从后台线程弹原生框）
+                            Err(failure) => {
+                                let message = platform::open_failure_text(&path, &failure);
+                                eprintln!("无法读取 {}: {message}", path.display());
+                                Doc {
+                                    text: String::new(),
+                                    path: None,
+                                    bom: false,
+                                    resume: false,
+                                    open_error: Some(StartupError {
+                                        path,
+                                        title: t(Key::MainOpenFailedTitle).to_string(),
+                                        message,
+                                    }),
+                                }
+                            }
+                        },
+                        None => Doc {
+                            text: String::new(),
+                            path: None,
+                            bom: false,
+                            resume: false,
+                            open_error: None,
+                        },
+                    };
+                    if tx.send(doc).is_err() {
+                        break;
+                    }
+                }
+            })
+        {
+            platform::show_error(t(Key::MainOpenFailedTitle), &e.to_string());
+            std::process::exit(1);
+        }
+        rx
+    });
+
+    let result = veil_ui::run(
         doc,
-        veil_ui::Ports {
+        move || veil_ui::Ports {
             clipboard: clipboard(),
             store: Box::new(Fs),
             clock: platform::system_clock(),
@@ -76,7 +194,10 @@ fn main() {
             print: platform::print(),
             url_opener: platform::url_opener(),
         },
-    ) {
+        doc_requests,
+    );
+    drop(primary);
+    if let Err(e) = result {
         eprintln!("{e}");
         std::process::exit(1);
     }
@@ -107,7 +228,7 @@ impl veil_ui::Exporter for NoExport {
         _p: Option<&Path>,
         _t: Option<&Path>,
     ) -> Result<PathBuf, String> {
-        Err("数学字体不可用".into())
+        Err(t(Key::ErrMathFontUnavailable).into())
     }
 }
 
@@ -178,7 +299,7 @@ impl veil_ui::MathRenderer for NoMath {
         _scale: f32,
         _color: [u8; 3],
     ) -> Result<MathImage, String> {
-        Err("数学字体不可用".into())
+        Err(t(Key::ErrMathFontUnavailable).into())
     }
 }
 
@@ -189,11 +310,13 @@ fn decode_png_rgba(png: &[u8]) -> Result<ImageData, String> {
     // 调色板/低位深灰度展开、16-bit 降为 8-bit、tRNS 转 alpha
     decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
     let mut reader = decoder.read_info().map_err(|e| e.to_string())?;
-    let size = reader.output_buffer_size().ok_or("PNG 输出尺寸溢出")?;
+    let size = reader
+        .output_buffer_size()
+        .ok_or_else(|| t(Key::ErrPngOutputOverflow).to_string())?;
     let mut buf = vec![0; size];
     let info = reader.next_frame(&mut buf).map_err(|e| e.to_string())?;
     if info.bit_depth != png::BitDepth::Eight {
-        return Err(format!("非预期 PNG 位深: {:?}", info.bit_depth));
+        return Err(tf(Key::ErrPngBitDepth, &[&format!("{:?}", info.bit_depth)]));
     }
     buf.truncate(info.buffer_size());
     let n = info.width as usize * info.height as usize;
@@ -221,7 +344,7 @@ fn decode_png_rgba(png: &[u8]) -> Result<ImageData, String> {
             out
         }
         // EXPAND 后不应出现调色板类型
-        png::ColorType::Indexed => return Err("索引色 PNG 未展开".into()),
+        png::ColorType::Indexed => return Err(t(Key::ErrIndexedPng).into()),
     };
     Ok(ImageData {
         pixels,
@@ -263,7 +386,12 @@ impl veil_ui::AssetStore for FsAssets {
             .parent()
             .unwrap_or_else(|| Path::new(""))
             .join(&dir_name);
-        std::fs::create_dir_all(&dir).map_err(|e| format!("{e}（创建 {}）", dir.display()))?;
+        std::fs::create_dir_all(&dir).map_err(|e| {
+            tf(
+                Key::ErrIoCreateDir,
+                &[&e.to_string(), &dir.display().to_string()],
+            )
+        })?;
         let (name, n) = unique_asset_name(&dir, self.next);
         self.next = n;
         let png = encode_png_rgba(image)?;
@@ -272,7 +400,12 @@ impl veil_ui::AssetStore for FsAssets {
         let tmp = dir.join(format!(".{name}.tmp"));
         std::fs::write(&tmp, png)
             .and_then(|()| std::fs::rename(&tmp, &path))
-            .map_err(|e| format!("{e}（写入 {}）", path.display()))?;
+            .map_err(|e| {
+                tf(
+                    Key::ErrIoWriteFile,
+                    &[&e.to_string(), &path.display().to_string()],
+                )
+            })?;
         Ok(format!("{dir_name}/{name}"))
     }
 }
@@ -331,11 +464,13 @@ fn unique_asset_name(dir: &Path, next: u32) -> (String, u32) {
 fn encode_png_rgba(image: &ImageData) -> Result<Vec<u8>, String> {
     let expect = image.width as usize * image.height as usize * 4;
     if image.pixels.len() != expect {
-        return Err(format!(
-            "位图尺寸不匹配: {} 字节 ≠ {}×{}×4",
-            image.pixels.len(),
-            image.width,
-            image.height
+        return Err(tf(
+            Key::ErrBitmapSizeMismatch,
+            &[
+                &image.pixels.len().to_string(),
+                &image.width.to_string(),
+                &image.height.to_string(),
+            ],
         ));
     }
     let mut out = Vec::new();
@@ -363,7 +498,12 @@ impl FileStore for Fs {
         // std::fs::rename 在 Windows 覆盖既有目标（MoveFileEx REPLACE_EXISTING），同目录 rename 原子
         std::fs::write(&tmp, data)
             .and_then(|()| std::fs::rename(&tmp, path))
-            .map_err(|e| format!("{e}（写入 {}）", path.display()))
+            .map_err(|e| {
+                tf(
+                    Key::ErrIoWriteFile,
+                    &[&e.to_string(), &path.display().to_string()],
+                )
+            })
     }
     fn list_files(&mut self, dir: &Path) -> Result<Vec<PathBuf>, String> {
         let mut out = Vec::new();

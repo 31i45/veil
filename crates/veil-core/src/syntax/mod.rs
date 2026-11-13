@@ -17,16 +17,18 @@ mod model;
 pub use block::{list_signature, task_span};
 pub(crate) use model::Block;
 pub use model::{
-    AdmonitionType, BlockId, BlockKind, CellAlign, InlineKind, InlineNode, Table, TableCell,
+    sanitize_style, should_strip_html, AdmonitionType, BlockContainer, BlockId, BlockKind, Callout,
+    CellAlign, HtmlAttrs, HtmlStyle, HtmlTag, InlineKind, InlineNode, Table, TableCell,
 };
 
 use crate::buffer::Buffer;
+use crate::callouts::CalloutRegistry;
 use crate::range::Range;
 use block::{
-    fence_close, fence_open, heading_content_span, is_thematic_break, line_text, list_mark,
-    normalize_label, parse_delim_row, parse_footnote_def, parse_link_ref_def, parse_table_cells,
-    quote_def_lines, quote_link_ref_defs, quote_marker_pos, scan_blocks, scan_next, visible_text,
-    RefMap,
+    fence_close, fence_open, heading_content_span, indent_info, is_thematic_break, line_text,
+    list_mark, normalize_label, parse_delim_row, parse_footnote_def, parse_link_ref_def,
+    parse_table_cells, quote_def_lines, quote_link_ref_defs, quote_marker_pos, scan_blocks_meta,
+    scan_next_meta, visible_text, RefMap, ScannedBlock,
 };
 use inline::parse_inlines;
 
@@ -49,10 +51,18 @@ pub(crate) struct Syntax {
     id_index: std::collections::HashMap<BlockId, usize>,
     /// 最近一次 `reparse` 实际扫描的行跨度（只读观测值，不参与解析语义）。
     last_rescan_lines: usize,
+    /// 自定义 Callout 表（`callouts.json`）：解析期把 `> [!NAME]` 引用块
+    /// 分类为 `BlockKind::Callout`。空表时仅五种内置 GFM Alerts 生效。
+    callouts: CalloutRegistry,
 }
 
 impl Syntax {
     pub fn new(buf: &Buffer) -> Self {
+        Self::new_with_callouts(buf, &CalloutRegistry::default())
+    }
+
+    /// 带自定义 Callout 表的构造入口（产品层从 `callouts.json` 注入）。
+    pub fn new_with_callouts(buf: &Buffer, callouts: &CalloutRegistry) -> Self {
         let mut syntax = Syntax {
             blocks: Vec::new(),
             next_id: 0,
@@ -62,17 +72,37 @@ impl Syntax {
             footnote_defs: std::collections::HashMap::new(),
             id_index: std::collections::HashMap::new(),
             last_rescan_lines: 0,
+            callouts: callouts.clone(),
         };
-        let raw = scan_blocks(buf, 0, buf.line_count());
+        let raw = scan_blocks_meta(buf, 0, buf.line_count());
         syntax.blocks = raw
             .into_iter()
-            .map(|(kind, s, e)| syntax.fresh_block(buf, kind, s, e))
+            .map(|b| {
+                let kind = syntax.classify_callout(buf, b.kind, b.start);
+                syntax.fresh_block(buf, kind, b.start, b.end, b.container, b.table_lines)
+            })
             .collect();
         syntax.build_refs(buf);
         // 先建 id 索引：build_footnotes 经 `inlines` 查块，依赖索引已就绪。
         syntax.rebuild_id_index();
         syntax.build_footnotes(buf);
         syntax
+    }
+
+    /// 引用块首行 `> [!NAME]` → 配置里定义的自定义 Callout；未配置的名字
+    /// 保持 `BlockQuote`（视图层负责隐藏裸标记文本）。
+    fn classify_callout(&self, buf: &Buffer, kind: BlockKind, start_line: usize) -> BlockKind {
+        if kind != BlockKind::BlockQuote {
+            return kind;
+        }
+        let line = line_text(buf, start_line);
+        let Some(name) = callout_marker_name(&line) else {
+            return kind;
+        };
+        match self.callouts.get(&name) {
+            Some(c) => BlockKind::Callout(c.clone()),
+            None => kind,
+        }
     }
 
     /// 重建引用表：遍历 LinkRefDef 块解析定义文本（first wins）；引用块内部经
@@ -139,6 +169,7 @@ impl Syntax {
                     | BlockKind::ThematicBreak
                     | BlockKind::LinkRefDef
                     | BlockKind::HtmlBlock
+                    | BlockKind::Details { .. }
                     | BlockKind::FrontMatter(_)
             ) {
                 continue;
@@ -259,7 +290,9 @@ impl Syntax {
                 }
                 out
             }
-            BlockKind::BlockQuote => quote_inlines(&text, start, &self.refs),
+            BlockKind::BlockQuote | BlockKind::Callout(_) => {
+                quote_inlines(&text, start, &self.refs)
+            }
             // Setext：inline 仅解析内容行，下划线行不参与（0c P0-2）
             BlockKind::SetextHeading(_) => {
                 let ul = buf.offset_of_line(b.end_line - 1);
@@ -275,6 +308,8 @@ impl Syntax {
         kind: BlockKind,
         start_line: usize,
         end_line: usize,
+        container: BlockContainer,
+        table_lines: Option<usize>,
     ) -> Block {
         let id = BlockId(self.next_id);
         self.next_id += 1;
@@ -284,6 +319,8 @@ impl Syntax {
             start_line,
             end_line,
             range: block_byte_range(buf, start_line, end_line),
+            container,
+            table_lines,
         }
     }
 
@@ -319,6 +356,40 @@ impl Syntax {
         Some(body.join("\n"))
     }
 
+    /// 围栏代码块的 lang + body（剥掉开/闭围栏行）。非围栏块/未知 id 返回 None。
+    /// body 不含开/闭 ``` 行，适合直接喂给语法高亮或 mermaid.live 预览。
+    pub fn fenced_code_source(
+        &self,
+        buf: &Buffer,
+        block: BlockId,
+    ) -> Option<(Option<String>, String)> {
+        let b = self.get_block(block)?;
+        let lang = match &b.kind {
+            BlockKind::FencedCode(l) => l.clone(),
+            _ => return None,
+        };
+        let start = buf.offset_of_line(b.start_line);
+        let end = if b.end_line < buf.line_count() {
+            buf.offset_of_line(b.end_line)
+        } else {
+            buf.len()
+        };
+        let text = buf.slice(start, end);
+        let mut lines = text.lines();
+        lines.next(); // 开围栏行（```mermaid）
+        let mut body: Vec<&str> = lines.collect();
+        // 闭围栏行（```）只有 trim 后才等于 ```，未闭合围栏不会被吞进来
+        if let Some(last) = body.last().copied() {
+            let trimmed = last.trim_start_matches([' ', '\t']);
+            let is_fence = (trimmed.starts_with("```") && !trimmed[3..].contains('`'))
+                || (trimmed.starts_with("~~~") && !trimmed[3..].contains('~'));
+            if is_fence {
+                body.pop();
+            }
+        }
+        Some((lang, body.join("\n")))
+    }
+
     /// 表格派生数据：表头/表体单元格与列对齐。非表格块/未知 id 返回 None。
     /// 单元格文本为「剥除 inline 标记后的可见文本」；区间为 trim 后的内容区间
     /// （绝对字节偏移）。表体行按列数补空/截断（GFM 行为）。
@@ -331,31 +402,62 @@ impl Syntax {
         if b.kind != BlockKind::Table {
             return None;
         }
-        let delim = line_text(buf, b.start_line + 1);
-        let mut aligns = parse_delim_row(&delim)?;
+        let table_lines = b.table_lines.unwrap_or(b.end_line - b.start_line);
+        if table_lines < 2 {
+            return None;
+        }
+        let delim_line = line_text(buf, b.start_line + 1);
+        let (_, delim_src) = table_line_content(&delim_line, b.container);
+        let mut aligns = parse_delim_row(delim_src)?;
         // 列数硬上限截断
         if aligns.len() > Self::MAX_TABLE_COLS {
             aligns.truncate(Self::MAX_TABLE_COLS);
         }
-        let header_off = buf.offset_of_line(b.start_line);
+        let head_line = line_text(buf, b.start_line);
+        let (head_off, head_src) = table_line_content(&head_line, b.container);
+        let header_line_off = buf.offset_of_line(b.start_line);
         let header = parse_table_cells(
-            &line_text(buf, b.start_line),
-            header_off,
+            head_src,
+            header_line_off + head_off,
             aligns.len(),
             &self.refs,
         );
-        let total_body = b.end_line.saturating_sub(b.start_line + 2);
+        let total_body = table_lines.saturating_sub(2);
         let capped_body = total_body.min(Self::MAX_TABLE_ROWS);
         let mut rows = Vec::with_capacity(capped_body);
         for line in b.start_line + 2..(b.start_line + 2 + capped_body) {
             let off = buf.offset_of_line(line);
-            rows.push(parse_table_cells(&line_text(buf, line), off, aligns.len(), &self.refs));
+            let line_text = line_text(buf, line);
+            let (content_off, content) = table_line_content(&line_text, b.container);
+            rows.push(parse_table_cells(
+                content,
+                off + content_off,
+                aligns.len(),
+                &self.refs,
+            ));
         }
         Some(Table {
             aligns,
             header,
             rows,
         })
+    }
+
+    /// 表格实际字节区间（Details 内表格的块区间可能吞入尾部闭标签行）。
+    pub fn table_span(&self, buf: &Buffer, block: BlockId) -> Option<Range> {
+        let b = self.get_block(block)?;
+        if b.kind != BlockKind::Table {
+            return None;
+        }
+        let lines = b.table_lines.unwrap_or(b.end_line - b.start_line);
+        let end_line = (b.start_line + lines).min(b.end_line);
+        Some(block_byte_range(buf, b.start_line, end_line))
+    }
+
+    /// 块的容器上下文（仅表格块可能非默认）。
+    pub fn block_container(&self, block: BlockId) -> BlockContainer {
+        self.get_block(block)
+            .map_or_else(BlockContainer::default, |b| b.container)
     }
 
     /// 标题块派生数据：(级别, 可见文本)。ATX 标记/闭合序列与 inline 标记均剥除
@@ -383,7 +485,10 @@ impl Syntax {
                 let ul = buf.offset_of_line(b.end_line - 1);
                 let content = buf.slice(start, ul);
                 let nodes = parse_inlines(&content, start, &self.refs);
-                Some((level, visible_text(&content, &nodes, start).trim().to_string()))
+                Some((
+                    level,
+                    visible_text(&content, &nodes, start).trim().to_string(),
+                ))
             }
             _ => None,
         }
@@ -428,6 +533,20 @@ impl Syntax {
         {
             bi -= 1;
         }
+        // details 子块回走（B3）：子块是独立块，但其容器上下文由所属 Details 头块
+        // 的扫描产物给出。编辑点落在子块 / 闭标签行 / 组内空行时，必须回到最外层
+        // Details 头块重扫，否则子块会丢掉 `details_depth` 归属、闭标签行也会
+        // 被当成正文重新解析。
+        if bi > 0 && bi < self.blocks.len() {
+            // 编辑点正好在闭标签行（不属于任何块）：回退到其前的末个子块。
+            if self.blocks[bi - 1].container.details_depth > 0
+                && edit_start_line >= self.blocks[bi - 1].end_line
+                && edit_start_line <= self.blocks[bi].start_line
+            {
+                bi -= 1;
+            }
+        }
+        bi = self.details_root_index(bi);
         let scan_from = if bi < self.blocks.len() {
             self.blocks[bi].start_line.min(edit_start_line)
         } else {
@@ -438,7 +557,7 @@ impl Syntax {
         // 重扫：超过新区后，遇到与旧块（平移后）对齐且同种的边界即停，
         // 其后的旧块整体平移保留——这是「干净块不动」承诺的实现。
         // 扫描单元为 scan_next：列表区域整体产出（0c P0-3）。
-        let mut produced: Vec<(BlockKind, usize, usize)> = Vec::new();
+        let mut produced: Vec<ScannedBlock> = Vec::new();
         let mut suffix_start: Option<usize> = None;
         let mut line = scan_from;
         while line < total {
@@ -446,7 +565,7 @@ impl Syntax {
                 line += 1;
                 continue;
             }
-            let (mut v, consumed) = scan_next(buf, line, total);
+            let (mut v, consumed) = scan_next_meta(buf, line, total);
             // 先把块扫出来再比对，避免为校验额外扫一遍（旧写法在此处再调
             // scan_next 会退化为 O(n²)）。起始行 + 种类 + **结束行**三者都平移
             // 对齐才算「干净块」；只比起始行与种类时，块边界变化（内容已改，
@@ -456,11 +575,9 @@ impl Syntax {
                     let shifted = self.blocks[k].start_line as isize + delta;
                     shifted >= 0 && shifted as usize == line
                 }) {
-                    let (nk, _, ne) = &v[0];
+                    let (nk, ne) = (&v[0].kind, v[0].end);
                     let shifted_end = self.blocks[k].end_line as isize + delta;
-                    if *nk == self.blocks[k].kind
-                        && shifted_end >= 0
-                        && shifted_end as usize == *ne
+                    if *nk == self.blocks[k].kind && shifted_end >= 0 && shifted_end as usize == ne
                     {
                         suffix_start = Some(k);
                         break; // 此后旧块整体平移保留，不再追加刚扫出的 v
@@ -477,7 +594,9 @@ impl Syntax {
 
         let mut dirty = Vec::with_capacity(produced.len());
         let mut new_blocks: Vec<Block> = self.blocks[..bi].to_vec();
-        for (i, (kind, s, e)) in produced.into_iter().enumerate() {
+        for (i, sb) in produced.into_iter().enumerate() {
+            let kind = self.classify_callout(buf, sb.kind, sb.start);
+            let (kind, s, e) = (kind, sb.start, sb.end);
             // zip-reuse：与旧块同相对位次且种类一致时，区间不触编辑区
             // [edit_start_line, new_end_line) ⇒ 内容必然未变 ⇒ 保留 id 不脏
             // （0c P0-3：列表区域整体重扫时，编辑点之前的同区域项由此保 id）。
@@ -508,9 +627,11 @@ impl Syntax {
                     end_line: e,
                     // 重扫区内的块按新行号一次性换算字节区间（代价只与脏块数相关）。
                     range: block_byte_range(buf, s, e),
+                    container: sb.container,
+                    table_lines: sb.table_lines,
                 },
                 None => {
-                    let b = self.fresh_block(buf, kind, s, e);
+                    let b = self.fresh_block(buf, kind, s, e, sb.container, sb.table_lines);
                     dirty.push(b.id);
                     b
                 }
@@ -535,6 +656,8 @@ impl Syntax {
                         (b.range.start as isize + byte_delta) as usize,
                         (b.range.end as isize + byte_delta) as usize,
                     ),
+                    container: b.container,
+                    table_lines: b.table_lines,
                 });
             }
         }
@@ -550,6 +673,31 @@ impl Syntax {
         #[cfg(test)]
         self.debug_assert_ranges(buf);
         dirty
+    }
+
+    /// details 归属回走：`bi` 指向块级 details 子块（或内层 Details 头块）时，
+    /// 返回其最外层 Details 头块索引；否则原样返回。
+    fn details_root_index(&self, mut bi: usize) -> usize {
+        if bi >= self.blocks.len() {
+            bi = self.blocks.len().saturating_sub(1);
+        }
+        loop {
+            let Some(b) = self.blocks.get(bi) else {
+                return bi;
+            };
+            let depth = b.container.details_depth;
+            if depth == 0 {
+                return bi;
+            }
+            let want = depth - 1;
+            match (0..bi).rev().find(|&k| {
+                matches!(self.blocks[k].kind, BlockKind::Details { .. })
+                    && self.blocks[k].container.details_depth == want
+            }) {
+                Some(parent) => bi = parent,
+                None => return bi,
+            }
+        }
     }
 
     /// 单元测试专用的 O(块数) 不变量校验：字节区间必须等于行号的换算结果。
@@ -584,9 +732,39 @@ fn block_byte_range(buf: &Buffer, start_line: usize, end_line: usize) -> Range {
     Range::new(buf.offset_of_line(start_line), end)
 }
 
+/// 容器内表格行的内容切片：剥除 `>` 前缀（按容器层数）与列表标记/续行缩进，
+/// 返回 (内容字节偏移, 内容)。顶层表格原样返回。单元格解析与列对齐必须基于
+/// 剥前缀后的内容，否则 `> | a |` 的首格会混入 `>`、`- | a |` 会混入标记。
+fn table_line_content(line: &str, container: BlockContainer) -> (usize, &str) {
+    let mut rest = line;
+    let mut off = 0usize;
+    for _ in 0..container.quote_depth {
+        let Some(p) = quote_marker_pos(rest) else {
+            break;
+        };
+        let mut e = p + 1;
+        if matches!(rest.as_bytes().get(e), Some(b' ') | Some(b'\t')) {
+            e += 1;
+        }
+        rest = &rest[e..];
+        off += e;
+    }
+    if container.list_indent > 0 {
+        if let Some(m) = list_mark(rest) {
+            off += m.content_start;
+            rest = &rest[m.content_start..];
+        } else {
+            let (_, start) = indent_info(rest);
+            off += start;
+            rest = &rest[start..];
+        }
+    }
+    (off, rest)
+}
+
 /// 一个强调结构的标记/内容区间（`*` 系 Emph、`**` 系 Strong），半开区间。
 /// 供编辑层做结构感知的 toggle 判定；渲染层仍直接消费 [`InlineNode`]。
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub struct EmphasisSpan {
     /// `Emph` 或 `Strong`。
     pub kind: InlineKind,
@@ -617,7 +795,7 @@ fn collect_emphasis(nodes: &[InlineNode], out: &mut Vec<EmphasisSpan>) {
     for n in nodes {
         if matches!(n.kind, InlineKind::Emph | InlineKind::Strong) {
             out.push(EmphasisSpan {
-                kind: n.kind,
+                kind: n.kind.clone(),
                 open: Range::new(n.range.start, n.content.start),
                 content: n.content,
                 close: Range::new(n.content.end, n.range.end),
@@ -672,6 +850,16 @@ fn quote_inlines(text: &str, base: usize, refs: &RefMap) -> Vec<InlineNode> {
         off += line.len();
     }
     out
+}
+
+/// 引用块首行 `[!NAME]` 的名字（大小写原样）。仅用于自定义 Callout 分类，
+/// 与 `block::scan_one` 的内置识别口径一致（行首 `>` + `[!` + `]`）。
+fn callout_marker_name(line: &str) -> Option<String> {
+    let rest = line.trim_start_matches('>').trim_start();
+    let inner = rest.strip_prefix("[!")?;
+    let close = inner.find(']')?;
+    let name = inner[..close].trim();
+    (!name.is_empty()).then(|| name.to_string())
 }
 
 #[cfg(test)]
@@ -813,10 +1001,7 @@ mod tests {
         // 标记内空白：trim 只剥行首尾，内容空白原样保留
         let buf = Buffer::new("$$  $$");
         let s = Syntax::new(&buf);
-        assert_eq!(
-            s.math_source(&buf, s.blocks()[0].id).as_deref(),
-            Some("  ")
-        );
+        assert_eq!(s.math_source(&buf, s.blocks()[0].id).as_deref(), Some("  "));
     }
 
     #[test]
@@ -839,6 +1024,43 @@ mod tests {
                 CellAlign::Center,
                 CellAlign::None
             ]
+        );
+    }
+
+    #[test]
+    fn table_derivation_strips_container_prefixes() {
+        // 引用 / 列表 / details 内表格：单元格文本与区间必须基于剥前缀后的内容。
+        let quote = Buffer::new("> | a | b |\n> | --- | --- |\n> | 1 | 2 |\n");
+        let s = Syntax::new(&quote);
+        assert_eq!(s.blocks()[0].kind, BlockKind::Table);
+        let t = s.table(&quote, s.blocks()[0].id).unwrap();
+        assert_eq!(t.header[0].text, "a");
+        assert_eq!(t.header[1].text, "b");
+        assert_eq!(t.rows[0][0].text, "1");
+        let r = t.header[0].range;
+        assert_eq!(&quote.slice(r.start, r.end), "a");
+
+        let list = Buffer::new("- | k | v |\n  | --- | --- |\n  | 1 | 2 |\n");
+        let s = Syntax::new(&list);
+        assert_eq!(s.blocks()[0].kind, BlockKind::Table);
+        let t = s.table(&list, s.blocks()[0].id).unwrap();
+        assert_eq!(t.header[0].text, "k");
+        assert_eq!(t.header[1].text, "v");
+        let r = t.rows[0][0].range;
+        assert_eq!(&list.slice(r.start, r.end), "1");
+
+        let details =
+            Buffer::new("<details>\n<summary>S</summary>\n| a |\n| --- |\n| 1 |\n</details>\n");
+        let s = Syntax::new(&details);
+        let block = &s.blocks()[1];
+        assert_eq!(block.kind, BlockKind::Table);
+        let t = s.table(&details, block.id).unwrap();
+        assert_eq!(t.header[0].text, "a");
+        assert_eq!(t.rows[0][0].text, "1");
+        let span = s.table_span(&details, block.id).unwrap();
+        assert_eq!(
+            &details.slice(span.start, span.end),
+            "| a |\n| --- |\n| 1 |\n"
         );
     }
 
@@ -893,6 +1115,18 @@ mod tests {
         let s = Syntax::new(&b);
         let t = s.table(&b, s.blocks()[0].id).unwrap();
         assert_eq!(t.header[0].text, "a");
+    }
+
+    #[test]
+    fn table_cell_br_and_html_img_visible_text() {
+        let b = Buffer::new("| a<br>b | <img src=\"p.png\" alt=\"图\"> |\n| --- | --- |\n");
+        let s = Syntax::new(&b);
+        let t = s.table(&b, s.blocks()[0].id).unwrap();
+        assert_eq!(
+            t.header[0].text, "a\nb",
+            "<br> 在单元格可见文本中应为硬换行"
+        );
+        assert_eq!(t.header[1].text, "图", "HTML img 的可见文本应为 alt");
     }
 
     #[test]
@@ -1006,7 +1240,10 @@ mod tests {
         let chunk = &s.blocks()[2];
         assert!(matches!(chunk.kind, BlockKind::ListItem { .. }));
         assert_eq!((chunk.start_line, chunk.end_line), (3, 4));
-        assert_eq!(sexp(&s.inlines(&b, chunk.id).unwrap()), "Emph[13..16 c=14..15]");
+        assert_eq!(
+            sexp(&s.inlines(&b, chunk.id).unwrap()),
+            "Emph[13..16 c=14..15]"
+        );
     }
 
     #[test]
@@ -1036,9 +1273,33 @@ mod tests {
         assert_eq!(
             got,
             [
-                (BlockKind::ListItem { ordered: false, depth: 0, task: None }, 0, 1),
-                (BlockKind::ListItem { ordered: false, depth: 1, task: None }, 1, 2),
-                (BlockKind::ListItem { ordered: false, depth: 0, task: None }, 2, 3),
+                (
+                    BlockKind::ListItem {
+                        ordered: false,
+                        depth: 0,
+                        task: None
+                    },
+                    0,
+                    1
+                ),
+                (
+                    BlockKind::ListItem {
+                        ordered: false,
+                        depth: 1,
+                        task: None
+                    },
+                    1,
+                    2
+                ),
+                (
+                    BlockKind::ListItem {
+                        ordered: false,
+                        depth: 0,
+                        task: None
+                    },
+                    2,
+                    3
+                ),
             ]
         );
     }
@@ -1064,10 +1325,7 @@ mod tests {
         b.edit(4, 4, "  b\n");
         s.reparse(&b, 1, 1, 2);
         assert_eq!(s.blocks().len(), 1);
-        assert_eq!(
-            (s.blocks()[0].start_line, s.blocks()[0].end_line),
-            (0, 2)
-        );
+        assert_eq!((s.blocks()[0].start_line, s.blocks()[0].end_line), (0, 2));
     }
 
     #[test]
@@ -1176,7 +1434,11 @@ mod tests {
         let kinds: Vec<_> = s.blocks().iter().map(|b| b.kind.clone()).collect();
         assert_eq!(
             kinds,
-            [BlockKind::Paragraph, BlockKind::FootnoteDef, BlockKind::Paragraph]
+            [
+                BlockKind::Paragraph,
+                BlockKind::FootnoteDef,
+                BlockKind::Paragraph
+            ]
         );
         let def = &s.blocks()[1];
         assert_eq!((def.start_line, def.end_line), (2, 4));
@@ -1319,9 +1581,156 @@ mod tests {
         let off = b.len() - 5; // `/old` 起点
         b.edit(off, off + 4, "/new");
         s.reparse(&b, 2, 3, 3);
-        let p = s.blocks().iter().find(|x| x.kind == BlockKind::Paragraph).unwrap();
+        let p = s
+            .blocks()
+            .iter()
+            .find(|x| x.kind == BlockKind::Paragraph)
+            .unwrap();
         let nodes = s.inlines(&b, p.id).unwrap();
         let url = nodes[0].url.unwrap();
         assert_eq!(&b.slice(0, b.len())[url.start..url.end], "/new");
+    }
+
+    // ===== N3c：`==高亮==` 的跨行/表格边界 =====
+
+    #[test]
+    fn highlight_is_confined_to_one_line() {
+        let b = Buffer::new("==a\nb==\n");
+        let s = Syntax::new(&b);
+        let p = s.blocks()[0].id;
+        let nodes = s.inlines(&b, p).unwrap();
+        assert!(
+            nodes.iter().all(|n| n.kind != InlineKind::Highlight),
+            "跨行不得识别为高亮"
+        );
+    }
+
+    #[test]
+    fn highlight_inside_table_cell() {
+        let b = Buffer::new("| a |\n| --- |\n| ==x== |\n");
+        let s = Syntax::new(&b);
+        let id = s.blocks()[0].id;
+        let t = s.table(&b, id).unwrap();
+        let kinds: Vec<InlineKind> = t.rows[0][0]
+            .inlines
+            .iter()
+            .map(|n| n.kind.clone())
+            .collect();
+        assert_eq!(kinds, vec![InlineKind::Highlight], "表格单元格内同样生效");
+    }
+
+    // ===== N3b：自定义 Callout 分类 =====
+
+    fn registry() -> CalloutRegistry {
+        CalloutRegistry::from_json(
+            r##"[{"name":"FIXME","label":"待修复","color":"#c00","icon":"!"}]"##,
+        )
+    }
+
+    #[test]
+    fn custom_callout_is_classified_when_configured() {
+        let b = Buffer::new("> [!FIXME] 内容\n> 第二行\n");
+        let s = Syntax::new_with_callouts(&b, &registry());
+        match &s.blocks()[0].kind {
+            BlockKind::Callout(c) => {
+                assert_eq!(c.name, "fixme");
+                assert_eq!(c.label, "待修复");
+                assert_eq!(c.color, [204, 0, 0]);
+            }
+            other => panic!("应分类为 Callout: {other:?}"),
+        }
+        // inline 仍按引用块口径（剥 `>`）：`[!FIXME]` 不是行内节点，内容文本照常解析
+        let nodes = s.inlines(&b, s.blocks()[0].id).unwrap();
+        assert!(
+            nodes.iter().all(|n| !n.range.is_empty()),
+            "inline 区间不得为空"
+        );
+    }
+
+    #[test]
+    fn custom_callout_name_is_case_insensitive() {
+        let b = Buffer::new("> [!fixme] x\n");
+        let s = Syntax::new_with_callouts(&b, &registry());
+        assert!(matches!(&s.blocks()[0].kind, BlockKind::Callout(c) if c.name == "fixme"));
+    }
+
+    #[test]
+    fn unknown_callout_falls_back_to_blockquote() {
+        for src in ["> [!BOGUS] x\n", "> [!NOTE2] x\n"] {
+            let s = Syntax::new_with_callouts(&Buffer::new(src), &registry());
+            assert_eq!(
+                s.blocks()[0].kind,
+                BlockKind::BlockQuote,
+                "未知类型回退普通引用块: {src}"
+            );
+        }
+    }
+
+    #[test]
+    fn builtin_alerts_win_over_custom_registry() {
+        let b = Buffer::new("> [!NOTE] x\n");
+        let s = Syntax::new_with_callouts(&b, &registry());
+        assert_eq!(
+            s.blocks()[0].kind,
+            BlockKind::Admonition(AdmonitionType::Note)
+        );
+    }
+
+    #[test]
+    fn five_builtin_alert_types_and_warn_alias() {
+        for (src, ty) in [
+            ("> [!NOTE] x\n", AdmonitionType::Note),
+            ("> [!TIP] x\n", AdmonitionType::Tip),
+            ("> [!IMPORTANT] x\n", AdmonitionType::Important),
+            ("> [!WARNING] x\n", AdmonitionType::Warning),
+            ("> [!CAUTION] x\n", AdmonitionType::Caution),
+            ("> [!warn] x\n", AdmonitionType::Warning),
+            ("> [!caution] x\n", AdmonitionType::Caution),
+        ] {
+            let s = Syntax::new(&Buffer::new(src));
+            assert_eq!(
+                s.blocks()[0].kind,
+                BlockKind::Admonition(ty),
+                "内置类型识别（大小写不敏感 + WARN 别名）: {src}"
+            );
+        }
+    }
+
+    #[test]
+    fn builtin_callout_visual_tokens_are_distinct() {
+        // 每种都有统一图标 / 强调色；互不重复，便于真机区分。
+        let all = [
+            AdmonitionType::Note,
+            AdmonitionType::Tip,
+            AdmonitionType::Important,
+            AdmonitionType::Warning,
+            AdmonitionType::Caution,
+        ];
+        let mut names: Vec<&str> = all.iter().map(|t| t.name()).collect();
+        let n = names.len();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), n, "类型名唯一（CSS 类名不冲突）");
+        let mut colors: Vec<[u8; 3]> = all.iter().map(|t| t.color()).collect();
+        colors.sort_unstable();
+        colors.dedup();
+        assert_eq!(colors.len(), n, "五种强调色唯一");
+        assert!(all
+            .iter()
+            .all(|t| !t.icon().is_empty() && !t.label().is_empty()));
+    }
+
+    #[test]
+    fn custom_callout_survives_incremental_reparse() {
+        let mut b = Buffer::new("> [!FIXME] x\n");
+        let mut s = Syntax::new_with_callouts(&b, &registry());
+        // 在正文末尾追加字符（同块内编辑，首行标记不变）
+        let at = b.len() - 2;
+        b.edit(at, at, "!");
+        s.reparse(&b, 0, 1, 1);
+        assert!(
+            matches!(&s.blocks()[0].kind, BlockKind::Callout(c) if c.name == "fixme"),
+            "重解析后仍为自定义 Callout"
+        );
     }
 }

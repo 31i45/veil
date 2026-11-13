@@ -13,12 +13,13 @@ use cosmic_text::{
     Attrs, Buffer, Color, Cursor, Family, FontSystem, Metrics, Shaping, Style as FontStyle,
     SwashCache, Weight, Wrap,
 };
-use veil_core::{task_span, BlockKind, InlineKind, InlineNode, Range};
+use veil_core::{task_span, BlockKind, HtmlTag, InlineKind, InlineNode, Range};
 
 use super::highlight::{highlight, to_styles};
 use super::linebreak;
 use super::style::{style_spans, Style};
 use crate::geometry::{BASE_FONT_SIZE, BASE_LINE_HEIGHT};
+use crate::i18n::{t, tf, Key};
 use crate::theme::{DocFontFamily, SyntaxColors, Theme};
 use crate::tokens::typography;
 
@@ -76,9 +77,9 @@ pub(crate) const MAX_RASTER_PX: usize = 24_000_000;
 
 /// 超限提示文案：由绘制层画在内容之后，明确告知「未渲染」而非静默截断。
 pub(crate) fn oversize_notice(full_len: usize) -> String {
-    format!(
-        "该块约 {:.1} MB，超出单块渲染上限，后续内容未渲染；源码完整保留",
-        full_len as f64 / (1024.0 * 1024.0)
+    tf(
+        Key::BlockOversizeNotice,
+        &[&format!("{:.1}", full_len as f64 / (1024.0 * 1024.0))],
     )
 }
 
@@ -111,6 +112,43 @@ fn cap_body(body: &str) -> (&str, bool) {
         }
     }
     (&body[..end], true)
+}
+
+/// 图片显示尺寸（B4）：宽 ≤ `max_w`、高 ≤ `max_h`，等比缩放且绝不放大。
+/// 至少 1px；两轴独立取整会有 ≤1px 的比例误差（与既有 `fit_size` 同口径）。
+pub(crate) fn fit_size_box(w: u32, h: u32, max_w: f32, max_h: f32) -> (u32, u32) {
+    let w = w.max(1) as f32;
+    let h = h.max(1) as f32;
+    let s = (max_w / w).min(max_h.max(1.0) / h).min(1.0);
+    (
+        (w * s).round().max(1.0) as u32,
+        (h * s).round().max(1.0) as u32,
+    )
+}
+
+/// 独占一行的图片（块级 / 段落仅含图片）：块文本剥掉全部图片节点源码后只剩空白。
+/// `img_ranges` 为文档绝对区间；`text` 是 `block` 区间内的块文本。
+pub(crate) fn block_is_image_only(text: &str, block: Range, img_ranges: &[Range]) -> bool {
+    if img_ranges.is_empty() {
+        return false;
+    }
+    let mut keep = String::new();
+    let mut pos = 0usize;
+    let mut ranges: Vec<Range> = img_ranges.to_vec();
+    ranges.sort_by_key(|r| r.start);
+    for r in ranges {
+        let s = r.start.saturating_sub(block.start).min(text.len());
+        let e = r.end.saturating_sub(block.start).min(text.len());
+        if !(text.is_char_boundary(s) && text.is_char_boundary(e)) || s < pos || s >= e {
+            continue;
+        }
+        keep.push_str(&text[pos..s]);
+        pos = e;
+    }
+    if pos < text.len() {
+        keep.push_str(&text[pos..]);
+    }
+    keep.trim().is_empty()
 }
 
 /// 替换段：块相对 doc 区间 `[doc_start, doc_end)` → `fill` 文本。
@@ -183,7 +221,10 @@ impl OffsetMap {
                 match (a.doc_end == a.doc_start, b.doc_end == b.doc_start) {
                     (true, false) => std::cmp::Ordering::Less,
                     (false, true) => std::cmp::Ordering::Greater,
-                    _ => b.doc_end.cmp(&a.doc_end),
+                    _ => b
+                        .doc_end
+                        .cmp(&a.doc_end)
+                        .then_with(|| b.fill.len().cmp(&a.fill.len())),
                 }
             })
         });
@@ -357,9 +398,42 @@ struct BlockDecor {
     suffix_len: usize,
 }
 
+/// 前置装饰（文本之下绘制）类别：mark 底色 / kbd 圆角边框 / 行内代码底色。
+/// 装饰区间为块相对 doc 坐标（与 strikes 同源），paint 层经 selection_rects 取物理矩形。
+/// 颜色在 paint 层按主题取（mark 浅黄、kbd 灰描边、code 主题 code_bg）。
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum UnderKind {
+    /// mark 底色（浅黄柔和色，按主题微调明度）。
+    MarkBg,
+    /// kbd 圆角边框（按键样式，1px 灰描边 + 浅灰底）。
+    KbdFrame,
+    /// 缺失/远程 `<img>` 的占位框（浅灰底 + 灰描边）。
+    ImagePlaceholder,
+    /// 行内代码底色（`` `x` `` / `<code>` / 行内 `<pre>`）：主题 code_bg + 轻微圆角。
+    InlineCodeBg,
+    /// `style="background-color:..."` 的自定义底色（取值由解析层校验）。
+    StyleBg([u8; 3]),
+}
+
+/// Sub/Sup 基线偏移物理像素：±4 逻辑像素按 DPI 缩放（正数下移 = sub，负数上移 = sup）。
+pub(crate) fn script_shift_px(shift: f32, scale: f32) -> f32 {
+    shift * 4.0 * scale
+}
+
+/// 后置装饰（文本之上绘制）类别：abbr 虚线下划线。
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum OverKind {
+    /// abbr 虚线下划线（提示可展开缩写）。
+    DottedUnderline,
+    /// `<u>` / `<ins>` / `text-decoration:underline` 的实线下划线。
+    Underline,
+    /// `text-decoration:overline` 的上划线。
+    Overline,
+}
+
 /// 单块排版结果。`line_bases[i]` = 第 i 个逻辑行在排版文本（layout 坐标）中的起始字节偏移。
 pub struct BlockLayout {
-    buffer: Buffer,
+    pub(crate) buffer: Buffer,
     map: OffsetMap,
     line_bases: Vec<usize>,
     /// 排版文本（`\r` 与隐藏标记已剥除）：Reveal 行为的直接观测量。
@@ -369,6 +443,15 @@ pub struct BlockLayout {
     pub imgs: Vec<PlacedImg>,
     /// 删除线区间（块相对 doc 坐标，含标记；paint 层经 selection_rects 取可视矩形）。
     pub strikes: Vec<(usize, usize)>,
+    /// 前置装饰（文本光栅之下绘制）：块相对 doc 坐标 + 装饰类别。
+    /// 含 mark 底色、kbd 圆角边框；用 selection_rects 取物理矩形。
+    pub decorations_under: Vec<(usize, usize, UnderKind)>,
+    /// 后置装饰（文本光栅之上绘制）：块相对 doc 坐标 + 装饰类别。
+    /// 含 abbr 虚线下划线；strikethrough 沿用 strikes 字段。
+    pub decorations_over: Vec<(usize, usize, OverKind)>,
+    /// Sub/Sup 基线偏移区间（**layout 坐标**，(start, end, 物理像素 dy)）：
+    /// 光栅化时按字形起点命中，正数下移（sub）、负数上移（sup）。
+    pub script_ranges: Vec<(usize, usize, f32)>,
     /// 全部行内节点区间（**块相对坐标**，先序遍历）：Reveal 激活指纹的输入。
     /// 用相对坐标而非文档绝对坐标，保证块整体平移（增量重解析保留 id）后指纹仍平移不变。
     node_ranges: Vec<Range>,
@@ -397,7 +480,7 @@ impl BlockLayout {
         let inside = block.start <= caret && caret <= block.end;
         let rel = if inside { caret - block.start } else { 0 };
         match kind {
-            BlockKind::BlockQuote | BlockKind::Admonition(_) => {
+            BlockKind::BlockQuote | BlockKind::Admonition(_) | BlockKind::Callout(_) => {
                 // 引用/提示块按行：line=0 即块外，天然区分「块外」与「块内任意行」。
                 let line = if inside {
                     self.source_newlines.partition_point(|&o| o < rel) as u64 + 1
@@ -443,18 +526,16 @@ fn fnv(h: &mut u64, v: u64) {
 /// 块级字号相对正文的额外倍率：代码块 14/16，其余 1.0。
 fn kind_scale(kind: &BlockKind) -> f32 {
     match kind {
-        BlockKind::FencedCode(_) | BlockKind::IndentedCode | BlockKind::HtmlBlock | BlockKind::FrontMatter(_) => {
-            typography::CODE_SCALE
-        }
+        BlockKind::FencedCode(_)
+        | BlockKind::IndentedCode
+        | BlockKind::HtmlBlock
+        | BlockKind::FrontMatter(_) => typography::CODE_SCALE,
         _ => 1.0,
     }
 }
 
 /// 按序返回第一个可用族：探测函数由调用方注入，便于无系统字体依赖地测试。
-fn pick_family<'a>(
-    candidates: &'a [&'a str],
-    available: impl Fn(&str) -> bool,
-) -> Option<&'a str> {
+fn pick_family<'a>(candidates: &'a [&'a str], available: impl Fn(&str) -> bool) -> Option<&'a str> {
     candidates.iter().copied().find(|name| available(name))
 }
 
@@ -475,7 +556,10 @@ pub(super) fn doc_family(font: DocFontFamily) -> Option<Family<'static>> {
 /// cosmic-text 的默认族（Open Sans / Noto Sans Mono）在 Windows 上通常不存在，
 /// 汉字会走各自回退，造成「`#` 与汉字不同族」。这里按 `typography` 的回退链
 /// 探测存在的族后显式设置；候选全部缺失时保持 fontdb 默认。
-fn new_font_system() -> FontSystem {
+///
+/// 返回同时给出探测到的等宽族名：generic `Monospace` 的回退链会先耗尽等宽候选，
+/// 旧 CJK 等宽字体（如 MS Gothic）会截走 Han，因此代码文本改用显式族名（N9）。
+fn new_font_system() -> (FontSystem, Option<&'static str>) {
     let mut fs = FontSystem::new();
     let (sans, mono) = {
         let db = fs.db_mut();
@@ -497,7 +581,7 @@ fn new_font_system() -> FontSystem {
     if let Some(family) = mono {
         db.set_monospace_family(family);
     }
-    fs
+    (fs, mono)
 }
 pub struct LayoutEngine {
     font_system: FontSystem,
@@ -510,6 +594,9 @@ pub struct LayoutEngine {
     doc_line_height: f32,
     /// 正文字体族（仅正文/表格文本生效，UI chrome 恒用既有字阶）。
     doc_font: DocFontFamily,
+    /// 启动时探测到的等宽族名：代码/行内代码显式指定，避免 generic Monospace 的
+    /// 等宽候选链截走 Han（N9）。
+    mono_family: Option<&'static str>,
     /// 代码块语法高亮色板（随主题切换更新）。
     syntax: SyntaxColors,
     /// 链接前景色（随主题切换更新）。
@@ -524,13 +611,15 @@ impl Default for LayoutEngine {
 
 impl LayoutEngine {
     pub fn new() -> Self {
+        let (font_system, mono_family) = new_font_system();
         LayoutEngine {
-            font_system: new_font_system(),
+            font_system,
             swash: SwashCache::new(),
             scale: 1.0,
             doc_font_size: BASE_FONT_SIZE,
             doc_line_height: BASE_LINE_HEIGHT,
             doc_font: DocFontFamily::System,
+            mono_family,
             syntax: SyntaxColors::default_light(),
             link_color: Theme::light().link,
         }
@@ -540,12 +629,7 @@ impl LayoutEngine {
     ///
     /// 启动读配置后调用一次，必须在任何排版之前完成；派生缓存键只含版心宽/DPI/主题等，
     /// 本参数在会话内固定，故无需额外失效（详见 view::cache 的键说明）。
-    pub fn set_doc_typography(
-        &mut self,
-        font_size: f32,
-        line_height: f32,
-        font: DocFontFamily,
-    ) {
+    pub fn set_doc_typography(&mut self, font_size: f32, line_height: f32, font: DocFontFamily) {
         self.doc_font_size = font_size.max(1.0);
         self.doc_line_height = line_height.max(1.0);
         self.doc_font = font;
@@ -564,6 +648,11 @@ impl LayoutEngine {
     /// 当前正文字体族（表格单元格排版复用）。
     pub(crate) fn doc_font(&self) -> DocFontFamily {
         self.doc_font
+    }
+
+    /// 启动时探测到的等宽族名（代码块/行内代码排版复用；N9）。
+    pub(crate) fn mono_family(&self) -> Option<&'static str> {
+        self.mono_family
     }
 
     /// 更新语法高亮色板（主题切换时调用）。
@@ -604,6 +693,7 @@ impl LayoutEngine {
             self.doc_font_size * self.scale,
             self.doc_line_height * self.scale,
             doc_family(self.doc_font),
+            Weight::NORMAL,
         )
     }
 
@@ -614,6 +704,18 @@ impl LayoutEngine {
             typography::UI_SIZE * self.scale,
             typography::UI_LINE_HEIGHT * self.scale,
             None,
+            Weight::NORMAL,
+        )
+    }
+
+    /// 模态标题排版：比 UI 正文大一档并加粗，与正文共用同一 shaping/光栅路径。
+    pub(crate) fn layout_ui_title(&mut self, text: &str) -> BlockLayout {
+        self.layout_single(
+            text,
+            typography::DIALOG_TITLE_SIZE * self.scale,
+            crate::tokens::surface::dialog_title_line_height(self.scale),
+            None,
+            Weight::SEMIBOLD,
         )
     }
 
@@ -624,6 +726,7 @@ impl LayoutEngine {
         size: f32,
         line_height: f32,
         family: Option<Family<'static>>,
+        weight: Weight,
     ) -> BlockLayout {
         let metrics = Metrics::new(size, line_height);
         let block = Range {
@@ -634,8 +737,8 @@ impl LayoutEngine {
             build_layout_text(text, block, &[], usize::MAX, &[], true, false);
         let mut buffer = Buffer::new(&mut self.font_system, metrics);
         let attrs = match family {
-            Some(family) => Attrs::new().family(family),
-            None => Attrs::new(),
+            Some(family) => Attrs::new().family(family).weight(weight),
+            None => Attrs::new().weight(weight),
         };
         buffer.set_text(&layout_text, &attrs, Shaping::Advanced, None);
         buffer.set_size(None, None);
@@ -652,6 +755,9 @@ impl LayoutEngine {
             height,
             imgs: Vec::new(),
             strikes: Vec::new(),
+            decorations_under: Vec::new(),
+            decorations_over: Vec::new(),
+            script_ranges: Vec::new(),
             node_ranges: Vec::new(),
             img_ranges: Vec::new(),
             source_newlines,
@@ -663,6 +769,17 @@ impl LayoutEngine {
     /// 单行文本度量（宽, 高）：仅 shape 不 rasterize，供浮层/模态按内容定宽与折行。
     pub(crate) fn measure(&mut self, text: &str) -> (f32, f32) {
         let layout = self.layout_ui(text);
+        let w = layout
+            .buffer
+            .layout_runs()
+            .map(|r| r.line_w)
+            .fold(0.0, f32::max);
+        (w, layout.height)
+    }
+
+    /// 模态标题度量：与 `layout_ui_title` 同源，保证卡片宽度与上屏宽度一致。
+    pub(crate) fn measure_title(&mut self, text: &str) -> (f32, f32) {
+        let layout = self.layout_ui_title(text);
         let w = layout
             .buffer
             .layout_runs()
@@ -694,7 +811,16 @@ impl LayoutEngine {
     ) -> BlockLayout {
         // 无编号表的调用方（打印等）降级：定义标记仍消隐，引用保留 `[^id]` 原文。
         self.layout_block_with_footnotes(
-            kind, text, block, inlines, width, caret, imgs, reveal_all, None,
+            kind,
+            text,
+            block,
+            inlines,
+            width,
+            caret,
+            imgs,
+            reveal_all,
+            None,
+            &[],
         )
     }
 
@@ -711,6 +837,7 @@ impl LayoutEngine {
         imgs: &[InlineImg],
         reveal_all: bool,
         footnotes: Option<&FootnoteCtx>,
+        folds: &[InlineFold],
     ) -> BlockLayout {
         let full = text.strip_suffix('\n').unwrap_or(text);
         // 单块上限（v0）：只排前缀，超出部分不参与成形/光栅，避免内存放大
@@ -725,6 +852,8 @@ impl LayoutEngine {
             self.measure_nbsp(metrics)
         };
         let mut kept: Vec<&InlineImg> = Vec::new();
+        // 缺失/远程 `<img>` 的占位文本区间（块相对 doc 坐标），供 paint 画占位框。
+        let mut img_placeholders: Vec<(usize, usize)> = Vec::new();
         // 脚注引用 `[^id]` → `[n]` 的替换区间（块相对 doc 坐标），供 style_spans 之后染链接色。
         let mut footnote_links: Vec<(usize, usize)> = Vec::new();
         // 脚注定义块的编号前缀 / 块末 ↩ 装饰（不来自源码区间，需单独补样式）。
@@ -760,6 +889,29 @@ impl LayoutEngine {
                 subs.push(Sub::fill(rs, re, "\u{A0}".repeat(nbsp)));
                 kept.push(im);
             }
+            // `<br>` 硬换行：void 自闭合标签，整段（<br> 或 <br/>）替换为单个 \n。
+            // 与 img 占位同源：br range 在 block 绝对坐标，转块相对后入 subs；
+            // OffsetMap::from_spans 按起点排序归并，若与已有 subs 重叠（罕见）则按包含判定丢弃。
+            collect_br_subs(inlines, block, &mut subs);
+            // `<q>` 双引号：非激活态在内容两端插入可见引号（激活态显源码，不插）。
+            collect_q_subs(inlines, block, caret, &mut subs);
+            // `<img>` 无可用位图（远程 src 被解析层置空 / 本地缺失 / 加载失败）时，
+            // 整段替换为 `[alt]` 文本占位，并登记占位框装饰（paint 画浅灰底）。
+            collect_html_img_subs(
+                inlines,
+                block,
+                caret,
+                &kept,
+                &mut subs,
+                &mut img_placeholders,
+            );
+            // 行内 `<details>` 折叠（B3）：收起态的正文整段消隐；标签本身由
+            // `collect_elide` 按行内 HTML 规则消隐，故不出现裸标签。
+            for f in folds {
+                if !f.expanded && f.body.0 < f.body.1 {
+                    subs.push(Sub::elide(f.body.0, f.body.1));
+                }
+            }
         }
         let apply_cjk = !matches!(
             kind,
@@ -767,6 +919,9 @@ impl LayoutEngine {
                 | BlockKind::IndentedCode
                 | BlockKind::Math
                 | BlockKind::Table
+                // Details 内是整块源码文本，标签消隐后不应在 CJK↔ASCII 边界补空格，
+                // 否则 summary 首字前会多出一个游标空格。
+                | BlockKind::Details { .. }
         );
         let (layout_text, map, line_bases, source_newlines) =
             build_layout_text(body, block, inlines, caret, &subs, apply_cjk, reveal_all);
@@ -790,7 +945,14 @@ impl LayoutEngine {
             .collect();
         img_ranges.sort_by_key(|r| (r.start, r.end));
         let mut buffer = Buffer::new(&mut self.font_system, metrics);
-        let default_attrs = attrs_of(kind.clone(), Style::default(), self.link_color, self.doc_font);
+        let default_attrs = attrs_of(
+            kind.clone(),
+            Style::default(),
+            self.link_color,
+            self.doc_font,
+            self.mono_family,
+            metrics.font_size,
+        );
         // style_spans 产出文档坐标，经映射转 layout 坐标；整体落入消隐/占位区的 span 零宽丢弃。
         // 占位 NBSP 区无样式来源，显式补默认样式 span（cosmic 排版文本 = 各 span 顺次拼接，
         // 覆盖必须完备且有序）；指针序即 layout 偏移序。
@@ -810,7 +972,17 @@ impl LayoutEngine {
         for &(s, e, st) in &style_segments {
             let (ls, le) = (map.doc_to_layout(s), map.doc_to_layout(e));
             if ls < le {
-                spans.push((&layout_text[ls..le], attrs_of(kind.clone(), st, self.link_color, self.doc_font)));
+                spans.push((
+                    &layout_text[ls..le],
+                    attrs_of(
+                        kind.clone(),
+                        st,
+                        self.link_color,
+                        self.doc_font,
+                        self.mono_family,
+                        metrics.font_size,
+                    ),
+                ));
             }
         }
         // 装饰 span：前缀 `n. `（muted）与块末 `↩`（链接色）由插入段产生，
@@ -823,7 +995,17 @@ impl LayoutEngine {
                     color: footnotes.map(FootnoteCtx::muted),
                     ..Default::default()
                 };
-                spans.push((&layout_text[ls..le], attrs_of(kind.clone(), st, self.link_color, self.doc_font)));
+                spans.push((
+                    &layout_text[ls..le],
+                    attrs_of(
+                        kind.clone(),
+                        st,
+                        self.link_color,
+                        self.doc_font,
+                        self.mono_family,
+                        metrics.font_size,
+                    ),
+                ));
             }
         }
         if decor.suffix_len > 0 {
@@ -834,13 +1016,68 @@ impl LayoutEngine {
                     link: true,
                     ..Default::default()
                 };
-                spans.push((&layout_text[ls..le], attrs_of(kind.clone(), st, self.link_color, self.doc_font)));
+                spans.push((
+                    &layout_text[ls..le],
+                    attrs_of(
+                        kind.clone(),
+                        st,
+                        self.link_color,
+                        self.doc_font,
+                        self.mono_family,
+                        metrics.font_size,
+                    ),
+                ));
             }
         }
+        // B4：图片高度参与行高。图高于正文行高时，把占位区间的 attrs 的 line_height
+        // 抬到图高（cosmic-text 逐 span metrics），该视觉行整体变高 → 后续行/光标/
+        // 命中随之下移，不会与图片重叠。占位区间可能与既有样式 span 重叠，故先按
+        // 图片区间切分基础 span（图片 attrs 优先），避免重复 span 被 cosmic 丢弃。
+        let mut img_specs: Vec<(usize, usize, Attrs)> = Vec::new();
         for im in &kept {
             let ls = map.doc_to_layout(im.range.start.saturating_sub(block.start));
             let ll = map.doc_to_layout(im.range.end.saturating_sub(block.start)) - ls;
-            spans.push((&layout_text[ls..ls + ll], default_attrs.clone()));
+            let img_metrics = if im.height as f32 > metrics.line_height {
+                Metrics::new(metrics.font_size, im.height as f32)
+            } else {
+                metrics
+            };
+            img_specs.push((ls, ls + ll, default_attrs.clone().metrics(img_metrics)));
+        }
+        if !img_specs.is_empty() {
+            let base = layout_text.as_ptr() as usize;
+            let mut out: Vec<(&str, Attrs)> = Vec::new();
+            for (txt, at) in spans.drain(..) {
+                let s = txt.as_ptr() as usize - base;
+                let mut pieces = vec![(s, s + txt.len(), at)];
+                for (is, ie, iat) in &img_specs {
+                    let mut next = Vec::new();
+                    for (ps, pe, pat) in pieces {
+                        if *ie <= ps || *is >= pe {
+                            next.push((ps, pe, pat));
+                            continue;
+                        }
+                        if ps < *is {
+                            next.push((ps, *is, pat.clone()));
+                        }
+                        let (os, oe) = (ps.max(*is), pe.min(*ie));
+                        if os < oe {
+                            next.push((os, oe, iat.clone()));
+                        }
+                        if pe > *ie {
+                            next.push((*ie, pe, pat));
+                        }
+                    }
+                    pieces = next;
+                }
+                for (ps, pe, pat) in pieces {
+                    out.push((&layout_text[ps..pe], pat));
+                }
+            }
+            for (is, ie, at) in &img_specs {
+                out.push((&layout_text[*is..*ie], at.clone()));
+            }
+            spans = out;
         }
         if spans.is_empty() {
             spans.push(("", default_attrs.clone())); // 空行也需默认样式
@@ -919,6 +1156,15 @@ impl LayoutEngine {
             });
         }
         probe_break_violations(&buffer, false);
+        // Sub/Sup 基线偏移：doc 坐标经 OffsetMap 转 layout 坐标（光栅按字形起点命中）。
+        let script_ranges: Vec<(usize, usize, f32)> = style_segments
+            .iter()
+            .filter_map(|&(s, e, st)| {
+                let shift = st.baseline_shift?;
+                let (ls, le) = (map.doc_to_layout(s), map.doc_to_layout(e));
+                (ls < le).then_some((ls, le, script_shift_px(shift, self.scale)))
+            })
+            .collect();
         BlockLayout {
             buffer,
             map,
@@ -931,6 +1177,51 @@ impl LayoutEngine {
                 .filter(|(_, _, st)| st.strikethrough)
                 .map(|&(s, e, _)| (s, e))
                 .collect(),
+            // 前置装饰：行内代码底色 / mark 底色 / kbd 圆角边框（按此顺序叠，后者覆盖前者）；
+            // 块相对 doc 坐标，paint 层用 selection_rects 取物理矩形。
+            decorations_under: style_segments
+                .iter()
+                .flat_map(|&(s, e, st)| {
+                    let mut out: Vec<(usize, usize, UnderKind)> = Vec::new();
+                    if st.code_bg {
+                        out.push((s, e, UnderKind::InlineCodeBg));
+                    }
+                    if st.mark_bg.is_some() {
+                        out.push((s, e, UnderKind::MarkBg));
+                    }
+                    if st.kbd_frame {
+                        out.push((s, e, UnderKind::KbdFrame));
+                    }
+                    if let Some(bg) = st.bg {
+                        out.push((s, e, UnderKind::StyleBg(bg)));
+                    }
+                    out
+                })
+                .chain(
+                    img_placeholders
+                        .iter()
+                        .map(|&(s, e)| (s, e, UnderKind::ImagePlaceholder)),
+                )
+                .collect(),
+            // 后置装饰：abbr 虚线下划线 / 实线下划线 / 上划线；画在文本光栅之上。
+            decorations_over: style_segments
+                .iter()
+                .flat_map(|&(s, e, st)| {
+                    let mut out: Vec<(usize, usize, OverKind)> = Vec::new();
+                    if st.dotted_underline {
+                        out.push((s, e, OverKind::DottedUnderline));
+                    }
+                    if st.underline {
+                        out.push((s, e, OverKind::Underline));
+                    }
+                    if st.overline {
+                        out.push((s, e, OverKind::Overline));
+                    }
+                    out
+                })
+                .collect(),
+            // Sub/Sup 基线偏移区间（layout 坐标），供光栅化施加 y 偏移。
+            script_ranges,
             node_ranges,
             img_ranges,
             source_newlines,
@@ -1063,17 +1354,20 @@ impl LayoutEngine {
     /// 光栅化为 RGBA8（straight alpha，src-over 混合到透明底）。`color` 为默认文字色。
     /// 已知简化：彩色 emoji（swash 预乘输出）按 straight 处理，边缘或有轻微杂边。
     pub fn rasterize(&mut self, layout: &BlockLayout, color: [u8; 3]) -> (Vec<u8>, u32, u32) {
-        self.rasterize_buffer(&layout.buffer, layout.height, color)
+        self.rasterize_buffer_scripts(&layout.buffer, layout.height, color, &layout.script_ranges)
     }
 
-    /// 光栅化任意已排版 buffer（表格单元格复用同一 path）；`height` 为排版高（物理像素）。
+    /// 光栅化任意已排版 buffer（表格单元格复用同一 path）。`height` 为排版高（物理像素）。
     /// 悬挂标点 v0 在此生效：满行末字为闭标点时光栅右移半字宽（排版几何不变，
     /// caret/命中/选区仍按未位移坐标——光标落在标点之后恰与位移后墨缘对齐）。
-    pub(crate) fn rasterize_buffer(
+    /// 带 Sub/Sup 基线偏移的光栅化：`scripts` 为 layout 字节区间 → 物理像素 dy
+    /// （正数下移 sub，负数上移 sup）。字形起点落入区间即施加偏移。
+    pub(crate) fn rasterize_buffer_scripts(
         &mut self,
         buffer: &Buffer,
         height: f32,
         color: [u8; 3],
+        scripts: &[(usize, usize, f32)],
     ) -> (Vec<u8>, u32, u32) {
         let width_opt = buffer.size().0;
         let mut max_w: f32 = 0.0;
@@ -1101,7 +1395,11 @@ impl LayoutEngine {
             for (i, g) in run.glyphs.iter().enumerate() {
                 let shift = if Some(i) == hi { dx } else { 0.0 };
                 let base = g.color_opt.map(|c| [c.r(), c.g(), c.b()]).unwrap_or(color);
-                let physical = g.physical((shift, run.line_y), 1.0);
+                let script_dy = scripts
+                    .iter()
+                    .find(|(s, e, _)| *s <= g.start && g.start < *e)
+                    .map_or(0.0, |&(_, _, dy)| dy);
+                let physical = g.physical((shift, run.line_y + script_dy), 1.0);
                 let fs = &mut self.font_system;
                 let key_color = Color::rgb(base[0], base[1], base[2]);
                 self.swash
@@ -1129,9 +1427,21 @@ impl LayoutEngine {
 fn hangable_end(ch: char) -> bool {
     matches!(
         ch,
-        '\u{3002}' | '\u{3001}' | '\u{FF0C}' | '\u{FF0E}' | '\u{FF1B}' | '\u{FF1A}'
-            | '\u{FF1F}' | '\u{FF01}' | '\u{FF09}' | '\u{3011}' | '\u{300B}' | '\u{300D}'
-            | '\u{300F}' | '\u{201D}' | '\u{2019}'
+        '\u{3002}'
+            | '\u{3001}'
+            | '\u{FF0C}'
+            | '\u{FF0E}'
+            | '\u{FF1B}'
+            | '\u{FF1A}'
+            | '\u{FF1F}'
+            | '\u{FF01}'
+            | '\u{FF09}'
+            | '\u{3011}'
+            | '\u{300B}'
+            | '\u{300D}'
+            | '\u{300F}'
+            | '\u{201D}'
+            | '\u{2019}'
     )
 }
 
@@ -1173,6 +1483,63 @@ fn hang_shift(run: &cosmic_text::LayoutRun, width_opt: Option<f32>) -> (f32, Opt
 /// 的「深层优先」规则裁决（见 `deep_active`），本函数只回答「区间是否覆盖 caret」。
 pub(crate) fn node_active(range: Range, caret: usize) -> bool {
     range.start <= caret && caret <= range.end
+}
+
+/// 行内 `<details>` 折叠区间（B3）：全部为**块相对**字节偏移。
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct InlineDetailsSpan {
+    /// `<details` 开标签的块内相对起点（折叠状态的稳定键）。
+    pub key: usize,
+    /// summary 可见内容区间（点击切换的命中区）。
+    pub summary: Option<(usize, usize)>,
+    /// 正文区间（summary 内容之后 → `</details>` 内容末尾）；收起时整段消隐。
+    pub body: (usize, usize),
+}
+
+/// 从行内节点树收集行内 `<details>` 折叠区间（块相对）。嵌套 details 一并收集。
+pub(crate) fn inline_details_spans(nodes: &[InlineNode], block: Range) -> Vec<InlineDetailsSpan> {
+    fn walk(nodes: &[InlineNode], block: Range, out: &mut Vec<InlineDetailsSpan>) {
+        for n in nodes {
+            if let InlineKind::Html {
+                tag: HtmlTag::Details,
+                ..
+            } = &n.kind
+            {
+                let content_s = n.content.start.saturating_sub(block.start);
+                let content_e = n.content.end.saturating_sub(block.start);
+                let summary = n.children.iter().find_map(|c| match &c.kind {
+                    InlineKind::Html {
+                        tag: HtmlTag::Summary,
+                        ..
+                    } => Some((
+                        c.content.start.saturating_sub(block.start),
+                        c.content.end.saturating_sub(block.start),
+                    )),
+                    _ => None,
+                });
+                let body = match summary {
+                    Some((_, ce)) => (ce, content_e),
+                    None => (content_s, content_e),
+                };
+                out.push(InlineDetailsSpan {
+                    key: n.range.start.saturating_sub(block.start),
+                    summary,
+                    body,
+                });
+            }
+            walk(&n.children, block, out);
+        }
+    }
+    let mut out = Vec::new();
+    walk(nodes, block, &mut out);
+    out
+}
+
+/// 单个行内 `<details>` 的排版折叠输入：`expanded == false` 时 body 整段消隐。
+#[derive(Clone, Copy, Debug)]
+pub struct InlineFold {
+    pub body: (usize, usize),
+    pub expanded: bool,
 }
 
 /// 深层节点优先：caret 落在本节点内、但不落在任何后代节点内时，本节点才显示标记。
@@ -1227,6 +1594,97 @@ fn collect_elide(nodes: &[InlineNode], block: Range, caret: usize, out: &mut Vec
     }
 }
 
+/// 行内代码 span 的块相对区间（含两端反引号标记）：CJK↔ASCII 自动间距的排除集。
+fn collect_code_spans(nodes: &[InlineNode], block: Range, out: &mut Vec<(usize, usize)>) {
+    for n in nodes {
+        if n.kind == InlineKind::Code {
+            let rs = n.range.start.saturating_sub(block.start);
+            let re = n.range.end.saturating_sub(block.start);
+            if rs < re {
+                out.push((rs, re));
+            }
+        }
+        collect_code_spans(&n.children, block, out);
+    }
+}
+
+/// 缺失/远程 `<img src alt>` 的占位替换：无可用位图时整段标签换成 `[alt]` 可见文本，
+/// 并登记占位区间供 paint 画浅灰占位框。可加载的本地图片走 `kept`（NBSP 占位 + 位图 blit）。
+fn collect_html_img_subs(
+    nodes: &[InlineNode],
+    block: Range,
+    caret: usize,
+    kept: &[&InlineImg],
+    out: &mut Vec<Sub>,
+    placeholders: &mut Vec<(usize, usize)>,
+) {
+    for n in nodes {
+        if let InlineKind::HtmlSelfClosed {
+            tag: HtmlTag::Img,
+            attrs,
+        } = &n.kind
+        {
+            // 激活态显源码：标签区间已不消隐，勿再替换成占位文本
+            let active = node_active(n.range, caret);
+            if !active && !kept.iter().any(|im| im.range == n.range) {
+                let rs = n.range.start.saturating_sub(block.start);
+                let re = n.range.end.saturating_sub(block.start);
+                if rs < re {
+                    let label = match attrs.alt.as_deref().filter(|a| !a.is_empty()) {
+                        Some(alt) => format!("[{alt}]"),
+                        None => t(Key::ImageAltFallback).to_string(),
+                    };
+                    out.push(Sub::fill(rs, re, label));
+                    placeholders.push((rs, re));
+                }
+            }
+        }
+        collect_html_img_subs(&n.children, block, caret, kept, out, placeholders);
+    }
+}
+
+/// `<br>` 硬换行替换：递归找全部 `HtmlSelfClosed(Br)` 节点，整段 range 替换为单个 `\n`。
+/// void 自闭合标签（`<br>` / `<br/>`）的 range 即为完整标签区间，无 children / content。
+/// 调用方只在 !reveal_all 时调用（源码模式显示原文，不做 HTML 断行替换）。
+fn collect_br_subs(nodes: &[InlineNode], block: Range, out: &mut Vec<Sub>) {
+    for n in nodes {
+        match &n.kind {
+            InlineKind::HtmlSelfClosed { tag, .. } if *tag == HtmlTag::Br => {
+                let rs = n.range.start.saturating_sub(block.start);
+                let re = n.range.end.saturating_sub(block.start);
+                if rs < re {
+                    out.push(Sub::fill(rs, re, "\n"));
+                }
+            }
+            _ => {}
+        }
+        collect_br_subs(&n.children, block, out);
+    }
+}
+
+/// `<q>` 双引号插入：非激活节点的内容两端各插入零宽 `“`/`”`。
+/// 与 [block::push_visible] 的表格可见文本口径一致（表格单元格同样补引号）。
+fn collect_q_subs(nodes: &[InlineNode], block: Range, caret: usize, out: &mut Vec<Sub>) {
+    for n in nodes {
+        if let InlineKind::Html {
+            tag: HtmlTag::Q, ..
+        } = &n.kind
+        {
+            if !node_active(n.range, caret) {
+                let cs = n.content.start.saturating_sub(block.start);
+                let ce = n.content.end.saturating_sub(block.start);
+                if cs < ce {
+                    out.push(Sub::insert(cs, "“"));
+                    out.push(Sub::insert(ce, "”"));
+                } else {
+                    out.push(Sub::insert(cs, "“”"));
+                }
+            }
+        }
+        collect_q_subs(&n.children, block, caret, out);
+    }
+}
+
 /// 脚注引用替换：非激活 `[^id]` → `[n]`，同时返回替换区间供样式层染链接色。
 /// `footnotes` 缺省或 id 无编号时**保留源码原文**：宁可露出 `[^id]`，
 /// 也不把未定义引用伪装成已编号（不背叛源码）。
@@ -1263,23 +1721,13 @@ fn footnote_ref_subs(
                     }
                 }
             }
-            walk(
-                &n.children,
-                block,
-                caret,
-                body,
-                footnotes,
-                subs,
-                links,
-            );
+            walk(&n.children, block, caret, body, footnotes, subs, links);
         }
     }
 
     let mut subs = Vec::new();
     let mut links = Vec::new();
-    walk(
-        nodes, block, caret, body, footnotes, &mut subs, &mut links,
-    );
+    walk(nodes, block, caret, body, footnotes, &mut subs, &mut links);
     (subs, links)
 }
 
@@ -1333,8 +1781,7 @@ fn with_link_spans(
 fn footnote_def_prefix(body: &str) -> Option<(usize, std::ops::Range<usize>)> {
     let indent = body.len() - body.trim_start_matches([' ', '\t']).len();
     let bytes = body.as_bytes();
-    if indent > 3 || bytes.get(indent) != Some(&b'[') || bytes.get(indent + 1) != Some(&b'^')
-    {
+    if indent > 3 || bytes.get(indent) != Some(&b'[') || bytes.get(indent + 1) != Some(&b'^') {
         return None;
     }
     let id_start = indent + 2;
@@ -1407,9 +1854,12 @@ fn is_cjk(ch: char) -> bool {
 
 /// 边界跳过：已存在空白/换行/全角空格 → 不再加间距。
 fn cjk_boundary_skip(prev: char, next: char) -> bool {
-    prev.is_whitespace() || next.is_whitespace()
-        || prev == '\n' || next == '\n'
-        || prev == '\r' || next == '\r'
+    prev.is_whitespace()
+        || next.is_whitespace()
+        || prev == '\n'
+        || next == '\n'
+        || prev == '\r'
+        || next == '\r'
         || (prev as u32) == 0x3000
         || (next as u32) == 0x3000
 }
@@ -1425,7 +1875,7 @@ fn is_glue_punct(ch: char) -> bool {
 /// 两趟产出互不重叠（间距在胶水字符两侧一律不注入），from_spans 可直接归并。
 /// 被包含在 elide/占位区的 sub 会被 from_spans 丢弃，
 /// 无需显式过滤（代码块、图片占位、行内公式标记都已在前一步进替换表）。
-fn build_typo_subs(body: &str) -> Vec<Sub> {
+fn build_typo_subs(body: &str, code_spans: &[(usize, usize)]) -> Vec<Sub> {
     let mut subs = Vec::new();
     // 第一趟：kinsoku 胶水段。左粘字符前插 WJ（文首/硬行首无需，与换行粘连本就无断点）、
     // 右粘字符后插 WJ（行尾同理）；WJ×/×WJ 禁断使 run 内不断、与相邻字不断。
@@ -1439,6 +1889,12 @@ fn build_typo_subs(body: &str) -> Vec<Sub> {
     while let Some((_i, ch)) = it.next() {
         let Some(&(j, next)) = it.peek() else { break };
         if is_glue_punct(ch) || is_glue_punct(next) {
+            continue;
+        }
+        // 行内代码 span（含两端反引号）内永不插间距：内容里的 CJK↔ASCII 边界
+        // 必须保持源码原样；而两端反引号标记处于消隐区间，若在此生成 fill，会与
+        // elide 同起点竞争并被优先采纳（fill 胜 elide），把反引号重新画出来。
+        if code_spans.iter().any(|&(s, e)| (s..e).contains(&j)) {
             continue;
         }
         if cjk_boundary_skip(ch, next) {
@@ -1503,7 +1959,8 @@ pub(crate) fn probe_break_violations(buffer: &Buffer, include_hard: bool) {
         let wrapped_end = if include_hard {
             i + 1 < runs.len()
         } else {
-            runs.get(i + 1).is_some_and(|next| next.line_i == run.line_i)
+            runs.get(i + 1)
+                .is_some_and(|next| next.line_i == run.line_i)
         };
         // 胶水保护的两种形态：
         // 1) 本 run 以 WJ 开头→断行点在 WJ 之前（cosmic 正确遵守 WJ 规则）
@@ -1523,11 +1980,13 @@ pub(crate) fn probe_break_violations(buffer: &Buffer, include_hard: bool) {
             .glyphs
             .iter()
             .find_map(|g| run.text.get(g.start..g.end)?.chars().find(|&c| visible(c)));
-        let last = run
-            .glyphs
-            .iter()
-            .rev()
-            .find_map(|g| run.text.get(g.start..g.end)?.chars().rev().find(|&c| visible(c)));
+        let last = run.glyphs.iter().rev().find_map(|g| {
+            run.text
+                .get(g.start..g.end)?
+                .chars()
+                .rev()
+                .find(|&c| visible(c))
+        });
         if let Some(c) = first {
             if wrapped_start && !skip_first && linebreak::forbidden_line_start(c) {
                 eprintln!(
@@ -1574,7 +2033,9 @@ fn build_layout_text(
     all.extend(elide.into_iter().map(|(s, e)| Sub::elide(s, e)));
     all.extend_from_slice(subs);
     if apply_cjk {
-        all.extend(build_typo_subs(body));
+        let mut code_spans = Vec::new();
+        collect_code_spans(inlines, block, &mut code_spans);
+        all.extend(build_typo_subs(body, &code_spans));
     }
     let (map, accepted) = OffsetMap::from_spans(body.len(), &all);
     // 保留段取源文本并记行基；替换段写 fill（调用方保证不含换行）
@@ -1583,7 +2044,18 @@ fn build_layout_text(
     let mut source_newlines: Vec<usize> = Vec::new();
     for seg in &map.segs {
         match seg.sub {
-            Some(i) => layout_text.push_str(&accepted[i].fill),
+            Some(i) => {
+                // 替换段 fill 可能含换行（br → \n），也要扫描记行基。
+                let fill = &accepted[i].fill;
+                let layout_start = layout_text.len();
+                for (j, b) in fill.bytes().enumerate() {
+                    if b == b'\n' {
+                        line_bases.push(layout_start + j + 1);
+                        // 替换段没有源文本坐标，source_newlines 不记（这些换行是虚拟的）。
+                    }
+                }
+                layout_text.push_str(fill);
+            }
             None => {
                 let seg_text = &body[seg.doc_start..seg.doc_start + seg.doc_len];
                 for (j, b) in seg_text.bytes().enumerate() {
@@ -1635,7 +2107,8 @@ fn block_subs(kind: BlockKind, body: &str, block: Range, caret: usize) -> Vec<Su
                 None => Vec::new(),
             }
         }
-        BlockKind::BlockQuote => quote_line_subs(body, block, caret),
+        BlockKind::BlockQuote => quote_subs(body, block, caret),
+        BlockKind::Callout(c) => callout_subs(&c, body, block, caret),
         BlockKind::Admonition(ty) => admonition_subs(ty, body, block, caret),
         BlockKind::ThematicBreak => {
             if node_active(block, caret) {
@@ -1647,7 +2120,10 @@ fn block_subs(kind: BlockKind, body: &str, block: Range, caret: usize) -> Vec<Su
         // 标题/围栏：非激活时隐源码标记（与列表/引用/分隔线同一 WYSIWYM 规则）。
         BlockKind::AtxHeading(level) => heading_subs(level, body, block, caret),
         BlockKind::SetextHeading(_) => setext_subs(body, block, caret),
-        BlockKind::FencedCode(_) => fenced_subs(body, block, caret),
+        BlockKind::FencedCode(lang) => fenced_subs(body, block, caret, lang.as_deref()),
+        // 折叠块：标签由 inline 消隐机制去掉后，再压掉标签行的换行与块内 Markdown
+        // 结构标记，让 summary / 正文以可见文本（段落）形式完整显示。
+        BlockKind::Details { .. } => details_subs(body, block, caret),
         _ => Vec::new(),
     }
 }
@@ -1670,20 +2146,59 @@ fn heading_subs(level: u8, body: &str, block: Range, caret: usize) -> Vec<Sub> {
     vec![Sub::elide(0, end)]
 }
 
-/// Setext 标题：非激活时把下划线行（`===` / `---`）换成等长空格。
+/// Setext 标题：非激活时只把末行下划线（`===` / `---`）换成等长空格。
 /// 不用消隐：末行纯空时排版会丢行高（光标进出会跳），空格占位保持行高与行宽。
+/// 内容可跨多行（CommonMark：段落全部行 + 下划线行构成标题），除末行外的
+/// 内容行一律保留，不能按「首行之后全换成空格」处理，否则中间行整段不可见。
 fn setext_subs(body: &str, block: Range, caret: usize) -> Vec<Sub> {
     if node_active(block, caret) {
         return Vec::new();
     }
-    body.find('\n')
-        .map(|nl| nl + 1)
-        .filter(|&start| start < body.len())
-        .map(|start| {
-            let n = body[start..].chars().count().max(1);
-            vec![Sub::fill(start, body.len(), " ".repeat(n))]
-        })
-        .unwrap_or_default()
+    let trimmed = body.trim_end_matches(['\r', '\n']);
+    let Some(start) = trimmed.rfind('\n').map(|i| i + 1) else {
+        return Vec::new();
+    };
+    if start >= body.len() {
+        return Vec::new();
+    }
+    let n = body[start..].chars().count().max(1);
+    vec![Sub::fill(start, body.len(), " ".repeat(n))]
+}
+
+/// `<details>` **头块**的非激活渲染（B3 起头块只含开标签行 + summary 行）：
+/// 1) 显式消隐 `<details>` / `<summary>` / `</summary>` 裸标签（header 内的
+///    `<details>` 未闭合，行内解析退化为 HtmlLiteral，不参与 collect_elide）；
+/// 2) 消隐头块内全部换行，让 summary 压成单行（折叠态高度 = 一行；
+///    summary 与正文已拆成兄弟块，不再需要逐行清理 Markdown 结构标记）。
+fn details_subs(body: &str, block: Range, caret: usize) -> Vec<Sub> {
+    if node_active(block, caret) {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    elide_details_tag(body, "<details", &mut out);
+    elide_details_tag(body, "<summary", &mut out);
+    elide_details_tag(body, "</summary>", &mut out);
+    for (i, b) in body.bytes().enumerate() {
+        if b == b'\n' {
+            out.push(Sub::elide(i, i + 1));
+        }
+    }
+    out
+}
+
+/// 消隐 details 头块中的裸标签（`<details ...>` / `<summary ...>` / `</summary>`）。
+fn elide_details_tag(body: &str, needle: &str, out: &mut Vec<Sub>) {
+    let lower = body.to_ascii_lowercase();
+    let mut from = 0usize;
+    while let Some(i) = lower[from..].find(needle) {
+        let start = from + i;
+        let Some(rel) = body[start..].find('>') else {
+            break;
+        };
+        let end = start + rel + 1;
+        out.push(Sub::elide(start, end));
+        from = end;
+    }
 }
 
 /// ATX 标记结束位置（块相对）：CommonMark 允许 ≤3 空格缩进、`#` 后接空白或行尾。
@@ -1710,14 +2225,53 @@ fn atx_marker_end(body: &str) -> Option<usize> {
 
 /// 围栏代码：非激活时消隐开围栏行（含语言标记）与闭合围栏行，保留换行（行高不变）。
 /// 未闭合围栏只有开围栏行需要消隐。
-fn fenced_subs(body: &str, block: Range, caret: usize) -> Vec<Sub> {
+/// mermaid 块特殊处理：开围栏行替换为 `◈ <类型徽标>` 卡片头（调用 `veil_core::detect_type`
+/// 识别 body 类型并映射到中文徽标）；空或只有 `%%` 注释的块在头下方插入一行提示。
+/// 源码模式下外层不会进入本函数（`reveal_all` 短路），天然隔离。
+fn fenced_subs(body: &str, block: Range, caret: usize, lang: Option<&str>) -> Vec<Sub> {
     if node_active(block, caret) {
         return Vec::new();
     }
     let mut out = Vec::new();
     let first_end = body.find('\n').unwrap_or(body.len());
     if first_end > 0 {
-        out.push(Sub::elide(0, first_end));
+        if lang.is_some_and(|l| l.eq_ignore_ascii_case("mermaid")) {
+            // 去掉开/闭围栏行，拿到真正的源码 body 供 detect_type 识别
+            let last_start = body.rfind('\n').map(|nl| nl + 1).unwrap_or(body.len());
+            let closed = last_start > first_end && fence_line(&body[last_start..]);
+            let body_mid_full = &body[first_end + 1..];
+            let body_mid = if closed {
+                // body_mid_full 末尾带闭合围栏行，按它在 body 中的起点切
+                let fence_in_mid = last_start - (first_end + 1);
+                &body_mid_full[..fence_in_mid]
+            } else {
+                body_mid_full
+            };
+            let badge = match veil_core::detect_type(body_mid) {
+                Some("flowchart") => Key::MermaidFlowchart,
+                Some("sequence") => Key::MermaidSequence,
+                Some("class") => Key::MermaidClass,
+                Some("state") => Key::MermaidState,
+                Some("er") => Key::MermaidEr,
+                Some("gantt") => Key::MermaidGantt,
+                Some("pie") => Key::MermaidPie,
+                _ => Key::MermaidUnknown,
+            };
+            out.push(Sub::fill(0, first_end, tf(Key::MermaidBadge, &[t(badge)])));
+            // 空块提示：所有非空行都是 %% 注释 → 提示用户插入模板
+            let is_empty = body_mid
+                .lines()
+                .map(|l| l.trim())
+                .all(|l| l.is_empty() || l.starts_with("%%"));
+            if is_empty {
+                let insert_pos = first_end + 1;
+                if insert_pos <= body.len() {
+                    out.push(Sub::insert(insert_pos, t(Key::MermaidEmptyHint)));
+                }
+            }
+        } else {
+            out.push(Sub::elide(0, first_end));
+        }
     }
     if let Some(nl) = body.rfind('\n') {
         let last_start = nl + 1;
@@ -1739,8 +2293,7 @@ fn fence_line(line: &str) -> bool {
     let Some(&ch) = rest.as_bytes().first() else {
         return false;
     };
-    (ch == b'`' || ch == b'~')
-        && rest.as_bytes().iter().take_while(|&&b| b == ch).count() >= 3
+    (ch == b'`' || ch == b'~') && rest.as_bytes().iter().take_while(|&&b| b == ch).count() >= 3
 }
 
 /// 无序列表符号位置（块相对字节）：缩进后首个 `-` / `*` / `+`。
@@ -1780,6 +2333,47 @@ fn quote_marker_pos(line: &str) -> Option<usize> {
     (line.as_bytes().get(indent) == Some(&b'>')).then_some(indent)
 }
 
+/// 普通引用块：逐行消隐 `>`；首行若形如 `[!XXX]`（未配置的 Callout 类型）也一并
+/// 消隐——未知类型回退普通引用块时不得露出裸标记文本。
+fn quote_subs(body: &str, block: Range, caret: usize) -> Vec<Sub> {
+    let mut out = quote_line_subs(body, block, caret);
+    if let Some((start, end)) = admonition_marker(body) {
+        if !line_active(body, block, caret, 0) {
+            out.push(Sub::fill(start, end, ""));
+        }
+    }
+    out
+}
+
+/// 自定义 Callout：沿用引用块的 `>` 消隐，首行 `[!NAME]` 替换为配置标签。
+fn callout_subs(c: &veil_core::Callout, body: &str, block: Range, caret: usize) -> Vec<Sub> {
+    let mut out = quote_line_subs(body, block, caret);
+    if line_active(body, block, caret, 0) {
+        return out;
+    }
+    if let Some((start, end)) = admonition_marker(body) {
+        out.push(Sub::fill(start, end, &c.label));
+    }
+    out
+}
+
+/// caret 是否落在块内第 `line_idx` 行（含行尾换行前）。
+fn line_active(body: &str, block: Range, caret: usize, line_idx: usize) -> bool {
+    if !(block.start <= caret && caret <= block.end) {
+        return false;
+    }
+    let rel = caret - block.start;
+    let mut off = 0usize;
+    for (i, line) in body.split_inclusive('\n').enumerate() {
+        let visible_end = off + line.trim_end_matches('\n').len();
+        if i == line_idx {
+            return off <= rel && rel <= visible_end;
+        }
+        off += line.len();
+    }
+    false
+}
+
 /// Admonition 提示块：沿用引用块的逐行 `>` 消隐，并把首行 `[!TYPE]` 标记
 /// 整体替换为可读标签（`Note`/`Tip`/…）。首行激活时保留源码，便于编辑标记。
 fn admonition_subs(
@@ -1789,18 +2383,26 @@ fn admonition_subs(
     caret: usize,
 ) -> Vec<Sub> {
     let mut out = quote_line_subs(body, block, caret);
-    let first_len = match body.split_inclusive('\n').next() {
-        Some(l) => l.len(),
-        None => 0,
-    };
     // 首行激活（caret 落在首行内）→ 显示源码标记，不做替换
-    if block.start <= caret && caret <= block.end && caret - block.start <= first_len {
+    if line_active(body, block, caret, 0) {
         return out;
     }
     if let Some((start, end)) = admonition_marker(body) {
-        out.push(Sub::fill(start, end, ty.label()));
+        out.push(Sub::fill(start, end, admonition_label(ty)));
     }
     out
+}
+
+/// 内置 Callout（GFM Admonition）标签：词条键化后与旧 `AdmonitionType::label()` 逐字一致。
+fn admonition_label(ty: veil_core::AdmonitionType) -> &'static str {
+    use veil_core::AdmonitionType;
+    t(match ty {
+        AdmonitionType::Note => Key::CalloutNote,
+        AdmonitionType::Tip => Key::CalloutTip,
+        AdmonitionType::Important => Key::CalloutImportant,
+        AdmonitionType::Warning => Key::CalloutWarning,
+        AdmonitionType::Caution => Key::CalloutCaution,
+    })
 }
 
 /// 首行 `> [!TYPE]` 标记的块相对字节区间 `[start, end)`。
@@ -1834,7 +2436,8 @@ pub(crate) fn cell_style_spans(
 ) -> Option<Vec<(usize, usize, Style)>> {
     let mut elide: Vec<(usize, usize)> = Vec::new();
     collect_elide(inlines, cell_range, usize::MAX, &mut elide);
-    let subs: Vec<Sub> = elide.into_iter().map(|(s, e)| Sub::elide(s, e)).collect();
+    let mut subs: Vec<Sub> = elide.into_iter().map(|(s, e)| Sub::elide(s, e)).collect();
+    collect_q_subs(inlines, cell_range, usize::MAX, &mut subs);
     let (map, _) = OffsetMap::from_spans(cell_range.len(), &subs);
     if map.layout_len != text_len {
         return None;
@@ -1874,7 +2477,8 @@ pub(crate) fn cell_math_spans(
 ) -> Option<Vec<(usize, usize, Range)>> {
     let mut elide: Vec<(usize, usize)> = Vec::new();
     collect_elide(inlines, cell_range, usize::MAX, &mut elide);
-    let subs: Vec<Sub> = elide.into_iter().map(|(s, e)| Sub::elide(s, e)).collect();
+    let mut subs: Vec<Sub> = elide.into_iter().map(|(s, e)| Sub::elide(s, e)).collect();
+    collect_q_subs(inlines, cell_range, usize::MAX, &mut subs);
     let (map, _) = OffsetMap::from_spans(cell_range.len(), &subs);
     if map.layout_len != text_len {
         return None;
@@ -1906,14 +2510,11 @@ pub(super) fn attrs_of(
     st: Style,
     link_color: [u8; 3],
     doc_font: DocFontFamily,
+    mono_family: Option<&'static str>,
+    pt: f32,
 ) -> Attrs<'static> {
     let a = Attrs::new();
-    let a = if st.bold
-        || matches!(
-            kind,
-            BlockKind::AtxHeading(_) | BlockKind::SetextHeading(_)
-        )
-    {
+    let a = if st.bold || matches!(kind, BlockKind::AtxHeading(_) | BlockKind::SetextHeading(_)) {
         a.weight(Weight::BOLD)
     } else {
         a
@@ -1924,13 +2525,20 @@ pub(super) fn attrs_of(
         a
     };
     // 代码/行内代码恒用等宽族；其余正文/表格文本按配置的字体族（system 不设）。
+    // 显式族名优先：generic Monospace 会先用尽等宽候选，旧 CJK 等宽字体（MS Gothic 等）
+    // 会截走 Han 造成与正文不同族；显式族名下 Han 才走脚本回退（N9）。
     let a = if st.mono
         || matches!(
             kind,
-            BlockKind::FencedCode(_) | BlockKind::IndentedCode | BlockKind::HtmlBlock | BlockKind::FrontMatter(_)
-        )
-    {
-        a.family(Family::Monospace)
+            BlockKind::FencedCode(_)
+                | BlockKind::IndentedCode
+                | BlockKind::HtmlBlock
+                | BlockKind::FrontMatter(_)
+        ) {
+        match mono_family {
+            Some(name) => a.family(Family::Name(name)),
+            None => a.family(Family::Monospace),
+        }
     } else if let Some(family) = doc_family(doc_font) {
         a.family(family)
     } else {
@@ -1941,6 +2549,16 @@ pub(super) fn attrs_of(
     let color = st.color.or_else(|| st.link.then_some(link_color));
     let a = if let Some([r, g, b]) = color {
         a.color(Color::rgb(r, g, b))
+    } else {
+        a
+    };
+    // Sub/Sup 缩字：覆写 span 的 Metrics（font_size × factor），cosmic-text 自动覆写排版字号。
+    // line_height 按同比例缩放，保证行内嵌套 Sub/Sup 不破坏行距。
+    // 正文字号通常 14pt，line_height ≈ 21pt（1.5×）；这里用 1.5 默认比例保持一致。
+    let a = if let Some(factor) = st.size_factor {
+        let scaled_font = pt * factor;
+        let scaled_lh = pt * 1.5 * factor;
+        a.metrics(Metrics::new(scaled_font, scaled_lh))
     } else {
         a
     };
@@ -2175,16 +2793,28 @@ mod tests {
         assert!(style_at(link_at).link && !style_at(body_at).link);
         for theme in [Theme::light(), Theme::dark()] {
             let want = Color::rgb(theme.link[0], theme.link[1], theme.link[2]);
-            let link_attrs =
-                attrs_of(kind.clone(), style_at(link_at), theme.link, DocFontFamily::System);
+            let link_attrs = attrs_of(
+                kind.clone(),
+                style_at(link_at),
+                theme.link,
+                DocFontFamily::System,
+                None,
+                12.0,
+            );
             assert_eq!(
                 link_attrs.color_opt,
                 Some(want),
                 "链接字符应使用主题链接色: dark={}",
                 theme.dark
             );
-            let body_attrs =
-                attrs_of(kind.clone(), style_at(body_at), theme.link, DocFontFamily::System);
+            let body_attrs = attrs_of(
+                kind.clone(),
+                style_at(body_at),
+                theme.link,
+                DocFontFamily::System,
+                None,
+                12.0,
+            );
             assert_eq!(body_attrs.color_opt, None, "正文不得使用链接色");
             assert_ne!(theme.link, theme.fg, "链接色与正文前景色必须可区分");
         }
@@ -2328,11 +2958,7 @@ mod tests {
             ("> [!CAUTION] x", "Caution"),
         ] {
             let (_, l) = layout_with_caret(src, usize::MAX, 600.0);
-            assert_eq!(
-                l.layout_text(),
-                format!("  {label} x"),
-                "变体标签: {src}"
-            );
+            assert_eq!(l.layout_text(), format!("  {label} x"), "变体标签: {src}");
         }
     }
 
@@ -2347,7 +2973,11 @@ mod tests {
     fn admonition_hides_each_line_marker_like_quote() {
         let src = "> [!TIP] a\n> b";
         let (_, l) = layout_with_caret(src, usize::MAX, 400.0);
-        assert_eq!(l.layout_text(), "  Tip a\n  b", "两行 `>` 均隐，仅首行标签替换");
+        assert_eq!(
+            l.layout_text(),
+            "  Tip a\n  b",
+            "两行 `>` 均隐，仅首行标签替换"
+        );
         // 光标在第二行 → 仅第二行显源码，首行仍替换标签
         let (_, l) = layout_with_caret(src, src.len() - 1, 400.0);
         assert_eq!(l.layout_text(), "  Tip a\n> b");
@@ -2372,6 +3002,55 @@ mod tests {
         let src = "> a\n> [!NOTE] b";
         let (_, l) = layout_with_caret(src, usize::MAX, 400.0);
         assert_eq!(l.layout_text(), "  a\n  [!NOTE] b");
+    }
+
+    fn layout_with_callouts(
+        src: &str,
+        caret: usize,
+        width: f32,
+        registry: &veil_core::CalloutRegistry,
+    ) -> BlockLayout {
+        let s = Session::open_with_callouts(src, registry);
+        let (id, kind, range) = s.blocks()[0].clone();
+        let inlines = s.block_inlines(id).unwrap();
+        let mut eng = LayoutEngine::new();
+        let block_text = &src[range.start..range.end];
+        eng.layout_block(kind, block_text, range, &inlines, width, caret, &[], false)
+    }
+
+    #[test]
+    fn custom_callout_uses_configured_label() {
+        let reg = veil_core::CalloutRegistry::from_json(
+            r##"[{"name":"FIXME","label":"待修复","color":"#c00","icon":"!"}]"##,
+        );
+        let l = layout_with_callouts("> [!FIXME] body", usize::MAX, 400.0, &reg);
+        assert_eq!(l.layout_text(), "  待修复 body", "首行标记 → 配置标签");
+        // 光标进入首行 → 还原源码标记
+        let l = layout_with_callouts("> [!FIXME] body", 5, 400.0, &reg);
+        assert_eq!(l.layout_text(), "> [!FIXME] body");
+    }
+
+    #[test]
+    fn unknown_callout_marker_hidden_in_plain_quote() {
+        // 未配置类型回退普通引用块：`[!XXX]` 不得显示成裸文本
+        let (_, l) = layout_with_caret("> [!BOGUS] body", usize::MAX, 400.0);
+        assert_eq!(l.layout_text(), "   body");
+        assert!(!l.layout_text().contains("[!"), "不得露出裸标记");
+    }
+
+    #[test]
+    fn highlight_markers_hidden_and_mark_bg_applied() {
+        let (_, l) = layout_with_caret("a ==hi== b", usize::MAX, 400.0);
+        assert_eq!(l.layout_text(), "a hi b", "非激活：`==` 标记消隐");
+        assert!(
+            l.decorations_under
+                .iter()
+                .any(|(_, _, k)| *k == UnderKind::MarkBg),
+            "高亮须与 `<mark>` 同一底色装饰"
+        );
+        // 光标进入节点 → 显示源码
+        let (_, l) = layout_with_caret("a ==hi== b", 4, 400.0);
+        assert_eq!(l.layout_text(), "a ==hi== b");
     }
 
     #[test]
@@ -2623,6 +3302,71 @@ mod tests {
         let imgs = [img(Range::new(2, 5), 40, 10, 8)];
         let (_, l) = layout_with_imgs("a $x$ b", 0, 400.0, &imgs);
         assert_eq!(l.imgs.len(), 1, "光标在外出图");
+    }
+
+    #[test]
+    fn fit_size_box_caps_both_axes_without_enlarging() {
+        assert_eq!(fit_size_box(10, 10, 100.0, 100.0), (10, 10), "不得放大");
+        assert_eq!(fit_size_box(100, 100, 50.0, 200.0), (50, 50), "宽度上限");
+        assert_eq!(fit_size_box(100, 100, 200.0, 44.0), (44, 44), "高度上限");
+        // B4 场景：240×160 行内图，2 行限高 44 → 66×44
+        assert_eq!(fit_size_box(240, 160, 756.0, 44.0), (66, 44));
+    }
+
+    #[test]
+    fn block_is_image_only_ignores_surrounding_whitespace() {
+        let r = Range::new(0, 11);
+        assert!(
+            block_is_image_only("![a](p.png)", r, &[r]),
+            "整块只有图片应判定为独占一行"
+        );
+        let r = Range::new(2, 13);
+        assert!(
+            block_is_image_only("  ![a](p.png)  ", Range::new(0, 15), &[r]),
+            "图片前后空白不影响判定"
+        );
+        assert!(
+            !block_is_image_only("x ![a](p.png)", Range::new(0, 13), &[Range::new(2, 13)]),
+            "有正文时按行内图处理"
+        );
+    }
+
+    #[test]
+    fn tall_image_expands_own_line_and_shifts_following_lines() {
+        // B4：100px 高图（> 22px 行高）→ 所在视觉行行高抬到 100，后续行下移，
+        // 块高覆盖图片底边，图片下半区域仍可命中节点（不重叠下一块）。
+        let imgs = [image(Range::new(0, 13), 100, 100)];
+        let (eng, l) = layout_with_imgs(
+            "![alt](p.png) bbbbbbbbbbbbbbbbbbbb",
+            usize::MAX,
+            140.0,
+            &imgs,
+        );
+        let p = &l.imgs[0];
+        assert!(p.y.abs() < 0.5, "图应贴视觉行顶: {}", p.y);
+        assert!(
+            l.height >= p.y + p.height as f32 - 0.5,
+            "块高须覆盖图片: {} vs {}",
+            l.height,
+            p.y + p.height as f32
+        );
+        let runs: Vec<_> = l.buffer.layout_runs().collect();
+        assert!(runs.len() >= 2, "窄宽应折行");
+        assert!(
+            runs[0].line_height >= 100.0,
+            "图所在视觉行行高须容纳图: {}",
+            runs[0].line_height
+        );
+        assert!(
+            runs[1].line_top >= runs[0].line_top + 100.0 - 0.5,
+            "后续视觉行必须下移: {}",
+            runs[1].line_top
+        );
+        assert_eq!(
+            eng.hit(&l, p.x + p.width as f32 * 0.75, p.y + 90.0),
+            13,
+            "图下半区域（行高内）命中节点尾"
+        );
     }
 
     #[test]
@@ -2935,6 +3679,65 @@ mod tests {
     }
 
     #[test]
+    fn inline_code_hides_both_backticks_and_skips_cjk_spacing() {
+        // 纯拉丁：两端反引号正常消隐
+        let (_, l) = layout_of("A `plain` B.", 400.0);
+        assert_eq!(l.layout_text(), "A plain B.");
+        // 末尾为 CJK：闭反引号必须完全消隐（不得多画一个反引号）
+        let (_, l) = layout_of("C `中文` D.", 400.0);
+        assert_eq!(l.layout_text(), "C 中文 D.", "闭反引号须完全消隐");
+        // 代码内 CJK↔ASCII 边界不得插空格
+        let (_, l) = layout_of("E `中文abc` F.", 400.0);
+        assert_eq!(
+            l.layout_text(),
+            "E 中文abc F.",
+            "代码 span 内不得插 CJK 空格"
+        );
+        let (_, l) = layout_of("`纯中文`", 400.0);
+        assert_eq!(l.layout_text(), "纯中文");
+        // 混排整行（§7 真机反例）；WJ 为禁则胶水零宽字符，剥掉后再逐字断言
+        let (_, l) = layout_of(
+            "行内代码：`中文行内代码` 与 `let 变量 = 1;` 与 `纯 Latin mono`。",
+            400.0,
+        );
+        assert_eq!(
+            l.layout_text().replace('\u{2060}', ""),
+            "行内代码：中文行内代码 与 let 变量 = 1; 与 纯 Latin mono。"
+        );
+    }
+
+    #[test]
+    fn midline_frontmatter_setext_keeps_every_content_line() {
+        // 中置 `---` 块走 Setext：内容可跨多行，除末行下划线外所有行都必须可见
+        let text = "正文\n\n---\n标题: 中文标题\n作者: 张三\n描述: 这是一段中文描述\n---\n";
+        let s = Session::open(text);
+        let (id, kind, range) = s.blocks()[2].clone();
+        assert_eq!(kind, BlockKind::SetextHeading(2));
+        let inlines = s.block_inlines(id).unwrap();
+        let mut eng = LayoutEngine::new();
+        let l = eng.layout_block(
+            kind,
+            &text[range.start..range.end],
+            range,
+            &inlines,
+            600.0,
+            usize::MAX,
+            &[],
+            false,
+        );
+        let visible = l.layout_text();
+        for want in ["中文标题", "张三", "这是一段中文描述"] {
+            assert!(visible.contains(want), "可见文本丢行 {want:?}: {visible:?}");
+        }
+        assert_eq!(
+            visible.lines().count(),
+            4,
+            "三行内容 + 下划线占位: {visible:?}"
+        );
+        assert!(!visible.contains("---"), "下划线行应消隐: {visible:?}");
+    }
+
+    #[test]
     fn hit_roundtrip_works_with_cjk_spacing() {
         // 插入空格后 OffsetMap 仍正确：doc 偏移 3（中结束、t 开始）→ layout 应落到空格之后
         let (eng, l) = layout_of("中t", 400.0);
@@ -2989,10 +3792,7 @@ mod tests {
             &[],
             false,
         );
-        l.buffer
-            .layout_runs()
-            .map(|r| r.line_w)
-            .fold(0.0, f32::max)
+        l.buffer.layout_runs().map(|r| r.line_w).fold(0.0, f32::max)
     }
 
     fn layout_paragraph(eng: &mut LayoutEngine, text: &str, width: f32) -> BlockLayout {
@@ -3100,11 +3900,7 @@ mod tests {
         let short = format!("{}。{}", "中".repeat(5), "文".repeat(2));
         let l2 = layout_paragraph(&mut eng, &short, width);
         let run2 = l2.buffer.layout_runs().next().unwrap();
-        assert_eq!(
-            hang_shift(&run2, Some(width)),
-            (0.0, None),
-            "非满行不悬挂"
-        );
+        assert_eq!(hang_shift(&run2, Some(width)), (0.0, None), "非满行不悬挂");
         // 末字非闭标点不悬挂
         let plain = "中".repeat(12);
         let l3 = layout_paragraph(&mut eng, &plain, width);
@@ -3193,15 +3989,47 @@ mod tests {
         let (bold, n) = cell_spans(doc, 0, 0);
         let bold = bold.expect("粗体应可映射");
         assert_eq!(n, "粗".len());
-        assert_eq!(bold, vec![(0, n, Style { bold: true, ..Default::default() })]);
+        assert_eq!(
+            bold,
+            vec![(
+                0,
+                n,
+                Style {
+                    bold: true,
+                    ..Default::default()
+                }
+            )]
+        );
 
         let (it, n) = cell_spans(doc, 0, 1);
         let it = it.expect("斜体应可映射");
-        assert_eq!(it, vec![(0, n, Style { italic: true, ..Default::default() })]);
+        assert_eq!(
+            it,
+            vec![(
+                0,
+                n,
+                Style {
+                    italic: true,
+                    ..Default::default()
+                }
+            )]
+        );
 
         let (mono, n) = cell_spans(doc, 0, 2);
         let mono = mono.expect("行内代码应可映射");
-        assert_eq!(mono, vec![(0, n, Style { mono: true, ..Default::default() })]);
+        // 行内代码：等宽 + 代码底色（与正文同一装饰语义）。
+        assert_eq!(
+            mono,
+            vec![(
+                0,
+                n,
+                Style {
+                    mono: true,
+                    code_bg: true,
+                    ..Default::default()
+                }
+            )]
+        );
 
         let (link, n) = cell_spans(doc, 0, 3);
         let link = link.expect("链接应可映射");
@@ -3262,6 +4090,7 @@ mod tests {
             &[],
             reveal_all,
             Some(&ctx),
+            &[],
         );
         (eng, l, range)
     }
@@ -3342,10 +4171,7 @@ mod tests {
             let (id, _, _) = s.blocks()[0].clone();
             let inlines = s.block_inlines(id).unwrap();
             let node = first_footnote_ref(&inlines).expect("应有脚注引用节点");
-            let (rs, re) = (
-                node.range.start - range.start,
-                node.range.end - range.start,
-            );
+            let (rs, re) = (node.range.start - range.start, node.range.end - range.start);
             let (x0, y, _) = eng.caret_xy(&l, rs);
             let (x1, _, _) = eng.caret_xy(&l, re);
             assert!(x1 > x0, "替换段应有宽度: {src:?}");
@@ -3389,8 +4215,7 @@ mod tests {
         let src = "body[^a]\n\n[^a]: note\n";
         let s = Session::open(src);
         let (_, _, range) = s.blocks()[1].clone();
-        let (_eng, l, _) =
-            layout_footnote_block(src, 1, range.start + 2, 400.0, false);
+        let (_eng, l, _) = layout_footnote_block(src, 1, range.start + 2, 400.0, false);
         assert_eq!(l.layout_text(), "[^a]: note", "光标进入沿用 reveal 显源码");
     }
 
@@ -3451,6 +4276,7 @@ mod tests {
             &[],
             false,
             Some(&ctx1),
+            &[],
         );
         assert_eq!(l1.layout_text(), "Y↩", "未被引用：仅隐藏标记");
         let reveal1 = l1.reveal_state(&kind1, range1, usize::MAX);
@@ -3466,7 +4292,9 @@ mod tests {
             },
         );
         assert!(
-            cache.layout(id1, &kind1, range1, base1, usize::MAX).is_some(),
+            cache
+                .layout(id1, &kind1, range1, base1, usize::MAX)
+                .is_some(),
             "代次未变必须命中"
         );
 
@@ -3492,7 +4320,460 @@ mod tests {
             &[],
             false,
             Some(&ctx2),
+            &[],
         );
         assert_eq!(l2.layout_text(), "1. Y↩", "新引用让文末定义块获得编号");
+    }
+
+    // ---- Mermaid v0：detect_type 接入卡片头 + 空块提示 ----
+
+    #[test]
+    fn mermaid_badge_flowchart_and_sequence() {
+        let flowchart_src = "```mermaid\ngraph TD\nA-->B\n```";
+        let (_, fc_layout) = layout_of(flowchart_src, 400.0);
+        assert!(
+            fc_layout.layout_text().contains("◈ 流程图"),
+            "flowchart 应渲染为 ◈ 流程图 卡片头；实际: {}",
+            fc_layout.layout_text()
+        );
+        // 开围栏行本身应被替换掉（没有 ``` 残留）
+        assert!(!fc_layout.layout_text().contains("```mermaid"));
+
+        let seq_src = "```mermaid\nsequenceDiagram\n  A->>B: hi\n```";
+        let (_, seq_layout) = layout_of(seq_src, 400.0);
+        assert!(
+            seq_layout.layout_text().contains("◈ 时序图"),
+            "sequenceDiagram 应渲染为 ◈ 时序图 卡片头；实际: {}",
+            seq_layout.layout_text()
+        );
+    }
+
+    #[test]
+    fn mermaid_badge_other_types_and_fallback() {
+        let cases = [
+            ("```mermaid\nclassDiagram\nclass A\n```", "◈ 类图"),
+            ("```mermaid\nstateDiagram-v2\n[*] --> Idle\n```", "◈ 状态图"),
+            ("```mermaid\nerDiagram\nA ||--o{ B : r\n```", "◈ ER图"),
+            ("```mermaid\ngantt\ntitle Test\n```", "◈ 甘特图"),
+            ("```mermaid\npie\ntitle Pie\nA : 1\n```", "◈ 饼图"),
+            ("```mermaid\njourney\ntitle X\n```", "◈ mermaid"),
+        ];
+        for (src, want) in cases {
+            let (_, l) = layout_of(src, 400.0);
+            assert!(
+                l.layout_text().contains(want),
+                "{src:?} 应得到 {want}；实际: {}",
+                l.layout_text()
+            );
+        }
+    }
+
+    #[test]
+    fn mermaid_source_mode_shows_fences_raw() {
+        // 源码模式（reveal_all=true）不做卡片化，保留原始围栏。
+        let src = "```mermaid\ngraph TD\nA-->B\n```";
+        let s = Session::open(src);
+        let (_, kind, range) = s.blocks()[0].clone();
+        let inlines = s.block_inlines(s.blocks()[0].0).unwrap();
+        let mut eng = LayoutEngine::new();
+        let block_text = &src[range.start..range.end];
+        let l = eng.layout_block(
+            kind,
+            block_text,
+            range,
+            &inlines,
+            400.0,
+            usize::MAX,
+            &[],
+            true, // reveal_all = 源码模式
+        );
+        assert!(
+            l.layout_text().contains("```mermaid"),
+            "源码模式应保留原始围栏；实际: {}",
+            l.layout_text()
+        );
+        assert!(!l.layout_text().contains("◈ 流程图"));
+    }
+
+    // ---- N9：代码块/行内代码 CJK 字体族诊断与回归 ----
+
+    /// 常用 CJK 统一表意文字区（测试字符「准备练习环境」均在此）。
+    fn is_han(c: char) -> bool {
+        matches!(c as u32, 0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xF900..=0xFAFF)
+    }
+
+    /// 遍历排版字形，返回 (字符, 族名列表, 是否等宽, face id)。
+    /// 直接查 fontdb 才能看清实际命中的系统字体（cosmic 的 Attrs 只记录意图）。
+    fn glyph_faces(
+        eng: &mut LayoutEngine,
+        l: &BlockLayout,
+    ) -> Vec<(char, Vec<String>, bool, cosmic_text::fontdb::ID)> {
+        let mut out = Vec::new();
+        for run in l.buffer.layout_runs() {
+            for g in run.glyphs.iter() {
+                let ch = run.text[g.start..g.end].chars().next().unwrap_or('\u{0}');
+                let (families, monospaced) = eng
+                    .font_system()
+                    .db_mut()
+                    .face(g.font_id)
+                    .map(|f| {
+                        (
+                            f.families.iter().map(|(name, _)| name.clone()).collect(),
+                            f.monospaced,
+                        )
+                    })
+                    .unwrap_or_default();
+                out.push((ch, families, monospaced, g.font_id));
+            }
+        }
+        out
+    }
+
+    /// 首个 Han 字形的 (族名列表, face id)；缺 Han 时 panic（调用方文本必含 Han）。
+    fn han_face(
+        eng: &mut LayoutEngine,
+        l: &BlockLayout,
+        ctx: &str,
+    ) -> (Vec<String>, cosmic_text::fontdb::ID) {
+        glyph_faces(eng, l)
+            .into_iter()
+            .find(|(c, ..)| is_han(*c))
+            .map(|(_, fam, _, id)| (fam, id))
+            .unwrap_or_else(|| panic!("{ctx}: 未找到 Han 字形"))
+    }
+
+    /// 排版指定索引的块并返回块类型（诊断不同块类共用同一字体路径）。
+    fn layout_kind_at(
+        text: &str,
+        idx: usize,
+        width: f32,
+    ) -> (LayoutEngine, BlockLayout, BlockKind) {
+        let s = Session::open(text);
+        let (id, kind, range) = s.blocks()[idx].clone();
+        let inlines = s.block_inlines(id).unwrap_or_default();
+        let mut eng = LayoutEngine::new();
+        let l = eng.layout_block(
+            kind.clone(),
+            &text[range.start..range.end],
+            range,
+            &inlines,
+            width,
+            usize::MAX,
+            &[],
+            false,
+        );
+        (eng, l, kind)
+    }
+
+    /// 墨水覆盖率：alpha>0 像素数 / 非空包围盒面积（同文本同字体下可跨字号比较）。
+    fn ink_coverage(px: &[u8], w: u32, h: u32) -> f64 {
+        let (mut min_x, mut min_y, mut max_x, mut max_y) = (u32::MAX, u32::MAX, 0, 0);
+        let mut ink = 0u64;
+        for y in 0..h {
+            for x in 0..w {
+                if px[((y * w + x) * 4 + 3) as usize] > 0 {
+                    ink += 1;
+                    min_x = min_x.min(x);
+                    min_y = min_y.min(y);
+                    max_x = max_x.max(x);
+                    max_y = max_y.max(y);
+                }
+            }
+        }
+        if ink == 0 {
+            return 0.0;
+        }
+        let area = u64::from(max_x - min_x + 1) * u64::from(max_y - min_y + 1);
+        ink as f64 / area as f64
+    }
+
+    #[test]
+    fn codeblock_cjk_glyph_font() {
+        let (mut cb_eng, cb) = layout_of("```rust\n// 准备练习环境\n```", 400.0);
+        let (mut par_eng, par) = layout_of("准备练习环境", 400.0);
+        let (cb_fam, cb_id) = han_face(&mut cb_eng, &cb, "fenced code");
+        let (par_fam, par_id) = han_face(&mut par_eng, &par, "paragraph");
+        // 修复前基线取证（--nocapture 可见）
+        println!("[N9] fenced Han families = {cb_fam:?}, face = {cb_id:?}");
+        println!("[N9] paragraph Han families = {par_fam:?}, face = {par_id:?}");
+        assert_eq!(cb_fam, par_fam, "代码块 Han 应与正文 Han 同族");
+        assert_eq!(cb_id, par_id, "代码块 Han 与正文 Han 应为同一 face");
+    }
+
+    #[test]
+    fn codeblock_latin_face_is_mono_family() {
+        // Latin 仍必须是启动时探测到的等宽族（Consolas），不能被 CJK 修复带偏。
+        let (mut eng, l) = layout_of("```rust\nlet x = 1;\n```", 400.0);
+        let want = eng.mono_family().expect("测试机应探测到等宽族");
+        let latin = glyph_faces(&mut eng, &l)
+            .into_iter()
+            .find(|(c, ..)| c.is_ascii_alphabetic())
+            .expect("代码块应有 Latin 字形");
+        println!(
+            "[N9] fenced Latin families = {:?}, monospaced = {}, face = {:?}",
+            latin.1, latin.2, latin.3
+        );
+        assert!(
+            latin.1.iter().any(|name| name == want),
+            "Latin 应命中等宽族 {want}；实际: {:?}",
+            latin.1
+        );
+        assert!(latin.2, "Latin 字形应来自等宽 face");
+    }
+
+    #[test]
+    fn inline_code_cjk_matches_paragraph() {
+        let (mut inline_eng, inline) = layout_of("a `中文` b", 400.0);
+        let (mut par_eng, par) = layout_of("中文", 400.0);
+        let (inline_fam, inline_id) = han_face(&mut inline_eng, &inline, "inline code");
+        let (par_fam, par_id) = han_face(&mut par_eng, &par, "paragraph");
+        assert_eq!(inline_fam, par_fam, "行内代码 Han 应与正文同族");
+        assert_eq!(inline_id, par_id, "行内代码 Han 与正文 Han 应为同一 face");
+    }
+
+    #[test]
+    fn code_block_kinds_share_body_han_face() {
+        let (mut par_eng, par) = layout_of("准备练习环境", 400.0);
+        let (par_fam, par_id) = han_face(&mut par_eng, &par, "paragraph");
+        // (源码, 期望块类)；HtmlBlock / FrontMatter 无卡片头，文本原样参与排版。
+        let cases = [
+            ("    准备练习环境", "indented code"),
+            ("<div>\n准备练习环境\n</div>", "html block"),
+            ("---\ntitle: 准备练习环境\n---", "front matter"),
+        ];
+        for (src, ctx) in cases {
+            let (mut eng, l, kind) = layout_kind_at(src, 0, 400.0);
+            assert!(
+                matches!(
+                    kind,
+                    BlockKind::IndentedCode | BlockKind::HtmlBlock | BlockKind::FrontMatter(_)
+                ),
+                "{ctx}: 块类型不符，实际 {kind:?}"
+            );
+            let (fam, id) = han_face(&mut eng, &l, ctx);
+            assert_eq!(fam, par_fam, "{ctx}: Han 应与正文同族");
+            assert_eq!(id, par_id, "{ctx}: Han 与正文 Han 应为同一 face");
+        }
+    }
+
+    #[test]
+    fn codeblock_cjk_ink_coverage_close_to_paragraph() {
+        // 渲染门禁：同文本下代码块 Han 的墨水覆盖率不得显著低于正文。
+        // IndentedCode 不带卡片头/边框，且与段落一样只有一行纯 Han，噪声最小。
+        let (mut cb_eng, cb) = layout_of("    准备练习环境", 400.0);
+        assert!(matches!(
+            Session::open("    准备练习环境").blocks()[0].1,
+            BlockKind::IndentedCode
+        ));
+        let (cb_px, cb_w, cb_h) = cb_eng.rasterize(&cb, [0, 0, 0]);
+        let cb_cov = ink_coverage(&cb_px, cb_w, cb_h);
+
+        let (mut par_eng, par) = layout_of("准备练习环境", 400.0);
+        let (par_px, par_w, par_h) = par_eng.rasterize(&par, [0, 0, 0]);
+        let par_cov = ink_coverage(&par_px, par_w, par_h);
+
+        println!("[N9] code coverage = {cb_cov:.4}, paragraph coverage = {par_cov:.4}");
+        assert!(par_cov > 0.0, "正文应有墨水像素");
+        assert!(
+            cb_cov >= par_cov * 0.85,
+            "代码块 Han 墨水覆盖率应 ≥ 正文 85%：code={cb_cov:.4} body={par_cov:.4}"
+        );
+    }
+
+    #[test]
+    fn mermaid_empty_block_shows_hint() {
+        let empty_src = "```mermaid\n```";
+        let (_, l) = layout_of(empty_src, 400.0);
+        assert!(
+            l.layout_text().contains("空 Mermaid 块 — 点击插入模板"),
+            "空 mermaid 块应显示提示；实际: {}",
+            l.layout_text()
+        );
+        // 同样全是 %% 注释也算空块
+        let comment_only = "```mermaid\n%% 注释行\n%% 再一行\n```";
+        let (_, l2) = layout_of(comment_only, 400.0);
+        assert!(
+            l2.layout_text().contains("空 Mermaid 块 — 点击插入模板"),
+            "只有 %% 注释的块也应显示提示；实际: {}",
+            l2.layout_text()
+        );
+    }
+
+    // ---- Wave 7 Task 3b: inline HTML decorations / br / sub-sup ----
+
+    #[test]
+    fn inline_html_kbd_produces_decoration_under() {
+        // <kbd>Ctrl</kbd> → decorations_under 应含 KbdFrame
+        let (_, l) = layout_of("Press <kbd>Ctrl</kbd> to save", 500.0);
+        assert!(
+            l.decorations_under
+                .iter()
+                .any(|(_, _, k)| matches!(k, UnderKind::KbdFrame)),
+            "<kbd> 应生成 KbdFrame 前置装饰；实际: {:?}",
+            l.decorations_under
+        );
+        // 光栅化结果应可见「Ctrl」
+        assert!(l.layout_text().contains("Ctrl"));
+    }
+
+    #[test]
+    fn inline_html_pre_renders_mono_not_literal_tags() {
+        let text = "正文 <pre>预格式</pre> 结尾";
+        let s = Session::open(text);
+        let (id, _, range) = s.blocks()[0].clone();
+        let inlines = s.block_inlines(id).unwrap();
+        let segs = crate::view::style::style_spans(range.len(), range, &inlines);
+        let (_, l) = layout_of(text, 500.0);
+        assert!(
+            !l.layout_text().contains("<pre>") && l.layout_text().contains("预格式"),
+            "段落内 <pre> 应按行内代码渲染；实际: {:?}",
+            l.layout_text()
+        );
+        assert!(
+            segs.iter().any(|(_, _, st)| st.mono),
+            "<pre> 应复用 code 的等宽样式；segs: {segs:?}"
+        );
+    }
+
+    #[test]
+    fn inline_html_q_wraps_content_in_quotes_and_semantic_tags_render() {
+        // <q> 非激活：内容两端插入中文双引号，标签本身消隐
+        let (_, l) = layout_of("他说 <q>你好</q> 结束", 500.0);
+        let text = l.layout_text();
+        assert!(
+            text.contains('“') && text.contains('”') && text.contains("你好"),
+            "<q> 应渲染为双引号包裹；实际: {:?}",
+            text
+        );
+        let open = text.find('“').unwrap();
+        let close = text.find('”').unwrap();
+        assert!(open < close, "引号顺序应为开在前；实际: {text:?}");
+        assert!(
+            text[open..close].contains("你好"),
+            "内容应位于引号之间；实际: {text:?}"
+        );
+        assert!(!l.layout_text().contains("<q>"), "标签不应泄漏");
+        // 语义标签不泄漏源码，内容可见
+        for (src, content) in [
+            ("<strong>x</strong>", "x"),
+            ("<b>x</b>", "x"),
+            ("<em>x</em>", "x"),
+            ("<u>x</u>", "x"),
+            ("<s>x</s>", "x"),
+            ("<del>x</del>", "x"),
+            ("<ins>x</ins>", "x"),
+            ("<cite>x</cite>", "x"),
+            ("<var>x</var>", "x"),
+            ("<samp>x</samp>", "x"),
+            ("<small>x</small>", "x"),
+            ("<span>x</span>", "x"),
+        ] {
+            let (_, l) = layout_of(src, 500.0);
+            assert_eq!(l.layout_text(), content, "{src} 应只渲染内容");
+        }
+    }
+
+    #[test]
+    fn inline_html_style_bg_and_underline_decorations() {
+        let (_, l) = layout_of(
+            "<span style=\"background-color:#ff0;text-decoration:underline\">x</span>",
+            500.0,
+        );
+        assert!(
+            l.decorations_under
+                .iter()
+                .any(|(_, _, k)| matches!(k, UnderKind::StyleBg([255, 255, 0]))),
+            "background-color 应生成 StyleBg 装饰；实际: {:?}",
+            l.decorations_under
+        );
+        assert!(
+            l.decorations_over
+                .iter()
+                .any(|(_, _, k)| matches!(k, OverKind::Underline)),
+            "text-decoration:underline 应生成实线下划线；实际: {:?}",
+            l.decorations_over
+        );
+    }
+
+    #[test]
+    fn inline_html_mark_produces_decoration_under() {
+        // <mark>重点</mark> → decorations_under 应含 MarkBg
+        let (_, l) = layout_of("这是 <mark>重点</mark> 内容", 500.0);
+        assert!(
+            l.decorations_under
+                .iter()
+                .any(|(_, _, k)| matches!(k, UnderKind::MarkBg)),
+            "<mark> 应生成 MarkBg 前置装饰；实际: {:?}",
+            l.decorations_under
+        );
+    }
+
+    #[test]
+    fn inline_html_br_breaks_line() {
+        // foo<br>bar → layout_text 里应有换行符，line_bases ≥ 2
+        let text = "foo<br>bar";
+        let s = Session::open(text);
+        let (id, kind, range) = s.blocks()[0].clone();
+        let inlines = s.block_inlines(id).unwrap();
+        eprintln!("DEBUG kind = {kind:?}, range = {range:?}");
+        eprintln!("DEBUG inlines = {inlines:#?}");
+        let (_, l) = layout_of(text, 500.0);
+        eprintln!("DEBUG layout_text = {:?}", l.layout_text());
+        eprintln!("DEBUG line_bases = {:?}", l.line_bases);
+        assert!(
+            l.layout_text().contains('\n'),
+            "<br> 应替换为 \\n；layout_text: {:?}",
+            l.layout_text()
+        );
+        assert!(
+            l.line_bases.len() >= 2,
+            "<br> 应断成至少 2 行；line_bases: {:?}",
+            l.line_bases
+        );
+    }
+
+    #[test]
+    fn inline_html_sub_sup_scaled_down() {
+        // x<sup>2</sup>y<sub>1</sub> → style_segments 里 Sub/Sup 段 size_factor ≈ 0.75
+        // cosmic-text run 的 line_height 是整行统一值，无法区分 sub/sup；
+        // 改为验证 style_segments 里 size_factor 字段（attrs_of 据此乘进 Attrs::size）。
+        let text = "x<sup>2</sup>y<sub>1</sub>";
+        let s = Session::open(text);
+        let (id, _, range) = s.blocks()[0].clone();
+        let inlines = s.block_inlines(id).unwrap();
+        let segs = crate::view::style::style_spans(range.len(), range, &inlines);
+        let has_sup_factor = segs
+            .iter()
+            .any(|(_, _, st)| st.size_factor.is_some_and(|f| (f - 0.75).abs() < 1e-3));
+        assert!(
+            has_sup_factor,
+            "sup 段应有 size_factor ≈ 0.75；segs: {segs:?}"
+        );
+        // 同时也验证 layout_text 里 Sub/Sup 内容可见（标签被消隐，只留内容）
+        let (_, l) = layout_of(text, 500.0);
+        let visible = l.layout_text();
+        assert!(
+            visible.contains('x')
+                && visible.contains('2')
+                && visible.contains('y')
+                && visible.contains('1'),
+            "sup/sub 内容应可见；layout_text: {visible:?}"
+        );
+        // 缩字：sup/sub 字形的 font_size 必须小于正文 'x'，且登记了下沉/上浮偏移。
+        let sizes: Vec<f32> = l
+            .buffer
+            .layout_runs()
+            .flat_map(|r| r.glyphs)
+            .map(|g| g.font_size)
+            .collect();
+        assert!(
+            sizes.iter().filter(|&&s| s < 16.0 * 1.0).count() >= 2,
+            "sup/sub 应缩字；glyph font_size: {sizes:?}"
+        );
+        assert!(
+            !l.script_ranges.is_empty(),
+            "sup/sub 应登记基线偏移区间；实际: {:?}",
+            l.script_ranges
+        );
     }
 }

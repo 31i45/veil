@@ -15,6 +15,7 @@ use std::time::Instant;
 
 use crate::anim::Fade;
 use crate::document::ExternalState;
+use crate::i18n::{t, tf, Key};
 use crate::theme::ThemeMode;
 use crate::tokens::{space, typography};
 
@@ -54,6 +55,8 @@ pub enum MenuAction {
     Separator,
     /// 新建空白草稿（Ctrl+N）。
     New,
+    /// 新建独立窗口（Ctrl+Shift+N）。
+    NewWindow,
     Open,
     /// 快速打开浮层（Ctrl+P）。
     QuickOpen,
@@ -64,6 +67,8 @@ pub enum MenuAction {
     ExportPdf,
     /// 打印 / 导出 PDF（3b）：系统打印对话框，PDF 走「Microsoft Print to PDF」。
     Print,
+    /// 版本历史（N1/B8a）：左侧快照列表 + 正文区只读预览。
+    VersionHistory,
     Undo,
     Redo,
     Cut,
@@ -104,68 +109,134 @@ pub enum MenuAction {
 }
 
 pub struct MenuDef {
-    pub title: &'static str,
-    /// (标签, 快捷键提示, 动作)
-    pub items: &'static [(&'static str, &'static str, MenuAction)],
+    pub title: Key,
+    /// (标签 key, 快捷键提示 key, 动作)
+    pub items: &'static [(Key, Key, MenuAction)],
 }
 
 pub const MENUS: [MenuDef; 3] = [
     MenuDef {
-        title: "文件",
+        title: Key::MenuFile,
         items: &[
-            ("新建", "Ctrl+N", MenuAction::New),
-            ("打开…", "Ctrl+O", MenuAction::Open),
-            ("快速打开…", "Ctrl+P", MenuAction::QuickOpen),
-            ("", "", MenuAction::Separator),
-            ("保存", "Ctrl+S", MenuAction::Save),
-            ("另存为…", "Ctrl+Shift+S", MenuAction::SaveAs),
-            ("", "", MenuAction::Separator),
-            ("导出 HTML…", "Ctrl+E", MenuAction::Export),
-            ("导出 PDF…", "Ctrl+Shift+E", MenuAction::ExportPdf),
-            ("打印…", "Ctrl+Shift+P", MenuAction::Print),
-            ("", "", MenuAction::Separator),
-            ("退出", "", MenuAction::Quit),
+            (Key::MenuFileNew, Key::ShortcutNew, MenuAction::New),
+            (
+                Key::MenuFileNewWindow,
+                Key::ShortcutNewWindow,
+                MenuAction::NewWindow,
+            ),
+            (Key::MenuFileOpen, Key::ShortcutOpen, MenuAction::Open),
+            (
+                Key::MenuFileQuickOpen,
+                Key::ShortcutQuickOpen,
+                MenuAction::QuickOpen,
+            ),
+            (Key::Empty, Key::Empty, MenuAction::Separator),
+            (Key::MenuFileSave, Key::ShortcutSave, MenuAction::Save),
+            (Key::MenuFileSaveAs, Key::ShortcutSaveAs, MenuAction::SaveAs),
+            (Key::Empty, Key::Empty, MenuAction::Separator),
+            (
+                Key::MenuFileExportHtml,
+                Key::ShortcutExportHtml,
+                MenuAction::Export,
+            ),
+            (
+                Key::MenuFileExportPdf,
+                Key::ShortcutExportPdf,
+                MenuAction::ExportPdf,
+            ),
+            (Key::MenuFilePrint, Key::ShortcutPrint, MenuAction::Print),
+            (
+                Key::MenuFileVersionHistory,
+                Key::ShortcutVersionHistory,
+                MenuAction::VersionHistory,
+            ),
+            (Key::Empty, Key::Empty, MenuAction::Separator),
+            (Key::MenuFileQuit, Key::Empty, MenuAction::Quit),
         ],
     },
     MenuDef {
-        title: "编辑",
+        title: Key::MenuEdit,
         items: &[
-            ("撤销", "Ctrl+Z", MenuAction::Undo),
-            ("重做", "Ctrl+Shift+Z", MenuAction::Redo),
-            ("", "", MenuAction::Separator),
-            ("剪切", "Ctrl+X", MenuAction::Cut),
-            ("复制", "Ctrl+C", MenuAction::Copy),
-            ("粘贴", "Ctrl+V", MenuAction::Paste),
-            ("全选", "Ctrl+A", MenuAction::SelectAll),
-            ("", "", MenuAction::Separator),
-            ("加粗", "Ctrl+B", MenuAction::ToggleBold),
-            ("斜体", "Ctrl+I", MenuAction::ToggleItalic),
-            ("链接", "Ctrl+K", MenuAction::InsertLink),
-            ("", "", MenuAction::Separator),
-            ("查找…", "Ctrl+F", MenuAction::Find),
-            ("替换…", "Ctrl+H", MenuAction::Replace),
-            ("", "", MenuAction::Separator),
-            ("插入图片…", "Ctrl+Shift+I", MenuAction::InsertImage),
+            (Key::MenuEditUndo, Key::ShortcutUndo, MenuAction::Undo),
+            (Key::MenuEditRedo, Key::ShortcutRedo, MenuAction::Redo),
+            (Key::Empty, Key::Empty, MenuAction::Separator),
+            (Key::MenuEditCut, Key::ShortcutCut, MenuAction::Cut),
+            (Key::MenuEditCopy, Key::ShortcutCopy, MenuAction::Copy),
+            (Key::MenuEditPaste, Key::ShortcutPaste, MenuAction::Paste),
+            (
+                Key::MenuEditSelectAll,
+                Key::ShortcutSelectAll,
+                MenuAction::SelectAll,
+            ),
+            (Key::Empty, Key::Empty, MenuAction::Separator),
+            (Key::MenuEditBold, Key::ShortcutBold, MenuAction::ToggleBold),
+            (
+                Key::MenuEditItalic,
+                Key::ShortcutItalic,
+                MenuAction::ToggleItalic,
+            ),
+            (Key::MenuEditLink, Key::ShortcutLink, MenuAction::InsertLink),
+            (Key::Empty, Key::Empty, MenuAction::Separator),
+            (Key::MenuEditFind, Key::ShortcutFind, MenuAction::Find),
+            (
+                Key::MenuEditReplace,
+                Key::ShortcutReplace,
+                MenuAction::Replace,
+            ),
+            (Key::Empty, Key::Empty, MenuAction::Separator),
+            (
+                Key::MenuEditInsertImage,
+                Key::ShortcutInsertImage,
+                MenuAction::InsertImage,
+            ),
         ],
     },
     MenuDef {
-        title: "视图",
+        title: Key::MenuView,
         items: &[
-            ("大纲面板", "Ctrl+Shift+O", MenuAction::ToggleOutline),
-            ("", "", MenuAction::Separator),
-            ("放大", "Ctrl+=", MenuAction::ZoomIn),
-            ("缩小", "Ctrl+-", MenuAction::ZoomOut),
-            ("还原缩放", "Ctrl+0", MenuAction::ZoomReset),
-            ("", "", MenuAction::Separator),
-            ("全屏", "F11", MenuAction::ToggleFullscreen),
-            ("", "", MenuAction::Separator),
-            ("跟随系统", "", MenuAction::ThemeSystem),
-            ("浅色", "", MenuAction::ThemeLight),
-            ("深色", "", MenuAction::ThemeDark),
-            ("", "", MenuAction::Separator),
-            ("源码模式", "Ctrl+/", MenuAction::ToggleSourceMode),
-            ("专注模式", "", MenuAction::ToggleFocus),
-            ("打字机模式", "", MenuAction::ToggleTypewriter),
+            (
+                Key::MenuViewOutline,
+                Key::ShortcutOutline,
+                MenuAction::ToggleOutline,
+            ),
+            (Key::Empty, Key::Empty, MenuAction::Separator),
+            (Key::MenuViewZoomIn, Key::ShortcutZoomIn, MenuAction::ZoomIn),
+            (
+                Key::MenuViewZoomOut,
+                Key::ShortcutZoomOut,
+                MenuAction::ZoomOut,
+            ),
+            (
+                Key::MenuViewZoomReset,
+                Key::ShortcutZoomReset,
+                MenuAction::ZoomReset,
+            ),
+            (Key::Empty, Key::Empty, MenuAction::Separator),
+            (
+                Key::MenuViewFullscreen,
+                Key::ShortcutFullscreen,
+                MenuAction::ToggleFullscreen,
+            ),
+            (Key::Empty, Key::Empty, MenuAction::Separator),
+            (
+                Key::MenuViewThemeSystem,
+                Key::Empty,
+                MenuAction::ThemeSystem,
+            ),
+            (Key::MenuViewThemeLight, Key::Empty, MenuAction::ThemeLight),
+            (Key::MenuViewThemeDark, Key::Empty, MenuAction::ThemeDark),
+            (Key::Empty, Key::Empty, MenuAction::Separator),
+            (
+                Key::MenuViewSourceMode,
+                Key::ShortcutSourceMode,
+                MenuAction::ToggleSourceMode,
+            ),
+            (Key::MenuViewFocusMode, Key::Empty, MenuAction::ToggleFocus),
+            (
+                Key::MenuViewTypewriterMode,
+                Key::Empty,
+                MenuAction::ToggleTypewriter,
+            ),
         ],
     },
 ];
@@ -193,7 +264,7 @@ pub fn menu_bar_rects(scale: f32) -> Vec<(usize, f32, f32)> {
     let mut x = 8.0 * scale;
     let mut out = Vec::with_capacity(MENUS.len());
     for (i, m) in MENUS.iter().enumerate() {
-        let w = text_width(m.title, scale) + 2.0 * pad;
+        let w = text_width(t(m.title), scale) + 2.0 * pad;
         out.push((i, x, w));
         x += w;
     }
@@ -219,7 +290,11 @@ pub(crate) fn menu_rows(open: usize, recent: &[String]) -> Vec<(String, &'static
     let Some(menu) = MENUS.get(open) else {
         return Vec::new();
     };
-    let statics = || menu.items.iter().map(|(l, s, a)| (l.to_string(), *s, *a));
+    let statics = || {
+        menu.items
+            .iter()
+            .map(|(l, s, a)| (t(*l).to_string(), t(*s), *a))
+    };
     // 仅文件菜单（下标 0）且有最近文件时动态插入
     if open != 0 || recent.is_empty() {
         return statics().collect();
@@ -407,12 +482,12 @@ pub fn scrollbar_hit(vp: Viewport, doc_h: f32, x: f32, y: f32, scale: f32) -> bo
 /// 用于窗口标题、状态栏、notice 等所有需要展示路径的位置——统一避免完整路径太吵。
 pub fn path_label(p: Option<&Path>) -> String {
     let Some(p) = p else {
-        return "未命名草稿".to_string();
+        return t(Key::UntitledDraft).to_string();
     };
     let stem = p
         .file_name()
         .and_then(|n| n.to_str())
-        .unwrap_or("未命名草稿");
+        .unwrap_or(t(Key::UntitledDraft));
     let parent = p
         .parent()
         .and_then(|dir| dir.file_name())
@@ -442,23 +517,29 @@ pub fn status_line(
 ) -> (String, String) {
     let mut left = path_label(path);
     if dirty {
-        left.push_str(" *");
+        left.push_str(t(Key::StatusDirtyMark));
     }
     match external {
         ExternalState::None => {}
-        ExternalState::Changed => left.push_str("（外部修改）"),
-        ExternalState::BackedUp => left.push_str("（外部修改已备份）"),
-        ExternalState::Missing => left.push_str("（文件缺失）"),
+        ExternalState::Changed => left.push_str(t(Key::StatusExternalChanged)),
+        ExternalState::BackedUp => left.push_str(t(Key::StatusExternalBackedUp)),
+        ExternalState::Missing => left.push_str(t(Key::StatusExternalMissing)),
     }
     if source_mode {
-        left.push_str("（源码模式）");
+        left.push_str(t(Key::StatusSourceMode));
     }
     if dirty {
-        left.push_str(" · 未保存");
+        left.push_str(t(Key::StatusUnsaved));
     } else if let Some(hhmm) = saved_hhmm {
-        left.push_str(&format!(" · 已保存 {hhmm}"));
+        left.push_str(&tf(Key::StatusSaved, &[hhmm]));
     }
-    (left, format!("{words} 字 · 行 {line}，列 {col}"))
+    (
+        left,
+        tf(
+            Key::StatusStats,
+            &[&words.to_string(), &line.to_string(), &col.to_string()],
+        ),
+    )
 }
 
 /// chrome 交互态与标签缓存。`notice` 为状态栏临时提示（动作失败/成功）。
@@ -517,8 +598,7 @@ impl Chrome {
     pub(crate) fn anim_tick(&mut self, now: Instant) {
         self.menu_fade.tick(now, self.hover_menu);
         // 弹出项下标在同一打开菜单内唯一，直接作为过渡槽标识。
-        self.popup_fade
-            .tick(now, self.hover_item.map(|(_, i)| i));
+        self.popup_fade.tick(now, self.hover_item.map(|(_, i)| i));
     }
 
     /// 是否仍有过渡在跑。

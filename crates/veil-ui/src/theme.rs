@@ -54,11 +54,11 @@ impl ThemeMode {
 
     /// 状态栏提示用中文标签。
     pub fn label(self) -> &'static str {
-        match self {
-            ThemeMode::System => "跟随系统",
-            ThemeMode::Light => "浅色",
-            ThemeMode::Dark => "深色",
-        }
+        crate::i18n::t(match self {
+            ThemeMode::System => crate::i18n::Key::MenuViewThemeSystem,
+            ThemeMode::Light => crate::i18n::Key::MenuViewThemeLight,
+            ThemeMode::Dark => crate::i18n::Key::MenuViewThemeDark,
+        })
     }
 }
 
@@ -513,10 +513,8 @@ pub fn parse_config(text: &str) -> ConfigParse {
     // 排版数值：缺省/非法用默认值，越界夹取（不产生 ignored）。
     let size = clamp_font_size(font_size.unwrap_or(DEFAULT_DOC_FONT_SIZE));
     out.config.doc_font_size = size;
-    out.config.doc_line_height = clamp_line_height(
-        line_height.unwrap_or(DEFAULT_DOC_LINE_HEIGHT),
-        size,
-    );
+    out.config.doc_line_height =
+        clamp_line_height(line_height.unwrap_or(DEFAULT_DOC_LINE_HEIGHT), size);
     out.config.window = match (win_w, win_h, win_x, win_y) {
         (Some(width), Some(height), Some(x), Some(y)) => Some(WindowGeom {
             width,
@@ -551,7 +549,8 @@ fn parse_bool(v: &str) -> Option<bool> {
 
 /// 配置文件字节 → 解析结果：剥 BOM、要求合法 UTF-8（非法编码整体拒绝，用默认主题）。
 pub fn decode_config(bytes: &[u8]) -> Result<ConfigParse, String> {
-    let text = std::str::from_utf8(bytes).map_err(|_| "配置文件不是合法 UTF-8".to_string())?;
+    let text = std::str::from_utf8(bytes)
+        .map_err(|_| crate::i18n::t(crate::i18n::Key::ErrConfigNotUtf8).to_string())?;
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     Ok(parse_config(text))
 }
@@ -674,6 +673,8 @@ pub struct ThemeEnv {
     pub config: Box<dyn ConfigStore>,
     pub system: Box<dyn SystemTheme>,
     pub effects: Box<dyn WindowEffects>,
+    /// 自定义 Callout 表（`%APPDATA%\Veil\callouts.json`，产品层读取；空表 = 仅内置）。
+    pub callouts: veil_core::CalloutRegistry,
 }
 
 #[cfg(test)]
@@ -710,6 +711,7 @@ pub(crate) mod test_support {
             config: Box::new(NoConfig),
             system: Box::new(FixedSystem(None)),
             effects: Box::new(NoEffects),
+            callouts: veil_core::CalloutRegistry::default(),
         }
     }
 }
@@ -925,23 +927,42 @@ mod tests {
     fn doc_typography_values_are_clamped_never_panic() {
         // 字号下限/上限
         let p = parse("doc_font_size = 0\ndoc_line_height = 0\n");
-        assert_eq!((p.config.doc_font_size, p.config.doc_line_height), (10.0, 10.0));
+        assert_eq!(
+            (p.config.doc_font_size, p.config.doc_line_height),
+            (10.0, 10.0)
+        );
         assert_eq!(p.ignored, 0, "越界是夹取而非忽略");
         let p = parse("doc_font_size = 999\ndoc_line_height = 99999\n");
-        assert_eq!((p.config.doc_font_size, p.config.doc_line_height), (32.0, 96.0));
+        assert_eq!(
+            (p.config.doc_font_size, p.config.doc_line_height),
+            (32.0, 96.0)
+        );
         assert_eq!(p.ignored, 0);
         // 行高小于字号 → 抬到字号；超过 3×字号 → 压到 3×
-        assert_eq!(parse("doc_font_size = 20\ndoc_line_height = 5").config.doc_line_height, 20.0);
         assert_eq!(
-            parse("doc_font_size = 20\ndoc_line_height = 100").config.doc_line_height,
+            parse("doc_font_size = 20\ndoc_line_height = 5")
+                .config
+                .doc_line_height,
+            20.0
+        );
+        assert_eq!(
+            parse("doc_font_size = 20\ndoc_line_height = 100")
+                .config
+                .doc_line_height,
             60.0
         );
         // 与键出现顺序无关（行高先出现也按最终字号夹取）
         let p = parse("doc_line_height = 100\ndoc_font_size = 20\n");
-        assert_eq!((p.config.doc_font_size, p.config.doc_line_height), (20.0, 60.0));
+        assert_eq!(
+            (p.config.doc_font_size, p.config.doc_line_height),
+            (20.0, 60.0)
+        );
         // 非数值：忽略并回落默认
         let p = parse("doc_font_size = abc\ndoc_line_height = inf\n");
-        assert_eq!((p.config.doc_font_size, p.config.doc_line_height), (16.0, 22.0));
+        assert_eq!(
+            (p.config.doc_font_size, p.config.doc_line_height),
+            (16.0, 22.0)
+        );
         assert_eq!(p.ignored, 2);
     }
 

@@ -87,14 +87,16 @@ pub const BASE_FONT_SIZE: f32 = crate::tokens::typography::BODY_SIZE;
 /// 单一来源：`tokens::typography::BODY_LINE_HEIGHT`。
 pub const BASE_LINE_HEIGHT: f32 = crate::tokens::typography::BODY_LINE_HEIGHT;
 /// 内容区左右边距（物理像素）。
-pub const MARGIN: f32 = 16.0;
-/// 块间垂直间距（物理像素）。
-pub const PARA_GAP: f32 = 10.0;
+/// 单一来源：`tokens::doc::MARGIN`。
+pub const MARGIN: f32 = crate::tokens::doc::MARGIN;
+/// 相邻块垂直间距（物理像素）。
+/// 单一来源：`tokens::doc::PARA_GAP`。
+pub const PARA_GAP: f32 = crate::tokens::doc::PARA_GAP;
 /// 正文可读列宽上限（全角字符当量，随字号/缩放换算为物理像素）。
-pub const READABLE_COLS: f32 = 40.0;
+pub const READABLE_COLS: f32 = crate::tokens::doc::READABLE_COLS;
 /// 启用可读列宽上限的窗口宽度阈值（物理像素，scale = 1 基准）。
 /// 窄窗口保持满宽排版，只有超宽窗口才左右留白居中。
-pub const WIDE_WINDOW: f32 = 1600.0;
+pub const WIDE_WINDOW: f32 = crate::tokens::doc::WIDE_WINDOW;
 
 /// 视口坐标下的轴对齐矩形（物理像素）。
 ///

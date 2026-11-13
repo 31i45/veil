@@ -378,9 +378,15 @@ impl Search {
         if self.query.is_empty() {
             String::new()
         } else if self.matches.is_empty() {
-            "0/0".into()
+            crate::i18n::tf(crate::i18n::Key::SearchCount, &["0", "0"])
         } else {
-            format!("{}/{}", self.current + 1, self.matches.len())
+            crate::i18n::tf(
+                crate::i18n::Key::SearchCount,
+                &[
+                    &(self.current + 1).to_string(),
+                    &self.matches.len().to_string(),
+                ],
+            )
         }
     }
 }
@@ -411,10 +417,7 @@ mod tests {
             find_all("Foo foo FOO", "foo", false),
             vec![Range::new(0, 3), Range::new(4, 7), Range::new(8, 11)]
         );
-        assert_eq!(
-            find_all("Foo foo FOO", "foo", true),
-            vec![Range::new(4, 7)]
-        );
+        assert_eq!(find_all("Foo foo FOO", "foo", true), vec![Range::new(4, 7)]);
         // CJK 与大写混排：开时「中A」不再命中「中a」，仅小写一处
         assert_eq!(
             find_all("中A中a", "中a", false),
@@ -563,7 +566,10 @@ mod tests {
         // 查询文本区 → Aa → 计数并入输入区右缘，自左向右不重叠
         assert_eq!(l.text.x + l.text.w, l.case.x - PAD);
         assert_eq!(l.count_right, l.case.x - PAD);
-        assert!(l.text.x + l.text.w - COUNT_W >= l.text.x, "计数预留在输入区内");
+        assert!(
+            l.text.x + l.text.w - COUNT_W >= l.text.x,
+            "计数预留在输入区内"
+        );
         assert!((l.text.w - COUNT_W) > 0.0, "输入区放得下计数");
     }
 
@@ -598,7 +604,13 @@ mod tests {
         assert_eq!(hit(&l, 1.0, true, cx, cy), Some(Hit::Close));
         // 两行之间的分组间距属于卡片内部：吞掉点击
         assert_eq!(
-            hit(&l, 1.0, true, l.bar.x + 4.0, l.bar.y + l.bar.h + ROW_GAP / 2.0),
+            hit(
+                &l,
+                1.0,
+                true,
+                l.bar.x + 4.0,
+                l.bar.y + l.bar.h + ROW_GAP / 2.0
+            ),
             Some(Hit::Bar)
         );
     }

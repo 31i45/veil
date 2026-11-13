@@ -8,6 +8,7 @@
 
 use crate::app::App;
 use crate::geometry::Rect;
+use crate::i18n::{t, Key};
 use crate::tokens::typography;
 use crate::view::{search, Frame};
 
@@ -157,7 +158,7 @@ impl App {
             if self.editor.preedit().is_none() {
                 if let Some(lab) = self.ui_state.chrome.labels.get_or_insert(
                     &mut self.engine,
-                    "查找",
+                    t(Key::SearchPlaceholder),
                     theme.muted,
                     scale,
                 ) {
@@ -195,7 +196,13 @@ impl App {
             let cw = crate::theme::surface::caret_width(scale).round().max(1.0) as u32;
             let ch = crate::theme::surface::caret_height(scale);
             let cy = (mid - ch / 2.0).round() as i32;
-            frame.fill_rect(cx, cy, cw, ch as u32, [theme.fg[0], theme.fg[1], theme.fg[2], 255]);
+            frame.fill_rect(
+                cx,
+                cy,
+                cw,
+                ch as u32,
+                [theme.fg[0], theme.fg[1], theme.fg[2], 255],
+            );
         }
         // IME 组合串：贴在查询文本之后（贴右缘钳位），下划线同文档 preedit；
         // 替换模式下焦点在替换框时由替换行负责绘制
@@ -225,7 +232,7 @@ impl App {
                 if !(focus == search::Field::Replace && self.editor.preedit().is_some()) {
                     if let Some(lab) = self.ui_state.chrome.labels.get_or_insert(
                         &mut self.engine,
-                        "替换为",
+                        t(Key::SearchReplacePlaceholder),
                         theme.muted,
                         scale,
                     ) {
@@ -262,7 +269,13 @@ impl App {
                 let cw = crate::theme::surface::caret_width(scale).round().max(1.0) as u32;
                 let ch = crate::theme::surface::caret_height(scale);
                 let cy = (rmid - ch / 2.0).round() as i32;
-                frame.fill_rect(cx, cy, cw, ch as u32, [theme.fg[0], theme.fg[1], theme.fg[2], 255]);
+                frame.fill_rect(
+                    cx,
+                    cy,
+                    cw,
+                    ch as u32,
+                    [theme.fg[0], theme.fg[1], theme.fg[2], 255],
+                );
             }
             if focus == search::Field::Replace {
                 if let Some(pre) = self.editor.preedit() {
@@ -281,7 +294,10 @@ impl App {
                     );
                 }
             }
-            for (btn, glyph) in [(r.one, "替换"), (r.all, "全部")] {
+            for (btn, glyph) in [
+                (r.one, t(Key::SearchReplace)),
+                (r.all, t(Key::SearchReplaceAll)),
+            ] {
                 let color = if search.matches.is_empty() {
                     crate::tokens::state::disabled_fg(&theme)
                 } else {
@@ -312,11 +328,11 @@ impl App {
             } else {
                 theme.muted
             };
-            if let Some(lab) = self
-                .ui_state
-                .chrome
-                .labels
-                .get_or_insert(&mut self.engine, &count, color, scale)
+            if let Some(lab) =
+                self.ui_state
+                    .chrome
+                    .labels
+                    .get_or_insert(&mut self.engine, &count, color, scale)
             {
                 let x = (l.count_right - lab.w as f32).round() as i32;
                 frame.blit(&lab.pixels, lab.w, lab.h, x, text_y(lab.h));
@@ -328,12 +344,12 @@ impl App {
         } else {
             theme.text
         };
-        if let Some(lab) =
-            self.ui_state
-                .chrome
-                .labels
-                .get_or_insert(&mut self.engine, "Aa", case_color, scale)
-        {
+        if let Some(lab) = self.ui_state.chrome.labels.get_or_insert(
+            &mut self.engine,
+            t(Key::SearchCaseSensitive),
+            case_color,
+            scale,
+        ) {
             let x = l.case.x + (l.case.w - lab.w as f32) / 2.0;
             let y = l.case.y + (l.case.h - lab.h as f32) / 2.0;
             frame.blit(
@@ -355,12 +371,12 @@ impl App {
             (l.next, "›", page_color),
             (l.close, "×", theme.text),
         ] {
-            if let Some(lab) = self.ui_state.chrome.labels.get_or_insert(
-                &mut self.engine,
-                glyph,
-                color,
-                scale,
-            ) {
+            if let Some(lab) =
+                self.ui_state
+                    .chrome
+                    .labels
+                    .get_or_insert(&mut self.engine, glyph, color, scale)
+            {
                 let x = r.x + (r.w - lab.w as f32) / 2.0;
                 let y = r.y + (r.h - lab.h as f32) / 2.0;
                 frame.blit(
@@ -393,7 +409,9 @@ impl App {
             let t = start.min(total) as f32 / total as f32;
             (vp.y + t * vp.h - h as f32 / 2.0).round() as i32
         };
-        let stride = (search.matches.len() as f32 / vp.h.max(1.0)).ceil().max(1.0) as usize;
+        let stride = (search.matches.len() as f32 / vp.h.max(1.0))
+            .ceil()
+            .max(1.0) as usize;
         for (i, m) in search.matches.iter().enumerate().step_by(stride) {
             if i == search.current {
                 continue;

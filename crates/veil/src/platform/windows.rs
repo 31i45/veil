@@ -11,6 +11,7 @@ use std::ffi::{c_void, OsString};
 use std::os::windows::ffi::OsStringExt;
 use std::path::PathBuf;
 
+use veil_ui::i18n::{t, Key};
 use veil_ui::FileDialog;
 
 use super::wide;
@@ -170,16 +171,12 @@ const MAX_PATH_U16: usize = 32_768;
 
 /// 过滤器串：每对「描述\0模式\0」，整体以额外 \0 结尾。
 fn filter() -> Vec<u16> {
-    "Markdown (*.md;*.markdown)\0*.md;*.markdown\0所有文件 (*.*)\0*.*\0\0"
-        .encode_utf16()
-        .collect()
+    t(Key::DialogFilterMarkdown).encode_utf16().collect()
 }
 
 /// 图片过滤器（2f 插入图片）：与 image::is_image_path 同一族扩展名。
 fn image_filter() -> Vec<u16> {
-    "图片 (*.png;*.jpg;*.jpeg;*.jfif;*.bmp;*.gif;*.webp;*.tif;*.tiff;*.ico)\0*.png;*.jpg;*.jpeg;*.jfif;*.bmp;*.gif;*.webp;*.tif;*.tiff;*.ico\0所有文件 (*.*)\0*.*\0\0"
-        .encode_utf16()
-        .collect()
+    t(Key::DialogFilterImage).encode_utf16().collect()
 }
 
 /// 用户「文档」目录：被重定向或不存在时退回用户主目录。
@@ -187,7 +184,11 @@ fn image_filter() -> Vec<u16> {
 fn documents_dir() -> Option<PathBuf> {
     let home = std::env::var_os("USERPROFILE")?;
     let docs = PathBuf::from(&home).join("Documents");
-    Some(if docs.is_dir() { docs } else { PathBuf::from(home) })
+    Some(if docs.is_dir() {
+        docs
+    } else {
+        PathBuf::from(home)
+    })
 }
 
 /// 拆分建议路径 → (文件名, 初始目录)。裸名（草稿首次保存/导出）落「文档」。
@@ -255,7 +256,10 @@ fn open_dialog(title: &str, filter: Vec<u16>, def_ext: &str) -> Option<PathBuf> 
 unsafe fn com_slot<F: Copy>(obj: *mut c_void, index: usize) -> F {
     let vtable = *(obj as *mut *const *const c_void);
     let slot = *vtable.add(index);
-    debug_assert_eq!(std::mem::size_of::<F>(), std::mem::size_of::<*const c_void>());
+    debug_assert_eq!(
+        std::mem::size_of::<F>(),
+        std::mem::size_of::<*const c_void>()
+    );
     std::mem::transmute_copy(&slot)
 }
 
@@ -297,9 +301,8 @@ fn com_save(
     // S_OK = 本次初始化由我们收尾；S_FALSE = 本线程已是 STA（无需收尾）。
     let hr = unsafe { CoInitializeEx(std::ptr::null_mut(), COINIT_APARTMENTTHREADED) };
     let owns_com = hr == 0;
-    let out = unsafe {
-        com_save_inner(title, file_name, dir, filter_label, filter_pattern, def_ext)
-    };
+    let out =
+        unsafe { com_save_inner(title, file_name, dir, filter_label, filter_pattern, def_ext) };
     if owns_com {
         unsafe { CoUninitialize() };
     }
@@ -341,7 +344,7 @@ unsafe fn com_save_inner(
     // 过滤器：目标类型 + 所有文件（与打开对话框的观感一致）。
     let label = wide(filter_label);
     let pattern = wide(filter_pattern);
-    let all_label = wide("所有文件 (*.*)");
+    let all_label = wide(t(Key::DialogFilterAllFiles));
     let all_pattern = wide("*.*");
     let specs = [
         FilterSpec {
@@ -409,31 +412,39 @@ pub struct WinDialogs;
 
 impl FileDialog for WinDialogs {
     fn open_markdown(&mut self) -> Option<PathBuf> {
-        open_dialog("打开 Markdown", filter(), "md")
+        open_dialog(t(Key::DialogOpenMarkdown), filter(), "md")
     }
 
     fn save_markdown(&mut self, suggested: &str) -> Option<PathBuf> {
         let (name, dir) = split_suggestion(suggested);
         com_save(
-            "另存为 Markdown",
+            t(Key::DialogSaveMarkdown),
             &name,
             dir.as_deref(),
-            "Markdown (*.md;*.markdown)",
-            "*.md;*.markdown",
+            t(Key::DialogFilterMarkdownLabel),
+            t(Key::DialogFilterMarkdownPattern),
             "md",
         )
     }
 
     fn open_image(&mut self) -> Option<PathBuf> {
-        open_dialog("插入图片", image_filter(), "png")
+        open_dialog(t(Key::DialogInsertImage), image_filter(), "png")
     }
 
     fn save_export(&mut self, suggested: &str, ext: &str) -> Option<PathBuf> {
         let (name, dir) = split_suggestion(suggested);
         let (title, label, pattern) = if ext.eq_ignore_ascii_case("pdf") {
-            ("导出 PDF", "PDF (*.pdf)", "*.pdf")
+            (
+                t(Key::DialogExportPdf),
+                t(Key::DialogFilterPdf),
+                t(Key::DialogFilterPdfPattern),
+            )
         } else {
-            ("导出 HTML", "HTML (*.html)", "*.html")
+            (
+                t(Key::DialogExportHtml),
+                t(Key::DialogFilterHtml),
+                t(Key::DialogFilterHtmlPattern),
+            )
         };
         com_save(title, &name, dir.as_deref(), label, pattern, ext)
     }

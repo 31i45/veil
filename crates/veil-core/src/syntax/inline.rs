@@ -661,10 +661,21 @@ fn html_tag_end(s: &str, lt: usize) -> Option<usize> {
     s[lt..].find('>').map(|rel| lt + rel + 1)
 }
 
+/// 显式尺寸属性值 → 像素数：只接受纯十进制数字（可带首尾空白），且必须 > 0。
+/// `0` / 空串 / `100px` / `-5` / 溢出 u32 的长数字都视为非法（返回 None，属性忽略）。
+fn parse_px(v: Option<&str>) -> Option<u32> {
+    let t = v?.trim();
+    if t.is_empty() || !t.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    t.parse::<u32>().ok().filter(|n| *n > 0)
+}
+
 /// 从一段开标签源码（如 `<abbr title="x">`）中抽取标签名、是否自闭合、白名单属性。
 /// 标签名必须以字母开头、后接 alnum/-；不满足返回 None（不是合法标签）。
-/// 属性名必须以字母开头；白名单收集 `title`/`src`/`alt`（`<a>` 另收 `href`）与
-/// 净化后的 `style`；`on*` 一律忽略；`src=http(s)://` 远程置空、`href=javascript:` 置空。
+/// 属性名必须以字母开头；白名单收集 `title`/`src`/`alt`（`<a>` 另收 `href`、
+/// `<img>` 另收 `width`/`height`）与净化后的 `style`；`on*` 一律忽略；
+/// `src=http(s)://` 远程置空、`href=javascript:` 置空。
 /// 属性值支持 `"..."` / `'...'` / 无引号。
 fn parse_open_tag(src: &str) -> Option<(String, bool, HtmlAttrs)> {
     // src 形如 "kbd>" 或 "img src=\"x\" />"（不含 `<`）。须以字母开头。
@@ -781,6 +792,11 @@ fn parse_open_tag(src: &str) -> Option<(String, bool, HtmlAttrs)> {
                 }
             }
             "alt" => attrs.alt = val,
+            // 显式尺寸只对 `<img>` 有意义（其它标签渲染/导出都不读这两个字段）。
+            // 只接受纯十进制数字：`100px` / `50%` / 负数等一律当非法值忽略，
+            // 避免把非像素语义的单位误当像素放大版面。
+            "width" if tag_name == "img" => attrs.width = parse_px(val.as_deref()),
+            "height" if tag_name == "img" => attrs.height = parse_px(val.as_deref()),
             // 只有 `<a>` 的 href 参与渲染/导出；javascript: 脚本 scheme 置空。
             "href" if tag_name == "a" => {
                 if let Some(ref v) = val {
@@ -2571,6 +2587,58 @@ mod tests {
                 }
                 _ => panic!("expected HtmlSelfClosed Img for {input}"),
             }
+        }
+    }
+
+    #[test]
+    fn html_img_explicit_size_parsed() {
+        // 合法：纯十进制数字（含无引号与首尾空白）
+        let ns = parse(r#"<img src="a.png" width="120" height=80>"#);
+        match &ns[0].kind {
+            InlineKind::HtmlSelfClosed { attrs, .. } => {
+                assert_eq!(attrs.width, Some(120));
+                assert_eq!(attrs.height, Some(80));
+            }
+            _ => panic!("expected HtmlSelfClosed Img"),
+        }
+        // 只给宽：高保持 None（由 UI 按原图比例推高）
+        let ns = parse(r#"<img src="a.png" width="120">"#);
+        match &ns[0].kind {
+            InlineKind::HtmlSelfClosed { attrs, .. } => {
+                assert_eq!(attrs.width, Some(120));
+                assert_eq!(attrs.height, None);
+            }
+            _ => panic!("expected HtmlSelfClosed Img"),
+        }
+        // 非法值：单位/百分比/负数/零/非数字/溢出 → 忽略该属性
+        for (input, want_w, want_h) in [
+            (r#"<img src="a.png" width="100px">"#, None, None),
+            (r#"<img src="a.png" width="50%">"#, None, None),
+            (r#"<img src="a.png" width="-5">"#, None, None),
+            (r#"<img src="a.png" width="0" height="0">"#, None, None),
+            (r#"<img src="a.png" width="abc">"#, None, None),
+            (r#"<img src="a.png" height="99999999999">"#, None, None),
+            (r#"<img src="a.png" width="">"#, None, None),
+            // 一个合法一个非法：只保留合法那个
+            (
+                r#"<img src="a.png" width="64" height="4x">"#,
+                Some(64),
+                None,
+            ),
+        ] {
+            match &parse(input)[0].kind {
+                InlineKind::HtmlSelfClosed { attrs, .. } => {
+                    assert_eq!(attrs.width, want_w, "{input} width");
+                    assert_eq!(attrs.height, want_h, "{input} height");
+                }
+                _ => panic!("expected HtmlSelfClosed Img for {input}"),
+            }
+        }
+        // 非 img 标签不收集 width/height（白名单按标签收窄）
+        let ns = parse(r#"<abbr width="120">x</abbr>"#);
+        match &ns[0].kind {
+            InlineKind::Html { attrs, .. } => assert_eq!(attrs.width, None),
+            _ => panic!("expected Html Abbr"),
         }
     }
 

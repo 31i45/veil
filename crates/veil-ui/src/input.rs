@@ -53,7 +53,6 @@ pub enum Key {
     /// 逻辑/物理键 `/`（仅 Ctrl 组合映射；无 ctrl 的 `/` 文本由 Text 变体承载）。
     Slash,
     /// 逻辑/物理键 `,`（仅 Ctrl 组合映射；无 ctrl 的 `,` 文本由 Text 变体承载）。
-    #[expect(dead_code, reason = "预留给 Ctrl+, 快捷键，尚未接线")]
     Comma,
     /// Escape：关闭菜单（切片 15）。
     Escape,
@@ -327,6 +326,14 @@ mod tests {
         assert_eq!(translate(Key::Slash, CTRL), Some(Action::OpenSourceMode));
         assert_eq!(translate(Key::Slash, NONE), None);
         assert_eq!(translate(Key::Slash, ALT_GR), None);
+    }
+
+    #[test]
+    fn settings_binding() {
+        // Ctrl+, 打开设置模态；无 ctrl 的 `,` 是普通文本（由 Text 变体承载）
+        assert_eq!(translate(Key::Comma, CTRL), Some(Action::OpenSettings));
+        assert_eq!(translate(Key::Comma, NONE), None);
+        assert_eq!(translate(Key::Comma, ALT_GR), None);
     }
 
     #[test]

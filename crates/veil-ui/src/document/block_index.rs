@@ -2,13 +2,14 @@
 //! 本文件是生产代码唯一允许全量枚举块的位置；其余读取一律走本索引。
 //! 不依赖 cosmic-text/像素概念，属文档域而非排版细节。
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use veil_core::{BlockContainer, BlockId, BlockKind, Range, Session};
 
 use crate::app::App;
 use crate::geometry::{MARGIN, PARA_GAP};
 use crate::tokens::doc;
+use crate::view::{list_marker_of, ordered_list_epoch, ordered_list_ordinals, ListMarker};
 
 /// 单块几何缓存：块清单一次枚举后复用，避免每次击键反复全量枚举（P1a）。
 pub(crate) struct BlockGeom {
@@ -50,6 +51,12 @@ pub(crate) fn gap_after(kind: &BlockKind) -> f32 {
 #[derive(Default)]
 pub(crate) struct BlockIndex {
     pub(crate) blocks: Vec<BlockGeom>,
+    /// 有序列表显示编号（BlockId → 编号）：随块清单一同重建，布局按块 id 取用。
+    /// 编号是全文派生量（`BlockKind` 不含源码起始号），由 `view::layout` 的纯函数派生。
+    pub(crate) list_ordinals: HashMap<BlockId, u32>,
+    /// 有序列表编号代次：任一编号变化都改变布局基础键，避免文首增删项后
+    /// 后续块（文本与 BlockId 未变）命中陈旧编号。
+    pub(crate) list_epoch: u64,
     /// 文档总高（含首尾外边距），即原 `doc_height()` 语义。
     pub(crate) total_h: f32,
     /// 上一轮估算高度的输入快照：三者不变时，`(id, kind, range)` 相同的块可原样复用
@@ -171,6 +178,27 @@ impl App {
             .collect()
     }
 
+    /// 有序列表编号及其代次：只见列表项取块文本（首行标记的源码起始号），
+    /// 其余块零读取；列表不存在的文档代价接近零。
+    fn derive_list_ordinals(
+        &self,
+        blocks: &[(BlockId, BlockKind, Range, BlockContainer)],
+    ) -> (HashMap<BlockId, u32>, u64) {
+        let session = self.editor.session();
+        let items = blocks.iter().map(|(id, kind, range, _)| {
+            let marker = match kind {
+                BlockKind::ListItem { .. } => session
+                    .text_slice(*range)
+                    .map_or(ListMarker::None, |t| list_marker_of(kind, &t)),
+                _ => ListMarker::None,
+            };
+            (*id, kind, marker)
+        });
+        let ordinals = ordered_list_ordinals(items);
+        let epoch = ordered_list_epoch(&ordinals);
+        (ordinals, epoch)
+    }
+
     /// 步骤 2：填充 `BlockGeom` 向量并回收缓存（除 `blocks_enum` 外的循环体）。
     ///
     /// `est_h` 只依赖块内字节长度与块内行数；同一 `BlockId` 的块内容未变时二者不变
@@ -183,6 +211,10 @@ impl App {
         let scale = self.input_state.scale;
         let chars_per_line = self.chars_per_line();
         let line_h = self.engine.doc_line_height();
+        // 编号派生必须早于 base_key：代次进基础键，布局缓存才能随编号变化失效。
+        let (list_ordinals, list_epoch) = self.derive_list_ordinals(&blocks);
+        self.index.list_ordinals = list_ordinals;
+        self.index.list_epoch = list_epoch;
         let base = self.base_key();
         let rev = self.input_state.revs.session;
         let can_reuse = self.index.est_scale == scale

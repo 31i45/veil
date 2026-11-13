@@ -19,6 +19,9 @@ use veil_core::{BlockId, BlockKind, HtmlTag, InlineKind, InlineNode, Range};
 /// 专注模式压暗强度：背景色以该 alpha 覆盖非光标块（越大越暗，255 = 全遮）。
 const FOCUS_DIM_ALPHA: u8 = 160;
 
+/// 待排版图片：(节点区间, url, 显式宽高)。显式宽高仅来自 HTML `<img width height>`。
+type PendingImage = (Range, String, (Option<u32>, Option<u32>));
+
 /// 打字机模式锚点：视口高比例（0.42 ≈ 上四成处），光标行中心恒定位于此处。
 const TYPEWRITER_ANCHOR: f32 = 0.42;
 
@@ -373,7 +376,9 @@ impl App {
             let text = self.editor.session().text_slice(range).unwrap_or_default();
             let inlines = self.editor.session().block_inlines(id).unwrap_or_default();
             let mut maths: Vec<(Range, String)> = Vec::new(); // (节点区间, tex)
-            let mut images: Vec<(Range, String)> = Vec::new(); // (节点区间, url)
+                                                              // (节点区间, url, 显式宽高)：Markdown 图片无显式尺寸（None, None），
+                                                              // HTML `<img width height>` 由解析层白名单收集后带下来。
+            let mut images: Vec<PendingImage> = Vec::new();
             let mut stack: Vec<&InlineNode> = inlines.iter().collect();
             while let Some(n) = stack.pop() {
                 if !node_active(n.range, caret) {
@@ -389,7 +394,7 @@ impl App {
                         InlineKind::Image => {
                             if let Some(url) = n.url {
                                 let url = self.editor.session().text_slice(url).unwrap_or_default();
-                                images.push((n.range, url));
+                                images.push((n.range, url, (None, None)));
                             }
                         }
                         // 行内/块级 `<img src alt>`：本地 src 走与 Markdown Image 相同的
@@ -401,7 +406,11 @@ impl App {
                         } => {
                             if let Some(src) = attrs.src.as_deref().or(attrs.remote_src.as_deref())
                             {
-                                images.push((n.range, src.to_string()));
+                                images.push((
+                                    n.range,
+                                    src.to_string(),
+                                    (attrs.width, attrs.height),
+                                ));
                             }
                         }
                         _ => {}
@@ -428,16 +437,14 @@ impl App {
             let mut imgs = Vec::new();
             let container = self.editor.session().block_container(id);
             let img_max_w = self.image_max_width(container, width);
-            // B4：行内图片限高 2×正文行高；独占一行（块级/仅含图片）放宽到 6×；
-            // 宽度上限 = 版心宽 - 容器内边距。仅缩小，不放大。
-            let line_h = self.engine.doc_line_height() * self.input_state.scale;
-            let img_ranges: Vec<Range> = images.iter().map(|(r, _)| *r).collect();
-            let standalone = crate::view::block_is_image_only(&text, range, &img_ranges);
-            let max_h = if standalone {
-                crate::tokens::doc::IMG_STANDALONE_LINES * line_h
-            } else {
-                crate::tokens::doc::IMG_INLINE_LINES * line_h
-            };
+            // B4：行内图片限高 4×正文行高；独占一行改用「窗口可视高度 × 80%」——
+            // 行高倍数会把正常截图压成小黑块。宽度上限 = 版心宽 - 容器内边距。
+            // 独占判定按「图片所在视觉行」而非整块：段落里图片后另起一行的正文
+            // （如 `![a](p.png)\nX`）不应把该图降级为行内小图。
+            // 非显式尺寸时仅缩小、不放大。
+            let scale = self.input_state.scale;
+            let line_h = self.engine.doc_line_height() * scale;
+            let inline_max_h = crate::tokens::doc::IMG_INLINE_LINES * line_h;
             for (nrange, tex) in maths {
                 // 失败记忆/渲染失败 → 降级源码（Reveal 消隐态）显示，不每帧重试。
                 let Some(img) = self.inline_math_image(&tex) else {
@@ -451,7 +458,21 @@ impl App {
                     baseline: img.baseline,
                 });
             }
-            for (nrange, url) in images {
+            for (nrange, url, explicit) in images {
+                // HTML `width`/`height` 是 CSS 逻辑像素 → 乘 DPI 转布局物理像素。
+                let explicit = (
+                    explicit
+                        .0
+                        .map(|v| (v as f32 * scale).round().max(1.0) as u32),
+                    explicit
+                        .1
+                        .map(|v| (v as f32 * scale).round().max(1.0) as u32),
+                );
+                let max_h = if crate::view::image_is_standalone(&text, range, nrange) {
+                    self.image_max_height()
+                } else {
+                    inline_max_h
+                };
                 let key = if let Some(path) = local_image_path(&url, self.doc.path.as_deref()) {
                     let key = path.to_string_lossy().into_owned();
                     if self.cache.image_failed(&key, image_base) {
@@ -499,7 +520,8 @@ impl App {
                         self.request_remote_image(&url);
                         continue;
                     };
-                    let (dw, dh) = crate::view::fit_size_box(w, h, img_max_w, max_h);
+                    let (dw, dh) =
+                        crate::view::image_display_size(w, h, explicit, img_max_w, max_h);
                     imgs.push(InlineImg {
                         range: nrange,
                         key: InlineAsset::Image(url),
@@ -512,7 +534,9 @@ impl App {
                     continue; // 内联 data URL 或草稿相对路径：降级 alt 文本
                 };
                 let nat = &self.cache.inline_images[&key].value;
-                let (dw, dh) = crate::view::fit_size_box(nat.width, nat.height, img_max_w, max_h);
+                let (dw, dh) = crate::view::image_display_size(
+                    nat.width, nat.height, explicit, img_max_w, max_h,
+                );
                 imgs.push(InlineImg {
                     range: nrange,
                     key: InlineAsset::Image(key),
@@ -532,6 +556,8 @@ impl App {
                 reveal_all,
                 Some(&footnotes),
                 &folds,
+                // 有序列表显示编号：编号在块索引层按文档顺序派生（BlockKind 不含起始号）。
+                self.index.list_ordinals.get(&id).copied(),
             );
             let reveal = l.reveal_state(&kind, range, caret);
             self.cache.layouts.insert(
@@ -1568,11 +1594,17 @@ impl App {
         let scale = self.input_state.scale;
         let Some(s) = self.ui_state.settings.as_ref() else {
             return crate::view::settings::SettingsLayout {
-                card: Rect { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
+                card: Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    w: 0.0,
+                    h: 0.0,
+                },
                 fields: Vec::new(),
                 buttons: Vec::new(),
                 button_ids: Vec::new(),
                 window_geom_clear: None,
+                window_geom_value: None,
             };
         };
         let mut text = ModalText {
@@ -1607,15 +1639,7 @@ impl App {
             scale,
         };
         crate::view::settings::paint(
-            frame,
-            vp,
-            scale,
-            &theme,
-            &s.form,
-            &s.state,
-            &layout,
-            &s.buttons,
-            &mut text,
+            frame, vp, scale, &theme, &s.form, &s.state, &layout, &s.buttons, &mut text,
         );
     }
 

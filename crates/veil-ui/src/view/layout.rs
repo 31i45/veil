@@ -13,7 +13,7 @@ use cosmic_text::{
     Attrs, Buffer, Color, Cursor, Family, FontSystem, Metrics, Shaping, Style as FontStyle,
     SwashCache, Weight, Wrap,
 };
-use veil_core::{task_span, BlockKind, HtmlTag, InlineKind, InlineNode, Range};
+use veil_core::{task_span, BlockId, BlockKind, HtmlTag, InlineKind, InlineNode, Range};
 
 use super::highlight::{highlight, to_styles};
 use super::linebreak;
@@ -126,6 +126,61 @@ pub(crate) fn fit_size_box(w: u32, h: u32, max_w: f32, max_h: f32) -> (u32, u32)
     )
 }
 
+/// 显式尺寸（HTML `<img width height>`）：给定轴直接用给定值，缺失轴按原图比例推算；
+/// 与 `fit_size_box` 不同，这里允许放大（作者显式指定即应生效），只把两轴等比夹到
+/// `max_w`/`max_h`（调用方传「版心宽 × 4」）——防止离谱属性值把版面撑到不可用。
+pub(crate) fn explicit_size(
+    w: u32,
+    h: u32,
+    want_w: Option<u32>,
+    want_h: Option<u32>,
+    max_w: f32,
+    max_h: f32,
+) -> (u32, u32) {
+    let w = w.max(1) as f32;
+    let h = h.max(1) as f32;
+    let (dw, dh) = match (want_w, want_h) {
+        (Some(ew), Some(eh)) => (ew.max(1) as f32, eh.max(1) as f32),
+        (Some(ew), None) => {
+            let ew = ew.max(1) as f32;
+            (ew, (h * ew / w).round().max(1.0))
+        }
+        (None, Some(eh)) => {
+            let eh = eh.max(1) as f32;
+            ((w * eh / h).round().max(1.0), eh)
+        }
+        (None, None) => (w, h),
+    };
+    // 只缩到上限，不再往下缩：显式小图应保持显式尺寸。
+    let s = (max_w.max(1.0) / dw).min(max_h.max(1.0) / dh).min(1.0);
+    (
+        (dw * s).round().max(1.0) as u32,
+        (dh * s).round().max(1.0) as u32,
+    )
+}
+
+/// 行内图片的最终显示尺寸：有显式宽/高时走 `explicit_size`（上限 = 版心宽 ×4）；
+/// 否则按默认限宽限高（`fit_size_box`，仅缩小不放大）。
+pub(crate) fn image_display_size(
+    nat_w: u32,
+    nat_h: u32,
+    explicit: (Option<u32>, Option<u32>),
+    max_w: f32,
+    max_h: f32,
+) -> (u32, u32) {
+    match explicit {
+        (None, None) => fit_size_box(nat_w, nat_h, max_w, max_h),
+        _ => explicit_size(
+            nat_w,
+            nat_h,
+            explicit.0,
+            explicit.1,
+            max_w * crate::tokens::doc::IMG_EXPLICIT_MAX_RATIO,
+            max_w * crate::tokens::doc::IMG_EXPLICIT_MAX_RATIO,
+        ),
+    }
+}
+
 /// 独占一行的图片（块级 / 段落仅含图片）：块文本剥掉全部图片节点源码后只剩空白。
 /// `img_ranges` 为文档绝对区间；`text` 是 `block` 区间内的块文本。
 pub(crate) fn block_is_image_only(text: &str, block: Range, img_ranges: &[Range]) -> bool {
@@ -149,6 +204,30 @@ pub(crate) fn block_is_image_only(text: &str, block: Range, img_ranges: &[Range]
         keep.push_str(&text[pos..]);
     }
     keep.trim().is_empty()
+}
+
+/// 单张图片是否「独占一行」：图片所在的**视觉行**（两个换行之间）除该图源码外只剩空白。
+/// 与 [`block_is_image_only`] 的区别：多行段落里图片之后另起一行的正文（如
+/// `![a](p.png)\nX`）不应把这张图降级为行内小图——它自己的那一行仍是纯图片；
+/// 而同一行内有任意正文时仍返回 false（继续走行内 4 行限高）。
+pub(crate) fn image_is_standalone(text: &str, block: Range, img: Range) -> bool {
+    if img.start < block.start || img.end > block.end || img.start >= img.end {
+        return false;
+    }
+    let s = img.start - block.start;
+    let e = img.end - block.start;
+    if e > text.len() || !text.is_char_boundary(s) || !text.is_char_boundary(e) {
+        return false;
+    }
+    let line_start = text[..s].rfind('\n').map_or(0, |i| i + 1);
+    let line_end = text[e..].find('\n').map_or(text.len(), |i| e + i);
+    let line = &text[line_start..line_end];
+    let base = block.start + line_start;
+    block_is_image_only(
+        line,
+        Range::new(base, block.start + line_end),
+        &[Range::new(base + (s - line_start), base + (e - line_start))],
+    )
 }
 
 /// 替换段：块相对 doc 区间 `[doc_start, doc_end)` → `fill` 文本。
@@ -821,10 +900,13 @@ impl LayoutEngine {
             reveal_all,
             None,
             &[],
+            None,
         )
     }
 
     /// 带脚注编号表的排版入口：编号在全文范围内派生，由调用方每轮构建一次并传引用。
+    /// `ordinal` 为有序列表项在文档块序列中的显示编号（见 [`ordered_list_ordinals`]）；
+    /// `None` 表示调用方拿不到文档顺序，此时有序列表保留源码编号。
     #[allow(clippy::too_many_arguments)] // 内部布局函数参数天然多
     pub(crate) fn layout_block_with_footnotes(
         &mut self,
@@ -838,6 +920,7 @@ impl LayoutEngine {
         reveal_all: bool,
         footnotes: Option<&FootnoteCtx>,
         folds: &[InlineFold],
+        ordinal: Option<u32>,
     ) -> BlockLayout {
         let full = text.strip_suffix('\n').unwrap_or(text);
         // 单块上限（v0）：只排前缀，超出部分不参与成形/光栅，避免内存放大
@@ -870,7 +953,7 @@ impl LayoutEngine {
         } else if is_footnote_def {
             decor.subs.clone()
         } else {
-            block_subs(kind.clone(), body, block, caret)
+            block_subs(kind.clone(), body, block, caret, ordinal)
         };
         if !reveal_all {
             let (ref_subs, links) = footnote_ref_subs(inlines, block, caret, body, footnotes);
@@ -1875,7 +1958,13 @@ fn is_glue_punct(ch: char) -> bool {
 /// 两趟产出互不重叠（间距在胶水字符两侧一律不注入），from_spans 可直接归并。
 /// 被包含在 elide/占位区的 sub 会被 from_spans 丢弃，
 /// 无需显式过滤（代码块、图片占位、行内公式标记都已在前一步进替换表）。
-fn build_typo_subs(body: &str, code_spans: &[(usize, usize)]) -> Vec<Sub> {
+/// 例外：`elided` 须显式过滤——单字符消隐段（如 Link 的 `[`）与同区间的间距 fill
+/// 在 from_spans 中同起点「长者优先」，fill 会胜出并把已消隐的标记重新画出来。
+fn build_typo_subs(
+    body: &str,
+    code_spans: &[(usize, usize)],
+    elided: &[(usize, usize)],
+) -> Vec<Sub> {
     let mut subs = Vec::new();
     // 第一趟：kinsoku 胶水段。左粘字符前插 WJ（文首/硬行首无需，与换行粘连本就无断点）、
     // 右粘字符后插 WJ（行尾同理）；WJ×/×WJ 禁断使 run 内不断、与相邻字不断。
@@ -1895,6 +1984,11 @@ fn build_typo_subs(body: &str, code_spans: &[(usize, usize)]) -> Vec<Sub> {
         // 必须保持源码原样；而两端反引号标记处于消隐区间，若在此生成 fill，会与
         // elide 同起点竞争并被优先采纳（fill 胜 elide），把反引号重新画出来。
         if code_spans.iter().any(|&(s, e)| (s..e).contains(&j)) {
+            continue;
+        }
+        // 被消隐的字符不参与间距：它不会出现在排版文本里，注入空格只会在
+        // from_spans 中与消隐段争同一起点（fill 胜 elide），把标记残片画出来。
+        if elided.iter().any(|&(s, e)| s <= j && j < e) {
             continue;
         }
         if cjk_boundary_skip(ch, next) {
@@ -2030,12 +2124,12 @@ fn build_layout_text(
     if !reveal_all {
         collect_elide(inlines, block, caret, &mut elide);
     }
-    all.extend(elide.into_iter().map(|(s, e)| Sub::elide(s, e)));
+    all.extend(elide.iter().map(|&(s, e)| Sub::elide(s, e)));
     all.extend_from_slice(subs);
     if apply_cjk {
         let mut code_spans = Vec::new();
         collect_code_spans(inlines, block, &mut code_spans);
-        all.extend(build_typo_subs(body, &code_spans));
+        all.extend(build_typo_subs(body, &code_spans, &elide));
     }
     let (map, accepted) = OffsetMap::from_spans(body.len(), &all);
     // 保留段取源文本并记行基；替换段写 fill（调用方保证不含换行）
@@ -2082,7 +2176,13 @@ fn collect_node_ranges(nodes: &[InlineNode], out: &mut Vec<Range>) {
 /// 块级替换（切片 12）：任务列表复选框 `☐`/`☑`、无序列表符号 `•`、
 /// 引用行首 `>` → 空格、分隔线整行消隐；标题 `#` 与围栏 ` ``` ` 同规则消隐（B7）。
 /// 激活判据沿用块区间闭区间；引用块逐行判定（光标所在行显源码，其余行隐标记）。
-fn block_subs(kind: BlockKind, body: &str, block: Range, caret: usize) -> Vec<Sub> {
+fn block_subs(
+    kind: BlockKind,
+    body: &str,
+    block: Range,
+    caret: usize,
+    ordinal: Option<u32>,
+) -> Vec<Sub> {
     match kind {
         BlockKind::ListItem {
             task: Some(done), ..
@@ -2097,6 +2197,40 @@ fn block_subs(kind: BlockKind, body: &str, block: Range, caret: usize) -> Vec<Su
                 }
                 None => Vec::new(),
             }
+        }
+        BlockKind::ListItem {
+            ordered: true,
+            depth,
+            task: None,
+        } => {
+            // 激活（含块首闭区间）→ 显源码编号，用户可直接改写 Markdown。
+            if node_active(block, caret) {
+                return Vec::new();
+            }
+            // 编号由文档块顺序派生（BlockKind 不含起始号）；拿不到顺序的调用方
+            //（单块排版/打印）保留源码，避免把后续项错误地重置成 1。
+            let Some(n) = ordinal else {
+                return Vec::new();
+            };
+            // 续块（无标记）不编号：其缩进必然大于标记列（与 list_marker_of 同一判据）。
+            let indent = body.len() - body.trim_start_matches([' ', '\t']).len();
+            if indent > usize::from(depth) * 2 + 1 {
+                return Vec::new();
+            }
+            let Some((start, end, _, delim)) = ordered_marker(body) else {
+                return Vec::new();
+            };
+            // 编号变宽（9→10）时补前导空格到源码标记宽度，保持内容列不变；
+            // 行高只由行数决定，与编号宽度无关（与「标记消隐不改行高」同一约束）。
+            let digits = (end - start) - 1;
+            let number = n.to_string();
+            let mut fill = String::new();
+            for _ in number.len()..digits {
+                fill.push(' ');
+            }
+            fill.push_str(&number);
+            fill.push(delim as char);
+            vec![Sub::fill(start, end, fill)]
         }
         BlockKind::ListItem { ordered: false, .. } => {
             if node_active(block, caret) {
@@ -2303,6 +2437,133 @@ fn bullet_pos(body: &str) -> Option<usize> {
         Some(b'-') | Some(b'*') | Some(b'+') => Some(indent),
         _ => None,
     }
+}
+
+/// 有序列表标记（块相对字节）：`(数字起点, 标记终点, 源码起始编号, 分隔符)`。
+/// 只认块首行行首的数字 + `.`/`)`；不含尾随空白（由调用方决定是否保留）。
+fn ordered_marker(body: &str) -> Option<(usize, usize, u32, u8)> {
+    let indent = body.len() - body.trim_start_matches([' ', '\t']).len();
+    let bytes = body.as_bytes();
+    let digits = bytes[indent..]
+        .iter()
+        .take_while(|b| b.is_ascii_digit())
+        .count();
+    // 与解析层一致：1–9 位数字（10 位不再视为列表标记）
+    if digits == 0 || digits > 9 {
+        return None;
+    }
+    let delim = *bytes.get(indent + digits)?;
+    if delim != b'.' && delim != b')' {
+        return None;
+    }
+    let start = body[indent..indent + digits].parse().ok()?;
+    Some((indent, indent + digits + 1, start, delim))
+}
+
+/// 列表项首行标记种类：供编号派生区分「新项」与「无标记续块」。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ListMarker {
+    /// 无标记的列表续块（项内内容行）：不参与编号，也不打断父层计数。
+    None,
+    /// 无序标记（`-` / `*` / `+`）。
+    Bullet,
+    /// 有序标记，携带源码起始编号。
+    Ordered(u32),
+}
+
+/// 列表项首行标记识别（块文本 → 标记种类）。
+///
+/// 用 `depth` 排除续块误判：续块内容缩进 = 项内容列，必然大于标记列
+///（`depth * 2`，允许 1 列零头），因此「内容行恰好以 `2024. ` 开头」不会被当作新项。
+pub(crate) fn list_marker_of(kind: &BlockKind, body: &str) -> ListMarker {
+    let BlockKind::ListItem { ordered, depth, .. } = kind else {
+        return ListMarker::None;
+    };
+    let indent = body.len() - body.trim_start_matches([' ', '\t']).len();
+    if indent > usize::from(*depth) * 2 + 1 {
+        return ListMarker::None;
+    }
+    if *ordered {
+        ordered_marker(body).map_or(ListMarker::None, |(_, _, n, _)| ListMarker::Ordered(n))
+    } else if bullet_pos(body).is_some() {
+        ListMarker::Bullet
+    } else {
+        ListMarker::None
+    }
+}
+
+/// 有序列表显示编号派生（BlockId → 非激活态显示的编号）。
+///
+/// `BlockKind::ListItem` 不含源码起始号，排版层又必须按语义递增显示，故编号只能在
+/// 文档块序列上派生。算法维护「当前各层列表」栈：
+/// - 遇到更浅的层级先弹栈：子列表结束后父层继续递增；
+/// - 同层同序型视为同一列表，编号 = 计数器并递增（源码写 `1.` 也显示 2./3.）；
+/// - 同层换序型、或列表被非列表块打断 → 新列表，从源码首个编号重新起算；
+/// - 无标记续块直接跳过（内容属于当前项，不改计数）。
+pub(crate) fn ordered_list_ordinals<'a>(
+    items: impl Iterator<Item = (BlockId, &'a BlockKind, ListMarker)>,
+) -> HashMap<BlockId, u32> {
+    struct Level {
+        depth: u8,
+        ordered: bool,
+        next: u32,
+    }
+    let mut stack: Vec<Level> = Vec::new();
+    let mut out = HashMap::new();
+    for (id, kind, marker) in items {
+        let BlockKind::ListItem { ordered, depth, .. } = kind else {
+            // 非列表块结束全部列表：下一个列表必须重新从源码编号起算。
+            stack.clear();
+            continue;
+        };
+        if marker == ListMarker::None {
+            continue;
+        }
+        let d = *depth;
+        while stack.last().is_some_and(|l| l.depth > d) {
+            stack.pop();
+        }
+        // 同层换了序型 → 新列表；同层同序型 → 同一列表继续。
+        if stack
+            .last()
+            .is_some_and(|l| l.depth == d && l.ordered != *ordered)
+        {
+            stack.pop();
+        }
+        if !stack.last().is_some_and(|l| l.depth == d) {
+            let start = match marker {
+                ListMarker::Ordered(n) => n,
+                _ => 1,
+            };
+            stack.push(Level {
+                depth: d,
+                ordered: *ordered,
+                next: start,
+            });
+        }
+        let level = stack.last_mut().expect("上方刚保证栈顶存在");
+        if *ordered {
+            out.insert(id, level.next);
+            level.next = level.next.saturating_add(1);
+        }
+    }
+    out
+}
+
+/// 有序列表编号代次：任一 (块, 编号) 变化都改变结果。
+///
+/// 编号是全文派生量——文首插入一项会让后续块的显示编号改变，而块文本与 BlockId
+/// 都可以保持不变（增量重解析只平移）。不带此代次时布局缓存会命中陈旧编号
+/// （与脚注编号代次同一因果）。按条目异或折叠，与 HashMap 迭代顺序无关。
+pub(crate) fn ordered_list_epoch(ordinals: &HashMap<BlockId, u32>) -> u64 {
+    let mut acc = 0u64;
+    for (id, n) in ordinals {
+        let mut h = 0xcbf2_9ce4_8422_2325u64;
+        h = (h ^ id.0).wrapping_mul(0x0100_0000_01b3);
+        h = (h ^ u64::from(*n)).wrapping_mul(0x0100_0000_01b3);
+        acc ^= h.wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    }
+    acc
 }
 
 /// 引用块逐行替换：非激活行的 `>` 换成空格（保留缩进与行距），激活行显源码。
@@ -2596,6 +2857,55 @@ mod tests {
         let block_text = &text[range.start..range.end];
         let l = eng.layout_block(kind, block_text, range, &inlines, width, caret, imgs, false);
         (eng, l)
+    }
+
+    /// 整篇逐块排版：按 Session 块顺序派生有序列表编号后排版每个块。
+    /// 单块辅助函数拿不到文档顺序，无法验证跨块递增编号。
+    fn layout_blocks_with_caret(
+        src: &str,
+        caret: usize,
+        width: f32,
+    ) -> (LayoutEngine, Vec<BlockLayout>) {
+        let s = Session::open(src);
+        let blocks = s.blocks();
+        let items = blocks.iter().map(|(id, kind, range)| {
+            let marker = match kind {
+                BlockKind::ListItem { .. } => list_marker_of(kind, &src[range.start..range.end]),
+                _ => ListMarker::None,
+            };
+            (*id, kind, marker)
+        });
+        let ordinals = ordered_list_ordinals(items);
+        let mut eng = LayoutEngine::new();
+        let layouts = blocks
+            .iter()
+            .map(|(id, kind, range)| {
+                let inlines = s.block_inlines(*id).unwrap_or_default();
+                eng.layout_block_with_footnotes(
+                    kind.clone(),
+                    &src[range.start..range.end],
+                    *range,
+                    &inlines,
+                    width,
+                    caret,
+                    &[],
+                    false,
+                    None,
+                    &[],
+                    ordinals.get(id).copied(),
+                )
+            })
+            .collect();
+        (eng, layouts)
+    }
+
+    /// 拼回整篇排版文本（块间以 `\n` 连接），便于断言跨块编号。
+    fn block_texts(layouts: &[BlockLayout]) -> String {
+        layouts
+            .iter()
+            .map(|l| l.layout_text())
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     #[test]
@@ -2897,7 +3207,7 @@ mod tests {
     // ---- 块级替换（切片 12）：列表符号 / 引用标记 / 分隔线 ----
 
     #[test]
-    fn list_bullet_hidden_outside_caret_keeps_ordered_source() {
+    fn list_bullet_hidden_outside_caret_renumbers_ordered() {
         // 无序标记 [0,1) 非激活 → `•`（与 strong 消隐叠加：「- **a**」→「• a」）
         let (_, l) = layout_with_caret("- **a**", usize::MAX, 200.0);
         assert_eq!(l.layout_text(), "• a");
@@ -2907,9 +3217,56 @@ mod tests {
         // 光标进 strong 内容 → 列表与 inline 标记均显源码
         let (_, l) = layout_with_caret("- **a**", 4, 200.0);
         assert_eq!(l.layout_text(), "- **a**");
-        // 有序列表保留源码编号（v0 不重排编号）
+        // 单块调用拿不到文档顺序（不传 ordinal）→ 有序列表保留源码编号
         let (_, l) = layout_with_caret("1. a", usize::MAX, 200.0);
         assert_eq!(l.layout_text(), "1. a");
+    }
+
+    #[test]
+    fn ordered_list_numbering_increments_across_blocks() {
+        // 源码每项都写 `1.`（`[TOC]` 旧输出的典型形态）：非激活态按语义递增显示。
+        let (_, ls) = layout_blocks_with_caret("1. a\n1. b\n1. c", usize::MAX, 300.0);
+        assert_eq!(block_texts(&ls), "1. a\n2. b\n3. c");
+    }
+
+    #[test]
+    fn ordered_nested_list_restarts_and_parent_continues() {
+        // 子列表从 1 起算；子列表结束后父层继续递增（父层源码写 `1.` 仍显示 2.）。
+        let src = "1. a\n   1. x\n   1. y\n1. b";
+        let (_, ls) = layout_blocks_with_caret(src, usize::MAX, 300.0);
+        assert_eq!(block_texts(&ls), "1. a\n   1. x\n   2. y\n2. b");
+    }
+
+    #[test]
+    fn ordered_list_restarts_from_source_number_after_interruption() {
+        // 新列表从源码首个编号起算（3. 开头 → 3./4.）。
+        let (_, ls) = layout_blocks_with_caret("3. a\n1. b", usize::MAX, 300.0);
+        assert_eq!(block_texts(&ls), "3. a\n4. b");
+        // 非列表块打断 → 后续列表重新从源码编号起算。
+        let (_, ls) = layout_blocks_with_caret("1. a\n\npara\n\n1. b", usize::MAX, 300.0);
+        assert_eq!(block_texts(&ls), "1. a\npara\n1. b");
+        // 无序项换序型 → 新列表，不得沿用上一列表的计数。
+        let (_, ls) = layout_blocks_with_caret("1. a\n- b\n1. c", usize::MAX, 300.0);
+        assert_eq!(block_texts(&ls), "1. a\n• b\n1. c");
+    }
+
+    #[test]
+    fn ordered_list_active_block_shows_source_number() {
+        // caret=7 落在第二块内 → 该块显源码；其余块仍按语义编号。
+        let (_, ls) = layout_blocks_with_caret("1. a\n1. b\n1. c", 7, 300.0);
+        assert_eq!(block_texts(&ls), "1. a\n1. b\n3. c");
+    }
+
+    #[test]
+    fn ordered_number_width_growth_keeps_line_height() {
+        // 9→10 编号变宽：单行块的行高不得因编号位数变化（必要时前导空格补齐）。
+        let src = "1. a\n1. b\n1. c\n1. d\n1. e\n1. f\n1. g\n1. h\n1. i\n1. j";
+        let (_, ls) = layout_blocks_with_caret(src, usize::MAX, 300.0);
+        assert_eq!(block_texts(&ls).lines().last(), Some("10. j"));
+        let h = ls[0].height;
+        for l in &ls {
+            assert!((l.height - h).abs() < 0.01, "编号宽度变化不得改变行高");
+        }
     }
 
     #[test]
@@ -3311,6 +3668,69 @@ mod tests {
         assert_eq!(fit_size_box(100, 100, 200.0, 44.0), (44, 44), "高度上限");
         // B4 场景：240×160 行内图，2 行限高 44 → 66×44
         assert_eq!(fit_size_box(240, 160, 756.0, 44.0), (66, 44));
+        // A：独占一行图片改用视口 80% 限高（600 → 480），宽度不再卡死在小值
+        assert_eq!(fit_size_box(800, 600, 756.0, 480.0), (640, 480));
+        // A：行内限高从 2 行提到 4 行（行高 22 → 88）
+        assert_eq!(fit_size_box(240, 160, 756.0, 88.0), (132, 88));
+    }
+
+    #[test]
+    fn explicit_size_prefers_author_dimensions() {
+        // 显式宽高：原样采用（可放大），不受默认限高约束
+        assert_eq!(
+            explicit_size(100, 100, Some(300), Some(200), 3024.0, 3024.0),
+            (300, 200),
+            "宽高都给 → 直接用给定值"
+        );
+        // 只给宽：高按原图比例（100×50 → 宽 300 则高 150）
+        assert_eq!(
+            explicit_size(100, 50, Some(300), None, 3024.0, 3024.0),
+            (300, 150),
+            "只给宽 → 高按比例"
+        );
+        // 只给高：宽按原图比例（100×50 → 高 200 则宽 400）
+        assert_eq!(
+            explicit_size(100, 50, None, Some(200), 3024.0, 3024.0),
+            (400, 200),
+            "只给高 → 宽按比例"
+        );
+        // 超宽：等比夹到上限（上限 = 版心宽 ×4 = 1600）
+        assert_eq!(
+            explicit_size(100, 100, Some(5000), Some(1000), 1600.0, 1600.0),
+            (1600, 320),
+            "超宽 → 等比缩到宽度上限"
+        );
+        // 超高：等比夹到上限
+        assert_eq!(
+            explicit_size(100, 100, Some(500), Some(5000), 1600.0, 1600.0),
+            (160, 1600),
+            "超高 → 等比缩到高度上限"
+        );
+        // 小图：显式尺寸小于上限时保持原样（不做「不放大」限制）
+        assert_eq!(
+            explicit_size(1000, 1000, Some(40), Some(40), 1600.0, 1600.0),
+            (40, 40),
+            "显式小图保持显式尺寸"
+        );
+    }
+
+    #[test]
+    fn image_display_size_uses_explicit_only_when_present() {
+        // 无显式尺寸：走默认限宽限高（仅缩小不放大）
+        assert_eq!(
+            image_display_size(240, 160, (None, None), 756.0, 88.0),
+            (132, 88)
+        );
+        // 有显式尺寸：上限放宽到版心宽 ×4，允许放大
+        assert_eq!(
+            image_display_size(24, 24, (Some(96), Some(96)), 756.0, 88.0),
+            (96, 96)
+        );
+        // 显式尺寸超极大值：夹到 756 × 4 = 3024
+        assert_eq!(
+            image_display_size(10, 10, (Some(9999), Some(9999)), 756.0, 88.0),
+            (3024, 3024)
+        );
     }
 
     #[test]
@@ -3325,10 +3745,56 @@ mod tests {
             block_is_image_only("  ![a](p.png)  ", Range::new(0, 15), &[r]),
             "图片前后空白不影响判定"
         );
+        // 块文本常带尾换行：仅空白残留仍应算独占一行（否则会误走行内 4 行限高）
+        let r = Range::new(0, 17);
+        assert!(
+            block_is_image_only("<img src=\"a.png\">\n", Range::new(0, 18), &[r]),
+            "仅剩换行也算独占一行"
+        );
         assert!(
             !block_is_image_only("x ![a](p.png)", Range::new(0, 13), &[Range::new(2, 13)]),
             "有正文时按行内图处理"
         );
+    }
+
+    #[test]
+    fn image_is_standalone_by_visual_line() {
+        // 整块仅图片（含尾随换行）
+        let r = Range::new(0, 11);
+        assert!(image_is_standalone("![a](p.png)\n", Range::new(0, 12), r));
+        // 图片后另起一行的正文：图片仍独占自己的视觉行
+        assert!(
+            image_is_standalone("![a](p.png)\nX", Range::new(0, 13), r),
+            "下一行正文不应把图片降级为行内"
+        );
+        // 同一行内有正文：按行内处理
+        assert!(!image_is_standalone(
+            "x ![a](p.png)",
+            Range::new(0, 13),
+            Range::new(2, 13)
+        ));
+        assert!(!image_is_standalone(
+            "![a](p.png) x",
+            Range::new(0, 13),
+            Range::new(0, 11)
+        ));
+        // 图片前一行有正文不影响本行
+        assert!(image_is_standalone(
+            "Y\n![a](p.png)\nX",
+            Range::new(0, 15),
+            Range::new(2, 13)
+        ));
+        // 区间越界/空区间防御
+        assert!(!image_is_standalone(
+            "abc",
+            Range::new(0, 3),
+            Range::new(0, 2)
+        ));
+        assert!(!image_is_standalone(
+            "abc",
+            Range::new(0, 3),
+            Range::new(5, 6)
+        ));
     }
 
     #[test]
@@ -4091,6 +4557,7 @@ mod tests {
             reveal_all,
             Some(&ctx),
             &[],
+            None,
         );
         (eng, l, range)
     }
@@ -4264,7 +4731,7 @@ mod tests {
         let (id1, kind1, range1) = s1.blocks()[2].clone();
         assert_eq!(kind1, BlockKind::FootnoteDef);
         let ctx1 = FootnoteCtx::new(s1.footnote_ids(), Theme::light().muted);
-        let base1 = revs.base(800.0, 1.0, false, footnote_epoch(&s1.footnote_ids()));
+        let base1 = revs.base(800.0, 1.0, 600.0, false, footnote_epoch(&s1.footnote_ids()));
         let inlines1 = s1.block_inlines(id1).unwrap_or_default();
         let l1 = eng.layout_block_with_footnotes(
             kind1.clone(),
@@ -4277,6 +4744,7 @@ mod tests {
             false,
             Some(&ctx1),
             &[],
+            None,
         );
         assert_eq!(l1.layout_text(), "Y↩", "未被引用：仅隐藏标记");
         let reveal1 = l1.reveal_state(&kind1, range1, usize::MAX);
@@ -4301,7 +4769,7 @@ mod tests {
         let s2 = Session::open(after);
         let (id2, kind2, range2) = s2.blocks()[2].clone();
         let ctx2 = FootnoteCtx::new(s2.footnote_ids(), Theme::light().muted);
-        let base2 = revs.base(800.0, 1.0, false, footnote_epoch(&s2.footnote_ids()));
+        let base2 = revs.base(800.0, 1.0, 600.0, false, footnote_epoch(&s2.footnote_ids()));
         assert_ne!(base1, base2, "文首新增未出现的引用 → 全文编号变化");
         assert!(
             cache
@@ -4321,6 +4789,7 @@ mod tests {
             false,
             Some(&ctx2),
             &[],
+            None,
         );
         assert_eq!(l2.layout_text(), "1. Y↩", "新引用让文末定义块获得编号");
     }
@@ -4777,16 +5246,82 @@ mod tests {
         );
     }
 
+    /// 可见文本：剥掉禁则胶水 WJ 与中西文自动间距的空格，便于对整句做精确断言。
+    fn visible_text(lt: &str) -> String {
+        lt.chars()
+            .filter(|c| *c != '\u{2060}' && *c != ' ')
+            .collect()
+    }
+
+    #[test]
+    fn link_markers_elide_atomically_across_cjk_spacing() {
+        // 回归：`个[链接]` 的 CJK↔ASCII 间距曾在 `[` 上生成 fill，与单字符消隐段
+        // 同起点竞争时 fill 胜出（from_spans「长者优先」），导致 `](url)` 已消隐
+        // 但 `[` 残留的半展开态。现要求：非激活时两端标记必须同时消失。
+        let src = "以及一个[链接](https://example.com)。\n";
+        let full = "以及一个[链接](https://example.com)。";
+        // caret 在链接之前：完全折叠
+        let (_, l) = layout_with_caret(src, 0, 400.0);
+        assert_eq!(visible_text(l.layout_text()), "以及一个链接。");
+        // caret 落在链接内（`链` 的字节偏移 13）：整段源码标记完整显示
+        let (_, l) = layout_with_caret(src, 13, 400.0);
+        assert_eq!(visible_text(l.layout_text()), full);
+        // caret 紧贴 `)` 右侧（40 是 `)`，41 即其后）：闭区间激活 → 整段展开，
+        // 不得只余 `[`。二者取「全显示」，与全局 node_active 语义一致。
+        let (_, l) = layout_with_caret(src, 41, 400.0);
+        assert_eq!(visible_text(l.layout_text()), full);
+        // caret 在 `。` 之后：离开链接区间 → 完全折叠
+        let (_, l) = layout_with_caret(src, 43, 400.0);
+        assert_eq!(visible_text(l.layout_text()), "以及一个链接。");
+    }
+
+    #[test]
+    fn link_markers_elide_in_surrounding_shapes() {
+        // 三种周边形态都必须原子折叠：链接在行首、后紧跟中文标点、前面有空格。
+        let cases: &[(&str, &str, &str)] = &[
+            (
+                "[链接](https://example.com)。\n",
+                "链接。",
+                "[链接](https://example.com)。",
+            ),
+            (
+                "前文[链接](https://example.com)，后文\n",
+                "前文链接，后文",
+                "前文[链接](https://example.com)，后文",
+            ),
+            (
+                "前文 [链接](https://example.com)后文\n",
+                "前文链接后文",
+                "前文[链接](https://example.com)后文",
+            ),
+        ];
+        for (src, folded, expanded) in cases {
+            let inside = src.find('链').unwrap(); // 链接文本内，节点必然激活
+            let (_, l) = layout_with_caret(src, usize::MAX, 400.0);
+            assert_eq!(
+                visible_text(l.layout_text()),
+                *folded,
+                "非激活应完全折叠: src={src:?}"
+            );
+            let (_, l) = layout_with_caret(src, inside, 400.0);
+            assert_eq!(
+                visible_text(l.layout_text()),
+                *expanded,
+                "激活应完整显示: src={src:?}"
+            );
+        }
+    }
+
     #[test]
     fn link_markdown_markers_are_hidden_when_not_active() {
         // 内联链接、引用式链接、隐式方括号——只要 core 解析为 Link 节点，
         // layout 层必须消隐两端 Markdown 标记 `[...]` `(url)`。裸方括号 `[foo]`
         // （无 URL/引用定义）不产生 Link 节点，标记按原文保留——符合 Markdown 规范。
         let cases: &[(&str, &str)] = &[
-            ("foo [x](http://x.com) bar\n", "foo x bar"),          // 内联
-            ("foo [x][ref] bar\n\n[ref]: http://x.com\n", "foo x bar"),   // 引用式
-            ("foo [x]\n\n[x]: http://x.com\n", "foo x"),          // 隐式方括号
-            ("foo [x] bar\n", "foo [x] bar"),                      // 裸方括号：不产生 Link，保留标记
+            ("foo [x](http://x.com) bar\n", "foo x bar"), // 内联
+            ("foo [x][ref] bar\n\n[ref]: http://x.com\n", "foo x bar"), // 引用式
+            ("foo [x]\n\n[x]: http://x.com\n", "foo x"),  // 隐式方括号
+            ("foo [x] bar\n", "foo [x] bar"),             // 裸方括号：不产生 Link，保留标记
         ];
         for (src, want_visible_substr) in cases {
             let (_, l) = layout_with_caret(src, usize::MAX, 400.0);

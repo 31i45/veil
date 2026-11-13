@@ -483,10 +483,7 @@ impl Editor {
                     if text.chars().count() == 1 {
                         let ch = text.chars().next().unwrap();
                         if let Some(close) = Self::matching_close(ch) {
-                            let selected_text = self
-                                .session
-                                .text_slice(sel)
-                                .expect("选区恒合法");
+                            let selected_text = self.session.text_slice(sel).expect("选区恒合法");
                             let wrap = format!("{ch}{selected_text}{close}");
                             let ev = self
                                 .session
@@ -575,7 +572,10 @@ impl Editor {
                                 let insert = format!("{ch}{close}");
                                 let dirty = self
                                     .session
-                                    .apply(Edit::Insert { at: c, text: insert })
+                                    .apply(Edit::Insert {
+                                        at: c,
+                                        text: insert,
+                                    })
                                     .expect("caret 恒合法")
                                     .dirty_blocks;
                                 let new_caret = c + ch.len_utf8();
@@ -607,7 +607,9 @@ impl Editor {
                 let prev = self.session.prev_grapheme(c)?;
                 // 反向删自动配对：光标前是开括号且光标后是匹配闭括号 → 两者一起删。
                 if let (Some(prev_ch), Some(next_ch)) = (self.char_at(prev), self.char_at(c)) {
-                    if Self::is_open_bracket(prev_ch) && Self::matching_close(prev_ch) == Some(next_ch) {
+                    if Self::is_open_bracket(prev_ch)
+                        && Self::matching_close(prev_ch) == Some(next_ch)
+                    {
                         let end = c + next_ch.len_utf8();
                         return self
                             .session
@@ -727,7 +729,7 @@ impl Editor {
     }
 
     /// [TOC] 自动刷新：编辑完成后若文档含 TOC 标记段落，且当前光标/选区不在其区间内，
-    /// 则根据该标记之后的所有标题重新生成 Markdown 有序列表并原地替换。
+    /// 则根据该标记之后的所有标题重新生成 Markdown 无序列表并原地替换。
     /// 光标离开 TOC 块才替换 → 符合 Obsidian 的「静态插入」语义，避免用户在 TOC 块内
     /// 编辑时被立即覆盖。替换本身不再产生新的 TOC 标记 → 不触发第二次刷新。
     ///
@@ -763,9 +765,7 @@ impl Editor {
         // 2. 对每个 TOC 标记：光标/选区是否在其内 → 是则跳过
         for (_toc_id, toc_range) in &toc_blocks {
             let caret_in = caret >= toc_range.start && caret <= toc_range.end;
-            let sel_in = sel.is_some_and(|s| {
-                s.start < toc_range.end && s.end > toc_range.start
-            });
+            let sel_in = sel.is_some_and(|s| s.start < toc_range.end && s.end > toc_range.start);
             if !force && (caret_in || sel_in) {
                 continue;
             }
@@ -775,16 +775,12 @@ impl Editor {
                 .iter()
                 .filter(|(_, kind, range)| {
                     range.start >= toc_range.end
-                        && matches!(
-                            kind,
-                            BlockKind::AtxHeading(_) | BlockKind::SetextHeading(_)
-                        )
+                        && matches!(kind, BlockKind::AtxHeading(_) | BlockKind::SetextHeading(_))
                 })
                 .filter_map(|(id, _, _)| self.session.heading(*id))
                 .collect();
 
-            let generated =
-                generate_toc(after_headings.iter().map(|(l, t)| (*l, t.as_str())));
+            let generated = generate_toc(after_headings.iter().map(|(l, t)| (*l, t.as_str())));
 
             // 4. 与现有内容比较；相同则跳过（避免空换脏/空进撤销栈）
             let existing = match self.session.text_slice(*toc_range) {
@@ -1787,8 +1783,8 @@ mod tests {
     fn toc_is_generated_on_load_with_caret_inside_marker() {
         let e = Editor::new("[TOC]\n\n# Hello\n\n# World");
         let text = e.session().serialize();
-        assert!(text.contains("1. [Hello](#hello)"));
-        assert!(text.contains("1. [World](#world)"));
+        assert!(text.contains("- [Hello](#hello)"));
+        assert!(text.contains("- [World](#world)"));
         assert!(!text.contains("[TOC]"));
     }
 

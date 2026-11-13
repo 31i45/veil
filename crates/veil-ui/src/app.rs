@@ -1286,6 +1286,9 @@ impl App {
                 Some(t) if now.duration_since(t) >= CURSOR_BLINK => {
                     self.cursor_visible = !self.cursor_visible;
                     self.last_blink = Some(now);
+                    // WaitUntil 只唤醒事件循环，不会自行产生 RedrawRequested；
+                    // 可见性翻转后必须显式请求重绘，否则屏幕会一直保留旧光标帧。
+                    self.request_redraw();
                 }
                 _ => {} // 间隔未到，保持当前可见性
             }

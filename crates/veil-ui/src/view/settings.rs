@@ -849,7 +849,12 @@ fn paint_field_control(
     };
     stroke_frame(frame, c, cr, border_color, palette::surface_popup(theme));
 
-    // 控件值文本
+    // 焦点环先画（在值文本下层），避免覆盖文本
+    if is_focused {
+        focus_ring(frame, c, cr, theme.accent, palette::surface_popup(theme));
+    }
+
+    // 控件值文本（在焦点环上层，始终可见）
     let inner_x = c.x + 6.0 * scale;
     let inner_y = c.y + (c.h - typography::UI_LINE_HEIGHT * scale) * 0.5;
     let value_text = field_value_display(f);
@@ -861,11 +866,6 @@ fn paint_field_control(
         inner_x as i32,
         inner_y as i32,
     );
-
-    // 焦点环
-    if is_focused {
-        focus_ring(frame, c, cr, theme.accent, palette::surface_popup(theme));
-    }
 }
 
 fn field_value_display(f: &SettingsField) -> String {

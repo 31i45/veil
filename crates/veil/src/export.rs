@@ -535,10 +535,17 @@ fn collect_html_inlines(
                 let rendered = match tag {
                     HtmlTag::Br => "<br>".to_string(),
                     HtmlTag::Img => {
-                        let src = attrs.src.as_deref().unwrap_or("");
+                        // 远程 src 被 core 解析到 remote_src（v1.4）：HTML 导出须还原 URL，
+                        // 让浏览器按需加载（与 Markdown 远程图片同口径、Typora/Obsidian 同行为）。
+                        // src 与 remote_src 可能同时为空（非法/缺失），此时降级为 alt-only。
+                        let src = attrs
+                            .src
+                            .as_deref()
+                            .or(attrs.remote_src.as_deref())
+                            .unwrap_or("");
                         let alt = attrs.alt.as_deref().unwrap_or("");
                         if src.is_empty() {
-                            // 远程 src 被解析层剥离或本地缺失：降级为带注释的 alt-only
+                            // src 与 remote_src 皆空：降级为带注释的 alt-only（HTML 解析层剥离或本地缺失）
                             format!(
                                 "<img alt=\"{}\"> <!-- veil blocked remote -->",
                                 escape_attr(alt)

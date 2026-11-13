@@ -357,6 +357,8 @@ struct Delim {
 
 /// 段内 token：原子节点（连带本段已产生的强调嵌套深度）或待匹配分隔符 run。
 /// 纯文本不产生 token（inline 节点只承载构造）。
+// 解析期瞬态 token，避免为 HTML 属性装箱带来每 token 分配。
+#[allow(clippy::large_enum_variant)]
 enum Tok {
     Node(InlineNode, u8),
     Delim(Delim),
@@ -770,7 +772,9 @@ fn parse_open_tag(src: &str) -> Option<(String, bool, HtmlAttrs)> {
                 if let Some(ref v) = val {
                     let lower = v.to_ascii_lowercase();
                     if lower.starts_with("http://") || lower.starts_with("https://") {
-                        attrs.src = None; // 远程置空
+                        // 远程地址不写入 src（导出/PDF 依赖 src 为空），仅存 remote_src 供 UI 加载。
+                        attrs.src = None;
+                        attrs.remote_src = Some(v.trim().to_string());
                     } else {
                         attrs.src = val;
                     }
@@ -2515,25 +2519,58 @@ mod tests {
 
     #[test]
     fn html_remote_img_src_stripped() {
-        // 远程 src 被清空，但仍产出 HtmlSelfClosed(Img)
+        // 远程 src 不写入 src（保持为空），但保留在 remote_src 供 UI 加载
         let ns = parse(r#"<img src="http://evil/x.png" alt="bad">"#);
         assert_eq!(ns.len(), 1);
         match &ns[0].kind {
             InlineKind::HtmlSelfClosed { tag, attrs } => {
                 assert_eq!(*tag, HtmlTag::Img);
                 assert!(attrs.src.is_none(), "远程 src 应被清空");
+                assert_eq!(
+                    attrs.remote_src.as_deref(),
+                    Some("http://evil/x.png"),
+                    "远程地址应保留在 remote_src"
+                );
                 assert_eq!(attrs.alt.as_deref(), Some("bad"));
             }
             _ => panic!("expected HtmlSelfClosed Img"),
         }
-        // 本地 src 保留
+        // https 大小写不敏感
+        let ns = parse(r#"<img src="HTTPS://Example.COM/a.png">"#);
+        match &ns[0].kind {
+            InlineKind::HtmlSelfClosed { attrs, .. } => {
+                assert!(attrs.src.is_none(), "HTTPS 大写也应视为远程");
+                assert_eq!(
+                    attrs.remote_src.as_deref(),
+                    Some("HTTPS://Example.COM/a.png")
+                );
+            }
+            _ => panic!(),
+        }
+        // 本地 src 保留，remote_src 不设置
         let ns = parse(r#"<img src="local.png" alt="ok">"#);
         match &ns[0].kind {
             InlineKind::HtmlSelfClosed { attrs, .. } => {
                 assert_eq!(attrs.src.as_deref(), Some("local.png"));
+                assert!(attrs.remote_src.is_none(), "本地地址不应进 remote_src");
                 assert_eq!(attrs.alt.as_deref(), Some("ok"));
             }
             _ => panic!(),
+        }
+        // 危险/相对 scheme 均不视为远程
+        for input in [
+            r#"<img src="javascript:alert(1)">"#,
+            r#"<img src="data:image/png;base64,AA">"#,
+            r#"<img src="file:///C:/a.png">"#,
+            r#"<img src="./a.png">"#,
+        ] {
+            let ns = parse(input);
+            match &ns[0].kind {
+                InlineKind::HtmlSelfClosed { attrs, .. } => {
+                    assert!(attrs.remote_src.is_none(), "{input} 不应进 remote_src");
+                }
+                _ => panic!("expected HtmlSelfClosed Img for {input}"),
+            }
         }
     }
 

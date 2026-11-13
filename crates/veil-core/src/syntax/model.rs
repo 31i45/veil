@@ -192,12 +192,15 @@ impl HtmlTag {
 }
 
 /// 白名单 HTML 属性（abbr.title / img.src / img.alt / a.href）。其余属性一律忽略；
-/// `script` 事件属性、`style`、`javascript:` href、远程（http/https）图片 src 解析层
-/// 判定非法后置空，渲染层读不到。
+/// `script` 事件属性、`style`、`javascript:` href 解析层判定非法后置空，渲染层读不到。
+/// 远程（http/https）图片地址不写入 `src`（仍为空），只保存在 `remote_src` 供 UI 渲染层按需加载。
 #[derive(Clone, Default, PartialEq, Eq, Debug)]
 pub struct HtmlAttrs {
     pub title: Option<String>,
     pub src: Option<String>,
+    /// 仅保存 http/https 图片地址（原始值），供 UI 渲染层按需加载；
+    /// `src` 仍为空，导出/PDF 读不到该地址，以保持单文件自包含。
+    pub remote_src: Option<String>,
     pub alt: Option<String>,
     /// `<a href="...">` 的目标（仅 a 标签收集；`javascript:` 等危险 scheme 置空）。
     pub href: Option<String>,

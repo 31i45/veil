@@ -16,6 +16,14 @@ pub struct ImageData {
 /// 按本地绝对/相对路径加载图片（相对路径已由 shell 按文档目录解析）。
 pub trait ImageLoader {
     fn load(&mut self, path: &Path) -> Result<ImageData, String>;
+
+    /// 远程图片异步请求（v1.4）：产品层实现。调用方保证同一 URL 在一个文档会话内只请求一次。
+    fn request_remote(&mut self, _url: &str) {}
+
+    /// 非阻塞取走已完成的远程图片结果：`(url, Ok(位图) | Err(可读原因))`；默认空。
+    fn poll_remote(&mut self) -> Vec<(String, Result<ImageData, String>)> {
+        Vec::new()
+    }
 }
 
 /// 粘贴图片落盘抽象（切片 14）：实现由产品层注入（同 ImageLoader 模式）。

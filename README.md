@@ -7,7 +7,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-stable%20%C2%B7%20edition%202021-orange.svg)](https://www.rust-lang.org/)
 [![Platform](https://img.shields.io/badge/platform-Windows%2011%20%C2%B7%20x64-0078d4.svg)](https://github.com/31i45/veil/releases)
-[![Portable](https://img.shields.io/badge/single%20exe%20%C2%B7%20no%20installer%20%C2%B7%20offline-2ea44f.svg)](https://github.com/31i45/veil/releases)
+[![Portable](https://img.shields.io/badge/single%20exe%20%C2%B7%20no%20installer%20%C2%B7%20no%20bg%20networking-2ea44f.svg)](https://github.com/31i45/veil/releases)
 
 [中文](README.zh-CN.md)
 
@@ -15,7 +15,7 @@
 
 Veil was born because **Typedown** — my favorite Markdown editor on Windows, bar none — takes **tens of seconds to minutes** to launch, every single time. A WinUI app that starts cold faster than you finish sipping your coffee should not exist, yet here we are.
 
-So I built my own. Pure Rust. No webview, no Chromium, no Electron, no external runtime. Single-file exe. In-app cold start ≈150 ms (the first open-and-edit adds ≈160 ms; measurements, commands and dates are in [Red Numbers](#red-numbers-targets-vs-measured)). **Single-user, single-document, purely offline — no collaboration, ever.**
+So I built my own. Pure Rust. No webview, no Chromium, no Electron, no external runtime. Single-file exe. In-app cold start ≈150 ms (the first open-and-edit adds ≈160 ms; measurements, commands and dates are in [Red Numbers](#red-numbers-targets-vs-measured)). **Single-user, single-document, zero background networking — no collaboration, ever.**
 
 ## Download & Run
 
@@ -58,7 +58,7 @@ Three crates, one-way dependency (`veil` → `veil-ui` → `veil-core`, no rever
 3. Cursor & selection: grapheme-boundary navigation; markers like `**bold**` auto-expand / collapse on caret enter/leave, caret visual position never jumps; links use the theme link colour (light `#2B6CB0` / dark `#7FB4F5`), distinct from body text
 4. File open / save: auto-save, external-modification notice + pre-overwrite backup
 5. Clipboard: plain text, HTML→Markdown conversion, screenshot paste writes to `<doc>.assets/` (incremental names, no overwrite)
-6. Block-level rendering: tables (grid mode + active-cell inline edit; the active cell shows Markdown source, other cells render bold / italic / strikethrough / inline code / links with markers hidden), math (pure Rust via latex-rust), inline images (relative-path PNG, broken link / remote URL degrades to alt text)
+6. Block-level rendering: tables (grid mode + active-cell inline edit; the active cell shows Markdown source, other cells render bold / italic / strikethrough / inline code / links with markers hidden), math (pure Rust via latex-rust), inline images (relative-path PNG; broken links degrade to alt text; remote http/https images load automatically, can be disabled globally via **View → Block Remote Images**, and on failure degrade to an alt placeholder with a one-time status-bar notice)
 7. HTML export: a single self-contained file with no external assets; inline CSS follows the current light/dark theme (background, body text, muted text, link colour, code background, borders), and dark pages declare `color-scheme: dark`
 8. Config & themes: top-level `mode` single source (`system` / `light` / `dark`, backward-compat with old `[theme] mode`), follows system appearance, deep-titlebar / Mica, switch persistent
 9. In-house chrome: menu bar (↑/↓ move, Enter run, Esc close — main and context menus alike), status bar, scroll bar; system file dialogs (Open / Save As)
@@ -67,7 +67,7 @@ Three crates, one-way dependency (`veil` → `veil-ui` → `veil-core`, no rever
 12. Fenced code blocks: syntax highlighting for 16 languages (keywords / strings / comments / numbers / types), implemented as a pure-Rust line-state machine — no `syntect`
 13. Source mode: Ctrl+/ shows the full Markdown source (tables and math blocks included); toggling keeps caret and scroll position; print and export always use the rendered view
 14. PDF export: Ctrl+Shift+E or File → Export PDF writes `<stem>.pdf` beside the document (name collisions become ` (2)`, ` (3)`); optional TOC page, page numbers and margin (default 20 mm) via `config.toml`. Native PDF output (multi-level bookmarks, CJK font subsetting, heading/table/image/math layout) with fallback to the system "Microsoft Print to PDF". Unsaved drafts first ask for an output location (cancelling aborts).
-15. Opening links: `Ctrl+click` an http/https/mailto link (a mouse gesture, not a new shortcut) to hand it to the system default browser or mail client; the caret does not move. The link context menu starts with "Open in Browser", followed by "Copy Link Address". Protocols outside the allowlist only show a notice; Veil itself makes no network requests
+15. Opening links: `Ctrl+click` an http/https/mailto link (a mouse gesture, not a new shortcut) to hand it to the system default browser or mail client; the caret does not move. The link context menu starts with "Open in Browser", followed by "Copy Link Address". Protocols outside the allowlist only show a notice; aside from on-demand remote-image fetches, Veil itself makes no network requests
 16. GFM footnotes: `[^id]` references and `[^id]: content` definitions. In rendered view, references show as a link-coloured `[n]`, while definition blocks hide the marker and show "number + content + ↩"; numbers follow first-reference order in the document. `Ctrl+click` a reference to jump to its definition, and `Ctrl+click` the trailing `↩` to jump back to the first reference. Source mode (`Ctrl+/`) shows the raw markup. HTML export emits `<sup>` references and a footnote list at the end (with backlinks)
 17. In-document anchors: `Ctrl+click` `[text](#slug)` to jump to the matching heading; exported headings carry `id="<slug>"`; duplicate headings are de-duplicated as `name`, `name-1` (the same `heading_slug` / `heading_slugs` rules used by export)
 18. Line navigation: `Alt+↑` / `Alt+↓` move the current line (one undo step); `PgUp` / `PgDn` page the viewport while keeping the target column; `Ctrl+Backspace` / `Ctrl+Delete` delete by word and never cross a line break
@@ -76,6 +76,7 @@ Three crates, one-way dependency (`veil` → `veil-ui` → `veil-core`, no rever
 21. Visible trust: the status bar shows "Saved · HH:MM" (or "Unsaved"); a failed CLI open raises a visible error box and exits with code 1
 22. Caret as focus: solid when the window is focused, hollow when it is not — no timers, no idle wake-ups
 23. State transitions: hover/press highlights in the menu bar, menus, outline, Quick Open, context menu, find bar and dialog buttons cross-fade over 120 ms (ease-out cubic); the fade advances only while it runs, so the idle path still schedules no timers and never wakes the process. Fades are skipped entirely when Windows "Show animations" is off
+24. Remote images (v1.4): http/https images load automatically; **View → Block Remote Images** disables them globally; a failed fetch degrades to an alt placeholder with a one-time status-bar notice. Requests never carry cookies, `Referer` or credentials, the User-Agent is fixed at `Veil/<version>`, connect/read timeout is 10 s, the response body is capped at 20 MiB, at most 3 redirects are followed with https→http downgrades refused, and localhost / loopback / private / link-local addresses are rejected. Export and PDF never include remote resources
 
 ## What It Won't Do (v1.2 explicitly out of scope)
 
@@ -87,7 +88,7 @@ Three crates, one-way dependency (`veil` → `veil-ui` → `veil-core`, no rever
 - Table visual editing beyond the delivered subset (merge/split cells, column-width drag); content editing, row/column insert/delete and column alignment are supported
 - Mermaid rendering (Mermaid fenced blocks stay as code, not rendered)
 - A separate rich-text document model: the text stays Markdown, and Ctrl+/ is a view toggle over the same document
-- Any networking: no sync, no update check, no telemetry; external links are handed to the system default program, and Veil itself makes no network requests
+- Background networking: no sync, no update check, no telemetry; the only outbound requests are made on demand when rendering remote images in a document, and can be disabled globally via **View → Block Remote Images**. External links are handed to the system default program; Export and PDF never include remote resources.
 - Competitor-parity items deliberately declined: regex find (the `regex` crate added 1,198,592 B to the exe), auto-pairing of brackets/quotes, a whole-word toggle, `Ctrl+Shift+K` delete-line (`Alt+↑` / `Alt+↓` already covers line operations), and a separate H5/H6 type scale (indentation expresses level)
 
 ## Build / Run / Test
@@ -100,7 +101,7 @@ cargo test --workspace
 cargo run -p veil -- <file.md>
 ```
 
-Baseline: 1459 passed / 0 failed / 14 ignored (2026-11-13); `cargo clippy --workspace --all-targets -- -D warnings` zero warnings.
+Baseline: 1476 passed / 0 failed / 14 ignored (2026-11-13, v1.4 remote images); `cargo clippy --workspace --all-targets -- -D warnings` zero warnings.
 
 ## Red Numbers (targets vs measured)
 
@@ -116,7 +117,7 @@ Measured on release build, probe-serialized; performance rows re-verified 2026-1
 | Keystroke→commit p95 on 100 K-word doc | ≤ 16 ms | 6.781 ms / 12.379 ms (`perf_keystroke_path` 5,005 blocks / `perf_keystroke_10k_blocks` 10,500 blocks; baseline 6.677 / 12.488; 2026-11-09) ✅ |
 | Resident memory, 100 K-word doc (private working set) | ≤ 150 MB | 40.76 MB (2026-11-05) |
 | Installed size — code + data (non-icon) | ≤ 6 MiB (Phase A baseline; superseded by the Wave 3/4 PDF export gate allowance) | 7,273,414 B (exe minus 47,162 B icons; 2026-11-13 B9 final check + UI revision) |
-| Installed size — total single-file `veil.exe` | ≤ 10 MiB = 10,485,760 B (Wave 4 authorization; every increment must be recorded) | 7,320,576 B ≈ 6.98 MiB (2026-11-13 B9 final check + UI revision; +331,776 B vs Wave 6 baseline 6,988,800 B; +406,528 B vs historical baseline 6,914,048 B); margin 3,165,184 B |
+| Installed size — total single-file `veil.exe` | ≤ 10 MiB = 10,485,760 B (Wave 4 authorization; every increment must be recorded) | 7,364,608 B ≈ 7.02 MiB (2026-11-13 v1.4 remote images; +375,808 B vs Wave 6 baseline 6,988,800 B; +450,560 B vs historical baseline 6,914,048 B); margin 3,121,152 B |
 | `veil-core` unit + property tests | ≥ 80 | 209 |
 | E2E assertions | ≥ 20 | 41 (3 e2e scenarios: open→save→reopen, table+image paste, find/replace→crash recovery→self-clean) ✅ |
 | Markdown roundtrip (no edits: output == input bytes; byte comparison) | 100% | 100% |

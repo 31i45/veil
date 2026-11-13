@@ -393,12 +393,14 @@ impl App {
                             }
                         }
                         // 行内/块级 `<img src alt>`：本地 src 走与 Markdown Image 相同的
-                        // 加载/缩略图路径；远程（解析层已置空 src）或缺失由 layout 占位 + alt。
+                        // 加载/缩略图路径；远程地址由解析层存在 `remote_src`（src 为空），
+                        // 这里与 Markdown 远程图片走同一套按需加载。
                         InlineKind::HtmlSelfClosed {
                             tag: HtmlTag::Img,
                             ref attrs,
                         } => {
-                            if let Some(src) = attrs.src.as_deref() {
+                            if let Some(src) = attrs.src.as_deref().or(attrs.remote_src.as_deref())
+                            {
                                 images.push((n.range, src.to_string()));
                             }
                         }
@@ -450,37 +452,65 @@ impl App {
                 });
             }
             for (nrange, url) in images {
-                let Some(path) = local_image_path(&url, self.doc.path.as_deref()) else {
-                    continue; // 远程/内联 URL 或草稿相对路径：降级 alt 文本
-                };
-                let key = path.to_string_lossy().into_owned();
-                if self.cache.image_failed(&key, image_base) {
-                    continue;
-                }
-                if self.cache.image(&key, image_base).is_none() {
-                    match self.ports.images.load(&path) {
-                        Ok(img) => {
-                            self.cache.inline_images.insert(
-                                key.clone(),
-                                Memo {
-                                    key: image_base,
-                                    value: img,
-                                },
-                            );
-                        }
-                        Err(e) => {
-                            eprintln!("图片加载失败（降级为 alt 文本） {}: {e}", path.display());
-                            self.cache.image_failed.insert(
-                                key,
-                                Memo {
-                                    key: image_base,
-                                    value: (),
-                                },
-                            );
-                            continue;
+                let key = if let Some(path) = local_image_path(&url, self.doc.path.as_deref()) {
+                    let key = path.to_string_lossy().into_owned();
+                    if self.cache.image_failed(&key, image_base) {
+                        continue;
+                    }
+                    if self.cache.image(&key, image_base).is_none() {
+                        match self.ports.images.load(&path) {
+                            Ok(img) => {
+                                self.cache.inline_images.insert(
+                                    key.clone(),
+                                    Memo {
+                                        key: image_base,
+                                        value: img,
+                                    },
+                                );
+                            }
+                            Err(e) => {
+                                eprintln!(
+                                    "图片加载失败（降级为 alt 文本） {}: {e}",
+                                    path.display()
+                                );
+                                self.cache.image_failed.insert(
+                                    key,
+                                    Memo {
+                                        key: image_base,
+                                        value: (),
+                                    },
+                                );
+                                continue;
+                            }
                         }
                     }
-                }
+                    key
+                } else if is_remote_image_url(&url) {
+                    // 远程图片：默认自动加载；全局阻止/已失败/源码模式 → alt 占位。
+                    if self.source_mode()
+                        || !self.config.allow_remote_images
+                        || self.cache.remote_failed.contains(&url)
+                    {
+                        continue;
+                    }
+                    let Some((w, h)) = self.cache.remote_image(&url).map(|i| (i.width, i.height))
+                    else {
+                        // 本帧占位；首次遇到才发起请求（pending 去重）。
+                        self.request_remote_image(&url);
+                        continue;
+                    };
+                    let (dw, dh) = crate::view::fit_size_box(w, h, img_max_w, max_h);
+                    imgs.push(InlineImg {
+                        range: nrange,
+                        key: InlineAsset::Image(url),
+                        width: dw,
+                        height: dh,
+                        baseline: dh, // 底边贴基线
+                    });
+                    continue;
+                } else {
+                    continue; // 内联 data URL 或草稿相对路径：降级 alt 文本
+                };
                 let nat = &self.cache.inline_images[&key].value;
                 let (dw, dh) = crate::view::fit_size_box(nat.width, nat.height, img_max_w, max_h);
                 imgs.push(InlineImg {
@@ -511,6 +541,19 @@ impl App {
                     value: l,
                 },
             );
+        }
+    }
+
+    /// 发起远程图片请求（pending 去重）：全局阻止/已失败/源码模式一律不请求。
+    fn request_remote_image(&mut self, url: &str) {
+        if self.source_mode()
+            || !self.config.allow_remote_images
+            || self.cache.remote_failed.contains(url)
+        {
+            return;
+        }
+        if self.cache.remote_pending.insert(url.to_string()) {
+            self.ports.images.request_remote(url);
         }
     }
 
@@ -827,8 +870,8 @@ impl App {
         out
     }
 
-    /// 表格单元格内联图片：复用 inline_images 缓存加载自然尺寸位图。
-    /// 远程 URL / 草稿相对路径 / 加载失败 / 已失败记忆 → 跳过（降级为 alt 文本）。
+    /// 表格单元格内联图片：本地路径复用 inline_images，远程 URL 复用远程会话缓存。
+    /// 全局阻止 / 源码模式 / 已失败记忆 / 草稿相对路径 → 跳过（降级为 alt 文本）。
     fn cell_img_assets(
         &mut self,
         seeds: HashMap<usize, Vec<String>>,
@@ -839,46 +882,61 @@ impl App {
         for (flat, urls) in seeds {
             let mut items = Vec::with_capacity(urls.len());
             for url in urls {
-                let Some(path) = local_image_path(&url, doc_path) else {
-                    continue;
-                };
-                let key = path.to_string_lossy().into_owned();
-                if self.cache.image_failed(&key, image_base) {
-                    continue;
-                }
-                if self.cache.image(&key, image_base).is_none() {
-                    match self.ports.images.load(&path) {
-                        Ok(img) => {
-                            self.cache.inline_images.insert(
-                                key.clone(),
-                                Memo {
-                                    key: image_base,
-                                    value: img,
-                                },
-                            );
-                        }
-                        Err(e) => {
-                            eprintln!(
-                                "表格图片加载失败（降级为 alt 文本） {}: {e}",
-                                path.display()
-                            );
-                            self.cache.image_failed.insert(
-                                key,
-                                Memo {
-                                    key: image_base,
-                                    value: (),
-                                },
-                            );
-                            continue;
+                if let Some(path) = local_image_path(&url, doc_path) {
+                    let key = path.to_string_lossy().into_owned();
+                    if self.cache.image_failed(&key, image_base) {
+                        continue;
+                    }
+                    if self.cache.image(&key, image_base).is_none() {
+                        match self.ports.images.load(&path) {
+                            Ok(img) => {
+                                self.cache.inline_images.insert(
+                                    key.clone(),
+                                    Memo {
+                                        key: image_base,
+                                        value: img,
+                                    },
+                                );
+                            }
+                            Err(e) => {
+                                eprintln!(
+                                    "表格图片加载失败（降级为 alt 文本） {}: {e}",
+                                    path.display()
+                                );
+                                self.cache.image_failed.insert(
+                                    key,
+                                    Memo {
+                                        key: image_base,
+                                        value: (),
+                                    },
+                                );
+                                continue;
+                            }
                         }
                     }
+                    let nat = self.cache.inline_images.get(&key).unwrap();
+                    items.push(CellImgAsset {
+                        w: nat.value.width,
+                        h: nat.value.height,
+                        pixels: nat.value.pixels.clone(),
+                    });
+                } else if is_remote_image_url(&url) {
+                    if self.source_mode()
+                        || !self.config.allow_remote_images
+                        || self.cache.remote_failed.contains(&url)
+                    {
+                        continue;
+                    }
+                    let Some(asset) = self.cache.remote_image(&url).map(|nat| CellImgAsset {
+                        w: nat.width,
+                        h: nat.height,
+                        pixels: nat.pixels.clone(),
+                    }) else {
+                        self.request_remote_image(&url);
+                        continue;
+                    };
+                    items.push(asset);
                 }
-                let nat = self.cache.inline_images.get(&key).unwrap();
-                items.push(CellImgAsset {
-                    w: nat.value.width,
-                    h: nat.value.height,
-                    pixels: nat.value.pixels.clone(),
-                });
             }
             if !items.is_empty() {
                 out.insert(flat, items);
@@ -1208,7 +1266,7 @@ impl App {
                         }
                     }
                     InlineAsset::Image(key) => {
-                        if let Some(img) = self.cache.image(key, image_base) {
+                        if let Some(img) = self.cache.image_or_remote(key, image_base) {
                             frame.blit_scaled(
                                 &img.pixels,
                                 img.width,
@@ -2651,12 +2709,12 @@ fn table_cell_img_seeds(
                     }
                 }
                 // 单元格内 HTML `<img>`：本地 src 与 Markdown Image 同路径；
-                // 远程 src 解析层已置空，走 cell.text 的 alt 降级。
+                // 远程地址在 `remote_src`（src 为空），走同一套远程加载。
                 InlineKind::HtmlSelfClosed {
                     tag: HtmlTag::Img,
                     attrs,
                 } => {
-                    if let Some(src) = attrs.src.as_deref() {
+                    if let Some(src) = attrs.src.as_deref().or(attrs.remote_src.as_deref()) {
                         out.push(src.to_string());
                     }
                 }
@@ -2972,6 +3030,15 @@ pub(crate) fn table_set_align(
     out.push_str(&marker);
     out.push_str(&src[ls + start + trimmed.len()..]);
     Some(out)
+}
+
+/// 是否为可加载的远程图片地址：trim 后大小写不敏感匹配 `http://` / `https://`。
+/// 与 `local_image_path` 的 scheme 判定互补：凡带其它 scheme（data:/file:）都不远程加载。
+pub(crate) fn is_remote_image_url(url: &str) -> bool {
+    let url = url.trim();
+    let b = url.as_bytes();
+    (b.len() >= 8 && b[..8].eq_ignore_ascii_case(b"https://"))
+        || (b.len() >= 7 && b[..7].eq_ignore_ascii_case(b"http://"))
 }
 
 /// 图片 URL → 本地路径（切片 13）。相对 URL 相对文档所在目录；草稿（无路径）的

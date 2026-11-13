@@ -83,6 +83,7 @@ keys! {
     MenuViewSourceMode => "menu.view.source_mode", "源码模式";
     MenuViewFocusMode => "menu.view.focus_mode", "专注模式";
     MenuViewTypewriterMode => "menu.view.typewriter_mode", "打字机模式";
+    MenuViewBlockRemoteImages => "menu.view.block_remote_images", "阻止远程图片";
 
     // ---- 快捷键提示（菜单右侧列） ----
     ShortcutNew => "shortcut.new", "Ctrl+N";
@@ -319,6 +320,9 @@ keys! {
     NoticeLinkFailed => "notice.link_failed", "无法打开链接: {}";
     NoticeFocusMode => "notice.focus_mode", "专注模式：{}";
     NoticeTypewriterMode => "notice.typewriter_mode", "打字机模式：{}";
+    NoticeRemoteImageFailed => "notice.remote_image_failed", "部分远程图片加载失败，已显示替代文本";
+    NoticeRemoteImagesBlocked => "notice.remote_images_blocked", "已阻止远程图片";
+    NoticeRemoteImagesAllowed => "notice.remote_images_allowed", "已允许远程图片";
     ToggleOn => "toggle.on", "开";
     ToggleOff => "toggle.off", "关";
 

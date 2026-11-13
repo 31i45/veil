@@ -3,8 +3,8 @@
 //! 正确性由因果键承载（ADR-009 决策四）：每个缓存项记录生成它时的全部外部输入，
 //! 读取时比对键，不匹配即视为缺失——不再有 `invalidate_*`/`clear_*` 失效方法族。
 //! 键的构成逐类如下（与原手工失效语义逐一对应）：
-//! - 块布局/光栅/表格网格：`BaseKey`（版心宽、DPI、主题、会话、图片基准、脚注代次）
-//!   + 激活指纹；宽/DPI/主题/新会话/另存为/脚注编号变化时键自然失配；
+//! - 块布局/光栅/表格网格：`BaseKey`（版心宽、DPI、主题、会话、图片基准、远程图片代次、
+//!   脚注代次）+ 激活指纹；宽/DPI/主题/新会话/另存为/远程图到达/脚注编号变化时键自然失配；
 //! - 块级公式图：块 id + DPI + 主题 + 会话；失败记忆不含主题（换主题不重试渲染）；
 //! - 行内公式：tex 内容寻址 + DPI + 主题；失败记忆仅按 DPI（跨文档保留）；
 //! - 文档图片：解析后路径 + 图片基准；失败记忆同键。
@@ -59,6 +59,8 @@ pub(crate) struct Revs {
     pub(crate) session: u32,
     /// 图片相对路径基准代次：打开/另存为时递增。
     pub(crate) image_base: u32,
+    /// 远程图片代次：远程图到达或全局开关切换时递增，使全部布局失配重排。
+    pub(crate) remote_images: u32,
 }
 
 impl Revs {
@@ -75,6 +77,7 @@ impl Revs {
             theme_rev: self.theme,
             session_rev: self.session,
             image_base: self.image_base,
+            remote_images: self.remote_images,
             source_mode,
             footnote_epoch,
             fold_epoch: 0,
@@ -90,6 +93,9 @@ pub(crate) struct BaseKey {
     theme_rev: u32,
     session_rev: u32,
     image_base: u32,
+    /// 远程图片到达/开关切换代次：远程图占位转为实图时换键重排；
+    /// 本地图片缓存键仍只用 `image_base`，不因远程图重读磁盘。
+    remote_images: u32,
     /// 源码模式：true 时全部块按源码排版（打印态恒 false，与屏幕态天然区分）。
     source_mode: bool,
     /// 脚注代次：全文引用顺序 + 编号的确定性哈希。编号是全文派生量——文首新增引用
@@ -171,6 +177,12 @@ pub(crate) struct Cache {
     pub(crate) image_failed: HashMap<String, Memo<u32, ()>>,
     /// 表格网格：键 = 基础键 + 活动单元格。
     pub(crate) tables: HashMap<BlockId, Memo<TableKey, TableLayout>>,
+    /// 远程图片（自然尺寸位图）：会话级缓存，键 = 绝对 URL；文档切换时清空。
+    pub(crate) remote_images: HashMap<String, ImageData>,
+    /// 远程图片失败记忆：同会话内不重试（URL 绝对，不受文档目录影响）。
+    pub(crate) remote_failed: HashSet<String>,
+    /// 已发起、尚未返回的远程请求：去重与轮询唤醒的依据。
+    pub(crate) remote_pending: HashSet<String>,
 }
 
 impl Cache {
@@ -251,6 +263,25 @@ impl Cache {
 
     pub(crate) fn image_failed(&self, path: &str, key: u32) -> bool {
         self.image_failed.get(path).is_some_and(|m| m.matches(&key))
+    }
+
+    /// 远程图片缓存查询（URL 内容寻址，无代次键）。
+    pub(crate) fn remote_image(&self, url: &str) -> Option<&ImageData> {
+        self.remote_images.get(url)
+    }
+
+    /// 行内图片统一查询：先本地图片（按图片基准代次），再远程会话缓存。
+    pub(crate) fn image_or_remote(&self, key: &str, image_base: u32) -> Option<&ImageData> {
+        self.image(key, image_base)
+            .or_else(|| self.remote_image(key))
+    }
+
+    /// 清空全部远程图片状态（位图/失败记忆/pending）：切换文档时调用，
+    /// 防止旧文档的请求与结果串到新文档。
+    pub(crate) fn clear_remote(&mut self) {
+        self.remote_images.clear();
+        self.remote_failed.clear();
+        self.remote_pending.clear();
     }
 
     pub(crate) fn table(&self, id: BlockId, key: TableKey) -> Option<&TableLayout> {
@@ -401,6 +432,15 @@ mod tests {
             ..revs
         };
         assert_ne!(b, revs3.base(800.0, 1.25, false, 0), "图片基准变化即换键");
+        let revs5 = Revs {
+            remote_images: 1,
+            ..revs
+        };
+        assert_ne!(
+            b,
+            revs5.base(800.0, 1.25, false, 0),
+            "远程图片代次变化即换键"
+        );
         let revs4 = Revs { session: 1, ..revs };
         assert_ne!(
             b,
@@ -489,6 +529,7 @@ mod tests {
             theme: 1,
             session: 1,
             image_base: 1,
+            ..revs
         };
         let base4 = revs4.base(800.0, 2.0, false, 0);
         // 行内失败记忆按当前 DPI 代次重新登记（上一轮 DPI 变化已使其过期）

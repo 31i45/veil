@@ -1160,6 +1160,229 @@ fn paste_image_asset_failure_keeps_document_unchanged() {
     assert_eq!(f.calls.borrow().len(), 1);
 }
 
+// ---- 远程图片（v1.4）：默认自动加载 + 全局阻止开关 ----
+
+/// 远程图片 mock 的结果队列句柄：(url, 加载结果)。
+type RemoteResults = Rc<RefCell<Vec<(String, Result<ImageData, String>)>>>;
+
+/// 远程图片 mock：记录请求 URL，`poll_remote` 返回测试预置的结果队列。
+#[derive(Clone, Default)]
+struct RemoteImages {
+    requests: Rc<RefCell<Vec<String>>>,
+    results: RemoteResults,
+}
+impl ImageLoader for RemoteImages {
+    fn load(&mut self, _path: &Path) -> Result<ImageData, String> {
+        Err("测试未注入本地图片".into())
+    }
+    fn request_remote(&mut self, url: &str) {
+        self.requests.borrow_mut().push(url.to_string());
+    }
+    fn poll_remote(&mut self) -> Vec<(String, Result<ImageData, String>)> {
+        std::mem::take(&mut *self.results.borrow_mut())
+    }
+}
+
+fn app_remote(text: &str, config: Box<dyn ConfigStore>, images: RemoteImages) -> App {
+    let doc = Doc {
+        text: text.into(),
+        path: None,
+        bom: false,
+        resume: false,
+        open_error: None,
+    };
+    App::new(
+        doc,
+        Ports {
+            clipboard: Box::new(NoClip),
+            store: Box::new(MemStore::default()),
+            math: Box::new(FakeMath {
+                fail: false,
+                calls: Rc::new(RefCell::new(Vec::new())),
+            }),
+            images: Box::new(images),
+            assets: Box::new(NoAssets),
+            exporter: Box::new(NoExport),
+            dialogs: Box::new(NoDialogs),
+            watcher: Box::new(NoWatcher),
+            theme_env: ThemeEnv {
+                config,
+                system: Box::new(DynSystem(Rc::new(Cell::new(Some(false))))),
+                effects: Box::new(theme::test_support::NoEffects),
+                callouts: veil_core::CalloutRegistry::default(),
+            },
+            persist_env: persist_env(),
+            print: Box::new(NoPrint),
+            url_opener: no_url(),
+            clock: fixed_clock(),
+        },
+    )
+}
+
+const REMOTE_URL: &str = "https://example.com/a.png";
+
+#[test]
+fn remote_image_requested_once_when_allowed() {
+    let images = RemoteImages::default();
+    let requests = images.requests.clone();
+    let mut a = app_remote(
+        &format!("前 ![a]({REMOTE_URL}) 后\n"),
+        Box::new(MemConfig::default()),
+        images,
+    );
+    a.ensure_layouts_all();
+    assert_eq!(requests.borrow().as_slice(), &[REMOTE_URL.to_string()]);
+    assert!(a.cache.remote_pending.contains(REMOTE_URL));
+    // 再次布局/重绘：布局已缓存且 pending 去重，不得重复请求
+    a.ensure_layouts_all();
+    a.request_redraw();
+    assert_eq!(requests.borrow().len(), 1, "同一 URL 只请求一次");
+}
+
+#[test]
+fn remote_image_not_requested_when_globally_blocked() {
+    let images = RemoteImages::default();
+    let requests = images.requests.clone();
+    let mut a = app_remote(
+        &format!("前 ![a]({REMOTE_URL}) 后\n"),
+        Box::new(MemConfig::default()),
+        images,
+    );
+    a.config.allow_remote_images = false;
+    a.ensure_layouts_all();
+    assert!(requests.borrow().is_empty(), "阻止后不得发起请求");
+    assert!(a.cache.remote_pending.is_empty());
+}
+
+#[test]
+fn remote_poll_success_caches_bitmap_and_bumps_generation() {
+    let images = RemoteImages::default();
+    let results = images.results.clone();
+    let mut a = app_remote(
+        &format!("前 ![a]({REMOTE_URL}) 后\n"),
+        Box::new(MemConfig::default()),
+        images,
+    );
+    a.ensure_layouts_all();
+    let before = a.input_state.revs.remote_images;
+    results
+        .borrow_mut()
+        .push((REMOTE_URL.to_string(), Ok(solid(4, 2))));
+    a.poll_remote_images();
+    assert!(a.cache.remote_image(REMOTE_URL).is_some(), "成功位图入缓存");
+    assert!(
+        !a.cache.remote_pending.contains(REMOTE_URL),
+        "pending 已取走"
+    );
+    assert_eq!(a.input_state.revs.remote_images, before + 1, "代次递增");
+    let placed = a.cache.layouts.values().any(|m| {
+        m.value
+            .imgs
+            .iter()
+            .any(|i| matches!(&i.key, InlineAsset::Image(k) if k.as_str() == REMOTE_URL))
+    });
+    assert!(placed, "换代次后重排应把远程图放入布局");
+}
+
+#[test]
+fn remote_poll_failure_is_remembered_without_retry() {
+    let images = RemoteImages::default();
+    let requests = images.requests.clone();
+    let results = images.results.clone();
+    let mut a = app_remote(
+        &format!("前 ![a]({REMOTE_URL}) 后\n"),
+        Box::new(MemConfig::default()),
+        images,
+    );
+    a.ensure_layouts_all();
+    results
+        .borrow_mut()
+        .push((REMOTE_URL.to_string(), Err("404".into())));
+    a.poll_remote_images();
+    assert!(a.cache.remote_failed.contains(REMOTE_URL));
+    assert!(a.cache.remote_image(REMOTE_URL).is_none());
+    assert!(
+        a.ui_state.chrome.notice.contains("远程图片加载失败"),
+        "状态栏提示: {}",
+        a.ui_state.chrome.notice
+    );
+    a.ensure_layouts_all();
+    assert_eq!(requests.borrow().len(), 1, "失败记忆命中后不重复请求");
+}
+
+#[test]
+fn remote_cache_cleared_on_document_switch() {
+    let images = RemoteImages::default();
+    let results = images.results.clone();
+    let mut a = app_remote(
+        &format!("前 ![a]({REMOTE_URL}) 后\n"),
+        Box::new(MemConfig::default()),
+        images,
+    );
+    a.ensure_layouts_all();
+    results
+        .borrow_mut()
+        .push((REMOTE_URL.to_string(), Ok(solid(2, 2))));
+    a.poll_remote_images();
+    assert!(a.cache.remote_image(REMOTE_URL).is_some());
+    a.new_draft();
+    assert!(
+        a.cache.remote_image(REMOTE_URL).is_none(),
+        "切换文档清空位图"
+    );
+    assert!(a.cache.remote_pending.is_empty());
+    assert!(a.cache.remote_failed.is_empty());
+}
+
+#[test]
+fn html_img_remote_src_uses_same_request_path() {
+    let images = RemoteImages::default();
+    let requests = images.requests.clone();
+    let mut a = app_remote(
+        "前文 <img src=\"https://example.com/b.png\" alt=\"b\"> 后文\n",
+        Box::new(MemConfig::default()),
+        images,
+    );
+    a.ensure_layouts_all();
+    assert_eq!(
+        requests.borrow().as_slice(),
+        &["https://example.com/b.png".to_string()],
+        "HTML <img> 的 remote_src 与 Markdown 图片走同一请求路径"
+    );
+}
+
+#[test]
+fn remote_images_menu_flag_reflects_config_and_toggle_persists() {
+    let cfg = MemConfig::default();
+    let saves = cfg.saves.clone();
+    let mut a = app_remote("abc", Box::new(cfg), RemoteImages::default());
+    a.config.allow_remote_images = false;
+    let flags = a.menu_flags();
+    assert!(flags.block_remote_images, "阻止态进入菜单标志");
+    assert!(chrome::action_checked(
+        MenuAction::ToggleRemoteImages,
+        flags
+    ));
+    a.perform_menu(MenuAction::ToggleRemoteImages);
+    assert!(a.config.allow_remote_images, "切换后恢复允许");
+    assert!(!a.menu_flags().block_remote_images);
+    assert!(a.ui_state.chrome.notice.contains("已允许远程图片"));
+    let last = saves.borrow().last().cloned().unwrap_or_default();
+    assert!(
+        last.contains("allow_remote_images = true"),
+        "应持久化为 true: {last}"
+    );
+    // 再次切换：阻止并持久化 false
+    a.perform_menu(MenuAction::ToggleRemoteImages);
+    assert!(!a.config.allow_remote_images);
+    assert!(a.ui_state.chrome.notice.contains("已阻止远程图片"));
+    let last = saves.borrow().last().cloned().unwrap_or_default();
+    assert!(
+        last.contains("allow_remote_images = false"),
+        "应持久化为 false: {last}"
+    );
+}
+
 // ---- 拖放（阶段 1）：图片插入落点；非图片按文档打开 ----
 
 struct DropFixture {
@@ -2719,6 +2942,40 @@ fn autosave_writes_after_idle_and_clears_dirty() {
     assert!(
         a.persist_state.persist.activity().is_none(),
         "保存后取消调度"
+    );
+}
+
+#[test]
+fn autosave_clears_stale_cancel_dirty_notice() {
+    // 关窗确认按 Esc 取消 → 状态栏「已取消：仍有未保存修改」；随后的自动保存成功后该提示已失真。
+    use crate::document::doc_state::SaveKind;
+    let store = MemStore::default();
+    let mut a = dirty_app("ab", Some("a.md"), &store);
+    a.ui_state.chrome.notice = t(I18nKey::NoticeCancelDirty).into();
+    a.save(SaveKind::Auto);
+    assert_eq!(a.ui_state.chrome.notice, "", "自动保存成功后陈旧提示应清空");
+    assert!(!a.editor.is_dirty());
+    assert_eq!(
+        store.files.borrow()[Path::new("a.md")],
+        encode(&a.editor.session().serialize(), a.doc.bom)
+    );
+}
+
+#[test]
+fn autosave_failure_keeps_cancel_dirty_notice() {
+    // 对照：自动保存失败时磁盘仍未同步，提示必须保留（此时提示内容反而是对的）。
+    use crate::document::doc_state::SaveKind;
+    let store = MemStore {
+        fail_save: true,
+        ..Default::default()
+    };
+    let mut a = dirty_app("ab", Some("a.md"), &store);
+    a.ui_state.chrome.notice = t(I18nKey::NoticeCancelDirty).into();
+    a.save(SaveKind::Auto);
+    assert!(a.editor.is_dirty());
+    assert!(
+        a.ui_state.chrome.notice.contains("保存失败"),
+        "失败时提示保留为失败原因，不得清空"
     );
 }
 

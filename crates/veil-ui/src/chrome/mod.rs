@@ -97,6 +97,8 @@ pub enum MenuAction {
     ToggleTypewriter,
     /// 切换源码模式（Ctrl+/）：全文按 Markdown 源码排版。
     ToggleSourceMode,
+    /// 全局阻止/允许远程图片（默认自动加载）。
+    ToggleRemoteImages,
     /// 视图缩放（3c-2）：放大/缩小一档、还原 100%。
     ZoomIn,
     ZoomOut,
@@ -236,6 +238,12 @@ pub const MENUS: [MenuDef; 3] = [
                 Key::MenuViewTypewriterMode,
                 Key::Empty,
                 MenuAction::ToggleTypewriter,
+            ),
+            (Key::Empty, Key::Empty, MenuAction::Separator),
+            (
+                Key::MenuViewBlockRemoteImages,
+                Key::Empty,
+                MenuAction::ToggleRemoteImages,
             ),
         ],
     },
@@ -631,6 +639,8 @@ pub(crate) struct MenuFlags {
     pub(crate) focus: bool,
     pub(crate) typewriter: bool,
     pub(crate) source: bool,
+    /// 远程图片已被全局阻止（配置 allow_remote_images = false）。
+    pub(crate) block_remote_images: bool,
     /// 有可保存内容（脏文档或未命名草稿）。
     pub(crate) can_save: bool,
     pub(crate) can_undo: bool,
@@ -644,6 +654,7 @@ pub(crate) fn action_checked(action: MenuAction, flags: MenuFlags) -> bool {
         MenuAction::ToggleFocus => flags.focus,
         MenuAction::ToggleTypewriter => flags.typewriter,
         MenuAction::ToggleSourceMode => flags.source,
+        MenuAction::ToggleRemoteImages => flags.block_remote_images,
         _ => false,
     }
 }

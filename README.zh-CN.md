@@ -7,7 +7,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-stable%20%C2%B7%20edition%202021-orange.svg)](https://www.rust-lang.org/)
 [![Platform](https://img.shields.io/badge/platform-Windows%2011%20%C2%B7%20x64-0078d4.svg)](https://github.com/31i45/veil/releases)
-[![Portable](https://img.shields.io/badge/single%20exe%20%C2%B7%20no%20installer%20%C2%B7%20offline-2ea44f.svg)](https://github.com/31i45/veil/releases)
+[![Portable](https://img.shields.io/badge/single%20exe%20%C2%B7%20no%20installer%20%C2%B7%20no%20bg%20networking-2ea44f.svg)](https://github.com/31i45/veil/releases)
 
 [English](README.md)
 
@@ -15,7 +15,7 @@
 
 Veil 的灵感来自 Typedown — Typedown 是我最喜欢的 Windows Markdown 编辑器，没有之一，但是它启动需要几十秒到数分钟，每次都让人崩溃。Typedown 是 WinUI 框架实现的应用，冷启动快过你完成一杯咖啡的时间本该是理所当然的事，但现实并非如此。
 
-所以，我决定自己复刻。纯 Rust 实现，无 webview、无 Chromium/WebView2 进程、无外部运行时依赖。单文件 exe，应用内冷启动 ≈150 ms（首次打开并编辑约再增 160 ms；双指标与测量命令/日期见[数字红线](#数字红线目标值与实测)）。**单机单用户 · 纯离线 · 永不协作**。
+所以，我决定自己复刻。纯 Rust 实现，无 webview、无 Chromium/WebView2 进程、无外部运行时依赖。单文件 exe，应用内冷启动 ≈150 ms（首次打开并编辑约再增 160 ms；双指标与测量命令/日期见[数字红线](#数字红线目标值与实测)）。**单机单用户 · 零后台网络 · 永不协作**。
 
 ## 下载与使用
 
@@ -58,7 +58,7 @@ veil.exe /unregister   # 只撤销 /register 创建、且当前值仍属于自�
 3. 光标与选区：grapheme 边界导航；光标进出 `**bold**` 等标记时展开/收起，光标视觉位置不跳；链接使用主题链接色（浅 `#2B6CB0` / 深 `#7FB4F5`），与正文不同色
 4. 文件打开/保存：自动保存、外部修改提示与覆盖前备份
 5. 剪贴板：纯文本、HTML→Markdown 转换、截图粘贴落盘（`<文档名>.assets/`，递增命名不覆盖）
-6. 块级渲染：表格（网格态 + 活动单元格内直接编辑；活动格显示 Markdown 源码，其余单元格渲染粗体/斜体/删除线/行内代码/链接色并隐藏标记）、公式（latex-rust 纯 Rust 路径）、文档内图片（相对路径 PNG，断链/远程 URL 降级为 alt 文本）
+6. 块级渲染：表格（网格态 + 活动单元格内直接编辑；活动格显示 Markdown 源码，其余单元格渲染粗体/斜体/删除线/行内代码/链接色并隐藏标记）、公式（latex-rust 纯 Rust 路径）、文档内图片（相对路径 PNG；断链降级为 alt 文本；远程 http/https 图片默认自动加载，可在「视图 → 阻止远程图片」全局关闭；加载失败降级为 alt 占位并在状态栏提示一次）
 7. HTML 导出：单文件自包含、无外部资源；内联 CSS 跟随当前浅/深主题（背景、正文、弱化色、链接色、代码底色、边框），深色页面含 `color-scheme: dark`
 8. 配置与主题：顶层 `mode` 单键（system/light/dark，兼容旧 `[theme] mode`）、跟随系统外观、深色标题栏/Mica、切换持久化
 9. 自绘 chrome：菜单栏（↑/↓ 选择、Enter 执行、Esc 关闭，主菜单与右键菜单一致）、状态栏、滚动条；系统文件对话框（打开/另存为）
@@ -67,7 +67,7 @@ veil.exe /unregister   # 只撤销 /register 创建、且当前值仍属于自�
 12. 代码块语法高亮：16 种语言的关键字/字符串/注释/数字/类型着色（纯 Rust 逐行状态机，不引入 syntect）
 13. 源码模式：`Ctrl+/` 全文显示 Markdown 源码（含表格与公式块），切换保持光标与滚动位置；打印/导出始终为渲染态
 14. 导出 PDF：`Ctrl+Shift+E` 或 文件 → 导出 PDF，默认输出到文档同目录 `<stem>.pdf`（重名递增 ` (2)`/` (3)`）；可选目录页、页码、页边距（默认 20 mm），配置写入 `config.toml`。原生 PDF 直出（多级书签 + CJK 字体子集化 + 标题/表格/图片/公式排版），失败时回退系统「Microsoft Print to PDF」。未保存草稿会先弹保存对话框选定输出位置（取消即中止）。
-15. 链接打开：`Ctrl+单击`（鼠标手势，不是新快捷键）http/https/mailto 链接时，交给系统默认浏览器/邮件客户端打开，光标不移动；链接右键菜单首项为「在浏览器中打开」，其后为「复制链接地址」；非白名单协议只提示不打开，Veil 自身不发起网络请求
+15. 链接打开：`Ctrl+单击`（鼠标手势，不是新快捷键）http/https/mailto 链接时，交给系统默认浏览器/邮件客户端打开，光标不移动；链接右键菜单首项为「在浏览器中打开」，其后为「复制链接地址」；非白名单协议只提示不打开，除按需抓取文档内远程图片外，Veil 自身不发起网络请求
 16. GFM 脚注：支持 `[^id]` 引用与 `[^id]: 内容` 定义。渲染态引用显示为链接色编号 `[n]`，定义块隐藏标记、显示「编号 + 内容 + ↩」；编号按全文首次引用顺序；`Ctrl+单击` 引用跳到定义、`Ctrl+单击` 定义末尾 `↩` 跳回首次引用；源码模式（`Ctrl+/`）显示原始标记；HTML 导出生成 `<sup>` 引用与文末脚注列表（含返回链接）
 17. 文档内锚点跳转：`[文本](#slug)` 的 `Ctrl+单击` 跳到对应标题；导出 HTML 的标题带 `id="<slug>"`；重复标题按 `名称`、`名称-1` 去重（与导出共用同一套 `heading_slug` / `heading_slugs` 规则）
 18. 行与导航编辑：`Alt+↑` / `Alt+↓` 移动当前行（一次 undo），`PgUp` / `PgDn` 翻页并保留目标列，`Ctrl+Backspace` / `Ctrl+Delete` 按词删除且不跨行
@@ -76,6 +76,7 @@ veil.exe /unregister   # 只撤销 /register 创建、且当前值仍属于自�
 21. 状态可见：状态栏显示「已保存 · HH:MM」（或「未保存」）；CLI 打开失败弹出可见错误框并以退出码 1 结束
 22. 光标表达焦点：窗口聚焦时实心、失焦时空心，零定时器、零空闲唤醒
 23. 状态过渡：菜单栏、菜单项、大纲、快速打开、右键菜单、查找栏与对话框按钮的悬停/按下高亮以 120 ms ease-out cubic 淡入淡出；仅在动画进行中推进，空闲路径仍然零定时器、不唤醒进程；系统关闭「显示动画」时直接跳到终态
+24. 远程图片（v1.4）：http/https 图片默认自动加载，「视图 → 阻止远程图片」可全局关闭；抓取失败降级为 alt 占位并在状态栏提示一次。请求不携带 Cookie、`Referer` 或任何凭据，UA 固定为 `Veil/<version>`，连接/读取超时 10 s，响应体上限 20 MiB，最多跟随 3 次重定向且拒绝 https→http 降级，拒绝 localhost / 回环 / 私有 / 链路本地地址。导出与 PDF 永不包含远程资源
 
 ## 非目标（v1.2 明确不做）
 
@@ -87,7 +88,7 @@ veil.exe /unregister   # 只撤销 /register 创建、且当前值仍属于自�
 - 表格结构可视化编辑的剩余部分（合并/拆分单元格、列宽拖动）；内容编辑、行列增删与列对齐已支持
 - Mermaid 渲染（Mermaid 围栏块保持为代码，不做渲染）
 - 独立富文本文档模型：正文始终是 Markdown，`Ctrl+/` 只是同一文档的视图切换
-- 任何网络功能：无同步、无更新检查、无遥测；外部链接交给系统默认程序打开，Veil 自身不发起网络请求
+- 任何后台网络：无同步、无更新检查、无遥测；唯一出站请求是在渲染文档中的远程图片时按需发出，可在「视图 → 阻止远程图片」一键阻止；外部链接交给系统默认程序打开，导出 / PDF 永不包含远程资源
 - 竞品对齐项明确不做：正则查找（`regex` 实测使 exe 净增 1,198,592 B）、括号/引号自动配对、全词匹配开关、`Ctrl+Shift+K` 删除行（`Alt+↑` / `Alt+↓` 已覆盖行级操作）、独立 H5/H6 字阶（层级用缩进表达）
 
 ## 构建 / 运行 / 测试
@@ -100,7 +101,7 @@ cargo test --workspace
 cargo run -p veil -- <file.md>
 ```
 
-当前 1459 项测试全绿（`cargo test --workspace` 1459 passed / 0 failed / 14 ignored，2026-11-13 实测），`cargo clippy --workspace --all-targets -- -D warnings` 零警告。
+当前 1476 项测试全绿（`cargo test --workspace` 1476 passed / 0 failed / 14 ignored，2026-11-13 v1.4 远程图片实测），`cargo clippy --workspace --all-targets -- -D warnings` 零警告。
 
 ## 数字红线（目标值与实测）
 
@@ -116,7 +117,7 @@ cargo run -p veil -- <file.md>
 | 10 万字文档击键→提交上屏延迟 p95 | ≤ 16 ms | 6.781 ms / 12.379 ms（`perf_keystroke_path` 5,005 块 / `perf_keystroke_10k_blocks` 10,500 块；基线 6.677 / 12.488；2026-11-09）✅ |
 | 10 万字文档常驻内存（私有工作集） | ≤ 150 MB | 40.76 MB（20 页深滚动后 WorkingSet，2026-11-05 实测） |
 | 安装产物体积 — 运行时代码（非图标） | ≤ 6 MiB（Phase A 基准；Wave 3/4 PDF 导出门槛让步已覆盖） | 7,273,414 B（exe 减 47,162 B 图标资源，2026-11-13 B9 终检 + UI 修订） |
-| 安装产物体积 — 合计单文件 `veil.exe` | ≤ 10 MiB = 10,485,760 B（Wave 4 用户授权；每次增量须记录） | 7,320,576 B ≈ 6.98 MiB（2026-11-13 B9 终检 + UI 修订；较 Wave 6 基线 6,988,800 B +331,776 B；较历史基线 6,914,048 B +406,528 B；余量 3,165,184 B） |
+| 安装产物体积 — 合计单文件 `veil.exe` | ≤ 10 MiB = 10,485,760 B（Wave 4 用户授权；每次增量须记录） | 7,364,608 B ≈ 7.02 MiB（2026-11-13 v1.4 远程图片；较 Wave 6 基线 6,988,800 B +375,808 B；较历史基线 6,914,048 B +450,560 B；余量 3,121,152 B） |
 | `veil-core` 单元+属性测试数 | ≥ 80 | 209 |
 | e2e 断言数 | ≥ 20 | 41（3 个 e2e_ 场景测试：写作闭环打开→保存→重开、表格+图片粘贴落盘、查找替换→崩溃恢复→自清）✅ |
 | Markdown 往返一致率（无编辑时输出 == 输入字节；按字节比较） | 100% | 100% |

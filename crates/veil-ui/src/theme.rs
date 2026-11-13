@@ -3,7 +3,7 @@
 //! 零 GUI 依赖：解析/序列化/路径推导/主题判定全部为纯函数，headless 可测。
 //! 平台能力（注册表系统外观、DWM 深色标题栏/Mica、配置落盘）以 trait 声明，由产品层注入。
 //!
-//! 配置格式（极简，共 12 个顶层键）：
+//! 配置格式（极简，共 13 个顶层键）：
 //! ```toml
 //! mode = "system"        # system | light | dark
 //! export_margin_mm = 20  # PDF 页边距（毫米）
@@ -13,6 +13,7 @@
 //! doc_font_size = 16     # 正文基准字号（物理像素），夹取 10..=32
 //! doc_line_height = 22   # 正文基准行高（物理像素），夹取 字号..=字号×3
 //! smooth_scroll = false  # 平滑滚动开关
+//! allow_remote_images = true  # 远程图片默认自动加载；false = 全局阻止
 //! # 以下四项仅在窗口几何已知时成组写入（旧配置不含这些键）
 //! window_width = 1200    # 逻辑宽，480..=8192
 //! window_height = 800    # 逻辑高，360..=8192
@@ -368,6 +369,8 @@ pub struct Config {
     pub doc_line_height: f32,
     /// 平滑滚动开关（默认关，保持既有行为）。
     pub smooth_scroll: bool,
+    /// 远程图片自动加载（默认开）；false = 全局阻止，只显示 alt 文本。
+    pub allow_remote_images: bool,
     /// 上次退出时的窗口几何；首次运行或配置缺失时为 `None`。
     pub window: Option<WindowGeom>,
 }
@@ -383,6 +386,7 @@ impl Default for Config {
             doc_font_size: DEFAULT_DOC_FONT_SIZE,
             doc_line_height: DEFAULT_DOC_LINE_HEIGHT,
             smooth_scroll: false,
+            allow_remote_images: true,
             window: None,
         }
     }
@@ -395,7 +399,7 @@ impl Config {
             "# Veil 配置（自动生成）\n# mode: system（跟随系统）| light | dark\nmode = \"{}\"\n\
              export_margin_mm = {}\nexport_page_numbers = {}\nexport_toc = {}\n\
              doc_font_family = \"{}\"\ndoc_font_size = {}\ndoc_line_height = {}\n\
-             smooth_scroll = {}\n",
+             smooth_scroll = {}\nallow_remote_images = {}\n",
             self.mode.as_str(),
             self.export_margin_mm,
             self.export_page_numbers,
@@ -403,7 +407,8 @@ impl Config {
             self.doc_font_family.as_str(),
             self.doc_font_size,
             self.doc_line_height,
-            self.smooth_scroll
+            self.smooth_scroll,
+            self.allow_remote_images
         );
         if let Some(w) = self.window {
             text.push_str(&format!(
@@ -423,7 +428,7 @@ pub struct ConfigParse {
 }
 
 /// 极简配置解析：识别顶层 `mode`/`export_*`、正文排版键
-/// `doc_font_family`/`doc_font_size`/`doc_line_height`/`smooth_scroll`
+/// `doc_font_family`/`doc_font_size`/`doc_line_height`/`smooth_scroll`/`allow_remote_images`
 /// 与成组的窗口键 `window_width`/`window_height`/`window_x`/`window_y`，其余条目计数忽略。
 /// 排版数值越界按夹取处理（不计数），类型/字面量非法才计入 ignored；
 /// 字号先夹 10..=32，行高再按「字号..=字号×3」夹取（与键出现顺序无关）。
@@ -489,6 +494,10 @@ pub fn parse_config(text: &str) -> ConfigParse {
             },
             "smooth_scroll" => match parse_bool(value) {
                 Some(v) => out.config.smooth_scroll = v,
+                None => out.ignored += 1,
+            },
+            "allow_remote_images" => match parse_bool(value) {
+                Some(v) => out.config.allow_remote_images = v,
                 None => out.ignored += 1,
             },
             "window_width" => {
@@ -992,6 +1001,48 @@ mod tests {
         let p = parse("smooth_scroll = \"true\"");
         assert!(!p.config.smooth_scroll);
         assert_eq!(p.ignored, 1);
+    }
+
+    #[test]
+    fn allow_remote_images_defaults_true_and_parses_bool() {
+        // 空配置 / 旧配置缺键：默认自动加载，且不产生 ignored
+        let p = parse("");
+        assert!(p.config.allow_remote_images);
+        assert_eq!(p.ignored, 0);
+        assert!(parse("mode = \"dark\"\n").config.allow_remote_images);
+        // 显式关闭 / 打开
+        assert!(
+            !parse("allow_remote_images = false")
+                .config
+                .allow_remote_images
+        );
+        assert!(
+            parse("allow_remote_images = true")
+                .config
+                .allow_remote_images
+        );
+        // 非法字面量：回落默认并计数
+        let p = parse("allow_remote_images = \"false\"");
+        assert!(p.config.allow_remote_images);
+        assert_eq!(p.ignored, 1);
+    }
+
+    #[test]
+    fn allow_remote_images_round_trips_through_toml() {
+        for allow in [true, false] {
+            let cfg = Config {
+                allow_remote_images: allow,
+                ..Config::default()
+            };
+            let text = cfg.to_toml();
+            assert!(
+                text.contains(&format!("allow_remote_images = {allow}")),
+                "序列化必须写 {allow}: {text}"
+            );
+            let p = parse(&text);
+            assert_eq!(p.config, cfg, "往返恒等");
+            assert_eq!(p.ignored, 0);
+        }
     }
 
     #[test]

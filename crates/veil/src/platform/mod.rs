@@ -5,6 +5,7 @@
 mod assoc;
 mod clock;
 mod error;
+pub mod http; // 远程图片抓取（v1.4）：WinHTTP 手写 FFI
 pub mod ipc;
 mod pdf; // 原生 PDF 导出（Wave 3A，跨平台 crate 但字体链 Windows 优先）
 #[cfg(windows)]

@@ -355,7 +355,19 @@ fn decode_png_rgba(png: &[u8]) -> Result<ImageData, String> {
 
 /// 文档内图片加载器（切片 13 + 阶段 1）：std 读文件；PNG 走 png 解码，
 /// 其余位图格式经 WIC。失败返回 Err 由视图降级 alt 文本（不每帧重试）。
-struct FsImages;
+/// 远程图片（v1.4）由 `HttpFetcher` 后台抓取，结果经 `poll_remote` 非阻塞取走。
+struct FsImages {
+    remote: platform::http::HttpFetcher,
+}
+
+impl FsImages {
+    pub(crate) fn new() -> Self {
+        Self {
+            remote: platform::http::HttpFetcher::new(),
+        }
+    }
+}
+
 impl veil_ui::ImageLoader for FsImages {
     fn load(&mut self, path: &Path) -> Result<ImageData, String> {
         let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
@@ -367,10 +379,18 @@ impl veil_ui::ImageLoader for FsImages {
             platform::decode_image(path)
         }
     }
+
+    fn request_remote(&mut self, url: &str) {
+        self.remote.request(url);
+    }
+
+    fn poll_remote(&mut self) -> Vec<(String, Result<ImageData, String>)> {
+        self.remote.poll()
+    }
 }
 
 fn image_loader() -> Box<dyn veil_ui::ImageLoader> {
-    Box::new(FsImages)
+    Box::new(FsImages::new())
 }
 
 /// 粘贴图片资产存储（切片 14）：在文档旁 `<stem>.assets/` 落盘 PNG。
@@ -681,7 +701,7 @@ mod tests {
             png_bytes(1, 1, png::ColorType::Rgba, &[255, 0, 0, 255]),
         )
         .unwrap();
-        let got = FsImages.load(&path);
+        let got = FsImages::new().load(&path);
         std::fs::remove_file(&path).ok();
         let img = got.expect("磁盘 PNG 应加载成功");
         assert_eq!((img.width, img.height), (1, 1));
@@ -702,7 +722,7 @@ mod tests {
     fn image_loader_decodes_jpeg_via_wic() {
         let path = std::env::temp_dir().join(format!("veil-img-{}.jpg", std::process::id()));
         std::fs::write(&path, include_bytes!("../tests/fixtures/red.jpg")).unwrap();
-        let got = FsImages.load(&path);
+        let got = FsImages::new().load(&path);
         std::fs::remove_file(&path).ok();
         let img = got.expect("JPEG 应经 WIC 解码");
         assert_eq!((img.width, img.height), (1, 1));
@@ -717,7 +737,7 @@ mod tests {
     fn image_loader_reports_wic_failure() {
         let path = std::env::temp_dir().join(format!("veil-bad-{}.jpg", std::process::id()));
         std::fs::write(&path, b"not an image").unwrap();
-        let got = FsImages.load(&path);
+        let got = FsImages::new().load(&path);
         std::fs::remove_file(&path).ok();
         assert!(got.is_err(), "垃圾字节应解码失败");
     }

@@ -161,6 +161,10 @@ impl App {
                     self.persist_state.persist.set_hold(false);
                     self.ui_state.chrome.notice =
                         tf(Key::NoticeSaved, &[&path_label(Some(path.as_path()))]);
+                } else if self.ui_state.chrome.notice == t(Key::NoticeCancelDirty) {
+                    // 取消关窗的提示描述的是「仍有未保存修改」，随后成功的自动保存已让磁盘与
+                    // 编辑器一致；此时保留该提示会自相矛盾，故仅清这一条，其他提示不动。
+                    self.ui_state.chrome.notice.clear();
                 }
                 self.persist_state.persist.clear_activity(); // 已干净：取消自动保存调度
                                                              // 当前版本也入历史：列表可标「当前」，且恢复面板始终能看到刚保存的版本
@@ -471,6 +475,8 @@ impl App {
         self.clear_recovery();
         self.input_state.revs.session += 1;
         self.input_state.revs.image_base += 1;
+        // 整篇替换：远程图片位图/失败记忆/pending 属文档会话，全部清空避免串档。
+        self.cache.clear_remote();
         // 表格列宽覆盖按块 id 生效：整篇替换即整体失效（纯视图态，无副作用）
         self.ui_state.tables.widths.clear();
         self.ui_state.tables.drag = None;
@@ -904,6 +910,8 @@ impl App {
                                // 行内公式按 tex 内容寻址，跨文档保留
         self.input_state.revs.session += 1;
         self.input_state.revs.image_base += 1;
+        // 换文档：远程图片状态属文档会话，清空以免旧请求/结果串到新文档。
+        self.cache.clear_remote();
         self.window_state.scroll_y = 0.0;
         self.window_state.goal_y = 0.0;
         self.window_state.goal_x = None;
@@ -951,6 +959,8 @@ impl App {
                                // 行内公式按 tex 内容寻址，跨文档保留
         self.input_state.revs.session += 1;
         self.input_state.revs.image_base += 1;
+        // 新建草稿：远程图片状态属旧文档会话，清空。
+        self.cache.clear_remote();
         self.window_state.scroll_y = 0.0;
         self.window_state.goal_y = 0.0;
         self.window_state.goal_x = None;

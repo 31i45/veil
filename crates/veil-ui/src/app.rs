@@ -44,6 +44,8 @@ use veil_core::BlockId;
 const WATCH_POLL: Duration = Duration::from_millis(300);
 /// 系统外观轮询间隔（切片 17）：仅在「跟随系统」时启用；注册表读取开销可忽略。
 const THEME_POLL: Duration = Duration::from_secs(1);
+/// 远程图片结果轮询间隔：仅在有 pending 请求时启用（干净文档不产生周期唤醒）。
+const REMOTE_POLL: Duration = Duration::from_millis(100);
 
 /// 系统剪贴板抽象：实现由产品层（veil）注入，本层不依赖具体剪贴板库（INSTANCE §6）。
 pub trait Clipboard {
@@ -330,6 +332,7 @@ pub struct Ports {
 enum ConfigSave {
     Theme,
     Window,
+    RemoteImages,
 }
 
 /// 被挂起的操作意图：模态结论出来后才执行，避免阻塞事件循环。
@@ -989,6 +992,9 @@ impl App {
         match part {
             ConfigSave::Theme => merged.mode = self.config.mode,
             ConfigSave::Window => merged.window = self.config.window,
+            ConfigSave::RemoteImages => {
+                merged.allow_remote_images = self.config.allow_remote_images
+            }
         }
         let text = merged.to_toml();
         if let Err(e) = self.ports.config.save(&text) {
@@ -1018,6 +1024,58 @@ impl App {
             self.input_state.theme = Theme::of(ThemeMode::System, dark);
             self.refresh_theme_visuals();
         }
+    }
+
+    /// 全局阻止/允许远程图片（视图菜单）：翻转配置并落盘，递增远程图片代次使
+    /// 全部布局失配重排（本地图片缓存键不变，不触发重新读盘）。
+    pub(crate) fn toggle_remote_images(&mut self) {
+        self.config.allow_remote_images = !self.config.allow_remote_images;
+        self.save_config(ConfigSave::RemoteImages);
+        self.input_state.revs.remote_images += 1;
+        self.refresh_index();
+        self.ensure_layouts_visible();
+        self.ensure_math_visible();
+        self.ensure_tables_visible();
+        self.recompute_geometry();
+        self.ui_state.chrome.notice = if self.config.allow_remote_images {
+            t(Key::NoticeRemoteImagesAllowed).into()
+        } else {
+            t(Key::NoticeRemoteImagesBlocked).into()
+        };
+        self.request_redraw();
+    }
+
+    /// 取走已完成的远程图片结果：成功入会话缓存、失败记入记忆（本批仅提示一次），
+    /// 任一结果都递增远程图片代次并按主题切换同序列重排重绘。
+    pub(crate) fn poll_remote_images(&mut self) {
+        let results = self.ports.images.poll_remote();
+        if results.is_empty() {
+            return;
+        }
+        let mut failed = false;
+        for (url, result) in results {
+            self.cache.remote_pending.remove(&url);
+            match result {
+                Ok(img) => {
+                    self.cache.remote_failed.remove(&url);
+                    self.cache.remote_images.insert(url, img);
+                }
+                Err(_) => {
+                    self.cache.remote_failed.insert(url);
+                    failed = true;
+                }
+            }
+        }
+        if failed {
+            self.ui_state.chrome.notice = t(Key::NoticeRemoteImageFailed).into();
+        }
+        self.input_state.revs.remote_images += 1;
+        self.refresh_index();
+        self.ensure_layouts_visible();
+        self.ensure_math_visible();
+        self.ensure_tables_visible();
+        self.recompute_geometry();
+        self.request_redraw();
     }
 
     pub(crate) fn win_size(&self) -> (u32, u32) {
@@ -1170,6 +1228,7 @@ impl App {
     fn tick(&mut self, now: Instant) {
         self.poll_external();
         self.poll_system_theme(now);
+        self.poll_remote_images();
         // 只读浏览版本历史期间冻结所有持久化副作用：浏览不得改变文档字节，
         // 也不得在预览暂存实时编辑器时触发自动保存/恢复写盘。
         if self.ui_state.history.open {
@@ -1603,6 +1662,11 @@ impl App {
         if self.doc.path.is_some() {
             let watch_at = now + WATCH_POLL;
             next = Some(next.map_or(watch_at, |t| t.min(watch_at)));
+        }
+        // 远程图片请求未回：周期轮询结果；全部取完即停止唤醒。
+        if !self.cache.remote_pending.is_empty() {
+            let remote_at = now + REMOTE_POLL;
+            next = Some(next.map_or(remote_at, |t| t.min(remote_at)));
         }
         // 悬停过渡（S6）：按 ~60fps 推进；帧点未到只登记唤醒，不空转重绘。
         if self.anim_running() {

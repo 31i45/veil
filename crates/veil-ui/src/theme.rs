@@ -3,7 +3,7 @@
 //! 零 GUI 依赖：解析/序列化/路径推导/主题判定全部为纯函数，headless 可测。
 //! 平台能力（注册表系统外观、DWM 深色标题栏/Mica、配置落盘）以 trait 声明，由产品层注入。
 //!
-//! 配置格式（极简，共 13 个顶层键）：
+//! 配置格式（极简，共 14 个顶层键）：
 //! ```toml
 //! mode = "system"        # system | light | dark
 //! export_margin_mm = 20  # PDF 页边距（毫米）
@@ -14,6 +14,7 @@
 //! doc_line_height = 22   # 正文基准行高（物理像素），夹取 字号..=字号×3
 //! smooth_scroll = false  # 平滑滚动开关
 //! allow_remote_images = true  # 远程图片默认自动加载；false = 全局阻止
+//! tab_width = 4          # 制表符宽度（2 或 4），默认 4
 //! # 以下四项仅在窗口几何已知时成组写入（旧配置不含这些键）
 //! window_width = 1200    # 逻辑宽，480..=8192
 //! window_height = 800    # 逻辑高，360..=8192
@@ -340,6 +341,8 @@ const DOC_FONT_SIZE_MIN: f32 = 10.0;
 const DOC_FONT_SIZE_MAX: f32 = 32.0;
 /// 字体族值最大长度：超长视为无法识别（防止恶意/损坏配置）。
 const DOC_FONT_FAMILY_MAX_LEN: usize = 64;
+/// 制表符宽度默认值（兼容 2 与 4，Task D 新增）。
+const DEFAULT_TAB_WIDTH: u8 = 4;
 
 /// 正文字号夹取：10..=32。
 fn clamp_font_size(v: f32) -> f32 {
@@ -371,6 +374,8 @@ pub struct Config {
     pub smooth_scroll: bool,
     /// 远程图片自动加载（默认开）；false = 全局阻止，只显示 alt 文本。
     pub allow_remote_images: bool,
+    /// 制表符宽度（2 或 4，默认 4）；其它值夹到 4。
+    pub tab_width: u8,
     /// 上次退出时的窗口几何；首次运行或配置缺失时为 `None`。
     pub window: Option<WindowGeom>,
 }
@@ -387,6 +392,7 @@ impl Default for Config {
             doc_line_height: DEFAULT_DOC_LINE_HEIGHT,
             smooth_scroll: false,
             allow_remote_images: true,
+            tab_width: DEFAULT_TAB_WIDTH,
             window: None,
         }
     }
@@ -399,7 +405,7 @@ impl Config {
             "# Veil 配置（自动生成）\n# mode: system（跟随系统）| light | dark\nmode = \"{}\"\n\
              export_margin_mm = {}\nexport_page_numbers = {}\nexport_toc = {}\n\
              doc_font_family = \"{}\"\ndoc_font_size = {}\ndoc_line_height = {}\n\
-             smooth_scroll = {}\nallow_remote_images = {}\n",
+             smooth_scroll = {}\nallow_remote_images = {}\ntab_width = {}\n",
             self.mode.as_str(),
             self.export_margin_mm,
             self.export_page_numbers,
@@ -408,7 +414,8 @@ impl Config {
             self.doc_font_size,
             self.doc_line_height,
             self.smooth_scroll,
-            self.allow_remote_images
+            self.allow_remote_images,
+            self.tab_width,
         );
         if let Some(w) = self.window {
             text.push_str(&format!(
@@ -499,6 +506,10 @@ pub fn parse_config(text: &str) -> ConfigParse {
             "allow_remote_images" => match parse_bool(value) {
                 Some(v) => out.config.allow_remote_images = v,
                 None => out.ignored += 1,
+            },
+            "tab_width" => match value.parse::<u8>() {
+                Ok(v) if v == 2 || v == 4 => out.config.tab_width = v,
+                _ => out.ignored += 1,
             },
             "window_width" => {
                 win_seen[0] = true;

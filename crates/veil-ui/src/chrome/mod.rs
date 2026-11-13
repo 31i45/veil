@@ -105,6 +105,8 @@ pub enum MenuAction {
     ZoomReset,
     /// 全屏切换（3c-3，F11）：无边框全屏。
     ToggleFullscreen,
+    /// 打开设置模态（Ctrl+,）：所有配置项集中编辑，写 config.toml。
+    Settings,
     Quit,
     /// 打开最近文件（0b）：下标为最近列表位置（0 = 最近一次）。
     OpenRecent(usize),
@@ -244,6 +246,12 @@ pub const MENUS: [MenuDef; 3] = [
                 Key::MenuViewBlockRemoteImages,
                 Key::Empty,
                 MenuAction::ToggleRemoteImages,
+            ),
+            (Key::Empty, Key::Empty, MenuAction::Separator),
+            (
+                Key::MenuViewSettings,
+                Key::ShortcutSettings,
+                MenuAction::Settings,
             ),
         ],
     },

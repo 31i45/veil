@@ -46,6 +46,8 @@ const WATCH_POLL: Duration = Duration::from_millis(300);
 const THEME_POLL: Duration = Duration::from_secs(1);
 /// 远程图片结果轮询间隔：仅在有 pending 请求时启用（干净文档不产生周期唤醒）。
 const REMOTE_POLL: Duration = Duration::from_millis(100);
+/// 光标闪烁半周期（600 ms 可见 / 600 ms 不可见）——标准文本编辑器节拍。
+const CURSOR_BLINK: Duration = Duration::from_millis(600);
 
 /// 系统剪贴板抽象：实现由产品层（veil）注入，本层不依赖具体剪贴板库（INSTANCE §6）。
 pub trait Clipboard {
@@ -329,10 +331,13 @@ pub struct Ports {
     pub url_opener: Box<dyn UrlOpener>,
 }
 
-enum ConfigSave {
+pub(crate) enum ConfigSave {
     Theme,
     Window,
     RemoteImages,
+    /// 完整写入：settings 模态 OK 时，把所有字段一次性写 config.toml。
+    #[allow(dead_code)]
+    All,
 }
 
 /// 被挂起的操作意图：模态结论出来后才执行，避免阻塞事件循环。
@@ -387,11 +392,23 @@ pub(crate) struct ActiveModal {
     pub(crate) purpose: ModalPurpose,
 }
 
+/// 设置模态：承载 SettingsForm + 独立交互态 + 独立布局。
+/// 与 ActiveModal 平行（不走 ModalSpec），因为设置模态有 10+ 可编辑表单控件。
+#[allow(dead_code)]
+pub(crate) struct SettingsModal {
+    pub(crate) form: crate::view::settings::SettingsForm,
+    pub(crate) state: crate::view::settings::SettingsState,
+    pub(crate) layout: Option<crate::view::settings::SettingsLayout>,
+    pub(crate) buttons: Vec<crate::view::modal::ModalButton>,
+}
+
 /// 文档视图 UI 组件状态（ADR-009 S6 C6）：chrome/大纲/查找栏/写作模式。
 /// 四者是 UI 交互态，无数据互借，合并减少顶层字段。
 pub(crate) struct UIState {
     /// 应用内模态（未保存确认等）：Some 时它是唯一输入接收者，绘制在最后一层。
     pub(crate) modal: Option<ActiveModal>,
+    /// 设置模态（独立于 modal — 有 10+ 表单控件）。优先级高于 modal。
+    pub(crate) settings: Option<SettingsModal>,
     /// 自绘 chrome（切片 15）：菜单/状态栏/滚动条交互态与标签缓存。
     pub(crate) chrome: Chrome,
     /// 大纲面板（P3-2）：标题条目、开关/滚动/悬停。
@@ -427,6 +444,7 @@ impl Default for UIState {
     fn default() -> Self {
         Self {
             modal: None,
+            settings: None,
             chrome: Chrome::default(),
             outline: Outline::default(),
             search: Search::default(),
@@ -656,6 +674,13 @@ pub(crate) struct App {
     pub(crate) ports: AppPorts,
     pub(crate) persist_state: PersistState,
     pub(crate) ui_state: UIState,
+    // —— 光标闪烁状态 —— //
+    /// 当前光标是否可见（tick 中每 600 ms 翻转一次）。
+    pub(crate) cursor_visible: bool,
+    /// 最近一次可见性翻转时刻：`None` 表示尚未开始闪烁（或首次进入）。
+    pub(crate) last_blink: Option<Instant>,
+    /// 上一次 tick 记录的 caret 值——用于检测 caret 移动并立即重置可见性。
+    pub(crate) last_seen_caret: usize,
 }
 
 /// 15 个平台端口聚合结构：能力集合，不携带状态语义（ADR-009 决策六）。
@@ -833,6 +858,7 @@ impl App {
         if start.recovered {
             editor.set_dirty(true); // 恢复内容相对磁盘基线是未保存修改
         }
+        let initial_caret = editor.caret();
         let mut persist = Persist::default();
         if start.missing {
             persist.set_missing(true);
@@ -887,6 +913,9 @@ impl App {
                 snapshot_deadline: None,
             },
             ui_state: UIState::default(),
+            cursor_visible: true,
+            last_blink: None,
+            last_seen_caret: initial_caret,
         };
         app.ui_state.chrome.notice = if start.notice.is_empty() {
             config_notice
@@ -982,7 +1011,7 @@ impl App {
     }
 
     /// 配置落盘：先读最新文件，只覆盖当前动作负责的字段，避免多窗口旧快照互写。
-    fn save_config(&mut self, part: ConfigSave) {
+    pub(crate) fn save_config(&mut self, part: ConfigSave) {
         let mut merged = self.config;
         if let Ok(text) = self.ports.config.load() {
             if let Ok(parsed) = theme::decode_config(text.as_bytes()) {
@@ -994,6 +1023,10 @@ impl App {
             ConfigSave::Window => merged.window = self.config.window,
             ConfigSave::RemoteImages => {
                 merged.allow_remote_images = self.config.allow_remote_images
+            }
+            // All: 完整覆盖所有字段（settings 模态 OK 时）
+            ConfigSave::All => {
+                merged = self.config;
             }
         }
         let text = merged.to_toml();
@@ -1233,6 +1266,33 @@ impl App {
         // 也不得在预览暂存实时编辑器时触发自动保存/恢复写盘。
         if self.ui_state.history.open {
             return;
+        }
+        // —— 光标闪烁：caret 移动立即重置；条件满足时每 600 ms 翻转可见性 —— //
+        let caret = self.editor.caret();
+        if caret != self.last_seen_caret {
+            self.cursor_visible = true;
+            self.last_blink = Some(now);
+            self.last_seen_caret = caret;
+        }
+        let blink_active = self.doc.path.is_some()
+            && self.window_state.print.is_none()
+            && self.editor.preedit().is_none();
+        if blink_active {
+            match self.last_blink {
+                None => {
+                    self.last_blink = Some(now);
+                    self.cursor_visible = true;
+                }
+                Some(t) if now.duration_since(t) >= CURSOR_BLINK => {
+                    self.cursor_visible = !self.cursor_visible;
+                    self.last_blink = Some(now);
+                }
+                _ => {} // 间隔未到，保持当前可见性
+            }
+        } else {
+            // 闪烁不活跃：强制可见（preedit / 打印 / 无路径草稿都应显示）
+            self.cursor_visible = true;
+            self.last_blink = None;
         }
         self.maybe_autosave(now);
         self.maybe_recovery_write(now);
@@ -1667,6 +1727,14 @@ impl App {
         if !self.cache.remote_pending.is_empty() {
             let remote_at = now + REMOTE_POLL;
             next = Some(next.map_or(remote_at, |t| t.min(remote_at)));
+        }
+        // 光标闪烁：文档已加载 + 非打印 + 无 preedit 时，每 600 ms 翻转可见性需要被唤醒。
+        if self.doc.path.is_some()
+            && self.window_state.print.is_none()
+            && self.editor.preedit().is_none()
+        {
+            let blink_at = now + CURSOR_BLINK;
+            next = Some(next.map_or(blink_at, |t| t.min(blink_at)));
         }
         // 悬停过渡（S6）：按 ~60fps 推进；帧点未到只登记唤醒，不空转重绘。
         if self.anim_running() {

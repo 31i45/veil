@@ -1,7 +1,7 @@
 //! 交互策略：按键到意图的翻译、编辑后的几何刷新编排、光标移动/命中/点选/
 //! 拖选、剪贴板、菜单动作。只发意图与调几何，不做像素绘制。
 
-use crate::app::App;
+use crate::app::{App, ConfigSave};
 use crate::chrome::{self, MenuAction};
 use crate::document::block_index::{gap_after, gap_between, BlockGeom};
 use crate::editor::Intent;
@@ -14,7 +14,7 @@ use crate::paint::{
     active_cell_index, table_cell_start, table_delete_column, table_delete_row,
     table_insert_column, table_insert_row, table_set_align,
 };
-use crate::theme::ThemeMode;
+use crate::theme::{Config, Theme, ThemeMode};
 use crate::view::ctx_menu::{CtxAction, CtxKind, TableCtx};
 use crate::view::{ctx_menu, history, inline_details_spans, outline, quick_open, search};
 use std::path::Path;
@@ -95,6 +95,22 @@ impl App {
     /// 单个内部键的路由与执行：`on_key` 与测试共用同一入口。
     /// 模式优先级与各模式的按键语义只在 `mode::route` 一处表达。
     pub(crate) fn route_key(&mut self, key: Key) {
+        // 设置模态优先（优先级高于普通 modal）：打开时它是唯一输入接收者
+        if self.ui_state.settings.is_some() {
+            let mods = self.input_state.mods;
+            // 先更新 layout（scale 变化时需要）
+            let layout = self.settings_layout();
+            let id = if let Some(s) = self.ui_state.settings.as_mut() {
+                s.state.on_key(&key, mods, &mut s.form, &layout)
+            } else {
+                None
+            };
+            match id {
+                Some(id) => self.resolve_settings(id),
+                None => self.request_redraw(),
+            }
+            return;
+        }
         // 模态优先：打开时它是唯一输入接收者，其余路由（菜单/浮层/正文）全部让位
         if self.ui_state.modal.is_some() {
             let shift = self.input_state.mods.shift;
@@ -262,6 +278,7 @@ impl App {
             Action::ZoomOut => self.zoom_step(-1),
             Action::ZoomReset => self.zoom_reset(),
             Action::ToggleFullscreen => self.toggle_fullscreen(),
+            Action::OpenSettings => self.open_settings(),
         }
     }
 
@@ -997,6 +1014,7 @@ impl App {
             MenuAction::QuickOpen => self.toggle_quick(),
             MenuAction::Separator => {}
             MenuAction::Quit => self.confirm_close(),
+            MenuAction::Settings => self.open_settings(),
         }
         self.request_redraw();
         false
@@ -1973,6 +1991,20 @@ impl App {
             self.input_state.mouse.x as f32,
             self.input_state.mouse.y as f32,
         );
+        // 设置模态优先（优先级高于普通 modal）：只判定按钮/字段命中，遮罩/空白点击一律吞掉
+        if self.ui_state.settings.is_some() {
+            let l = self.settings_layout();
+            let hit = self
+                .ui_state
+                .settings
+                .as_mut()
+                .and_then(|s| s.state.on_click((mx, my), &l, &mut s.form));
+            if let Some(id) = hit {
+                self.resolve_settings(id);
+            }
+            self.request_redraw();
+            return false;
+        }
         // 模态优先：只判定按钮命中，遮罩/空白点击一律吞掉且不关闭（须显式作答）
         if self.ui_state.modal.is_some() {
             let l = self.modal_layout();
@@ -2460,6 +2492,87 @@ impl App {
         self.recompute_geometry();
         self.set_ime_area();
         self.request_redraw();
+    }
+
+    /// 打开设置模态（Ctrl+, / 视图菜单 → 设置…）。
+    /// 先关掉可能打开的主菜单/右键菜单，避免层叠遮挡。
+    pub(crate) fn open_settings(&mut self) {
+        // 关掉主菜单、右键菜单（打开设置前清理）
+        self.ui_state.chrome.close();
+        self.ui_state.ctx.close();
+        // 关掉其他浮层（查找、快速打开）
+        self.ui_state.search.open = false;
+        self.ui_state.quick.open = false;
+        let buttons = crate::view::settings::buttons();
+        let form = crate::view::settings::SettingsForm::from_config(&self.config);
+        let state = crate::view::settings::SettingsState::new(&form);
+        self.ui_state.settings = Some(crate::app::SettingsModal {
+            form,
+            state,
+            layout: None,
+            buttons,
+        });
+        self.request_redraw();
+    }
+
+    /// 设置模态结论落地：
+    /// - OK（BTN_OK）：把表单值应用到 Config，写 config.toml（ConfigSave::All），刷新 UI（主题/字体/滚动等立即生效）。
+    /// - Reset Defaults（BTN_RESET_DEFAULTS）：只在表单内恢复默认（用户还可以 OK/Cancel）。
+    /// - Cancel（BTN_CANCEL）：关闭不写盘。
+    #[allow(dead_code)]
+    pub(crate) fn resolve_settings(&mut self, id: u16) {
+        use crate::view::settings::{BTN_OK, BTN_RESET_DEFAULTS, BTN_CANCEL};
+        let Some(s) = self.ui_state.settings.as_mut() else {
+            return;
+        };
+        match id {
+            BTN_OK => {
+                // 应用表单值到 Config
+                self.config = s.form.apply(&self.config);
+                // 持久化完整 Config
+                self.save_config(ConfigSave::All);
+                // 立即刷新所有受影响的 UI（主题模式、字体、平滑滚动等）
+                self.refresh_settings_effects();
+                self.ui_state.settings = None;
+                self.request_redraw();
+            }
+            BTN_RESET_DEFAULTS => {
+                // 表单内恢复默认（不改 Config）：用户还可以 OK 或 Cancel
+                s.form = crate::view::settings::SettingsForm::from_config(&Config::default());
+                s.state = crate::view::settings::SettingsState::new(&s.form);
+                s.layout = None; // 强制在下次 paint 时重算
+                self.request_redraw();
+            }
+            BTN_CANCEL => {
+                self.ui_state.settings = None;
+                self.request_redraw();
+            }
+            _ => {}
+        }
+    }
+
+    /// 设置应用后立即生效：主题模式、字体缓存、平滑滚动。
+    /// 不要求重启。
+    #[allow(dead_code)]
+    fn refresh_settings_effects(&mut self) {
+        // 1) 主题：mode 变了需要重新取系统深色并刷新 Theme 派生值
+        if self.config.mode == ThemeMode::System {
+            if let Some(dark) = self.ports.system.is_dark() {
+                self.input_state.system_dark = dark;
+            }
+        }
+        self.input_state.theme = Theme::of(self.config.mode, self.input_state.system_dark);
+        // 2) 平滑滚动：WindowState 独立存储，需要同步
+        self.window_state.smooth = self.config.smooth_scroll;
+        // 3) 文档字体族/字号/行高/制表符：所有 layout 失配（base_key 包含 typography）
+        self.refresh_index();
+        self.ensure_layouts_visible();
+        self.ensure_tables_visible();
+        self.recompute_geometry();
+        self.set_ime_area();
+        // 4) 主题/颜色变了 → engine 语法着色同步
+        self.engine.set_syntax_colors(self.input_state.theme.syntax);
+        self.ui_state.chrome.notice = t(I18nKey::NoticeSettingsSaved).into();
     }
 
     /// 切换专注模式（阶段 1）：只改视觉开关，不动真值/派生缓存；重绘即生效。

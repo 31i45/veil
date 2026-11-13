@@ -11,8 +11,10 @@ mod range;
 mod session;
 mod slug;
 mod syntax;
+pub mod toc;
 
 pub use callouts::CalloutRegistry;
+pub use toc::{generate_toc, is_toc_marker};
 pub use mermaid::{
     detect_type, mermaid_live_url, MermaidTemplate, CLASS_TEMPLATE, ER_TEMPLATE,
     FLOWCHART_TEMPLATE, MERMAID_LIVE_BASE, SEQUENCE_TEMPLATE, STATE_TEMPLATE,

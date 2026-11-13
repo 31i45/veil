@@ -10,21 +10,16 @@ use std::process::Command;
 
 /// 图标像素与 ICO 编码的单一真源在 veil-ui/src/icon.rs（窗口图标与文件资源共用）；
 /// build script 不能依赖 workspace crate，故以 include! 复用同一份代码。
+/// 应用图标（资源 ID 1）与文档图标（资源 ID 2）均由 icon.rs 纯代码生成。
 #[allow(dead_code)] // icon_rgba 仅 GUI 侧使用
 mod icon {
     include!("../veil-ui/src/icon.rs");
 }
-use icon::icon_bytes;
-
-/// 文档图标（F1/S9）：由 `icons/Markdown.png` 离线生成的多尺寸 ICO，作为**第二组**图标资源
-/// 以资源 ID `2` 嵌入；注册表 `DefaultIcon` 用负数资源 ID `-2` 引用它（D7②）。
-/// 应用图标仍是资源 `1`，窗口/任务栏外观不变。
-const DOC_ICO: &[u8] = include_bytes!("../../icons/veil-doc.ico");
+use icon::{doc_icon_bytes, icon_bytes};
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=../veil-ui/src/icon.rs");
-    println!("cargo:rerun-if-changed=../../icons/veil-doc.ico");
     println!("cargo:rerun-if-env-changed=RC_EXE");
 
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows")
@@ -44,7 +39,7 @@ fn main() {
     let res_file = out.join("veil.res");
     let ico_file = out.join("veil.ico");
     std::fs::write(&ico_file, icon_bytes()).expect("写 veil.ico");
-    std::fs::write(out.join("veil-doc.ico"), DOC_ICO).expect("写 veil-doc.ico");
+    std::fs::write(out.join("veil-doc.ico"), doc_icon_bytes()).expect("写 veil-doc.ico");
     std::fs::write(&rc_file, rc_source(&ver, nums)).expect("写 veil.rc");
 
     let status = Command::new(&rc)

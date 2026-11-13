@@ -4776,4 +4776,27 @@ mod tests {
             l.script_ranges
         );
     }
+
+    #[test]
+    fn link_markdown_markers_are_hidden_when_not_active() {
+        // 内联链接、引用式链接、隐式方括号——只要 core 解析为 Link 节点，
+        // layout 层必须消隐两端 Markdown 标记 `[...]` `(url)`。裸方括号 `[foo]`
+        // （无 URL/引用定义）不产生 Link 节点，标记按原文保留——符合 Markdown 规范。
+        let cases: &[(&str, &str)] = &[
+            ("foo [x](http://x.com) bar\n", "foo x bar"),          // 内联
+            ("foo [x][ref] bar\n\n[ref]: http://x.com\n", "foo x bar"),   // 引用式
+            ("foo [x]\n\n[x]: http://x.com\n", "foo x"),          // 隐式方括号
+            ("foo [x] bar\n", "foo [x] bar"),                      // 裸方括号：不产生 Link，保留标记
+        ];
+        for (src, want_visible_substr) in cases {
+            let (_, l) = layout_with_caret(src, usize::MAX, 400.0);
+            let lt = l.layout_text();
+            // 只检查「可见子串必须存在」——不管 CJK 自动间距插入的 WORD JOINER
+            // （因此避免 contains 含标点的精确匹配）
+            assert!(
+                lt.contains(want_visible_substr.trim()),
+                "src={src:?}: expected visible {want_visible_substr:?} in layout_text {lt:?}"
+            );
+        }
+    }
 }

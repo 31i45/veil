@@ -15,3 +15,8 @@ png = "0.18"
 pulldown-cmark = "0.13"
 # 外部文件监听（切片 16）：事件线程 + 非阻塞通道，策略在 veil-ui
 notify = "8"
+# PDF 原生导出（Wave 3A）：pdf-writer 0.15 + ttf-parser + subsetter 0.2.6
+# spike 实测合计 +730 KB（零 PDF 时 6.18 MB → 引入后约 6.9 MB），门禁放宽到 7 MiB 仅因 PDF 导出门槛
+pdf-writer = "0.15"
+ttf-parser = "0.25"
+subsetter = "0.2.6"

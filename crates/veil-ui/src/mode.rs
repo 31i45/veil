@@ -16,6 +16,8 @@ pub(crate) enum Mode {
     QuickOpen,
     /// 查找栏打开：文档只读，按键归查询串。
     Search,
+    /// 版本历史打开：正文区是只读预览，按键只归历史面板（Esc/↑/↓/Enter）。
+    History,
 }
 
 /// IME 文本落点。组合串与提交文本共用同一判定，避免两处各写一遍。
@@ -67,6 +69,12 @@ pub(crate) enum Cmd {
     SearchLastMatch,
     /// 文档级动作（含纯视图动作），交 `perform_action` 执行。
     Edit(Action),
+    /// 版本历史：关闭面板并归还实时编辑器。
+    HistoryClose,
+    /// 版本历史：上下移动选中项（+1 = 更新的版本 / 列表向下）。
+    HistoryMove(i32),
+    /// 版本历史：恢复选中版本（走未保存守卫）。
+    HistoryRestore,
 }
 
 /// 按键路由：纯函数，无副作用、可穷举测试。
@@ -75,6 +83,10 @@ pub(crate) enum Cmd {
 pub(crate) fn route(mode: Mode, key: Key, mods: Mods, composing: bool) -> Cmd {
     // AltGr（Ctrl+Alt）= 字符输入：不作快捷键，文本变体也不得被当作 Ctrl 组合吞掉
     let ctrl = mods.ctrl && !mods.alt;
+    // 新窗口是进程级动作，在菜单、快速打开、查找与历史预览中都可使用；模态仍在更上层独占。
+    if ctrl && mods.shift && key == Key::N {
+        return Cmd::Edit(Action::NewWindow);
+    }
     match mode {
         Mode::Menu => {
             if key == Key::Escape {
@@ -145,6 +157,16 @@ pub(crate) fn route(mode: Mode, key: Key, mods: Mods, composing: bool) -> Cmd {
             Some(action) => Cmd::Edit(action),
             None => Cmd::Ignore,
         },
+        Mode::History => {
+            // 预览只读：除面板导航外一律吞掉，防误编辑/误保存
+            match key {
+                Key::Escape => Cmd::HistoryClose,
+                Key::Up => Cmd::HistoryMove(-1),
+                Key::Down => Cmd::HistoryMove(1),
+                Key::Enter => Cmd::HistoryRestore,
+                _ => Cmd::Ignore,
+            }
+        }
     }
 }
 
@@ -153,6 +175,8 @@ impl App {
     pub(crate) fn mode(&self) -> Mode {
         if self.ui_state.chrome.is_open() || self.ui_state.ctx.open {
             Mode::Menu
+        } else if self.ui_state.history.open {
+            Mode::History
         } else if self.ui_state.quick.open {
             Mode::QuickOpen
         } else if self.ui_state.search.open {
@@ -162,12 +186,12 @@ impl App {
         }
     }
 
-    /// IME 文本落点：菜单打开时提交被吞掉，故落点按 `Doc` 处理。
+    /// IME 文本落点：菜单/历史面板打开时提交被吞掉，故落点按 `Doc` 处理。
     pub(crate) fn text_sink(&self) -> TextSink {
         match self.mode() {
             Mode::QuickOpen => TextSink::Quick,
             Mode::Search => TextSink::Query,
-            Mode::Menu | Mode::Document => TextSink::Doc,
+            Mode::Menu | Mode::History | Mode::Document => TextSink::Doc,
         }
     }
 }
@@ -246,7 +270,11 @@ mod tests {
             route(Mode::Menu, Key::P, CTRL_SHIFT, false),
             Cmd::Edit(Action::Print)
         );
-        assert_eq!(route(Mode::Menu, text("f"), CTRL, false), Cmd::Ignore, "ctrl+文本 不绑定则 Ignore");
+        assert_eq!(
+            route(Mode::Menu, text("f"), CTRL, false),
+            Cmd::Ignore,
+            "ctrl+文本 不绑定则 Ignore"
+        );
     }
 
     #[test]
@@ -411,6 +439,39 @@ mod tests {
         for key in [Key::Escape, Key::Enter, Key::Backspace, text("a")] {
             assert_eq!(route(Mode::Search, key, NONE, true), Cmd::Ignore);
         }
+    }
+
+    #[test]
+    fn history_mode_swallows_editing_and_routes_navigation() {
+        assert_eq!(
+            route(Mode::History, Key::Escape, NONE, false),
+            Cmd::HistoryClose
+        );
+        assert_eq!(
+            route(Mode::History, Key::Up, NONE, false),
+            Cmd::HistoryMove(-1)
+        );
+        assert_eq!(
+            route(Mode::History, Key::Down, NONE, false),
+            Cmd::HistoryMove(1)
+        );
+        assert_eq!(
+            route(Mode::History, Key::Enter, NONE, false),
+            Cmd::HistoryRestore
+        );
+        // 只读浏览：字符/退格/Ctrl+S/Ctrl+Z/Ctrl+Shift+H 一律不生效
+        for key in [
+            text("a"),
+            text("中"),
+            Key::Backspace,
+            Key::S,
+            Key::Z,
+            Key::H,
+        ] {
+            assert_eq!(route(Mode::History, key.clone(), NONE, false), Cmd::Ignore);
+            assert_eq!(route(Mode::History, key, CTRL, false), Cmd::Ignore);
+        }
+        assert_eq!(route(Mode::History, Key::H, CTRL_SHIFT, false), Cmd::Ignore);
     }
 
     #[test]

@@ -13,6 +13,8 @@
 // 非 Windows 构建下注册表常量与格式化函数只被单元测试使用
 #![cfg_attr(not(windows), allow(dead_code))]
 
+use veil_ui::i18n::{t, tf, Key as I18nKey};
+
 /// 命令行动作：仅这两个开关进入关联分支，其余参数仍按「文档路径」处理。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AssocCommand {
@@ -23,7 +25,10 @@ pub enum AssocCommand {
 /// 解析 `/register`、`/unregister`（大小写不敏感；`-` 前缀同义）。
 /// 纯函数：不接受裸词，避免把名为 `register` 的文件误当命令。
 pub fn parse_command(arg: &str) -> Option<AssocCommand> {
-    let rest = arg.trim().strip_prefix('/').or_else(|| arg.trim().strip_prefix('-'))?;
+    let rest = arg
+        .trim()
+        .strip_prefix('/')
+        .or_else(|| arg.trim().strip_prefix('-'))?;
     match rest.to_ascii_lowercase().as_str() {
         "register" => Some(AssocCommand::Register),
         "unregister" => Some(AssocCommand::Unregister),
@@ -59,10 +64,11 @@ pub fn open_command(exe: &str) -> String {
 /// 执行关联动作；成功返回给用户看的结果说明，失败返回可读原因。
 #[cfg(windows)]
 pub fn run(cmd: AssocCommand) -> Result<String, String> {
-    let exe = std::env::current_exe().map_err(|e| format!("无法定位当前程序路径：{e}"))?;
+    let exe =
+        std::env::current_exe().map_err(|e| tf(I18nKey::AssocLocateExe, &[&e.to_string()]))?;
     let exe = exe
         .to_str()
-        .ok_or_else(|| "程序路径不是有效的 UTF-8".to_owned())?;
+        .ok_or_else(|| t(I18nKey::AssocExeNotUtf8).to_owned())?;
     match cmd {
         AssocCommand::Register => register(exe),
         AssocCommand::Unregister => unregister(exe),
@@ -72,7 +78,7 @@ pub fn run(cmd: AssocCommand) -> Result<String, String> {
 /// 非 Windows 兜底：本仓库只发布 Windows 构建，其余平台明确拒绝而不是假装成功。
 #[cfg(not(windows))]
 pub fn run(_cmd: AssocCommand) -> Result<String, String> {
-    Err("当前平台不支持文件关联（仅 Windows）".into())
+    Err(t(I18nKey::AssocUnsupported).into())
 }
 
 #[cfg(windows)]
@@ -82,8 +88,12 @@ mod win {
     use std::ffi::c_void;
     use std::ptr::{null, null_mut};
 
-    use super::{icon_ref, open_command, APP_ICON_KEY, MD_KEY, MD_OPEN_WITH_KEY, PROG_ID, PROG_ID_KEY, STATE_KEY};
+    use super::{
+        icon_ref, open_command, APP_ICON_KEY, MD_KEY, MD_OPEN_WITH_KEY, PROG_ID, PROG_ID_KEY,
+        STATE_KEY,
+    };
     use crate::platform::wide;
+    use veil_ui::i18n::{t, tf, Key as I18nKey};
 
     /// HKEY_CURRENT_USER = (LONG)0x80000001 按指针宽度符号扩展（64 位下高位全 1）。
     const HKEY_CURRENT_USER: isize = 0x8000_0001u32 as i32 as isize;
@@ -113,8 +123,21 @@ mod win {
             out: *mut isize,
             disposition: *mut u32,
         ) -> i32;
-        fn RegOpenKeyExW(hkey: isize, sub: *const u16, options: u32, sam: u32, out: *mut isize) -> i32;
-        fn RegSetValueExW(hkey: isize, name: *const u16, reserved: u32, ty: u32, data: *const u8, cb: u32) -> i32;
+        fn RegOpenKeyExW(
+            hkey: isize,
+            sub: *const u16,
+            options: u32,
+            sam: u32,
+            out: *mut isize,
+        ) -> i32;
+        fn RegSetValueExW(
+            hkey: isize,
+            name: *const u16,
+            reserved: u32,
+            ty: u32,
+            data: *const u8,
+            cb: u32,
+        ) -> i32;
         fn RegQueryValueExW(
             hkey: isize,
             name: *const u16,
@@ -147,7 +170,14 @@ mod win {
     }
 
     fn err(ctx: &str, code: i32) -> String {
-        format!("{ctx}：{}（错误码 {code}）", std::io::Error::from_raw_os_error(code))
+        tf(
+            I18nKey::AssocErrWithCode,
+            &[
+                ctx,
+                &std::io::Error::from_raw_os_error(code).to_string(),
+                &code.to_string(),
+            ],
+        )
     }
 
     fn name_ptr(name: Option<&str>) -> Vec<u16> {
@@ -159,11 +189,12 @@ mod win {
         let sub = wide(sub);
         let mut h: isize = 0;
         // SAFETY: sub 为 NUL 结尾 UTF-16；h 在返回后归 Key 所有
-        let rc = unsafe { RegOpenKeyExW(HKEY_CURRENT_USER, sub.as_ptr(), 0, KEY_ALL_ACCESS, &mut h) };
+        let rc =
+            unsafe { RegOpenKeyExW(HKEY_CURRENT_USER, sub.as_ptr(), 0, KEY_ALL_ACCESS, &mut h) };
         match rc {
             ERROR_SUCCESS => Ok(Some(Key(h))),
             ERROR_FILE_NOT_FOUND => Ok(None),
-            _ => Err(err("打开注册表键失败", rc)),
+            _ => Err(err(t(I18nKey::AssocOpenKeyFailed), rc)),
         }
     }
 
@@ -186,7 +217,7 @@ mod win {
             )
         };
         if rc != ERROR_SUCCESS {
-            return Err(err("创建注册表键失败", rc));
+            return Err(err(t(I18nKey::AssocCreateKeyFailed), rc));
         }
         Ok((Key(h), disp == REG_CREATED_NEW_KEY))
     }
@@ -198,7 +229,11 @@ mod win {
         let rc = unsafe {
             RegSetValueExW(
                 key.0,
-                if name.is_empty() { null() } else { name.as_ptr() },
+                if name.is_empty() {
+                    null()
+                } else {
+                    name.as_ptr()
+                },
                 0,
                 REG_SZ,
                 data.as_ptr().cast::<u8>(),
@@ -206,7 +241,7 @@ mod win {
             )
         };
         if rc != ERROR_SUCCESS {
-            return Err(err("写入注册表值失败", rc));
+            return Err(err(t(I18nKey::AssocWriteValueFailed), rc));
         }
         Ok(())
     }
@@ -216,11 +251,9 @@ mod win {
         let name = wide(name);
         let empty: [u8; 0] = [];
         // SAFETY: name 为 NUL 结尾 UTF-16；cb = 0 时 data 不被解引用
-        let rc = unsafe {
-            RegSetValueExW(key.0, name.as_ptr(), 0, REG_NONE, empty.as_ptr(), 0)
-        };
+        let rc = unsafe { RegSetValueExW(key.0, name.as_ptr(), 0, REG_NONE, empty.as_ptr(), 0) };
         if rc != ERROR_SUCCESS {
-            return Err(err("写入注册表值失败", rc));
+            return Err(err(t(I18nKey::AssocWriteValueFailed), rc));
         }
         Ok(())
     }
@@ -231,24 +264,36 @@ mod win {
             return Ok(None);
         };
         let name = name_ptr(name);
-        let name_ptr = if name.is_empty() { null() } else { name.as_ptr() };
+        let name_ptr = if name.is_empty() {
+            null()
+        } else {
+            name.as_ptr()
+        };
         let mut ty = 0u32;
         let mut cb = 0u32;
         // SAFETY: 第一次调用只取类型与长度，data = null
-        let rc = unsafe { RegQueryValueExW(key.0, name_ptr, null_mut(), &mut ty, null_mut(), &mut cb) };
+        let rc =
+            unsafe { RegQueryValueExW(key.0, name_ptr, null_mut(), &mut ty, null_mut(), &mut cb) };
         if rc == ERROR_FILE_NOT_FOUND {
             return Ok(None);
         }
         if rc != ERROR_SUCCESS {
-            return Err(err("读取注册表值失败", rc));
+            return Err(err(t(I18nKey::AssocReadValueFailed), rc));
         }
         let mut buf = vec![0u8; cb as usize];
         // SAFETY: buf 容量恰为 cb，由系统写入不超过该长度
         let rc = unsafe {
-            RegQueryValueExW(key.0, name_ptr, null_mut(), &mut ty, buf.as_mut_ptr(), &mut cb)
+            RegQueryValueExW(
+                key.0,
+                name_ptr,
+                null_mut(),
+                &mut ty,
+                buf.as_mut_ptr(),
+                &mut cb,
+            )
         };
         if rc != ERROR_SUCCESS {
-            return Err(err("读取注册表值失败", rc));
+            return Err(err(t(I18nKey::AssocReadValueFailed), rc));
         }
         buf.truncate(cb as usize);
         Ok(Some((ty, buf)))
@@ -278,11 +323,20 @@ mod win {
         };
         let name = name_ptr(name);
         // SAFETY: 同上；名字缺省时删除「默认值」
-        let rc = unsafe { RegDeleteValueW(key.0, if name.is_empty() { null() } else { name.as_ptr() }) };
+        let rc = unsafe {
+            RegDeleteValueW(
+                key.0,
+                if name.is_empty() {
+                    null()
+                } else {
+                    name.as_ptr()
+                },
+            )
+        };
         if rc == ERROR_SUCCESS || rc == ERROR_FILE_NOT_FOUND {
             Ok(())
         } else {
-            Err(err("删除注册表值失败", rc))
+            Err(err(t(I18nKey::AssocDeleteValueFailed), rc))
         }
     }
 
@@ -293,7 +347,7 @@ mod win {
         if rc == ERROR_SUCCESS || rc == ERROR_FILE_NOT_FOUND {
             Ok(())
         } else {
-            Err(err("删除注册表键失败", rc))
+            Err(err(t(I18nKey::AssocDeleteKeyFailed), rc))
         }
     }
 
@@ -326,7 +380,7 @@ mod win {
 
         // 1) 本程序命名空间：ProgID + 文档图标 + 打开命令（幂等）
         let (prog, created) = create_key(PROG_ID_KEY)?;
-        set_sz(&prog, None, "Markdown 文档")?;
+        set_sz(&prog, None, t(I18nKey::AssocMarkdownDescription))?;
         let (icon_key, _) = create_key(&format!("{PROG_ID_KEY}\\DefaultIcon"))?;
         set_sz(&icon_key, None, &icon)?;
         let (cmd_key, _) = create_key(&format!("{PROG_ID_KEY}\\shell\\open\\command"))?;
@@ -341,13 +395,10 @@ mod win {
                 let (md, _) = create_key(MD_KEY)?;
                 set_sz(&md, None, PROG_ID)?;
                 set_state("MdDefault", PROG_ID)?;
-                notes.push("已把 .md 的默认打开方式指向 Veil".to_owned());
+                notes.push(t(I18nKey::AssocDefaultSet).to_owned());
             }
             Some(v) if v == PROG_ID => {}
-            Some(_) => notes.push(
-                ".md 已有其他关联，未改写；如需 Veil 打开，请在「设置 → 应用 → 默认应用」中选择"
-                    .to_owned(),
-            ),
+            Some(_) => notes.push(t(I18nKey::AssocDefaultOther).to_owned()),
         }
 
         // 3) 「打开方式」列表：只加 Veil，不改默认应用
@@ -362,15 +413,12 @@ mod win {
                 set_state("AppIcon", &icon)?;
             }
             Some(v) if v == icon => {}
-            Some(_) => notes.push("已存在自定义文件图标，未改写".to_owned()),
+            Some(_) => notes.push(t(I18nKey::AssocIconKept).to_owned()),
         }
 
         notify_shell();
 
-        let mut text = "已注册 Markdown 文件关联（仅当前用户）。\n\n\
-            - 文档图标已内嵌：设为 .md 默认应用后即显示\n\
-            - 右键 .md →「打开方式」中可选择 Veil"
-            .to_owned();
+        let mut text = t(I18nKey::AssocRegisteredBody).to_owned();
         if !notes.is_empty() {
             text.push('\n');
             for n in notes {
@@ -378,9 +426,7 @@ mod win {
                 text.push_str(&n);
             }
         }
-        text.push_str(
-            "\n\n要让 .md 双击默认由 Veil 打开，请在「设置 → 应用 → 默认应用」中选择 Veil：Windows 不允许程序自行修改默认应用。",
-        );
+        text.push_str(t(I18nKey::AssocManualDefault));
         Ok(text)
     }
 
@@ -389,9 +435,9 @@ mod win {
 
         // 已关联到 veil.exe 的图标：只删自己写的那个值
         let recorded_icon = read_sz(STATE_KEY, Some("AppIcon"))?;
-        if read_sz(APP_ICON_KEY, None)?.is_some_and(|v| {
-            v == icon || recorded_icon.as_deref() == Some(v.as_str())
-        }) {
+        if read_sz(APP_ICON_KEY, None)?
+            .is_some_and(|v| v == icon || recorded_icon.as_deref() == Some(v.as_str()))
+        {
             delete_value(APP_ICON_KEY, None)?;
             delete_key_if_empty(APP_ICON_KEY);
         }
@@ -412,9 +458,7 @@ mod win {
         delete_tree(STATE_KEY)?;
         delete_key_if_empty(r"Software\Veil");
         notify_shell();
-        Ok("已撤销 Veil 的 Markdown 文件关联（仅当前用户）。\n\n\
-            若资源管理器仍显示旧图标，注销并重新登录后即可刷新。"
-            .to_owned())
+        Ok(t(I18nKey::AssocUnregisteredBody).to_owned())
     }
 }
 
@@ -454,7 +498,10 @@ mod tests {
 
     #[test]
     fn open_command_quotes_exe_and_placeholder() {
-        assert_eq!(open_command(r"D:\Apps\veil.exe"), r#""D:\Apps\veil.exe" "%1""#);
+        assert_eq!(
+            open_command(r"D:\Apps\veil.exe"),
+            r#""D:\Apps\veil.exe" "%1""#
+        );
     }
 
     /// 路径含空格/中文时保留引号，命令才能被 shell 正确切分。
@@ -470,7 +517,13 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn registry_paths_are_relative_and_consistent() {
-        for key in [PROG_ID_KEY, MD_KEY, MD_OPEN_WITH_KEY, APP_ICON_KEY, STATE_KEY] {
+        for key in [
+            PROG_ID_KEY,
+            MD_KEY,
+            MD_OPEN_WITH_KEY,
+            APP_ICON_KEY,
+            STATE_KEY,
+        ] {
             assert!(!key.starts_with('\\'), "{key}");
             assert!(!key.ends_with('\\'), "{key}");
         }

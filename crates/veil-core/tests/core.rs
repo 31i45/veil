@@ -62,7 +62,10 @@ fn assert_reparse_idempotent(s: &Session) {
         .into_iter()
         .map(|(_, k, r)| (format!("{:?}", k), r.start, r.end))
         .collect();
-    assert_eq!(got_blocks, want_blocks, "块结构不一致，serialize:\n{text:?}");
+    assert_eq!(
+        got_blocks, want_blocks,
+        "块结构不一致，serialize:\n{text:?}"
+    );
 }
 
 #[test]
@@ -371,7 +374,7 @@ fn block_inlines_absolute_offsets() {
         .iter()
         .map(|n| {
             (
-                n.kind,
+                n.kind.clone(),
                 (n.range.start, n.range.end),
                 (n.content.start, n.content.end),
             )
@@ -994,9 +997,15 @@ fn table_none_for_non_table_or_unknown_id() {
 fn table_large_col_degrade() {
     // 1000 列表格 → table() 返回 aligns.len() == 128，头/体列数 ≤ 128
     let cols = 1000;
-    let header = (0..cols).map(|i| format!("h{i}")).collect::<Vec<_>>().join(" | ");
+    let header = (0..cols)
+        .map(|i| format!("h{i}"))
+        .collect::<Vec<_>>()
+        .join(" | ");
     let delim = (0..cols).map(|_| "---").collect::<Vec<_>>().join(" | ");
-    let body = (0..cols).map(|i| format!("b{i}")).collect::<Vec<_>>().join(" | ");
+    let body = (0..cols)
+        .map(|i| format!("b{i}"))
+        .collect::<Vec<_>>()
+        .join(" | ");
     let s = Session::open(&format!("| {} |\n| {} |\n| {} |\n", header, delim, body));
     let (id, kind, _) = s.blocks()[0].clone();
     assert_eq!(kind, BlockKind::Table);
@@ -1019,7 +1028,11 @@ fn table_large_row_degrade() {
     let (id, kind, _) = s.blocks()[0].clone();
     assert_eq!(kind, BlockKind::Table);
     let t = s.table(id).unwrap();
-    assert!(t.rows.len() <= 512, "2000 行表体应该截断到 ≤ 512，实际 {}", t.rows.len());
+    assert!(
+        t.rows.len() <= 512,
+        "2000 行表体应该截断到 ≤ 512，实际 {}",
+        t.rows.len()
+    );
 }
 
 // ---- 批次 2-5：Session.offset_of_line + id_index 间接验证 ----
@@ -1031,7 +1044,7 @@ fn offset_of_line_roundtrip() {
     assert_eq!(s.offset_of_line(0), 0);
     assert_eq!(s.offset_of_line(1), 7); // 「你好」6字节 + \n
     assert_eq!(s.offset_of_line(2), 14); // 「世界」6字节 + \n
-    // line_of_offset 互逆
+                                         // line_of_offset 互逆
     assert_eq!(s.line_of_offset(0), 0);
     assert_eq!(s.line_of_offset(7), 1);
     assert_eq!(s.line_of_offset(14), 2);

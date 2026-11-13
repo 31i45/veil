@@ -8,7 +8,7 @@
 
 use veil_core::{InlineKind, InlineNode, Range};
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[derive(Clone, Copy, PartialEq, Debug, Default)]
 pub struct Style {
     pub bold: bool,
     pub italic: bool,
@@ -19,6 +19,27 @@ pub struct Style {
     pub strikethrough: bool,
     /// 语法高亮前景色；None 表示沿用主题默认前景色。
     pub color: Option<[u8; 3]>,
+    /// Sub/Sup 缩字系数（HTML5：约 0.75）。None 表示不缩。
+    /// layout 层 attrs_of 会乘以 metrics.size 应用到 cosmic-text Attrs::size。
+    pub size_factor: Option<f32>,
+    /// Sub/Sup 基线偏移方向（em 的符号倍率）：-1 下沉（sub）、+1 上浮（sup）。
+    /// layout 层转成物理像素偏移，paint 光栅化时按字形区间施加。
+    pub baseline_shift: Option<f32>,
+    /// Mark 底色（HTML `<mark>`）。None 表示不画底色。
+    /// paint 层在 draw_text 前按 glyph 矩形填色。
+    pub mark_bg: Option<[u8; 3]>,
+    /// Abbr 虚线下划线（HTML `<abbr>`）。paint 层绘制。
+    pub dotted_underline: bool,
+    /// Kbd 边框标记（HTML `<kbd>`）。paint 层绘制圆角矩形。
+    pub kbd_frame: bool,
+    /// 行内代码底色（Markdown `` `x` `` 与 HTML `<code>`/`<pre>`）。paint 层绘制圆角底色。
+    pub code_bg: bool,
+    /// `style="background-color:..."` 的底色；paint 层按此色填充字形矩形。
+    pub bg: Option<[u8; 3]>,
+    /// `style="text-decoration:underline"`（含 `<u>` / `<ins>`）：paint 层画实线下划线。
+    pub underline: bool,
+    /// `style="text-decoration:overline"`：paint 层画上划线。
+    pub overline: bool,
 }
 
 /// 产出致密覆盖 `[0, text_len)` 的样式段。`inlines` 为文档绝对偏移，`block` 为块区间。
@@ -52,6 +73,28 @@ pub fn style_spans(
                 st.mono |= mst.mono;
                 st.link |= mst.link;
                 st.strikethrough |= mst.strikethrough;
+                st.kbd_frame |= mst.kbd_frame;
+                st.dotted_underline |= mst.dotted_underline;
+                st.code_bg |= mst.code_bg;
+                st.underline |= mst.underline;
+                st.overline |= mst.overline;
+                if st.bg.is_none() {
+                    st.bg = mst.bg;
+                }
+                // Option<f32> / Option<[u8;3]> 取第一个非 None（白名单 HTML 标签互斥，
+                // 同一段不会同时被 Sub 和 Sup 或 Mark 和 Abbr 覆盖）。
+                if st.size_factor.is_none() {
+                    st.size_factor = mst.size_factor;
+                }
+                if st.baseline_shift.is_none() {
+                    st.baseline_shift = mst.baseline_shift;
+                }
+                if st.mark_bg.is_none() {
+                    st.mark_bg = mst.mark_bg;
+                }
+                if st.color.is_none() {
+                    st.color = mst.color;
+                }
             }
         }
         match out.last_mut() {
@@ -75,6 +118,7 @@ fn collect(nodes: &[InlineNode], block: Range, out: &mut Vec<(usize, usize, Styl
             },
             InlineKind::Code => Style {
                 mono: true,
+                code_bg: true,
                 ..Default::default()
             },
             InlineKind::Link => Style {
@@ -85,11 +129,122 @@ fn collect(nodes: &[InlineNode], block: Range, out: &mut Vec<(usize, usize, Styl
                 strikethrough: true,
                 ..Default::default()
             },
+            // N3c：`==x==` 与 `<mark>` 同一底色 token（柔和黄）。
+            InlineKind::Highlight => Style {
+                mark_bg: Some([255, 247, 153]),
+                ..Default::default()
+            },
             // Image 非激活时整段被占位图替换（layout），无可见文本需要样式；
             // 降级态（加载失败/远程 URL）只显 alt 文本，与正文同式。
             // FootnoteRef 的 `[n]` 是 layout 层替换文本，由 layout 按其替换区间补链接色；
             // 样式层不置 link（否则表格单元格等纯文本降级路径也会被染色）。
             InlineKind::Image | InlineKind::Math | InlineKind::FootnoteRef => Style::default(),
+            // Task 3-5：行内白名单 HTML（开+闭）。
+            // kbd: 粗体；code: 等宽；a: 链接色；sub/sup/mark/br/abbr/img 不在 Style 层处理
+            // （sub/sup 的字体缩放+基线偏移、mark 底色、br 断行、abbr 下划线、img 占位
+            // 都由 layout 层单独分派；样式层产出默认 span 即可让 cosmic-text 正常排字形）。
+            InlineKind::Html { tag, ref attrs } => {
+                let mut st = match tag {
+                    veil_core::HtmlTag::Kbd => Style {
+                        bold: true,
+                        kbd_frame: true,
+                        ..Default::default()
+                    },
+                    veil_core::HtmlTag::Code | veil_core::HtmlTag::Pre => Style {
+                        mono: true,
+                        code_bg: true,
+                        ..Default::default()
+                    },
+                    veil_core::HtmlTag::A => Style {
+                        link: true,
+                        ..Default::default()
+                    },
+                    // 语义映射与导出 CSS / PDF 一致：strong/b 粗体、em/i/cite 斜体、
+                    // u/ins 下划线、s/del 删除线、var 斜体等宽、samp 等宽、small 0.85em。
+                    veil_core::HtmlTag::Strong | veil_core::HtmlTag::B => Style {
+                        bold: true,
+                        ..Default::default()
+                    },
+                    veil_core::HtmlTag::Em | veil_core::HtmlTag::I | veil_core::HtmlTag::Cite => {
+                        Style {
+                            italic: true,
+                            ..Default::default()
+                        }
+                    }
+                    veil_core::HtmlTag::Var => Style {
+                        italic: true,
+                        mono: true,
+                        ..Default::default()
+                    },
+                    veil_core::HtmlTag::Samp => Style {
+                        mono: true,
+                        ..Default::default()
+                    },
+                    veil_core::HtmlTag::U | veil_core::HtmlTag::Ins => Style {
+                        underline: true,
+                        ..Default::default()
+                    },
+                    veil_core::HtmlTag::S | veil_core::HtmlTag::Del => Style {
+                        strikethrough: true,
+                        ..Default::default()
+                    },
+                    veil_core::HtmlTag::Small => Style {
+                        size_factor: Some(0.85),
+                        ..Default::default()
+                    },
+                    // Sub/Sup：HTML5 推荐缩字 ~0.75 倍（cosmic-text Attrs::size 接收 pt 值，
+                    // 直接乘 metrics pt 即可；y 轴偏移由 paint 层按类型决定——sub 下移、sup 上移）。
+                    veil_core::HtmlTag::Sub => Style {
+                        size_factor: Some(0.75),
+                        baseline_shift: Some(1.0),
+                        ..Default::default()
+                    },
+                    veil_core::HtmlTag::Sup => Style {
+                        size_factor: Some(0.75),
+                        baseline_shift: Some(-1.0),
+                        ..Default::default()
+                    },
+                    // Mark：HTML5 语义高亮色，柔和黄（类似 GitHub mark）。
+                    veil_core::HtmlTag::Mark => Style {
+                        mark_bg: Some([255, 247, 153]),
+                        ..Default::default()
+                    },
+                    // Abbr：虚线下划线提示可展开缩写；tooltip 由 shell 层负责，此处只绘下划线。
+                    veil_core::HtmlTag::Abbr => Style {
+                        dotted_underline: true,
+                        ..Default::default()
+                    },
+                    // q 的双引号由 layout/PDF 插入可见文本；span 无默认样式但承载 style。
+                    _ => Style::default(),
+                };
+                // style 属性（解析层已净化）：叠加到标签语义之上。
+                if let Some(raw) = attrs.style.as_deref() {
+                    let hs = veil_core::HtmlStyle::parse(raw);
+                    st.bold |= hs.bold;
+                    st.italic |= hs.italic;
+                    st.underline |= hs.underline;
+                    st.strikethrough |= hs.strike;
+                    st.overline |= hs.overline;
+                    st.mono |= hs.mono;
+                    if hs.color.is_some() {
+                        st.color = hs.color;
+                    }
+                    if hs.background_color.is_some() {
+                        st.bg = hs.background_color;
+                    }
+                    if st.size_factor.is_none() {
+                        if let Some(px) = hs.size_px {
+                            // CSS 参考字号 16px；渲染时按正文字号比例缩放。
+                            st.size_factor = Some(px / 16.0);
+                        }
+                    }
+                }
+                st
+            }
+            // 自闭合白名单：br 断行、img 占位，样式层都产出默认；layout/paint 另行处理。
+            InlineKind::HtmlSelfClosed { .. } => Style::default(),
+            // 非白名单 HTML 源码原样：不染色，按纯文本 span。
+            InlineKind::HtmlLiteral => Style::default(),
         };
         if style != Style::default() {
             let s = n.range.start.saturating_sub(block.start);
@@ -195,10 +350,65 @@ mod tests {
     }
 
     #[test]
+    fn html_semantic_style_attr_maps_to_color_and_weights() {
+        // <strong style="color:red">VISUAL</strong>：内容段 bold + 红色
+        let sp = spans("<strong style=\"color:red\">VISUAL</strong>");
+        let st = find(&sp, 26);
+        assert!(st.bold, "strong 应粗体");
+        assert_eq!(st.color, Some([255, 0, 0]), "color:red 应映射为前景色");
+        // em/i/u/s/del/ins 语义映射
+        assert!(find(&spans("<em>x</em>"), 1).italic);
+        assert!(find(&spans("<i>x</i>"), 1).italic);
+        assert!(find(&spans("<u>x</u>"), 1).underline);
+        assert!(find(&spans("<ins>x</ins>"), 1).underline);
+        assert!(find(&spans("<s>x</s>"), 1).strikethrough);
+        assert!(find(&spans("<del>x</del>"), 1).strikethrough);
+        assert!(find(&spans("<small>x</small>"), 1).size_factor == Some(0.85));
+        assert!(find(&spans("<samp>x</samp>"), 1).mono);
+        let var = find(&spans("<var>x</var>"), 1);
+        assert!(var.italic && var.mono, "var 应斜体等宽");
+        // style 背景色 / 删除线 / 上划线
+        let bg = find(&spans("<span style=\"background-color:#ff0\">x</span>"), 1);
+        assert_eq!(bg.bg, Some([255, 255, 0]));
+        let deco = find(
+            &spans("<span style=\"text-decoration:underline line-through overline\">x</span>"),
+            1,
+        );
+        assert!(deco.underline && deco.strikethrough && deco.overline);
+        // 危险声明被丢弃，合法声明保留
+        let safe = find(
+            &spans("<span style=\"color:red;position:fixed\">x</span>"),
+            1,
+        );
+        assert_eq!(safe.color, Some([255, 0, 0]));
+    }
+
+    #[test]
     fn strikethrough_nests_with_strong() {
         // 「~~**x**~~」：内层同时 bold + strikethrough
         let sp = spans("~~**x**~~");
         let mid = find(&sp, 4);
         assert!(mid.strikethrough && mid.bold);
+    }
+
+    #[test]
+    fn highlight_uses_mark_bg_token() {
+        // `==hi==` 整节点（含标记）与 `<mark>` 同一底色，正文色不变
+        let sp = spans("a ==hi== b");
+        assert_eq!(find(&sp, 3).mark_bg, Some([255, 247, 153]));
+        assert_eq!(find(&sp, 5).mark_bg, Some([255, 247, 153]));
+        assert_eq!(find(&sp, 0), Style::default());
+        // 与 `<mark>` 标签输出完全同式
+        assert_eq!(
+            find(&sp, 3).mark_bg,
+            find(&spans("<mark>hi</mark>"), 7).mark_bg
+        );
+    }
+
+    #[test]
+    fn highlight_nests_with_strong() {
+        let sp = spans("==**x**==");
+        let mid = find(&sp, 4);
+        assert!(mid.mark_bg.is_some() && mid.bold);
     }
 }

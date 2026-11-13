@@ -5,14 +5,16 @@
 use crate::app::App;
 use crate::chrome;
 use crate::geometry::{Rect, MARGIN};
-use crate::view::table::CellMath;
+use crate::i18n::{t, tf, Key};
+use crate::view::table::{CellImgAsset, CellMath};
 use crate::view::{
-    cell_math_spans, ctx_menu, node_active, outline, oversize_notice, quick_open, search,
-    BlockLayout, Frame, InlineAsset, InlineImg, LayoutEngine, LayoutKey, Memo, TableKey,
+    cell_math_spans, ctx_menu, inline_details_spans, node_active, outline, oversize_notice,
+    quick_open, search, BlockLayout, Frame, InlineAsset, InlineFold, InlineImg, LayoutEngine,
+    LayoutKey, Memo, OverKind, TableKey, UnderKind,
 };
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use veil_core::{AdmonitionType, BlockId, BlockKind, InlineKind, InlineNode, Range};
+use veil_core::{BlockId, BlockKind, HtmlTag, InlineKind, InlineNode, Range};
 
 /// 专注模式压暗强度：背景色以该 alpha 覆盖非光标块（越大越暗，255 = 全遮）。
 const FOCUS_DIM_ALPHA: u8 = 160;
@@ -99,9 +101,22 @@ impl crate::view::modal::Text for ModalText<'_> {
         if s.is_empty() {
             return;
         }
+        if let Some(l) = self.labels.get_or_insert(self.engine, s, color, self.scale) {
+            frame.blit(&l.pixels, l.w, l.h, x, y);
+        }
+    }
+
+    fn title_width(&mut self, s: &str) -> f32 {
+        self.engine.measure_title(s).0
+    }
+
+    fn draw_title(&mut self, frame: &mut Frame, s: &str, color: [u8; 3], x: i32, y: i32) {
+        if s.is_empty() {
+            return;
+        }
         if let Some(l) = self
             .labels
-            .get_or_insert(self.engine, s, color, self.scale)
+            .get_or_insert_title(self.engine, s, color, self.scale)
         {
             frame.blit(&l.pixels, l.w, l.h, x, y);
         }
@@ -130,13 +145,167 @@ pub(crate) fn caret_visual(focused: bool) -> CaretVisual {
     }
 }
 
-/// Admonition 左竖条颜色：复用主题既有语义色，不新增调色板字段。
-/// Note/Important → 链接蓝；Tip → 主强调色；Warning/Caution → 危险色。
-pub(crate) fn admonition_color(ty: AdmonitionType, theme: &crate::theme::Theme) -> [u8; 3] {
-    match ty {
-        AdmonitionType::Note | AdmonitionType::Important => theme.link,
-        AdmonitionType::Tip => theme.accent,
-        AdmonitionType::Warning | AdmonitionType::Caution => theme.danger,
+/// Callout（内置五种 + 自定义）的强调色；非 Callout 块返回 None。
+fn callout_accent(kind: &BlockKind) -> Option<[u8; 3]> {
+    match kind {
+        BlockKind::Admonition(ty) => Some(ty.color()),
+        BlockKind::Callout(c) => Some(c.color),
+        _ => None,
+    }
+}
+
+/// Callout 图标（短文本 + 强调色）；普通引用块返回 None。
+fn callout_icon(kind: &BlockKind) -> Option<(&str, [u8; 3])> {
+    match kind {
+        BlockKind::Admonition(ty) => Some((ty.icon(), ty.color())),
+        BlockKind::Callout(c) => Some((c.icon.as_str(), c.color)),
+        _ => None,
+    }
+}
+
+/// 强调色按 `ratio` 混入底色（Callout 浅底色；PDF/HTML 用同一比例保持视觉一致）。
+pub(crate) fn tint(accent: [u8; 3], base: [u8; 4], ratio: f32) -> [u8; 4] {
+    let r = ratio.clamp(0.0, 1.0);
+    let mix = |a: u8, b: u8| ((a as f32) * r + (b as f32) * (1.0 - r)).round() as u8;
+    [
+        mix(accent[0], base[0]),
+        mix(accent[1], base[1]),
+        mix(accent[2], base[2]),
+        255,
+    ]
+}
+
+/// ▼ 箭头（尖头朝下）：等腰三角形，底在顶部。用 Frame 逐行 fill_rect 画。
+fn draw_arrow_down(frame: &mut Frame, cx: i32, cy: i32, size: i32, color: [u8; 3]) {
+    let c = [color[0], color[1], color[2], 255];
+    let half = size / 2;
+    for row in -half..=half {
+        let bar_w = (half - row).max(1) as u32;
+        frame.fill_rect(cx - bar_w as i32 / 2, cy + row, bar_w, 1, c);
+    }
+}
+
+/// ▶ 箭头（尖头朝右）：等腰三角形，底在左侧。
+fn draw_arrow_right(frame: &mut Frame, cx: i32, cy: i32, size: i32, color: [u8; 3]) {
+    let c = [color[0], color[1], color[2], 255];
+    let half = size / 2;
+    for col in -half..=half {
+        let bar_h = (half - col).max(1) as u32;
+        frame.fill_rect(cx + col, cy - bar_h as i32 / 2, 1, bar_h, c);
+    }
+}
+
+/// 行内前置装饰（块与表格共用同一套颜色/圆角规则）：`x/y/w/h` 为目标矩形，
+/// 调用方已按像素对齐并外扩 1px（装饰比字形框略大，观感更完整）。
+/// 顺序语义：code 底色在最先，mark 其次，kbd 最后（重叠时后者覆盖前者）。
+#[allow(clippy::too_many_arguments)] // 内部位图操作参数天然多（同其它绘制原语）
+pub(crate) fn paint_under_decor(
+    frame: &mut Frame,
+    x: i32,
+    y: i32,
+    w: u32,
+    h: u32,
+    kind: &UnderKind,
+    theme: &crate::theme::Theme,
+    scale: f32,
+) {
+    let radius = (2.0 * scale).max(1.0);
+    match kind {
+        UnderKind::MarkBg => frame.fill_rect(x, y, w, h, [255u8, 247, 153, 180]),
+        UnderKind::KbdFrame => {
+            // 边框用「外框边框色 + 内缩 1px 底色」叠出（stroke 的透明挖空
+            // 在 src-over 下无效，会把整块涂成边框色）。
+            frame.fill_rounded_rect(x, y, w.max(2), h.max(2), radius, [160u8, 160, 160, 255]);
+            if w > 2 && h > 2 {
+                frame.fill_rounded_rect(
+                    x + 1,
+                    y + 1,
+                    w - 2,
+                    h - 2,
+                    (radius - 1.0).max(0.0),
+                    [245u8, 245, 245, 255],
+                );
+            }
+        }
+        UnderKind::ImagePlaceholder => {
+            frame.fill_rounded_rect(x, y, w.max(2), h.max(2), radius, [190u8, 190, 190, 255]);
+            if w > 2 && h > 2 {
+                frame.fill_rounded_rect(
+                    x + 1,
+                    y + 1,
+                    w - 2,
+                    h - 2,
+                    (radius - 1.0).max(0.0),
+                    [235u8, 235, 235, 255],
+                );
+            }
+        }
+        UnderKind::InlineCodeBg => {
+            frame.fill_rounded_rect(
+                x,
+                y,
+                w.max(2),
+                h.max(2),
+                radius,
+                crate::tokens::palette::code_bg(theme),
+            );
+        }
+        UnderKind::StyleBg([r, g, b]) => {
+            frame.fill_rect(x, y, w, h, [*r, *g, *b, 255]);
+        }
+    }
+}
+
+/// 行内后置装饰（块与表格共用）：`(x, y_top, w, h)` 为区间在目标坐标的矩形
+/// （逐视觉行分段），下划线画在行底往上 2px。
+#[allow(clippy::too_many_arguments)] // 内部位图操作参数天然多（同其它绘制原语）
+pub(crate) fn paint_over_decor(
+    frame: &mut Frame,
+    x: i32,
+    y_top: i32,
+    w: u32,
+    h: f32,
+    kind: &OverKind,
+    theme: &crate::theme::Theme,
+    scale: f32,
+) {
+    match kind {
+        OverKind::DottedUnderline => {
+            let color = [theme.muted[0], theme.muted[1], theme.muted[2], 200];
+            let uy = y_top + h as i32 - 2; // 行底往上 2px，恒 1px 厚
+                                           // 点线：x 方向每 `step` 画 `dash` 段（1–2px），随 DPI 缩放。
+            let step = (3.0 * scale).round().max(3.0) as i32;
+            let dash = (step / 2).max(1);
+            let end = x + w as i32;
+            let mut cx = x;
+            while cx < end {
+                let d = dash.min(end - cx) as u32;
+                frame.fill_rect(cx, uy, d, 1, color);
+                cx += step;
+            }
+        }
+        OverKind::Underline => {
+            // 实线下划线：行底往上 1–2px，粗细随 DPI 缩放。
+            let th = (scale.round() as i32).max(1);
+            let uy = y_top + h as i32 - 1 - th;
+            frame.fill_rect(
+                x,
+                uy,
+                w,
+                th as u32,
+                [theme.fg[0], theme.fg[1], theme.fg[2], 255],
+            );
+        }
+        OverKind::Overline => {
+            let th = (scale.round() as i32).max(1);
+            frame.fill_rect(
+                x,
+                y_top,
+                w,
+                th as u32,
+                [theme.fg[0], theme.fg[1], theme.fg[2], 255],
+            );
+        }
     }
 }
 
@@ -194,6 +363,9 @@ impl App {
         // 先收集待排块与其行内公式/图片（session 借用期），再调渲染器/加载器（&mut self）
         let mut pending = Vec::new();
         for g in blocks {
+            if self.block_hidden(g) {
+                continue; // 折叠 details 的隐藏子块不排版（展开时再惰性补齐）
+            }
             let (id, kind, range) = (g.id, g.kind.clone(), g.range);
             if self.cache.layout(id, &kind, range, base, caret).is_some() {
                 continue;
@@ -220,16 +392,50 @@ impl App {
                                 images.push((n.range, url));
                             }
                         }
+                        // 行内/块级 `<img src alt>`：本地 src 走与 Markdown Image 相同的
+                        // 加载/缩略图路径；远程（解析层已置空 src）或缺失由 layout 占位 + alt。
+                        InlineKind::HtmlSelfClosed {
+                            tag: HtmlTag::Img,
+                            ref attrs,
+                        } => {
+                            if let Some(src) = attrs.src.as_deref() {
+                                images.push((n.range, src.to_string()));
+                            }
+                        }
                         _ => {}
                     }
                 }
                 stack.extend(n.children.iter());
             }
-            pending.push((id, kind, range, text, inlines, maths, images));
+            // B3：行内 `<details>` 折叠输入（仅含该标记的块才扫描节点，普通块零开销）。
+            let folds: Vec<InlineFold> = if text.contains("<details") {
+                inline_details_spans(&inlines, range)
+                    .into_iter()
+                    .map(|s| InlineFold {
+                        body: s.body,
+                        expanded: self.ui_state.expanded_inline_details.contains(&(id, s.key)),
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            pending.push((id, kind, range, text, inlines, maths, images, folds));
         }
         let image_base = self.input_state.revs.image_base;
-        for (id, kind, range, text, inlines, maths, images) in pending {
+        for (id, kind, range, text, inlines, maths, images, folds) in pending {
             let mut imgs = Vec::new();
+            let container = self.editor.session().block_container(id);
+            let img_max_w = self.image_max_width(container, width);
+            // B4：行内图片限高 2×正文行高；独占一行（块级/仅含图片）放宽到 6×；
+            // 宽度上限 = 版心宽 - 容器内边距。仅缩小，不放大。
+            let line_h = self.engine.doc_line_height() * self.input_state.scale;
+            let img_ranges: Vec<Range> = images.iter().map(|(r, _)| *r).collect();
+            let standalone = crate::view::block_is_image_only(&text, range, &img_ranges);
+            let max_h = if standalone {
+                crate::tokens::doc::IMG_STANDALONE_LINES * line_h
+            } else {
+                crate::tokens::doc::IMG_INLINE_LINES * line_h
+            };
             for (nrange, tex) in maths {
                 // 失败记忆/渲染失败 → 降级源码（Reveal 消隐态）显示，不每帧重试。
                 let Some(img) = self.inline_math_image(&tex) else {
@@ -276,7 +482,7 @@ impl App {
                     }
                 }
                 let nat = &self.cache.inline_images[&key].value;
-                let (dw, dh) = fit_size(nat.width, nat.height, width);
+                let (dw, dh) = crate::view::fit_size_box(nat.width, nat.height, img_max_w, max_h);
                 imgs.push(InlineImg {
                     range: nrange,
                     key: InlineAsset::Image(key),
@@ -295,6 +501,7 @@ impl App {
                 &imgs,
                 reveal_all,
                 Some(&footnotes),
+                &folds,
             );
             let reveal = l.reveal_state(&kind, range, caret);
             self.cache.layouts.insert(
@@ -499,14 +706,20 @@ impl App {
     /// 网格态光标矩形：活动单元格内容左上角（与点击落点、Tab 落点同源）。
     /// 表格显示为网格时，源码排版坐标与所见网格不一致，直接复用会画出「悬空光标」。
     /// `doc_top` 为块的文档坐标（非视口坐标），滚动量在此统一扣除。
-    pub(crate) fn table_caret_xy(&self, id: BlockId, doc_top: f32, caret: usize) -> Option<(f32, f32, f32)> {
+    pub(crate) fn table_caret_xy(
+        &self,
+        id: BlockId,
+        doc_top: f32,
+        caret: usize,
+    ) -> Option<(f32, f32, f32)> {
         let tbl = self.editor.session().table(id)?;
         let idx = active_cell_index(&tbl, caret)?;
-        let cell = self.cache.table(id, self.table_key(id))?.cells.get(idx)?;
+        let grid = self.cache.table(id, self.table_key(id))?;
+        let cell = grid.cells.get(idx)?;
         let scale = self.input_state.scale;
         let vp = self.viewport();
         Some((
-            self.content_x() + cell.x,
+            self.content_x() + grid.x + cell.x,
             vp.y + doc_top - self.window_state.scroll_y + cell.y,
             self.engine.doc_line_height() * scale,
         ))
@@ -526,6 +739,8 @@ impl App {
         let Some(blocks) = self.index.blocks.get(indices) else {
             return;
         };
+        let image_base = self.input_state.revs.image_base;
+        let doc_path = self.doc.path.clone();
         let mut pending = Vec::new();
         for g in blocks {
             let (id, kind, range) = (g.id, g.kind.clone(), g.range);
@@ -556,13 +771,20 @@ impl App {
                 let raw_cells = footnote_cell_sources(self.editor.session(), &t);
                 // 非活动格内联公式：先收可见区间与 TeX，渲染放到下面的循环（&mut self）。
                 let seeds = table_cell_math_seeds(self.editor.session(), &t, key.active);
-                pending.push((id, key, t, active, raw_cells, seeds));
+                // 非活动格内联图片：直接从 cell.inlines 提取 URL 并加载。
+                let seeds_img = table_cell_img_seeds(self.editor.session(), &t, key.active);
+                pending.push((id, key, t, active, raw_cells, seeds, seeds_img, g.container));
             }
         }
-        for (id, key, t, active, raw_cells, seeds) in pending {
+        for (id, key, t, active, raw_cells, seeds, seeds_img, container) in pending {
             let maths = self.cell_math_assets(seeds);
+            let img_assets = self.cell_img_assets(seeds_img, doc_path.as_deref(), image_base);
             let widths = self.ui_state.tables.widths.get(&id).cloned();
-            let l = self.engine.layout_table_opts(
+            // 容器内表格按容器缩进排版：版心宽扣除缩进，网格整体右移。
+            let indent = self.table_indent(container);
+            let width =
+                (width - indent).max(crate::view::table::MIN_COL_WIDTH * self.input_state.scale);
+            let mut l = self.engine.layout_table_opts(
                 &t,
                 width,
                 fg,
@@ -570,14 +792,10 @@ impl App {
                 Some(&raw_cells),
                 (!maths.is_empty()).then_some(&maths),
                 widths.as_deref(),
+                (!img_assets.is_empty()).then_some(&img_assets),
             );
-            self.cache.tables.insert(
-                id,
-                Memo {
-                    key,
-                    value: l,
-                },
-            );
+            l.x = indent;
+            self.cache.tables.insert(id, Memo { key, value: l });
         }
     }
 
@@ -600,6 +818,66 @@ impl App {
                     tex: seed.tex,
                     w,
                     h,
+                });
+            }
+            if !items.is_empty() {
+                out.insert(flat, items);
+            }
+        }
+        out
+    }
+
+    /// 表格单元格内联图片：复用 inline_images 缓存加载自然尺寸位图。
+    /// 远程 URL / 草稿相对路径 / 加载失败 / 已失败记忆 → 跳过（降级为 alt 文本）。
+    fn cell_img_assets(
+        &mut self,
+        seeds: HashMap<usize, Vec<String>>,
+        doc_path: Option<&Path>,
+        image_base: u32,
+    ) -> HashMap<usize, Vec<CellImgAsset>> {
+        let mut out = HashMap::new();
+        for (flat, urls) in seeds {
+            let mut items = Vec::with_capacity(urls.len());
+            for url in urls {
+                let Some(path) = local_image_path(&url, doc_path) else {
+                    continue;
+                };
+                let key = path.to_string_lossy().into_owned();
+                if self.cache.image_failed(&key, image_base) {
+                    continue;
+                }
+                if self.cache.image(&key, image_base).is_none() {
+                    match self.ports.images.load(&path) {
+                        Ok(img) => {
+                            self.cache.inline_images.insert(
+                                key.clone(),
+                                Memo {
+                                    key: image_base,
+                                    value: img,
+                                },
+                            );
+                        }
+                        Err(e) => {
+                            eprintln!(
+                                "表格图片加载失败（降级为 alt 文本） {}: {e}",
+                                path.display()
+                            );
+                            self.cache.image_failed.insert(
+                                key,
+                                Memo {
+                                    key: image_base,
+                                    value: (),
+                                },
+                            );
+                            continue;
+                        }
+                    }
+                }
+                let nat = self.cache.inline_images.get(&key).unwrap();
+                items.push(CellImgAsset {
+                    w: nat.value.width,
+                    h: nat.value.height,
+                    pixels: nat.value.pixels.clone(),
                 });
             }
             if !items.is_empty() {
@@ -666,6 +944,8 @@ impl App {
         if self.index.blocks.is_empty() {
             self.refresh_index();
         }
+        // B3：光标落在折叠 details 的隐藏区时先展开（键盘/撤销/搜索等任意路径的兜底）。
+        self.sync_details_at_caret();
         // 视口驱动惰性排版（P1b）：先排当前可见区间并重算几何；估算高度偏小
         // 可能让视口底部露出未排版块，故重算可见区间后再补跑一遍即收敛。
         self.ensure_layouts_visible();
@@ -688,12 +968,18 @@ impl App {
             self.recompute_geometry();
         }
         // 帧缓冲跨帧复用：仅尺寸变化才重新分配（每帧只做一次底色填充）
-        let mut frame = self
-            .window_state
-            .frame
-            .take()
-            .unwrap_or_else(|| Frame::new(w, h, crate::tokens::palette::surface_base(&self.input_state.theme)));
-        frame.reset(w, h, crate::tokens::palette::surface_base(&self.input_state.theme));
+        let mut frame = self.window_state.frame.take().unwrap_or_else(|| {
+            Frame::new(
+                w,
+                h,
+                crate::tokens::palette::surface_base(&self.input_state.theme),
+            )
+        });
+        frame.reset(
+            w,
+            h,
+            crate::tokens::palette::surface_base(&self.input_state.theme),
+        );
         let scale = self.input_state.scale;
         let theme = self.input_state.theme;
         let vp = self.viewport();
@@ -719,6 +1005,9 @@ impl App {
         // 超限块降级提示：内容画完后再画，避免与文本光栅/选区叠加顺序冲突
         let mut oversize: Vec<(i32, f32, usize)> = Vec::new();
         for g in &self.index.blocks[vis] {
+            if self.block_hidden(g) {
+                continue; // B3：折叠 details 的隐藏子块整组不渲染（非光栅裁剪）
+            }
             let (id, kind, range, top) = (g.id, g.kind.clone(), g.range, g.top);
             let sy = (vp.y + top - self.window_state.scroll_y) as i32;
             if (sy as f32) >= vp.y + vp.h || sy + self.block_height(g) as i32 <= vp.y as i32 {
@@ -733,7 +1022,9 @@ impl App {
                 frame.blit(&img.pixels, img.width, img.height, x, sy);
                 continue;
             }
-            if kind == BlockKind::Table && self.table_shows_grid(id, &range) {
+            if kind == BlockKind::Table && self.block_height(g) > 0.0 {
+                // 容器内表格先画引用条（表格分支会提前 continue，装饰 match 不覆盖）。
+                self.paint_quote_rails(&mut frame, g, sy);
                 self.paint_table(&mut frame, id, sy);
                 continue;
             }
@@ -749,18 +1040,37 @@ impl App {
             let l = &self.cache.layouts[&id].value;
             if matches!(
                 kind,
-                BlockKind::FencedCode(_) | BlockKind::IndentedCode | BlockKind::HtmlBlock | BlockKind::FrontMatter(_)
+                BlockKind::FencedCode(_)
+                    | BlockKind::IndentedCode
+                    | BlockKind::HtmlBlock
+                    | BlockKind::FrontMatter(_)
             ) {
                 let (rw, rh) = {
                     let r = &self.cache.rasters[&id].value;
                     (r.1, r.2)
                 };
+                let pad_x = (crate::tokens::doc::CODE_PAD_X * scale).round() as i32;
+                let pad_y = (crate::tokens::doc::CODE_PAD_Y * scale).round() as i32;
                 frame.fill_rect(
-                    self.content_x() as i32 - 4,
-                    sy - 2,
-                    rw + 8,
-                    rh + 4,
+                    self.content_x() as i32 - pad_x,
+                    sy - pad_y,
+                    rw + 2 * pad_x as u32,
+                    rh + 2 * pad_y as u32,
                     crate::tokens::palette::code_bg(&theme),
+                );
+            }
+            // Callout（N3b）：强调色 10% 浅底色覆盖整块（含引用缩进区），文字仍后绘。
+            if let Some(accent) = callout_accent(&kind) {
+                let bh = self.block_height(g) as u32;
+                let inset = (crate::tokens::doc::QUOTE_INSET * scale) as i32;
+                let x = self.content_x() as i32 - inset;
+                let w = (self.content_width() as i32 + inset).max(1) as u32;
+                frame.fill_rect(
+                    x,
+                    sy,
+                    w,
+                    bh,
+                    tint(accent, crate::tokens::palette::surface_base(&theme), 0.10),
                 );
             }
             // 查找命中高亮（P3-3）：全部命中用 hover 色，当前命中用选区色；打印不画
@@ -785,8 +1095,78 @@ impl App {
                     }
                 }
             }
+            // 前置装饰：行内代码底色 / mark 底色 / kbd 圆角边框。在文本光栅之下绘制，
+            // 折行 span 按 selection_rects 分段画，每段独立底色/边框。
+            // 选区可能覆盖装饰 — 装饰在选区高亮之后、文本 blit 之前，保持可见。
+            let cx0 = self.content_x() as i32;
+            // 装饰区间已是块相对 doc 坐标（与 strikes 同源），直接交给 selection_rects。
+            for &(s, e, ref kind) in &l.decorations_under {
+                for (rx, ry, rw2, rh2) in self.engine.selection_rects(l, s, e) {
+                    paint_under_decor(
+                        &mut frame,
+                        cx0 + (rx - 1.0) as i32,
+                        sy + (ry - 1.0) as i32,
+                        (rw2 + 2.0) as u32,
+                        (rh2 + 2.0) as u32,
+                        kind,
+                        &theme,
+                        scale,
+                    );
+                }
+            }
             let (px, rw, rh) = &self.cache.rasters[&id].value;
-            frame.blit(px, *rw, *rh, self.content_x() as i32, sy);
+            // Details 卡片底/边框必须先于文本光栅绘制，否则不透明卡片会把正文整块盖住。
+            // 折叠箭头在文本之后补画（见下方块级装饰分支）。
+            let details_card = if matches!(&kind, BlockKind::Details { .. }) {
+                let expanded = self.ui_state.expanded_details.contains(&id);
+                let bh = self.block_height(g) as i32;
+                // B2：展开态卡片覆盖紧随其后的子表格，视觉上仍是同一张卡片。
+                let extra = if expanded {
+                    self.details_children_height(g) as i32
+                } else {
+                    0
+                };
+                let cw = self.content_width() as u32;
+                let cx = self.content_x() as i32;
+                let pad = ((crate::tokens::doc::DETAILS_PAD * scale).max(2.0)) as i32;
+                let radius = (3.0 * scale).max(1.0);
+                let card_y = sy - pad / 2;
+                let card_h = bh + extra + pad;
+                let card_x = cx - pad;
+                let card_w = cw + 2 * pad as u32;
+                let card_bg = if expanded {
+                    [250u8, 250, 250, 255]
+                } else {
+                    [252u8, 252, 252, 255]
+                };
+                let card_border = [theme.grid[0], theme.grid[1], theme.grid[2], 255];
+                frame.fill_rounded_rect(card_x, card_y, card_w, card_h as u32, radius, card_border);
+                if card_w > 2 && card_h > 2 {
+                    frame.fill_rounded_rect(
+                        card_x + 1,
+                        card_y + 1,
+                        card_w - 2,
+                        (card_h - 2) as u32,
+                        (radius - 1.0).max(0.0),
+                        card_bg,
+                    );
+                }
+                Some((expanded, cx, cw, bh, pad))
+            } else {
+                None
+            };
+            // Details 块折叠态：只 blit summary 单行的像素高度，正文区域用卡片底遮罩。
+            // 打印态恒展开（skip 折叠钳制），让正文完整渲染。
+            let is_collapsed_details = self.window_state.print.is_none()
+                && matches!(&kind, BlockKind::Details { .. })
+                && !self.ui_state.expanded_details.contains(&id);
+            let blit_h = if is_collapsed_details {
+                // 折叠高度与几何同源（block_height 已含 DPI 缩放），保证 summary 行不被裁切
+                (self.block_height(g).round() as u32).clamp(1, *rh)
+            } else {
+                *rh
+            };
+            frame.blit(px, *rw, blit_h, self.content_x() as i32, sy);
             // 删除线（P3-4）：叠加在字形之上；cosmic-text 无原生支持，
             // 按可视行矩形在文本中线画横线（粗细随 DPI 缩放）
             for (s, e) in &l.strikes {
@@ -798,6 +1178,21 @@ impl App {
                         rw2 as u32,
                         th as u32,
                         [theme.fg[0], theme.fg[1], theme.fg[2], 255],
+                    );
+                }
+            }
+            // 后置装饰：abbr 虚线下划线。画在 strikes 之后、imgs 之前。
+            for &(s, e, ref kind) in &l.decorations_over {
+                for (rx, ry, rw2, rh2) in self.engine.selection_rects(l, s, e) {
+                    paint_over_decor(
+                        &mut frame,
+                        (self.content_x() + rx) as i32,
+                        sy + ry as i32,
+                        rw2 as u32,
+                        rh2,
+                        kind,
+                        &theme,
+                        scale,
                     );
                 }
             }
@@ -832,24 +1227,72 @@ impl App {
                 BlockKind::BlockQuote => {
                     let bh = self.block_height(g) as u32;
                     frame.fill_rect(
-                        self.content_x() as i32 - (8.0 * scale) as i32,
+                        self.content_x() as i32 - (crate::tokens::doc::QUOTE_INSET * scale) as i32,
                         sy,
-                        (3.0 * scale).max(1.0) as u32,
+                        (crate::tokens::doc::QUOTE_RAIL * scale).max(1.0) as u32,
                         bh,
                         theme.grid,
                     );
                 }
-                BlockKind::Admonition(ty) => {
-                    // 提示块：左竖条按变体着色（引用灰条 → 语义色），不改变任何字节。
+                BlockKind::Admonition(_) | BlockKind::Callout(_) => {
+                    // 提示块：左竖条按类型着色（引用灰条 → 语义/配置色），不改字节。
                     let bh = self.block_height(g) as u32;
-                    let [r, gg, b] = admonition_color(ty, &theme);
+                    let rail_color = match callout_accent(&kind) {
+                        Some([r, g, b]) => [r, g, b, 255],
+                        None => theme.grid,
+                    };
+                    let rail_x =
+                        self.content_x() as i32 - (crate::tokens::doc::QUOTE_INSET * scale) as i32;
                     frame.fill_rect(
-                        self.content_x() as i32 - (8.0 * scale) as i32,
+                        rail_x,
                         sy,
-                        (3.0 * scale).max(1.0) as u32,
+                        (crate::tokens::doc::QUOTE_RAIL * scale).max(1.0) as u32,
                         bh,
-                        [r, gg, b, 255],
+                        rail_color,
                     );
+                    // 图标徽标：强调色小方块 + 反色图标字形（三种通道同一图标文本）。
+                    if let Some((icon, color)) = callout_icon(&kind) {
+                        let sz = (12.0 * scale).max(9.0);
+                        let bx = rail_x - sz as i32 - (2.0 * scale) as i32;
+                        let radius = (2.5 * scale).max(1.0);
+                        frame.fill_rounded_rect(
+                            bx,
+                            sy,
+                            sz as u32,
+                            sz as u32,
+                            radius,
+                            [color[0], color[1], color[2], 255],
+                        );
+                        let ink = crate::tokens::palette::surface_base(&theme);
+                        let ink = [ink[0], ink[1], ink[2]];
+                        if let Some(lab) = self.ui_state.chrome.labels.get_or_insert(
+                            &mut self.engine,
+                            icon,
+                            ink,
+                            scale,
+                        ) {
+                            frame.blit(
+                                &lab.pixels,
+                                lab.w,
+                                lab.h,
+                                bx + ((sz - lab.w as f32) / 2.0).round() as i32,
+                                sy + ((sz - lab.h as f32) / 2.0).round() as i32,
+                            );
+                        }
+                    }
+                }
+                BlockKind::Details { .. } => {
+                    // 卡片底/边框已在文本光栅之前绘制；这里只补折叠箭头（▶ 收起 / ▼ 展开）。
+                    if let Some((expanded, cx, cw, bh, pad)) = details_card {
+                        let arrow_size = (6.0 * scale).max(3.0) as i32;
+                        let arrow_x = cx + cw as i32 - arrow_size - pad;
+                        let arrow_cy = sy + bh / 2;
+                        if expanded {
+                            draw_arrow_down(&mut frame, arrow_x, arrow_cy, arrow_size, theme.fg);
+                        } else {
+                            draw_arrow_right(&mut frame, arrow_x, arrow_cy, arrow_size, theme.fg);
+                        }
+                    }
                 }
                 BlockKind::ThematicBreak if !node_active(range, caret) => {
                     let bh = self.block_height(g);
@@ -907,15 +1350,17 @@ impl App {
         // 光标/浮层/chrome 只在屏幕语义下绘制；打印帧 = 纯文档内容（3b）
         if self.window_state.print.is_none() {
             let (line, col) = self.editor.session().line_col(caret).unwrap_or((1, 1));
-            let dirty = self.editor.is_dirty();
+            let dirty = self.history_live_dirty();
             let external = self.external_state();
             let doc_h = self.doc_height();
-            // 查找栏打开时文档只读：光标与 preedit 均由浮栏承接，不画在正文
-            if !self.ui_state.search.open {
+            // 查找栏/版本历史打开时文档只读：光标与 preedit 均由浮层承接，不画在正文
+            if !self.ui_state.search.open && !self.ui_state.history.open {
                 self.paint_caret_and_preedit(&mut frame);
             }
             // 大纲面板（P3-2）：内容之后、chrome 之前（标题区/状态栏覆盖上溢行）
             self.paint_outline(&mut frame);
+            // 版本历史（B8a）：左侧快照列表；右侧正文区即只读预览
+            self.paint_history(&mut frame);
             // 查找栏（P3-3）：浮在内容/大纲之上、chrome 之前的最后一层内容装饰
             self.paint_search(&mut frame);
             // 快速打开（阶段 1）：浮在查找栏之上
@@ -1026,7 +1471,11 @@ impl App {
     /// 最后一层：遮罩 + 卡片 + 按钮。
     fn paint_modal(&mut self, frame: &mut Frame) {
         let layout = self.modal_layout();
-        let Some((spec, state)) = self.ui_state.modal.as_ref().map(|a| (a.spec.clone(), a.state))
+        let Some((spec, state)) = self
+            .ui_state
+            .modal
+            .as_ref()
+            .map(|a| (a.spec.clone(), a.state))
         else {
             return;
         };
@@ -1089,11 +1538,7 @@ impl App {
             crate::tokens::palette::surface_popup(&theme),
             theme.chrome_border,
         );
-        let fade = self
-            .ui_state
-            .outline
-            .fade
-            .view(self.ui_state.outline.hover);
+        let fade = self.ui_state.outline.fade.view(self.ui_state.outline.hover);
         for row in outline::visible_rows(panel, count, self.ui_state.outline.scroll, scale) {
             let is_current = current == Some(row.index);
             // 当前条目与悬停同底色：只画一次，避免重复叠加变暗。
@@ -1183,7 +1628,7 @@ impl App {
         if count == 0 {
             if let Some(l) = self.ui_state.chrome.labels.get_or_insert(
                 &mut self.engine,
-                "无标题",
+                t(Key::OutlineEmpty),
                 theme.muted,
                 scale,
             ) {
@@ -1220,12 +1665,12 @@ impl App {
             1,
             theme.chrome_border,
         );
-        if let Some(l) =
-            self.ui_state
-                .chrome
-                .labels
-                .get_or_insert(&mut self.engine, "大纲", theme.muted, scale)
-        {
+        if let Some(l) = self.ui_state.chrome.labels.get_or_insert(
+            &mut self.engine,
+            t(Key::OutlineTitle),
+            theme.muted,
+            scale,
+        ) {
             let ly = panel.y + (outline::HEAD_H * scale - l.h as f32) / 2.0;
             frame.blit(
                 &l.pixels,
@@ -1234,6 +1679,296 @@ impl App {
                 (panel.x + outline::PAD * scale).round() as i32,
                 ly.round() as i32,
             );
+        }
+    }
+
+    /// 版本历史面板（N1/B8a）：左侧快照列表（时间/大小/当前标记）+ 底部操作按钮。
+    /// 右侧正文区由正常渲染管线绘制——预览只是在打开期间把 `self.editor` 换成
+    /// 快照文本的只读 Editor，因此这里不再造第二套渲染器。
+    pub(crate) fn paint_history(&mut self, frame: &mut Frame) {
+        if !self.ui_state.history.open {
+            return;
+        }
+        let scale = self.input_state.scale;
+        let theme = self.input_state.theme;
+        let l = self.history_layout();
+        let panel = l.panel;
+        let count = self.ui_state.history.entries.len();
+        let rows_h = crate::view::history::rows_height(panel, scale);
+        let max_scroll = crate::view::history::max_scroll(panel, count, scale);
+        self.ui_state.history.scroll = self.ui_state.history.scroll.clamp(0.0, max_scroll);
+        let x = panel.x.round() as i32;
+        let y = panel.y.round() as i32;
+        let w = panel.w.ceil() as u32;
+        let h = panel.h.ceil() as u32;
+        frame.fill_surface_card(
+            x,
+            y,
+            w,
+            h,
+            scale,
+            theme.dark,
+            crate::tokens::palette::surface_popup(&theme),
+            theme.chrome_border,
+        );
+
+        // 快照行：选中/悬停底色 + 左侧 accent 指示条 + 时间/大小 + 当前标记
+        let top = crate::view::history::first_visible(self.ui_state.history.scroll, scale);
+        let slots = crate::view::history::visible_slots(panel, scale);
+        let current = self.ui_state.history.current_index();
+        for slot in 0..slots {
+            let index = top + slot;
+            if index >= count {
+                break;
+            }
+            let row =
+                crate::view::history::row_rect(panel, index, self.ui_state.history.scroll, scale);
+            let selected = self.ui_state.history.selected == Some(index);
+            let hovered = self.ui_state.history.hover == Some(index);
+            if selected || hovered {
+                frame.fill_hover(
+                    x,
+                    row.y.round() as i32,
+                    w,
+                    row.h.ceil() as u32,
+                    scale,
+                    if selected { theme.sel } else { theme.hover },
+                );
+            }
+            if selected {
+                let bar_h = (row.h - 14.0 * scale).max(3.0);
+                frame.fill_rounded_rect(
+                    (panel.x + 4.0 * scale).round() as i32,
+                    (row.y + (row.h - bar_h) / 2.0).round() as i32,
+                    (3.0 * scale).max(1.0) as u32,
+                    bar_h.ceil() as u32,
+                    1.5 * scale,
+                    [theme.accent[0], theme.accent[1], theme.accent[2], 255],
+                );
+            }
+            let time = self
+                .ui_state
+                .history
+                .labels
+                .get(index)
+                .cloned()
+                .unwrap_or_else(|| crate::app::format_unix_ms_utc(0));
+            let bytes = self.ui_state.history.entries[index].bytes;
+            let text_w = (row.w - 8.0 * scale).max(0.0);
+            let time_label = crate::view::history::fit_label(&time, text_w, scale);
+            if let Some(label) = self.ui_state.chrome.labels.get_or_insert(
+                &mut self.engine,
+                &time_label,
+                theme.text,
+                scale,
+            ) {
+                frame.blit(
+                    &label.pixels,
+                    label.w,
+                    label.h,
+                    (row.x + 4.0 * scale).round() as i32,
+                    (row.y + 7.0 * scale).round() as i32,
+                );
+            }
+            let mut meta = crate::view::history::format_size(bytes);
+            if current == Some(index) {
+                meta.push_str(t(Key::HistoryCurrentSuffix));
+            }
+            let meta_label = crate::view::history::fit_label(&meta, text_w, scale);
+            let color = if current == Some(index) {
+                theme.accent
+            } else {
+                theme.muted
+            };
+            if let Some(label) = self.ui_state.chrome.labels.get_or_insert(
+                &mut self.engine,
+                &meta_label,
+                color,
+                scale,
+            ) {
+                let ly = row.y + row.h - label.h as f32 - 7.0 * scale;
+                frame.blit(
+                    &label.pixels,
+                    label.w,
+                    label.h,
+                    (row.x + 4.0 * scale).round() as i32,
+                    ly.round() as i32,
+                );
+            }
+        }
+
+        // 空态/错误态：走 B6 视觉 token（正文色 / danger + muted 辅助说明）
+        if count == 0 {
+            let (headline, hint, color) = match &self.ui_state.history.error {
+                Some(e) => (
+                    tf(Key::HistoryErrorHeadline, &[e]),
+                    t(Key::HistoryErrorHint).to_string(),
+                    theme.danger,
+                ),
+                None => (
+                    t(crate::view::history::EMPTY_TEXT).to_string(),
+                    t(crate::view::history::EMPTY_HINT).to_string(),
+                    theme.text,
+                ),
+            };
+            let inner_w = (panel.w - 2.0 * crate::view::history::PAD * scale).max(0.0);
+            let body_top =
+                crate::view::history::rows_top(panel, scale) + crate::view::history::PAD * scale;
+            for (i, (text, color)) in [(headline, color), (hint, theme.muted)]
+                .into_iter()
+                .enumerate()
+            {
+                let label_text = crate::view::history::fit_label(&text, inner_w, scale);
+                if let Some(label) = self.ui_state.chrome.labels.get_or_insert(
+                    &mut self.engine,
+                    &label_text,
+                    color,
+                    scale,
+                ) {
+                    frame.blit(
+                        &label.pixels,
+                        label.w,
+                        label.h,
+                        (panel.x + crate::view::history::PAD * scale).round() as i32,
+                        (body_top + i as f32 * 22.0 * scale).round() as i32,
+                    );
+                }
+            }
+        }
+
+        // 滚动指示（仅列表溢出时）
+        if max_scroll > 0.0 && rows_h > 0.0 {
+            let top_y = crate::view::history::rows_top(panel, scale);
+            let track_h = rows_h - 4.0 * scale;
+            let track_x = panel.x + panel.w - 6.0 * scale;
+            let track_w = (3.0 * scale).max(1.0) as u32;
+            let radius = 1.5 * scale;
+            frame.fill_rounded_rect(
+                track_x.round() as i32,
+                top_y.round() as i32,
+                track_w,
+                track_h.ceil() as u32,
+                radius,
+                theme.chrome_border,
+            );
+            let content_h = count as f32 * crate::view::history::ROW_H * scale;
+            let thumb_h = (track_h * track_h / content_h)
+                .max(crate::theme::surface::scrollbar_min_thumb(scale))
+                .min(track_h);
+            let ty = top_y + (self.ui_state.history.scroll / max_scroll) * (track_h - thumb_h);
+            frame.fill_rounded_rect(
+                track_x.round() as i32,
+                ty.round() as i32,
+                track_w,
+                thumb_h.ceil() as u32,
+                radius,
+                theme.thumb,
+            );
+        }
+
+        // 标题区（覆盖上溢行）：不透明、底部分隔线与左右内边距对齐
+        let head_h = (crate::view::history::HEAD_H * scale).ceil() as u32;
+        let r = crate::theme::surface::corner_radius(scale);
+        let popup_bg = crate::tokens::palette::surface_popup(&theme);
+        frame.fill_rounded_rect(
+            x + 1,
+            y + 1,
+            w.saturating_sub(2),
+            head_h,
+            (r - 1.0).max(0.0),
+            popup_bg,
+        );
+        let sq = r.ceil().max(1.0) as i32;
+        let hi = y + head_h as i32;
+        frame.fill_rect(x + 1, hi - sq, w.saturating_sub(2), sq as u32, popup_bg);
+        frame.fill_rect(
+            (panel.x + crate::view::history::PAD * scale).round() as i32,
+            hi - 1,
+            (panel.w - 2.0 * crate::view::history::PAD * scale).max(1.0) as u32,
+            1,
+            theme.chrome_border,
+        );
+        if let Some(label) = self.ui_state.chrome.labels.get_or_insert(
+            &mut self.engine,
+            t(Key::HistoryTitle),
+            theme.text,
+            scale,
+        ) {
+            let ly = panel.y + (crate::view::history::HEAD_H * scale - label.h as f32) / 2.0;
+            frame.blit(
+                &label.pixels,
+                label.w,
+                label.h,
+                (panel.x + crate::view::history::PAD * scale).round() as i32,
+                ly.round() as i32,
+            );
+        }
+
+        // 底部操作区（恢复/删除/清空 + 撤销提示）
+        let btn_r = crate::theme::surface::corner_radius(scale).min(6.0 * scale);
+        for (action, rect) in [
+            (crate::view::history::HistoryAction::Restore, l.restore),
+            (crate::view::history::HistoryAction::Delete, l.delete),
+            (crate::view::history::HistoryAction::Clear, l.clear),
+            (crate::view::history::HistoryAction::Close, l.close),
+        ] {
+            let hovered = self.ui_state.history.hover_action == Some(action);
+            let (bg, fg): ([u8; 4], [u8; 3]) = match action {
+                crate::view::history::HistoryAction::Restore => (
+                    [theme.accent[0], theme.accent[1], theme.accent[2], 255],
+                    theme.accent_text,
+                ),
+                crate::view::history::HistoryAction::Delete
+                | crate::view::history::HistoryAction::Clear => {
+                    (if hovered { theme.hover } else { popup_bg }, theme.danger)
+                }
+                crate::view::history::HistoryAction::Close => {
+                    (if hovered { theme.hover } else { popup_bg }, theme.muted)
+                }
+            };
+            if hovered || action == crate::view::history::HistoryAction::Restore {
+                frame.fill_rounded_rect(
+                    rect.x.round() as i32,
+                    rect.y.round() as i32,
+                    rect.w.ceil() as u32,
+                    rect.h.ceil() as u32,
+                    btn_r,
+                    bg,
+                );
+            }
+            if let Some(label) = self.ui_state.chrome.labels.get_or_insert(
+                &mut self.engine,
+                t(action.label()),
+                fg,
+                scale,
+            ) {
+                let lx = rect.x + (rect.w - label.w as f32) / 2.0;
+                let ly = rect.y + (rect.h - label.h as f32) / 2.0;
+                frame.blit(
+                    &label.pixels,
+                    label.w,
+                    label.h,
+                    lx.round() as i32,
+                    ly.round() as i32,
+                );
+            }
+        }
+        if let Some(label) = self.ui_state.chrome.labels.get_or_insert(
+            &mut self.engine,
+            t(Key::HistoryUndoHint),
+            theme.muted,
+            scale,
+        ) {
+            let max_w = (panel.w - 2.0 * crate::view::history::PAD * scale).max(0.0);
+            if label.w as f32 <= max_w {
+                frame.blit(
+                    &label.pixels,
+                    label.w,
+                    label.h,
+                    (panel.x + crate::view::history::PAD * scale).round() as i32,
+                    l.footer_note_y.round() as i32,
+                );
+            }
         }
     }
 
@@ -1298,7 +2033,16 @@ impl App {
         let py = l.panel.y.round() as i32;
         let pw = l.panel.w.ceil() as u32;
         let ph = l.panel.h.ceil() as u32;
-        frame.fill_surface_card(px, py, pw, ph, scale, theme.dark, crate::tokens::palette::surface_popup(&theme), theme.chrome_border);
+        frame.fill_surface_card(
+            px,
+            py,
+            pw,
+            ph,
+            scale,
+            theme.dark,
+            crate::tokens::palette::surface_popup(&theme),
+            theme.chrome_border,
+        );
         // 输入行与候选行的分隔线：左右内缩与输入区文字对齐（不顶到卡片边）
         frame.fill_rect(
             (px as f32 + pad).round() as i32,
@@ -1336,7 +2080,7 @@ impl App {
             if self.editor.preedit().is_none() {
                 if let Some(lab) = self.ui_state.chrome.labels.get_or_insert(
                     &mut self.engine,
-                    "快速打开：输入文件名，回车打开",
+                    t(Key::QuickOpenPlaceholder),
                     theme.muted,
                     scale,
                 ) {
@@ -1434,7 +2178,11 @@ impl App {
             }
             let mid = row.y + row.h / 2.0;
             let ty = |h: u32| (mid - h as f32 / 2.0).round() as i32;
-            let hint = if recent { "最近".to_string() } else { hint };
+            let hint = if recent {
+                t(Key::QuickOpenRecent).to_string()
+            } else {
+                hint
+            };
             let hint_shown = quick_open::fit_label(&hint, row.w * 0.45, scale);
             let hint_w = if hint_shown.is_empty() {
                 0.0
@@ -1475,17 +2223,22 @@ impl App {
                 );
             }
         }
-        // 空态提示：占首行
+        // 空态提示：占首行，水平/垂直居中；文案区分「无候选」与「查询不命中」。
         if empty {
             if let Some(row) = l.rows.first() {
+                let message = quick_open::empty_message(
+                    &self.ui_state.quick.query,
+                    self.ui_state.quick.items.is_empty(),
+                );
                 if let Some(lab) = self.ui_state.chrome.labels.get_or_insert(
                     &mut self.engine,
-                    "无匹配文件",
+                    t(message),
                     theme.muted,
                     scale,
                 ) {
+                    let x = row.x + (row.w - lab.w as f32) / 2.0;
                     let y = (row.y + row.h / 2.0 - lab.h as f32 / 2.0).round() as i32;
-                    frame.blit(&lab.pixels, lab.w, lab.h, (row.x + pad).round() as i32, y);
+                    frame.blit(&lab.pixels, lab.w, lab.h, x.round() as i32, y);
                 }
             }
         }
@@ -1538,7 +2291,7 @@ impl App {
         }
         let scale = self.input_state.scale;
         let theme = self.input_state.theme;
-        let items: Vec<(&'static str, ctx_menu::CtxAction)> = self.ui_state.ctx.items().to_vec();
+        let items: Vec<(Key, ctx_menu::CtxAction)> = self.ui_state.ctx.items().to_vec();
         let vp = self.viewport();
         let l = ctx_menu::layout(
             &items,
@@ -1552,7 +2305,16 @@ impl App {
         let py = l.y.round() as i32;
         let pw = l.w.ceil() as u32;
         let ph = l.h.ceil() as u32;
-        frame.fill_surface_card(px, py, pw, ph, scale, theme.dark, crate::tokens::palette::surface_popup(&theme), theme.chrome_border);
+        frame.fill_surface_card(
+            px,
+            py,
+            pw,
+            ph,
+            scale,
+            theme.dark,
+            crate::tokens::palette::surface_popup(&theme),
+            theme.chrome_border,
+        );
         let hover = self.ui_state.ctx.hover;
         let fade = self.ui_state.ctx.fade.view(hover);
         // S3：只有卡片边界线；分组间距由布局提供，不再绘制分隔线。
@@ -1574,7 +2336,7 @@ impl App {
             }
             if let Some(lab) = self.ui_state.chrome.labels.get_or_insert(
                 &mut self.engine,
-                label,
+                t(*label),
                 theme.text,
                 scale,
             ) {
@@ -1600,12 +2362,12 @@ impl App {
             .unwrap_or_else(|| path.display().to_string());
         let text = if crate::image::is_image_path(&path) {
             if self.doc.path.is_none() {
-                format!("「{name}」无法插入：草稿没有落盘目录")
+                tf(Key::DropImageNeedsDir, &[&name])
             } else {
-                format!("松开以插入图片：{name}")
+                tf(Key::DropInsertImage, &[&name])
             }
         } else {
-            format!("松开以打开文档：{name}")
+            tf(Key::DropOpenDocument, &[&name])
         };
         frame.fill_rect(
             vp.x.round() as i32,
@@ -1630,7 +2392,16 @@ impl App {
         let bh = lab.h + pad * 2;
         let bx = (vp.x + (vp.w - bw as f32) / 2.0).round() as i32;
         let by = (vp.y + (vp.h - bh as f32) / 2.0).round() as i32;
-        frame.fill_surface_card(bx, by, bw, bh, scale, theme.dark, crate::tokens::palette::surface_popup(&theme), theme.chrome_border);
+        frame.fill_surface_card(
+            bx,
+            by,
+            bw,
+            bh,
+            scale,
+            theme.dark,
+            crate::tokens::palette::surface_popup(&theme),
+            theme.chrome_border,
+        );
         frame.blit(
             &lab.pixels,
             lab.w,
@@ -1694,7 +2465,12 @@ impl App {
         } else if cy < vp.y {
             target += cy - vp.y - MARGIN * self.input_state.scale;
         } else if cy + ch > vp.y + vp.h {
-            target += cy + ch - (vp.y + vp.h) + MARGIN * self.input_state.scale;
+            // B5：光标行下方至少保留 `BOTTOM_PAD_LINES` 行可点击空白，
+            // 换行继续输入时不会贴着状态栏（文档已含同等底部留白）。
+            let pad = (crate::tokens::doc::BOTTOM_PAD_LINES * self.engine.doc_line_height())
+                .max(MARGIN)
+                * self.input_state.scale;
+            target += cy + ch - (vp.y + vp.h) + pad;
         }
         self.window_state.goal_y = target.clamp(0.0, max);
         if !self.window_state.smooth {
@@ -1708,12 +2484,20 @@ impl App {
         let Some((_tid, _tbl)) = self.caret_table_and_cell(caret) else {
             return false;
         };
-        let Some(block_range) = self.index.blocks.iter()
+        let Some(block_range) = self
+            .index
+            .blocks
+            .iter()
             .find(|g| g.kind == BlockKind::Table && g.range.start <= caret && caret <= g.range.end)
-            .map(|g| g.range) else {
+            .map(|g| g.range)
+        else {
             return false;
         };
-        let src = self.editor.session().text_slice(block_range).unwrap_or_default();
+        let src = self
+            .editor
+            .session()
+            .text_slice(block_range)
+            .unwrap_or_default();
         let new_src = table_append_row(&src);
         if new_src == src {
             return false;
@@ -1722,9 +2506,9 @@ impl App {
         // 空单元格（`|  |`）若只按 `+2` 定位会落在管道符上，活动单元格判定失败、Tab 跳格错位。
         let last_line = new_src.trim_end_matches(['\n', '\r']).matches('\n').count();
         let caret_in_block = table_cell_start(&new_src, last_line, 0);
-        let Some(dirty_blocks) = self
-            .editor
-            .replace_table_block(block_range, new_src, caret_in_block)
+        let Some(dirty_blocks) =
+            self.editor
+                .replace_table_block(block_range, new_src, caret_in_block)
         else {
             return false;
         };
@@ -1850,6 +2634,57 @@ fn table_cell_math_seeds(
     out
 }
 
+/// 收集非活动单元格的图片 URL（递归扫描 inlines，活动格跳过）。
+fn table_cell_img_seeds(
+    session: &veil_core::Session,
+    tbl: &veil_core::Table,
+    active: u32,
+) -> HashMap<usize, Vec<String>> {
+    fn collect_urls(nodes: &[InlineNode], out: &mut Vec<String>, session: &veil_core::Session) {
+        for n in nodes {
+            match &n.kind {
+                InlineKind::Image => {
+                    if let Some(url_range) = n.url {
+                        if let Some(url) = session.text_slice(url_range) {
+                            out.push(url);
+                        }
+                    }
+                }
+                // 单元格内 HTML `<img>`：本地 src 与 Markdown Image 同路径；
+                // 远程 src 解析层已置空，走 cell.text 的 alt 降级。
+                InlineKind::HtmlSelfClosed {
+                    tag: HtmlTag::Img,
+                    attrs,
+                } => {
+                    if let Some(src) = attrs.src.as_deref() {
+                        out.push(src.to_string());
+                    }
+                }
+                _ => {}
+            }
+            collect_urls(&n.children, out, session);
+        }
+    }
+    let mut out: HashMap<usize, Vec<String>> = HashMap::new();
+    let cols = tbl.aligns.len();
+    let mut idx = 0usize;
+    for cells in std::iter::once(&tbl.header).chain(tbl.rows.iter()) {
+        for col in 0..cols {
+            if let Some(cell) = cells.get(col) {
+                if active as usize != idx {
+                    let mut urls = Vec::new();
+                    collect_urls(&cell.inlines, &mut urls, session);
+                    if !urls.is_empty() {
+                        out.insert(idx, urls);
+                    }
+                }
+            }
+            idx += 1;
+        }
+    }
+    out
+}
+
 /// caret 所在单元格的 flat 索引（header 先，rows 后）；不在任何单元格时 None。
 pub(crate) fn active_cell_index(tbl: &veil_core::Table, caret: usize) -> Option<usize> {
     let mut idx = 0usize;
@@ -1885,10 +2720,7 @@ fn split_row(row: &str) -> Vec<String> {
     if trimmed.is_empty() {
         return Vec::new();
     }
-    trimmed
-        .split('|')
-        .map(|s| s.trim().to_string())
-        .collect()
+    trimmed.split('|').map(|s| s.trim().to_string()).collect()
 }
 
 #[allow(dead_code)]
@@ -2162,15 +2994,11 @@ pub(crate) fn local_image_path(url: &str, doc: Option<&Path>) -> Option<PathBuf>
     Some(doc?.parent()?.join(p))
 }
 
-/// 图片显示尺寸：宽超版心按比例缩放（高同比），至少 1px。
+/// 图片显示尺寸（仅宽度上限；测试与历史调用口径）。生产路径统一走
+/// `view::fit_size_box`（同时限宽限高，B4）。
+#[cfg(test)]
 pub(crate) fn fit_size(w: u32, h: u32, max_width: f32) -> (u32, u32) {
-    let w = w.max(1) as f32;
-    let h = h.max(1) as f32;
-    let s = if w > max_width { max_width / w } else { 1.0 };
-    (
-        (w * s).round().max(1.0) as u32,
-        (h * s).round().max(1.0) as u32,
-    )
+    crate::view::fit_size_box(w, h, max_width, f32::MAX)
 }
 
 #[cfg(test)]
@@ -2215,9 +3043,7 @@ mod tests {
         );
         // 分隔行与列数不变
         assert_eq!(
-            table_insert_row(TABLE_2X2_ALIGNED, 0, true)
-                .lines()
-                .nth(1),
+            table_insert_row(TABLE_2X2_ALIGNED, 0, true).lines().nth(1),
             Some("| :-- | --: |")
         );
     }
@@ -2280,7 +3106,10 @@ mod tests {
             "| a |\n| :-- |\n| c |\n| e |\n"
         );
         // 单列不删除
-        assert_eq!(table_delete_column("| a |\n| --- |\n| b |\n", 0), "| a |\n| --- |\n| b |\n");
+        assert_eq!(
+            table_delete_column("| a |\n| --- |\n| b |\n", 0),
+            "| a |\n| --- |\n| b |\n"
+        );
     }
 
     #[test]
@@ -2298,7 +3127,10 @@ mod tests {
             "回到无对齐时与原文逐字节一致"
         );
         // 幂等：同值再设一次输出相等
-        assert_eq!(table_set_align(&right, 1, veil_core::CellAlign::Right), Some(right));
+        assert_eq!(
+            table_set_align(&right, 1, veil_core::CellAlign::Right),
+            Some(right)
+        );
     }
 
     #[test]
@@ -2333,7 +3165,10 @@ mod tests {
         );
         // col 越界 / 无分隔行 / 第 2 行不是分隔格
         assert_eq!(table_set_align(TABLE, 2, veil_core::CellAlign::Left), None);
-        assert_eq!(table_set_align("| a |\n", 0, veil_core::CellAlign::Left), None);
+        assert_eq!(
+            table_set_align("| a |\n", 0, veil_core::CellAlign::Left),
+            None
+        );
         assert_eq!(
             table_set_align("| a |\n| x |\n| b |\n", 0, veil_core::CellAlign::Left),
             None
@@ -2363,4 +3198,3 @@ mod tests {
         assert_eq!(table_cell_start(&src, 3, 1), 40);
     }
 }
-

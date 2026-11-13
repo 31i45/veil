@@ -9,6 +9,7 @@ use super::{
     STATUS_H,
 };
 use crate::document::ExternalState;
+use crate::i18n::{t, Key};
 use crate::theme::Theme;
 use crate::tokens::{palette, space, state, stroke};
 use crate::view::{Frame, LayoutEngine};
@@ -137,7 +138,13 @@ impl Chrome {
         let status_h = STATUS_H * scale;
 
         // 菜单栏
-        frame.fill_rect(0, 0, frame.width, menu_h.ceil() as u32, palette::surface_card(theme));
+        frame.fill_rect(
+            0,
+            0,
+            frame.width,
+            menu_h.ceil() as u32,
+            palette::surface_card(theme),
+        );
         let menu_fade = self.menu_fade.view(self.hover_menu);
         for (i, x, w) in menu_bar_rects(scale) {
             // active（已展开）用按下色，hover 用悬停色：六态单源。
@@ -162,7 +169,7 @@ impl Chrome {
             self.draw_left(
                 frame,
                 engine,
-                MENUS[i].title,
+                t(MENUS[i].title),
                 x + 14.0 * scale,
                 menu_h / 2.0,
                 theme.text,
@@ -238,9 +245,9 @@ impl Chrome {
             if avail_notice >= space::XL * scale {
                 let notice = self.notice.clone();
                 let fitted = self.fit_middle(engine, &notice, avail_notice, scale);
-                if let Some(l) = self
-                    .labels
-                    .get_or_insert(engine, &fitted, state::disabled_fg(theme), scale)
+                if let Some(l) =
+                    self.labels
+                        .get_or_insert(engine, &fitted, state::disabled_fg(theme), scale)
                 {
                     let x = x0 + (avail_notice - l.w as f32) / 2.0;
                     let y = mid - l.h as f32 / 2.0;
@@ -310,9 +317,13 @@ impl Chrome {
                     }
                 }
                 // 主题项 / 开关项：开启态在右侧显示「当前」（快捷键列复用）
-                let is_current = theme_action_matches(*action, theme.mode)
-                    || action_checked(*action, flags);
-                let hint = if is_current { "当前" } else { shortcut };
+                let is_current =
+                    theme_action_matches(*action, theme.mode) || action_checked(*action, flags);
+                let hint = if is_current {
+                    t(Key::MenuCurrent)
+                } else {
+                    shortcut
+                };
                 // 标签可用宽 = 行内宽 - 左右内边距 - 右侧提示占位
                 let inner = iw - 2.0 * pad;
                 let hint_w = if hint.is_empty() {

@@ -36,8 +36,15 @@ pub(crate) mod surface {
     /// High 档阴影层（模态对话框）：比 Low 档多两层、外扩更大、alpha 更浓，
     /// 强化「应用内对话框」层级，叠加大致等效 10px 高斯模糊。
     #[allow(dead_code)] // 模态对话框 paint 改造后消费
-    pub const HIGH_SHADOW_LAYERS: &[(f32, u8)] =
-        &[(10.0, 4), (8.0, 6), (6.0, 10), (4.0, 16), (3.0, 22), (2.0, 28), (1.0, 34)];
+    pub const HIGH_SHADOW_LAYERS: &[(f32, u8)] = &[
+        (10.0, 4),
+        (8.0, 6),
+        (6.0, 10),
+        (4.0, 16),
+        (3.0, 22),
+        (2.0, 28),
+        (1.0, 34),
+    ];
     /// High 档深色主题阴影 alpha 增益（模态在深底上需更强存在感）
     #[allow(dead_code)] // 同上
     pub const HIGH_SHADOW_DARK_GAIN: f32 = 1.35;
@@ -59,6 +66,14 @@ pub(crate) mod surface {
     pub const DIALOG_TITLE_GAP: f32 = 8.0;
     /// 正文与按钮行间距（px）
     pub const DIALOG_BODY_GAP: f32 = 20.0;
+    /// 标题行高（px）：标题字号更大，但行高与正文行距保持同一节奏。
+    pub const DIALOG_TITLE_LINE_HEIGHT: f32 = 22.0;
+    /// 正文行高（px）：错误/确认弹窗共用，禁止在弹窗内另立行距。
+    pub const DIALOG_BODY_LINE_HEIGHT: f32 = 22.0;
+    /// 语义图标边长（px）：错误态标题左侧的徽标，与标题同高不压字。
+    pub const DIALOG_ICON_SIZE: f32 = 18.0;
+    /// 语义图标与标题间距（px）。
+    pub const DIALOG_ICON_GAP: f32 = 10.0;
     /// 模态卡片距视口边缘的最小留白（px）
     pub const DIALOG_MARGIN: f32 = 24.0;
     /// 浅色主题遮罩 alpha（黑）：足以压暗正文又把弹窗推前。
@@ -123,6 +138,18 @@ pub(crate) mod surface {
     }
     pub fn dialog_body_gap(scale: f32) -> f32 {
         DIALOG_BODY_GAP * scale
+    }
+    pub fn dialog_title_line_height(scale: f32) -> f32 {
+        DIALOG_TITLE_LINE_HEIGHT * scale
+    }
+    pub fn dialog_body_line_height(scale: f32) -> f32 {
+        DIALOG_BODY_LINE_HEIGHT * scale
+    }
+    pub fn dialog_icon_size(scale: f32) -> f32 {
+        DIALOG_ICON_SIZE * scale
+    }
+    pub fn dialog_icon_gap(scale: f32) -> f32 {
+        DIALOG_ICON_GAP * scale
     }
     pub fn dialog_margin(scale: f32) -> f32 {
         DIALOG_MARGIN * scale
@@ -261,6 +288,8 @@ pub(crate) mod typography {
     pub const UI_SIZE: f32 = 13.0;
     /// UI 行高（单行浮层/标签）。
     pub const UI_LINE_HEIGHT: f32 = 18.0;
+    /// 模态标题字号：比 UI 正文大一档，形成清晰的层级（正文仍用 UI_SIZE）。
+    pub const DIALOG_TITLE_SIZE: f32 = 15.0;
     /// 正文字号（正文块与表格单元格）。
     pub const BODY_SIZE: f32 = 16.0;
     /// 正文行高。
@@ -274,6 +303,49 @@ pub(crate) mod typography {
     pub const SANS_FAMILIES: &[&str] = &["Microsoft YaHei UI", "Segoe UI"];
     /// 等宽族回退链（按序探测存在性）。
     pub const MONO_FAMILIES: &[&str] = &["Consolas", "Courier New"];
+}
+
+/// 正文排版标尺（B5）：行距/块距/容器内边距/图片限高的唯一定义源。
+///
+/// 长度均为 1.0× scale 基准的物理像素，调用方按 scale 线性放大。
+/// 与 `space` 的区别：`space` 是 UI chrome 的 4 倍数刻度，这里是正文排版语义标尺，
+/// 保留既有排版节奏（`PARA_GAP=10` 不是 4 的倍数，改它会整体改变文档观感）。
+pub(crate) mod doc {
+    /// 内容区左右边距（物理像素）。
+    pub const MARGIN: f32 = 16.0;
+    /// 相邻块（无空行分隔）的垂直间距。
+    pub const PARA_GAP: f32 = 10.0;
+    /// 标题块之后与下一个块的最小间距（层级感：大于正文段距）。
+    /// 保留既有 1.6× 比例（10 × 1.6 = 16），与 `PARA_GAP` 同源派生。
+    pub const HEADING_GAP: f32 = PARA_GAP * 1.6;
+    /// 正文可读列宽上限（全角字符当量）。
+    pub const READABLE_COLS: f32 = 40.0;
+    /// 启用可读列宽上限的窗口宽度阈值（物理像素，scale = 1 基准）。
+    pub const WIDE_WINDOW: f32 = 1600.0;
+    /// 空行高度（以正文行高为单位）：块间存在空行时额外占 1 行。
+    pub const BLANK_LINE_LINES: f32 = 1.0;
+    /// 文末可点击输入空间（以正文行高为单位，B5）：末行下方至少保留 2 行空白。
+    pub const BOTTOM_PAD_LINES: f32 = 2.0;
+    /// 行内图片高度上限（以正文行高为单位，B4）。
+    pub const IMG_INLINE_LINES: f32 = 2.0;
+    /// 独占一行（块级 / 段落仅含图片）图片高度上限（行高倍数，B4）。
+    pub const IMG_STANDALONE_LINES: f32 = 6.0;
+    /// 表格单元格内图片高度上限（行高倍数，B4）。
+    pub const IMG_TABLE_LINES: f32 = 1.5;
+    /// 代码卡外部内边距：左右 / 上下（绘制底色外扩）。
+    pub const CODE_PAD_X: f32 = 4.0;
+    pub const CODE_PAD_Y: f32 = 2.0;
+    /// 引用块左竖条：相对版心左缘的内缩 / 条宽。
+    pub const QUOTE_INSET: f32 = 8.0;
+    pub const QUOTE_RAIL: f32 = 3.0;
+    /// Details 卡片相对版心的内边距。
+    pub const DETAILS_PAD: f32 = 4.0;
+    /// 表格单元格内边距（水平 / 垂直）。
+    pub const TABLE_PAD_X: f32 = 8.0;
+    pub const TABLE_PAD_Y: f32 = 5.0;
+    /// 容器内表格/图片的额外水平缩进步长：引用层 / 列表层。
+    pub const QUOTE_STEP: f32 = 14.0;
+    pub const LIST_STEP: f32 = 6.0;
 }
 
 /// 动效令牌（S1 / S6）：S6 的过渡实现只从这里取时长与缓动。
@@ -305,6 +377,40 @@ mod tests {
         assert!((typography::CODE_SCALE - 0.875).abs() < 1e-6);
         assert!(typography::UI_LINE_HEIGHT > typography::UI_SIZE);
         assert!(typography::BODY_LINE_HEIGHT > typography::BODY_SIZE);
+    }
+
+    /// 弹窗视觉令牌必须单点定义，且标题/正文/图标/按钮处在同一节奏上。
+    #[test]
+    #[allow(clippy::assertions_on_constants)]
+    fn dialog_tokens_are_single_source_and_consistent() {
+        use super::surface;
+        assert!(
+            typography::DIALOG_TITLE_SIZE > typography::UI_SIZE,
+            "标题须大于正文字号"
+        );
+        assert!(
+            typography::DIALOG_TITLE_SIZE < typography::BODY_SIZE,
+            "标题不得大于正文字号"
+        );
+        assert!(surface::DIALOG_TITLE_LINE_HEIGHT >= typography::DIALOG_TITLE_SIZE);
+        assert!(surface::DIALOG_BODY_LINE_HEIGHT >= typography::UI_SIZE);
+        assert!(surface::DIALOG_ICON_SIZE >= typography::DIALOG_TITLE_SIZE);
+        assert!(surface::DIALOG_ICON_GAP > 0.0);
+        assert!(surface::DIALOG_BUTTON_HEIGHT >= surface::DIALOG_BUTTON_MIN_WIDTH / 4.0);
+        assert!(surface::DIALOG_MAX_WIDTH > surface::DIALOG_MIN_WIDTH);
+        assert!(
+            surface::DIALOG_RADIUS > surface::CORNER_RADIUS,
+            "模态圆角须大于普通浮层"
+        );
+        // 几何访问器必须按 scale 线性放大（150% / 200% 不脱节）。
+        for s in [1.0f32, 1.5, 2.0] {
+            assert!((surface::dialog_icon_size(s) - surface::DIALOG_ICON_SIZE * s).abs() < 1e-6);
+            assert!(
+                (surface::dialog_title_line_height(s) - surface::DIALOG_TITLE_LINE_HEIGHT * s)
+                    .abs()
+                    < 1e-6
+            );
+        }
     }
 
     #[test]
@@ -360,7 +466,10 @@ mod tests {
     fn high_shadow_layers_are_seven_layers_and_have_stronger_dark_gain() {
         use super::surface::{HIGH_SHADOW_DARK_GAIN, HIGH_SHADOW_LAYERS, SHADOW_DARK_GAIN};
         assert_eq!(HIGH_SHADOW_LAYERS.len(), 7, "High 档阴影必须 7 层");
-        assert!(HIGH_SHADOW_DARK_GAIN > SHADOW_DARK_GAIN, "High 档 dark 增益 > Low 档");
+        assert!(
+            HIGH_SHADOW_DARK_GAIN > SHADOW_DARK_GAIN,
+            "High 档 dark 增益 > Low 档"
+        );
     }
 
     #[test]

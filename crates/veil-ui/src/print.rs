@@ -6,6 +6,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::app::App;
+use crate::i18n::{t, tf, Key};
 use crate::theme::NativeWindow;
 use crate::tokens::palette;
 use crate::view::Frame;
@@ -26,7 +27,7 @@ pub trait Print {
 
     /// 直接导出 PDF（无打印对话框）。默认实现仅提示，不产生输出。
     fn export_pdf(&mut self, session: &mut PrintSession) {
-        session.notice("当前平台暂不支持导出 PDF");
+        session.notice(t(Key::PrintUnsupportedPdf));
     }
 }
 
@@ -34,7 +35,7 @@ pub trait Print {
 pub struct NoPrint;
 impl Print for NoPrint {
     fn print(&mut self, session: &mut PrintSession) {
-        session.notice("当前平台暂不支持打印");
+        session.notice(t(Key::PrintUnsupportedPrint));
     }
 }
 
@@ -238,7 +239,7 @@ impl PrintSession<'_> {
     pub fn export_suggestion(&self) -> PathBuf {
         match self.app.doc.path.as_ref() {
             Some(p) => p.with_extension("pdf"),
-            None => PathBuf::from("未命名.pdf"),
+            None => PathBuf::from(t(Key::ExportUntitledPdf)),
         }
     }
 
@@ -328,7 +329,7 @@ impl PrintSession<'_> {
 
     /// 目录页标题行（左对齐），返回正文条目起点 y。
     fn draw_toc_title(&mut self, frame: &mut Frame, pad: i32, width: f32, gap: f32) -> f32 {
-        let (px, pw, ph) = self.text_raster("目录", width);
+        let (px, pw, ph) = self.text_raster(t(Key::PrintTocTitle), width);
         frame.blit(&px, pw, ph, pad, pad);
         pad as f32 + ph as f32 + gap
     }
@@ -348,7 +349,13 @@ impl PrintSession<'_> {
                 out.push((Vec::new(), 0, 0));
                 continue;
             }
-            let (px, pw, ph) = self.text_raster(&format!("{} / {}", i + 1, total), w as f32);
+            let (px, pw, ph) = self.text_raster(
+                &tf(
+                    Key::PrintPageFooter,
+                    &[&(i + 1).to_string(), &total.to_string()],
+                ),
+                w as f32,
+            );
             out.push((px, pw, ph));
         }
         out
@@ -373,6 +380,53 @@ impl PrintSession<'_> {
         self.app.request_redraw();
     }
 
+    /// 打印失败/中断：与其它失败态同一错误弹窗（重试重新打印 / 取消）。
+    pub fn print_error(&mut self, reason: &str) {
+        self.app.ui_state.chrome.notice = tf(Key::NoticePrintFailed, &[reason]);
+        self.app.show_error_modal(
+            t(Key::ModalPrintFailedTitle),
+            tf(Key::ModalPrintFailedBody, &[reason]),
+            crate::app::ErrorPurpose::Print,
+            vec![
+                crate::view::modal::ModalButton::new(
+                    1,
+                    t(Key::BtnRetry),
+                    crate::view::modal::ButtonRole::Primary,
+                )
+                .with_mnemonic('r'),
+                crate::view::modal::ModalButton::new(
+                    3,
+                    t(Key::BtnCancel),
+                    crate::view::modal::ButtonRole::Secondary,
+                ),
+            ],
+        );
+    }
+
+    /// 导出 PDF 失败：与应用内其它失败态共用同一错误弹窗（重试 / 取消）。
+    pub fn export_pdf_error(&mut self, reason: &str) {
+        self.app.ui_state.chrome.notice = tf(Key::NoticeExportPdfFailed, &[reason]);
+        let buttons = vec![
+            crate::view::modal::ModalButton::new(
+                1,
+                t(Key::BtnRetry),
+                crate::view::modal::ButtonRole::Primary,
+            )
+            .with_mnemonic('r'),
+            crate::view::modal::ModalButton::new(
+                3,
+                t(Key::BtnCancel),
+                crate::view::modal::ButtonRole::Secondary,
+            ),
+        ];
+        self.app.show_error_modal(
+            t(Key::ModalExportPdfFailedTitle),
+            tf(Key::ModalExportPdfFailedBody, &[reason]),
+            crate::app::ErrorPurpose::ExportPdf,
+            buttons,
+        );
+    }
+
     /// 窗口句柄（打印对话框的 owner）；无窗口/非 Windows 返回 None。
     pub fn window_handle(&self) -> Option<NativeWindow> {
         #[cfg(windows)]
@@ -394,10 +448,42 @@ impl PrintSession<'_> {
             None => &[],
         }
     }
+
+    /// 当前文档的完整 Markdown 源文本（原生 PDF / 导出侧用）。
+    pub fn markdown_text(&self) -> String {
+        let sess = self.app.editor.session();
+        let len = sess.text_len();
+        sess.text_slice(Range::new(0, len)).unwrap_or_default()
+    }
+
+    /// 只读语法会话（原生 PDF 版面重建用；不暴露可变入口）。
+    pub fn session(&self) -> &veil_core::Session {
+        self.app.editor.session()
+    }
+
+    /// 当前文档所在目录（相对图片路径的解析基准）；未保存返回 None。
+    pub fn document_dir(&self) -> Option<std::path::PathBuf> {
+        self.app
+            .doc
+            .path
+            .as_ref()
+            .and_then(|p| p.parent())
+            .map(|p| p.to_path_buf())
+    }
+
+    /// 当前打印的分页总数（含目录页）；非打印中返回 0。
+    pub fn total_pages(&self) -> usize {
+        self.app
+            .window_state
+            .print
+            .as_ref()
+            .map(|p| p.total_pages)
+            .unwrap_or(0)
+    }
 }
 
 impl App {
-    /// 菜单「打印…」入口（3b）：端口置换规避 app 与 ports.print 的同时借用。
+    /// 菜单「打印」入口（3b）：端口置换规避 app 与 ports.print 的同时借用。
     pub(crate) fn print_document(&mut self) {
         let mut port = std::mem::replace(&mut self.ports.print, Box::new(NoPrint));
         port.print(&mut PrintSession { app: self });

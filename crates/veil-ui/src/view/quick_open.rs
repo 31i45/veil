@@ -7,6 +7,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::geometry::Rect;
+use crate::i18n::Key;
 use crate::tokens::typography;
 
 /// 浮层基准宽（乘 DPI scale）。
@@ -219,6 +220,16 @@ pub(crate) fn filter(items: &[QuickItem], query: &str) -> Vec<usize> {
         .collect();
     hits.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
     hits.into_iter().map(|(_, i)| i).collect()
+}
+
+/// 空态文案：区分「完全没有候选（无最近文件/同目录无 Markdown）」与
+/// 「有候选但查询不命中」。两者共用同一行槽位与居中留白。
+pub(crate) fn empty_message(query: &str, items_empty: bool) -> Key {
+    if query.trim().is_empty() && items_empty {
+        Key::QuickOpenEmptyNoCandidates
+    } else {
+        Key::QuickOpenEmptyNoMatch
+    }
 }
 
 /// 浮层几何：面板、输入行与固定数量的候选行槽位。
@@ -438,5 +449,18 @@ mod tests {
         let out = fit_label(long, 60.0, 1.0);
         assert!(out.ends_with('…'));
         assert!(out.chars().count() < long.chars().count());
+    }
+
+    /// 空态文案：无候选与查询不命中必须给出不同原因，不能共用一个含糊提示。
+    #[test]
+    fn empty_message_distinguishes_no_candidates_from_no_match() {
+        use crate::i18n::t;
+        assert_eq!(t(empty_message("", true)), "暂无最近文件或同目录 Markdown");
+        assert_eq!(
+            t(empty_message("   ", true)),
+            "暂无最近文件或同目录 Markdown"
+        );
+        assert_eq!(t(empty_message("abc", true)), "无匹配文件");
+        assert_eq!(t(empty_message("abc", false)), "无匹配文件");
     }
 }

@@ -12,6 +12,7 @@ use std::os::windows::ffi::OsStrExt;
 use std::path::Path;
 use std::ptr;
 
+use veil_ui::i18n::{t, tf, Key};
 use veil_ui::ImageData;
 
 /// COM GUID（16 字节，repr(C) 与 Windows ABI 一致）。
@@ -107,7 +108,7 @@ fn hresult(hr: i32, what: &str) -> Result<(), String> {
     if hr >= 0 {
         Ok(())
     } else {
-        Err(format!("{what}失败（HRESULT 0x{:08X}）", hr as u32))
+        Err(tf(Key::ErrHresult, &[what, &format!("{:08X}", hr as u32)]))
     }
 }
 
@@ -132,7 +133,10 @@ pub fn decode_image(path: &Path) -> Result<ImageData, String> {
 unsafe fn decode_impl(path: &Path) -> Result<ImageData, String> {
     let hr = CoInitializeEx(ptr::null_mut(), COINIT_APARTMENTTHREADED);
     if hr < 0 && hr != RPC_E_CHANGED_MODE {
-        return Err(format!("COM 初始化失败（HRESULT 0x{:08X}）", hr as u32));
+        return Err(tf(
+            Key::ErrHresult,
+            &[t(Key::WicComInit), &format!("{:08X}", hr as u32)],
+        ));
     }
     // S_OK/S_FALSE 都需配对 CoUninitialize；RPC_E_CHANGED_MODE 说明线程已在
     // 其它套间（winit 的 OLE 拖放），本次未初始化、不得反初始化
@@ -149,10 +153,10 @@ unsafe fn decode_impl(path: &Path) -> Result<ImageData, String> {
             &IID_IWIC_IMAGING_FACTORY,
             factory.out(),
         ),
-        "创建 WIC 工厂",
+        t(Key::WicCreateFactory),
     )?;
     if factory.0.is_null() {
-        return Err("创建 WIC 工厂返回空指针".into());
+        return Err(t(Key::WicFactoryNull).into());
     }
 
     // IWICImagingFactory::CreateDecoderFromFilename（vtable 3）
@@ -180,10 +184,10 @@ unsafe fn decode_impl(path: &Path) -> Result<ImageData, String> {
             WIC_DECODE_METADATA_CACHE_ON_DEMAND,
             decoder.out(),
         ),
-        "打开图片解码器",
+        t(Key::WicOpenDecoder),
     )?;
     if decoder.0.is_null() {
-        return Err("图片解码器返回空指针".into());
+        return Err(t(Key::WicDecoderNull).into());
     }
 
     // IWICBitmapDecoder::GetFrame（vtable 13：QueryCapability/Initialize/GetContainerFormat/
@@ -192,18 +196,21 @@ unsafe fn decode_impl(path: &Path) -> Result<ImageData, String> {
     let mut frame = Com::empty();
     type GetFrameFn = unsafe extern "system" fn(*mut c_void, u32, *mut *mut c_void) -> i32;
     let get_frame: GetFrameFn = method(decoder.0, 13);
-    hresult(get_frame(decoder.0, 0, frame.out()), "读取图片帧")?;
+    hresult(get_frame(decoder.0, 0, frame.out()), t(Key::WicReadFrame))?;
     if frame.0.is_null() {
-        return Err("图片帧返回空指针".into());
+        return Err(t(Key::WicFrameNull).into());
     }
 
     // IWICImagingFactory::CreateFormatConverter（vtable 10）
     let mut converter = Com::empty();
     type CreateConverterFn = unsafe extern "system" fn(*mut c_void, *mut *mut c_void) -> i32;
     let create_conv: CreateConverterFn = method(factory.0, 10);
-    hresult(create_conv(factory.0, converter.out()), "创建格式转换器")?;
+    hresult(
+        create_conv(factory.0, converter.out()),
+        t(Key::WicCreateConverter),
+    )?;
     if converter.0.is_null() {
-        return Err("格式转换器返回空指针".into());
+        return Err(t(Key::WicConverterNull).into());
     }
 
     // IWICFormatConverter::Initialize（vtable 8：IWICBitmapSource 5 项之后）
@@ -227,20 +234,23 @@ unsafe fn decode_impl(path: &Path) -> Result<ImageData, String> {
             0.0,
             WIC_PALETTE_CUSTOM,
         ),
-        "转换像素格式",
+        t(Key::WicConvertPixels),
     )?;
 
     // IWICBitmapSource::GetSize（vtable 3）
     let (mut w, mut h) = (0u32, 0u32);
     type GetSizeFn = unsafe extern "system" fn(*mut c_void, *mut u32, *mut u32) -> i32;
     let get_size: GetSizeFn = method(converter.0, 3);
-    hresult(get_size(converter.0, &mut w, &mut h), "读取图片尺寸")?;
+    hresult(get_size(converter.0, &mut w, &mut h), t(Key::WicReadSize))?;
     let pixels = w as u64 * h as u64;
     if w == 0 || h == 0 {
-        return Err(format!("图片尺寸无效: {w}×{h}"));
+        return Err(tf(
+            Key::ErrImageSizeInvalid,
+            &[&w.to_string(), &h.to_string()],
+        ));
     }
     if pixels > MAX_PIXELS {
-        return Err(format!("图片过大: {w}×{h}（上限 1 亿像素）"));
+        return Err(tf(Key::ErrImageTooLarge, &[&w.to_string(), &h.to_string()]));
     }
 
     // IWICBitmapSource::CopyPixels（vtable 7）：null 矩形 = 整张图
@@ -256,7 +266,7 @@ unsafe fn decode_impl(path: &Path) -> Result<ImageData, String> {
             buf.len() as u32,
             buf.as_mut_ptr(),
         ),
-        "读取图片像素",
+        t(Key::WicReadPixels),
     )?;
 
     Ok(ImageData {

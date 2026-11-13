@@ -205,6 +205,10 @@ impl Frame {
         }
     }
 
+    /// 圆角描边矩形（kbd/abbr 等行内装饰）：外框 fill_rounded_rect + 内缩 stroke 宽度
+    /// 的 fill_rounded_rect（透明底）叠出纯描边效果；内缩半径同步减 stroke 宽度，
+    /// 保证四角曲率连续。stroke 宽为 0 或 ≥ 短边一半时退化为整框填充。
+    #[allow(clippy::too_many_arguments)]
     /// surface 卡片（全部浮层的统一观感）：柔和投影 + 1px 圆角边框 + 圆角底。
     /// 边框用「外框圆角矩形（边框色）+ 内缩 1px 圆角矩形（底色）」叠出，
     /// 四个角与底同曲率，无直边接缝。x/y/w/h 为面板外边界（阴影自此处外扩）。

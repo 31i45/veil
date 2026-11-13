@@ -7,6 +7,7 @@
 
 use std::ffi::c_void;
 
+use veil_ui::i18n::{tf, Key};
 use veil_ui::UrlOpener;
 
 use super::wide;
@@ -35,7 +36,7 @@ pub struct SystemUrlOpener;
 impl UrlOpener for SystemUrlOpener {
     fn open_url(&mut self, url: &str) -> Result<(), String> {
         if !veil_ui::url_is_openable(url) {
-            return Err(format!("不支持的链接协议: {url}"));
+            return Err(tf(Key::ErrShellProtocol, &[url]));
         }
         let op = wide("open");
         let file = wide(url);
@@ -52,7 +53,7 @@ impl UrlOpener for SystemUrlOpener {
             )
         };
         if ret <= SHELL_EXECUTE_MIN_SUCCESS {
-            return Err(format!("ShellExecuteW 返回 {ret}"));
+            return Err(tf(Key::ErrShellExecute, &[&ret.to_string()]));
         }
         Ok(())
     }
@@ -66,7 +67,11 @@ mod tests {
     #[test]
     fn rejects_non_whitelisted_scheme_without_invoking_shell() {
         let mut o = SystemUrlOpener;
-        for bad in ["file:///C:/Windows/notepad.exe", "javascript:alert(1)", "a.md"] {
+        for bad in [
+            "file:///C:/Windows/notepad.exe",
+            "javascript:alert(1)",
+            "a.md",
+        ] {
             let err = o.open_url(bad).expect_err("白名单外必须拒绝");
             assert!(err.contains("不支持的链接协议"), "错误信息可读: {err}");
         }

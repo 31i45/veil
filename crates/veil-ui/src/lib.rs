@@ -21,6 +21,7 @@ mod document;
 mod editor;
 mod geometry;
 mod html;
+pub mod i18n;
 mod icon;
 mod image;
 mod input;
@@ -30,6 +31,7 @@ mod mode;
 mod paint;
 mod perf;
 mod print;
+mod shell;
 mod stats;
 mod theme;
 mod tokens;
@@ -39,15 +41,16 @@ mod view;
 mod app_tests;
 
 pub use app::{
-    normalize_link_url, run, url_is_openable, Clipboard, Clock, Doc, Exporter, FileDialog,
-    FileEvent, FileStore, FileWatcher, PersistEnv, Ports, RecoveryStore, SessionStore,
-    SnapshotStore, UrlOpener,
+    content_hash, format_unix_ms_utc, normalize_link_url, url_is_openable, Clipboard, Clock, Doc,
+    Exporter, FileDialog, FileEvent, FileStore, FileWatcher, PersistEnv, Ports, RecoveryStore,
+    SessionStore, SnapshotMeta, SnapshotStore, StartupError, UrlOpener,
 };
 pub use chrome::path_label;
 pub use docio::decode;
 pub use image::{AssetStore, ImageData, ImageLoader};
 pub use math::{MathImage, MathRenderer};
 pub use print::{ExportOptions, NoPrint, Print, PrintSession};
+pub use shell::run;
 pub use theme::{
     config_path, data_dir, ConfigStore, ExportStyle, NativeWindow, SystemTheme, ThemeEnv,
     WindowEffects,

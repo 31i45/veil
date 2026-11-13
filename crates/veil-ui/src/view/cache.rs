@@ -77,6 +77,7 @@ impl Revs {
             image_base: self.image_base,
             source_mode,
             footnote_epoch,
+            fold_epoch: 0,
         }
     }
 }
@@ -94,6 +95,9 @@ pub(crate) struct BaseKey {
     /// 脚注代次：全文引用顺序 + 编号的确定性哈希。编号是全文派生量——文首新增引用
     /// 会改变文末定义块的前缀编号，而定义块文本不变；不带此代次会命中旧布局。
     footnote_epoch: u64,
+    /// 行内 details 折叠代次（B3）：折叠态改变块的排版文本（正文整段消隐），
+    /// 必须换键重排；集合按「条目哈希异或」折叠，与迭代顺序无关。
+    fold_epoch: u64,
 }
 
 /// 表格网格键 = 基础键 + 活动单元格 flat 索引（`u32::MAX` = 无活动格）
@@ -292,14 +296,13 @@ impl Cache {
     /// "窗口 + 一屏 overscan + caret 块 + 块级公式图"量级，防止滚动过程中内存持续增长。
     /// 其他 6 个缓存（math_imgs 除外）不动：它们要么量小要么按内容寻址跨块共享。
     /// base_key 不匹配的条目按 `m.key.base == *base` 双重保险剪（resize/DPI 风暴期间旧键残留）。
-    pub(crate) fn prune_viewport(
-        &mut self,
-        keep: &HashSet<BlockId>,
-        base: &BaseKey,
-    ) {
-        self.layouts.retain(|id, m| keep.contains(id) && m.key.base == *base);
-        self.rasters.retain(|id, m| keep.contains(id) && m.key.base == *base);
-        self.tables.retain(|id, m| keep.contains(id) && m.key.base == *base);
+    pub(crate) fn prune_viewport(&mut self, keep: &HashSet<BlockId>, base: &BaseKey) {
+        self.layouts
+            .retain(|id, m| keep.contains(id) && m.key.base == *base);
+        self.rasters
+            .retain(|id, m| keep.contains(id) && m.key.base == *base);
+        self.tables
+            .retain(|id, m| keep.contains(id) && m.key.base == *base);
     }
 }
 
@@ -308,12 +311,31 @@ impl App {
     pub(crate) fn base_key(&self) -> BaseKey {
         // 脚注编号是全文派生量（当前数据量小：只哈希引用 id 列表，不扫正文）。
         let epoch = footnote_epoch(&self.editor.session().footnote_ids());
-        self.input_state.revs.base(
+        let mut key = self.input_state.revs.base(
             self.content_width(),
             self.input_state.scale,
             self.source_mode(),
             epoch,
-        )
+        );
+        key.fold_epoch = self.inline_details_epoch();
+        key
+    }
+
+    /// 行内 details 折叠集合的确定性指纹（与 HashSet 迭代顺序无关）。
+    fn inline_details_epoch(&self) -> u64 {
+        let mut acc = 0u64;
+        for (id, off) in &self.ui_state.expanded_inline_details {
+            let mut h = 0xcbf2_9ce4_8422_2325u64;
+            h = (h ^ id.0).wrapping_mul(0x0100_0000_01b3);
+            h = (h ^ *off as u64).wrapping_mul(0x0100_0000_01b3);
+            acc ^= h.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        }
+        // 非空集合强制非零，与默认键（空集 = 0）区分。
+        if acc == 0 && !self.ui_state.expanded_inline_details.is_empty() {
+            1
+        } else {
+            acc
+        }
     }
 
     /// 当前文档的脚注渲染上下文：编号表一次构建、逐块 O(1) 查询；随 `base_key` 对齐。
@@ -495,11 +517,17 @@ mod tests {
         // 为 ids[0] 和 ids[1] 填充 rasters（值 = (像素, 宽, 高) 易构造）
         c.rasters.insert(
             ids[0],
-            Memo { key: lk0, value: (vec![0u8; 4], 1, 1) },
+            Memo {
+                key: lk0,
+                value: (vec![0u8; 4], 1, 1),
+            },
         );
         c.rasters.insert(
             ids[1],
-            Memo { key: lk1, value: (vec![0u8; 4], 1, 1) },
+            Memo {
+                key: lk1,
+                value: (vec![0u8; 4], 1, 1),
+            },
         );
         assert_eq!(c.rasters.len(), 2, "预填充成功");
 
@@ -517,7 +545,13 @@ mod tests {
         // 用 ids[1] 插 base2 条目（ids[0] 已经被 prune_viewport 保留且还是 base 的条目）
         c.rasters.insert(
             ids[1],
-            Memo { key: LayoutKey { base: base2, reveal: 0 }, value: (vec![0u8; 4], 1, 1) },
+            Memo {
+                key: LayoutKey {
+                    base: base2,
+                    reveal: 0,
+                },
+                value: (vec![0u8; 4], 1, 1),
+            },
         );
         assert_eq!(c.rasters.len(), 2, "ids[0] base 条目 + ids[1] base2 条目");
         let keep2: HashSet<BlockId> = [ids[0], ids[1]].into_iter().collect();
@@ -571,7 +605,13 @@ mod tests {
         c.prune_viewport(&keep, &base);
 
         // prune_viewport 只剪 raster/layout/table，其他不动
-        assert!(c.math_imgs.contains_key(&ids[0]), "块级公式图（MathKey 索引）不被 viewport prune 剪");
-        assert!(c.inline_math.contains_key("x"), "行内公式（tex 内容寻址）不被 viewport prune 剪");
+        assert!(
+            c.math_imgs.contains_key(&ids[0]),
+            "块级公式图（MathKey 索引）不被 viewport prune 剪"
+        );
+        assert!(
+            c.inline_math.contains_key("x"),
+            "行内公式（tex 内容寻址）不被 viewport prune 剪"
+        );
     }
 }

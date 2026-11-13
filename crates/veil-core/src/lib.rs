@@ -4,16 +4,24 @@
 //! Markdown 源码是唯一真值；内核单线程。
 
 mod buffer;
+mod callouts;
 mod history;
+mod mermaid;
 mod range;
 mod session;
 mod slug;
 mod syntax;
 
+pub use callouts::CalloutRegistry;
+pub use mermaid::{
+    detect_type, mermaid_live_url, MermaidTemplate, CLASS_TEMPLATE, ER_TEMPLATE,
+    FLOWCHART_TEMPLATE, MERMAID_LIVE_BASE, SEQUENCE_TEMPLATE, STATE_TEMPLATE,
+};
 pub use range::{Bias, MarkId, Range};
 pub use session::{Edit, EditError, Events, Session};
 pub use slug::{heading_slug, heading_slugs};
 pub use syntax::{
-    emphasis_spans, list_signature, task_span, AdmonitionType, BlockId, BlockKind, CellAlign,
-    EmphasisSpan, InlineKind, InlineNode, Table, TableCell,
+    emphasis_spans, list_signature, sanitize_style, should_strip_html, task_span, AdmonitionType,
+    BlockContainer, BlockId, BlockKind, Callout, CellAlign, EmphasisSpan, HtmlAttrs, HtmlStyle,
+    HtmlTag, InlineKind, InlineNode, Table, TableCell,
 };

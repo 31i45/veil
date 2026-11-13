@@ -8,18 +8,18 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use softbuffer::{Context, Surface};
-use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, Ime, MouseButton, MouseScrollDelta, WindowEvent};
-use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
+use winit::event_loop::ActiveEventLoop;
 use winit::window::{Icon, Window, WindowId};
 
 use crate::autosave::Autosave;
 use crate::chrome::{self, Chrome, Viewport};
 use crate::docio::{decode, encode};
-use crate::document::{recovery, session};
+use crate::document::{history, recovery, session};
 use crate::editor::Editor;
 use crate::geometry::{clamp_window_geom, ScreenRect, BASE_LINE_HEIGHT};
+use crate::i18n::{t, tf, Key};
 use crate::image::{AssetStore, ImageData, ImageLoader};
 use crate::input::Mods;
 use crate::interaction::ZOOM_WHEEL_PX;
@@ -30,13 +30,14 @@ use crate::theme::{
     WindowGeom,
 };
 use crate::view::{
-    quick_open, search, Cache, Frame, LayoutEngine, Outline, QuickOpen, Revs, Search,
+    quick_open, search, Cache, Frame, History, LayoutEngine, Outline, QuickOpen, Revs, Search,
 };
 
 // 各域 impl App 的注册由 lib.rs 的模块声明承担（同 crate 内 impl 自动链接）。
 
 use crate::document::block_index::BlockIndex;
 use crate::document::Persist;
+use veil_core::BlockId;
 
 /// 外部文件监听轮询间隔（切片 16）：事件在实现侧入队，主线程按此节奏非阻塞取走。
 /// 仅在有路径时设置唤醒，草稿空转不产生周期性唤醒。
@@ -83,6 +84,36 @@ pub trait FileStore {
 /// 测试注入固定时钟即可断言文案。返回值须为两位补零的 `HH:MM`。
 pub trait Clock {
     fn local_hhmm(&self) -> String;
+    /// 快照时间戳的本地展示文本（`YYYY-MM-DD HH:MM:SS`）。默认按 UTC 派生，
+    /// 产品层可覆写为本地时区；测试注入固定值即可断言文案。
+    fn local_datetime(&self, ts_ms: u64) -> String {
+        format_unix_ms_utc(ts_ms)
+    }
+}
+
+/// Unix 毫秒 → `YYYY-MM-DD HH:MM:SS`（UTC）。快照列表的兜底格式：
+/// 不依赖系统时区，保证 headless 测试与跨平台文案稳定。
+pub fn format_unix_ms_utc(ts_ms: u64) -> String {
+    let secs = (ts_ms / 1000) as i64;
+    let sod = secs.rem_euclid(86_400);
+    let days = secs.div_euclid(86_400);
+    // Howard Hinnant civil_from_days：1970-01-01 起的天数 → 公历日期
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    format!(
+        "{y:04}-{m:02}-{d:02} {:02}:{:02}:{:02}",
+        sod / 3600,
+        (sod % 3600) / 60,
+        sod % 60
+    )
 }
 
 /// 文件对话框抽象（切片 15）：实现由产品层（veil）注入，本层不依赖具体 GUI 框架。
@@ -206,15 +237,41 @@ pub trait SessionStore {
     fn save(&mut self, text: &str) -> Result<(), String>;
 }
 
-/// 版本历史快照存储（N1）：多槽、按文档分目录、原子写。
+/// 单份版本快照的元数据（N1）：时间戳 + 内容哈希 + 字节数。
+/// `ts_ms` 同时是槽名（目录内唯一），`hash` 用于去重与损坏校验，`bytes` 供列表展示。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct SnapshotMeta {
+    pub ts_ms: u64,
+    pub hash: u64,
+    pub bytes: u64,
+}
+
+/// 快照内容哈希（FNV-1a 64）：产品层写元数据/校验与 UI 去重共用同一实现。
+pub fn content_hash(data: &[u8]) -> u64 {
+    recovery::fnv64(data)
+}
+
+/// 版本历史快照存储（N1）：多槽、按文档稳定身份分目录、原子写。
 /// 实现由产品层注入；snapshot_text 是 Markdown 源码纯文本。
+///
+/// 稳定身份键（`doc_key`）由调用方按「规范化绝对路径」或「未命名草稿会话 id」派生；
+/// 实现不得把内容哈希当目录键（内容一变历史就碎成多个目录）。
 pub trait SnapshotStore {
-    /// 保存一份快照，返回 unix 毫秒时间戳作槽名；失败不 panic。
-    fn save_snapshot(&mut self, doc_hash: u64, snapshot_text: &str) -> Result<u64, String>;
-    /// 列出某文档的所有快照时间戳（升序）。
-    fn list_snapshots(&mut self, doc_hash: u64) -> Result<Vec<u64>, String>;
-    /// 删除某文档最旧的 N 槽（清理策略调用）。
-    fn prune(&mut self, doc_hash: u64, keep_newest: usize) -> Result<usize, String>;
+    /// 保存一份快照；同一内容（哈希相同）不重复写，返回既有元数据。
+    fn save_snapshot(&mut self, doc_key: u64, snapshot_text: &str) -> Result<SnapshotMeta, String>;
+    /// 列出某文档的全部快照，按时间倒序（最新在前）。损坏/缺失项跳过而不是报错。
+    fn list_snapshots(&mut self, doc_key: u64) -> Result<Vec<SnapshotMeta>, String>;
+    /// 读取某槽纯文本；缺失/校验失败返回可读错误（调用方展示错误态，不崩溃）。
+    fn read_snapshot(&mut self, doc_key: u64, ts_ms: u64) -> Result<String, String>;
+    /// 删除某槽（快照 + 元数据）；已不存在视为成功。
+    fn delete_snapshot(&mut self, doc_key: u64, ts_ms: u64) -> Result<(), String>;
+    /// 清空某文档全部快照，返回删除份数。
+    fn clear_snapshots(&mut self, doc_key: u64) -> Result<usize, String>;
+    /// 删除某文档最旧的 N 槽（超出保留上限时调用）。
+    fn prune(&mut self, doc_key: u64, keep_newest: usize) -> Result<usize, String>;
+    /// 未命名草稿首次保存：把临时会话键的快照迁移到路径键目录，返回迁移份数。
+    /// 目标目录已有同内容快照时去重跳过。
+    fn migrate_key(&mut self, from: u64, to: u64) -> Result<usize, String>;
 }
 
 /// 持久化能力打包（0b）：崩溃恢复 + 会话/最近文件 + 版本快照。与 ThemeEnv 同模式，
@@ -223,6 +280,17 @@ pub struct PersistEnv {
     pub recovery: Box<dyn RecoveryStore>,
     pub session: Box<dyn SessionStore>,
     pub snapshot: Box<dyn SnapshotStore>,
+}
+
+/// 启动即失败：产品层无法读取目标文件时，以空白草稿开窗并让首帧弹出应用内错误模态。
+#[derive(Clone, Debug)]
+pub struct StartupError {
+    /// 读取失败的目标路径（「重试」重读同一文件）。
+    pub path: PathBuf,
+    /// 弹窗标题（产品层传 `t(Key::MainOpenFailedTitle)`）。
+    pub title: String,
+    /// 已含路径/原因/下一步的正文（产品层传 `open_failure_text`）。
+    pub message: String,
 }
 
 /// 待编辑文档：产品层从 CLI 参数或默认样例构造。
@@ -235,6 +303,8 @@ pub struct Doc {
     /// 启动恢复模式（0b）：无 CLI 参数时置 true——允许从崩溃恢复草稿/会话
     /// 最近文件重建文档；CLI 显式打开时置 false（恢复文件保留不动）。
     pub resume: bool,
+    /// 启动即失败：以空白草稿开窗，并在首帧弹出应用内错误模态。
+    pub open_error: Option<StartupError>,
 }
 
 /// 外部依赖端口聚合（公共 API）：所有产品层注入的 trait/配置打包成一个 struct，
@@ -257,16 +327,9 @@ pub struct Ports {
     pub url_opener: Box<dyn UrlOpener>,
 }
 
-/// 运行编辑器窗口。所有外部依赖经 Ports struct 注入；公式渲染器、图片加载/资产
-/// 存储与导出器由产品层实现（latex-rust / png / pulldown-cmark，ADR-002）；
-/// 主题配置与系统外观同样注入（切片 17）。
-pub fn run(doc: Doc, ports: Ports) -> Result<(), String> {
-    let event_loop = EventLoop::new().map_err(|e| format!("创建事件循环失败: {e}"))?;
-    event_loop.set_control_flow(ControlFlow::Wait);
-    let mut app = App::new(doc, ports);
-    event_loop
-        .run_app(&mut app)
-        .map_err(|e| format!("事件循环错误: {e}"))
+enum ConfigSave {
+    Theme,
+    Window,
 }
 
 /// 被挂起的操作意图：模态结论出来后才执行，避免阻塞事件循环。
@@ -275,13 +338,50 @@ pub(crate) enum PendingIntent {
     New,
     Open,
     OpenRecent(PathBuf),
+    /// 版本历史恢复（B8a）：未保存确认通过后把快照文本写回缓冲区。
+    RestoreSnapshot(String),
+}
+
+/// 错误弹窗的重试语义：失败后用户点「重试」时应重新执行的动作。
+/// 保留失败目标（路径），避免用户在弹窗里重试却落到另一个文件。
+#[derive(Clone, Debug)]
+pub(crate) enum ErrorPurpose {
+    /// Ctrl+S 保存失败：重试写同一路径。
+    Save,
+    /// 另存为失败：重试写同一目标路径。
+    SaveAs(PathBuf),
+    /// 打开失败：重试读同一路径。
+    Open(PathBuf),
+    /// 启动即失败：重试读同一路径；其余出口为「打开其他文件」/关闭本窗口。
+    Startup(PathBuf),
+    /// 导出 HTML 失败：重试走同一导出流程（重新确认输出位置）。
+    ExportHtml,
+    /// 导出 PDF 失败：重试走同一导出流程。
+    ExportPdf,
+    /// 打印失败/中断：重试重新打开打印对话框。
+    Print,
+    /// 删除某份版本快照（B8a）：危险确认后按时间戳删除。
+    HistoryDelete(u64),
+    /// 清空版本历史（B8a）：危险确认后清空该文档目录。
+    HistoryClear,
+}
+
+/// 模态用途：区分「未保存确认」（保存/不保存/取消）、错误弹窗（重试/取消）
+/// 与外部变更选择（重新加载/保留当前/另存为/取消）。
+#[derive(Clone, Debug)]
+pub(crate) enum ModalPurpose {
+    Unsaved,
+    Error(ErrorPurpose),
+    External,
 }
 
 /// 应用内模态：规格 + 交互态 + 待执行意图（结论落地后整条替换）。
 pub(crate) struct ActiveModal {
     pub(crate) spec: crate::view::modal::ModalSpec,
     pub(crate) state: crate::view::modal::ModalState,
-    pub(crate) intent: PendingIntent,
+    /// 未保存确认的挂起意图；错误弹窗无此意图（重试动作由 `purpose` 决定）。
+    pub(crate) intent: Option<PendingIntent>,
+    pub(crate) purpose: ModalPurpose,
 }
 
 /// 文档视图 UI 组件状态（ADR-009 S6 C6）：chrome/大纲/查找栏/写作模式。
@@ -306,9 +406,18 @@ pub(crate) struct UIState {
     /// 窗口焦点（光标表达）：true = 实心插入点，false = 空心框。
     /// 由 `WindowEvent::Focused` 经 `set_window_focused` 写入，默认聚焦。
     pub(crate) focused: bool,
+    /// Details 块展开集合：id 在 set 里表示展开，不在里表示收起。
+    /// spec 默认收起（空 set = 全收起）；open_default = true 的块在 refresh_index
+    /// 后自动预塞进此集合，尊重 HTML `<details open>`。
+    pub(crate) expanded_details: std::collections::HashSet<BlockId>,
+    /// 行内 `<details>` 展开集合（B3）：(块 id, `<details` 开标签的块内相对字节)。
+    /// 默认收起（空集）；纯视图态，不写文档字节、不进撤销栈。
+    pub(crate) expanded_inline_details: std::collections::HashSet<(BlockId, usize)>,
     /// 链接悬停浮层（N5）：(归一化目标 URL, 锚点屏幕 x, y)；None = 不显示。
     /// 由 `update_hover` 每次鼠标移动即时重算，无定时器。
     pub(crate) hover_link: Option<(String, f32, f32)>,
+    /// 版本历史面板（N1/B8a）：左侧快照列表 + 正文区只读预览。
+    pub(crate) history: History,
 }
 
 impl Default for UIState {
@@ -324,6 +433,9 @@ impl Default for UIState {
             tables: TableView::default(),
             focused: true,
             hover_link: None,
+            history: History::default(),
+            expanded_details: std::collections::HashSet::new(),
+            expanded_inline_details: std::collections::HashSet::new(),
         }
     }
 }
@@ -431,6 +543,8 @@ const SNAPSHOT_INTERVAL_MIN: u64 = 30;
 pub(crate) struct DocState {
     /// 关联文件路径（None = 草稿）；标题由此派生。
     pub(crate) path: Option<PathBuf>,
+    /// 版本历史的稳定文档身份键（N1/B8a）：路径派生或未命名草稿会话 id。
+    pub(crate) history_key: u64,
     /// 读入时的 BOM 标记，保存时还原。
     pub(crate) bom: bool,
     /// 上次保存的磁盘字节（或新建时的初始字节）：冲突检测的基线。
@@ -466,8 +580,10 @@ pub(crate) struct WindowState {
     pub(crate) resize_pending: bool,
     /// 窗口可见性（3g）：最小化/失焦/Occluded 时置 false，阻止 RedrawRequested → render → paint 路径。
     pub(crate) visible: bool,
-    /// 已获准退出：仅当「关闭意图」真正执行后置 true，事件循环在事件末尾统一消费。
+    /// 已获准退出：仅当「关闭意图」真正执行后置 true，由 Shell 只移除当前窗口。
     pub(crate) exit_requested: bool,
+    /// 用户请求新建独立窗口；Shell 消费后在主事件循环中创建另一个 App。
+    pub(crate) new_window_requested: bool,
     /// 窗口几何有变更待落盘（3d）：移动/缩放期间只置位不写盘（避免拖动窗口时反复 IO），
     /// 退出出口统一保存一次后清零。
     pub(crate) geom_dirty: bool,
@@ -497,6 +613,7 @@ impl Default for WindowState {
             resize_pending: false,
             visible: true,
             exit_requested: false,
+            new_window_requested: false,
             geom_dirty: false,
             geom: None,
             anim_last_frame: None,
@@ -520,6 +637,8 @@ pub(crate) struct App {
     pub(crate) doc: DocState,
     /// 启动时读入的配置（主题模式 + PDF 导出设置）；写回时整体落盘。
     pub(crate) config: Config,
+    /// 自定义 Callout 表（启动时读 `callouts.json`）：重建编辑器时随文档解析注入。
+    pub(crate) callouts: veil_core::CalloutRegistry,
     pub(crate) window_state: WindowState,
     pub(crate) editor: Editor,
     pub(crate) engine: LayoutEngine,
@@ -599,7 +718,7 @@ fn startup_doc(ports: &mut AppPorts, doc: Doc) -> StartupDoc {
                         out.doc.path = r.path;
                         out.doc.bom = r.bom;
                         out.recovered = true;
-                        out.notice = "已从崩溃恢复未保存的内容；确认后请保存".into();
+                        out.notice = t(Key::NoticeRecovered).into();
                         // 快照仍在磁盘上且已被本会话消费：记下它的指纹，保存成功时才能
                         // 正确作废。否则 clear_recovery 会误判「本会话没写过」而跳过清除，
                         // 导致旧草稿每次启动都被恢复、每次都要另存为（3e 修 R1）。
@@ -654,21 +773,31 @@ struct StartupDoc {
 
 impl App {
     pub(crate) fn new(doc: Doc, ports: Ports) -> Self {
+        // 启动即失败的目标：文档以空白草稿开窗，错误在窗口建好后用应用内模态告知
+        let open_error = doc.open_error.clone();
         let ThemeEnv {
             mut config,
             mut system,
             effects,
+            callouts,
         } = ports.theme_env;
-        let PersistEnv { recovery, session, snapshot } = ports.persist_env;
+        let PersistEnv {
+            recovery,
+            session,
+            snapshot,
+        } = ports.persist_env;
         // 系统外观读不到（非 Windows/注册表异常）按浅色处理：不影响其它功能
         let system_dark = system.is_dark().unwrap_or(false);
         let (app_config, config_notice) = match config.load() {
             Ok(text) => match theme::decode_config(text.as_bytes()) {
                 Ok(p) if p.ignored == 0 => (p.config, String::new()),
-                Ok(p) => (p.config, format!("配置有 {} 处无法识别，已忽略", p.ignored)),
+                Ok(p) => (
+                    p.config,
+                    tf(Key::NoticeConfigIgnored, &[&p.ignored.to_string()]),
+                ),
                 Err(e) => (
                     Config::default(),
-                    format!("配置文件无效，已用默认主题: {e}"),
+                    tf(Key::NoticeConfigInvalid, &[&e.to_string()]),
                 ),
             },
             // 文件不存在属正常状态（首次运行）：静默用默认配置
@@ -697,7 +826,7 @@ impl App {
             url_opener: ports.url_opener,
         };
         let start = startup_doc(&mut ports, doc);
-        let mut editor = Editor::new(&start.doc.text);
+        let mut editor = Editor::new_with_callouts(&start.doc.text, &callouts);
         if start.recovered {
             editor.set_dirty(true); // 恢复内容相对磁盘基线是未保存修改
         }
@@ -707,7 +836,13 @@ impl App {
         }
         let mut app = App {
             doc: DocState {
-                path: start.doc.path,
+                path: start.doc.path.clone(),
+                history_key: start
+                    .doc
+                    .path
+                    .as_deref()
+                    .map(history::doc_key)
+                    .unwrap_or_else(history::session_key),
                 bom: start.doc.bom,
                 baseline: start
                     .baseline
@@ -723,6 +858,7 @@ impl App {
             engine: LayoutEngine::new(),
             index: BlockIndex::default(),
             cache: Cache::default(),
+            callouts,
             input_state: InputState {
                 revs: Revs::default(),
                 mouse: PhysicalPosition::new(0.0, 0.0),
@@ -769,6 +905,9 @@ impl App {
             app.note_opened(p);
         }
         app.watch_current();
+        if let Some(err) = open_error {
+            app.show_startup_error(err);
+        }
         app
     }
 
@@ -834,16 +973,26 @@ impl App {
         self.input_state.last_theme_check = None;
         self.refresh_theme_visuals();
         // 先给成功提示再落盘：保存失败时错误提示更重要，覆盖为「配置未保存」
-        self.ui_state.chrome.notice = format!("主题：{}", mode.label());
-        self.save_config();
+        self.ui_state.chrome.notice = tf(Key::NoticeTheme, &[mode.label()]);
+        self.save_config(ConfigSave::Theme);
         self.request_redraw();
     }
 
-    /// 配置落盘（极小文本、全量重写；实现侧保证原子与父目录创建）。
-    fn save_config(&mut self) {
-        let text = self.config.to_toml();
+    /// 配置落盘：先读最新文件，只覆盖当前动作负责的字段，避免多窗口旧快照互写。
+    fn save_config(&mut self, part: ConfigSave) {
+        let mut merged = self.config;
+        if let Ok(text) = self.ports.config.load() {
+            if let Ok(parsed) = theme::decode_config(text.as_bytes()) {
+                merged = parsed.config;
+            }
+        }
+        match part {
+            ConfigSave::Theme => merged.mode = self.config.mode,
+            ConfigSave::Window => merged.window = self.config.window,
+        }
+        let text = merged.to_toml();
         if let Err(e) = self.ports.config.save(&text) {
-            self.ui_state.chrome.notice = format!("配置未保存：{e}");
+            self.ui_state.chrome.notice = tf(Key::NoticeConfigNotSaved, &[&e.to_string()]);
             eprintln!("配置保存失败: {e}");
         }
     }
@@ -974,6 +1123,27 @@ impl App {
             PhysicalSize::new(2.0, h as f64),
         );
     }
+
+    /// 打开/关闭模态时同步 IME：模态独占键盘，若 IME 仍启用，
+    /// 中文输入法会先吞掉字母与 Esc，助记符和取消键都到不了弹窗。
+    pub(crate) fn sync_ime_for_modal(&mut self) {
+        let allowed = self.ui_state.modal.is_none();
+        if let Some(w) = &self.window_state.window {
+            w.set_ime_allowed(allowed);
+        }
+        if !allowed {
+            self.editor.clear_preedit();
+        }
+    }
+
+    /// 模态独占覆盖层：弹窗出现前收掉菜单/右键菜单/快速打开/查找栏，
+    /// 避免弹窗下方仍可交互，也避免结论落地后浮层重新出现。
+    pub(crate) fn close_lite_overlays(&mut self) {
+        self.ui_state.chrome.close();
+        self.ui_state.ctx.close();
+        self.close_quick();
+        self.close_search();
+    }
 }
 
 impl App {
@@ -1000,19 +1170,23 @@ impl App {
     fn tick(&mut self, now: Instant) {
         self.poll_external();
         self.poll_system_theme(now);
+        // 只读浏览版本历史期间冻结所有持久化副作用：浏览不得改变文档字节，
+        // 也不得在预览暂存实时编辑器时触发自动保存/恢复写盘。
+        if self.ui_state.history.open {
+            return;
+        }
         self.maybe_autosave(now);
         self.maybe_recovery_write(now);
         self.maybe_snapshot(now);
     }
 
-    /// 版本历史快照触发（N1）：30 分钟节流 + 保存后立即触发。
-    /// dirty + 有路径 + 非 hold + 非 IME 基础条件不变；节流避免每次 tick 写盘。
+    /// 版本历史快照触发（N1）：30 分钟节流 + 保存前留档（`save` 内）。
+    /// 稳定身份键：有路径按路径哈希，未命名草稿按本次会话 id。
     fn maybe_snapshot(&mut self, now: Instant) {
-        // 基础条件：dirty + 有路径 + 非 hold + 非 IME
+        // 基础条件：dirty + 非 hold + 非 IME（未命名草稿也允许按会话键归档）
         if !self.editor.is_dirty()
             || self.persist_state.persist.hold()
             || self.editor.preedit().is_some()
-            || self.doc.path.is_none()
         {
             return;
         }
@@ -1023,9 +1197,15 @@ impl App {
             }
         }
         let text = self.editor.session().serialize();
-        let hash = recovery::fnv64(text.as_bytes());
-        let _ = self.ports.snapshot.save_snapshot(hash, &text);
-        let _ = self.ports.snapshot.prune(hash, 20);
+        if !text.is_empty() {
+            // 先留档磁盘基线，再记当前缓冲：保证列表里旧版本早于新版本，
+            // 也避免 30 分钟快照抢在保存留档之前造成顺序倒挂。
+            self.archive_baseline();
+            let _ = self
+                .ports
+                .snapshot
+                .save_snapshot(self.doc.history_key, &text);
+        }
         // 重置节流 deadline
         self.persist_state.snapshot_deadline =
             Some(now + Duration::from_secs(SNAPSHOT_INTERVAL_MIN * 60));
@@ -1090,10 +1270,10 @@ impl App {
     }
 }
 
-impl ApplicationHandler for App {
-    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+impl App {
+    pub(crate) fn create_window(&mut self, event_loop: &ActiveEventLoop) -> Option<WindowId> {
         if self.window_state.window.is_some() {
-            return;
+            return None;
         }
         // 窗口几何（3d）：读回上次退出时的逻辑尺寸 + 物理坐标，先按当前显示器集合夹取，
         // 避免显示器拔出/分辨率改变后窗口落在屏外。无几何记录时沿用默认 900×700。
@@ -1128,8 +1308,7 @@ impl ApplicationHandler for App {
             Ok(w) => Arc::new(w),
             Err(e) => {
                 eprintln!("创建窗口失败: {e}");
-                event_loop.exit();
-                return;
+                return None;
             }
         };
         window.set_ime_allowed(true);
@@ -1138,8 +1317,7 @@ impl ApplicationHandler for App {
             Ok(c) => c,
             Err(e) => {
                 eprintln!("创建呈现上下文失败: {e}");
-                event_loop.exit();
-                return;
+                return None;
             }
         };
         self.window_state.surface = Surface::new(&context, window.clone()).ok();
@@ -1150,9 +1328,10 @@ impl ApplicationHandler for App {
         let animations = self.ports.system.animations_enabled();
         self.set_animations(animations);
         self.request_redraw();
+        self.window_state.window.as_ref().map(|w| w.id())
     }
 
-    fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+    pub(crate) fn handle_window_event(&mut self, event: WindowEvent) {
         match event {
             WindowEvent::CloseRequested => {
                 // 关窗只是「请求」：脏文档先挂起模态，获准后由 exit_requested 统一退出
@@ -1367,36 +1546,37 @@ impl ApplicationHandler for App {
             }
             _ => {}
         }
-        // 唯一退出出口：只有「关闭意图」真正执行后才会置位（模态结论 / 干净关窗）
-        if self.window_state.exit_requested {
-            // 几何待存（3d）：拖动/缩放期间只置脏位，退出时统一落盘一次。
-            // 最大化状态下不覆盖已存几何（保留最大化前的常规尺寸）。
-            if self.window_state.geom_dirty {
-                let maximized = self
-                    .window_state
-                    .window
-                    .as_ref()
-                    .is_some_and(|w| w.is_maximized());
-                if !maximized {
-                    if let Some(g) = self.window_state.geom {
-                        self.config.window = Some(g);
-                    }
-                }
-                self.save_config();
-                self.window_state.geom_dirty = false;
-            }
-            event_loop.exit();
-        }
     }
 
-    /// 空闲回调：取外部变更事件、校验系统外观、尝试自动保存与恢复写盘，并把下次唤醒定在
+    /// 保存当前窗口几何并报告是否应关闭。Shell 据此只移除一个 WindowId。
+    pub(crate) fn finish_close(&mut self) -> bool {
+        if !self.window_state.exit_requested {
+            return false;
+        }
+        if self.window_state.geom_dirty {
+            let maximized = self
+                .window_state
+                .window
+                .as_ref()
+                .is_some_and(|w| w.is_maximized());
+            if !maximized {
+                if let Some(g) = self.window_state.geom {
+                    self.config.window = Some(g);
+                }
+            }
+            self.save_config(ConfigSave::Window);
+            self.window_state.geom_dirty = false;
+        }
+        true
+    }
+
+    /// 取外部变更事件、校验系统外观、尝试自动保存与恢复写盘，并返回下次唤醒时刻。
     /// 「恢复/自动保存静默期终点」「监听轮询」「系统外观轮询」的较早者
     /// （干净草稿且显式主题下完全休眠）。
-    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+    pub(crate) fn next_wake(&mut self) -> Option<Instant> {
         // 窗口不可见时跳过所有周期性工作——恢复路径由 Resized/Focused/Occluded 主动 request_redraw
         if !self.window_state.visible {
-            event_loop.set_control_flow(ControlFlow::Wait);
-            return;
+            return None;
         }
         let now = Instant::now();
         self.tick(now);
@@ -1439,9 +1619,6 @@ impl ApplicationHandler for App {
                 next = Some(next.map_or(due, |t| t.min(due)));
             }
         }
-        event_loop.set_control_flow(match next {
-            Some(t) => ControlFlow::WaitUntil(t),
-            None => ControlFlow::Wait,
-        });
+        next
     }
 }

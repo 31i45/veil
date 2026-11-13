@@ -1,7 +1,9 @@
 //! 右键上下文菜单（2f）：选区/链接/块三类上下文的项集、几何与命中。
 //! 纯模型与几何：不绘制（paint.rs 消费布局）、不执行（interaction.rs 分发动作）。
 
+use crate::i18n::{t, Key};
 use crate::tokens::{space, typography};
+use veil_core::BlockId;
 
 /// 上下文菜单动作：执行映射在 interaction.rs（复用既有剪贴板/插入路径）。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -28,6 +30,19 @@ pub(crate) enum CtxAction {
     TableAlignLeft,
     TableAlignCenter,
     TableAlignRight,
+    /// Mermaid v0：在 mermaid.live 在线预览当前源码。
+    MermaidPreview,
+    /// Mermaid v0：复制当前 mermaid 块的源码（不含围栏行）到剪贴板。
+    MermaidCopySource,
+    /// Mermaid v0：复制 mermaid.live 预览 URL 到剪贴板。
+    MermaidCopyLink,
+    /// Mermaid v0：插入预设模板（三种 diagram 类型）。
+    MermaidInsertFlowchart,
+    MermaidInsertSequence,
+    MermaidInsertClass,
+    /// Details 块折叠 / 展开（右键菜单入口，与左键点击 summary 行同源）。
+    FoldDetails,
+    UnfoldDetails,
 }
 
 /// 表格右键上下文：打开时刻的命中位置（表头命中时 `body_row` 为 None）。
@@ -52,57 +67,109 @@ pub(crate) enum CtxKind {
     Block,
     /// 表格单元格/结构字符上。
     Table(TableCtx),
+    /// Mermaid v0：mermaid 围栏代码块上。
+    MermaidBlock,
+    /// Mermaid 空块（内容为空或全为 `%%` 注释）：只给模板项。
+    MermaidEmptyBlock,
+    /// Details 块：携带命中块的 BlockId，供 ctx_exec 定位折叠/展开目标。
+    Details(BlockId),
 }
 
 /// 各类上下文的项集（单一来源：布局/命中/分发共用）。
 /// 分隔线按语义分组：编辑类 / 选择类 / 链接类 / 表格结构 / 对齐 / 剪贴板。
-pub(crate) fn items_for(kind: CtxKind) -> Vec<(&'static str, CtxAction)> {
+pub(crate) fn items_for(kind: CtxKind) -> Vec<(Key, CtxAction)> {
     match kind {
         CtxKind::Selection => vec![
-            ("剪切", CtxAction::Cut),
-            ("复制", CtxAction::Copy),
-            ("粘贴", CtxAction::Paste),
-            ("", CtxAction::Separator),
-            ("全选", CtxAction::SelectAll),
+            (Key::CtxCut, CtxAction::Cut),
+            (Key::CtxCopy, CtxAction::Copy),
+            (Key::CtxPaste, CtxAction::Paste),
+            (Key::Empty, CtxAction::Separator),
+            (Key::CtxSelectAll, CtxAction::SelectAll),
         ],
         CtxKind::Link => vec![
             // 「打开」在「复制」之前：链接上下文的首要意图是跳转
-            ("在浏览器中打开", CtxAction::OpenLink),
-            ("复制链接地址", CtxAction::CopyLink),
-            ("", CtxAction::Separator),
-            ("复制", CtxAction::Copy),
-            ("粘贴", CtxAction::Paste),
-            ("", CtxAction::Separator),
-            ("全选", CtxAction::SelectAll),
+            (Key::CtxOpenInBrowser, CtxAction::OpenLink),
+            (Key::CtxCopyLink, CtxAction::CopyLink),
+            (Key::Empty, CtxAction::Separator),
+            (Key::CtxCopy, CtxAction::Copy),
+            (Key::CtxPaste, CtxAction::Paste),
+            (Key::Empty, CtxAction::Separator),
+            (Key::CtxSelectAll, CtxAction::SelectAll),
         ],
         CtxKind::Block => vec![
-            ("粘贴", CtxAction::Paste),
-            ("全选", CtxAction::SelectAll),
-            ("", CtxAction::Separator),
-            ("插入图片…", CtxAction::InsertImage),
+            (Key::CtxPaste, CtxAction::Paste),
+            (Key::CtxSelectAll, CtxAction::SelectAll),
+            (Key::Empty, CtxAction::Separator),
+            (Key::CtxInsertImage, CtxAction::InsertImage),
+        ],
+        CtxKind::MermaidBlock => vec![
+            (Key::CtxMermaidPreview, CtxAction::MermaidPreview),
+            (Key::CtxMermaidCopySource, CtxAction::MermaidCopySource),
+            (Key::CtxMermaidCopyLink, CtxAction::MermaidCopyLink),
+            (Key::Empty, CtxAction::Separator),
+            (
+                Key::CtxMermaidInsertFlowchart,
+                CtxAction::MermaidInsertFlowchart,
+            ),
+            (
+                Key::CtxMermaidInsertSequence,
+                CtxAction::MermaidInsertSequence,
+            ),
+            (Key::CtxMermaidInsertClass, CtxAction::MermaidInsertClass),
+            (Key::Empty, CtxAction::Separator),
+            (Key::CtxPaste, CtxAction::Paste),
+            (Key::CtxSelectAll, CtxAction::SelectAll),
+        ],
+        // 空块没有可预览/可复制的源码，只保留三条模板项（与提示行点击同源）。
+        CtxKind::MermaidEmptyBlock => vec![
+            (
+                Key::CtxMermaidInsertFlowchart,
+                CtxAction::MermaidInsertFlowchart,
+            ),
+            (
+                Key::CtxMermaidInsertSequence,
+                CtxAction::MermaidInsertSequence,
+            ),
+            (Key::CtxMermaidInsertClass, CtxAction::MermaidInsertClass),
+        ],
+        // Details 块：折叠 / 展开（两项都列，ctx_exec 根据实际态择一执行）
+        CtxKind::Details(_) => vec![
+            (Key::CtxFold, CtxAction::FoldDetails),
+            (Key::CtxUnfold, CtxAction::UnfoldDetails),
+            (Key::Empty, CtxAction::Separator),
+            (Key::CtxCopy, CtxAction::Copy),
+            (Key::CtxPaste, CtxAction::Paste),
+            (Key::Empty, CtxAction::Separator),
+            (Key::CtxSelectAll, CtxAction::SelectAll),
         ],
         CtxKind::Table(tc) => {
             let mut items = Vec::new();
             // 表头只给列操作；正文行才给行操作
             if tc.body_row.is_some() {
-                items.push(("上方插入行", CtxAction::TableInsertRowAbove));
-                items.push(("下方插入行", CtxAction::TableInsertRowBelow));
-                items.push(("删除行", CtxAction::TableDeleteRow));
-                items.push(("", CtxAction::Separator));
+                items.push((Key::CtxTableInsertRowAbove, CtxAction::TableInsertRowAbove));
+                items.push((Key::CtxTableInsertRowBelow, CtxAction::TableInsertRowBelow));
+                items.push((Key::CtxTableDeleteRow, CtxAction::TableDeleteRow));
+                items.push((Key::Empty, CtxAction::Separator));
             }
-            items.push(("左侧插入列", CtxAction::TableInsertColumnLeft));
-            items.push(("右侧插入列", CtxAction::TableInsertColumnRight));
+            items.push((
+                Key::CtxTableInsertColumnLeft,
+                CtxAction::TableInsertColumnLeft,
+            ));
+            items.push((
+                Key::CtxTableInsertColumnRight,
+                CtxAction::TableInsertColumnRight,
+            ));
             if tc.ncols > 1 {
-                items.push(("删除列", CtxAction::TableDeleteColumn));
+                items.push((Key::CtxTableDeleteColumn, CtxAction::TableDeleteColumn));
             }
-            items.push(("", CtxAction::Separator));
+            items.push((Key::Empty, CtxAction::Separator));
             // 任意列（含表头、单列）都可对齐
-            items.push(("左对齐", CtxAction::TableAlignLeft));
-            items.push(("居中", CtxAction::TableAlignCenter));
-            items.push(("右对齐", CtxAction::TableAlignRight));
-            items.push(("", CtxAction::Separator));
-            items.push(("粘贴", CtxAction::Paste));
-            items.push(("全选", CtxAction::SelectAll));
+            items.push((Key::CtxTableAlignLeft, CtxAction::TableAlignLeft));
+            items.push((Key::CtxTableAlignCenter, CtxAction::TableAlignCenter));
+            items.push((Key::CtxTableAlignRight, CtxAction::TableAlignRight));
+            items.push((Key::Empty, CtxAction::Separator));
+            items.push((Key::CtxPaste, CtxAction::Paste));
+            items.push((Key::CtxSelectAll, CtxAction::SelectAll));
             items
         }
     }
@@ -120,11 +187,25 @@ pub(crate) struct CtxMenu {
     pub(crate) link: Option<String>,
     /// 表格上下文（打开时刻定；执行结构操作时读行列信息）。
     pub(crate) table: Option<TableCtx>,
-    items: Vec<(&'static str, CtxAction)>,
+    /// Mermaid v0：打开时刻捕获的块 body 源码（不含围栏行），供预览/复制链接动作读取。
+    pub(crate) mermaid_body: Option<String>,
+    /// Mermaid 空块：模板插入锚点（body 起点，绝对字节偏移）；非空块为 None，
+    /// 此时沿用既有的「在光标处插入」语义。
+    pub(crate) mermaid_insert_start: Option<usize>,
+    /// Details 块右键菜单携带的 BlockId（供折叠/展开动作定位目标块）。
+    pub(crate) details_id: Option<BlockId>,
+    items: Vec<(Key, CtxAction)>,
 }
 
 impl CtxMenu {
-    pub(crate) fn open_at(&mut self, x: f32, y: f32, kind: CtxKind, link: Option<String>) {
+    pub(crate) fn open_at(
+        &mut self,
+        x: f32,
+        y: f32,
+        kind: CtxKind,
+        link: Option<String>,
+        mermaid_body: Option<String>,
+    ) {
         self.open = true;
         self.x = x;
         self.y = y;
@@ -132,6 +213,12 @@ impl CtxMenu {
         self.link = link;
         self.table = match kind {
             CtxKind::Table(tc) => Some(tc),
+            _ => None,
+        };
+        self.mermaid_body = mermaid_body;
+        self.mermaid_insert_start = None;
+        self.details_id = match kind {
+            CtxKind::Details(id) => Some(id),
             _ => None,
         };
         self.items = items_for(kind);
@@ -142,9 +229,11 @@ impl CtxMenu {
         self.hover = None;
         self.link = None;
         self.table = None;
+        self.mermaid_body = None;
+        self.mermaid_insert_start = None;
     }
 
-    pub(crate) fn items(&self) -> &[(&'static str, CtxAction)] {
+    pub(crate) fn items(&self) -> &[(Key, CtxAction)] {
         &self.items
     }
 
@@ -181,7 +270,7 @@ pub(crate) struct Layout {
 }
 
 pub(crate) fn layout(
-    items: &[(&'static str, CtxAction)],
+    items: &[(Key, CtxAction)],
     x: f32,
     y: f32,
     vp_right: f32,
@@ -196,7 +285,7 @@ pub(crate) fn layout(
     let widest = items
         .iter()
         .filter(|(_, a)| *a != CtxAction::Separator)
-        .map(|(l, _)| text_width(l, scale))
+        .map(|(l, _)| text_width(t(*l), scale))
         .fold(0.0_f32, f32::max);
     let w = (widest + 2.0 * pad).max(120.0 * scale);
     let mut cur = top_pad;
@@ -251,14 +340,13 @@ mod tests {
             CtxAction::OpenLink,
             "链接上下文首项为在浏览器中打开"
         );
-        assert_eq!(
-            link[1].1,
-            CtxAction::CopyLink,
-            "复制链接地址紧随其后"
-        );
+        assert_eq!(link[1].1, CtxAction::CopyLink, "复制链接地址紧随其后");
         let blk = items_for(CtxKind::Block);
         assert!(blk.iter().any(|&(_, a)| a == CtxAction::InsertImage));
-        assert!(!blk.iter().any(|&(_, a)| a == CtxAction::Cut), "无选区不出现剪切");
+        assert!(
+            !blk.iter().any(|&(_, a)| a == CtxAction::Cut),
+            "无选区不出现剪切"
+        );
     }
 
     #[test]
@@ -275,9 +363,15 @@ mod tests {
                 | CtxAction::TableInsertRowBelow
                 | CtxAction::TableDeleteRow
         )));
-        assert!(items.iter().any(|&(_, a)| a == CtxAction::TableInsertColumnLeft));
-        assert!(items.iter().any(|&(_, a)| a == CtxAction::TableInsertColumnRight));
-        assert!(items.iter().any(|&(_, a)| a == CtxAction::TableDeleteColumn));
+        assert!(items
+            .iter()
+            .any(|&(_, a)| a == CtxAction::TableInsertColumnLeft));
+        assert!(items
+            .iter()
+            .any(|&(_, a)| a == CtxAction::TableInsertColumnRight));
+        assert!(items
+            .iter()
+            .any(|&(_, a)| a == CtxAction::TableDeleteColumn));
         assert!(items.iter().any(|&(_, a)| a == CtxAction::Paste));
         assert!(items.iter().any(|&(_, a)| a == CtxAction::SelectAll));
     }
@@ -290,9 +384,13 @@ mod tests {
             ncols: 1,
         };
         let items = items_for(CtxKind::Table(tc));
-        assert!(items.iter().any(|&(_, a)| a == CtxAction::TableInsertRowAbove));
+        assert!(items
+            .iter()
+            .any(|&(_, a)| a == CtxAction::TableInsertRowAbove));
         assert!(items.iter().any(|&(_, a)| a == CtxAction::TableDeleteRow));
-        assert!(!items.iter().any(|&(_, a)| a == CtxAction::TableDeleteColumn));
+        assert!(!items
+            .iter()
+            .any(|&(_, a)| a == CtxAction::TableDeleteColumn));
     }
 
     #[test]
@@ -340,7 +438,10 @@ mod tests {
                 CtxAction::TableAlignCenter,
                 CtxAction::TableAlignRight,
             ] {
-                assert!(items.iter().any(|&(_, a)| a == want), "{tc:?} 缺少 {want:?}");
+                assert!(
+                    items.iter().any(|&(_, a)| a == want),
+                    "{tc:?} 缺少 {want:?}"
+                );
             }
         }
     }
@@ -353,7 +454,7 @@ mod tests {
             col: 1,
             ncols: 2,
         };
-        m.open_at(0.0, 0.0, CtxKind::Table(tc), None);
+        m.open_at(0.0, 0.0, CtxKind::Table(tc), None, None);
         assert_eq!(m.table, Some(tc));
         m.close();
         assert_eq!(m.table, None);

@@ -29,7 +29,7 @@
 //   迭代实现，不受递归上限影响。
 
 use super::block::{normalize_label, RefMap};
-use super::model::{InlineKind, InlineNode};
+use super::model::{HtmlAttrs, HtmlTag, InlineKind, InlineNode};
 use crate::range::Range;
 
 /// inline 解析递归深度硬上限。超限后开标记按纯文本处理；
@@ -57,11 +57,7 @@ pub(super) fn parse_inlines(text: &str, base: usize, refs: &RefMap) -> Vec<Inlin
 /// 扫描到空白/`<` 为止，再按 GFM 规则剥尾部标点（`&entity;` 整体排除、
 /// 尾部 `)` 按括号收支剥离），跳过已由 Code/Link/Autolink 覆盖的区间。
 /// 不修改源码字节（协议补全在消费侧完成）。
-fn link_bare_urls(
-    text: &str,
-    base: usize,
-    mut nodes: Vec<InlineNode>,
-) -> Vec<InlineNode> {
+fn link_bare_urls(text: &str, base: usize, mut nodes: Vec<InlineNode>) -> Vec<InlineNode> {
     link_bare_urls_in(text, base, &mut nodes);
     nodes.sort_by_key(|n| n.range.start);
     nodes
@@ -177,8 +173,7 @@ fn url_prefix(bytes: &[u8], i: usize) -> Option<usize> {
 
 /// 自动链接的左边界：不能紧贴字母数字或 scheme 字符（否则只是普通单词的一部分）。
 fn at_token_boundary(bytes: &[u8], i: usize) -> bool {
-    i == 0
-        || !(bytes[i - 1].is_ascii_alphanumeric() || matches!(bytes[i - 1], b'+' | b'.' | b'-'))
+    i == 0 || !(bytes[i - 1].is_ascii_alphanumeric() || matches!(bytes[i - 1], b'+' | b'.' | b'-'))
 }
 
 /// URL 终点：扫到空白/控制符/`<`，随后按 GFM 规则剥除尾部：
@@ -644,7 +639,269 @@ fn html_tag_end(s: &str, lt: usize) -> Option<usize> {
     if !tag_like {
         return None;
     }
+    // 引号内的 `>`（如 `style="font-family:'a>b'"`）不是标签结束；找不到合法结束
+    // 则回退到第一个 `>`（保持历史容错行为，不把整段吞掉）。
+    let mut quote = 0u8;
+    let mut i = lt + 1;
+    while i < b.len() {
+        let c = b[i];
+        if quote != 0 {
+            if c == quote {
+                quote = 0;
+            }
+        } else if c == b'"' || c == b'\'' {
+            quote = c;
+        } else if c == b'>' {
+            return Some(i + 1);
+        }
+        i += 1;
+    }
     s[lt..].find('>').map(|rel| lt + rel + 1)
+}
+
+/// 从一段开标签源码（如 `<abbr title="x">`）中抽取标签名、是否自闭合、白名单属性。
+/// 标签名必须以字母开头、后接 alnum/-；不满足返回 None（不是合法标签）。
+/// 属性名必须以字母开头；白名单收集 `title`/`src`/`alt`（`<a>` 另收 `href`）与
+/// 净化后的 `style`；`on*` 一律忽略；`src=http(s)://` 远程置空、`href=javascript:` 置空。
+/// 属性值支持 `"..."` / `'...'` / 无引号。
+fn parse_open_tag(src: &str) -> Option<(String, bool, HtmlAttrs)> {
+    // src 形如 "kbd>" 或 "img src=\"x\" />"（不含 `<`）。须以字母开头。
+    let bytes = src.as_bytes();
+    if bytes.is_empty() || !bytes[0].is_ascii_alphabetic() {
+        return None;
+    }
+    // 标签名：字母 + alnum + -
+    let mut tn = 1;
+    while tn < bytes.len() && (bytes[tn].is_ascii_alphanumeric() || bytes[tn] == b'-') {
+        tn += 1;
+    }
+    let tag_name = src[..tn].to_ascii_lowercase();
+    let rest = &src[tn..];
+    let rb = rest.as_bytes();
+    let mut i = 0;
+    let mut attrs = HtmlAttrs::default();
+    let mut self_closed = false;
+    'outer: while i < rb.len() {
+        // 跳过前导空白
+        while i < rb.len() && matches!(rb[i], b' ' | b'\t' | b'\n' | b'\r') {
+            i += 1;
+        }
+        if i >= rb.len() {
+            break;
+        }
+        if rb[i] == b'/' {
+            // 自闭合标记：`/>`
+            if rb.get(i + 1) == Some(&b'>') {
+                self_closed = true;
+                break;
+            }
+            i += 1;
+            continue;
+        }
+        if rb[i] == b'>' {
+            break;
+        }
+        // 属性名：字母 + alnum + - + _ + . + :
+        if !rb[i].is_ascii_alphabetic() && rb[i] != b'_' {
+            // 非合法属性字符——跳过整段直到下一个空白或 >
+            while i < rb.len() && !matches!(rb[i], b' ' | b'\t' | b'>' | b'/') {
+                i += 1;
+            }
+            continue;
+        }
+        let an_start = i;
+        i += 1;
+        while i < rb.len()
+            && (rb[i].is_ascii_alphanumeric() || matches!(rb[i], b'_' | b'.' | b':' | b'-'))
+        {
+            i += 1;
+        }
+        let an = &rest[an_start..i].to_ascii_lowercase();
+        // 跳 `=` 与可选引号
+        let mut val: Option<String> = None;
+        if i < rb.len() && rb[i] == b'=' {
+            i += 1;
+            while i < rb.len() && matches!(rb[i], b' ' | b'\t') {
+                i += 1;
+            }
+            let quote = if i < rb.len() && (rb[i] == b'"' || rb[i] == b'\'') {
+                let q = rb[i];
+                i += 1;
+                q
+            } else {
+                0 // 无引号
+            };
+            let vs = i;
+            if quote != 0 {
+                while i < rb.len() && rb[i] != quote {
+                    i += 1;
+                }
+                if i < rb.len() {
+                    // i 当前指向闭引号；[vs..i) 是纯值
+                    val = Some(rest[vs..i].to_string());
+                    i += 1; // 跳过闭引号
+                }
+            } else {
+                while i < rb.len() && !matches!(rb[i], b' ' | b'\t' | b'>' | b'/') {
+                    i += 1;
+                }
+                val = Some(rest[vs..i.min(rb.len())].to_string());
+            }
+            if quote != 0 && i <= vs {
+                // 没找到闭引号——放弃这个属性
+                continue 'outer;
+            }
+        }
+        // 白名单属性收集
+        let on_event = an.starts_with("on");
+        if on_event {
+            continue; // 事件属性一律忽略
+        }
+        if an == "style" {
+            // 只保留白名单属性与合法值；非法声明逐条丢弃，标签本身仍生效。
+            if let Some(v) = val {
+                attrs.style = crate::syntax::model::sanitize_style(&v);
+            }
+            continue;
+        }
+        match an.as_str() {
+            "title" => attrs.title = val,
+            "src" => {
+                if let Some(ref v) = val {
+                    let lower = v.to_ascii_lowercase();
+                    if lower.starts_with("http://") || lower.starts_with("https://") {
+                        attrs.src = None; // 远程置空
+                    } else {
+                        attrs.src = val;
+                    }
+                }
+            }
+            "alt" => attrs.alt = val,
+            // 只有 `<a>` 的 href 参与渲染/导出；javascript: 脚本 scheme 置空。
+            "href" if tag_name == "a" => {
+                if let Some(ref v) = val {
+                    let unsafe_scheme = v
+                        .trim_start()
+                        .to_ascii_lowercase()
+                        .starts_with("javascript:");
+                    attrs.href = (!unsafe_scheme).then(|| v.clone());
+                }
+            }
+            _ => {}
+        }
+    }
+    Some((tag_name, self_closed, attrs))
+}
+
+/// 交叉标签尾部：`close_gt` 处紧跟一个闭标签 `</name>`，而 name 在 `[start, close_gt)`
+/// 内有开标签却无配对闭标签 → 返回该闭标签之后的位置。返回 None 表示配对正常。
+fn cross_tag_tail(src: &str, start: usize, close_gt: usize) -> Option<usize> {
+    let rest = src.get(close_gt..)?.strip_prefix("</")?;
+    let name_end = rest.find(['>', '/', ' ', '\t', '\n', '\r'])?;
+    let name = rest[..name_end].to_ascii_lowercase();
+    if name.is_empty() || !name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') {
+        return None;
+    }
+    let inner = src[start..close_gt].to_ascii_lowercase();
+    let needle = format!("<{name}");
+    let opened = inner.match_indices(&needle).any(|(i, _)| {
+        matches!(
+            inner.as_bytes().get(i + needle.len()),
+            None | Some(b'>') | Some(b'/') | Some(b' ') | Some(b'\t') | Some(b'\n') | Some(b'\r')
+        )
+    });
+    if !opened {
+        return None;
+    }
+    let gt = rest.find('>')?;
+    Some(close_gt + 2 + gt + 1)
+}
+
+/// 在开标签结束 `open_end`（`>` 之后）处向后扫描，找同一 `tag_name` 的合法闭标签。
+/// 扫描时跳过 `<!-- -->` / `<![CDATA[...]]>` / `<?...?>` / `<!...>` / 自闭合标签，
+/// 并正确处理同类嵌套（如 `<div>a<div>b</div></div>`）。找到返回闭标签 `<` 的位置；
+/// 到 EOF 仍未找到返回 None。`void_tags` 为自闭合标签集（不参与配对计数）。
+fn find_matching_close(src: &str, open_end: usize, tag_name: &str) -> Option<usize> {
+    let bytes = src.as_bytes();
+    let mut i = open_end;
+    let mut depth = 0i32;
+    while i < bytes.len() {
+        if bytes[i] != b'<' {
+            i += 1;
+            continue;
+        }
+        // 跳过注释/CDATA/PI/DOCTYPE——整段吞掉
+        if src[i..].starts_with("<!--") {
+            let end = src[i..]
+                .find("-->")
+                .map(|r| i + r + 3)
+                .unwrap_or(bytes.len());
+            i = end;
+            continue;
+        }
+        if src[i..].starts_with("<![CDATA[") {
+            let end = src[i..]
+                .find("]]>")
+                .map(|r| i + r + 3)
+                .unwrap_or(bytes.len());
+            i = end;
+            continue;
+        }
+        if bytes.get(i + 1) == Some(&b'?') {
+            let end = src[i..].find('>').map(|r| i + r + 1).unwrap_or(bytes.len());
+            i = end;
+            continue;
+        }
+        if bytes.get(i + 1) == Some(&b'!')
+            && bytes.get(i + 2).is_some_and(|c| c.is_ascii_uppercase())
+        {
+            let end = src[i..].find('>').map(|r| i + r + 1).unwrap_or(bytes.len());
+            i = end;
+            continue;
+        }
+        // 解析标签名
+        let after_lt = &src[i + 1..];
+        let (closing, name_start) = if after_lt.starts_with('/') {
+            (true, 1)
+        } else {
+            (false, 0)
+        };
+        let nb = after_lt.as_bytes();
+        if nb.get(name_start).is_none_or(|c| !c.is_ascii_alphabetic()) {
+            i += 1;
+            continue;
+        }
+        let mut nl = 1usize;
+        while nl + name_start < nb.len()
+            && (nb[nl + name_start].is_ascii_alphanumeric() || nb[nl + name_start] == b'-')
+        {
+            nl += 1;
+        }
+        let name_here = after_lt[name_start..name_start + nl].to_ascii_lowercase();
+        // 找 `>` 看是否自闭合（引号内的 `>` 不算结束）
+        let tag_end = html_tag_end(src, i);
+        let self_closed = tag_end.is_some_and(|te| src[i..te - 1].trim_end().ends_with('/'));
+        if self_closed && !closing {
+            // 自闭合开标签：不计入 depth，直接跳过
+            i = tag_end.unwrap_or(bytes.len());
+            continue;
+        }
+        if closing {
+            if name_here == tag_name {
+                if depth == 0 {
+                    return Some(i); // 匹配成功
+                } else {
+                    depth -= 1;
+                }
+            }
+        } else {
+            if name_here == tag_name {
+                depth += 1;
+            }
+        }
+        i = tag_end.unwrap_or(bytes.len());
+    }
+    None
 }
 
 struct InlineParser<'a> {
@@ -728,8 +985,7 @@ impl<'a> InlineParser<'a> {
             prefix[i + 1] = prefix[i];
             if b[i] == b'[' {
                 if let Some(close_pos) = pairs[i] {
-                    let prev_is_bang =
-                        i >= 1 && b[i - 1] == b'!' && (i < 2 || b[i - 2] != b'\\');
+                    let prev_is_bang = i >= 1 && b[i - 1] == b'!' && (i < 2 || b[i - 2] != b'\\');
                     if !prev_is_bang && self.pair_resolves(i, close_pos) {
                         prefix[i + 1] += 1;
                     }
@@ -806,10 +1062,12 @@ impl<'a> InlineParser<'a> {
             }
             if depth < MAX_INLINE_DEPTH {
                 if let Some(node) = self
-                    .try_autolink()
+                    .try_html(depth)
+                    .or_else(|| self.try_autolink())
                     .or_else(|| self.try_code_span())
                     .or_else(|| self.try_math())
                     .or_else(|| self.try_strikethrough(depth))
+                    .or_else(|| self.try_highlight(depth))
                     .or_else(|| self.try_footnote_ref())
                     .or_else(|| self.try_image())
                     .or_else(|| {
@@ -837,7 +1095,10 @@ impl<'a> InlineParser<'a> {
             if self.pos < self.s.len() {
                 let c = self.s[self.pos..].chars().next().unwrap();
                 let adv = if c == '`' {
-                    self.s[self.pos..].bytes().take_while(|&b| b == b'`').count()
+                    self.s[self.pos..]
+                        .bytes()
+                        .take_while(|&b| b == b'`')
+                        .count()
                 } else if c == '<' {
                     // 行内 HTML/自动链接形态整段跳过：标签内的 `[`/`]`/`*` 等不参与
                     // 行内解析（#0536：标签属性里的 `[ref]` 不成链）
@@ -875,7 +1136,10 @@ impl<'a> InlineParser<'a> {
         let right = !prev_ws && (!prev_punct || next_ws || next_punct);
         // `_` 追加 intraword 限制：词内（两侧非空白非标点）不可开、不可闭
         let (can_open, can_close) = if chr == b'_' {
-            (left && (!right || prev_punct), right && (!left || next_punct))
+            (
+                left && (!right || prev_punct),
+                right && (!left || next_punct),
+            )
         } else {
             (left, right)
         };
@@ -905,6 +1169,91 @@ impl<'a> InlineParser<'a> {
             url: url.map(|(s, e)| Range::new(self.base + s, self.base + e)),
             children,
         }
+    }
+
+    /// 行内白名单 HTML 解析：`<kbd>Ctrl</kbd>` / `<br>` / `<img src="...">` 等。
+    /// 分派位置在 try_autolink 之前（`<kbd>` 不是自动链接）。
+    /// - 白名单 void 自闭合 → HtmlSelfClosed
+    /// - 白名单 pair 配对成功 → Html + 子节点递归
+    /// - 白名单 pair 配对失败 → HtmlLiteral（整段源码原样，吞至 EOF）
+    /// - 白名单外 / 非合法开标签 → 返回 None（后续逻辑继续）
+    fn try_html(&mut self, depth: usize) -> Option<InlineNode> {
+        let rest = &self.s[self.pos..];
+        if !rest.starts_with('<') {
+            return None;
+        }
+        let start = self.pos;
+        let end_tag = html_tag_end(self.s, start)?;
+        let open_src = &self.s[start + 1..end_tag - 1];
+        // 自动链接先行：`<scheme:...>` / `<local@domain>` 不含空白、不含 `<`、标签名后
+        // 直接接 `:` 或 `@`。这些形态不是合法 HTML 属性语法（属性名须以字母/`_` 开头、
+        // 前须有空白）。open_src 不含空白 → 大概率是 autolink，放给 try_autolink。
+        if !open_src
+            .as_bytes()
+            .iter()
+            .any(|b| matches!(b, b' ' | b'\t' | b'\n' | b'\r' | b'>'))
+            && open_src.find([':', '@']).is_some()
+        {
+            return None;
+        }
+        let (tag_name, self_closed, attrs) = parse_open_tag(open_src)?;
+        let tag = HtmlTag::from_str(&tag_name)?; // 白名单外 → None，后续处理
+                                                 // void 标签（<br> / <img>）：HTML5 允许省略 `/`，只要标签名合法就算自闭合
+        if tag.is_void() {
+            self.pos = end_tag;
+            return Some(self.node(
+                InlineKind::HtmlSelfClosed { tag, attrs },
+                start,
+                end_tag,
+                end_tag,
+                None,
+                Vec::new(),
+            ));
+        }
+        // pair 标签——自闭合写法非法（如 `<a />`）
+        if self_closed {
+            return None;
+        }
+        let close_lt = find_matching_close(self.s, end_tag, &tag_name);
+        let Some(close_lt) = close_lt else {
+            // 未闭合 → 整段 HtmlLiteral 吞到 EOF
+            self.pos = self.s.len();
+            let literal_end = self.s.len();
+            let lit_kind = InlineKind::HtmlLiteral;
+            return Some(self.node(lit_kind, start, start, literal_end, None, Vec::new()));
+        };
+        // 找闭标签的 `>` 位置
+        let close_gt = html_tag_end(self.s, close_lt)?;
+        // 交叉标签（`<kbd><mark>x</kbd></mark>`）：外层闭标签之后紧跟着内层未闭合
+        // 标签的闭标签。整段源码按字面（HtmlLiteral）处理并吞掉两段闭标签，
+        // 否则内层开标签已被降级为字面、外层闭标签后却漏出孤立的 `</mark>`，
+        // 导出件会产出半开半闭的畸形 HTML。
+        if let Some(end) = cross_tag_tail(self.s, start, close_gt) {
+            self.pos = end;
+            return Some(self.node(InlineKind::HtmlLiteral, start, start, end, None, Vec::new()));
+        }
+        // 递归解析内部
+        let inner_start = end_tag;
+        let inner_end = close_lt;
+        let mut sub = InlineParser {
+            s: &self.s[inner_start..inner_end],
+            base: self.base + inner_start,
+            refs: self.refs,
+            pos: 0,
+            bracket_pairs: Vec::new(),
+            resolved_prefix: Vec::new(),
+            backtick_runs: Vec::new(),
+        };
+        let children = sub.parse_until(None, true, depth + 1);
+        self.pos = close_gt;
+        Some(self.node(
+            InlineKind::Html { tag, attrs },
+            start,
+            inner_start,
+            inner_end,
+            None,
+            children,
+        ))
     }
 
     /// 自动链接（CommonMark §6.5）：`<scheme:...>` 或 `<local@domain>`。
@@ -946,7 +1295,8 @@ impl<'a> InlineParser<'a> {
         }
         let search_start = self.pos + open;
         // 从预扫索引中找 search_start 之后、长度 == open 的第一个 run
-        let close_pos = self.backtick_runs
+        let close_pos = self
+            .backtick_runs
             .iter()
             .find(|&&(rp, rl)| rp >= search_start && rl == open)
             .map(|&(rp, _)| rp)?;
@@ -1031,6 +1381,52 @@ impl<'a> InlineParser<'a> {
         ))
     }
 
+    /// `==text==`（高亮，等价 `<mark>`）：最近闭标记成节点，内容非空，子节点递归。
+    /// `===` 不作为开标记；闭标记若属于更长的 `=` run（`===`）同样不承认，
+    /// 避免把 `===x===` 的边界错切。转义 `\==` 由通用转义扫描消费。
+    fn try_highlight(&mut self, depth: usize) -> Option<InlineNode> {
+        let rest = &self.s[self.pos..];
+        if !rest.starts_with("==") {
+            return None;
+        }
+        // 开标记必须是长度恰为 2 的 `=` run（`===` 的任一位置都不开）。
+        let prev_eq = self.pos > 0 && self.s.as_bytes()[self.pos - 1] == b'=';
+        if prev_eq || rest.as_bytes().get(2) == Some(&b'=') {
+            return None;
+        }
+        let start = self.pos;
+        self.pos = start + 2;
+        let saved_pairs = std::mem::take(&mut self.bracket_pairs);
+        let saved_prefix = std::mem::take(&mut self.resolved_prefix);
+        let saved_runs = std::mem::take(&mut self.backtick_runs);
+        let children = self.parse_until(Some("=="), true, depth + 1);
+        self.bracket_pairs = saved_pairs;
+        self.resolved_prefix = saved_prefix;
+        self.backtick_runs = saved_runs;
+        let content_end = self.pos;
+        let content = &self.s[start + 2..content_end];
+        // 闭标记同为长度恰为 2 的 run；跨行（含 `\n`）不识别。
+        let close_prev_eq = content_end > 0 && self.s.as_bytes()[content_end - 1] == b'=';
+        let closed = self.s[content_end..].starts_with("==")
+            && !close_prev_eq
+            && self.s.as_bytes().get(content_end + 2) != Some(&b'=')
+            && content_end > start + 2
+            && !content.contains('\n');
+        if !closed {
+            self.pos = start; // 未闭合/空内容/跨行/`===` 边界：开标记按纯文本
+            return None;
+        }
+        self.pos = content_end + 2;
+        Some(self.node(
+            InlineKind::Highlight,
+            start,
+            start + 2,
+            content_end,
+            None,
+            children,
+        ))
+    }
+
     /// `[^id]`（GFM 脚注引用）：节点 `content` 为 id 文本区间，不查定义——缺失定义
     /// 仍产出节点，由视图按编号表降级。id 字符集与块级 `parse_footnote_def` 同源
     /// （字母/数字/`-`/`_`/中文），故两处不会对同一个 `[^…]` 给出不同边界。
@@ -1039,9 +1435,7 @@ impl<'a> InlineParser<'a> {
     fn try_footnote_ref(&mut self) -> Option<InlineNode> {
         let rest = &self.s[self.pos..];
         let inner = rest.strip_prefix("[^")?;
-        if self.pos > 0
-            && self.s.as_bytes()[self.pos - 1] == b'!'
-            && !self.is_escaped(self.pos - 1)
+        if self.pos > 0 && self.s.as_bytes()[self.pos - 1] == b'!' && !self.is_escaped(self.pos - 1)
         {
             return None;
         }
@@ -1176,7 +1570,11 @@ impl<'a> InlineParser<'a> {
             if self.s[ls..le].contains('[') || le - ls > 999 {
                 return false;
             }
-            let src = if le == ls { &self.s[o + 1..p] } else { &self.s[ls..le] };
+            let src = if le == ls {
+                &self.s[o + 1..p]
+            } else {
+                &self.s[ls..le]
+            };
             return self.refs.contains_key(&normalize_label(src));
         }
         self.refs.contains_key(&normalize_label(&self.s[o + 1..p]))
@@ -1222,7 +1620,14 @@ impl<'a> InlineParser<'a> {
             };
             let &(dest, _) = self.refs.get(&normalize_label(label_src))?;
             self.pos = le + 1;
-            let mut n = self.node(InlineKind::Image, start, start + 2, alt_end, None, Vec::new());
+            let mut n = self.node(
+                InlineKind::Image,
+                start,
+                start + 2,
+                alt_end,
+                None,
+                Vec::new(),
+            );
             n.url = Some(dest);
             return Some(n);
         }
@@ -1231,7 +1636,14 @@ impl<'a> InlineParser<'a> {
             .refs
             .get(&normalize_label(&self.s[start + 2..alt_end]))?;
         self.pos = alt_end + 1;
-        let mut n = self.node(InlineKind::Image, start, start + 2, alt_end, None, Vec::new());
+        let mut n = self.node(
+            InlineKind::Image,
+            start,
+            start + 2,
+            alt_end,
+            None,
+            Vec::new(),
+        );
         n.url = Some(dest);
         Some(n)
     }
@@ -1494,9 +1906,18 @@ mod tests {
     fn bare_url_basic_prefixes() {
         // W1-5：三种前缀（url 指向源码本身，协议补全在消费侧完成）
         assert_eq!(sexp(&parse("www.a.com")), "Link[0..9 c=0..9 url=0..9]");
-        assert_eq!(sexp(&parse("http://a.com")), "Link[0..12 c=0..12 url=0..12]");
-        assert_eq!(sexp(&parse("https://a.com")), "Link[0..13 c=0..13 url=0..13]");
-        assert_eq!(sexp(&parse("Visit www.a.com now")), "Link[6..15 c=6..15 url=6..15]");
+        assert_eq!(
+            sexp(&parse("http://a.com")),
+            "Link[0..12 c=0..12 url=0..12]"
+        );
+        assert_eq!(
+            sexp(&parse("https://a.com")),
+            "Link[0..13 c=0..13 url=0..13]"
+        );
+        assert_eq!(
+            sexp(&parse("Visit www.a.com now")),
+            "Link[6..15 c=6..15 url=6..15]"
+        );
     }
 
     #[test]
@@ -1535,7 +1956,10 @@ mod tests {
         // 代码段内不成链（已被 Code 节点覆盖）
         assert_eq!(sexp(&parse("`www.a.com`")), "Code[0..11 c=1..10]");
         // CommonMark 显式自动链接（`<...>`）由原逻辑处理，裸 URL 不抢
-        assert_eq!(sexp(&parse("<http://a.com>")), "Link[0..14 c=1..13 url=1..13]");
+        assert_eq!(
+            sexp(&parse("<http://a.com>")),
+            "Link[0..14 c=1..13 url=1..13]"
+        );
         // `<...>` 内含空格 → 显式自动链接非法，裸 URL 也不应接管
         assert_eq!(sexp(&parse("<http://a.com x>")), "");
         // 已有链接文本内不成链
@@ -1561,7 +1985,10 @@ mod tests {
         // `&hl;` 是实体样式，整体排除；正常 `&x=y` 保留
         let ns = parse("www.a.com/?q=a&hl;");
         let link = ns.iter().find(|n| n.kind == InlineKind::Link).unwrap();
-        assert_eq!(&"www.a.com/?q=a&hl;"[..link.url.unwrap().end], "www.a.com/?q=a");
+        assert_eq!(
+            &"www.a.com/?q=a&hl;"[..link.url.unwrap().end],
+            "www.a.com/?q=a"
+        );
         let ns = parse("www.a.com/?q=a&hl=en");
         let link = ns.iter().find(|n| n.kind == InlineKind::Link).unwrap();
         assert_eq!(link.url.unwrap().end, 20);
@@ -1586,7 +2013,12 @@ mod tests {
             assert_eq!(link.url.unwrap().end, src.len(), "{src} 应整体成链");
         }
         // 域名含 `+` 非法；尾部 `-` / `_` 非法；句末 `.` 不属于链接
-        for src in ["hello@mail+xyz.example", "a.b-c_d@a.b-", "a.b-c_d@a.b_", "foo@bar"] {
+        for src in [
+            "hello@mail+xyz.example",
+            "a.b-c_d@a.b-",
+            "a.b-c_d@a.b_",
+            "foo@bar",
+        ] {
             assert_eq!(sexp(&parse(src)), "", "{src} 不应成链");
         }
         let ns = parse("a.b-c_d@a.b.");
@@ -1594,7 +2026,10 @@ mod tests {
         assert_eq!(link.url.unwrap().end, 11);
         // 代码段/尖括号内不接管
         assert_eq!(sexp(&parse("`foo@bar.baz`")), "Code[0..13 c=1..12]");
-        assert_eq!(sexp(&parse("<foo@bar.baz>")), "Link[0..13 c=1..12 url=1..12]");
+        assert_eq!(
+            sexp(&parse("<foo@bar.baz>")),
+            "Link[0..13 c=1..12 url=1..12]"
+        );
         // 已有 scheme 前缀（`mailto:`）不当作裸邮箱
         assert_eq!(sexp(&parse("mailto:foo@bar.baz")), "");
     }
@@ -1635,10 +2070,7 @@ mod tests {
     fn link_dest_invalid_falls_back_to_shortcut() {
         // #0568：`[foo](not a link)` URL 含空格 → inline 链接失败，shortcut 查表
         let mut refs = RefMap::new();
-        refs.insert(
-            "foo".into(),
-            (crate::range::Range::new(21, 26), None),
-        );
+        refs.insert("foo".into(), (crate::range::Range::new(21, 26), None));
         let nodes = parse_inlines("[foo](not a link)", 0, &refs);
         assert_eq!(sexp(&nodes), "Link[0..5 c=1..4 url=21..26]");
     }
@@ -1669,10 +2101,7 @@ mod tests {
     #[test]
     fn image_alt_may_nest_inline() {
         // CommonMark：image alt 为纯文本，不产生子节点
-        assert_eq!(
-            sexp(&parse("![**b**](u)")),
-            "Image[0..11 c=2..7 url=9..10]"
-        );
+        assert_eq!(sexp(&parse("![**b**](u)")), "Image[0..11 c=2..7 url=9..10]");
     }
 
     #[test]
@@ -1688,6 +2117,55 @@ mod tests {
     fn escaped_bang_is_literal() {
         // `\!` 转义后余下 `[a](u)` 按普通 Link 解析
         assert_eq!(sexp(&parse("\\![a](u)")), "Link[2..8 c=3..4 url=6..7]");
+    }
+
+    // ===== Highlight（N3c）：`==text==` =====
+
+    #[test]
+    fn highlight_basic() {
+        assert_eq!(sexp(&parse("a ==hi== c")), "Highlight[2..8 c=4..6]");
+    }
+
+    #[test]
+    fn highlight_nests_strong_and_code() {
+        assert_eq!(
+            sexp(&parse("==**b** `c`==")),
+            "Highlight[0..13 c=2..11 Strong[2..7 c=4..5] Code[8..11 c=9..10]]"
+        );
+    }
+
+    #[test]
+    fn highlight_empty_single_or_triple_equals_is_text() {
+        assert_eq!(sexp(&parse("==a")), ""); // 未闭合
+        assert_eq!(sexp(&parse("====")), ""); // `===` 不是开标记（空内容同理）
+        assert_eq!(sexp(&parse("a =x= b")), ""); // 单 `=` 为纯文本
+        assert_eq!(sexp(&parse("===x===")), ""); // 三连 `=` 边界不成节点
+                                                 // 三连边界不吞掉后续正常高亮
+        assert_eq!(sexp(&parse("=== a ==b==")), "Highlight[6..11 c=8..9]");
+    }
+
+    #[test]
+    fn escaped_equals_is_literal() {
+        assert_eq!(sexp(&parse("\\==x==")), "");
+        assert_eq!(sexp(&parse("\\=\\=x\\=\\=")), "");
+    }
+
+    #[test]
+    fn highlight_multibyte_offsets_are_bytes() {
+        assert_eq!(sexp(&parse("中文 ==亮==")), "Highlight[7..14 c=9..12]");
+    }
+
+    #[test]
+    fn highlight_adjacent_leftmost() {
+        assert_eq!(sexp(&parse("==a ==b==")), "Highlight[0..6 c=2..4]");
+    }
+
+    #[test]
+    fn highlight_stop_bounds_bracket_pairs() {
+        assert_eq!(
+            sexp(&parse("==a [b c== d](url)==")),
+            "Highlight[0..10 c=2..8]"
+        );
     }
 
     // ===== Strikethrough（P3-4）：`~~del~~` =====
@@ -1916,7 +2394,7 @@ mod tests {
         // "[![a](b)]" —— 外层 [ 配 ]，内层 ![a](b) 成图（内层是图片开括号，不淘汰外层）
         assert_eq!(
             sexp(&parse("[![a](b)]")),
-            "Image[1..8 c=3..4 url=6..7]"  // 内层图片命中后淘汰了外层链接（内层是链接？不对）
+            "Image[1..8 c=3..4 url=6..7]" // 内层图片命中后淘汰了外层链接（内层是链接？不对）
         );
     }
 
@@ -1942,9 +2420,9 @@ mod tests {
     #[test]
     fn code_span_basic_and_nested() {
         assert_eq!(sexp(&parse("`code`")), "Code[0..6 c=1..5]");
-        assert_eq!(sexp(&parse("``")) , ""); // 空代码段
+        assert_eq!(sexp(&parse("``")), ""); // 空代码段
         assert_eq!(sexp(&parse("```foo``")), ""); // 不等长 run（Example 347）
-        // 独立代码段 + 后续文本；node.end = close_pos + open = 3
+                                                  // 独立代码段 + 后续文本；node.end = close_pos + open = 3
         assert_eq!(sexp(&parse("`a`b`")), "Code[0..3 c=1..2]");
     }
 
@@ -1961,5 +2439,275 @@ mod tests {
             "512KB 不匹配反引号 inline 解析 {}ms 超过 500ms 预算",
             elapsed.as_millis()
         );
+    }
+
+    // ===== 批次 3：行内 HTML 白名单 =====
+
+    #[test]
+    fn html_whitelist_pair_basic() {
+        // 两个独立的 <kbd> —— 都被解析成 Html(Kbd)
+        let ns = parse("<kbd>Ctrl</kbd>+<kbd>A</kbd>");
+        assert_eq!(ns.len(), 2);
+        assert!(matches!(&ns[0].kind, InlineKind::Html { tag, .. } if *tag == HtmlTag::Kbd));
+        assert!(matches!(&ns[1].kind, InlineKind::Html { tag, .. } if *tag == HtmlTag::Kbd));
+    }
+
+    #[test]
+    fn html_whitelist_void_self_closed() {
+        // <br> 硬换行 —— HtmlSelfClosed(Br)
+        let ns = parse("foo<br>bar");
+        assert_eq!(ns.len(), 1);
+        assert!(
+            matches!(&ns[0].kind, InlineKind::HtmlSelfClosed { tag, .. } if *tag == HtmlTag::Br)
+        );
+        // 显式自闭合写法也接受
+        let ns = parse("a<br/>b");
+        assert_eq!(ns.len(), 1);
+        assert!(
+            matches!(&ns[0].kind, InlineKind::HtmlSelfClosed { tag, .. } if *tag == HtmlTag::Br)
+        );
+    }
+
+    #[test]
+    fn html_whitelist_nested_sub_inside_kbd() {
+        // <kbd>a<sub>b</sub>c</kbd> —— 子节点里嵌 InlineKind::Html(Sub)
+        let ns = parse("<kbd>a<sub>b</sub>c</kbd>");
+        assert_eq!(ns.len(), 1);
+        let kbd = &ns[0];
+        assert!(matches!(&kbd.kind, InlineKind::Html { tag, .. } if *tag == HtmlTag::Kbd));
+        // 子节点里有 InlineKind::Html(Sub)
+        assert!(kbd
+            .children
+            .iter()
+            .any(|c| matches!(&c.kind, InlineKind::Html { tag, .. } if *tag == HtmlTag::Sub)));
+    }
+
+    #[test]
+    fn html_unclosed_pair_falls_back_to_literal() {
+        // 未闭合 <kbd> —— 整段退成 HtmlLiteral
+        let ns = parse("<kbd>未闭合文本");
+        assert_eq!(ns.len(), 1);
+        assert!(matches!(&ns[0].kind, InlineKind::HtmlLiteral));
+    }
+
+    #[test]
+    fn html_crossed_tags_falls_back_to_literal() {
+        // <kbd>交叉</sub> —— 找不到 </kbd>，整段退成 HtmlLiteral
+        let ns = parse("<kbd>交叉</sub>x");
+        assert_eq!(ns.len(), 1);
+        assert!(matches!(&ns[0].kind, InlineKind::HtmlLiteral));
+    }
+
+    #[test]
+    fn html_off_whitelist_passthrough_autolink() {
+        // <div>不在白名单 —— try_html 返回 None，标签被跳过，整体按纯文本
+        // 但我们无法直接断言 sexp（因为没有节点产出），而是断言没有 InlineKind::Html
+        let ns = parse("<div>x</div>");
+        assert!(ns
+            .iter()
+            .all(|n| !matches!(&n.kind, InlineKind::Html { .. })));
+        // <script>alert(1)</script> —— 脚本白名单外，不是行内 Html
+        let ns = parse("<script>alert(1)</script>");
+        assert!(ns
+            .iter()
+            .all(|n| !matches!(&n.kind, InlineKind::Html { .. } | InlineKind::HtmlLiteral)));
+    }
+
+    #[test]
+    fn html_remote_img_src_stripped() {
+        // 远程 src 被清空，但仍产出 HtmlSelfClosed(Img)
+        let ns = parse(r#"<img src="http://evil/x.png" alt="bad">"#);
+        assert_eq!(ns.len(), 1);
+        match &ns[0].kind {
+            InlineKind::HtmlSelfClosed { tag, attrs } => {
+                assert_eq!(*tag, HtmlTag::Img);
+                assert!(attrs.src.is_none(), "远程 src 应被清空");
+                assert_eq!(attrs.alt.as_deref(), Some("bad"));
+            }
+            _ => panic!("expected HtmlSelfClosed Img"),
+        }
+        // 本地 src 保留
+        let ns = parse(r#"<img src="local.png" alt="ok">"#);
+        match &ns[0].kind {
+            InlineKind::HtmlSelfClosed { attrs, .. } => {
+                assert_eq!(attrs.src.as_deref(), Some("local.png"));
+                assert_eq!(attrs.alt.as_deref(), Some("ok"));
+            }
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn html_abbr_title_collected() {
+        let ns = parse(r#"<abbr title="World Wide Web">WWW</abbr>"#);
+        assert_eq!(ns.len(), 1);
+        match &ns[0].kind {
+            InlineKind::Html { tag, attrs } => {
+                assert_eq!(*tag, HtmlTag::Abbr);
+                assert_eq!(attrs.title.as_deref(), Some("World Wide Web"));
+            }
+            _ => panic!("expected Html Abbr"),
+        }
+    }
+
+    #[test]
+    fn html_event_and_style_attrs_ignored() {
+        // onclick / style 属性应被忽略；abbr 正常 title 仍被收集
+        let input = r#"<abbr onclick="x" style="y" title="T">a</abbr>"#;
+        let ns = parse(input);
+        eprintln!("ns.len() = {}", ns.len());
+        for n in &ns {
+            eprintln!("kind = {:?}", n.kind);
+        }
+        assert_eq!(ns.len(), 1);
+        match &ns[0].kind {
+            InlineKind::Html { attrs, .. } => {
+                eprintln!("attrs.title = {:?}", attrs.title);
+                assert_eq!(attrs.title.as_deref(), Some("T"));
+            }
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn html_semantic_tags_whitelisted() {
+        // 用户真机截图暴露的常用语义标签：<strong style="color:red">VISUAL</strong>
+        let ns = parse(r#"<strong style="color: red">VISUAL</strong>"#);
+        match &ns[0].kind {
+            InlineKind::Html { tag, attrs } => {
+                assert_eq!(*tag, HtmlTag::Strong);
+                assert_eq!(attrs.style.as_deref(), Some("color:red"));
+            }
+            _ => panic!("expected Html Strong"),
+        }
+        for (src, want) in [
+            ("<b>x</b>", HtmlTag::B),
+            ("<em>x</em>", HtmlTag::Em),
+            ("<i>x</i>", HtmlTag::I),
+            ("<u>x</u>", HtmlTag::U),
+            ("<s>x</s>", HtmlTag::S),
+            ("<del>x</del>", HtmlTag::Del),
+            ("<ins>x</ins>", HtmlTag::Ins),
+            ("<q>x</q>", HtmlTag::Q),
+            ("<cite>x</cite>", HtmlTag::Cite),
+            ("<var>x</var>", HtmlTag::Var),
+            ("<samp>x</samp>", HtmlTag::Samp),
+            ("<small>x</small>", HtmlTag::Small),
+            ("<span>x</span>", HtmlTag::Span),
+        ] {
+            let ns = parse(src);
+            assert_eq!(ns.len(), 1, "{src} 应解析为单个节点");
+            assert!(
+                matches!(&ns[0].kind, InlineKind::Html { tag, .. } if *tag == want),
+                "{src} 应解析为 {want:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn html_style_legal_values_kept() {
+        let cases = [
+            ("#f00", "#f00"),
+            ("#ff0000", "#ff0000"),
+            ("rgb(1,2,3)", "rgb(1,2,3)"),
+            ("rgba(1,2,3,0.5)", "rgba(1,2,3,0.5)"),
+            ("hsl(120,50%,50%)", "hsl(120,50%,50%)"),
+            ("red", "red"),
+        ];
+        for (v, want) in cases {
+            let src = format!(r#"<span style="color:{v}">x</span>"#);
+            let ns = parse(&src);
+            match &ns[0].kind {
+                InlineKind::Html { attrs, .. } => {
+                    assert_eq!(attrs.style.as_deref(), Some(&*format!("color:{want}")))
+                }
+                _ => panic!("expected Html Span"),
+            }
+        }
+        let ns = parse(
+            r#"<span style="font-weight:bold;font-style:italic;text-decoration:underline line-through;font-size:14px;font-family:'Segoe UI', Arial">x</span>"#,
+        );
+        match &ns[0].kind {
+            InlineKind::Html { attrs, .. } => {
+                let st = veil_core_style(attrs);
+                assert!(st.bold && st.italic && st.underline && st.strike);
+                assert_eq!(st.size_px, Some(14.0));
+            }
+            _ => panic!("expected Html Span"),
+        }
+    }
+
+    #[test]
+    fn html_style_injections_and_unknown_dropped() {
+        // 危险片段/未知属性逐条丢弃，合法声明保留，不整段降级为字面量。
+        let ns = parse(
+            r#"<strong style="color:red;position:fixed;background-image:url(javascript:x);expression(y);z-index:9">V</strong>"#,
+        );
+        match &ns[0].kind {
+            InlineKind::Html { tag, attrs } => {
+                assert_eq!(*tag, HtmlTag::Strong, "标签本身必须保留");
+                assert_eq!(attrs.style.as_deref(), Some("color:red"));
+                let st = veil_core_style(attrs);
+                assert_eq!(st.color, Some([255, 0, 0]));
+            }
+            _ => panic!("expected Html Strong"),
+        }
+        // 全部非法 → 无 style 属性
+        let ns = parse(r#"<span style="position:fixed;content:'x'">x</span>"#);
+        match &ns[0].kind {
+            InlineKind::Html { attrs, .. } => assert!(attrs.style.is_none()),
+            _ => panic!("expected Html Span"),
+        }
+    }
+
+    #[test]
+    fn html_style_gt_inside_quotes_does_not_truncate() {
+        // style 值内含 `>`、分号、引号：标签边界必须按引号状态判定。
+        let src = r#"<span style="font-family:'a>b';color:red">X</span>Y"#;
+        let ns = parse(src);
+        assert_eq!(ns.len(), 1, "应只产出 span 节点（Y 是普通文本）");
+        match &ns[0].kind {
+            InlineKind::Html { tag, attrs } => {
+                assert_eq!(*tag, HtmlTag::Span);
+                assert_eq!(ns[0].range.end, src.find("</span>").unwrap() + 7);
+                // `>` 出现在引号内不得截断标签；含 `>` 的 font-family 非法被丢弃，
+                // 同一条 style 里的合法 color 声明必须保留。
+                assert_eq!(
+                    attrs.style.as_deref(),
+                    Some("color:red"),
+                    "style 解析不得被引号内 `>` 截断: {:?}",
+                    attrs.style
+                );
+            }
+            _ => panic!("expected Html Span"),
+        }
+    }
+
+    #[test]
+    fn html_semantic_tags_nest() {
+        let ns = parse("<strong>a<em>b<u>c</u></em></strong>");
+        assert_eq!(ns.len(), 1);
+        let strong = &ns[0];
+        assert!(matches!(&strong.kind, InlineKind::Html { tag, .. } if *tag == HtmlTag::Strong));
+        let em = strong
+            .children
+            .iter()
+            .find(|c| matches!(&c.kind, InlineKind::Html { tag, .. } if *tag == HtmlTag::Em))
+            .expect("strong 内应有 em");
+        assert!(em
+            .children
+            .iter()
+            .any(|c| matches!(&c.kind, InlineKind::Html { tag, .. } if *tag == HtmlTag::U)));
+    }
+
+    fn veil_core_style(attrs: &HtmlAttrs) -> super::super::model::HtmlStyle {
+        super::super::model::HtmlStyle::parse(attrs.style.as_deref().unwrap_or(""))
+    }
+
+    #[test]
+    fn html_autolink_not_affected() {
+        // try_html 在 autolink 形态（无空白 + 含 :/@）时应返回 None，交给 try_autolink
+        assert_eq!(sexp(&parse("<a+b+c:d>")), "Link[0..9 c=1..8 url=1..8]");
+        assert_eq!(sexp(&parse("<a@b.c>")), "Link[0..7 c=1..6 url=1..6]");
     }
 }

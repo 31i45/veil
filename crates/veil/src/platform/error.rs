@@ -4,6 +4,8 @@
 use std::ffi::c_void;
 use std::path::Path;
 
+use veil_ui::i18n::{t, tf, Key};
+
 /// 打开失败的可归因原因：决定文案里的原因与「下一步」。
 pub enum OpenFailure {
     /// 文件不是合法 UTF-8（GBK 等本地编码最常见）。
@@ -30,25 +32,17 @@ impl OpenFailure {
 /// 打开失败说明：包含完整路径、可读原因与可执行的下一步（纯函数，便于测试）。
 pub fn open_failure_text(path: &Path, failure: &OpenFailure) -> String {
     let (reason, next) = match failure {
-        OpenFailure::NotUtf8(e) => (
-            format!("文件不是有效的 UTF-8 编码（{e}）"),
-            "请将文件另存为 UTF-8 后重试。",
-        ),
+        OpenFailure::NotUtf8(e) => (tf(Key::OpenFailNotUtf8, &[e]), t(Key::OpenFailNotUtf8Next)),
         OpenFailure::NotFound(e) => (
-            format!("文件不存在或已被移动（{e}）"),
-            "请确认路径后重试，或从「文件 → 打开」重新选择。",
+            tf(Key::OpenFailNotFound, &[e]),
+            t(Key::OpenFailNotFoundNext),
         ),
-        OpenFailure::Denied(e) => (
-            format!("没有读取该文件的权限（{e}）"),
-            "请确认文件未被只读锁定或被安全软件拦截，取得权限后重试。",
-        ),
-        OpenFailure::Other(e) => (format!("读取失败（{e}）"), "请确认文件可访问后重试。"),
+        OpenFailure::Denied(e) => (tf(Key::OpenFailDenied, &[e]), t(Key::OpenFailDeniedNext)),
+        OpenFailure::Other(e) => (tf(Key::OpenFailOther, &[e]), t(Key::OpenFailOtherNext)),
     };
-    format!(
-        "无法打开：{}\n\n原因：{}\n\n下一步：{}",
-        path.display(),
-        reason,
-        next
+    tf(
+        Key::OpenFailBody,
+        &[&path.display().to_string(), &reason, next],
     )
 }
 
@@ -145,11 +139,20 @@ mod tests {
     #[test]
     fn io_error_kinds_are_classified() {
         let denied = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
-        assert!(matches!(OpenFailure::from_io(&denied), OpenFailure::Denied(_)));
+        assert!(matches!(
+            OpenFailure::from_io(&denied),
+            OpenFailure::Denied(_)
+        ));
         let missing = std::io::Error::from(std::io::ErrorKind::NotFound);
-        assert!(matches!(OpenFailure::from_io(&missing), OpenFailure::NotFound(_)));
+        assert!(matches!(
+            OpenFailure::from_io(&missing),
+            OpenFailure::NotFound(_)
+        ));
         let other = std::io::Error::from(std::io::ErrorKind::Other);
-        assert!(matches!(OpenFailure::from_io(&other), OpenFailure::Other(_)));
+        assert!(matches!(
+            OpenFailure::from_io(&other),
+            OpenFailure::Other(_)
+        ));
     }
 
     /// 第四类归因（其他 IO 失败）：保留原始诊断，并仍给路径与下一步。

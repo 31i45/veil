@@ -31,7 +31,8 @@ param(
     [int]$PerfChars = 200,
     [switch]$KeepAlive,
     [int]$SettleMs = 700,
-    [int]$WindowWaitMs = 15000
+    [int]$WindowWaitMs = 15000,
+    [string[]]$AuditFiles = @()
 )
 
 $ErrorActionPreference = 'Stop'
@@ -114,6 +115,7 @@ namespace VeilWalkthrough {
         [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr hWnd, IntPtr hdcBlt, uint flags);
         [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hWnd);
         [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr hWnd);
+        [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetWindowText(IntPtr hWnd, System.Text.StringBuilder text, int count);
         [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
     }
 
@@ -121,6 +123,7 @@ namespace VeilWalkthrough {
         public const uint WM_KEYDOWN = 0x0100;
         public const uint WM_KEYUP = 0x0101;
         public const uint WM_MOUSEWHEEL = 0x020A;
+        public const uint WM_CLOSE = 0x0010;
         public const int VK_NEXT = 0x22;
         public const int VK_PRIOR = 0x21;
         public const int SW_RESTORE = 9;
@@ -141,27 +144,55 @@ namespace VeilWalkthrough {
 # 进程内声明 DPI 感知后，窗口矩形、客户端矩形、点击坐标、屏幕捕获统一为物理像素。
 [VeilWalkthrough.Win32]::SetProcessDPIAware() | Out-Null
 
-function Get-MainWindow {
-    param([int]$ProcessId, [int]$TimeoutMs)
+# 枚举同一 PID 的全部可见顶层文档窗口。Process.MainWindowHandle 只返回其中一个，
+# 不能用于单进程多窗口验收；句柄排序仅保证步骤中的窗口编号在枚举间稳定。
+function Get-ProcessWindows {
+    param([int]$ProcessId)
+    $script:enumPid = [uint32]$ProcessId
+    $script:enumWindows = New-Object System.Collections.Generic.List[object]
+    $collect = {
+        param([IntPtr]$h, [IntPtr]$p)
+        $wp = [uint32]0
+        [VeilWalkthrough.Win32]::GetWindowThreadProcessId($h, [ref]$wp) | Out-Null
+        if ($wp -ne $script:enumPid) { return $true }
+        if (-not [VeilWalkthrough.Win32]::IsWindowVisible($h) -or
+            [VeilWalkthrough.Win32]::IsIconic($h)) { return $true }
+        $wr = New-Object VeilWalkthrough.RECT
+        [VeilWalkthrough.Win32]::GetWindowRect($h, [ref]$wr) | Out-Null
+        if (($wr.Right - $wr.Left) -lt 200 -or ($wr.Bottom - $wr.Top) -lt 300) { return $true }
+        $title = New-Object System.Text.StringBuilder 1024
+        [VeilWalkthrough.Win32]::GetWindowText($h, $title, $title.Capacity) | Out-Null
+        $script:enumWindows.Add([pscustomobject]@{
+            Hwnd = $h
+            Title = $title.ToString()
+            Left = $wr.Left
+            Top = $wr.Top
+            Right = $wr.Right
+            Bottom = $wr.Bottom
+        })
+        return $true
+    }
+    [VeilWalkthrough.Win32]::EnumWindows($collect, [IntPtr]::Zero) | Out-Null
+    return @($script:enumWindows | Sort-Object { $_.Hwnd.ToInt64() })
+}
+
+function Wait-ProcessWindowCount {
+    param([int]$ProcessId, [int]$MinimumCount, [int]$TimeoutMs)
     $deadline = (Get-Date).AddMilliseconds($TimeoutMs)
     do {
-        $p = Get-Process -Id $ProcessId -ErrorAction SilentlyContinue
-        if ($null -eq $p) { return $null }
-        $candidate = $p.MainWindowHandle
-        if ($candidate -ne 0) {
-            # 启动早期可能存在临时窗口；只接受可见且尺寸正常的窗口
-            $wr = New-Object VeilWalkthrough.RECT
-            [VeilWalkthrough.Win32]::GetWindowRect($candidate, [ref]$wr) | Out-Null
-            $h = $wr.Bottom - $wr.Top
-            if ([VeilWalkthrough.Win32]::IsWindowVisible($candidate) -and
-                -not [VeilWalkthrough.Win32]::IsIconic($candidate) -and
-                $h -ge 300) {
-                return $candidate
-            }
-        }
+        if ($null -eq (Get-Process -Id $ProcessId -ErrorAction SilentlyContinue)) { return $null }
+        $windows = @(Get-ProcessWindows -ProcessId $ProcessId)
+        if ($windows.Count -ge $MinimumCount) { return $windows }
         Start-Sleep -Milliseconds 100
     } while ((Get-Date) -lt $deadline)
     return $null
+}
+
+function Get-MainWindow {
+    param([int]$ProcessId, [int]$TimeoutMs)
+    $windows = Wait-ProcessWindowCount -ProcessId $ProcessId -MinimumCount 1 -TimeoutMs $TimeoutMs
+    if ($null -eq $windows -or @($windows).Count -eq 0) { return $null }
+    return @($windows)[0].Hwnd
 }
 
 function Wait-WindowStable {
@@ -212,7 +243,7 @@ function Test-BlankBitmap {
     return ($colors.Count -le 2)
 }
 
-function Save-Screenshot {
+function Save-WindowScreenshot {
     param([IntPtr]$Hwnd, [string]$Path)
     $wr = New-Object VeilWalkthrough.RECT
     [VeilWalkthrough.Win32]::GetWindowRect($Hwnd, [ref]$wr) | Out-Null
@@ -307,7 +338,7 @@ function Send-RealClick {
 
 # 屏幕捕获（始终 CopyFromScreen）：只取目标进程可见窗口的并集，
 # 既覆盖 MessageBox 等独立窗口，也不把其它应用截进证据。
-function Save-ScreenShot {
+function Save-ProcessScreenshot {
     param([IntPtr]$Hwnd, [string]$Path)
     $targetPid = [uint32]0
     [VeilWalkthrough.Win32]::GetWindowThreadProcessId($Hwnd, [ref]$targetPid) | Out-Null
@@ -349,10 +380,64 @@ function Save-ScreenShot {
 }
 
 
-# 步骤串：click:x,y / rclick:x,y / key:发送键串（SendKeys 语法，如 {TAB} ^p） / type:文本 / wait:毫秒 / shot:名字 / shot-screen:名字
+function Wait-ProcessWindowExactCount {
+    param([int]$ProcessId, [int]$ExpectedCount, [int]$TimeoutMs)
+    $deadline = (Get-Date).AddMilliseconds($TimeoutMs)
+    do {
+        if ($null -eq (Get-Process -Id $ProcessId -ErrorAction SilentlyContinue)) { return $null }
+        $windows = @(Get-ProcessWindows -ProcessId $ProcessId)
+        if ($windows.Count -eq $ExpectedCount) {
+            # 多等一个重绘周期再复核，避免关窗事件尚未路由时把旧数量当成结论。
+            Start-Sleep -Milliseconds 350
+            $windows = @(Get-ProcessWindows -ProcessId $ProcessId)
+            if ($windows.Count -eq $ExpectedCount) { return $windows }
+        }
+        Start-Sleep -Milliseconds 100
+    } while ((Get-Date) -lt $deadline)
+    return $null
+}
+
+function Invoke-Secondary {
+    param([int]$PrimaryId, [string[]]$Arguments, [int]$TimeoutMs)
+    $stamp = Get-Date -Format 'yyyyMMdd-HHmmssfff'
+    $stdout = Join-Path $ShotDir "secondary-$stamp.stdout.log"
+    $stderr = Join-Path $ShotDir "secondary-$stamp.stderr.log"
+    $startArgs = @{
+        FilePath = $Exe
+        ArgumentList = $Arguments
+        PassThru = $true
+        RedirectStandardOutput = $stdout
+        RedirectStandardError = $stderr
+    }
+    $secondary = Start-Process @startArgs
+    $secondaryId = $secondary.Id
+    $argText = $Arguments -join ' '
+    if (-not $secondary.WaitForExit($TimeoutMs)) {
+        Stop-Process -Id $secondaryId -Force -ErrorAction SilentlyContinue
+        throw "次实例 PID=$secondaryId 未在 ${TimeoutMs}ms 内退出（参数：$argText）"
+    }
+    Write-Log 'INFO' "次实例已退出：PID=$secondaryId ExitCode=$($secondary.ExitCode) 参数=$argText"
+    if ($secondary.ExitCode -ne 0) {
+        throw "次实例 PID=$secondaryId 退出码 $($secondary.ExitCode)（参数：$argText）"
+    }
+    $live = @(Get-Process -Name veil -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $Exe })
+    $liveText = @($live | ForEach-Object { "PID=$($_.Id)" }) -join '，'
+    Write-Log 'INFO' "次实例退出后的同路径 Veil 进程数=$($live.Count)：$liveText"
+    if ($live.Count -ne 1 -or $live[0].Id -ne $PrimaryId) {
+        throw "单实例进程断言失败：期望仅主进程 PID=$PrimaryId，实际=$liveText"
+    }
+}
+
+# 步骤串：click:x,y / rclick:x,y / key:发送键串（SendKeys 语法，如 {TAB} ^p；{SPACE} 走 VK_SPACE） / type:文本 / wait:毫秒
+#   shot:名字 / shot-screen:名字 / wait-windows:最小数量 / expect-windows:精确数量 / window:从0开始的编号
+#   window-title:唯一标题子串 / expect-title:当前窗口完整标题 / close / wait-exit / shot-windows:名字
+#   tile-windows：同 PID 文档窗口横向平铺，避免 PrintWindow 降级截图时相互遮挡。
+#   launch-new / launch-doc:路径 / launch-new-doc:路径：启动次实例并断言其退出且主进程唯一。
 #   shot 走 PrintWindow（窗口内容）；shot-screen 走屏幕捕获（用于系统对话框等独立窗口）。
+#   window/window-title 切换后续交互目标并前台化；shot-windows 对同 PID 的每个文档窗口分别截图。
 function Invoke-Steps {
-    param([IntPtr]$Hwnd, [string]$Spec, [string]$Dir, [string]$Stamp, [ref]$Index)
+    param([IntPtr]$Hwnd, [int]$ProcessId, [string]$Spec, [string]$Dir, [string]$Stamp, [ref]$Index)
+    $targetHwnd = $Hwnd
     foreach ($raw in @($Spec -split ';')) {
         $step = $raw.Trim()
         if (-not $step) { continue }
@@ -360,13 +445,33 @@ function Invoke-Steps {
         switch ($kind) {
             'click' {
                 $xy = $arg.Split(',')
-                Send-RealClick -Hwnd $Hwnd -X ([int]$xy[0]) -Y ([int]$xy[1])
+                Send-RealClick -Hwnd $targetHwnd -X ([int]$xy[0]) -Y ([int]$xy[1])
                 Write-Log 'INFO' "点击 $arg"
             }
             'rclick' {
                 $xy = $arg.Split(',')
-                Send-RealClick -Hwnd $Hwnd -X ([int]$xy[0]) -Y ([int]$xy[1]) -Right
+                Send-RealClick -Hwnd $targetHwnd -X ([int]$xy[0]) -Y ([int]$xy[1]) -Right
                 Write-Log 'INFO' "右键 $arg"
+            }
+            'hover' {
+                # 仅移动鼠标（不按键）：客户端坐标转屏幕后 SetCursorPos，
+                # 再发一次 MOUSEEVENTF_MOVE(0x0001) 触发 WM_MOUSEMOVE；等 400ms 让悬停态重绘。
+                $xy = $arg.Split(',')
+                $pt = New-Object VeilWalkthrough.Win32+POINT
+                $pt.X = [int]$xy[0]
+                $pt.Y = [int]$xy[1]
+                [VeilWalkthrough.Win32]::ClientToScreen($targetHwnd, [ref]$pt) | Out-Null
+                [VeilWalkthrough.Win32]::SetCursorPos($pt.X, $pt.Y) | Out-Null
+                Start-Sleep -Milliseconds 60
+                # 相对移动 2px 再回到目标点：确保产生真实 WM_MOUSEMOVE（SetCursorPos 单独调用未必触发重绘）。
+                [VeilWalkthrough.Win32]::mouse_event(0x0001, 1, 0, 0, [UIntPtr]::Zero)
+                [VeilWalkthrough.Win32]::mouse_event(0x0001, 1, 0, 0, [UIntPtr]::Zero)
+                Start-Sleep -Milliseconds 120
+                [VeilWalkthrough.Win32]::SetCursorPos($pt.X, $pt.Y) | Out-Null
+                $chk = New-Object VeilWalkthrough.Win32+POINT
+                [VeilWalkthrough.Win32]::GetCursorPos([ref]$chk) | Out-Null
+                Start-Sleep -Milliseconds 400
+                Write-Log 'INFO' "悬停 $arg 目标屏幕=($($pt.X),$($pt.Y)) 实际光标=($($chk.X),$($chk.Y))"
             }
             'pastefile' {
                 # 以资源管理器复制的形式把文件放进剪贴板（文件列表），再 ^v 让应用走图片/附件粘贴。
@@ -379,10 +484,32 @@ function Invoke-Steps {
                 Start-Sleep -Milliseconds 600
                 Write-Log 'INFO' "粘贴文件 $arg"
             }
+            'launch-new' {
+                Invoke-Secondary -PrimaryId $ProcessId -Arguments @('--new-window') -TimeoutMs $WindowWaitMs
+            }
+            'launch-doc' {
+                Invoke-Secondary -PrimaryId $ProcessId -Arguments @($arg) -TimeoutMs $WindowWaitMs
+            }
+            'launch-new-doc' {
+                Invoke-Secondary -PrimaryId $ProcessId -Arguments @('--new-window', $arg) -TimeoutMs $WindowWaitMs
+            }
             'key' {
-                [System.Windows.Forms.SendKeys]::SendWait($arg)
+                $foreground = [VeilWalkthrough.Win32]::GetForegroundWindow()
+                if ($foreground -ne $targetHwnd) {
+                    Write-Log 'WARN' "按键前目标窗口不在前台：目标=$targetHwnd 前台=$foreground，重新前台化"
+                    Enter-Foreground -Hwnd $targetHwnd | Out-Null
+                }
+                if ($arg -ceq '{SPACE}') {
+                    # SendKeys 没有可移植的 {SPACE} 键名；直接发送命名键，避免中文输入法组合态吞掉普通字符。
+                    [VeilWalkthrough.Win32]::keybd_event(0x20, 0, 0, [UIntPtr]::Zero)
+                    Start-Sleep -Milliseconds 40
+                    [VeilWalkthrough.Win32]::keybd_event(0x20, 0, 2, [UIntPtr]::Zero)
+                } else {
+                    [System.Windows.Forms.SendKeys]::SendWait($arg)
+                }
                 Start-Sleep -Milliseconds 400
-                Write-Log 'INFO' "按键 $arg"
+                $foreground = [VeilWalkthrough.Win32]::GetForegroundWindow()
+                Write-Log 'INFO' "按键 $arg（前台=$foreground，目标=$targetHwnd）"
             }
             'type' {
                 # 走剪贴板粘贴：SendKeys 逐字符会被输入法截获成分解候选，ESC 还会吞掉文本。
@@ -397,19 +524,129 @@ function Invoke-Steps {
                 }
                 Write-Log 'INFO' "输入文本（剪贴板粘贴）"
             }
+            'wait-windows' {
+                $count = [int]$arg
+                if ($count -lt 1) { throw "wait-windows 数量必须大于 0：$arg" }
+                $windows = Wait-ProcessWindowCount -ProcessId $ProcessId -MinimumCount $count -TimeoutMs $WindowWaitMs
+                if ($null -eq $windows) { throw "等待 ${count} 个文档窗口超时（${WindowWaitMs}ms）" }
+                $description = @($windows | ForEach-Object { "句柄=$($_.Hwnd) 标题=$($_.Title)" }) -join '；'
+                Write-Log 'INFO' "文档窗口数=$(@($windows).Count)：$description"
+            }
+            'tile-windows' {
+                $windows = @(Get-ProcessWindows -ProcessId $ProcessId)
+                if ($windows.Count -eq 0) { throw '平铺失败：当前 PID 无文档窗口' }
+                $area = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
+                $margin = 8
+                $gap = 8
+                $width = [int](($area.Width - 2 * $margin - ($windows.Count - 1) * $gap) / $windows.Count)
+                $height = $area.Height - 2 * $margin
+                for ($n = 0; $n -lt $windows.Count; $n++) {
+                    $x = $area.X + $margin + $n * ($width + $gap)
+                    $y = $area.Y + $margin
+                    [VeilWalkthrough.Win32]::SetWindowPos(
+                        $windows[$n].Hwnd, [IntPtr]::Zero, $x, $y, $width, $height,
+                        ([VeilWalkthrough.Const]::SWP_NOZORDER -bor [VeilWalkthrough.Const]::SWP_NOACTIVATE)
+                    ) | Out-Null
+                    Write-Log 'INFO' "平铺窗口[$n]：句柄=$($windows[$n].Hwnd) 标题=$($windows[$n].Title) 矩形=${x},${y},${width},${height}"
+                }
+                Start-Sleep -Milliseconds 500
+            }
+            'expect-windows' {
+                $count = [int]$arg
+                if ($count -lt 1) { throw "expect-windows 数量必须大于 0：$arg" }
+                $windows = Wait-ProcessWindowExactCount -ProcessId $ProcessId -ExpectedCount $count -TimeoutMs $WindowWaitMs
+                if ($null -eq $windows) {
+                    $actual = @(Get-ProcessWindows -ProcessId $ProcessId)
+                    $actualText = @($actual | ForEach-Object { "句柄=$($_.Hwnd) 标题=$($_.Title)" }) -join '；'
+                    $Index.Value++
+                    $failureShot = Join-Path $Dir ("{0:00}-step-expect-windows-timeout-{1}.png" -f $Index.Value, $Stamp)
+                    Save-WindowScreenshot -Hwnd $targetHwnd -Path $failureShot | Out-Null
+                    $foreground = [VeilWalkthrough.Win32]::GetForegroundWindow()
+                    throw "等待精确 ${count} 个文档窗口超时（${WindowWaitMs}ms）；实际=$($actual.Count)：$actualText；前台=$foreground 目标=$targetHwnd；截图=$failureShot"
+                }
+                $description = @($windows | ForEach-Object { "句柄=$($_.Hwnd) 标题=$($_.Title)" }) -join '；'
+                Write-Log 'PASS' "精确文档窗口数=$count：$description"
+            }
+            'window' {
+                $n = [int]$arg
+                $windows = @(Get-ProcessWindows -ProcessId $ProcessId)
+                if ($n -lt 0 -or $n -ge $windows.Count) {
+                    throw "窗口编号 $n 越界（当前 $($windows.Count) 个文档窗口）"
+                }
+                $targetHwnd = $windows[$n].Hwnd
+                Enter-Foreground -Hwnd $targetHwnd | Out-Null
+                Write-Log 'INFO' "切换窗口[$n]：句柄=$targetHwnd 标题=$($windows[$n].Title)"
+            }
+            'window-title' {
+                $windows = @(Get-ProcessWindows -ProcessId $ProcessId)
+                $titleMatches = @($windows | Where-Object { $_.Title.Contains($arg) })
+                if ($titleMatches.Count -ne 1) {
+                    $description = @($windows | ForEach-Object { $_.Title }) -join '；'
+                    throw "标题子串 '$arg' 应唯一命中，实际 $($titleMatches.Count) 个；全部标题：$description"
+                }
+                $targetHwnd = $titleMatches[0].Hwnd
+                Enter-Foreground -Hwnd $targetHwnd | Out-Null
+                Write-Log 'INFO' "按标题切换窗口：句柄=$targetHwnd 标题=$($titleMatches[0].Title)"
+            }
+            'window-exact' {
+                $windows = @(Get-ProcessWindows -ProcessId $ProcessId)
+                $titleMatches = @($windows | Where-Object { $_.Title -ceq $arg })
+                if ($titleMatches.Count -ne 1) {
+                    $description = @($windows | ForEach-Object { $_.Title }) -join '；'
+                    throw "完整标题 '$arg' 应唯一命中，实际 $($titleMatches.Count) 个；全部标题：$description"
+                }
+                $targetHwnd = $titleMatches[0].Hwnd
+                Enter-Foreground -Hwnd $targetHwnd | Out-Null
+                Write-Log 'INFO' "按完整标题切换窗口：句柄=$targetHwnd 标题=$($titleMatches[0].Title)"
+            }
+            'expect-title' {
+                $current = @(Get-ProcessWindows -ProcessId $ProcessId | Where-Object { $_.Hwnd -eq $targetHwnd })
+                if ($current.Count -ne 1 -or $current[0].Title -cne $arg) {
+                    $actual = if ($current.Count -eq 1) { $current[0].Title } else { '<窗口不存在>' }
+                    $Index.Value++
+                    $failureShot = Join-Path $Dir ("{0:00}-step-expect-title-failure-{1}.png" -f $Index.Value, $Stamp)
+                    Save-WindowScreenshot -Hwnd $targetHwnd -Path $failureShot | Out-Null
+                    throw "窗口标题断言失败：期望='$arg'，实际='$actual'；截图=$failureShot"
+                }
+                Write-Log 'PASS' "窗口标题=$arg"
+            }
+            'close' {
+                [VeilWalkthrough.Win32]::PostMessage($targetHwnd, [VeilWalkthrough.Const]::WM_CLOSE, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null
+                Write-Log 'INFO' "发送 WM_CLOSE：句柄=$targetHwnd"
+            }
+            'wait-exit' {
+                $primary = Get-Process -Id $ProcessId -ErrorAction SilentlyContinue
+                if ($primary -and -not $primary.WaitForExit($WindowWaitMs)) {
+                    throw "最后窗口关闭后主进程 PID=$ProcessId 未在 ${WindowWaitMs}ms 内退出"
+                }
+                Write-Log 'PASS' "最后窗口关闭后主进程 PID=$ProcessId 已退出"
+            }
             'wait' {
                 Start-Sleep -Milliseconds ([int]$arg)
+            }
+            'hash-file' {
+                Write-FileDigest -Path $arg -Phase $step
             }
             'shot' {
                 $Index.Value++
                 $path = Join-Path $Dir ("{0:00}-step-{1}-{2}.png" -f $Index.Value, $arg, $Stamp)
-                Save-Screenshot -Hwnd $Hwnd -Path $path | Out-Null
+                Save-WindowScreenshot -Hwnd $targetHwnd -Path $path | Out-Null
                 Write-Log 'INFO' "步骤截图：$path"
+            }
+            'shot-windows' {
+                $windows = @(Get-ProcessWindows -ProcessId $ProcessId)
+                if ($windows.Count -eq 0) { throw '逐窗口截图失败：当前 PID 无文档窗口' }
+                for ($n = 0; $n -lt $windows.Count; $n++) {
+                    $Index.Value++
+                    $path = Join-Path $Dir ("{0:00}-step-{1}-window-{2}-{3}.png" -f $Index.Value, $arg, $n, $Stamp)
+                    Save-WindowScreenshot -Hwnd $windows[$n].Hwnd -Path $path | Out-Null
+                    Write-Log 'INFO' "窗口[$n]截图：句柄=$($windows[$n].Hwnd) 标题=$($windows[$n].Title) 文件=$path"
+                }
             }
             'shot-screen' {
                 $Index.Value++
                 $path = Join-Path $Dir ("{0:00}-step-{1}-{2}.png" -f $Index.Value, $arg, $Stamp)
-                Save-ScreenShot -Hwnd $Hwnd -Path $path
+                Save-ProcessScreenshot -Hwnd $targetHwnd -Path $path
                 Write-Log 'INFO' "屏幕截图（含独立窗口）：$path"
             }
             default { Write-Log 'WARN' "未知步骤：$step" }
@@ -418,6 +655,17 @@ function Invoke-Steps {
 }
 
 
+
+function Write-FileDigest {
+    param([string]$Path, [string]$Phase)
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        throw "文件字节审计失败：找不到 $Path"
+    }
+    $bytes = [System.IO.File]::ReadAllBytes($Path)
+    $hash = (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash
+    $base64 = [Convert]::ToBase64String($bytes)
+    Write-Log 'INFO' "文件字节[$Phase]：路径=$Path 字节数=$($bytes.Length) SHA256=$hash Base64=$base64"
+}
 
 function Get-ShotHash {
     param([string]$Path)
@@ -516,6 +764,9 @@ $proc = $null
 $procId = 0
 try {
     Write-Log 'INFO' "exe=$Exe doc=$Doc probe=$($Probe.IsPresent) shots=$ShotDir"
+    foreach ($auditFile in $AuditFiles) {
+        Write-FileDigest -Path $auditFile -Phase '启动前'
+    }
     $startArgs = @{
         FilePath = $Exe
         PassThru = $true
@@ -554,7 +805,7 @@ try {
         Set-ClientWidth -Hwnd $hwnd -ClientWidth $width
         $shotIndex++
         $shot = Join-Path $ShotDir ("{0:00}-w{1}-p0-{2}.png" -f $shotIndex, $width, $stamp)
-        $ok = Save-Screenshot -Hwnd $hwnd -Path $shot
+        $ok = Save-WindowScreenshot -Hwnd $hwnd -Path $shot
         Write-Log 'INFO' "宽度 ${width}px 截图：$shot（PrintWindow=$ok）"
 
         if ($Steps -and ($StepsWidth -eq 0 -or $StepsWidth -eq $width)) {
@@ -562,7 +813,7 @@ try {
             $saved = New-Object VeilWalkthrough.Win32+POINT
             [VeilWalkthrough.Win32]::GetCursorPos([ref]$saved) | Out-Null
             try {
-                Invoke-Steps -Hwnd $hwnd -Spec $Steps -Dir $ShotDir -Stamp $stamp -Index ([ref]$shotIndex)
+                Invoke-Steps -Hwnd $hwnd -ProcessId $procId -Spec $Steps -Dir $ShotDir -Stamp $stamp -Index ([ref]$shotIndex)
             } finally {
                 [VeilWalkthrough.Win32]::SetCursorPos($saved.X, $saved.Y) | Out-Null
                 if ($prevFg -and $prevFg -ne [IntPtr]::Zero) {
@@ -579,13 +830,13 @@ try {
                 Send-PageKey -Hwnd $hwnd -VirtualKey ([VeilWalkthrough.Const]::VK_NEXT) -Times 1
                 $shotIndex++
                 $shot = Join-Path $ShotDir ("{0:00}-w{1}-p{2}-{3}.png" -f $shotIndex, $width, $page, $stamp)
-                Save-Screenshot -Hwnd $hwnd -Path $shot | Out-Null
+                Save-WindowScreenshot -Hwnd $hwnd -Path $shot | Out-Null
                 Write-Log 'INFO' "宽度 ${width}px 第 $page 页截图：$shot"
                 if ((Get-ShotHash $prevShot) -eq (Get-ShotHash $shot)) {
                     # 无焦点窗口可能收不到键盘消息；改用滚轮消息并复核
                     Write-Log 'WARN' "PageDown 未改变画面（page=$page），改用 WM_MOUSEWHEEL"
                     Send-Wheel -Hwnd $hwnd -Notches 3
-                    Save-Screenshot -Hwnd $hwnd -Path $shot | Out-Null
+                    Save-WindowScreenshot -Hwnd $hwnd -Path $shot | Out-Null
                     if ((Get-ShotHash $prevShot) -eq (Get-ShotHash $shot)) {
                         $stuck++
                         Write-Log 'FAIL' "滚动未生效：截图与上一页完全相同，不能作为深滚动证据（page=$page）"

@@ -3,9 +3,11 @@
 
 pub(crate) mod block_index;
 pub(crate) mod doc_state;
+pub(crate) mod history;
 pub(crate) mod persist;
 pub(crate) mod recovery;
 pub(crate) mod session;
+pub(crate) mod snapshot;
 
 pub use persist::ExternalState;
 pub(crate) use persist::Persist;

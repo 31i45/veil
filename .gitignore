@@ -43,6 +43,8 @@ bench/results/
 
 # ─── Local UI snapshots ───
 .screenshots/
+# Real-machine evidence bundle (screenshots/logs, local only)
+/evidence/
 
 # ─── Real-device walkthrough evidence (PNG screenshots, local only) ───
 docs/review/evidence/**/*.png

@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::document::ExternalState;
+use crate::i18n::t;
 use crate::theme::Theme;
 use crate::tokens::palette;
 use crate::view::{Frame, LayoutEngine};
@@ -21,10 +22,22 @@ fn viewport_excludes_menu_and_status() {
 #[test]
 fn action_enabled_only_gates_known_noop_items() {
     let none = MenuFlags::default();
-    assert!(!action_enabled(MenuAction::Separator, none), "分隔线不可执行");
-    assert!(!action_enabled(MenuAction::Save, none), "无改动无草稿：保存禁用");
-    assert!(!action_enabled(MenuAction::Undo, none), "无撤销步：撤销禁用");
-    assert!(!action_enabled(MenuAction::Redo, none), "无重做步：重做禁用");
+    assert!(
+        !action_enabled(MenuAction::Separator, none),
+        "分隔线不可执行"
+    );
+    assert!(
+        !action_enabled(MenuAction::Save, none),
+        "无改动无草稿：保存禁用"
+    );
+    assert!(
+        !action_enabled(MenuAction::Undo, none),
+        "无撤销步：撤销禁用"
+    );
+    assert!(
+        !action_enabled(MenuAction::Redo, none),
+        "无重做步：重做禁用"
+    );
     // 其余项恒可用（含剪贴板等不可静态判断的项）
     assert!(action_enabled(MenuAction::Copy, none));
     assert!(action_enabled(MenuAction::Open, none));
@@ -84,7 +97,8 @@ fn popup_hit_maps_items_and_contains_padding() {
     assert!(popup_contains(p.x + 1.0, p.y + 1.0, 0, 1.0, &[], 1000.0));
     assert!(!popup_contains(p.x - 1.0, p.y + 1.0, 0, 1.0, &[], 1000.0));
     assert_eq!(action_at(0, 0, &[]), Some(MenuAction::New));
-    assert_eq!(action_at(0, 1, &[]), Some(MenuAction::Open));
+    assert_eq!(action_at(0, 1, &[]), Some(MenuAction::NewWindow));
+    assert_eq!(action_at(0, 2, &[]), Some(MenuAction::Open));
     assert_eq!(action_at(0, 99, &[]), None);
 }
 
@@ -100,8 +114,16 @@ fn file_menu_injects_recent_before_quit() {
         .iter()
         .position(|(_, _, a)| *a == MenuAction::OpenRecent(0))
         .expect("应含第一个最近文件");
-    assert_eq!(rows[first - 1].2, MenuAction::Separator, "最近文件块上方有分隔线");
-    assert_eq!(rows[first + 2].2, MenuAction::Separator, "最近文件块下方有分隔线");
+    assert_eq!(
+        rows[first - 1].2,
+        MenuAction::Separator,
+        "最近文件块上方有分隔线"
+    );
+    assert_eq!(
+        rows[first + 2].2,
+        MenuAction::Separator,
+        "最近文件块下方有分隔线"
+    );
     assert_eq!(rows[first + 3].2, MenuAction::Quit, "退出仍在最后");
     // 分发与布局同源
     assert_eq!(
@@ -159,7 +181,7 @@ fn popup_label_truncated_when_too_long() {
     let long = "运维量化核心：标签体系与记录模板终极配置.md · Desktop".to_string();
     let recent = vec![long.clone()];
     let mut engine = LayoutEngine::new();
-    let mut frame = Frame::new(800, 200, [255, 255, 255, 255]);
+    let mut frame = Frame::new(800, 400, [255, 255, 255, 255]);
     let theme = Theme::light();
     let mut chrome = Chrome {
         open: Some(0),
@@ -168,7 +190,7 @@ fn popup_label_truncated_when_too_long() {
     chrome.paint(
         &mut frame,
         &mut engine,
-        viewport(800, 200, 1.0),
+        viewport(800, 400, 1.0),
         1.0,
         &theme,
         None,
@@ -200,6 +222,7 @@ fn menu_definitions_cover_shortcuts() {
         file,
         vec![
             MenuAction::New,
+            MenuAction::NewWindow,
             MenuAction::Open,
             MenuAction::QuickOpen,
             MenuAction::Separator,
@@ -209,6 +232,7 @@ fn menu_definitions_cover_shortcuts() {
             MenuAction::Export,
             MenuAction::ExportPdf,
             MenuAction::Print,
+            MenuAction::VersionHistory,
             MenuAction::Separator,
             MenuAction::Quit
         ]
@@ -266,11 +290,13 @@ fn print_entry_label_has_no_export_wording() {
         .iter()
         .find(|(_, _, a)| *a == MenuAction::Print)
         .expect("文件菜单应含打印项");
-    assert_eq!(print.0, "打印…");
-    assert_eq!(print.1, "Ctrl+Shift+P");
+    assert_eq!(t(print.0), "打印");
+    assert_eq!(t(print.1), "Ctrl+Shift+P");
     assert!(
-        !MENUS[0].items.iter().any(|(l, _, _)| l.contains("打印")
-            && l.contains("导出 PDF")),
+        !MENUS[0]
+            .items
+            .iter()
+            .any(|(l, _, _)| t(*l).contains("打印") && t(*l).contains("导出 PDF")),
         "打印项不得再兼提导出 PDF"
     );
 }
@@ -282,8 +308,8 @@ fn view_menu_exposes_source_mode_toggle() {
         .iter()
         .find(|(_, _, a)| *a == MenuAction::ToggleSourceMode)
         .expect("视图菜单应含源码模式");
-    assert_eq!(item.0, "源码模式");
-    assert_eq!(item.1, "Ctrl+/");
+    assert_eq!(t(item.0), "源码模式");
+    assert_eq!(t(item.1), "Ctrl+/");
     // 与专注/打字机模式同类开关项相邻
     let idx = MENUS[2]
         .items
@@ -503,7 +529,9 @@ fn paint_caches_status_fit_across_frames() {
     let mut frame = Frame::new(320, 200, [255, 255, 255, 255]);
     let theme = Theme::light();
     let mut chrome = Chrome::default();
-    let long_path = Path::new("D:/").join("很长的目录名".repeat(20)).join("文件.md");
+    let long_path = Path::new("D:/")
+        .join("很长的目录名".repeat(20))
+        .join("文件.md");
     let v = viewport(320, 200, 1.0);
     for _ in 0..2 {
         chrome.paint(
@@ -551,13 +579,13 @@ fn paint_caches_status_fit_across_frames() {
 #[test]
 fn paint_draws_menu_status_and_popup() {
     let mut engine = LayoutEngine::new();
-    let mut frame = Frame::new(300, 200, [255, 255, 255, 255]);
+    let mut frame = Frame::new(300, 260, [255, 255, 255, 255]);
     let theme = Theme::light();
     let mut chrome = Chrome {
         open: Some(0),
         ..Default::default()
     };
-    let v = viewport(300, 200, 1.0);
+    let v = viewport(300, 260, 1.0);
     chrome.paint(
         &mut frame,
         &mut engine,
@@ -577,7 +605,7 @@ fn paint_draws_menu_status_and_popup() {
         MenuFlags::default(),
     );
     assert_eq!(frame.get(0, 0), palette::surface_card(&theme), "菜单栏底色");
-    let status_y = 200 - STATUS_H as i32;
+    let status_y = 260 - STATUS_H as i32;
     assert_eq!(
         frame.get(299, (status_y + 5) as u32),
         palette::surface_card(&theme),
@@ -621,11 +649,14 @@ fn toggle_rows_report_and_paint_checked_state() {
     };
     assert!(action_checked(MenuAction::ToggleFocus, flags));
     assert!(!action_checked(MenuAction::ToggleTypewriter, flags));
-    assert!(!action_checked(MenuAction::Save, flags), "非开关项无「当前」");
-    assert!(!action_checked(
-        MenuAction::ToggleOutline,
-        MenuFlags::default()
-    ), "大纲面板不显示任何状态标识");
+    assert!(
+        !action_checked(MenuAction::Save, flags),
+        "非开关项无「当前」"
+    );
+    assert!(
+        !action_checked(MenuAction::ToggleOutline, MenuFlags::default()),
+        "大纲面板不显示任何状态标识"
+    );
     assert!(action_checked(
         MenuAction::ToggleFullscreen,
         MenuFlags {

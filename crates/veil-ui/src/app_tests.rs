@@ -1,15 +1,15 @@
 //! 跨域行为测试：以 headless App 驱动真实编辑/排版/绘制/持久化路径。
 
 use crate::app::*;
-use crate::Ports;
 use crate::chrome;
 use crate::chrome::MenuAction;
 use crate::docio::encode;
-use crate::document::block_index::{gap_after, BlockGeom};
+use crate::document::block_index::{gap_after, gap_between, BlockGeom};
 use crate::document::recovery;
 use crate::document::ExternalState;
 use crate::editor::Intent;
 use crate::geometry::{BASE_LINE_HEIGHT, MARGIN, PARA_GAP};
+use crate::i18n::{t, Key as I18nKey};
 use crate::image::{AssetStore, ImageData, ImageLoader};
 use crate::input::{Action, Key, Mods};
 use crate::interaction::map_key_parts;
@@ -22,6 +22,7 @@ use crate::view::ctx_menu;
 use crate::view::outline;
 use crate::view::search;
 use crate::view::{Frame, InlineAsset, Memo, MAX_BLOCK_BYTES};
+use crate::Ports;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -137,7 +138,7 @@ fn persist_env() -> PersistEnv {
     PersistEnv {
         recovery: Box::new(FakeRecovery::default()),
         session: Box::new(FakeSession::default()),
-        snapshot: Box::new(FakeSnapshot),
+        snapshot: Box::new(FakeSnapshot::default()),
     }
 }
 
@@ -146,15 +147,131 @@ fn persist_env_with(recovery: FakeRecovery, session: FakeSession) -> PersistEnv 
     PersistEnv {
         recovery: Box::new(recovery),
         session: Box::new(session),
-        snapshot: Box::new(FakeSnapshot),
+        snapshot: Box::new(FakeSnapshot::default()),
     }
 }
 
-struct FakeSnapshot;
+/// 内存快照库：按文档键分槽，供版本历史测试注入并断言。
+#[derive(Clone, Default)]
+struct FakeSnapshot {
+    slots: Rc<RefCell<Vec<(u64, SnapshotMeta, String)>>>,
+    fail_list: Rc<Cell<bool>>,
+}
+
+impl FakeSnapshot {
+    fn texts(&self, key: u64) -> Vec<String> {
+        let mut v: Vec<(SnapshotMeta, String)> = self
+            .slots
+            .borrow()
+            .iter()
+            .filter(|(k, _, _)| *k == key)
+            .map(|(_, m, t)| (*m, t.clone()))
+            .collect();
+        v.sort_by_key(|a| std::cmp::Reverse(a.0.ts_ms));
+        v.into_iter().map(|(_, t)| t).collect()
+    }
+}
+
 impl SnapshotStore for FakeSnapshot {
-    fn save_snapshot(&mut self, _: u64, _: &str) -> Result<u64, String> { Ok(0) }
-    fn list_snapshots(&mut self, _: u64) -> Result<Vec<u64>, String> { Ok(Vec::new()) }
-    fn prune(&mut self, _: u64, _: usize) -> Result<usize, String> { Ok(0) }
+    fn save_snapshot(&mut self, key: u64, text: &str) -> Result<SnapshotMeta, String> {
+        let hash = content_hash(text.as_bytes());
+        if let Some((_, m, _)) = self
+            .slots
+            .borrow()
+            .iter()
+            .find(|(k, m, _)| *k == key && m.hash == hash)
+        {
+            return Ok(*m);
+        }
+        let ts = self
+            .slots
+            .borrow()
+            .iter()
+            .map(|(_, m, _)| m.ts_ms)
+            .max()
+            .unwrap_or(0)
+            + 1;
+        let meta = SnapshotMeta {
+            ts_ms: ts,
+            hash,
+            bytes: text.len() as u64,
+        };
+        self.slots.borrow_mut().push((key, meta, text.to_string()));
+        Ok(meta)
+    }
+
+    fn list_snapshots(&mut self, key: u64) -> Result<Vec<SnapshotMeta>, String> {
+        if self.fail_list.get() {
+            return Err("模拟读取失败".into());
+        }
+        let mut v: Vec<SnapshotMeta> = self
+            .slots
+            .borrow()
+            .iter()
+            .filter(|(k, _, _)| *k == key)
+            .map(|(_, m, _)| *m)
+            .collect();
+        v.sort_by_key(|m| std::cmp::Reverse(m.ts_ms));
+        Ok(v)
+    }
+
+    fn read_snapshot(&mut self, key: u64, ts: u64) -> Result<String, String> {
+        self.slots
+            .borrow()
+            .iter()
+            .find(|(k, m, _)| *k == key && m.ts_ms == ts)
+            .map(|(_, _, t)| t.clone())
+            .ok_or_else(|| "快照不存在".into())
+    }
+
+    fn delete_snapshot(&mut self, key: u64, ts: u64) -> Result<(), String> {
+        self.slots
+            .borrow_mut()
+            .retain(|(k, m, _)| !(*k == key && m.ts_ms == ts));
+        Ok(())
+    }
+
+    fn clear_snapshots(&mut self, key: u64) -> Result<usize, String> {
+        let before = self.slots.borrow().len();
+        self.slots.borrow_mut().retain(|(k, _, _)| *k != key);
+        Ok(before - self.slots.borrow().len())
+    }
+
+    fn prune(&mut self, key: u64, keep_newest: usize) -> Result<usize, String> {
+        let list = self.list_snapshots(key)?;
+        let mut removed = 0;
+        for m in list.into_iter().skip(keep_newest) {
+            self.delete_snapshot(key, m.ts_ms)?;
+            removed += 1;
+        }
+        Ok(removed)
+    }
+
+    fn migrate_key(&mut self, from: u64, to: u64) -> Result<usize, String> {
+        let moved: Vec<_> = self
+            .slots
+            .borrow()
+            .iter()
+            .filter(|(k, _, _)| *k == from)
+            .cloned()
+            .collect();
+        let mut count = 0;
+        for (_, m, t) in moved {
+            let exists = self
+                .slots
+                .borrow()
+                .iter()
+                .any(|(k, x, _)| *k == to && x.hash == m.hash);
+            if !exists {
+                self.slots.borrow_mut().push((to, m, t));
+                count += 1;
+            }
+            self.slots
+                .borrow_mut()
+                .retain(|(k, x, _)| !(*k == from && x.ts_ms == m.ts_ms));
+        }
+        Ok(count)
+    }
 }
 
 /// 不加载任何图片（既有测试的默认注入）：所有图片降级 alt 文本。
@@ -355,32 +472,33 @@ fn app_clip(html: Option<&str>, plain: Option<&str>) -> App {
         path: None,
         bom: false,
         resume: false,
+        open_error: None,
     };
     let m = FakeMath {
         fail: false,
         calls: Rc::new(RefCell::new(Vec::new())),
     };
     App::new(
-    doc,
-    Ports {
-        clipboard: Box::new(Clip {
-            html: html.map(str::to_string),
-            text: plain.map(str::to_string),
-        }),
-        store: Box::new(MemStore::default()),
-        math: Box::new(m),
-        images: Box::new(NoImages),
-        assets: Box::new(NoAssets),
-        exporter: Box::new(NoExport),
-        dialogs: Box::new(NoDialogs),
-        watcher: Box::new(NoWatcher),
-        theme_env: theme::test_support::env(),
-        persist_env: persist_env(),
-        print: Box::new(NoPrint),
-        url_opener: no_url(),
-        clock: fixed_clock(),
-    }
-)
+        doc,
+        Ports {
+            clipboard: Box::new(Clip {
+                html: html.map(str::to_string),
+                text: plain.map(str::to_string),
+            }),
+            store: Box::new(MemStore::default()),
+            math: Box::new(m),
+            images: Box::new(NoImages),
+            assets: Box::new(NoAssets),
+            exporter: Box::new(NoExport),
+            dialogs: Box::new(NoDialogs),
+            watcher: Box::new(NoWatcher),
+            theme_env: theme::test_support::env(),
+            persist_env: persist_env(),
+            print: Box::new(NoPrint),
+            url_opener: no_url(),
+            clock: fixed_clock(),
+        },
+    )
 }
 
 fn doc_text(a: &App) -> String {
@@ -395,7 +513,11 @@ fn doc_text(a: &App) -> String {
 fn paste_prefers_html_over_plain() {
     let mut a = app_clip(Some("<p>a <strong>b</strong></p>"), Some("纯文本"));
     a.paste_clipboard();
-    assert_eq!(doc_text(&a), "a **b**", "末尾单换行必须剥掉，避免行中粘贴凭空断行");
+    assert_eq!(
+        doc_text(&a),
+        "a **b**",
+        "末尾单换行必须剥掉，避免行中粘贴凭空断行"
+    );
     assert!(a.editor.is_dirty());
 }
 
@@ -472,29 +594,30 @@ fn app_math(text: &str, fail: bool) -> (App, MathCalls) {
         path: None,
         bom: false,
         resume: false,
+        open_error: None,
     };
     let m = FakeMath {
         fail,
         calls: calls.clone(),
     };
     let a = App::new(
-    doc,
-    Ports {
-        clipboard: Box::new(NoClip),
-        store: Box::new(MemStore::default()),
-        math: Box::new(m),
-        images: Box::new(NoImages),
-        assets: Box::new(NoAssets),
-        exporter: Box::new(NoExport),
-        dialogs: Box::new(NoDialogs),
-        watcher: Box::new(NoWatcher),
-        theme_env: theme::test_support::env(),
-        persist_env: persist_env(),
-        print: Box::new(NoPrint),
-        url_opener: no_url(),
-        clock: fixed_clock(),
-    }
-);
+        doc,
+        Ports {
+            clipboard: Box::new(NoClip),
+            store: Box::new(MemStore::default()),
+            math: Box::new(m),
+            images: Box::new(NoImages),
+            assets: Box::new(NoAssets),
+            exporter: Box::new(NoExport),
+            dialogs: Box::new(NoDialogs),
+            watcher: Box::new(NoWatcher),
+            theme_env: theme::test_support::env(),
+            persist_env: persist_env(),
+            print: Box::new(NoPrint),
+            url_opener: no_url(),
+            clock: fixed_clock(),
+        },
+    );
     (a, calls)
 }
 
@@ -691,32 +814,33 @@ fn app_with_images(
         path: path.map(PathBuf::from),
         bom: false,
         resume: false,
+        open_error: None,
     };
     let m = FakeMath {
         fail: false,
         calls: Rc::new(RefCell::new(Vec::new())),
     };
     let a = App::new(
-    doc,
-    Ports {
-        clipboard: Box::new(NoClip),
-        store: Box::new(MemStore::default()),
-        math: Box::new(m),
-        images: Box::new(FakeImages {
-            files,
-            calls: calls.clone(),
-        }),
-        assets: Box::new(NoAssets),
-        exporter: Box::new(NoExport),
-        dialogs: Box::new(NoDialogs),
-        watcher: Box::new(NoWatcher),
-        theme_env: theme::test_support::env(),
-        persist_env: persist_env(),
-        print: Box::new(NoPrint),
-        url_opener: no_url(),
-        clock: fixed_clock(),
-    }
-);
+        doc,
+        Ports {
+            clipboard: Box::new(NoClip),
+            store: Box::new(MemStore::default()),
+            math: Box::new(m),
+            images: Box::new(FakeImages {
+                files,
+                calls: calls.clone(),
+            }),
+            assets: Box::new(NoAssets),
+            exporter: Box::new(NoExport),
+            dialogs: Box::new(NoDialogs),
+            watcher: Box::new(NoWatcher),
+            theme_env: theme::test_support::env(),
+            persist_env: persist_env(),
+            print: Box::new(NoPrint),
+            url_opener: no_url(),
+            clock: fixed_clock(),
+        },
+    );
     (a, calls)
 }
 
@@ -777,7 +901,8 @@ fn image_loads_relative_to_document_and_caches() {
         panic!("应为图片键")
     };
     assert_eq!(Path::new(key), Path::new("dir/img/p.png"));
-    assert_eq!((l.imgs[0].width, l.imgs[0].height), (100, 50));
+    // B4：100×50 行内图高度上限 2 行（2×22=44），等比缩放为 88×44。
+    assert_eq!((l.imgs[0].width, l.imgs[0].height), (88, 44));
     assert!(
         !l.layout_text().contains("alt"),
         "加载成功：整节点由占位图替换"
@@ -792,20 +917,21 @@ fn image_loads_relative_to_document_and_caches() {
 #[test]
 fn image_wider_than_content_scales_proportionally() {
     // 前缀 "x "：默认光标 0 不在图片节点区间内（否则进入源码态不加载）
+    // 宽 1600 且高 45（低于 2 行限高），确保本用例仍由「宽度上限」触发缩放。
     let (mut a, _) = app_with_images(
         "x ![a](p.png)",
         Some("dir/doc.md"),
-        &[("dir/p.png", 1600, 900)],
+        &[("dir/p.png", 1600, 45)],
     );
     a.ensure_layouts_all();
     let (id, _, _) = a.editor.session().blocks()[0].clone();
-    // 默认版心宽 = 800 - 2*16 - 滚动条 12 = 756；1600×900 等比缩放
+    // 默认版心宽 = 800 - 2*16 - 滚动条 12 = 756；1600×45 等比缩放
     assert_eq!(
         (
             a.cache.layouts[&id].imgs[0].width,
             a.cache.layouts[&id].imgs[0].height
         ),
-        (756, 425)
+        (756, 21)
     );
 }
 
@@ -874,36 +1000,37 @@ fn app_paste_image(
         path: path.map(PathBuf::from),
         bom: false,
         resume: false,
+        open_error: None,
     };
     let m = FakeMath {
         fail: false,
         calls: Rc::new(RefCell::new(Vec::new())),
     };
     let app = App::new(
-    doc,
-    Ports {
-        clipboard: Box::new(ClipImage {
-            text: plain.map(str::to_string),
-            html: html.map(str::to_string),
-            image,
-        }),
-        store: Box::new(MemStore::default()),
-        math: Box::new(m),
-        images: Box::new(NoImages),
-        assets: Box::new(FakeAssets {
-            result,
-            calls: calls.clone(),
-        }),
-        exporter: Box::new(NoExport),
-        dialogs: Box::new(NoDialogs),
-        watcher: Box::new(NoWatcher),
-        theme_env: theme::test_support::env(),
-        persist_env: persist_env(),
-        print: Box::new(NoPrint),
-        url_opener: no_url(),
-        clock: fixed_clock(),
-    }
-);
+        doc,
+        Ports {
+            clipboard: Box::new(ClipImage {
+                text: plain.map(str::to_string),
+                html: html.map(str::to_string),
+                image,
+            }),
+            store: Box::new(MemStore::default()),
+            math: Box::new(m),
+            images: Box::new(NoImages),
+            assets: Box::new(FakeAssets {
+                result,
+                calls: calls.clone(),
+            }),
+            exporter: Box::new(NoExport),
+            dialogs: Box::new(NoDialogs),
+            watcher: Box::new(NoWatcher),
+            theme_env: theme::test_support::env(),
+            persist_env: persist_env(),
+            print: Box::new(NoPrint),
+            url_opener: no_url(),
+            clock: fixed_clock(),
+        },
+    );
     PasteFixture { app, calls }
 }
 
@@ -954,42 +1081,43 @@ fn paste_image_files_prefer_file_list_over_path_text() {
         path: Some(PathBuf::from("dir/notes.md")),
         bom: false,
         resume: false,
+        open_error: None,
     };
     let mut files = HashMap::new();
     files.insert(PathBuf::from("C:/pics/cat.png"), (8, 4));
     let mut app = App::new(
-    doc,
-    Ports {
-        clipboard: Box::new(ClipFiles {
-            files: vec![
-                PathBuf::from("C:/pics/cat.png"),
-                PathBuf::from("C:/pics/readme.txt"),
-            ],
-            text: Some("C:/pics/cat.png".into()),
-        }),
-        store: Box::new(MemStore::default()),
-        math: Box::new(FakeMath {
-            fail: false,
-            calls: Rc::new(RefCell::new(Vec::new())),
-        }),
-        images: Box::new(FakeImages {
-            files,
-            calls: loads.clone(),
-        }),
-        assets: Box::new(FakeAssets {
-            result: Ok("notes.assets/image-1.png".into()),
-            calls: saved.clone(),
-        }),
-        exporter: Box::new(NoExport),
-        dialogs: Box::new(NoDialogs),
-        watcher: Box::new(NoWatcher),
-        theme_env: theme::test_support::env(),
-        persist_env: persist_env(),
-        print: Box::new(NoPrint),
-        url_opener: no_url(),
-        clock: fixed_clock(),
-    }
-);
+        doc,
+        Ports {
+            clipboard: Box::new(ClipFiles {
+                files: vec![
+                    PathBuf::from("C:/pics/cat.png"),
+                    PathBuf::from("C:/pics/readme.txt"),
+                ],
+                text: Some("C:/pics/cat.png".into()),
+            }),
+            store: Box::new(MemStore::default()),
+            math: Box::new(FakeMath {
+                fail: false,
+                calls: Rc::new(RefCell::new(Vec::new())),
+            }),
+            images: Box::new(FakeImages {
+                files,
+                calls: loads.clone(),
+            }),
+            assets: Box::new(FakeAssets {
+                result: Ok("notes.assets/image-1.png".into()),
+                calls: saved.clone(),
+            }),
+            exporter: Box::new(NoExport),
+            dialogs: Box::new(NoDialogs),
+            watcher: Box::new(NoWatcher),
+            theme_env: theme::test_support::env(),
+            persist_env: persist_env(),
+            print: Box::new(NoPrint),
+            url_opener: no_url(),
+            clock: fixed_clock(),
+        },
+    );
     app.paste_clipboard();
     assert_eq!(doc_text(&app), "![](notes.assets/image-1.png)\nab");
     assert_eq!(
@@ -1057,35 +1185,36 @@ fn app_drop(
         path: path.map(PathBuf::from),
         bom: false,
         resume: false,
+        open_error: None,
     };
     let m = FakeMath {
         fail: false,
         calls: Rc::new(RefCell::new(Vec::new())),
     };
     let app = App::new(
-    doc,
-    Ports {
-        clipboard: Box::new(NoClip),
-        store: Box::new(MemStore::default()),
-        math: Box::new(m),
-        images: Box::new(FakeImages {
-            files: map,
-            calls: images.clone(),
-        }),
-        assets: Box::new(FakeAssets {
-            result: assets,
-            calls: asset_calls.clone(),
-        }),
-        exporter: Box::new(NoExport),
-        dialogs: Box::new(NoDialogs),
-        watcher: Box::new(NoWatcher),
-        theme_env: theme::test_support::env(),
-        persist_env: persist_env(),
-        print: Box::new(NoPrint),
-        url_opener: no_url(),
-        clock: fixed_clock(),
-    }
-);
+        doc,
+        Ports {
+            clipboard: Box::new(NoClip),
+            store: Box::new(MemStore::default()),
+            math: Box::new(m),
+            images: Box::new(FakeImages {
+                files: map,
+                calls: images.clone(),
+            }),
+            assets: Box::new(FakeAssets {
+                result: assets,
+                calls: asset_calls.clone(),
+            }),
+            exporter: Box::new(NoExport),
+            dialogs: Box::new(NoDialogs),
+            watcher: Box::new(NoWatcher),
+            theme_env: theme::test_support::env(),
+            persist_env: persist_env(),
+            print: Box::new(NoPrint),
+            url_opener: no_url(),
+            clock: fixed_clock(),
+        },
+    );
     DropFixture {
         app,
         images,
@@ -1209,7 +1338,10 @@ fn table_shows_source_when_caret_on_pipe() {
     a.ensure_layouts_all();
     a.ensure_tables();
     let (id, _, range) = a.editor.session().blocks()[1].clone();
-    assert!(!a.cache.tables.contains_key(&id), "管道符位置 → 源码态不排版网格");
+    assert!(
+        !a.cache.tables.contains_key(&id),
+        "管道符位置 → 源码态不排版网格"
+    );
     assert!(!a.table_shows_grid(id, &range));
 }
 
@@ -1220,7 +1352,10 @@ fn table_shows_grid_when_caret_inside_cell() {
     a.ensure_layouts_all();
     a.ensure_tables();
     let (id, _, range) = a.editor.session().blocks()[1].clone();
-    assert!(a.cache.tables.contains_key(&id), "活动单元格 → 网格继续显示");
+    assert!(
+        a.cache.tables.contains_key(&id),
+        "活动单元格 → 网格继续显示"
+    );
     assert!(a.table_shows_grid(id, &range));
 }
 
@@ -1289,10 +1424,97 @@ fn table_grid_rebuilds_when_editing_inside_active_cell() {
     a.after_edit(dirty);
     let new_id = a.editor.session().blocks()[1].0;
     // 活动单元格内编辑 → 网格继续排版且重建（列宽变大）
-    assert!(a.cache.tables.contains_key(&new_id), "活动单元格内 → 网格重建");
+    assert!(
+        a.cache.tables.contains_key(&new_id),
+        "活动单元格内 → 网格重建"
+    );
     assert!(
         a.cache.tables[&new_id].width > old_w,
         "内容变宽 → 新网格列宽变大"
+    );
+}
+
+// ---- 容器内表格（B2）：引用/列表/details 原生网格 + 容器缩进 ----
+
+#[test]
+fn quote_container_table_renders_native_grid_with_offset() {
+    let doc = "p\n\n> | h | h |\n> | --- | --- |\n> | **MMMM** | MMMM |\n";
+    let (mut a, _) = app_math(doc, false);
+    a.ensure_layouts_all();
+    a.ensure_tables();
+    let blocks = a.editor.session().blocks();
+    assert_eq!(blocks.len(), 2, "段落 + 引用内表格块");
+    let (id, kind, range) = blocks[1].clone();
+    assert_eq!(kind, BlockKind::Table);
+    let t = &a.cache.tables[&id];
+    assert!(t.x > 0.0, "引用内表格应右移（容器缩进），实际 {}", t.x);
+    assert_eq!(t.rows.len(), 2, "表头 + 1 行表体");
+    assert!(
+        t.height > a.engine.doc_line_height() * 1.5,
+        "原生表格高度应大于一行"
+    );
+    assert!(
+        t.cells[2].pixel_w > t.cells[3].pixel_w,
+        "**粗体** 单元格应宽于同文本普通格（B1 行内样式沿用）"
+    );
+    assert_eq!(a.block_height(geom(&a, id)), t.height);
+
+    // 命中位置扣除容器缩进后应落回单元格内容起点（与顶层表格同一路径）
+    let want = a.editor.session().table(id).unwrap().rows[0][1].range.start;
+    let cell = &t.cells[3];
+    let hit = a.hit_block(
+        id,
+        kind,
+        &range,
+        t.x + cell.x + cell.w / 2.0,
+        t.rows[1].top + t.rows[1].height / 2.0,
+    );
+    assert_eq!(hit, Some(want));
+}
+
+#[test]
+fn list_item_container_table_renders_with_indent() {
+    let doc = "p\n\n- | 键 | 值 |\n  | --- | --- |\n  | k | v |\n";
+    let (mut a, _) = app_math(doc, false);
+    a.ensure_layouts_all();
+    a.ensure_tables();
+    let blocks = a.editor.session().blocks();
+    assert_eq!(blocks.len(), 2);
+    let (id, _, _) = blocks[1].clone();
+    assert_eq!(blocks[1].1, BlockKind::Table);
+    let t = &a.cache.tables[&id];
+    assert!(t.x > 0.0, "列表项内表格应有内容列缩进");
+    assert_eq!(t.rows.len(), 2);
+}
+
+#[test]
+fn details_child_table_tracks_parent_expand_state() {
+    let doc = "p\n\n<details>\n<summary>S</summary>\n| a |\n| --- |\n| 1 |\n</details>\n";
+    let (mut a, _) = app_math(doc, false);
+    a.refresh_index();
+    let table_id = block_id_of(&a, |k| *k == BlockKind::Table);
+    let details_id = block_id_of(&a, |k| matches!(k, BlockKind::Details { .. }));
+    a.ensure_layouts_all();
+    // 默认收起：子表格不占行高
+    let g = a.index.blocks.iter().find(|g| g.id == table_id).unwrap();
+    assert_eq!(a.block_height(g), 0.0, "收起态子表格应隐藏");
+    // 展开后：原生表格占位，且 details 卡片覆盖子块高度
+    a.ui_state.expanded_details.insert(details_id);
+    a.ensure_layouts_all();
+    a.ensure_tables();
+    let g = a.index.blocks.iter().find(|g| g.id == table_id).unwrap();
+    let h = a.block_height(g);
+    assert!(h > a.engine.doc_line_height() * 1.5, "展开态子表格应排版");
+    let header = a.index.blocks.iter().find(|b| b.id == details_id).unwrap();
+    assert!(
+        a.details_children_height(header) >= h,
+        "details 卡片高度应覆盖子表格"
+    );
+    // 子表格切段后闭标签移出 details 头块：裸标签仍须消隐，只显示 summary。
+    let header_text = a.cache.layouts[&details_id].layout_text();
+    assert!(
+        !header_text.contains('<') && header_text.contains('S'),
+        "details 头块应只显示 summary，实际：{header_text:?}"
     );
 }
 
@@ -1341,7 +1563,10 @@ fn table_cache_key_tracks_active_cell() {
     assert_ne!(k0, k1, "活动格变化 → 键变化");
     assert_eq!(k1.active, 2, "flat 索引：header 2 格后的首个体格");
     assert!(a.cache.table(id, k1).is_some(), "新键命中");
-    assert!(a.cache.table(id, k0).is_none(), "旧键失配（切换活动格即失效）");
+    assert!(
+        a.cache.table(id, k0).is_none(),
+        "旧键失配（切换活动格即失效）"
+    );
 }
 
 // ---- Tab / Shift+Tab 单元格导航（T2） ----
@@ -1365,7 +1590,11 @@ fn table_ctrl_enter_sets_dirty_and_moves_caret_into_new_row() {
 
     let src = a.editor.session().serialize();
     assert!(src.ends_with("|  |  |  |\n"), "新行应为空单元格行：{src:?}");
-    let last_line = src.trim_end_matches('\n').rfind('\n').map(|i| i + 1).unwrap();
+    let last_line = src
+        .trim_end_matches('\n')
+        .rfind('\n')
+        .map(|i| i + 1)
+        .unwrap();
     assert!(
         a.editor.caret() >= last_line,
         "光标应落在新行而非表首：caret={} last_line={last_line}",
@@ -1486,7 +1715,7 @@ fn exec_table_ctx(a: &mut App, tc: ctx_menu::TableCtx, action: ctx_menu::CtxActi
     a.editor.set_caret(caret);
     a.ui_state
         .ctx
-        .open_at(10.0, 20.0, ctx_menu::CtxKind::Table(tc), None);
+        .open_at(10.0, 20.0, ctx_menu::CtxKind::Table(tc), None, None);
     let i = a
         .ui_state
         .ctx
@@ -1690,7 +1919,7 @@ fn table_align_sets_aligns_keeps_caret_and_undo_restores() {
     };
     a.ui_state
         .ctx
-        .open_at(10.0, 20.0, ctx_menu::CtxKind::Table(tc), None);
+        .open_at(10.0, 20.0, ctx_menu::CtxKind::Table(tc), None, None);
     let i = a
         .ui_state
         .ctx
@@ -1716,7 +1945,11 @@ fn table_align_sets_aligns_keeps_caret_and_undo_restores() {
             .expect("编辑后仍应有表格块");
         a.editor.session().table(id).unwrap().aligns[1]
     };
-    assert_eq!(align_of(&a), veil_core::CellAlign::Right, "解析后的列对齐应更新");
+    assert_eq!(
+        align_of(&a),
+        veil_core::CellAlign::Right,
+        "解析后的列对齐应更新"
+    );
     assert_eq!(
         a.editor.caret() - range.start,
         before,
@@ -1724,7 +1957,11 @@ fn table_align_sets_aligns_keeps_caret_and_undo_restores() {
     );
 
     a.editor.apply(Intent::Undo).unwrap();
-    assert_eq!(a.editor.session().serialize(), TABLE_MENU_DOC, "对齐是单撤销步");
+    assert_eq!(
+        a.editor.session().serialize(),
+        TABLE_MENU_DOC,
+        "对齐是单撤销步"
+    );
     assert_eq!(align_of(&a), veil_core::CellAlign::None, "撤销后对齐复原");
 }
 
@@ -1852,10 +2089,18 @@ fn shift_tab_goes_back() {
     // caret 在表体第二格 "e"
     a.editor.set_caret(tbl.rows[0][1].range.start);
     // Shift+Tab → 表体首格 "d"
-    a.input_state.mods = Mods { ctrl: false, shift: true, alt: false };
+    a.input_state.mods = Mods {
+        ctrl: false,
+        shift: true,
+        alt: false,
+    };
     a.route_key(Key::Tab);
     assert_eq!(a.editor.caret(), tbl.rows[0][0].range.start);
-    a.input_state.mods = Mods { ctrl: false, shift: false, alt: false };
+    a.input_state.mods = Mods {
+        ctrl: false,
+        shift: false,
+        alt: false,
+    };
 }
 
 #[test]
@@ -1866,10 +2111,7 @@ fn tab_outside_table_is_normal_indent() {
     let before = a.editor.caret();
     a.route_key(Key::Tab);
     // 缩进至少让光标右移（插 4 空格）
-    assert!(
-        a.editor.caret() >= before,
-        "表外 Tab 不应回退 caret"
-    );
+    assert!(a.editor.caret() >= before, "表外 Tab 不应回退 caret");
 }
 
 // ---- 列表 / 引用 / 分隔线 Reveal（切片 12）：块级重排与块高 ----
@@ -2000,29 +2242,123 @@ fn app_with(
         path: path.map(PathBuf::from),
         bom,
         resume: false,
+        open_error: None,
     };
     let m = FakeMath {
         fail: false,
         calls: Rc::new(RefCell::new(Vec::new())),
     };
     App::new(
-    doc,
-    Ports {
-        clipboard: Box::new(NoClip),
-        store: Box::new(store.clone()),
-        math: Box::new(m),
-        images: Box::new(NoImages),
-        assets: Box::new(NoAssets),
-        exporter: Box::new(NoExport),
-        dialogs: Box::new(NoDialogs),
-        watcher: Box::new(NoWatcher),
-        theme_env: theme::test_support::env(),
-        persist_env: persist_env(),
-        print: Box::new(NoPrint),
-        url_opener,
-        clock: fixed_clock(),
-    }
-)
+        doc,
+        Ports {
+            clipboard: Box::new(NoClip),
+            store: Box::new(store.clone()),
+            math: Box::new(m),
+            images: Box::new(NoImages),
+            assets: Box::new(NoAssets),
+            exporter: Box::new(NoExport),
+            dialogs: Box::new(NoDialogs),
+            watcher: Box::new(NoWatcher),
+            theme_env: theme::test_support::env(),
+            persist_env: persist_env(),
+            print: Box::new(NoPrint),
+            url_opener,
+            clock: fixed_clock(),
+        },
+    )
+}
+
+/// 启动即失败装配：Doc 带 open_error（空白草稿 + 首帧错误模态），store 决定「重试」结果。
+const STARTUP_ERROR_MESSAGE: &str = "无法读取 a.md：文件不存在。\n\n下一步：可重试或打开其他文件。";
+
+fn app_startup_error(path: &str, store: &MemStore) -> App {
+    let doc = Doc {
+        text: String::new(),
+        path: None,
+        bom: false,
+        resume: false,
+        open_error: Some(StartupError {
+            path: PathBuf::from(path),
+            title: t(I18nKey::MainOpenFailedTitle).to_string(),
+            message: STARTUP_ERROR_MESSAGE.to_string(),
+        }),
+    };
+    let m = FakeMath {
+        fail: false,
+        calls: Rc::new(RefCell::new(Vec::new())),
+    };
+    App::new(
+        doc,
+        Ports {
+            clipboard: Box::new(NoClip),
+            store: Box::new(store.clone()),
+            math: Box::new(m),
+            images: Box::new(NoImages),
+            assets: Box::new(NoAssets),
+            exporter: Box::new(NoExport),
+            dialogs: Box::new(NoDialogs),
+            watcher: Box::new(NoWatcher),
+            theme_env: theme::test_support::env(),
+            persist_env: persist_env(),
+            print: Box::new(NoPrint),
+            url_opener: no_url(),
+            clock: fixed_clock(),
+        },
+    )
+}
+
+/// 版本历史测试装配：快照库句柄由测试持有，用于预置/断言稳定键与槽内容。
+fn app_history(text: &str, path: Option<&str>, store: &MemStore, snapshot: &FakeSnapshot) -> App {
+    app_history_dialogs(text, path, store, snapshot, None)
+}
+
+fn app_history_dialogs(
+    text: &str,
+    path: Option<&str>,
+    store: &MemStore,
+    snapshot: &FakeSnapshot,
+    save: Option<&str>,
+) -> App {
+    let doc = Doc {
+        text: text.into(),
+        path: path.map(PathBuf::from),
+        bom: false,
+        resume: false,
+        open_error: None,
+    };
+    let m = FakeMath {
+        fail: false,
+        calls: Rc::new(RefCell::new(Vec::new())),
+    };
+    let d = FakeDialogs {
+        open: None,
+        save: save.map(PathBuf::from),
+        image: None,
+        export: None,
+        calls: Rc::new(RefCell::new(Vec::new())),
+    };
+    App::new(
+        doc,
+        Ports {
+            clipboard: Box::new(NoClip),
+            store: Box::new(store.clone()),
+            math: Box::new(m),
+            images: Box::new(NoImages),
+            assets: Box::new(NoAssets),
+            exporter: Box::new(NoExport),
+            dialogs: Box::new(d),
+            watcher: Box::new(NoWatcher),
+            theme_env: theme::test_support::env(),
+            persist_env: PersistEnv {
+                recovery: Box::new(FakeRecovery::default()),
+                session: Box::new(FakeSession::default()),
+                snapshot: Box::new(snapshot.clone()),
+            },
+            print: Box::new(NoPrint),
+            url_opener: no_url(),
+            clock: fixed_clock(),
+        },
+    )
 }
 
 /// 记录调用（会话序列化 + 源路径 + 主题样式透传）的导出器；fail 时返回 Err。
@@ -2062,6 +2398,7 @@ fn app_export(text: &str, path: Option<&str>, fail: bool) -> (App, ExportCalls) 
         path: path.map(PathBuf::from),
         bom: false,
         resume: false,
+        open_error: None,
     };
     let m = FakeMath {
         fail: false,
@@ -2081,23 +2418,23 @@ fn app_export(text: &str, path: Option<&str>, fail: bool) -> (App, ExportCalls) 
         calls: Rc::new(RefCell::new(Vec::new())),
     };
     let a = App::new(
-    doc,
-    Ports {
-        clipboard: Box::new(NoClip),
-        store: Box::new(MemStore::default()),
-        math: Box::new(m),
-        images: Box::new(NoImages),
-        assets: Box::new(NoAssets),
-        exporter: Box::new(e),
-        dialogs: Box::new(d),
-        watcher: Box::new(NoWatcher),
-        theme_env: theme::test_support::env(),
-        persist_env: persist_env(),
-        print: Box::new(NoPrint),
-        url_opener: no_url(),
-        clock: fixed_clock(),
-    }
-);
+        doc,
+        Ports {
+            clipboard: Box::new(NoClip),
+            store: Box::new(MemStore::default()),
+            math: Box::new(m),
+            images: Box::new(NoImages),
+            assets: Box::new(NoAssets),
+            exporter: Box::new(e),
+            dialogs: Box::new(d),
+            watcher: Box::new(NoWatcher),
+            theme_env: theme::test_support::env(),
+            persist_env: persist_env(),
+            print: Box::new(NoPrint),
+            url_opener: no_url(),
+            clock: fixed_clock(),
+        },
+    );
     (a, calls)
 }
 
@@ -2113,6 +2450,7 @@ fn app_export_with_dialog(
         path: None,
         bom: false,
         resume: false,
+        open_error: None,
     };
     let m = FakeMath {
         fail: false,
@@ -2172,7 +2510,7 @@ fn export_passes_current_theme_style() {
     assert!(!a.doc.export_style.dark);
     a.export_now();
     assert_eq!(calls.borrow()[0].2, a.doc.export_style); // 透传的是 App 侧快照
-    // 切到深色：主题刷新同点更新导出样式，之后导出立刻是深色页面
+                                                         // 切到深色：主题刷新同点更新导出样式，之后导出立刻是深色页面
     a.set_theme_mode(ThemeMode::Dark);
     assert_eq!(
         a.doc.export_style,
@@ -2245,6 +2583,26 @@ fn export_failure_does_not_crash_or_touch_document() {
     assert_eq!(calls.borrow().len(), 1);
     assert_eq!(a.editor.session().serialize(), "x"); // 文档不受影响
     assert!(!a.editor.is_dirty()); // 导出不改脏标
+}
+
+/// B6：导出失败必须有明确标题、原因与可操作出口（重试 / 取消）。
+#[test]
+fn export_failure_opens_error_modal_with_retry() {
+    use crate::view::modal::ModalKind;
+    let (mut a, calls) = app_export("x", Some("a.md"), true);
+    a.export_now();
+    let m = a.ui_state.modal.as_ref().expect("导出失败必须弹错误弹窗");
+    assert_eq!(m.spec.kind, ModalKind::Error);
+    assert_eq!(m.spec.title, "导出失败");
+    assert!(m.spec.message.contains("模拟导出失败"));
+    let labels: Vec<_> = m.spec.buttons.iter().map(|b| b.label.as_str()).collect();
+    assert_eq!(labels, vec!["重试", "取消"]);
+
+    // 重试：重走导出流程（导出器再次被调用），文档内容不变。
+    a.resolve_modal(1);
+    assert_eq!(calls.borrow().len(), 2);
+    assert_eq!(a.editor.session().serialize(), "x");
+    assert!(a.ui_state.chrome.notice.contains("导出失败"));
 }
 
 #[test]
@@ -2552,29 +2910,30 @@ fn app_dialogs(
         path: path.map(PathBuf::from),
         bom,
         resume: false,
+        open_error: None,
     };
     let m = FakeMath {
         fail: false,
         calls: Rc::new(RefCell::new(Vec::new())),
     };
     let a = App::new(
-    doc,
-    Ports {
-        clipboard: Box::new(NoClip),
-        store: Box::new(store.clone()),
-        math: Box::new(m),
-        images: Box::new(NoImages),
-        assets: Box::new(NoAssets),
-        exporter: Box::new(NoExport),
-        dialogs: Box::new(d),
-        watcher: Box::new(NoWatcher),
-        theme_env: theme::test_support::env(),
-        persist_env: persist_env(),
-        print: Box::new(NoPrint),
-        url_opener: no_url(),
-        clock: fixed_clock(),
-    }
-);
+        doc,
+        Ports {
+            clipboard: Box::new(NoClip),
+            store: Box::new(store.clone()),
+            math: Box::new(m),
+            images: Box::new(NoImages),
+            assets: Box::new(NoAssets),
+            exporter: Box::new(NoExport),
+            dialogs: Box::new(d),
+            watcher: Box::new(NoWatcher),
+            theme_env: theme::test_support::env(),
+            persist_env: persist_env(),
+            print: Box::new(NoPrint),
+            url_opener: no_url(),
+            clock: fixed_clock(),
+        },
+    );
     (a, calls)
 }
 
@@ -2749,7 +3108,6 @@ fn mouse_click_breaks_undo_group() {
     assert_eq!(full(&a), "", "再次撤销才回退点击前的 ab");
 }
 
-
 fn menu_title_center(menu: usize) -> (f32, f32) {
     let (_, x, w) = chrome::menu_bar_rects(1.0)[menu];
     (x + w / 2.0, chrome::MENU_H / 2.0)
@@ -2774,7 +3132,7 @@ fn menu_title_click_toggles_and_item_click_runs_save() {
     let (tx, ty) = menu_title_center(0);
     click_at(&mut a, tx, ty);
     assert_eq!(a.ui_state.chrome.open, Some(0), "点菜单标题打开文件菜单");
-    let (x, y) = popup_item_center(0, 3); // 保存（新建/打开/快速打开/保存）
+    let (x, y) = popup_item_center(0, 4); // 保存（新建/打开/快速打开/保存）
     click_at(&mut a, x, y);
     assert_eq!(a.ui_state.chrome.open, None, "执行动作后菜单关闭");
     assert!(!a.editor.is_dirty());
@@ -2899,6 +3257,116 @@ fn menu_quit_requests_exit() {
     a.perform_menu(MenuAction::Quit);
     assert!(a.window_state.exit_requested, "干净文档退出立即获准");
     assert!(!a.perform_menu(MenuAction::Copy));
+}
+
+#[test]
+fn new_window_action_preserves_current_document_and_dirty_state() {
+    let store = MemStore::default();
+    let mut a = app("原文", Some("a.md"), false, &store);
+    a.editor.apply(Intent::InsertText("改".into())).unwrap();
+    let before = doc_text(&a);
+    a.perform_action(Action::NewWindow);
+    assert!(a.window_state.new_window_requested);
+    assert_eq!(doc_text(&a), before);
+    assert_eq!(a.doc.path.as_deref(), Some(Path::new("a.md")));
+    assert!(a.editor.is_dirty());
+    assert!(
+        a.ui_state.modal.is_none(),
+        "新建窗口不得触发当前文档关闭/替换确认"
+    );
+}
+
+#[test]
+fn shell_routes_close_only_to_target_window() {
+    let store = MemStore::default();
+    let clean = app("干净", Some("clean.md"), false, &store);
+    let mut dirty = app("脏文档", Some("dirty.md"), false, &store);
+    dirty.editor.apply(Intent::InsertText("改".into())).unwrap();
+    let clean_id = winit::window::WindowId::from(101_u64);
+    let dirty_id = winit::window::WindowId::from(102_u64);
+    let mut shell = crate::shell::Shell::empty_for_test();
+    shell.insert_for_test(clean_id, clean);
+    shell.insert_for_test(dirty_id, dirty);
+
+    let blocked = shell.route_event(dirty_id, winit::event::WindowEvent::CloseRequested);
+    assert!(!blocked.closed);
+    assert!(!blocked.exit_process);
+    assert!(shell
+        .get_for_test(dirty_id)
+        .unwrap()
+        .ui_state
+        .modal
+        .is_some());
+    assert!(shell
+        .get_for_test(clean_id)
+        .unwrap()
+        .ui_state
+        .modal
+        .is_none());
+
+    let closed = shell.route_event(clean_id, winit::event::WindowEvent::CloseRequested);
+    assert!(closed.closed);
+    assert!(!closed.exit_process, "仍有脏窗口时不得退出进程");
+    assert!(shell.get_for_test(clean_id).is_none());
+    assert!(shell.get_for_test(dirty_id).unwrap().editor.is_dirty());
+}
+
+#[test]
+fn shell_exits_only_after_last_window_closes() {
+    let store = MemStore::default();
+    let id = winit::window::WindowId::from(103_u64);
+    let mut shell = crate::shell::Shell::empty_for_test();
+    shell.insert_for_test(id, app("最后窗口", None, false, &store));
+    let outcome = shell.route_event(id, winit::event::WindowEvent::CloseRequested);
+    assert!(outcome.closed);
+    assert!(outcome.exit_process);
+    assert!(shell.get_for_test(id).is_none());
+}
+
+#[test]
+fn explicit_new_window_doc_does_not_consume_recovery() {
+    let store = MemStore::default();
+    let recovery = FakeRecovery::default();
+    *recovery.slot.borrow_mut() = Some("不应读取".as_bytes().to_vec());
+    let a = app_persist(
+        "显式文档",
+        None,
+        &store,
+        &recovery,
+        &FakeSession::default(),
+        false,
+    );
+    assert_eq!(doc_text(&a), "显式文档");
+    assert!(!recovery.calls.borrow().iter().any(|call| call == "load"));
+}
+
+#[test]
+fn saving_one_window_does_not_clear_another_windows_recovery() {
+    let store = MemStore::default();
+    let recovery = FakeRecovery::default();
+    let session = FakeSession::default();
+    let mut a = app_persist("a", Some("a.md"), &store, &recovery, &session, false);
+    let mut b = app_persist("b", Some("b.md"), &store, &recovery, &session, false);
+    a.editor.apply(Intent::InsertText("甲".into())).unwrap();
+    b.editor.apply(Intent::InsertText("乙".into())).unwrap();
+    let t0 = Instant::now();
+    a.persist_state.persist.note_activity(t0);
+    a.maybe_recovery_write(t0 + Duration::from_secs(2));
+    b.persist_state.persist.note_activity(t0);
+    b.maybe_recovery_write(t0 + Duration::from_secs(2));
+    assert_eq!(slot_content(&recovery).1, "乙b");
+
+    a.save_now();
+    assert!(!a.editor.is_dirty());
+    assert!(b.editor.is_dirty());
+    assert_eq!(
+        slot_content(&recovery).1,
+        "乙b",
+        "A 保存不得清除 B 最后写入的恢复快照"
+    );
+
+    b.save_now();
+    assert!(recovery.slot.borrow().is_none(), "槽属主保存后正常清槽");
 }
 
 #[test]
@@ -3122,6 +3590,130 @@ fn save_failure_keeps_dirty_and_keeps_hhmm_stale_free() {
     );
 }
 
+/// B6：保存失败必须同时给出错误弹窗（标题/原因/重试·另存为·取消），
+/// 且错误态与普通弹窗同源（ModalKind::Error + 统一按钮角色）。
+#[test]
+fn save_failure_opens_error_modal_with_actionable_exits() {
+    use crate::view::modal::{ButtonRole, ModalKind};
+    let store = MemStore::default();
+    store
+        .files
+        .borrow_mut()
+        .insert(PathBuf::from("a.md"), b"ab".to_vec());
+    let (mut a, _) = app_dialogs("ab", Some("a.md"), false, &store, None, Some("b.md"));
+    store.fail_paths.borrow_mut().push(PathBuf::from("a.md"));
+    a.editor.apply(Intent::InsertText("x".into())).unwrap();
+    a.save_now();
+
+    let m = a.ui_state.modal.as_ref().expect("失败必须弹错误弹窗");
+    assert_eq!(m.spec.kind, ModalKind::Error);
+    assert_eq!(m.spec.title, "保存失败");
+    assert!(m.spec.message.contains("模拟写失败"), "须带原因");
+    assert!(m.spec.message.contains("当前修改仍保留"), "须带下一步");
+    let labels: Vec<_> = m.spec.buttons.iter().map(|b| b.label.as_str()).collect();
+    assert_eq!(labels, vec!["重试", "另存为", "取消"]);
+    assert_eq!(m.spec.buttons[0].role, ButtonRole::Primary);
+    assert!(a.editor.is_dirty(), "失败不得清脏");
+
+    // 取消：关闭弹窗、文档与脏标保持。
+    a.resolve_modal(3);
+    assert!(a.ui_state.modal.is_none());
+    assert!(a.editor.is_dirty());
+    assert!(a.ui_state.chrome.notice.contains("已取消保存"));
+}
+
+/// B6：错误弹窗「重试」重跑同一动作（成功即恢复），不静默换目标。
+#[test]
+fn save_error_retry_reuses_same_path_and_recovers() {
+    let store = MemStore::default();
+    store
+        .files
+        .borrow_mut()
+        .insert(PathBuf::from("a.md"), b"ab".to_vec());
+    let (mut a, _) = app_dialogs("ab", Some("a.md"), false, &store, None, None);
+    store.fail_paths.borrow_mut().push(PathBuf::from("a.md"));
+    a.editor.apply(Intent::InsertText("x".into())).unwrap();
+    a.save_now();
+    assert!(a.ui_state.modal.is_some());
+
+    // 修复写入条件后重试：同一路径成功、清脏并关闭弹窗。
+    store.fail_paths.borrow_mut().clear();
+    a.resolve_modal(1);
+    assert!(a.ui_state.modal.is_none());
+    assert!(!a.editor.is_dirty());
+    assert_eq!(a.doc.path.as_deref(), Some(Path::new("a.md")));
+    assert!(a.ui_state.chrome.notice.contains("已保存"));
+}
+
+/// B6：错误弹窗「另存为」是可操作的第二出口（无需先关弹窗再走菜单）。
+#[test]
+fn save_error_secondary_exit_uses_save_as() {
+    let store = MemStore::default();
+    store
+        .files
+        .borrow_mut()
+        .insert(PathBuf::from("a.md"), b"ab".to_vec());
+    let (mut a, _) = app_dialogs("ab", Some("a.md"), false, &store, None, Some("b.md"));
+    store.fail_paths.borrow_mut().push(PathBuf::from("a.md"));
+    a.editor.apply(Intent::InsertText("x".into())).unwrap();
+    a.save_now();
+    assert!(a.ui_state.modal.is_some());
+
+    a.resolve_modal(2);
+    assert!(a.ui_state.modal.is_none());
+    assert!(!a.editor.is_dirty());
+    assert_eq!(a.doc.path.as_deref(), Some(Path::new("b.md")));
+    assert!(store.files.borrow().contains_key(Path::new("b.md")));
+}
+
+/// B6：自动保存失败不打断输入（状态栏提示、无模态）；手工保存失败才弹错误弹窗。
+#[test]
+fn autosave_failure_stays_in_status_bar_without_modal() {
+    let store = MemStore::default();
+    store
+        .files
+        .borrow_mut()
+        .insert(PathBuf::from("a.md"), b"ab".to_vec());
+    let (mut a, _) = app_dialogs("ab", Some("a.md"), false, &store, None, None);
+    store.fail_paths.borrow_mut().push(PathBuf::from("a.md"));
+    a.editor.apply(Intent::InsertText("x".into())).unwrap();
+    let t0 = Instant::now();
+    a.persist_state.persist.note_activity(t0);
+    a.maybe_autosave(t0 + Duration::from_secs(3));
+    assert!(a.ui_state.modal.is_none(), "自动保存失败不得打断用户");
+    assert!(a.editor.is_dirty());
+    assert!(a.ui_state.chrome.notice.contains("保存失败"));
+    // 模态未决时自动保存也必须让位（用户正在处理失败原因）。
+    a.save_now();
+    assert!(a.ui_state.modal.is_some());
+    assert!(!a.autosave_due(std::time::Instant::now() + std::time::Duration::from_secs(30)));
+}
+
+/// B6：打开失败同样走错误弹窗（重试 / 重新选择 / 取消），原文档不被改动。
+#[test]
+fn open_failure_opens_error_modal_and_cancel_keeps_document() {
+    use crate::view::modal::ModalKind;
+    let store = MemStore::default();
+    store
+        .files
+        .borrow_mut()
+        .insert(PathBuf::from("a.md"), b"ab".to_vec());
+    let (mut a, _) = app_dialogs("ab", Some("a.md"), false, &store, Some("missing.md"), None);
+    a.open_via_dialog();
+    // 干净文档直接走打开；失败必须挂起错误弹窗而不是只写一行状态栏。
+    let m = a.ui_state.modal.as_ref().expect("打开失败必须弹错误弹窗");
+    assert_eq!(m.spec.kind, ModalKind::Error);
+    assert_eq!(m.spec.title, "打开失败");
+    assert!(m.spec.message.contains("missing.md"));
+    let labels: Vec<_> = m.spec.buttons.iter().map(|b| b.label.as_str()).collect();
+    assert_eq!(labels, vec!["重试", "重新选择", "取消"]);
+
+    a.resolve_modal(3);
+    assert!(a.ui_state.modal.is_none());
+    assert_eq!(a.doc.path.as_deref(), Some(Path::new("a.md")));
+    assert!(a.ui_state.chrome.notice.contains("已取消打开"));
+}
+
 /// 另存为成功刷新时刻；打开另一份文档时旧时间作废（不得把 A 的时刻显示在 B 上）。
 #[test]
 fn save_as_records_hhmm_and_open_resets_it() {
@@ -3228,34 +3820,53 @@ fn open_resets_conflict_state_and_baseline() {
 // ---- 外部文件监听（切片 16）：变更检测 / 提示去重 / 删除恢复 / 监听切换 ----
 
 fn app_watch(text: &str, path: Option<&str>, store: &MemStore, watch: &FakeWatch) -> App {
+    app_watch_dialogs(text, path, store, watch, None)
+}
+
+/// 外部变更 + 文件对话框联合装配：另存为出口需要真实返回目标的对话框。
+fn app_watch_dialogs(
+    text: &str,
+    path: Option<&str>,
+    store: &MemStore,
+    watch: &FakeWatch,
+    save: Option<&str>,
+) -> App {
     let doc = Doc {
         text: text.into(),
         path: path.map(PathBuf::from),
         bom: false,
         resume: false,
+        open_error: None,
     };
     let m = FakeMath {
         fail: false,
         calls: Rc::new(RefCell::new(Vec::new())),
     };
+    let d = FakeDialogs {
+        open: None,
+        save: save.map(PathBuf::from),
+        image: None,
+        export: None,
+        calls: Rc::new(RefCell::new(Vec::new())),
+    };
     App::new(
-    doc,
-    Ports {
-        clipboard: Box::new(NoClip),
-        store: Box::new(store.clone()),
-        math: Box::new(m),
-        images: Box::new(NoImages),
-        assets: Box::new(NoAssets),
-        exporter: Box::new(NoExport),
-        dialogs: Box::new(NoDialogs),
-        watcher: Box::new(watch.clone()),
-        theme_env: theme::test_support::env(),
-        persist_env: persist_env(),
-        print: Box::new(NoPrint),
-        url_opener: no_url(),
-        clock: fixed_clock(),
-    }
-)
+        doc,
+        Ports {
+            clipboard: Box::new(NoClip),
+            store: Box::new(store.clone()),
+            math: Box::new(m),
+            images: Box::new(NoImages),
+            assets: Box::new(NoAssets),
+            exporter: Box::new(NoExport),
+            dialogs: Box::new(d),
+            watcher: Box::new(watch.clone()),
+            theme_env: theme::test_support::env(),
+            persist_env: persist_env(),
+            print: Box::new(NoPrint),
+            url_opener: no_url(),
+            clock: fixed_clock(),
+        },
+    )
 }
 
 fn disk(store: &MemStore, path: &str, bytes: &[u8]) {
@@ -3352,29 +3963,30 @@ fn app_confirm(
         path: path.map(PathBuf::from),
         bom: false,
         resume: false,
+        open_error: None,
     };
     let m = FakeMath {
         fail: false,
         calls: Rc::new(RefCell::new(Vec::new())),
     };
     App::new(
-    doc,
-    Ports {
-        clipboard: Box::new(NoClip),
-        store: Box::new(store.clone()),
-        math: Box::new(m),
-        images: Box::new(NoImages),
-        assets: Box::new(NoAssets),
-        exporter: Box::new(NoExport),
-        dialogs,
-        watcher: Box::new(NoWatcher),
-        theme_env: theme::test_support::env(),
-        persist_env: persist_env_with(recovery, session.clone()),
-        print: Box::new(NoPrint),
-        url_opener: no_url(),
-        clock: fixed_clock(),
-    }
-)
+        doc,
+        Ports {
+            clipboard: Box::new(NoClip),
+            store: Box::new(store.clone()),
+            math: Box::new(m),
+            images: Box::new(NoImages),
+            assets: Box::new(NoAssets),
+            exporter: Box::new(NoExport),
+            dialogs,
+            watcher: Box::new(NoWatcher),
+            theme_env: theme::test_support::env(),
+            persist_env: persist_env_with(recovery, session.clone()),
+            print: Box::new(NoPrint),
+            url_opener: no_url(),
+            clock: fixed_clock(),
+        },
+    )
 }
 
 /// 断言模态已打开并按给定键作答（走真实路由，等价用户操作）。
@@ -3455,7 +4067,7 @@ fn dirty_open_discard_clears_snapshot_without_writing_disk() {
         a.doc.path.as_deref() == Some(Path::new("a.md")),
         "等待结论前不切换文档"
     );
-    answer_modal(&mut a, Key::Text("n".into()));
+    answer_modal(&mut a, Key::Text("c".into()));
     assert!(
         rec.slot.borrow().is_none(),
         "明确放弃：恢复快照必须作废，下次启动不得复活"
@@ -3582,8 +4194,9 @@ fn close_confirmation_saves_discards_or_cancels() {
     b.editor.apply(Intent::InsertText("改".into())).unwrap();
     seed_recovery(&mut b, &rec);
     b.confirm_close();
-    answer_modal(&mut b, Key::Text("n".into()));
-    assert!(b.window_state.exit_requested, "放弃允许退出");
+    b.ime_commit("c".into());
+    assert!(b.window_state.exit_requested, "IME 助记符放弃允许退出");
+    assert_eq!(doc_text(&b), "改old", "模态 IME 提交不得写入正文");
     assert!(rec.slot.borrow().is_none(), "放弃即清快照");
 
     // 保存：写盘后允许退出，快照作废
@@ -3599,10 +4212,93 @@ fn close_confirmation_saves_discards_or_cancels() {
     c.editor.apply(Intent::InsertText("改".into())).unwrap();
     seed_recovery(&mut c, &rec);
     c.confirm_close();
-    answer_modal(&mut c, Key::Text("s".into()));
-    assert!(c.window_state.exit_requested, "保存成功允许退出");
+    c.ime_commit("s".into());
+    assert!(c.window_state.exit_requested, "IME 助记符保存成功允许退出");
     assert_eq!(store.files.borrow()[Path::new("a.md")], "改old".as_bytes());
     assert!(rec.slot.borrow().is_none());
+}
+
+#[test]
+fn unsaved_modal_accepts_letters_without_ime_text() {
+    // 真机复现：输入法启用时字母只到逻辑键（Text 为空），弹窗此前完全无响应。
+    let store = MemStore::default();
+    disk(&store, "a.md", b"old");
+
+    let mut a = app_confirm(
+        "old",
+        Some("a.md"),
+        &store,
+        FakeRecovery::default(),
+        &FakeSession::default(),
+        Box::new(NoDialogs),
+    );
+    a.editor.apply(Intent::InsertText("改".into())).unwrap();
+    a.confirm_close();
+    a.route_key(Key::C);
+    assert!(a.window_state.exit_requested, "逻辑键 c 应触发放弃");
+    assert_eq!(doc_text(&a), "改old", "模态按键不得写入正文");
+
+    let mut b = app_confirm(
+        "old",
+        Some("a.md"),
+        &store,
+        FakeRecovery::default(),
+        &FakeSession::default(),
+        Box::new(NoDialogs),
+    );
+    b.editor.apply(Intent::InsertText("改".into())).unwrap();
+    b.confirm_close();
+    b.route_key(Key::S);
+    assert!(b.window_state.exit_requested, "逻辑键 s 应触发保存");
+    assert_eq!(store.files.borrow()[Path::new("a.md")], "改old".as_bytes());
+}
+
+#[test]
+fn modal_is_exclusive_and_closes_lite_overlays() {
+    let store = MemStore::default();
+    let mut a = dirty_app("ab", Some("a.md"), &store);
+    a.ui_state.chrome.open = Some(0);
+    a.open_search();
+    assert!(a.ui_state.search.open && a.ui_state.chrome.open.is_none());
+
+    a.ui_state.chrome.open = Some(0);
+    a.confirm_close();
+    assert!(a.ui_state.modal.is_some());
+    assert!(!a.ui_state.search.open, "弹窗出现即收掉查找栏");
+    assert!(a.ui_state.chrome.open.is_none(), "弹窗出现即收掉菜单");
+
+    // 模态未决期间，快捷键不得打开其它浮层
+    a.input_state.mods.ctrl = true;
+    a.route_key(Key::P);
+    a.route_key(Key::F);
+    a.input_state.mods.ctrl = false;
+    assert!(
+        !a.ui_state.quick.open && !a.ui_state.search.open,
+        "模态独占：其它浮层不可打开"
+    );
+}
+
+#[test]
+fn navigation_panels_are_mutually_exclusive() {
+    let store = MemStore::default();
+    let mut a = app("ab\ncd", Some("a.md"), false, &store);
+    a.open_history();
+    assert!(a.ui_state.history.open);
+    a.open_quick();
+    assert!(
+        a.ui_state.quick.open && !a.ui_state.history.open,
+        "快速打开接管历史面板"
+    );
+    a.open_search();
+    assert!(
+        a.ui_state.search.open && !a.ui_state.quick.open,
+        "查找栏接管快速打开"
+    );
+    a.open_history();
+    assert!(
+        a.ui_state.history.open && !a.ui_state.search.open,
+        "历史面板接管查找栏"
+    );
 }
 
 #[test]
@@ -3643,7 +4339,7 @@ fn dirty_open_is_deferred_until_modal_choice() {
     );
     assert_eq!(doc_text(&a), "改old");
 
-    answer_modal(&mut a, Key::Text("n".into()));
+    answer_modal(&mut a, Key::Text("c".into()));
     assert_eq!(a.doc.path.as_deref(), Some(Path::new("b.md")));
     assert_eq!(doc_text(&a), "new");
     assert!(!a.editor.is_dirty());
@@ -3691,6 +4387,10 @@ fn modal_swallows_editor_input_until_answered() {
     a.open_path(PathBuf::from("b.md"));
     a.route_key(Key::Text("x".into()));
     assert_eq!(doc_text(&a), before, "模态打开时字母键不进入编辑器");
+    a.ime_preedit("x".into(), None);
+    assert!(a.editor.preedit().is_none(), "模态打开时不挂 IME 组合串");
+    a.ime_commit("x".into());
+    assert_eq!(doc_text(&a), before, "模态打开时 IME 提交不进入编辑器");
     assert!(a.ui_state.modal.is_some(), "无效按键不关闭模态");
 }
 
@@ -3953,7 +4653,11 @@ fn ctrl_enter_in_replace_field_replaces_all() {
     a.input_state.mods.ctrl = true;
     a.route_key(Key::Enter);
     a.input_state.mods.ctrl = false;
-    assert_eq!(doc_text(&a), "b b b", "Ctrl+Enter 全部替换（默认不区分大小写）");
+    assert_eq!(
+        doc_text(&a),
+        "b b b",
+        "Ctrl+Enter 全部替换（默认不区分大小写）"
+    );
     assert!(a.ui_state.search.matches.is_empty());
     assert_eq!(a.ui_state.search.label(), "0/0");
 }
@@ -4061,12 +4765,33 @@ fn same_external_version_notifies_once() {
     disk(&store, "a.md", b"external");
     let watch = FakeWatch::default();
     let mut a = app_watch("ab", Some("a.md"), &store, &watch);
+    a.editor.apply(Intent::InsertText("改".into())).unwrap();
     watch.events.borrow_mut().push(FileEvent::Changed);
     a.poll_external();
+    assert!(
+        matches!(
+            a.ui_state.modal.as_ref().map(|m| &m.purpose),
+            Some(ModalPurpose::External)
+        ),
+        "脏文档首次外部修改必须弹选择框"
+    );
     a.ui_state.chrome.notice = "占位".into();
     watch.events.borrow_mut().push(FileEvent::Changed);
     a.poll_external();
     assert_eq!(a.ui_state.chrome.notice, "占位", "同一外部版本不重复提示");
+    assert!(
+        a.ui_state.modal.is_some(),
+        "同一版本不重开/替换弹窗（弹窗保持原状）"
+    );
+    a.resolve_modal(4);
+    a.ui_state.chrome.notice = "占位2".into();
+    watch.events.borrow_mut().push(FileEvent::Changed);
+    a.poll_external();
+    assert_eq!(
+        a.ui_state.chrome.notice, "占位2",
+        "取消后同一版本不得每次轮询重复弹窗"
+    );
+    assert!(a.ui_state.modal.is_none());
     assert_eq!(
         a.persist_state.persist.pending(),
         Some(b"external".as_slice())
@@ -4084,6 +4809,7 @@ fn already_backed_up_version_does_not_renotify() {
     a.poll_external();
     assert!(a.persist_state.persist.pending().is_none());
     assert!(!a.persist_state.persist.hold());
+    assert!(a.ui_state.modal.is_none(), "已备份版本不弹窗");
 }
 
 #[test]
@@ -4098,11 +4824,16 @@ fn newer_external_version_overrides_backed_up_state() {
     a.poll_external();
     assert_eq!(
         a.external_state(),
-        ExternalState::Changed,
-        "新版本待备份必须盖过旧版本的已备份提示"
+        ExternalState::None,
+        "干净文档静默重载后外部状态归零"
     );
-    assert_eq!(a.title_text(), "veil — a.md (外部修改)");
-    assert!(a.persist_state.persist.hold());
+    assert_eq!(a.title_text(), "veil — a.md", "静默重载不保留外部修改后缀");
+    assert_eq!(doc_text(&a), "v2", "干净文档内容替换为磁盘版本");
+    assert_eq!(a.doc.baseline, b"v2".to_vec());
+    assert!(!a.editor.is_dirty());
+    assert!(a.ui_state.modal.is_none());
+    assert!(a.persist_state.persist.pending().is_none());
+    assert!(!a.persist_state.persist.hold());
 }
 
 #[test]
@@ -4135,9 +4866,14 @@ fn external_revert_to_baseline_clears_pending() {
     disk(&store, "a.md", b"external");
     let watch = FakeWatch::default();
     let mut a = app_watch("ab", Some("a.md"), &store, &watch);
+    a.editor.apply(Intent::InsertText("改".into())).unwrap(); // 脏文档才进入挂起路径
     watch.events.borrow_mut().push(FileEvent::Changed);
     a.poll_external();
     assert!(a.persist_state.persist.hold());
+    assert_eq!(
+        a.persist_state.persist.pending(),
+        Some(b"external".as_slice())
+    );
     disk(&store, "a.md", b"ab");
     watch.events.borrow_mut().push(FileEvent::Changed);
     a.poll_external();
@@ -4185,6 +4921,206 @@ fn recovery_after_missing_surfaces_notice() {
 }
 
 #[test]
+fn clean_document_external_change_reloads_silently() {
+    let store = MemStore::default();
+    disk(&store, "a.md", b"external");
+    let watch = FakeWatch::default();
+    let mut a = app_watch("ab", Some("a.md"), &store, &watch);
+    watch.events.borrow_mut().push(FileEvent::Changed);
+    a.poll_external();
+    assert!(a.ui_state.modal.is_none(), "干净文档不弹选择框");
+    assert_eq!(doc_text(&a), "external", "静默采用磁盘内容");
+    assert_eq!(a.doc.baseline, b"external".to_vec());
+    assert!(!a.editor.is_dirty());
+    assert_eq!(a.external_state(), ExternalState::None);
+    assert_eq!(a.title_text(), "veil — a.md");
+    assert!(a.ui_state.chrome.notice.contains("已重新加载"));
+}
+
+#[test]
+fn external_change_modal_offers_four_choices() {
+    let store = MemStore::default();
+    disk(&store, "a.md", b"external");
+    let watch = FakeWatch::default();
+    let mut a = app_watch("ab", Some("a.md"), &store, &watch);
+    a.editor.apply(Intent::InsertText("改".into())).unwrap();
+    watch.events.borrow_mut().push(FileEvent::Changed);
+    a.poll_external();
+    let modal = a.ui_state.modal.as_ref().expect("脏文档必须弹选择框");
+    assert!(matches!(modal.purpose, ModalPurpose::External));
+    assert_eq!(
+        modal.spec.buttons.iter().map(|b| b.id).collect::<Vec<_>>(),
+        vec![1, 2, 3, 4]
+    );
+    assert_eq!(
+        modal.spec.buttons[0].display_label(),
+        format!("{} (R)", t(I18nKey::BtnReload))
+    );
+    assert_eq!(
+        modal.spec.buttons[1].display_label(),
+        format!("{} (K)", t(I18nKey::BtnKeepCurrent))
+    );
+    assert_eq!(
+        modal.spec.buttons[2].display_label(),
+        format!("{} (A)", t(I18nKey::BtnSaveAs))
+    );
+    assert_eq!(modal.spec.buttons[3].display_label(), t(I18nKey::BtnCancel));
+    assert_eq!(modal.spec.primary_id(), Some(2), "默认焦点为「保留当前」");
+    assert_eq!(modal.state.focused, 1, "Enter 不会误丢未保存修改");
+    assert_eq!(a.editor.session().serialize(), "改ab", "选择前不改内容");
+    assert_eq!(
+        store.files.borrow()[Path::new("a.md")],
+        b"external".to_vec(),
+        "选择前不改磁盘"
+    );
+}
+
+#[test]
+fn external_modal_reload_replaces_content_and_clears_state() {
+    let store = MemStore::default();
+    disk(&store, "a.md", b"external");
+    let watch = FakeWatch::default();
+    let mut a = app_watch("ab", Some("a.md"), &store, &watch);
+    a.editor.apply(Intent::InsertText("改".into())).unwrap();
+    watch.events.borrow_mut().push(FileEvent::Changed);
+    a.poll_external();
+    a.resolve_modal(1);
+    assert!(a.ui_state.modal.is_none());
+    assert_eq!(doc_text(&a), "external", "编辑器内容替换为磁盘字节");
+    assert!(!a.editor.is_dirty());
+    assert_eq!(a.doc.baseline, b"external".to_vec());
+    assert!(!a.doc.bom);
+    assert!(a.persist_state.persist.pending().is_none());
+    assert!(!a.persist_state.persist.hold());
+    assert_eq!(a.external_state(), ExternalState::None);
+    assert!(!a.title_text().contains("(外部修改)"), "标题后缀清除");
+    assert!(a.ui_state.chrome.notice.contains("已重新加载"));
+    watch.events.borrow_mut().push(FileEvent::Changed);
+    a.poll_external();
+    assert!(a.ui_state.modal.is_none(), "重载后同一磁盘版本不再弹窗");
+    assert!(a.ui_state.chrome.notice.contains("已重新加载"));
+}
+
+#[test]
+fn external_modal_keep_current_holds_until_manual_save() {
+    let store = MemStore::default();
+    disk(&store, "a.md", b"external");
+    let watch = FakeWatch::default();
+    let mut a = app_watch("ab", Some("a.md"), &store, &watch);
+    a.editor.apply(Intent::InsertText("改".into())).unwrap();
+    watch.events.borrow_mut().push(FileEvent::Changed);
+    a.poll_external();
+    a.resolve_modal(2);
+    assert_eq!(doc_text(&a), "改ab", "保留当前内容");
+    assert!(a.editor.is_dirty());
+    assert!(!a.persist_state.persist.hold(), "解除自动保存挂起");
+    assert_eq!(
+        a.persist_state.persist.pending(),
+        Some(b"external".as_slice()),
+        "pending 保留：标题仍提示外部修改"
+    );
+    assert_eq!(a.external_state(), ExternalState::Changed);
+    assert!(a.ui_state.chrome.notice.contains("已保留当前内容"));
+
+    let t0 = Instant::now();
+    a.persist_state.persist.note_activity(t0);
+    a.maybe_autosave(t0 + Duration::from_secs(2));
+    assert_eq!(
+        store.files.borrow()[Path::new("a.md")],
+        b"external".to_vec(),
+        "自动保存绝不静默覆盖磁盘"
+    );
+    assert_eq!(
+        store.files.borrow()[Path::new("a.conflict-1.md")],
+        b"external".to_vec(),
+        "覆盖前先写冲突副本"
+    );
+    assert!(a.persist_state.persist.hold(), "冲突后重新挂起自动保存");
+}
+
+#[test]
+fn external_modal_cancel_via_escape_keeps_pending() {
+    let store = MemStore::default();
+    disk(&store, "a.md", b"external");
+    let watch = FakeWatch::default();
+    let mut a = app_watch("ab", Some("a.md"), &store, &watch);
+    a.editor.apply(Intent::InsertText("改".into())).unwrap();
+    watch.events.borrow_mut().push(FileEvent::Changed);
+    a.poll_external();
+    a.route_key(Key::Escape);
+    assert!(a.ui_state.modal.is_none(), "Esc 关闭弹窗");
+    assert_eq!(doc_text(&a), "改ab", "内容不变");
+    assert!(a.persist_state.persist.hold(), "hold 保持不变");
+    assert_eq!(
+        a.persist_state.persist.pending(),
+        Some(b"external".as_slice())
+    );
+    assert_eq!(
+        a.ui_state.chrome.notice,
+        t(I18nKey::NoticeExternalDismissed)
+    );
+}
+
+#[test]
+fn external_modal_mnemonics_route_to_actions() {
+    // R：重新加载
+    let store = MemStore::default();
+    disk(&store, "a.md", b"external");
+    let watch = FakeWatch::default();
+    let mut a = app_watch("ab", Some("a.md"), &store, &watch);
+    a.editor.apply(Intent::InsertText("改".into())).unwrap();
+    watch.events.borrow_mut().push(FileEvent::Changed);
+    a.poll_external();
+    a.route_key(Key::Text("r".into()));
+    assert_eq!(doc_text(&a), "external", "助记符 R 走重新加载");
+
+    // K：保留当前
+    let mut b = app_watch("ab", Some("a.md"), &store, &watch);
+    b.editor.apply(Intent::InsertText("改".into())).unwrap();
+    watch.events.borrow_mut().push(FileEvent::Changed);
+    b.poll_external();
+    b.route_key(Key::K);
+    assert_eq!(doc_text(&b), "改ab", "助记符 K 保留当前");
+    assert!(!b.persist_state.persist.hold());
+    assert!(b.persist_state.persist.pending().is_some());
+
+    // A：另存为（需要能返回目标的对话框）
+    let mut c = app_watch_dialogs("ab", Some("a.md"), &store, &watch, Some("b.md"));
+    c.editor.apply(Intent::InsertText("改".into())).unwrap();
+    watch.events.borrow_mut().push(FileEvent::Changed);
+    c.poll_external();
+    c.route_key(Key::A);
+    assert!(c.ui_state.modal.is_none());
+    assert_eq!(c.doc.path.as_deref(), Some(Path::new("b.md")));
+    assert_eq!(
+        store.files.borrow()[Path::new("b.md")],
+        "改ab".as_bytes(),
+        "助记符 A 走既有另存为"
+    );
+}
+
+#[test]
+fn external_delete_or_unreadable_never_opens_modal() {
+    let store = MemStore::default();
+    disk(&store, "a.md", b"ab");
+    let watch = FakeWatch::default();
+    let mut a = app_watch("ab", Some("a.md"), &store, &watch);
+    a.editor.apply(Intent::InsertText("改".into())).unwrap();
+    store.files.borrow_mut().remove(Path::new("a.md"));
+    watch.events.borrow_mut().push(FileEvent::Removed);
+    a.poll_external();
+    assert!(a.ui_state.modal.is_none(), "外部删除不弹窗");
+    assert!(a.ui_state.chrome.notice.contains("删除"));
+
+    let mut b = app_watch("ab", Some("a.md"), &store, &watch);
+    b.editor.apply(Intent::InsertText("改".into())).unwrap();
+    watch.events.borrow_mut().push(FileEvent::Changed);
+    b.poll_external();
+    assert!(b.ui_state.modal.is_none(), "外部不可读不弹窗");
+    assert!(b.ui_state.chrome.notice.contains("不可读"));
+}
+
+#[test]
 fn save_as_rebinds_watcher() {
     let store = MemStore::default();
     let watch = FakeWatch::default();
@@ -4194,6 +5130,7 @@ fn save_as_rebinds_watcher() {
         path: Some(PathBuf::from("a.md")),
         bom: false,
         resume: false,
+        open_error: None,
     };
     let m = FakeMath {
         fail: false,
@@ -4207,23 +5144,23 @@ fn save_as_rebinds_watcher() {
         calls,
     };
     let mut a = App::new(
-    doc,
-    Ports {
-        clipboard: Box::new(NoClip),
-        store: Box::new(store.clone()),
-        math: Box::new(m),
-        images: Box::new(NoImages),
-        assets: Box::new(NoAssets),
-        exporter: Box::new(NoExport),
-        dialogs: Box::new(d),
-        watcher: Box::new(watch.clone()),
-        theme_env: theme::test_support::env(),
-        persist_env: persist_env(),
-        print: Box::new(NoPrint),
-        url_opener: no_url(),
-        clock: fixed_clock(),
-    }
-);
+        doc,
+        Ports {
+            clipboard: Box::new(NoClip),
+            store: Box::new(store.clone()),
+            math: Box::new(m),
+            images: Box::new(NoImages),
+            assets: Box::new(NoAssets),
+            exporter: Box::new(NoExport),
+            dialogs: Box::new(d),
+            watcher: Box::new(watch.clone()),
+            theme_env: theme::test_support::env(),
+            persist_env: persist_env(),
+            print: Box::new(NoPrint),
+            url_opener: no_url(),
+            clock: fixed_clock(),
+        },
+    );
     a.save_as();
     assert_eq!(a.doc.path.as_deref(), Some(Path::new("b.md")));
     assert_eq!(watch.calls.borrow().last().unwrap(), "watch:b.md");
@@ -4276,33 +5213,35 @@ fn app_theme(config: Box<dyn ConfigStore>, system: Rc<Cell<Option<bool>>>) -> Ap
         path: None,
         bom: false,
         resume: false,
+        open_error: None,
     };
     let m = FakeMath {
         fail: false,
         calls: Rc::new(RefCell::new(Vec::new())),
     };
     App::new(
-    doc,
-    Ports {
-        clipboard: Box::new(NoClip),
-        store: Box::new(MemStore::default()),
-        math: Box::new(m),
-        images: Box::new(NoImages),
-        assets: Box::new(NoAssets),
-        exporter: Box::new(NoExport),
-        dialogs: Box::new(NoDialogs),
-        watcher: Box::new(NoWatcher),
-        theme_env: ThemeEnv {
-            config,
-            system: Box::new(DynSystem(system)),
-            effects: Box::new(theme::test_support::NoEffects),
+        doc,
+        Ports {
+            clipboard: Box::new(NoClip),
+            store: Box::new(MemStore::default()),
+            math: Box::new(m),
+            images: Box::new(NoImages),
+            assets: Box::new(NoAssets),
+            exporter: Box::new(NoExport),
+            dialogs: Box::new(NoDialogs),
+            watcher: Box::new(NoWatcher),
+            theme_env: ThemeEnv {
+                config,
+                system: Box::new(DynSystem(system)),
+                effects: Box::new(theme::test_support::NoEffects),
+                callouts: veil_core::CalloutRegistry::default(),
+            },
+            persist_env: persist_env(),
+            print: Box::new(NoPrint),
+            url_opener: no_url(),
+            clock: fixed_clock(),
         },
-        persist_env: persist_env(),
-        print: Box::new(NoPrint),
-        url_opener: no_url(),
-        clock: fixed_clock(),
-    }
-)
+    )
 }
 
 #[test]
@@ -4637,7 +5576,7 @@ fn cjk_fenced_code_scroll_to_end_does_not_panic() {
     loop {
         a.window_state.scroll_y = y;
         let _ = a.render(); // 每屏触发布局/绘制
-        // 用当前帧几何判定可见性（块高在滚动中可能从实高回退估算值）
+                            // 用当前帧几何判定可见性（块高在滚动中可能从实高回退估算值）
         let (code_top, code_h) = {
             let g = a.index.blocks.iter().find(|g| g.id == code_id).unwrap();
             (g.top, a.block_height(g))
@@ -4677,10 +5616,18 @@ fn crlf_bom_edit_save_preserves_bytes() {
     let b = text.as_bytes();
     for (i, &c) in b.iter().enumerate() {
         if c == b'\n' {
-            assert_eq!(b.get(i - 1), Some(&b'\r'), "第 {i} 字节的 \\n 前缺 \\r（混入 LF）");
+            assert_eq!(
+                b.get(i - 1),
+                Some(&b'\r'),
+                "第 {i} 字节的 \\n 前缺 \\r（混入 LF）"
+            );
         }
         if c == b'\r' {
-            assert_eq!(b.get(i + 1), Some(&b'\n'), "第 {i} 字节的 \\r 后缺 \\n（孤立回车）");
+            assert_eq!(
+                b.get(i + 1),
+                Some(&b'\n'),
+                "第 {i} 字节的 \\r 后缺 \\n（孤立回车）"
+            );
         }
     }
 }
@@ -4767,12 +5714,15 @@ fn caret_before_commit_anchors_where_text_will_land() {
         "软换行光标须在同段下一行起始"
     );
 
-    // 段落分隔（Enter×2）：新段顶边 = 块底 + 段距
+    // 段落分隔（Enter×2）：新段顶边 = 块底 + 段距 + 1 个空行行高（B5）
     a.route_key(Key::Enter);
     let (cx2, cy2, _) = a.caret_screen();
     assert_eq!(
         (cx2, cy2),
-        (margin, vp_y + top1 + h1 + PARA_GAP * a.input_state.scale),
+        (
+            margin,
+            vp_y + top1 + h1 + (PARA_GAP + BASE_LINE_HEIGHT) * a.input_state.scale
+        ),
         "新段光标须在段落将出现的位置"
     );
 
@@ -4848,7 +5798,10 @@ fn new_paragraph_caret_matches_block_position() {
         (g.top, a.block_height(g))
     };
     let vp = a.viewport();
-    let (sy0, sy1) = (vp.y + top - a.window_state.scroll_y, vp.y + top + bh - a.window_state.scroll_y);
+    let (sy0, sy1) = (
+        vp.y + top - a.window_state.scroll_y,
+        vp.y + top + bh - a.window_state.scroll_y,
+    );
     println!(
         "blocks={} ci={ci} last={last} caret={} cy={cy} ch={ch} 块屏幕区间={sy0}..{sy1} scroll={}",
         a.index.blocks.len(),
@@ -4874,8 +5827,9 @@ fn new_paragraph_caret_with_cold_images_below() {
         parts.push(format!("![p{i}](p{i}.png)"));
     }
     let text = parts.join("\n\n");
-    let files: Vec<(String, u32, u32)> =
-        (0..10).map(|i| (format!("doc/p{i}.png"), 600, 500)).collect();
+    let files: Vec<(String, u32, u32)> = (0..10)
+        .map(|i| (format!("doc/p{i}.png"), 600, 500))
+        .collect();
     let files_ref: Vec<(&str, u32, u32)> =
         files.iter().map(|(p, w, h)| (p.as_str(), *w, *h)).collect();
     let (mut a, _calls) = app_with_images(&text, Some("doc/note.md"), &files_ref);
@@ -4907,7 +5861,9 @@ fn new_paragraph_caret_with_cold_images_below() {
         .iter()
         .enumerate()
         .filter(|(_, g)| {
-            a.cache.layout(g.id, &g.kind, g.range, base, caret).is_none()
+            a.cache
+                .layout(g.id, &g.kind, g.range, base, caret)
+                .is_none()
                 && g.kind != BlockKind::Math
                 && !(g.kind == BlockKind::Table && a.cache.table(g.id, a.table_key(g.id)).is_some())
         })
@@ -4921,7 +5877,10 @@ fn new_paragraph_caret_with_cold_images_below() {
         vp.y + vp.h
     );
     assert_eq!(ci, last, "文末新段光标须在末块");
-    assert!(missing.is_empty(), "可见区间存在未排版块（绘制为空洞）: {missing:?}");
+    assert!(
+        missing.is_empty(),
+        "可见区间存在未排版块（绘制为空洞）: {missing:?}"
+    );
     assert!(
         cy >= sy0 - 1.0 && cy + ch <= sy1 + 1.0,
         "光标须在所属块纵向跨度内：cy={cy} ch={ch} 块区间={sy0}..{sy1}"
@@ -4947,9 +5906,11 @@ fn new_paragraph_caret_matches_block_position_with_images() {
         }
     }
     let text = parts.join("\n\n");
-    let files: Vec<(String, u32, u32)> =
-        (0..5).map(|i| (format!("doc/p{}.png", i * 2), 600, 500)).collect();
-    let files_ref: Vec<(&str, u32, u32)> = files.iter().map(|(p, w, h)| (p.as_str(), *w, *h)).collect();
+    let files: Vec<(String, u32, u32)> = (0..5)
+        .map(|i| (format!("doc/p{}.png", i * 2), 600, 500))
+        .collect();
+    let files_ref: Vec<(&str, u32, u32)> =
+        files.iter().map(|(p, w, h)| (p.as_str(), *w, *h)).collect();
     let (mut a, _calls) = app_with_images(&text, Some("doc/note.md"), &files_ref);
     a.paint();
     a.perform_action(Action::Doc(Intent::MoveDocEnd));
@@ -4978,7 +5939,9 @@ fn new_paragraph_caret_matches_block_position_with_images() {
         .iter()
         .enumerate()
         .filter(|(_, g)| {
-            a.cache.layout(g.id, &g.kind, g.range, base, caret).is_none()
+            a.cache
+                .layout(g.id, &g.kind, g.range, base, caret)
+                .is_none()
                 && g.kind != BlockKind::Math
                 && !(g.kind == BlockKind::Table && a.cache.table(g.id, a.table_key(g.id)).is_some())
         })
@@ -4989,7 +5952,10 @@ fn new_paragraph_caret_matches_block_position_with_images() {
         a.index.blocks.len(),
         a.index.total_h
     );
-    assert!(missing.is_empty(), "可见区间存在未排版块（绘制为空洞）: {missing:?}");
+    assert!(
+        missing.is_empty(),
+        "可见区间存在未排版块（绘制为空洞）: {missing:?}"
+    );
     assert_eq!(ci, last, "文末新段光标须在末块");
     assert!(
         cy >= sy0 - 1.0 && cy + ch <= sy1 + 1.0,
@@ -5002,7 +5968,10 @@ fn new_paragraph_caret_matches_block_position_with_images() {
 #[test]
 fn new_paragraph_caret_matches_block_position_tall_cjk() {
     let para = "这是一段足够长的中文段落，用来产生多行折行的真实排版效果。".repeat(8);
-    let text = (0..12).map(|_| para.clone()).collect::<Vec<_>>().join("\n\n");
+    let text = (0..12)
+        .map(|_| para.clone())
+        .collect::<Vec<_>>()
+        .join("\n\n");
     let store = MemStore::default();
     let mut a = app(&text, None, false, &store);
     a.paint();
@@ -5033,10 +6002,11 @@ fn new_paragraph_caret_matches_block_position_tall_cjk() {
         .iter()
         .enumerate()
         .filter(|(_, g)| {
-            a.cache.layout(g.id, &g.kind, g.range, base, caret).is_none()
+            a.cache
+                .layout(g.id, &g.kind, g.range, base, caret)
+                .is_none()
                 && g.kind != BlockKind::Math
-                && !(g.kind == BlockKind::Table
-                    && a.cache.table(g.id, a.table_key(g.id)).is_some())
+                && !(g.kind == BlockKind::Table && a.cache.table(g.id, a.table_key(g.id)).is_some())
         })
         .map(|(i, _)| vr.start + i)
         .collect();
@@ -5053,7 +6023,10 @@ fn new_paragraph_caret_matches_block_position_tall_cjk() {
         a.index.total_h
     );
     assert!(tops_ok, "块 top 必须单调不减");
-    assert!(missing.is_empty(), "可见区间存在未排版块（绘制为空洞）: {missing:?}");
+    assert!(
+        missing.is_empty(),
+        "可见区间存在未排版块（绘制为空洞）: {missing:?}"
+    );
     assert_eq!(ci, last, "文末新段光标须在末块");
     assert!(
         cy >= sy0 - 1.0 && cy + ch <= sy1 + 1.0,
@@ -5119,6 +6092,43 @@ fn block_below_cap_is_not_truncated() {
     assert_eq!(l.full_len, text.len());
 }
 
+/// 按几何标尺（B5）重算期望文档高：块高 + 块距（含空行行高）+ 文末留白。
+/// 与 `recompute_geometry` 使用同一组公开规则，用于校验 top/total_h 累计一致性。
+fn expected_doc_height(a: &App) -> f32 {
+    let scale = a.input_state.scale;
+    let line_h = a.engine.doc_line_height();
+    let mut y = MARGIN * scale;
+    let mut prev: Option<&BlockGeom> = None;
+    for g in &a.index.blocks {
+        if let Some(p) = prev {
+            let blank = a.blank_lines_in_gap(p.range, g.range);
+            y += gap_between(
+                &p.kind,
+                p.range,
+                p.container,
+                &g.kind,
+                g.range,
+                g.container,
+                blank,
+                line_h,
+            ) * scale;
+        }
+        y += g.height;
+        prev = Some(g);
+    }
+    let Some(last) = a.index.blocks.last() else {
+        return 2.0 * MARGIN * scale;
+    };
+    let len = a.editor.session().text_len();
+    let tail_blank = a.blank_lines_in_gap(last.range, Range::new(len, len));
+    let tail = gap_after(&last.kind)
+        + (tail_blank as f32
+            + crate::tokens::doc::BLANK_LINE_LINES
+            + crate::tokens::doc::BOTTOM_PAD_LINES)
+            * line_h;
+    y + tail * scale
+}
+
 #[test]
 fn geometry_index_is_monotonic_and_consistent() {
     let store = MemStore::default();
@@ -5126,26 +6136,16 @@ fn geometry_index_is_monotonic_and_consistent() {
     let dirty = a.editor.apply(Intent::InsertText("a".into())).unwrap();
     a.after_edit(dirty);
     let mut prev = f32::NEG_INFINITY;
-    let mut y = MARGIN * a.input_state.scale;
     for g in &a.index.blocks {
         assert!(g.height > 0.0, "块高须为正: {:?}", g.id);
         assert!(g.top >= prev, "top 须单调不减: {:?}", g.id);
-        assert!(
-            (g.top - y).abs() < 1e-3,
-            "top 应与逐块累计一致: {} vs {}",
-            g.top,
-            y
-        );
         prev = g.top;
-        y += g.height + gap_after(&g.kind) * a.input_state.scale;
     }
-    let last_gap = a.index.blocks.last().map_or(0.0, |g| gap_after(&g.kind));
-    let want = y - last_gap * a.input_state.scale + MARGIN * a.input_state.scale;
+    let want = expected_doc_height(&a);
     assert!(
         (a.index.total_h - want).abs() < 1e-3,
-        "total_h 应与累计一致: {} vs {}",
-        a.index.total_h,
-        want
+        "total_h 应与累计一致: {} vs {want}",
+        a.index.total_h
     );
 }
 
@@ -5326,7 +6326,10 @@ fn heading_reveal_invalidates_after_block_shift_and_caret_leave() {
     let dirty = a.editor.apply(Intent::MoveDocStart).unwrap_or_default();
     a.after_edit(dirty); // caret 回到块外 → 标记应消隐
     let stale = memo_matches_forced_after(&mut a);
-    assert!(stale.is_empty(), "标题块迁移后不得残留旧 Reveal 布局: {stale:?}");
+    assert!(
+        stale.is_empty(),
+        "标题块迁移后不得残留旧 Reveal 布局: {stale:?}"
+    );
     // caret 在块外（0）→ 隐藏 `#`
     let heading = a
         .index
@@ -5347,7 +6350,10 @@ fn fenced_reveal_invalidates_after_block_shift_and_caret_leave() {
     let dirty = a.editor.apply(Intent::MoveDocStart).unwrap_or_default();
     a.after_edit(dirty);
     let stale = memo_matches_forced_after(&mut a);
-    assert!(stale.is_empty(), "围栏块迁移后不得残留旧 Reveal 布局: {stale:?}");
+    assert!(
+        stale.is_empty(),
+        "围栏块迁移后不得残留旧 Reveal 布局: {stale:?}"
+    );
 }
 
 /// 快照函数：收集 alive BlockId 集合后，按 id 从 cache.layouts 逐块取 (height, reveal, layout_text)。
@@ -6205,29 +7211,30 @@ fn app_persist(
         path: path.map(PathBuf::from),
         bom: false,
         resume,
+        open_error: None,
     };
     let m = FakeMath {
         fail: false,
         calls: Rc::new(RefCell::new(Vec::new())),
     };
     App::new(
-    doc,
-    Ports {
-        clipboard: Box::new(NoClip),
-        store: Box::new(store.clone()),
-        math: Box::new(m),
-        images: Box::new(NoImages),
-        assets: Box::new(NoAssets),
-        exporter: Box::new(NoExport),
-        dialogs: Box::new(NoDialogs),
-        watcher: Box::new(NoWatcher),
-        theme_env: theme::test_support::env(),
-        persist_env: persist_env_with(recovery.clone(), session.clone()),
-        print: Box::new(NoPrint),
-        url_opener: no_url(),
-        clock: fixed_clock(),
-    }
-)
+        doc,
+        Ports {
+            clipboard: Box::new(NoClip),
+            store: Box::new(store.clone()),
+            math: Box::new(m),
+            images: Box::new(NoImages),
+            assets: Box::new(NoAssets),
+            exporter: Box::new(NoExport),
+            dialogs: Box::new(NoDialogs),
+            watcher: Box::new(NoWatcher),
+            theme_env: theme::test_support::env(),
+            persist_env: persist_env_with(recovery.clone(), session.clone()),
+            print: Box::new(NoPrint),
+            url_opener: no_url(),
+            clock: fixed_clock(),
+        },
+    )
 }
 
 /// 恢复槽中解码出的（路径, 内容）。
@@ -6252,6 +7259,7 @@ fn app_persist_dialogs(
         path: path.map(PathBuf::from),
         bom: false,
         resume,
+        open_error: None,
     };
     let m = FakeMath {
         fail: false,
@@ -6265,23 +7273,23 @@ fn app_persist_dialogs(
         calls: Rc::new(RefCell::new(Vec::new())),
     };
     App::new(
-    draft,
-    Ports {
-        clipboard: Box::new(NoClip),
-        store: Box::new(store.clone()),
-        math: Box::new(m),
-        images: Box::new(NoImages),
-        assets: Box::new(NoAssets),
-        exporter: Box::new(NoExport),
-        dialogs: Box::new(d),
-        watcher: Box::new(NoWatcher),
-        theme_env: theme::test_support::env(),
-        persist_env: persist_env_with(recovery.clone(), session.clone()),
-        print: Box::new(NoPrint),
-        url_opener: no_url(),
-        clock: fixed_clock(),
-    }
-)
+        draft,
+        Ports {
+            clipboard: Box::new(NoClip),
+            store: Box::new(store.clone()),
+            math: Box::new(m),
+            images: Box::new(NoImages),
+            assets: Box::new(NoAssets),
+            exporter: Box::new(NoExport),
+            dialogs: Box::new(d),
+            watcher: Box::new(NoWatcher),
+            theme_env: theme::test_support::env(),
+            persist_env: persist_env_with(recovery.clone(), session.clone()),
+            print: Box::new(NoPrint),
+            url_opener: no_url(),
+            clock: fixed_clock(),
+        },
+    )
 }
 
 #[test]
@@ -6313,7 +7321,10 @@ fn cli_open_save_keeps_foreign_recovery_snapshot() {
     let ses = FakeSession::default();
     let mut a = app_persist_dialogs("ab", Some("a.md"), &store, &rec, &ses, false, None);
     a.save(crate::document::doc_state::SaveKind::Manual);
-    assert!(rec.slot.borrow().is_some(), "外部打开的保存不动他人恢复快照");
+    assert!(
+        rec.slot.borrow().is_some(),
+        "外部打开的保存不动他人恢复快照"
+    );
 }
 
 #[test]
@@ -6683,8 +7694,7 @@ fn recent_labels_disambiguate_same_file_name_across_dirs() {
     let store = MemStore::default();
     let rec = FakeRecovery::default();
     let ses = FakeSession::default();
-    *ses.text.borrow_mut() =
-        Some("recent=dir/a.md\nrecent=dir2/a.md\n".into());
+    *ses.text.borrow_mut() = Some("recent=dir/a.md\nrecent=dir2/a.md\n".into());
     let a = app_persist("默认样例", None, &store, &rec, &ses, false);
     assert_eq!(
         a.recent_labels(),
@@ -7247,11 +8257,12 @@ fn winit_key_chain_opens_search_and_types_into_query() {
 }
 
 #[test]
-fn ctrl_h_first_open_focuses_query_then_repeat_focuses_replace() {
+fn ctrl_h_first_opens_then_closes_then_reopens() {
     let store = MemStore::default();
     let mut a = app("a x a\n", None, false, &store);
     a.ensure_layouts_all();
 
+    // 首次 Ctrl+H：打开 search+replace，focus 在 Query（首字不得落进替换框）
     a.input_state.mods.ctrl = true;
     a.route_key(Key::H);
     a.input_state.mods.ctrl = false;
@@ -7264,20 +8275,34 @@ fn ctrl_h_first_open_focuses_query_then_repeat_focuses_replace() {
     a.route_key(Key::Text("a".into()));
     assert_eq!(a.ui_state.search.matches.len(), 2, "查询即时出命中");
 
-    // 栏已开时再按 Ctrl+H：焦点给替换串，可直接输入替换词
+    // 第二次 Ctrl+H：replace_open 已是 true → 关闭整个 search 面板（toggle 语义）
     a.input_state.mods.ctrl = true;
     a.route_key(Key::H);
     a.input_state.mods.ctrl = false;
-    assert_eq!(a.ui_state.search.focus, search::Field::Replace);
-    a.route_key(Key::Text("b".into()));
-    assert_eq!(a.ui_state.search.replace, "b");
+    assert!(
+        !a.ui_state.search.open,
+        "已打开 replace 时再按 Ctrl+H 关闭整个面板"
+    );
 
-    // Ctrl+F 在栏内仍可回到查询焦点，且不丢已有查询词
+    // 第三次 Ctrl+H：search 已关 → 重新打开 search+replace，focus 又到 Query
+    a.input_state.mods.ctrl = true;
+    a.route_key(Key::H);
+    a.input_state.mods.ctrl = false;
+    assert!(a.ui_state.search.open && a.ui_state.search.replace_open);
+    assert_eq!(
+        a.ui_state.search.focus,
+        search::Field::Query,
+        "重新打开仍先聚焦查询"
+    );
+
+    // Search 模式下 Ctrl+F 同样是 toggle：search 已开 → 关闭
     a.input_state.mods.ctrl = true;
     a.route_key(Key::F);
     a.input_state.mods.ctrl = false;
-    assert_eq!(a.ui_state.search.focus, search::Field::Query);
-    assert_eq!(a.ui_state.search.query, "a");
+    assert!(
+        !a.ui_state.search.open,
+        "Search 模式下 Ctrl+F 也按 toggle 关闭"
+    );
 }
 
 #[test]
@@ -7301,8 +8326,10 @@ fn right_click_on_link_text_opens_link_menu() {
         let l = &a.cache.layouts[&id];
         a.engine.caret_xy(l, 1)
     };
-    a.input_state.mouse =
-        PhysicalPosition::new((MARGIN * scale + lx + 2.0) as f64, (vp.y + top - a.window_state.scroll_y + ly + 5.0) as f64);
+    a.input_state.mouse = PhysicalPosition::new(
+        (MARGIN * scale + lx + 2.0) as f64,
+        (vp.y + top - a.window_state.scroll_y + ly + 5.0) as f64,
+    );
     a.on_right_click();
     assert!(a.ui_state.ctx.open, "应打开右键菜单");
     assert!(
@@ -7338,11 +8365,7 @@ fn link_point(a: &mut App) -> (f32, f32) {
     )
 }
 
-fn link_app(
-    text: &str,
-    calls: &Rc<RefCell<Vec<String>>>,
-    result: Result<(), String>,
-) -> App {
+fn link_app(text: &str, calls: &Rc<RefCell<Vec<String>>>, result: Result<(), String>) -> App {
     app_with(
         text,
         None,
@@ -7545,7 +8568,13 @@ fn url_whitelist_accepts_only_web_and_mail_schemes() {
     for ok in ["https://example.com", "  HTTP://a.b", "MAILTO:x@y.z"] {
         assert!(url_is_openable(ok), "应放行: {ok:?}");
     }
-    for bad in ["file:///C:/x", "javascript:alert(1)", "a.md", "#anchor", "/abs"] {
+    for bad in [
+        "file:///C:/x",
+        "javascript:alert(1)",
+        "a.md",
+        "#anchor",
+        "/abs",
+    ] {
         assert!(!url_is_openable(bad), "应拒绝: {bad:?}");
     }
 }
@@ -7556,7 +8585,10 @@ fn normalize_link_url_adds_http_for_bare_www() {
         normalize_link_url("www.example.com/a"),
         "http://www.example.com/a"
     );
-    assert_eq!(normalize_link_url("  WWW.Example.com  "), "http://WWW.Example.com");
+    assert_eq!(
+        normalize_link_url("  WWW.Example.com  "),
+        "http://WWW.Example.com"
+    );
     assert_eq!(normalize_link_url("https://a.b"), "https://a.b");
     assert_eq!(normalize_link_url("mailto:x@y.z"), "mailto:x@y.z");
     // `wwwx.com` 不是 www 前缀，保持原样（随后仍会被白名单拒绝）
@@ -7680,7 +8712,10 @@ fn ctrl_click_link_opens_without_touching_document() {
     assert_eq!(a.editor.selection(), None, "Ctrl+单击不改变选区");
     assert_eq!(a.editor.session().serialize(), bytes0, "文档字节不变");
     assert_eq!(a.editor.session().undo_depth(), undo0, "不产生撤销步");
-    assert!(a.window_state.last_click.is_none(), "不进入点击计数/拖选路径");
+    assert!(
+        a.window_state.last_click.is_none(),
+        "不进入点击计数/拖选路径"
+    );
 }
 
 #[test]
@@ -7783,7 +8818,7 @@ fn opening_search_closes_context_menu_so_keys_are_not_swallowed() {
     let mut a = app("abc\n", None, false, &store);
     a.ui_state
         .ctx
-        .open_at(10.0, 20.0, ctx_menu::CtxKind::Block, None);
+        .open_at(10.0, 20.0, ctx_menu::CtxKind::Block, None, None);
     assert_eq!(a.mode(), Mode::Menu, "右键菜单打开时按键归菜单");
     a.open_search();
     assert!(!a.ui_state.ctx.open, "查找栏打开必须关掉右键菜单");
@@ -7851,7 +8886,11 @@ fn search_bar_has_one_boundary_and_no_internal_dividers() {
     let gap_y = (rl.row.y - search::ROW_GAP / 2.0).round() as u32;
     for x in (l.bar.x + 2.0) as u32..(l.bar.x + l.bar.w - 2.0) as u32 {
         let px = f.get(x, gap_y);
-        assert_ne!([px[0], px[1], px[2]], border, "查询行与替换行之间不得有横线");
+        assert_ne!(
+            [px[0], px[1], px[2]],
+            border,
+            "查询行与替换行之间不得有横线"
+        );
     }
 }
 
@@ -8359,10 +9398,10 @@ fn typewriter_mode_pins_caret_line_to_anchor() {
 fn e2e_writing_loop_open_edit_save_reopen() {
     // 打开既有文件 → 文末追加写作 → 保存落盘 → 重开验证字节一致
     let store = MemStore::default();
-    store
-        .files
-        .borrow_mut()
-        .insert(PathBuf::from("doc/a.md"), "# 标题\n\n第一段。\n".as_bytes().to_vec());
+    store.files.borrow_mut().insert(
+        PathBuf::from("doc/a.md"),
+        "# 标题\n\n第一段。\n".as_bytes().to_vec(),
+    );
     let rec = FakeRecovery::default();
     let ses = FakeSession::default();
     let mut a = app_persist("默认样例", None, &store, &rec, &ses, false);
@@ -8406,38 +9445,39 @@ fn e2e_table_edit_and_image_paste() {
         .insert(PathBuf::from("doc/t.md"), text.as_bytes().to_vec());
     let calls: Rc<RefCell<Vec<(PathBuf, u32, u32)>>> = Rc::new(RefCell::new(Vec::new()));
     let mut a = App::new(
-    Doc {
+        Doc {
             text: text.into(),
             path: Some(PathBuf::from("doc/t.md")),
             bom: false,
             resume: false,
+            open_error: None,
         },
-    Ports {
-        clipboard: Box::new(ClipImage {
-            text: None,
-            html: None,
-            image: Some(solid(4, 2)),
-        }),
-        store: Box::new(store.clone()),
-        math: Box::new(FakeMath {
-            fail: false,
-            calls: Rc::new(RefCell::new(Vec::new())),
-        }),
-        images: Box::new(NoImages),
-        assets: Box::new(FakeAssets {
-            result: Ok("t.assets/image-1.png".into()),
-            calls: calls.clone(),
-        }),
-        exporter: Box::new(NoExport),
-        dialogs: Box::new(NoDialogs),
-        watcher: Box::new(NoWatcher),
-        theme_env: theme::test_support::env(),
-        persist_env: persist_env(),
-        print: Box::new(NoPrint),
-        url_opener: no_url(),
-        clock: fixed_clock(),
-    }
-);
+        Ports {
+            clipboard: Box::new(ClipImage {
+                text: None,
+                html: None,
+                image: Some(solid(4, 2)),
+            }),
+            store: Box::new(store.clone()),
+            math: Box::new(FakeMath {
+                fail: false,
+                calls: Rc::new(RefCell::new(Vec::new())),
+            }),
+            images: Box::new(NoImages),
+            assets: Box::new(FakeAssets {
+                result: Ok("t.assets/image-1.png".into()),
+                calls: calls.clone(),
+            }),
+            exporter: Box::new(NoExport),
+            dialogs: Box::new(NoDialogs),
+            watcher: Box::new(NoWatcher),
+            theme_env: theme::test_support::env(),
+            persist_env: persist_env(),
+            print: Box::new(NoPrint),
+            url_opener: no_url(),
+            clock: fixed_clock(),
+        },
+    );
 
     a.ensure_layouts_all();
     a.ensure_tables();
@@ -8479,7 +9519,10 @@ fn e2e_table_edit_and_image_paste() {
     a.save_now();
     let disk = String::from_utf8(store.files.borrow()[&PathBuf::from("doc/t.md")].clone())
         .expect("落盘内容恒为 UTF-8");
-    assert!(disk.contains("| 长长长名称 | 数量 |"), "格内编辑后的表格源码完整落盘");
+    assert!(
+        disk.contains("| 长长长名称 | 数量 |"),
+        "格内编辑后的表格源码完整落盘"
+    );
     assert!(disk.contains("![](t.assets/image-1.png)"));
 }
 
@@ -8489,7 +9532,14 @@ fn e2e_search_replace_and_crash_recovery() {
     let store = MemStore::default();
     let rec = FakeRecovery::default();
     let ses = FakeSession::default();
-    let mut a = app_persist("alpha beta alpha\n", Some("r.md"), &store, &rec, &ses, false);
+    let mut a = app_persist(
+        "alpha beta alpha\n",
+        Some("r.md"),
+        &store,
+        &rec,
+        &ses,
+        false,
+    );
     a.ensure_layouts_all();
     a.perform_action(Action::Replace);
     assert!(a.ui_state.search.open && a.ui_state.search.replace_open);
@@ -8513,7 +9563,10 @@ fn e2e_search_replace_and_crash_recovery() {
     a.maybe_recovery_write(t0 + Duration::from_secs(2));
     assert_eq!(
         slot_content(&rec),
-        (Some(PathBuf::from("r.md")), "gamma beta gamma\n".to_string()),
+        (
+            Some(PathBuf::from("r.md")),
+            "gamma beta gamma\n".to_string()
+        ),
         "恢复快照 = 路径 + 未保存内容"
     );
     store
@@ -8526,7 +9579,11 @@ fn e2e_search_replace_and_crash_recovery() {
     assert_eq!(doc_text(&b), "gamma beta gamma\n", "重启后恢复未保存内容");
     assert_eq!(b.doc.path, Some(PathBuf::from("r.md")));
     assert!(b.editor.is_dirty(), "恢复内容相对磁盘是未保存修改");
-    assert_eq!(b.doc.baseline, b"alpha beta alpha\n".to_vec(), "基线 = 磁盘");
+    assert_eq!(
+        b.doc.baseline,
+        b"alpha beta alpha\n".to_vec(),
+        "基线 = 磁盘"
+    );
 
     // 恢复后保存：磁盘更新、脏标清除（本 session 未重写快照，槽留待下次启动比对自清）
     b.save_now();
@@ -8607,37 +9664,38 @@ fn app_print(text: &str, print: Box<dyn Print>) -> App {
         path: None,
         bom: false,
         resume: false,
+        open_error: None,
     };
     let m = FakeMath {
         fail: false,
         calls: Rc::new(RefCell::new(Vec::new())),
     };
     App::new(
-    doc,
-    Ports {
-        clipboard: Box::new(NoClip),
-        store: Box::new(MemStore::default()),
-        math: Box::new(m),
-        images: Box::new(NoImages),
-        assets: Box::new(NoAssets),
-        exporter: Box::new(NoExport),
-        dialogs: Box::new(NoDialogs),
-        watcher: Box::new(NoWatcher),
-        theme_env: theme::test_support::env(),
-        persist_env: persist_env(),
-        print,
-        url_opener: no_url(),
-        clock: fixed_clock(),
-    }
-)
+        doc,
+        Ports {
+            clipboard: Box::new(NoClip),
+            store: Box::new(MemStore::default()),
+            math: Box::new(m),
+            images: Box::new(NoImages),
+            assets: Box::new(NoAssets),
+            exporter: Box::new(NoExport),
+            dialogs: Box::new(NoDialogs),
+            watcher: Box::new(NoWatcher),
+            theme_env: theme::test_support::env(),
+            persist_env: persist_env(),
+            print,
+            url_opener: no_url(),
+            clock: fixed_clock(),
+        },
+    )
 }
 
 /// 断点合法性：除 0.0 外每个断点落在某块 top 或块内行顶（不劈行）。
 fn assert_breaks_on_boundaries(bs: &[f32], gs: &[(f32, Vec<f32>)]) {
     for &b in &bs[1..] {
-        let on = gs
-            .iter()
-            .any(|(top, lines)| (top - b).abs() < 0.5 || lines.iter().any(|&t| (top + t - b).abs() < 0.5));
+        let on = gs.iter().any(|(top, lines)| {
+            (top - b).abs() < 0.5 || lines.iter().any(|&t| (top + t - b).abs() < 0.5)
+        });
         assert!(on, "断点 {b} 应落在块顶或行顶: {gs:?}");
     }
 }
@@ -8674,7 +9732,11 @@ fn print_paginates_clean_frames_and_restores_state() {
     let bg = a.input_state.theme.bg;
     for (w, h, corners) in frames.borrow().iter() {
         assert_eq!((*w, *h), (300, 120), "页帧尺寸 = 注入尺寸");
-        assert_eq!(corners, &[bg, bg, bg, bg], "页帧四角为文档底色（无 chrome）");
+        assert_eq!(
+            corners,
+            &[bg, bg, bg, bg],
+            "页帧四角为文档底色（无 chrome）"
+        );
     }
     // 屏幕态复原（尺寸/缩放/滚动），文档真值未动
     assert_eq!(a.win_size(), (800, 600), "headless 窗口尺寸复原");
@@ -8761,11 +9823,18 @@ fn print_collapses_all_reveal_markup() {
     a.render();
     let id = a.index.blocks[0].id;
     let screen = a.cache.layouts[&id].value.layout_text().to_string();
-    assert!(screen.contains("**"), "屏幕态光标在节点内显源码: {screen:?}");
+    assert!(
+        screen.contains("**"),
+        "屏幕态光标在节点内显源码: {screen:?}"
+    );
     a.perform_menu(MenuAction::Print);
     let printed = texts.borrow();
     assert_eq!(printed.len(), 1, "单块文档");
-    assert!(!printed[0].contains("**"), "打印态标记收拢: {:?}", printed[0]);
+    assert!(
+        !printed[0].contains("**"),
+        "打印态标记收拢: {:?}",
+        printed[0]
+    );
     assert!(printed[0].contains('b'), "内容保留: {:?}", printed[0]);
     assert_eq!(a.editor.caret(), bold, "打印不动真实光标");
 }
@@ -8809,25 +9878,26 @@ fn print_hard_cuts_atomic_block_taller_than_page() {
         path: None,
         bom: false,
         resume: false,
+        open_error: None,
     };
     let mut a = App::new(
-    doc,
-    Ports {
-        clipboard: Box::new(NoClip),
-        store: Box::new(MemStore::default()),
-        math: Box::new(TallMath),
-        images: Box::new(NoImages),
-        assets: Box::new(NoAssets),
-        exporter: Box::new(NoExport),
-        dialogs: Box::new(NoDialogs),
-        watcher: Box::new(NoWatcher),
-        theme_env: theme::test_support::env(),
-        persist_env: persist_env(),
-        print: Box::new(p),
-        url_opener: no_url(),
-        clock: fixed_clock(),
-    }
-);
+        doc,
+        Ports {
+            clipboard: Box::new(NoClip),
+            store: Box::new(MemStore::default()),
+            math: Box::new(TallMath),
+            images: Box::new(NoImages),
+            assets: Box::new(NoAssets),
+            exporter: Box::new(NoExport),
+            dialogs: Box::new(NoDialogs),
+            watcher: Box::new(NoWatcher),
+            theme_env: theme::test_support::env(),
+            persist_env: persist_env(),
+            print: Box::new(p),
+            url_opener: no_url(),
+            clock: fixed_clock(),
+        },
+    );
     a.perform_menu(MenuAction::Print);
     assert!(ended.get());
     assert!(
@@ -8841,9 +9911,9 @@ fn print_hard_cuts_atomic_block_taller_than_page() {
     let hard = bs[1..]
         .iter()
         .filter(|&&b| {
-            !gs
-                .iter()
-                .any(|(top, lines)| (top - b).abs() < 0.5 || lines.iter().any(|&t| (top + t - b).abs() < 0.5))
+            !gs.iter().any(|(top, lines)| {
+                (top - b).abs() < 0.5 || lines.iter().any(|&t| (top + t - b).abs() < 0.5)
+            })
         })
         .count();
     assert!(hard >= 1, "超页原子块应产生硬切断点: {bs:?} vs {gs:?}");
@@ -8899,7 +9969,12 @@ impl Print for ExportProbe {
             .index
             .blocks
             .iter()
-            .filter(|g| matches!(g.kind, BlockKind::AtxHeading(_) | BlockKind::SetextHeading(_)))
+            .filter(|g| {
+                matches!(
+                    g.kind,
+                    BlockKind::AtxHeading(_) | BlockKind::SetextHeading(_)
+                )
+            })
             .map(|g| g.top)
             .collect();
         let mut frames = Vec::new();
@@ -8916,25 +9991,15 @@ fn packed(c: [u8; 4]) -> u32 {
     ((c[0] as u32) << 16) | ((c[1] as u32) << 8) | c[2] as u32
 }
 
-fn region_has_ink(
-    frame: &[u32],
-    width: u32,
-    bg: u32,
-    x0: u32,
-    y0: u32,
-    x1: u32,
-    y1: u32,
-) -> bool {
-    (y0..y1).any(|y| {
-        (x0..x1).any(|x| frame[(y as usize) * width as usize + x as usize] != bg)
-    })
+fn region_has_ink(frame: &[u32], width: u32, bg: u32, x0: u32, y0: u32, x1: u32, y1: u32) -> bool {
+    (y0..y1).any(|y| (x0..x1).any(|x| frame[(y as usize) * width as usize + x as usize] != bg))
 }
 
 fn export_doc() -> String {
-    let filler: String = (1..=12).map(|i| format!("正文段落 {i} 内容。\n\n")).collect();
-    format!(
-        "# 第一章\n\n{filler}## 第二节\n\n{filler}### 小节\n\n{filler}尾段\n"
-    )
+    let filler: String = (1..=12)
+        .map(|i| format!("正文段落 {i} 内容。\n\n"))
+        .collect();
+    format!("# 第一章\n\n{filler}## 第二节\n\n{filler}### 小节\n\n{filler}尾段\n")
 }
 
 #[test]
@@ -8994,7 +10059,11 @@ fn export_without_toc_matches_plain_begin() {
     );
     let mut a = app_print(&text, Box::new(toc_off));
     a.perform_menu(MenuAction::ExportPdf);
-    assert_eq!(pages.get(), breaks.borrow().len(), "无目录时总页数 = 正文页数");
+    assert_eq!(
+        pages.get(),
+        breaks.borrow().len(),
+        "无目录时总页数 = 正文页数"
+    );
 
     let legacy = ExportProbe {
         w: 300,
@@ -9044,7 +10113,15 @@ fn export_page_numbers_draw_bottom_right_footer() {
     let mut b = app_print(text, Box::new(off));
     b.perform_menu(MenuAction::ExportPdf);
     let bg = packed(b.input_state.theme.bg);
-    let off_ink = region_has_ink(&off_frames.borrow()[0], w, bg, w - 120, h - 48, w - 4, h - 4);
+    let off_ink = region_has_ink(
+        &off_frames.borrow()[0],
+        w,
+        bg,
+        w - 120,
+        h - 48,
+        w - 4,
+        h - 4,
+    );
 
     assert!(on_ink, "页码开启时页脚右下应有墨迹");
     assert!(!off_ink, "页码关闭时页脚区域应为背景色");
@@ -9077,7 +10154,6 @@ fn export_toc_entry_pages_follow_breaks() {
         assert_eq!(*page, expected, "标题 {text:?} 的物理页码");
     }
 }
-
 
 // ── 3c-2：用户缩放（Ctrl+滚轮/捏合、Ctrl+=/-/0、视图菜单）────────────────────
 
@@ -9225,11 +10301,14 @@ fn zoom_menu_and_key_paths() {
     assert_eq!(a.input_state.user_zoom, 1.1, "菜单放大");
     // 键盘链路：map_key（Ctrl+= 的 winit 形态）→ translate → Action
     assert_eq!(
-        crate::input::translate(Key::Equal, Mods {
-            ctrl: true,
-            shift: false,
-            alt: false,
-        }),
+        crate::input::translate(
+            Key::Equal,
+            Mods {
+                ctrl: true,
+                shift: false,
+                alt: false,
+            }
+        ),
         Some(Action::ZoomIn)
     );
     a.perform_action(Action::ZoomOut);
@@ -9247,7 +10326,11 @@ fn ctrl_combo_ignores_winit_text_stripped_of_ctrl() {
     // winit Windows：Ctrl+S 的 event.text 是「剥离 Ctrl 后」的 "s"。文本分支若先行，
     // 全部 Ctrl 组合都会退化成 Key::Text("s") → translate 返回 None → 快捷键静默失效
     let s = winit::keyboard::SmolStr::new("s");
-    let ctrl = Mods { ctrl: true, shift: false, alt: false };
+    let ctrl = Mods {
+        ctrl: true,
+        shift: false,
+        alt: false,
+    };
     assert_eq!(
         crate::interaction::map_key_parts(Some("s"), WKey::Character(s.clone()), ctrl),
         Some(Key::S),
@@ -9259,7 +10342,11 @@ fn ctrl_combo_ignores_winit_text_stripped_of_ctrl() {
         Some(Key::Text("s".into()))
     );
     // AltGr（Ctrl+Alt）仍是输入字符，必须走文本
-    let altgr = Mods { ctrl: true, shift: false, alt: true };
+    let altgr = Mods {
+        ctrl: true,
+        shift: false,
+        alt: true,
+    };
     assert_eq!(
         crate::interaction::map_key_parts(Some("s"), WKey::Character(s), altgr),
         Some(Key::Text("s".into()))
@@ -9275,16 +10362,22 @@ fn fullscreen_headless_noop_and_menu_path() {
     assert!(!a.window_state.fullscreen, "无窗口不翻状态");
     assert!(!a.editor.is_dirty(), "全屏切换不动文档");
     let notice = a.ui_state.chrome.notice.clone();
-    assert!(!a.perform_menu(MenuAction::ToggleFullscreen), "全屏不退出应用");
+    assert!(
+        !a.perform_menu(MenuAction::ToggleFullscreen),
+        "全屏不退出应用"
+    );
     assert!(!a.window_state.fullscreen);
     assert_eq!(a.ui_state.chrome.notice, notice, "no-op 不刷提示");
     // 路由：Document 模式 F11 直达动作；Esc 语义不变（关菜单，不退全屏）
     assert_eq!(
-        crate::input::translate(Key::F11, Mods {
-            ctrl: false,
-            shift: false,
-            alt: false,
-        }),
+        crate::input::translate(
+            Key::F11,
+            Mods {
+                ctrl: false,
+                shift: false,
+                alt: false,
+            }
+        ),
         Some(Action::ToggleFullscreen)
     );
 }
@@ -9296,10 +10389,7 @@ fn fullscreen_headless_noop_and_menu_path() {
 #[test]
 fn window_visibility_defaults_to_true() {
     let a = app_clip(None, None);
-    assert!(
-        a.window_state.visible,
-        "App 刚构造时窗口默认可见"
-    );
+    assert!(a.window_state.visible, "App 刚构造时窗口默认可见");
 }
 
 #[test]
@@ -9358,20 +10448,12 @@ fn paint_is_harmless_when_not_visible() {
     let mut a = app("不可见时 paint 不应 panic\n", None, false, &store);
     // 先跑一次让 frame 有值
     a.paint();
-    let frame_before = a
-        .window_state
-        .frame
-        .as_ref()
-        .map(|f| f.pixels.clone());
+    let frame_before = a.window_state.frame.as_ref().map(|f| f.pixels.clone());
 
     // 手动设置不可见后再直接 paint（绕过 RedrawRequested 守卫）
     a.window_state.visible = false;
     a.paint(); // 不应 panic
-    let frame_after = a
-        .window_state
-        .frame
-        .as_ref()
-        .map(|f| f.pixels.clone());
+    let frame_after = a.window_state.frame.as_ref().map(|f| f.pixels.clone());
 
     // paint 仍会 render（绕过守卫），但这是 headless 测试；生产中 RedrawRequested 守卫
     // 会直接 return，根本不会调 paint。这里仅断言「直接调 paint 在不可见态也无害」。
@@ -9390,7 +10472,11 @@ fn menu_keyboard_navigation_selects_and_clamps() {
     assert!(n > 1);
 
     a.route_key(Key::Down);
-    assert_eq!(a.ui_state.chrome.hover_item, Some((0, 0)), "无选中时 ↓ 选首项");
+    assert_eq!(
+        a.ui_state.chrome.hover_item,
+        Some((0, 0)),
+        "无选中时 ↓ 选首项"
+    );
     a.route_key(Key::Down);
     assert_eq!(a.ui_state.chrome.hover_item, Some((0, 1)));
     a.route_key(Key::Up);
@@ -9434,7 +10520,11 @@ fn menu_keyboard_enter_runs_selected_item_and_closes() {
     assert_eq!(a.ui_state.chrome.hover_item, Some((2, dark)));
 
     a.route_key(Key::Enter);
-    assert_eq!(a.input_state.theme.mode, ThemeMode::Dark, "Enter 执行选中项");
+    assert_eq!(
+        a.input_state.theme.mode,
+        ThemeMode::Dark,
+        "Enter 执行选中项"
+    );
     assert_eq!(a.ui_state.chrome.open, None, "执行后菜单关闭");
     assert_eq!(a.ui_state.chrome.hover_item, None);
     assert_eq!(a.editor.session().serialize(), "ab\n", "菜单动作不改文档");
@@ -9543,7 +10633,7 @@ fn menu_click_on_disabled_item_keeps_menu_open() {
     let (tx, ty) = menu_title_center(0);
     click_at(&mut a, tx, ty);
     assert_eq!(a.ui_state.chrome.open, Some(0));
-    let (x, y) = popup_item_center(0, 3); // 保存（干净文档 → 禁用）
+    let (x, y) = popup_item_center(0, 4); // 保存（干净文档 → 禁用）
     click_at(&mut a, x, y);
     assert_eq!(a.ui_state.chrome.open, Some(0), "禁用项点击不关菜单");
     assert!(calls.borrow().is_empty(), "禁用项不触发任何对话框/写盘");
@@ -9647,7 +10737,7 @@ fn disabled_menu_item_paints_muted_without_hover() {
     a.ui_state.chrome.open = Some(0);
     // 干净文档：保存禁用，且悬停其上
     let p = chrome::popup_layout(0, 1.0, &[], 1000.0);
-    let save = p.items[3]; // 新建 / 打开 / 快速打开 / 保存
+    let save = p.items[4]; // 新建 / 新建窗口 / 打开 / 快速打开 / 保存
     let (row, sx, sy, sw, sh) = save;
     a.ui_state.chrome.hover_item = Some((0, row));
     a.paint();
@@ -9659,11 +10749,7 @@ fn disabled_menu_item_paints_muted_without_hover() {
         let bg = frame.get(sx as u32 + 2, y0 + 2);
         assert_eq!(
             [bg[0], bg[1], bg[2]],
-            [
-                theme.popup_bg[0],
-                theme.popup_bg[1],
-                theme.popup_bg[2]
-            ],
+            [theme.popup_bg[0], theme.popup_bg[1], theme.popup_bg[2]],
             "禁用项不得出现悬停底色"
         );
         let (mut muted, mut normal) = (0, 0);
@@ -9712,7 +10798,7 @@ fn context_menu_keyboard_up_selects_last_and_enter_executes() {
     let mut a = app("ab\n", None, false, &store);
     a.ui_state
         .ctx
-        .open_at(10.0, 20.0, ctx_menu::CtxKind::Selection, None);
+        .open_at(10.0, 20.0, ctx_menu::CtxKind::Selection, None, None);
     let n = a.ui_state.ctx.items().len();
     assert_eq!(a.mode(), Mode::Menu);
 
@@ -9774,7 +10860,7 @@ fn source_mode_toggles_markup_but_keeps_caret_and_scroll() {
     assert!(!a.cache.layouts[&para].layout_text().contains("**"));
     assert!(!a.cache.layouts[&para].layout_text().contains('['));
 
-    a.perform_action(Action::ToggleSourceMode);
+    a.perform_action(Action::OpenSourceMode);
     a.ensure_layouts_all();
     assert!(a.source_mode(), "Ctrl+/ 开启源码模式");
     assert!(
@@ -9788,7 +10874,7 @@ fn source_mode_toggles_markup_but_keeps_caret_and_scroll() {
     assert_eq!(a.editor.caret(), caret, "切换不得移动光标");
     assert_eq!(a.window_state.scroll_y, 42.0, "切换不得改变滚动位置");
 
-    a.perform_action(Action::ToggleSourceMode);
+    a.perform_action(Action::OpenSourceMode);
     a.ensure_layouts_all();
     assert!(!a.source_mode());
     assert_eq!(a.cache.layouts[&heading].layout_text(), "标题");
@@ -9821,10 +10907,13 @@ fn source_mode_hides_math_image_and_table_grid() {
     assert!(a.math_shows_image(math.0, &math.1));
     assert!(a.table_shows_grid(table.0, &table.1));
 
-    a.perform_action(Action::ToggleSourceMode);
+    a.perform_action(Action::OpenSourceMode);
     a.ensure_layouts_all();
     assert!(!a.math_shows_image(math.0, &math.1), "源码模式不渲染公式图");
-    assert!(!a.table_shows_grid(table.0, &table.1), "源码模式不渲染表格网格");
+    assert!(
+        !a.table_shows_grid(table.0, &table.1),
+        "源码模式不渲染表格网格"
+    );
     assert!(
         !a.cache.tables.contains_key(&table.0),
         "源码模式不产表格网格缓存"
@@ -9832,7 +10921,7 @@ fn source_mode_hides_math_image_and_table_grid() {
     let tl = a.cache.layouts[&table.0].layout_text().to_string();
     assert!(tl.contains('|'), "表格显管道与分隔行源码: {tl:?}");
 
-    a.perform_action(Action::ToggleSourceMode);
+    a.perform_action(Action::OpenSourceMode);
     a.ensure_math();
     a.ensure_tables();
     assert!(a.math_shows_image(math.0, &math.1), "关闭后恢复公式图");
@@ -9857,12 +10946,10 @@ impl Print for SourcePrintProbe {
             .map(|g| g.id)
             .expect("文档含标题块");
         self.source_during_print.set(s.app.source_mode());
-        *self.during_heading.borrow_mut() =
-            s.app.cache.layouts[&heading].layout_text().to_string();
+        *self.during_heading.borrow_mut() = s.app.cache.layouts[&heading].layout_text().to_string();
         s.end();
         s.app.ensure_layouts_all();
-        *self.after_heading.borrow_mut() =
-            s.app.cache.layouts[&heading].layout_text().to_string();
+        *self.after_heading.borrow_mut() = s.app.cache.layouts[&heading].layout_text().to_string();
     }
 }
 
@@ -9879,7 +10966,7 @@ fn print_ignores_source_mode_and_screen_restores_it() {
     let text = "# 标\n\n尾\n";
     let mut a = app_print(text, Box::new(probe));
     a.editor.set_caret(text.len() - 1);
-    a.perform_action(Action::ToggleSourceMode);
+    a.perform_action(Action::OpenSourceMode);
     a.ensure_layouts_all();
     let heading = block_id_of(&a, |k| matches!(k, BlockKind::AtxHeading(_)));
     assert!(a.cache.layouts[&heading].layout_text().contains('#'));
@@ -9887,11 +10974,7 @@ fn print_ignores_source_mode_and_screen_restores_it() {
     a.perform_menu(MenuAction::Print);
     assert!(!flag.get(), "打印中 source_mode() 恒 false");
     assert_eq!(&*during.borrow(), "标", "打印态忽略源码模式");
-    assert_eq!(
-        &*after.borrow(),
-        "# 标",
-        "打印结束回屏幕后恢复源码模式"
-    );
+    assert_eq!(&*after.borrow(), "# 标", "打印结束回屏幕后恢复源码模式");
     assert!(a.source_mode(), "用户开关未被打印改写");
 }
 
@@ -9929,7 +11012,10 @@ fn narrow_window_content_width_unchanged_by_readable_cap() {
     let scale = a.input_state.scale;
     let want = (1200.0 - 2.0 * MARGIN * scale - chrome::SCROLL_W * scale).max(32.0);
     assert!((a.content_width() - want).abs() < 1e-4);
-    assert!((a.content_x() - MARGIN * scale).abs() < 1e-4, "窄窗口不偏移原点");
+    assert!(
+        (a.content_x() - MARGIN * scale).abs() < 1e-4,
+        "窄窗口不偏移原点"
+    );
 }
 
 /// 宽窗口下点击列宽内同一点，命中结果与窄窗口同一相对位置一致
@@ -9951,11 +11037,18 @@ fn wide_window_click_hits_same_column_as_narrow() {
     a.recompute_geometry();
     let vp = a.viewport();
     let wide_x = a.content_x() + 100.0;
-    assert!(wide_x > MARGIN * a.input_state.scale + 100.0, "宽窗口原点应右移");
-    a.input_state.mouse = PhysicalPosition::new(wide_x as f64, (vp.y + a.index.blocks[0].top + 5.0) as f64);
+    assert!(
+        wide_x > MARGIN * a.input_state.scale + 100.0,
+        "宽窗口原点应右移"
+    );
+    a.input_state.mouse =
+        PhysicalPosition::new(wide_x as f64, (vp.y + a.index.blocks[0].top + 5.0) as f64);
     let wide = a.hit_offset().expect("宽窗口命中");
     assert_eq!(wide, narrow, "同列点击应命中同一文档偏移");
-    assert!(narrow > 0 && narrow < text.len(), "命中点须落在行内: {narrow}");
+    assert!(
+        narrow > 0 && narrow < text.len(),
+        "命中点须落在行内: {narrow}"
+    );
 }
 
 /// H4 非激活：标记区替换为 2 个半角空格缩进，行高与激活态一致；
@@ -9967,7 +11060,11 @@ fn h4_marker_replaced_by_indent_and_h1_h3_unchanged() {
     a.editor.set_caret(a.editor.session().text_len());
     a.ensure_layouts_all();
     let h4 = block_id_of(&a, |k| matches!(k, BlockKind::AtxHeading(4)));
-    assert_eq!(a.cache.layouts[&h4].layout_text(), "  a", "H4 应缩进 2 空格");
+    assert_eq!(
+        a.cache.layouts[&h4].layout_text(),
+        "  a",
+        "H4 应缩进 2 空格"
+    );
     let height = |a: &App| {
         let g = a.index.blocks.iter().find(|g| g.id == h4).unwrap();
         a.block_height(g)
@@ -9980,7 +11077,11 @@ fn h4_marker_replaced_by_indent_and_h1_h3_unchanged() {
     );
     a.editor.set_caret(0);
     a.ensure_layouts_all();
-    assert_eq!(a.cache.layouts[&h4].layout_text(), "#### a", "激活态还原源码");
+    assert_eq!(
+        a.cache.layouts[&h4].layout_text(),
+        "#### a",
+        "激活态还原源码"
+    );
     assert!((inactive - height(&a)).abs() < 0.01, "显隐切换不得改变行高");
 
     let mut b = app("### a\n\n正文", None, false, &store);
@@ -10000,7 +11101,7 @@ fn h4_marker_replaced_by_indent_and_h1_h3_unchanged() {
     }
 }
 
-/// 标题后段距大于正文段距；total_h 与逐块累加（同一 gap_after 真源）一致。
+/// 标题后段距大于正文段距；total_h 与逐块累加（含空行/文末留白）一致。
 #[test]
 fn heading_gap_exceeds_paragraph_gap_and_total_h_consistent() {
     let store = MemStore::default();
@@ -10008,7 +11109,6 @@ fn heading_gap_exceeds_paragraph_gap_and_total_h_consistent() {
     a.refresh_index();
     a.ensure_layouts_all();
     a.recompute_geometry();
-    let scale = a.input_state.scale;
     let blocks = &a.index.blocks;
     assert_eq!(blocks.len(), 3);
     assert!(matches!(blocks[0].kind, BlockKind::AtxHeading(2)));
@@ -10018,12 +11118,7 @@ fn heading_gap_exceeds_paragraph_gap_and_total_h_consistent() {
         heading_to_body > body_to_body,
         "标题段距应大于正文段距: {heading_to_body} vs {body_to_body}"
     );
-    let mut y = MARGIN * scale;
-    for g in blocks {
-        y += g.height + gap_after(&g.kind) * scale;
-    }
-    let last_gap = gap_after(&blocks.last().unwrap().kind);
-    let want = y - last_gap * scale + MARGIN * scale;
+    let want = expected_doc_height(&a);
     assert!(
         (a.index.total_h - want).abs() < 1e-3,
         "total_h 应与逐块累加一致: {} vs {want}",
@@ -10031,3 +11126,1619 @@ fn heading_gap_exceeds_paragraph_gap_and_total_h_consistent() {
     );
 }
 
+// ---- 空 Mermaid 块提示点击插入（Wave 6） ----
+
+const EMPTY_MERMAID_DOC: &str = "p\n\n```mermaid\n```\n";
+
+/// 空 mermaid 块 body 起点的绝对字节偏移（开围栏行换行之后）。
+fn empty_mermaid_body_start(doc: &str) -> usize {
+    doc.find("```mermaid\n").expect("文档应含 mermaid 开围栏") + "```mermaid\n".len()
+}
+
+/// 把鼠标放到 mermaid 块首行（卡片头）内；空块允许整块卡片命中。
+fn hover_mermaid_block(a: &mut App) {
+    a.ensure_layouts_all();
+    let id = block_id_of(
+        a,
+        |k| matches!(k, BlockKind::FencedCode(Some(l)) if l.eq_ignore_ascii_case("mermaid")),
+    );
+    let top = geom(a, id).top;
+    let scale = a.input_state.scale;
+    let vp = a.viewport();
+    a.input_state.mouse = PhysicalPosition::new(
+        (MARGIN * scale + 8.0) as f64,
+        (vp.y + top - a.window_state.scroll_y + BASE_LINE_HEIGHT * scale / 2.0) as f64,
+    );
+}
+
+fn click_empty_mermaid_block(a: &mut App) {
+    hover_mermaid_block(a);
+    a.on_left_click();
+}
+
+#[test]
+fn click_empty_mermaid_opens_template_only_menu() {
+    let store = MemStore::default();
+    let mut a = app(EMPTY_MERMAID_DOC, None, false, &store);
+    let body_start = empty_mermaid_body_start(EMPTY_MERMAID_DOC);
+    click_empty_mermaid_block(&mut a);
+    assert!(a.ui_state.ctx.open, "空 mermaid 块左键应打开菜单");
+    let actions: Vec<_> = a.ui_state.ctx.items().iter().map(|&(_, act)| act).collect();
+    assert_eq!(
+        actions,
+        vec![
+            ctx_menu::CtxAction::MermaidInsertFlowchart,
+            ctx_menu::CtxAction::MermaidInsertSequence,
+            ctx_menu::CtxAction::MermaidInsertClass,
+        ],
+        "空块菜单只含三条模板项"
+    );
+    assert_eq!(a.editor.caret(), body_start, "光标应落在 body 起点");
+
+    // 右键同口径：空块只给三条模板项
+    a.route_key(Key::Escape);
+    hover_mermaid_block(&mut a);
+    a.on_right_click();
+    assert!(a.ui_state.ctx.open, "空 mermaid 块右键也应打开菜单");
+    assert_eq!(a.ui_state.ctx.items().len(), 3, "右键同样只含模板项");
+    assert_eq!(
+        a.ui_state.ctx.mermaid_insert_start,
+        Some(body_start),
+        "右键时模板插入锚点同样为 body 起点"
+    );
+
+    // 纯注释块与空块同口径
+    let doc = "p\n\n```mermaid\n%% 注释\n%% 再一行\n```\n";
+    let mut b = app(doc, None, false, &store);
+    click_empty_mermaid_block(&mut b);
+    assert!(b.ui_state.ctx.open, "纯注释块也应打开菜单");
+    assert_eq!(b.ui_state.ctx.items().len(), 3);
+    assert_eq!(
+        b.editor.caret(),
+        empty_mermaid_body_start(doc),
+        "纯注释块光标也在 body 起点"
+    );
+}
+
+#[test]
+fn empty_mermaid_click_ignored_in_source_mode() {
+    // 源码模式无卡片头/提示行：点击空 mermaid 块必须按普通落光标处理，
+    // 不能弹出模板菜单（否则改源码会被劫持）。
+    let store = MemStore::default();
+    let mut a = app(EMPTY_MERMAID_DOC, None, false, &store);
+    a.perform_action(Action::OpenSourceMode);
+    assert!(a.source_mode());
+    let n = a.editor.session().text_len();
+    let before = a
+        .editor
+        .session()
+        .text_slice(Range::new(0, n))
+        .unwrap_or_default();
+    click_empty_mermaid_block(&mut a);
+    assert!(!a.ui_state.ctx.open, "源码模式点击不应打开模板菜单");
+    let after = a
+        .editor
+        .session()
+        .text_slice(Range::new(0, a.editor.session().text_len()))
+        .unwrap_or_default();
+    assert_eq!(after, before, "源码模式点击不应改动文档");
+}
+
+#[test]
+fn non_empty_mermaid_right_click_keeps_full_menu() {
+    let store = MemStore::default();
+    let doc = "p\n\n```mermaid\ngraph TD\nA-->B\n```\n";
+    let mut a = app(doc, None, false, &store);
+    hover_mermaid_block(&mut a);
+    a.on_right_click();
+    assert!(a.ui_state.ctx.open, "非空 mermaid 块右键打开专用菜单");
+    let actionable = a
+        .ui_state
+        .ctx
+        .items()
+        .iter()
+        .filter(|&&(_, act)| act != ctx_menu::CtxAction::Separator)
+        .count();
+    assert_eq!(actionable, 8, "非空块保持现状 8 项可执行项");
+    assert!(
+        a.ui_state.ctx.mermaid_insert_start.is_none(),
+        "非空块不启用空块插入锚点"
+    );
+}
+
+#[test]
+fn empty_mermaid_template_inserts_at_body_and_undo_once() {
+    let store = MemStore::default();
+    let mut a = app(EMPTY_MERMAID_DOC, None, false, &store);
+    let body_start = empty_mermaid_body_start(EMPTY_MERMAID_DOC);
+    click_empty_mermaid_block(&mut a);
+    let i = a
+        .ui_state
+        .ctx
+        .items()
+        .iter()
+        .position(|&(_, act)| act == ctx_menu::CtxAction::MermaidInsertFlowchart)
+        .expect("空块菜单应含流程图模板项");
+    a.ui_state.ctx.hover = Some(i);
+    a.route_key(Key::Enter);
+
+    let template = veil_core::FLOWCHART_TEMPLATE;
+    assert_eq!(
+        a.editor.session().serialize(),
+        format!("p\n\n```mermaid\n{template}\n```\n"),
+        "模板插入 body 起点，闭合围栏保持独立一行"
+    );
+    assert_eq!(
+        a.editor.caret(),
+        body_start + template.len(),
+        "光标位于插入内容之后"
+    );
+
+    a.editor.apply(Intent::Undo).unwrap();
+    assert_eq!(
+        a.editor.session().serialize(),
+        EMPTY_MERMAID_DOC,
+        "一次 undo 整体回退"
+    );
+}
+
+#[test]
+fn empty_mermaid_menu_cancel_keeps_bytes() {
+    let store = MemStore::default();
+    let mut a = app(EMPTY_MERMAID_DOC, None, false, &store);
+    click_empty_mermaid_block(&mut a);
+    a.route_key(Key::Escape);
+    assert!(!a.ui_state.ctx.open, "Esc 关闭菜单");
+    assert_eq!(a.editor.session().serialize(), EMPTY_MERMAID_DOC);
+
+    click_empty_mermaid_block(&mut a);
+    assert!(a.ui_state.ctx.open);
+    a.input_state.mouse = PhysicalPosition::new(1.0, 1.0); // 菜单面板之外
+    a.on_left_click();
+    assert!(!a.ui_state.ctx.open, "点击菜单外关闭菜单");
+    assert_eq!(
+        a.editor.session().serialize(),
+        EMPTY_MERMAID_DOC,
+        "取消不改文档字节"
+    );
+}
+
+#[test]
+fn empty_mermaid_hint_absent_in_source_mode() {
+    let store = MemStore::default();
+    let mut a = app(EMPTY_MERMAID_DOC, None, false, &store);
+    a.ensure_layouts_all();
+    let id = block_id_of(
+        &a,
+        |k| matches!(k, BlockKind::FencedCode(Some(l)) if l.eq_ignore_ascii_case("mermaid")),
+    );
+    assert!(
+        a.cache.layouts[&id]
+            .layout_text()
+            .contains("空 Mermaid 块 — 点击插入模板"),
+        "渲染态显示提示"
+    );
+    a.perform_action(Action::OpenSourceMode);
+    a.ensure_layouts_all();
+    let src = a.cache.layouts[&id].layout_text();
+    assert!(src.contains("```mermaid"), "源码模式保留围栏: {src:?}");
+    assert!(
+        !src.contains("空 Mermaid 块"),
+        "源码模式不出现提示: {src:?}"
+    );
+}
+
+// ---- Details 块折叠（Wave 7 Task 3-5） ----
+
+const DETAILS_DOC: &str = r#"前
+
+<details>
+<summary>安装步骤</summary>
+pip install veil
+然后运行 veil
+</details>
+
+后
+"#;
+
+const DETAILS_OPEN_DOC: &str = r#"前
+
+<details open>
+<summary>配置</summary>
+export VEIL_HOME=~/.veil
+</details>
+
+后
+"#;
+
+/// 默认收起：空 expanded_details 集合，Details 块不在其中 → block_height 钳到单行。
+#[test]
+fn details_block_default_collapsed() {
+    let store = MemStore::default();
+    let mut a = app(DETAILS_DOC, None, false, &store);
+    a.refresh_index();
+    assert!(
+        a.ui_state.expanded_details.is_empty(),
+        "空集 = 全收起（details 块都不在展开集里）"
+    );
+    let id = block_id_of(&a, |k| matches!(k, BlockKind::Details { .. }));
+    a.ensure_layouts_all();
+    let g = a.index.blocks.iter().find(|g| g.id == id).unwrap();
+    let line_h = a.engine.doc_line_height();
+    assert!(
+        (a.block_height(g) - line_h).abs() < 0.5,
+        "折叠态高度应 ≈ 单行（{line_h:.1}），实际: {}",
+        a.block_height(g)
+    );
+}
+
+/// open_default=true 的 Details 块自动展开（sync_expanded_details 预塞进集合）。
+#[test]
+fn details_open_default_auto_expands() {
+    let store = MemStore::default();
+    let mut a = app(DETAILS_OPEN_DOC, None, false, &store);
+    a.refresh_index();
+    let id = block_id_of(&a, |k| {
+        matches!(
+            k,
+            BlockKind::Details {
+                open_default: true,
+                ..
+            }
+        )
+    });
+    assert!(
+        a.ui_state.expanded_details.contains(&id),
+        "open_default=true 的块应自动加入 expanded_details"
+    );
+    a.ensure_layouts_all();
+    let g = a.index.blocks.iter().find(|g| g.id == id).unwrap();
+    // B3：头块只含 summary 一行，正文是独立子块——整组高度应明显大于单行。
+    assert!(
+        a.block_height(g) + a.details_children_height(g) > a.engine.doc_line_height() * 1.5,
+        "展开态整组高度应明显大于单行"
+    );
+}
+
+/// 点击 Details 块切换折叠——收起时整块点击展开；展开时点击 summary 行收起。
+#[test]
+fn details_click_toggles_expand() {
+    let store = MemStore::default();
+    let mut a = app(DETAILS_DOC, None, false, &store);
+    let before = a.editor.session().serialize();
+    a.refresh_index();
+    let id = block_id_of(&a, |k| matches!(k, BlockKind::Details { .. }));
+
+    // 初始态：全收起
+    assert!(!a.ui_state.expanded_details.contains(&id));
+
+    // 点击 Details 块区域 → 展开
+    a.ensure_layouts_all();
+    let g = a.index.blocks.iter().find(|g| g.id == id).unwrap();
+    let scale = a.input_state.scale;
+    let vp = a.viewport();
+    let click_y = (vp.y + g.top - a.window_state.scroll_y + 5.0 * scale) as f64;
+    a.input_state.mouse = PhysicalPosition::new((a.content_x() + 10.0) as f64, click_y);
+    a.on_left_click();
+    assert!(a.ui_state.expanded_details.contains(&id), "点击后应展开");
+    let mid = a.editor.session().serialize();
+    assert_eq!(mid, before, "展开不改文档字节");
+
+    // 再点击 summary 行 → 收起
+    a.ensure_layouts_all();
+    let g2 = a.index.blocks.iter().find(|g| g.id == id).unwrap();
+    let click_y2 = (vp.y + g2.top - a.window_state.scroll_y + 2.0 * scale) as f64;
+    a.input_state.mouse = PhysicalPosition::new((a.content_x() + 10.0) as f64, click_y2);
+    a.on_left_click();
+    assert!(!a.ui_state.expanded_details.contains(&id), "再次点击应收起");
+    let after = a.editor.session().serialize();
+    assert_eq!(after, before, "收起不改文档字节");
+}
+
+/// 非 100% DPI：summary 行点击仍能收起（y/top 是物理像素，行高须乘 scale）。
+#[test]
+fn details_click_collapses_at_non_unit_dpi() {
+    let store = MemStore::default();
+    let mut a = app(DETAILS_DOC, None, false, &store);
+    a.input_state.set_dpi(1.25);
+    a.refresh_index();
+    let id = block_id_of(&a, |k| matches!(k, BlockKind::Details { .. }));
+    a.ensure_layouts_all();
+    a.recompute_geometry();
+    let scale = a.input_state.scale;
+    let vp = a.viewport();
+    let g = a.index.blocks.iter().find(|g| g.id == id).unwrap();
+    a.input_state.mouse = PhysicalPosition::new(
+        (a.content_x() + 10.0) as f64,
+        (vp.y + g.top - a.window_state.scroll_y + 5.0 * scale) as f64,
+    );
+    a.on_left_click();
+    assert!(a.ui_state.expanded_details.contains(&id), "点击后应展开");
+    a.ensure_layouts_all();
+    let g2 = a.index.blocks.iter().find(|g| g.id == id).unwrap();
+    a.input_state.mouse = PhysicalPosition::new(
+        (a.content_x() + 10.0) as f64,
+        (vp.y + g2.top - a.window_state.scroll_y + 2.0 * scale) as f64,
+    );
+    a.on_left_click();
+    assert!(
+        !a.ui_state.expanded_details.contains(&id),
+        "1.25 DPI 下 summary 行点击应收起"
+    );
+}
+
+/// B3：块级 details 展开后，内部标题/列表/代码/表格/段落各自成为原生块并排版。
+#[test]
+fn details_expanded_children_use_native_layouts() {
+    let store = MemStore::default();
+    let doc = "前\n\n<details open>\n<summary>S</summary>\n## 标题\n\n- 项\n\n```rust\nfn x() {}\n```\n\n| a |\n| --- |\n| 1 |\n\n段落\n</details>\n\n后\n";
+    let mut a = app(doc, None, false, &store);
+    a.refresh_index();
+    a.ensure_layouts_all();
+    a.ensure_tables();
+    let header = block_id_of(&a, |k| matches!(k, BlockKind::Details { .. }));
+    let kinds: Vec<BlockKind> = a
+        .index
+        .blocks
+        .iter()
+        .filter(|g| g.container.details_depth == 1)
+        .map(|g| g.kind.clone())
+        .collect();
+    assert!(kinds.iter().any(|k| matches!(k, BlockKind::AtxHeading(2))));
+    assert!(kinds
+        .iter()
+        .any(|k| matches!(k, BlockKind::ListItem { .. })));
+    assert!(kinds.iter().any(|k| matches!(k, BlockKind::FencedCode(_))));
+    assert!(kinds.contains(&BlockKind::Table));
+    assert!(kinds.contains(&BlockKind::Paragraph));
+    // 标题走标题字号/间距：块高大于正文行高。
+    let hg = a
+        .index
+        .blocks
+        .iter()
+        .find(|g| matches!(g.kind, BlockKind::AtxHeading(2)))
+        .unwrap();
+    assert!(
+        a.block_height(hg) > a.engine.doc_line_height(),
+        "子块标题应使用标题字号层级"
+    );
+    // 代码块按代码卡排版（等宽文本进入布局）。
+    let cg = a
+        .index
+        .blocks
+        .iter()
+        .find(|g| matches!(g.kind, BlockKind::FencedCode(_)))
+        .unwrap();
+    let ctext = a.cache.layouts[&cg.id].value.layout_text().to_string();
+    assert!(ctext.contains("fn x() {}"), "代码子块应原生排版：{ctext:?}");
+    // 表格走 B2 网格。
+    let tg = a
+        .index
+        .blocks
+        .iter()
+        .find(|g| g.kind == BlockKind::Table)
+        .unwrap();
+    assert!(a.table_shows_grid(tg.id, &tg.range));
+    assert!(a.cache.tables[&tg.id].value.rows.len() >= 2);
+    // 卡片高度覆盖整组。
+    let hdr = a.index.blocks.iter().find(|g| g.id == header).unwrap();
+    assert!(
+        a.details_children_height(hdr) > a.engine.doc_line_height() * 3.0,
+        "卡片应覆盖全部子块高度"
+    );
+}
+
+/// B3：折叠态子块高度为 0（整组不占排版空间），展开后再获得真实高度。
+#[test]
+fn details_collapsed_child_blocks_have_zero_height() {
+    let store = MemStore::default();
+    let doc = "p\n\n<details>\n<summary>S</summary>\n## t\n\n- a\n\n尾段\n</details>\n\nq\n";
+    let mut a = app(doc, None, false, &store);
+    a.refresh_index();
+    a.ensure_layouts_all();
+    a.recompute_geometry();
+    let header = block_id_of(&a, |k| matches!(k, BlockKind::Details { .. }));
+    for g in a
+        .index
+        .blocks
+        .iter()
+        .filter(|g| g.container.details_depth == 1)
+    {
+        assert_eq!(a.block_height(g), 0.0, "折叠态子块应为 0 高：{:?}", g.kind);
+    }
+    let hdr = a.index.blocks.iter().find(|g| g.id == header).unwrap();
+    assert_eq!(a.details_children_height(hdr), 0.0);
+    // 紧跟其后的顶层块从 summary 行底部开始（不存在被隐藏内容的空白）。
+    let next = a
+        .index
+        .blocks
+        .iter()
+        .find(|g| g.range.start > hdr.range.start && g.container.details_depth == 0)
+        .unwrap();
+    assert!(next.top > hdr.top, "后续块仍在 summary 之后");
+    // 展开后子块有真实高度。
+    a.toggle_details(header);
+    a.ensure_layouts_all();
+    a.recompute_geometry();
+    let any = a
+        .index
+        .blocks
+        .iter()
+        .filter(|g| g.container.details_depth == 1)
+        .any(|g| a.block_height(g) > 0.0);
+    assert!(any, "展开后子块应恢复真实高度");
+}
+
+/// B3：折叠态下上下移动光标跳过隐藏子块（落到 summary 或下一块）。
+#[test]
+fn collapsed_details_caret_skips_hidden_children() {
+    let store = MemStore::default();
+    let doc = "A\n\n<details>\n<summary>S</summary>\nB\n\nC\n</details>\n\nZ\n";
+    let mut a = app(doc, None, false, &store);
+    a.refresh_index();
+    a.ensure_layouts_all();
+    a.recompute_geometry();
+    a.editor.set_caret(1);
+    a.move_vertical(1, false);
+    let first = a.editor.caret();
+    assert!(
+        first < doc.find("B").unwrap(),
+        "第一次下移应落在 details 头块（summary），实际 {first}"
+    );
+    a.move_vertical(1, false);
+    let second = a.editor.caret();
+    assert!(
+        second >= doc.find("Z").unwrap(),
+        "第二次下移应跳过隐藏子块直达下一顶层块，实际 {second}"
+    );
+}
+
+/// B3：行内 `<details>` 默认只显示 summary；summary 点击切换展开/收起。
+#[test]
+fn inline_details_collapses_body_and_summary_click_toggles() {
+    let store = MemStore::default();
+    let doc = "前 <details><summary>更多</summary>隐藏正文XYZ</details> 后\n";
+    let mut a = app(doc, None, false, &store);
+    a.refresh_index();
+    a.ensure_layouts_all();
+    let id = block_id_of(&a, |k| *k == BlockKind::Paragraph);
+    let undo_before = a.editor.session().undo_depth();
+    let collapsed = a.cache.layouts[&id].value.layout_text().to_string();
+    assert!(
+        collapsed.contains("更多"),
+        "应收起态显示 summary：{collapsed:?}"
+    );
+    assert!(
+        !collapsed.contains("隐藏正文"),
+        "收起态正文必须隐藏（不出现 <details> 裸标签）：{collapsed:?}"
+    );
+    assert!(!collapsed.contains("summary"), "不应显示裸标签");
+    let (g_top, g_start) = {
+        let g = a.index.blocks.iter().find(|g| g.id == id).unwrap();
+        (g.top, g.range.start)
+    };
+    let scale = a.input_state.scale;
+    let vp = a.viewport();
+    let abs = doc.find("更多").unwrap() + 1;
+    let (cx, cy) = {
+        let l = &a.cache.layouts[&id].value;
+        let (x, y, _) = a.engine.caret_xy(l, abs - g_start);
+        (x, y)
+    };
+    let _ = scale;
+    a.input_state.mouse = PhysicalPosition::new(
+        (a.content_x() + cx) as f64,
+        (vp.y + g_top - a.window_state.scroll_y + cy) as f64,
+    );
+    a.on_left_click();
+    assert_eq!(
+        a.ui_state.expanded_inline_details.len(),
+        1,
+        "点击 summary 应展开行内 details"
+    );
+    a.ensure_layouts_all();
+    let expanded = a.cache.layouts[&id].value.layout_text().to_string();
+    assert!(
+        expanded.contains("隐藏正文"),
+        "展开后正文应以行内文本流继续：{expanded:?}"
+    );
+    assert_eq!(a.editor.session().serialize(), doc, "折叠/展开不改文档字节");
+    assert_eq!(
+        a.editor.session().undo_depth(),
+        undo_before,
+        "行内折叠/展开不得产生撤销步"
+    );
+    // 再点 summary → 收起。
+    let g_top = a
+        .index
+        .blocks
+        .iter()
+        .find(|g| g.id == id)
+        .map(|g| g.top)
+        .unwrap();
+    a.input_state.mouse = PhysicalPosition::new(
+        (a.content_x() + cx) as f64,
+        (vp.y + g_top - a.window_state.scroll_y + cy) as f64,
+    );
+    a.on_left_click();
+    a.ensure_layouts_all();
+    assert!(a.ui_state.expanded_inline_details.is_empty());
+    let again = a.cache.layouts[&id].value.layout_text().to_string();
+    assert!(!again.contains("隐藏正文"));
+}
+
+/// details 闭标签行是纯 chrome（不属于任何块）：光标停在那里时吸附到前一块末尾。
+#[test]
+fn caret_in_details_close_line_snaps_to_previous_block() {
+    let store = MemStore::default();
+    let doc = "<details>\n<summary>S</summary>\n正文\n</details>\n\n尾\n";
+    let mut a = app(doc, None, false, &store);
+    a.refresh_index();
+    a.ensure_layouts_all();
+    let close = doc.find("</details>").unwrap();
+    a.editor.set_caret(close + 2);
+    a.sync_details_at_caret();
+    let caret = a.editor.caret();
+    assert!(caret < close, "光标不应停在闭标签行，实际 {caret}");
+    assert_eq!(a.editor.session().serialize(), doc, "吸附不改文档字节");
+}
+
+/// B3：搜索命中位于折叠 details 内时自动展开（块级与行内两种形态都覆盖）。
+#[test]
+fn search_match_inside_collapsed_details_auto_expands() {
+    let store = MemStore::default();
+    let doc =
+        "p\n\n<details>\n<summary>S</summary>\nneedle_block\n</details>\n\n前 <details><summary>M</summary>needle_inline</details> 后\n";
+    let mut a = app(doc, None, false, &store);
+    a.refresh_index();
+    a.ensure_layouts_all();
+    let id = block_id_of(&a, |k| matches!(k, BlockKind::Details { .. }));
+    assert!(!a.ui_state.expanded_details.contains(&id));
+    a.open_search();
+    a.search_input("needle_block");
+    assert!(
+        a.ui_state.expanded_details.contains(&id),
+        "块级命中应自动展开"
+    );
+    // 继续搜行内正文命中。
+    a.close_search();
+    a.open_search();
+    a.search_input("needle_inline");
+    assert_eq!(
+        a.ui_state.expanded_inline_details.len(),
+        1,
+        "行内 details 命中应自动展开"
+    );
+    assert_eq!(a.editor.caret(), doc.find("needle_inline").unwrap());
+    a.ensure_layouts_all();
+    assert_eq!(a.editor.session().serialize(), doc, "搜索展开不写文档");
+}
+
+/// 折叠态与展开态保存的字节完全一致——折叠是纯 UI 视图态。
+/// 高度断言留给 details_block_default_collapsed / details_open_default_auto_expands 两个测试覆盖。
+#[test]
+fn details_fold_is_view_state_not_byte_change() {
+    let store = MemStore::default();
+    let mut a = app(DETAILS_DOC, None, false, &store);
+    a.refresh_index();
+    let id = block_id_of(&a, |k| matches!(k, BlockKind::Details { .. }));
+
+    let collapsed_bytes = a.editor.session().serialize();
+    let undo_before = a.editor.session().undo_depth();
+    a.toggle_details(id);
+    let expanded_bytes = a.editor.session().serialize();
+    assert_eq!(
+        expanded_bytes, collapsed_bytes,
+        "展开态字节应与折叠态一致（视图态不改文档）"
+    );
+    assert_eq!(
+        a.editor.session().undo_depth(),
+        undo_before,
+        "折叠/展开不得产生撤销步"
+    );
+
+    // 再 toggle 回去还是一样
+    a.toggle_details(id);
+    let after_toggle_back = a.editor.session().serialize();
+    assert_eq!(after_toggle_back, collapsed_bytes, "再切回折叠态字节不变");
+}
+
+// ---- Wave 7 修复：行内 HTML 装饰 / sub-sup / img / 表格 br / details 像素回归 ----
+
+/// 文档偏移 → 块内相对偏移（测试取样辅助）。
+fn rel_offset(a: &App, id: BlockId, abs: usize) -> usize {
+    let g = a.index.blocks.iter().find(|g| g.id == id).unwrap();
+    abs - g.range.start
+}
+
+/// 多次取样中寻找矩形内第一个满足条件的像素（避免依赖字形墨迹具体位置）。
+fn any_pixel(f: &Frame, x0: i32, y0: i32, w: u32, h: u32, pred: impl Fn([u8; 4]) -> bool) -> bool {
+    for y in y0..y0 + h as i32 {
+        for x in x0..x0 + w as i32 {
+            if x >= 0
+                && y >= 0
+                && (x as u32) < f.width
+                && (y as u32) < f.height
+                && pred(f.get(x as u32, y as u32))
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// 统计区域内明显深于背景的墨迹像素数（文本可见性判定）。
+fn ink_pixels(f: &Frame, x0: i32, y0: i32, w: u32, h: u32) -> usize {
+    let mut n = 0;
+    for y in y0..y0 + h as i32 {
+        for x in x0..x0 + w as i32 {
+            if x >= 0 && y >= 0 && (x as u32) < f.width && (y as u32) < f.height {
+                let p = f.get(x as u32, y as u32);
+                n += usize::from(p[0] < 200 && p[1] < 200 && p[2] < 200);
+            }
+        }
+    }
+    n
+}
+
+#[test]
+fn inline_html_kbd_mark_abbr_pixels_visible() {
+    let store = MemStore::default();
+    let text = "段落 <kbd>Ctrl</kbd> 与 <mark>高亮</mark> 与 <abbr title=\"x\">API</abbr>。\n";
+    let mut a = app(text, None, false, &store);
+    a.editor.set_caret(text.len() - 1); // 块内激活会显源码，这里让节点保持非激活
+    a.ensure_layouts_all();
+    a.recompute_geometry();
+    let id = a.index.blocks[0].id;
+    let text = a.editor.session().serialize();
+    let (ck, cm, ca) = (
+        rel_offset(&a, id, text.find("Ctrl").unwrap()),
+        rel_offset(&a, id, text.find("高亮").unwrap()),
+        rel_offset(&a, id, text.find("API").unwrap()),
+    );
+    let vp = a.viewport();
+    let g = a.index.blocks.iter().find(|g| g.id == id).unwrap();
+    let sy = (vp.y + g.top - a.window_state.scroll_y) as i32;
+    let cx = a.content_x() as i32;
+    let scale = a.input_state.scale;
+    let _ = scale;
+    let l = &a.cache.layouts[&id];
+    let k_rect = a.engine.selection_rects(l, ck, ck + "Ctrl".len())[0];
+    let m_rect = a.engine.selection_rects(l, cm, cm + "高亮".len())[0];
+    let a_rect = a.engine.selection_rects(l, ca, ca + "API".len())[0];
+    let kx = cx + (k_rect.0 - 1.0) as i32;
+    let ky = sy + (k_rect.1 + k_rect.3 / 2.0) as i32;
+    let mx = cx + (m_rect.0 + m_rect.2 - 2.0) as i32;
+    let my = sy + (m_rect.1 + 2.0) as i32;
+    let bg = a.input_state.theme.bg;
+    let f = a.render();
+    assert_eq!(
+        f.get(kx as u32, ky as u32),
+        [160, 160, 160, 255],
+        "kbd 左侧描边像素应为灰描边（实际: {:?}）",
+        f.get(kx as u32, ky as u32)
+    );
+    let mark = f.get(mx as u32, my as u32);
+    assert!(
+        mark[0] > 245 && mark[1] > 240 && mark[2] < 225,
+        "mark 底色应为黄色系，实际: {mark:?}"
+    );
+    // abbr 下划线为点线：同一行内存在间隔暗像素段（非连续实线）
+    let uy = sy + (a_rect.1 + a_rect.3) as i32 - 2;
+    let ux = cx + a_rect.0 as i32;
+    assert_dotted_row(f, ux, uy, a_rect.2 as i32, bg);
+}
+
+#[test]
+fn inline_html_sub_sup_pixels_smaller_and_shifted() {
+    let store = MemStore::default();
+    let text = "H<sub>2</sub>O<sup>3</sup>\n";
+    let mut a = app(text, None, false, &store);
+    a.editor.set_caret(text.len() - 1);
+    a.ensure_layouts_all();
+    let id = a.index.blocks[0].id;
+    let (px, w, _h) = {
+        let l = &a.cache.layouts[&id];
+        let glyphs: Vec<(usize, f32, f32, f32)> = l
+            .buffer
+            .layout_runs()
+            .flat_map(|r| r.glyphs)
+            .map(|g| (g.start, g.x, g.w, g.font_size))
+            .collect();
+        let body = glyphs.iter().find(|g| g.0 == 0).copied().unwrap();
+        let sub = glyphs.iter().find(|g| g.0 == 1).copied().unwrap();
+        let sup = glyphs.iter().find(|g| g.0 == 3).copied().unwrap();
+        assert!(sub.3 < body.3, "sub 字号应小于正文: {sub:?} vs {body:?}");
+        assert!(sup.3 < body.3, "sup 字号应小于正文: {sup:?} vs {body:?}");
+        a.engine.rasterize(l, [0, 0, 0])
+    };
+    let bbox = |gx: f32, gw: f32| -> (usize, usize, usize) {
+        let (x0, x1) = (gx.floor().max(0.0) as usize, (gx + gw).ceil() as usize);
+        let (mut lo, mut hi, mut n) = (usize::MAX, 0usize, 0usize);
+        for y in 0.._h as usize {
+            for x in x0..x1.min(w as usize) {
+                if px[(y * w as usize + x) * 4 + 3] > 32 {
+                    lo = lo.min(y);
+                    hi = hi.max(y);
+                    n += 1;
+                }
+            }
+        }
+        assert!(n > 0, "字形区域应有墨迹");
+        (lo, hi, n)
+    };
+    let body_g = {
+        let l = &a.cache.layouts[&id];
+        let gs: Vec<_> = l.buffer.layout_runs().flat_map(|r| r.glyphs).collect();
+        (gs[0].x, gs[0].w, gs[1].x, gs[1].w, gs[3].x, gs[3].w)
+    };
+    let (b_lo, b_hi, _) = bbox(body_g.0, body_g.1);
+    let (sub_lo, sub_hi, _) = bbox(body_g.2, body_g.3);
+    let (sup_lo, sup_hi, _) = bbox(body_g.4, body_g.5);
+    assert!(sub_hi - sub_lo < b_hi - b_lo, "sub 字形高度应小于正文");
+    assert!(sup_hi - sup_lo < b_hi - b_lo, "sup 字形高度应小于正文");
+    assert!(sub_hi > b_hi, "sub 应下沉（底部低于正文基线）");
+    assert!(sup_hi < b_hi, "sup 应上浮（底部高于正文基线）");
+}
+
+#[test]
+fn html_img_missing_or_remote_placeholder_and_alt_visible() {
+    let store = MemStore::default();
+    let text = "图：<img src=\"https://example.com/r.png\" alt=\"远程\"> 后\n";
+    let mut a = app(text, None, false, &store);
+    a.editor.set_caret(text.len() - 1);
+    a.ensure_layouts_all();
+    a.recompute_geometry();
+    let id = a.index.blocks[0].id;
+    let l = &a.cache.layouts[&id];
+    assert!(
+        l.layout_text().contains("[远程]"),
+        "远程/缺失 img 应显 alt 占位文本；layout_text: {:?}",
+        l.layout_text()
+    );
+    let rect = l
+        .decorations_under
+        .iter()
+        .find(|(_, _, k)| matches!(k, crate::view::UnderKind::ImagePlaceholder))
+        .map(|&(s, e, _)| a.engine.selection_rects(l, s, e)[0])
+        .expect("应登记图片占位框");
+    let vp = a.viewport();
+    let g = a.index.blocks.iter().find(|g| g.id == id).unwrap();
+    let sy = (vp.y + g.top - a.window_state.scroll_y) as i32;
+    let cx = a.content_x() as i32;
+    let dx = cx + (rect.0 - 1.0) as i32;
+    let dy = sy + (rect.1 - 1.0) as i32;
+    let dw = (rect.2 + 2.0) as u32;
+    let dh = (rect.3 + 2.0) as u32;
+    let px = dx + dw as i32 - 3;
+    let py = dy + dh as i32 / 2;
+    let f = a.render();
+    assert!(
+        any_pixel(
+            f,
+            dx + 1,
+            dy + 1,
+            dw.saturating_sub(2),
+            dh.saturating_sub(2),
+            |p| { p == [235, 235, 235, 255] }
+        ),
+        "占位框内应有浅灰底色，实际: {:?}",
+        f.get(px as u32, py as u32)
+    );
+}
+
+#[test]
+fn html_img_local_inline_uses_image_path() {
+    let text = "行内 <img src=\"logo.png\" alt=\"本地\"> 后\n";
+    let (mut a, calls) = app_with_images(text, Some("dir/doc.md"), &[("dir/logo.png", 20, 10)]);
+    a.editor.set_caret(text.len() - 1);
+    a.ensure_layouts_all();
+    let id = a.index.blocks[0].id;
+    let l = &a.cache.layouts[&id];
+    assert!(
+        calls.borrow().iter().any(|p| p.ends_with("dir/logo.png")),
+        "行内 <img> 的本地 src 应交给 ImageLoader"
+    );
+    assert_eq!(l.imgs.len(), 1, "应有 1 个图片占位");
+    assert!(
+        l.imgs[0].width > 0 && l.imgs[0].height > 0,
+        "图片占位宽高应 > 0"
+    );
+    assert!(
+        !l.layout_text().contains("<img"),
+        "激活/渲染态不应露出源码标签"
+    );
+}
+
+#[test]
+fn block_level_html_img_line_renders_placeholder_not_code_card() {
+    let store = MemStore::default();
+    let text = "<img src=\"veil-missing.png\" alt=\"缺失\">\n\n后\n";
+    let mut a = app(text, None, false, &store);
+    a.editor
+        .set_caret(text.find('后').unwrap() + '后'.len_utf8()); // 光标在末段，img 块保持非激活渲染态
+    a.refresh_index();
+    let id = block_id_of(&a, |k| matches!(k, BlockKind::Paragraph));
+    a.ensure_layouts_all();
+    let l = &a.cache.layouts[&id];
+    assert!(
+        l.layout_text().contains("[缺失]"),
+        "块级 img 行应渲染占位 + alt；layout_text: {:?}",
+        l.layout_text()
+    );
+    assert!(
+        l.decorations_under
+            .iter()
+            .any(|(_, _, k)| matches!(k, crate::view::UnderKind::ImagePlaceholder)),
+        "块级 img 应登记占位框"
+    );
+}
+
+#[test]
+fn table_cell_br_renders_two_visual_lines() {
+    let store = MemStore::default();
+    let text = "前言\n\n| 列 |\n| --- |\n| 第一行<br>第二行 |\n";
+    let mut a = app(text, None, false, &store);
+    a.refresh_index();
+    a.ensure_tables();
+    let id = block_id_of(&a, |k| matches!(k, BlockKind::Table));
+    let line_h = a.engine.doc_line_height() * a.input_state.scale;
+    let tl = &a.cache.tables[&id].value;
+    assert!(
+        tl.rows[1].height > line_h * 1.5,
+        "含 <br> 的表格行应有两行高，实际: {}（单行 {line_h}）",
+        tl.rows[1].height
+    );
+    let cell = &tl.cells[tl.cols.len()]; // 表体第一行第一列
+    let mut lo = usize::MAX;
+    let mut hi = 0usize;
+    for y in 0..cell.pixel_h as usize {
+        for x in 0..cell.pixel_w as usize {
+            if cell.pixels[(y * cell.pixel_w as usize + x) * 4 + 3] > 32 {
+                lo = lo.min(y);
+                hi = hi.max(y);
+            }
+        }
+    }
+    assert!(
+        hi.saturating_sub(lo) as f32 > line_h,
+        "单元格墨迹应跨两行（跨度 {}），单行高 {line_h}",
+        hi.saturating_sub(lo)
+    );
+}
+
+#[test]
+fn details_collapsed_summary_and_expanded_body_are_painted() {
+    let store = MemStore::default();
+    let mut a = app(DETAILS_DOC, None, false, &store);
+    a.editor.set_caret(DETAILS_DOC.len() - 1);
+    a.refresh_index();
+    let id = block_id_of(&a, |k| matches!(k, BlockKind::Details { .. }));
+    a.ensure_layouts_all();
+    a.recompute_geometry();
+    let collapsed_h = {
+        let g = a.index.blocks.iter().find(|g| g.id == id).unwrap();
+        a.block_height(g)
+    };
+    let line_h = a.engine.doc_line_height() * a.input_state.scale;
+    assert!(
+        (collapsed_h - line_h).abs() < 0.6,
+        "折叠高度应为一整行（{line_h}），实际 {collapsed_h}"
+    );
+    let layout_text = a.cache.layouts[&id].value.layout_text().to_string();
+    assert!(
+        layout_text.starts_with("安装步骤"),
+        "折叠态首行应为 summary 文本，实际: {layout_text:?}"
+    );
+    let vp = a.viewport();
+    let g = a.index.blocks.iter().find(|g| g.id == id).unwrap();
+    let sy = (vp.y + g.top - a.window_state.scroll_y) as i32;
+    let cx = a.content_x() as i32;
+    let cw = a.content_width() as u32;
+    let f = a.render();
+    assert!(
+        ink_pixels(f, cx - 2, sy, cw, collapsed_h as u32) > 0,
+        "折叠条应画出 summary 文本"
+    );
+    // 展开：正文行必须可见，且整组（头块 + 子块）高度增长（B3：正文是独立子块）
+    a.toggle_details(id);
+    a.ensure_layouts_all();
+    a.recompute_geometry();
+    let expanded_h = {
+        let g = a.index.blocks.iter().find(|g| g.id == id).unwrap();
+        a.block_height(g) + a.details_children_height(g)
+    };
+    assert!(expanded_h > collapsed_h * 2.0, "展开后整组高度应明显增大");
+    let body_id = a
+        .index
+        .blocks
+        .iter()
+        .find(|g| g.details_parent == Some(id))
+        .map(|g| g.id)
+        .expect("展开后正文应为 details 子块");
+    let layout_text = a.cache.layouts[&body_id].value.layout_text().to_string();
+    assert!(
+        layout_text.contains("pip install veil") && layout_text.contains("然后运行 veil"),
+        "展开后正文应作为可见文本渲染；layout_text: {layout_text:?}"
+    );
+    let f = a.render();
+    let y0 = sy + collapsed_h as i32;
+    assert!(
+        ink_pixels(f, cx - 2, y0, cw, (expanded_h - collapsed_h) as u32) > 0,
+        "展开后正文区域应有墨迹（不能被卡片底遮盖）"
+    );
+}
+
+// ---- Wave 7 收尾：表格内行内装饰 / abbr 点线 / abbr 悬停 / 行内代码底色 ----
+
+/// 单元格光栅的墨迹行范围（alpha > 32）；无墨迹 → None。
+fn raster_ink_rows(pixels: &[u8], w: u32, h: u32) -> Option<(usize, usize)> {
+    let (mut lo, mut hi) = (usize::MAX, 0usize);
+    for y in 0..h as usize {
+        for x in 0..w as usize {
+            if pixels[(y * w as usize + x) * 4 + 3] > 32 {
+                lo = lo.min(y);
+                hi = hi.max(y);
+            }
+        }
+    }
+    (lo != usize::MAX).then_some((lo, hi))
+}
+
+/// 断言某一行存在「间隔的暗像素段」（≥2 段 + 段间背景缝隙）：abbr 点线回归。
+fn assert_dotted_row(f: &Frame, x0: i32, y: i32, w: i32, bg: [u8; 4]) {
+    let (mut runs, mut gaps) = (0usize, 0usize);
+    let mut prev_dark = false;
+    for x in x0..x0 + w {
+        let p = f.get(x.max(0) as u32, y.max(0) as u32);
+        let dark = p != bg;
+        if dark && !prev_dark {
+            runs += 1;
+        }
+        if !dark && prev_dark {
+            gaps += 1;
+        }
+        prev_dark = dark;
+    }
+    assert!(runs >= 2, "下划线应为间隔短段（实际段数 {runs}，行 {y}）");
+    assert!(gaps >= 1, "下划线短段之间应有缝隙（实际缝隙 {gaps}）");
+}
+
+/// 表格单元格内 kbd / mark / abbr / pre 与正文同语义：描边、黄底、点线、代码底色。
+#[test]
+fn table_cell_inline_decor_pixels_visible() {
+    use crate::view::UnderKind;
+    let store = MemStore::default();
+    let text = "| a | b | c | d |\n| --- | --- | --- | --- |\n\
+                | <kbd>K</kbd> | <mark>M</mark> | <abbr title=\"tip\">AB</abbr> | <pre>P</pre> |\n\n尾\n";
+    let mut a = app(text, None, false, &store);
+    a.editor.set_caret(text.len()); // 光标移出表格 → 全部单元格走富文本网格
+    a.refresh_index();
+    a.ensure_tables();
+    let id = block_id_of(&a, |k| matches!(k, BlockKind::Table));
+    let (top, xs, ys, unders, overs) = {
+        let top = a.index.blocks.iter().find(|g| g.id == id).unwrap().top;
+        let tl = &a.cache.tables[&id].value;
+        let mut xs = Vec::new();
+        let mut ys = Vec::new();
+        let mut unders = Vec::new();
+        let mut overs = Vec::new();
+        for i in 4..8 {
+            let c = &tl.cells[i];
+            xs.push(c.x);
+            ys.push(c.y);
+            unders.push(c.under.clone());
+            overs.push(c.over.clone());
+        }
+        (top, xs, ys, unders, overs)
+    };
+    let vp = a.viewport();
+    let sy = (vp.y + top - a.window_state.scroll_y) as i32;
+    let cx = a.content_x() as i32;
+    let code_bg = a.input_state.theme.code_bg;
+    let bg = a.input_state.theme.bg;
+    let f = a.render();
+    // kbd：左缘描边像素（灰 160）
+    let kbd = unders[0]
+        .iter()
+        .position(|r| matches!(r.4, UnderKind::KbdFrame))
+        .expect("kbd 单元格应登记边框装饰");
+    {
+        let (rx, ry, _, rh, _) = unders[0][kbd];
+        let dx = cx + (xs[0] + rx - 1.0) as i32;
+        let dy = sy + (ys[0] + ry - 1.0) as i32;
+        let px = f.get(dx as u32, (dy + rh as i32 / 2) as u32);
+        assert_eq!(px, [160, 160, 160, 255], "表格 kbd 左侧描边应为灰描边");
+    }
+    // mark：底色矩形内出现黄色系像素
+    let mark = unders[1]
+        .iter()
+        .position(|r| matches!(r.4, UnderKind::MarkBg))
+        .expect("mark 单元格应登记底色");
+    {
+        let (rx, ry, rw, rh, _) = unders[1][mark];
+        let dx = cx + (xs[1] + rx - 1.0) as i32;
+        let dy = sy + (ys[1] + ry - 1.0) as i32;
+        assert!(
+            any_pixel(f, dx, dy, rw as u32, rh as u32, |p| p[0] > 245
+                && p[1] > 240
+                && p[2] < 225),
+            "表格 mark 应有黄色底"
+        );
+    }
+    // pre：代码底色（主题 code_bg）出现在装饰矩形内
+    let pre = unders[3]
+        .iter()
+        .position(|r| matches!(r.4, UnderKind::InlineCodeBg))
+        .expect("行内 pre 单元格应登记代码底色");
+    {
+        let (rx, ry, rw, rh, _) = unders[3][pre];
+        let dx = cx + (xs[3] + rx - 1.0) as i32;
+        let dy = sy + (ys[3] + ry - 1.0) as i32;
+        assert!(
+            any_pixel(f, dx, dy, rw as u32, rh as u32, |p| p == code_bg),
+            "表格行内 pre 应有主题代码底色"
+        );
+    }
+    // abbr：下划线为点线（同一条行内存在暗段间隔）
+    let abbr = overs[2].first().expect("abbr 单元格应登记下划线");
+    let oy = sy + (ys[2] + abbr.1 + abbr.3) as i32 - 2;
+    let ox = cx + (xs[2] + abbr.0) as i32;
+    assert_dotted_row(f, ox, oy, abbr.2 as i32, bg);
+}
+
+/// `<strong style="color:red">` 在正文与表格单元格里都必须渲染为红色内容（非源码原文）。
+#[test]
+fn inline_strong_style_color_pixels_paragraph_and_table() {
+    let store = MemStore::default();
+    let text = "正文 <strong style=\"color:red\">VISUAL</strong> 结束\n\n\
+                | 标题 |\n| --- |\n| <strong style=\"color:red\">VISUAL</strong> |\n\n尾\n";
+    let mut a = app(text, None, false, &store);
+    a.editor.set_caret(text.len()); // 光标移出表格 / 段落，保持非激活渲染
+    a.refresh_index();
+    a.ensure_layouts_all();
+    a.ensure_tables();
+    a.recompute_geometry();
+    let is_red = |p: [u8; 4]| p[3] > 0 && p[0] > 150 && p[1] < 110 && p[2] < 110;
+
+    // 1) 正文段落：glyph 区域内出现红色像素，且 layout_text 不泄漏标签。
+    let pid = block_id_of(&a, |k| matches!(k, BlockKind::Paragraph));
+    let src = a.editor.session().serialize();
+    let vpos = src.find("VISUAL").unwrap();
+    let rel = rel_offset(&a, pid, vpos);
+    let (rect, l_text) = {
+        let l = &a.cache.layouts[&pid];
+        (
+            a.engine.selection_rects(l, rel, rel + "VISUAL".len())[0],
+            l.layout_text().to_string(),
+        )
+    };
+    assert!(
+        !l_text.contains("<strong"),
+        "正文不得显示源码标签: {l_text:?}"
+    );
+    let vp = a.viewport();
+    let g = a.index.blocks.iter().find(|g| g.id == pid).unwrap();
+    let sy = (vp.y + g.top - a.window_state.scroll_y) as i32;
+    let cx = a.content_x() as i32;
+    let f = a.render();
+    assert!(
+        any_pixel(
+            f,
+            cx + rect.0 as i32,
+            sy + rect.1 as i32,
+            rect.2 as u32,
+            rect.3 as u32,
+            is_red
+        ),
+        "正文 VISUAL 应为红色（实际区域像素: {:?}）",
+        f.get((cx as f32 + rect.0) as u32, (sy as f32 + rect.1) as u32)
+    );
+
+    // 2) 表格单元格：可见文本为 VISUAL（无标签），光栅像素含红色。
+    let tid = block_id_of(&a, |k| matches!(k, BlockKind::Table));
+    let tl = &a.cache.tables[&tid].value;
+    assert_eq!(tl.cells.len(), 2, "表头 + 一行表体");
+    let cell = &tl.cells[1];
+    assert_eq!(cell.pixels.len() as u32, cell.pixel_w * cell.pixel_h * 4);
+    assert!(
+        cell.pixels
+            .chunks_exact(4)
+            .any(|p| is_red([p[0], p[1], p[2], p[3]])),
+        "表格单元格 VISUAL 应为红色"
+    );
+}
+
+/// 表格单元格内 sub/sup 缩小且基线偏移（与同文本普通单元格逐像素比较）。
+#[test]
+fn table_cell_sub_sup_smaller_and_shifted() {
+    let store = MemStore::default();
+    let text = "| 2 | 2 | 2 |\n| --- | --- | --- |\n| 2 | <sub>2</sub> | <sup>2</sup> |\n\n尾\n";
+    let mut a = app(text, None, false, &store);
+    a.editor.set_caret(text.len());
+    a.refresh_index();
+    a.ensure_tables();
+    let id = block_id_of(&a, |k| matches!(k, BlockKind::Table));
+    let tl = &a.cache.tables[&id].value;
+    let boxed = |i: usize| {
+        let c = &tl.cells[i];
+        (c.pixels.clone(), c.pixel_w, c.pixel_h)
+    };
+    let (plain, pw, ph) = boxed(3);
+    let (sub, sw, sh) = boxed(4);
+    let (sup, uw, uh) = boxed(5);
+    let (p_lo, p_hi) = raster_ink_rows(&plain, pw, ph).expect("普通格应有墨迹");
+    let (s_lo, s_hi) = raster_ink_rows(&sub, sw, sh).expect("sub 格应有墨迹");
+    let (u_lo, u_hi) = raster_ink_rows(&sup, uw, uh).expect("sup 格应有墨迹");
+    assert!(
+        s_hi - s_lo < p_hi - p_lo,
+        "sub 字形高度应小于正文（sub {s_lo}..{s_hi} vs 正文 {p_lo}..{p_hi}）"
+    );
+    assert!(
+        u_hi - u_lo < p_hi - p_lo,
+        "sup 字形高度应小于正文（sup {u_lo}..{u_hi} vs 正文 {p_lo}..{p_hi}）"
+    );
+    // 基线偏移方向：同一字符在 sub 里整体低于 sup（下沉/上浮）
+    assert!(
+        s_lo > u_lo && s_hi > u_hi,
+        "sub 应较 sup 下沉（sub {s_lo}..{s_hi} vs sup {u_lo}..{u_hi}）"
+    );
+    assert!(u_hi < p_hi, "sup 应上浮（底部高于正文）");
+}
+
+/// 行内 code（Markdown 反引号与 `<pre>`）均有代码底色，且与正文同一装饰语义。
+#[test]
+fn inline_code_and_pre_have_code_background() {
+    use crate::view::UnderKind;
+    let store = MemStore::default();
+    let text = "行内 `code` 与 <pre>预格式</pre> 尾\n";
+    let mut a = app(text, None, false, &store);
+    a.editor.set_caret(text.len() - 1);
+    a.ensure_layouts_all();
+    a.recompute_geometry();
+    let id = a.index.blocks[0].id;
+    let (rects, code_bg, sy, cx) = {
+        let g = a.index.blocks.iter().find(|g| g.id == id).unwrap();
+        let vp = a.viewport();
+        let sy = (vp.y + g.top - a.window_state.scroll_y) as i32;
+        let cx = a.content_x() as i32;
+        let l = &a.cache.layouts[&id];
+        let kinds: Vec<_> = l
+            .decorations_under
+            .iter()
+            .filter(|(_, _, k)| matches!(k, UnderKind::InlineCodeBg))
+            .map(|&(s, e, _)| (s, e))
+            .collect();
+        let mut rects = Vec::new();
+        for (s, e) in kinds {
+            for r in a.engine.selection_rects(l, s, e) {
+                rects.push(r);
+            }
+        }
+        (rects, a.input_state.theme.code_bg, sy, cx)
+    };
+    assert_eq!(rects.len(), 2, "`code` 与行内 `<pre>` 应各有一段代码底色");
+    let f = a.render();
+    for r in rects {
+        assert!(
+            any_pixel(
+                f,
+                cx + r.0 as i32,
+                sy + r.1 as i32,
+                r.2 as u32,
+                r.3 as u32,
+                |p| p == code_bg
+            ),
+            "行内代码底色应为主题 code_bg：{:?}",
+            code_bg
+        );
+    }
+}
+
+/// abbr 悬停：命中 `<abbr title>` 后状态含 title 文本（浮层由既有 tooltip 绘制）。
+#[test]
+fn abbr_hover_exposes_title_tooltip() {
+    let store = MemStore::default();
+    let text = "这里 <abbr title=\"Application Programming Interface\">API</abbr> 缩写。\n";
+    let mut a = app(text, None, false, &store);
+    let off = text.find("API").unwrap();
+    let (x, y) = point_at_doc(&mut a, off);
+    a.input_state.mouse = PhysicalPosition::new(x as f64, y as f64);
+    a.update_hover();
+    assert_eq!(
+        a.ui_state.hover_link.as_ref().map(|t| t.0.as_str()),
+        Some("Application Programming Interface"),
+        "abbr 悬停应暴露 title 文本"
+    );
+    // 移到正文区外 → 清除
+    a.input_state.mouse = PhysicalPosition::new(x as f64, 2.0);
+    a.update_hover();
+    assert!(a.ui_state.hover_link.is_none());
+}
+
+// ---- B5：排版留白与输入空间（底部留白 / 空行行高 / 末尾空块 / 点击落末尾） ----
+
+/// 文末可点击输入空间 ≥ 2 行正文行高（B5-1）。
+#[test]
+fn doc_end_keeps_two_lines_of_clickable_space() {
+    let store = MemStore::default();
+    let mut a = app("正文一行", None, false, &store);
+    a.paint();
+    let scale = a.input_state.scale;
+    let line_h = BASE_LINE_HEIGHT * scale;
+    let g = a.index.blocks.last().unwrap();
+    let space = a.index.total_h - (g.top + a.block_height(g));
+    assert!(
+        space >= 2.0 * line_h - 1e-3,
+        "文末留白须 ≥ 2 行: {space} < {}",
+        2.0 * line_h
+    );
+}
+
+/// 光标滚到文末后，底部至少仍有 2 行正文高度的可视空白（B5-1/5）。
+#[test]
+fn caret_at_doc_end_keeps_two_lines_of_visible_space() {
+    let store = MemStore::default();
+    let doc = (1..=80)
+        .map(|i| format!("第 {i:02} 段：滚动测试内容。\n"))
+        .collect::<String>();
+    let mut a = app(&doc, None, false, &store);
+    a.paint();
+    a.window_state.smooth = false;
+    a.perform_action(Action::Doc(Intent::MoveDocEnd));
+    a.scroll_to_caret();
+    let scale = a.input_state.scale;
+    let (_, cy, ch) = a.caret_screen();
+    let vp = a.viewport();
+    let line_h = BASE_LINE_HEIGHT * scale;
+    let last_bottom = a
+        .index
+        .blocks
+        .last()
+        .map(|g| g.top + a.block_height(g))
+        .unwrap_or(0.0);
+    assert!(
+        cy + ch <= vp.y + vp.h - 2.0 * line_h + 0.5,
+        "光标行下方须留 ≥2 行可视空白: caret_bottom={} vp_bottom={} line_h={line_h} total_h={} last_bottom={} scroll={} vp_h={}",
+        cy + ch,
+        vp.y + vp.h,
+        a.index.total_h,
+        last_bottom,
+        a.window_state.scroll_y,
+        vp.h
+    );
+}
+
+/// 点击末块下方留白 → 光标直接落文档末尾（B5-1）。
+#[test]
+fn click_in_doc_end_space_moves_caret_to_doc_end() {
+    let store = MemStore::default();
+    let mut a = app("正文一行", None, false, &store);
+    a.paint();
+    let scale = a.input_state.scale;
+    let line_h = BASE_LINE_HEIGHT * scale;
+    let vp = a.viewport();
+    let (top, h) = {
+        let g = a.index.blocks.last().unwrap();
+        (g.top, a.block_height(g))
+    };
+    a.input_state.mouse = PhysicalPosition::new(
+        (MARGIN * scale + 40.0) as f64,
+        (vp.y + top + h + line_h * 0.5 - a.window_state.scroll_y) as f64,
+    );
+    assert_eq!(
+        a.hit_offset(),
+        Some(a.editor.session().text_len()),
+        "文末留白点击须落文档末尾"
+    );
+}
+
+/// 块间空行 = 段距 + 1 个满行高（B5-2），不得被压扁。
+#[test]
+fn blank_line_between_paragraphs_occupies_one_line() {
+    let store = MemStore::default();
+    let mut a = app("a\n\nb\n", None, false, &store);
+    a.paint();
+    let scale = a.input_state.scale;
+    let line_h = BASE_LINE_HEIGHT * scale;
+    let gap = {
+        let b0 = &a.index.blocks[0];
+        let b1 = &a.index.blocks[1];
+        b1.top - (b0.top + b0.height)
+    };
+    assert!(
+        (gap - (PARA_GAP * scale + line_h)).abs() < 1e-3,
+        "空行间距应为段距 + 1 行: {gap} vs {}",
+        PARA_GAP * scale + line_h
+    );
+}
+
+/// 文档以空行结尾：光标锚在块底 + 段距 + 1 行，可继续输入且落在文末留白内（B5-3）。
+#[test]
+fn caret_after_trailing_blank_line_has_full_line_space() {
+    let store = MemStore::default();
+    let mut a = app("a\n\n", None, false, &store);
+    a.paint();
+    a.perform_action(Action::Doc(Intent::MoveDocEnd));
+    let scale = a.input_state.scale;
+    let vp = a.viewport();
+    let (top, h) = {
+        let g = a.index.blocks.last().unwrap();
+        (g.top, a.block_height(g))
+    };
+    let (_, cy, _) = a.caret_screen();
+    let want = vp.y + top + h + (PARA_GAP + BASE_LINE_HEIGHT) * scale;
+    assert!((cy - want).abs() < 1e-3, "尾空行光标位置: {cy} vs {want}");
+    assert!(
+        cy + BASE_LINE_HEIGHT * scale <= vp.y + a.index.total_h + 1e-3,
+        "尾空行光标须在文档高度内（可见可输入）"
+    );
+    a.route_key(Key::Text("b".into()));
+    assert!(a.editor.session().serialize().ends_with('b'));
+}
+
+/// 文档以空块结尾（空列表项）：块高 = 1 行，光标可达且可输入（B5-3）。
+#[test]
+fn trailing_empty_list_item_keeps_one_line_and_is_editable() {
+    let store = MemStore::default();
+    let mut a = app("正文\n\n- ", None, false, &store);
+    a.paint();
+    let scale = a.input_state.scale;
+    let (kind, height, top) = {
+        let g = a.index.blocks.last().unwrap();
+        (g.kind.clone(), a.block_height(g), g.top)
+    };
+    assert!(matches!(kind, BlockKind::ListItem { .. }), "末块应为列表项");
+    assert!(
+        (height - BASE_LINE_HEIGHT * scale).abs() < 1.0,
+        "空列表项高度应为 1 行: {height}"
+    );
+    a.perform_action(Action::Doc(Intent::MoveDocEnd));
+    let (_, cy, _) = a.caret_screen();
+    let vp = a.viewport();
+    assert!(
+        cy >= vp.y + top - 0.5 && cy <= vp.y + top + height + 0.5,
+        "光标须落在末尾空块内: {cy} / [{top}, {}]",
+        top + height
+    );
+    a.route_key(Key::Text("x".into()));
+    assert!(a.editor.session().serialize().ends_with('x'));
+}
+
+// ---- 版本历史（N1/B8a）：稳定键、只读预览、可撤销恢复、未保存守卫 ----
+
+#[test]
+fn version_history_key_is_path_stable_across_saves() {
+    let path = r"C:\notes\b8a\stable.md";
+    let store = MemStore::default();
+    let mut snap = FakeSnapshot::default();
+    let mut a = app_history("v0\n", Some(path), &store, &snap);
+    let key = a.doc.history_key;
+    assert_eq!(key, crate::document::history::doc_key(Path::new(path)));
+    // 改三次内容并各保存一次：保存前把被覆盖的旧版本留档到同一稳定键目录
+    for v in ["v1\n", "v2\n", "v3\n"] {
+        a.editor.replace_all_text(v);
+        a.save_now();
+        assert_eq!(a.doc.history_key, key, "内容变化不得更换目录键");
+    }
+    assert_eq!(
+        snap.texts(key),
+        vec!["v3\n", "v2\n", "v1\n", "v0\n"],
+        "时间倒序：保存前留档旧版本 + 当前版本入历史，同内容去重"
+    );
+    // 未改动再保存：不产生重复快照
+    a.save_now();
+    assert_eq!(snap.texts(key).len(), 4);
+    let _ = &mut snap;
+}
+
+#[test]
+fn version_history_preview_is_read_only_and_keeps_live_document() {
+    let store = MemStore::default();
+    let mut snap = FakeSnapshot::default();
+    let mut a = app_history("current\n", Some(r"C:\notes\b8a\preview.md"), &store, &snap);
+    let key = a.doc.history_key;
+    snap.save_snapshot(key, "old\n").unwrap();
+    a.open_history();
+    assert!(a.ui_state.history.open);
+    assert_eq!(a.mode(), Mode::History);
+    assert_eq!(a.ui_state.history.entries.len(), 1);
+    a.history_select(0);
+    // 预览显示旧内容，但实时文档字节/脏态/基线均不变
+    assert_eq!(a.editor.session().serialize(), "old\n");
+    assert_eq!(a.history_live_text(), "current\n");
+    assert!(!a.history_live_dirty());
+    assert_eq!(a.doc.baseline, encode("current\n", false));
+    a.close_history();
+    assert_eq!(a.editor.session().serialize(), "current\n");
+    assert!(!a.editor.is_dirty());
+    assert!(!a.ui_state.history.open);
+}
+
+#[test]
+fn version_history_restore_is_undoable_and_marks_dirty() {
+    let store = MemStore::default();
+    let mut snap = FakeSnapshot::default();
+    let mut a = app_history("v2\n", Some(r"C:\notes\b8a\undo.md"), &store, &snap);
+    let key = a.doc.history_key;
+    snap.save_snapshot(key, "v1\n").unwrap();
+    a.open_history();
+    a.history_select(0);
+    a.history_restore_selected();
+    assert!(!a.ui_state.history.open, "恢复后关闭面板");
+    assert_eq!(a.editor.session().serialize(), "v1\n");
+    assert!(a.editor.is_dirty(), "恢复必须写入缓冲区并标脏");
+    // 恢复是一次编辑：Ctrl+Z 回到恢复前内容
+    let dirty = a.editor.apply(Intent::Undo).expect("恢复应可撤销");
+    a.after_edit(dirty);
+    assert_eq!(a.editor.session().serialize(), "v2\n");
+}
+
+#[test]
+fn version_history_restore_with_unsaved_changes_uses_existing_guard() {
+    let store = MemStore::default();
+    let mut snap = FakeSnapshot::default();
+    let mut a = app_history("saved\n", Some(r"C:\notes\b8a\guard.md"), &store, &snap);
+    let key = a.doc.history_key;
+    snap.save_snapshot(key, "old\n").unwrap();
+    a.editor.replace_all_text("unsaved\n");
+    assert!(a.editor.is_dirty());
+    a.open_history();
+    a.history_select(0);
+    a.history_restore_selected();
+    // 走出既有未保存确认弹窗；结论落地前不覆盖缓冲区
+    assert!(a.ui_state.modal.is_some(), "必须先问未保存改动");
+    assert_eq!(a.editor.session().serialize(), "unsaved\n");
+    a.resolve_modal(3); // 取消
+    assert_eq!(a.editor.session().serialize(), "unsaved\n");
+    assert!(a.editor.is_dirty());
+    // 改为「不保存」→ 恢复执行；恢复本身仍可撤销
+    a.history_restore_selected();
+    a.resolve_modal(2);
+    assert_eq!(a.editor.session().serialize(), "old\n");
+    assert!(a.editor.is_dirty());
+    assert!(!a.ui_state.history.open);
+}
+
+#[test]
+fn version_history_list_error_shows_error_state() {
+    let store = MemStore::default();
+    let snap = FakeSnapshot::default();
+    let mut a = app_history("x\n", Some(r"C:\notes\b8a\err.md"), &store, &snap);
+    snap.fail_list.set(true);
+    a.open_history();
+    assert!(a.ui_state.history.open);
+    assert!(a.ui_state.history.entries.is_empty());
+    assert_eq!(a.ui_state.history.error.as_deref(), Some("模拟读取失败"));
+    assert!(a.history_live_text() == "x\n");
+}
+
+#[test]
+fn version_history_draft_snapshots_migrate_on_first_save() {
+    let store = MemStore::default();
+    let mut snap = FakeSnapshot::default();
+    let target = r"C:\notes\b8a\first-save.md";
+    let mut a = app_history_dialogs("draft\n", None, &store, &snap, Some(target));
+    let old = a.doc.history_key;
+    snap.save_snapshot(old, "draft\n").unwrap();
+    assert_eq!(snap.texts(old).len(), 1);
+    a.save_as();
+    let new_key = crate::document::history::doc_key(Path::new(target));
+    assert_eq!(a.doc.history_key, new_key);
+    assert!(snap.texts(old).is_empty(), "临时会话键历史已迁走");
+    assert_eq!(snap.texts(new_key), vec!["draft\n"]);
+}
+
+#[test]
+fn version_history_delete_and_clear_go_through_danger_modal() {
+    let store = MemStore::default();
+    let mut snap = FakeSnapshot::default();
+    let mut a = app_history("v2\n", Some(r"C:\notes\b8a\del.md"), &store, &snap);
+    let key = a.doc.history_key;
+    snap.save_snapshot(key, "v1\n").unwrap();
+    a.open_history();
+    a.history_select(0);
+    a.history_request_delete();
+    assert!(matches!(
+        a.ui_state.modal.as_ref().map(|m| m.purpose.clone()),
+        Some(ModalPurpose::Error(ErrorPurpose::HistoryDelete(_)))
+    ));
+    a.resolve_modal(1);
+    assert!(snap.texts(key).is_empty());
+    assert!(a.ui_state.history.open, "删除后面板保持打开");
+    // 清空：空列表直接提示，不弹危险框
+    a.history_request_clear();
+    assert!(a.ui_state.modal.is_none());
+}
+
+// ---- 启动即失败：应用内错误模态（同卡片/按钮样式，可重试/换文件/关闭） ----
+
+#[test]
+fn startup_error_opens_in_app_modal() {
+    use crate::view::modal::ButtonRole;
+    let store = MemStore::default();
+    let a = app_startup_error("a.md", &store);
+    let modal = a
+        .ui_state
+        .modal
+        .as_ref()
+        .expect("启动失败须在首帧弹出应用内模态");
+    assert!(matches!(
+        modal.purpose,
+        ModalPurpose::Error(ErrorPurpose::Startup(_))
+    ));
+    assert_eq!(modal.spec.title, t(I18nKey::MainOpenFailedTitle));
+    assert_eq!(modal.spec.message, STARTUP_ERROR_MESSAGE);
+    let labels: Vec<String> = modal
+        .spec
+        .buttons
+        .iter()
+        .map(|b| b.display_label())
+        .collect();
+    assert_eq!(labels, vec!["重试 (R)", "打开其他文件 (O)", "关闭"]);
+    assert_eq!(modal.spec.buttons[0].role, ButtonRole::Primary);
+    assert_eq!(modal.state.focused, 0, "默认焦点在主按钮");
+    assert_eq!(a.doc.path, None, "失败时以空白草稿开窗");
+}
+
+#[test]
+fn startup_error_retry_loads_same_path() {
+    let store = MemStore::default();
+    disk(&store, "a.md", b"abc\n");
+    let mut a = app_startup_error("a.md", &store);
+    a.resolve_modal(1);
+    assert!(a.ui_state.modal.is_none(), "重试成功后模态关闭");
+    assert_eq!(a.doc.path, Some(PathBuf::from("a.md")));
+    assert_eq!(a.editor.session().serialize(), "abc\n");
+}
+
+#[test]
+fn startup_error_retry_failure_shows_open_error() {
+    let store = MemStore::default(); // 无目标文件：重试仍失败
+    let mut a = app_startup_error("a.md", &store);
+    a.resolve_modal(1);
+    assert!(
+        matches!(
+            a.ui_state.modal.as_ref().map(|m| m.purpose.clone()),
+            Some(ModalPurpose::Error(ErrorPurpose::Open(_)))
+        ),
+        "重试失败应走既有「打开失败」错误模态"
+    );
+}
+
+#[test]
+fn startup_error_close_exits_window() {
+    let store = MemStore::default();
+    let mut a = app_startup_error("a.md", &store);
+    assert!(!a.window_state.exit_requested);
+    a.route_key(Key::Escape);
+    assert!(
+        a.window_state.exit_requested,
+        "Esc 落到最后一个 Secondary「关闭」→ 请求退出本窗口"
+    );
+    assert!(a.ui_state.modal.is_none());
+
+    let mut b = app_startup_error("a.md", &store);
+    b.resolve_modal(3);
+    assert!(b.window_state.exit_requested, "「关闭」按钮同样请求退出");
+}
+
+#[test]
+fn startup_error_open_other_uses_dialog() {
+    let store = MemStore::default();
+    let mut a = app_startup_error("a.md", &store);
+    a.resolve_modal(2); // NoDialogs 返回 None：什么都不做
+    assert!(a.ui_state.modal.is_none(), "换文件出口关闭模态");
+    assert!(!a.window_state.exit_requested, "换文件不等于退出");
+    assert_eq!(a.doc.path, None);
+}
+
+#[test]
+fn startup_error_mnemonic_o() {
+    let store = MemStore::default();
+    let mut a = app_startup_error("a.md", &store);
+    a.route_key(Key::O);
+    assert!(a.ui_state.modal.is_none(), "O 助记符命中「打开其他文件」");
+    assert!(!a.window_state.exit_requested, "助记符出口不退出窗口");
+}

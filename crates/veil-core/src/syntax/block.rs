@@ -2,16 +2,60 @@
 //! 分隔线 / 段落（GFM 其余块留待后续增量）。
 
 use super::inline::parse_inlines;
-use super::model::{AdmonitionType, BlockKind, CellAlign, InlineKind, InlineNode, TableCell};
+use super::model::{
+    AdmonitionType, BlockContainer, BlockKind, CellAlign, InlineKind, InlineNode, TableCell,
+};
 use crate::buffer::Buffer;
 use crate::range::Range;
 
-/// 扫描 `[from_line, total)` 内的全部块（跳过空行）。
+/// 扫描产物：块种类 + 行区间 + 容器上下文（仅容器内表格非默认）。
+#[derive(Debug)]
+pub(super) struct ScannedBlock {
+    pub kind: BlockKind,
+    pub start: usize,
+    pub end: usize,
+    pub container: BlockContainer,
+    /// 表格实际行数（Details 内表格的块区间可吞入尾部 `</details>` 行）。
+    pub table_lines: Option<usize>,
+}
+
+/// 扫描 `[from_line, total)` 内的全部块（跳过空行），返回未做容器展开的原始
+/// 扫描单元。容器内表格切段（B2）与 details 子块切分（B3）由
+/// [`scan_blocks_meta`] 负责——该函数是建块唯一入口；本函数保留给需要
+/// 「整块」形态的调用方（引用内定义扫描、解析单测）。
 pub(super) fn scan_blocks(
     buf: &Buffer,
     from_line: usize,
     total: usize,
 ) -> Vec<(BlockKind, usize, usize)> {
+    // 容器内表格切段（B2）保留；details 子块切分（B3）只在建块入口
+    // `scan_blocks_meta` 生效——本函数的调用方（引用内定义扫描、解析单测）
+    // 依赖「details 一个块」的整块形态。
+    let mut out = Vec::new();
+    for (kind, s, e) in scan_blocks_raw(buf, from_line, total) {
+        match kind {
+            BlockKind::BlockQuote => {
+                let mut scanned = Vec::new();
+                split_quote_tables(buf, s, e, &mut scanned);
+                out.extend(scanned.into_iter().map(|b| (b.kind, b.start, b.end)));
+            }
+            BlockKind::ListItem { .. } => {
+                let mut scanned = Vec::new();
+                split_list_tables(buf, s, e, kind, &mut scanned);
+                out.extend(scanned.into_iter().map(|b| (b.kind, b.start, b.end)));
+            }
+            other => out.push((other, s, e)),
+        }
+    }
+    out
+}
+
+/// 同 [`scan_blocks`]，另携带容器上下文（Session 建块用）。
+pub(super) fn scan_blocks_meta(buf: &Buffer, from_line: usize, total: usize) -> Vec<ScannedBlock> {
+    expand_container_tables(buf, scan_blocks_raw(buf, from_line, total))
+}
+
+fn scan_blocks_raw(buf: &Buffer, from_line: usize, total: usize) -> Vec<(BlockKind, usize, usize)> {
     let mut out = Vec::new();
     let mut line = from_line;
     // Front Matter：仅文档首行（line == 0）可能命中；增量重扫时 from_line > 0 跳过
@@ -34,11 +78,9 @@ pub(super) fn scan_blocks(
                 let body_lines: Vec<String> = (line + body_start..line + consumed - 1)
                     .map(|l| line_text(buf, l))
                     .collect();
-                let body_trimmed: Vec<&str> =
-                    body_lines.iter().map(|s| s.trim()).collect();
+                let body_trimmed: Vec<&str> = body_lines.iter().map(|s| s.trim()).collect();
                 // Body 非空、且非空行须匹配 YAML 模式（key: value / key: / - item / # comment / nested key）
-                let non_empty: Vec<&&str> =
-                    body_trimmed.iter().filter(|s| !s.is_empty()).collect();
+                let non_empty: Vec<&&str> = body_trimmed.iter().filter(|s| !s.is_empty()).collect();
                 let looks_like_yaml = !non_empty.is_empty()
                     && non_empty.iter().all(|s| {
                         let t = *s;
@@ -60,9 +102,13 @@ pub(super) fn scan_blocks(
                         let has_colon = trimmed.contains(':');
                         let key_part = trimmed.split(':').next().unwrap_or("");
                         let key_valid = !key_part.is_empty()
-                            && key_part
-                                .chars()
-                                .all(|c| c.is_alphanumeric() || c == '_' || c == '-' || c == '.' || !c.is_ascii());
+                            && key_part.chars().all(|c| {
+                                c.is_alphanumeric()
+                                    || c == '_'
+                                    || c == '-'
+                                    || c == '.'
+                                    || !c.is_ascii()
+                            });
                         has_colon && key_valid
                     });
                 if looks_like_yaml {
@@ -82,7 +128,7 @@ pub(super) fn scan_blocks(
             line += 1;
             continue;
         }
-        let (mut v, consumed) = scan_next(buf, line, total);
+        let (mut v, consumed) = scan_next_raw(buf, line, total);
         out.append(&mut v);
         line += consumed;
     }
@@ -91,7 +137,17 @@ pub(super) fn scan_blocks(
 
 /// 扫描以 `line` 起始的一个扫描单元：普通块为单块；列表标记行触发区域扫描，
 /// 整片列表（嵌套项/续块，0c P0-3）一次产出。返回 (块序列, 消耗行数)。
-pub(super) fn scan_next(
+/// 同 [`scan_next`]，另携带容器上下文。
+pub(super) fn scan_next_meta(
+    buf: &Buffer,
+    line: usize,
+    total: usize,
+) -> (Vec<ScannedBlock>, usize) {
+    let (v, n) = scan_next_raw(buf, line, total);
+    (expand_container_tables(buf, v), n)
+}
+
+fn scan_next_raw(
     buf: &Buffer,
     line: usize,
     total: usize,
@@ -122,7 +178,10 @@ pub(super) fn scan_one(buf: &Buffer, line: usize, total: usize) -> (BlockKind, u
     // 缩进代码块（0c P1）：前导缩进 ≥4 列优先于一切块标记（`    # foo` 是代码）。
     // 空行暂存、非空行须 ≥4 列续块；末尾空行不计入块区间。
     if indent_info(&text).0 >= 4 {
-        return (BlockKind::IndentedCode, indented_code_lines(buf, line, total));
+        return (
+            BlockKind::IndentedCode,
+            indented_code_lines(buf, line, total),
+        );
     }
     let t = text.trim_start();
     if let Some(level) = atx_level(t) {
@@ -184,8 +243,22 @@ pub(super) fn scan_one(buf: &Buffer, line: usize, total: usize) -> (BlockKind, u
     }
     // 原始 HTML 块（CommonMark §4.6，类型 1–7）：块起始识别；类型 6 可打断段落（见
     // interrupts_paragraph），类型 7 不可。块内不解析 inline，源码原样渲染。
+    // 白名单优先：类型 6 的 `<details>` 开标签走 BlockKind::Details 分支，允许嵌套
+    // 块级内容（标题/列表/段落等）；其余类型 6/7 仍进 HtmlBlock 代码卡。
     if let Some(start) = html_block_start(&text) {
-        return (BlockKind::HtmlBlock, html_block_lines(buf, line, total, start));
+        if let HtmlStart::BlankLine { type6: true } = start {
+            if let Some(details) = try_details_block(buf, line, total, &text) {
+                return details;
+            }
+        }
+        // 单独成行的 `<img ...>` 按段落处理：交给行内 HTML img 占位/缩略图路径，
+        // 而不是退化成 HtmlBlock 源码卡（类型 7 的 `<img>` 行本身没有块级语义）。
+        if !is_single_img_line(&text) {
+            return (
+                BlockKind::HtmlBlock,
+                html_block_lines(buf, line, total, start),
+            );
+        }
     }
     // 段落：直到空行 / 可打断段落的块起始（打断规则集中于 `interrupts_paragraph`）。
     // 表格 v0 不打断段落——同 GFM，表头须位于块起始。
@@ -733,7 +806,7 @@ fn scan_list_region(
         if l.trim().is_empty() {
             pending_blanks += 1;
             cur_para = false; // 空行闭合段落：懒续行不跨空行
-            // 空行永久闭合无内容的项（Ex 280：`-\n\n  foo` → 列表外段落）
+                              // 空行永久闭合无内容的项（Ex 280：`-\n\n  foo` → 列表外段落）
             while stack.last().is_some_and(|t| !t.has_content) {
                 stack.pop();
             }
@@ -755,51 +828,51 @@ fn scan_list_region(
         }
         if !thematic {
             if let Some(m) = list_mark(&l) {
-            let valid = match stack.get(popped_len.wrapping_sub(1)) {
-                _ if popped_len == 0 => indent <= 3,
-                _ => indent - stack[popped_len - 1].col <= 3,
-            };
-            // 接受规则（对齐 cmark 的「last matched ≠ 段落」判定，Ex 302/312 实测）：
-            // - 弹栈（缩进够不着当前项）：当前项及其段落已被反缩进闭合，标记自由
-            //   开项——起始号非 1 / 空内容亦可（Ex 302 `3) baz` 开新列表）；
-            // - 未弹栈且当前块为开放段落：适用段落打断规则——内容非空且（无序或
-            //   起始号为 1）（Ex 285/304 的区域内形态；缩进合法性已由 valid 保证，
-            //   此处不再要求绝对缩进 ≤3——嵌套标记缩进可 >3，Ex 307）。
-            let accept = valid
-                && (popped_len < stack.len()
-                    || !cur_para
-                    || (!m.blank_content && (!m.ordered || m.start == 1)));
-            if accept {
-                stack.truncate(popped_len);
-                // 子项入栈即父项内容（父项不再是「无内容项」，空行不再闭合它）
-                if let Some(parent) = stack.last_mut() {
-                    parent.has_content = true;
-                }
-                let kind = BlockKind::ListItem {
-                    ordered: m.ordered,
-                    depth: m.depth,
-                    task: task_span(&l).map(|(_, _, _, done)| done),
+                let valid = match stack.get(popped_len.wrapping_sub(1)) {
+                    _ if popped_len == 0 => indent <= 3,
+                    _ => indent - stack[popped_len - 1].col <= 3,
                 };
-                blocks.push((kind, i, i + 1));
-                let id = next_id;
-                next_id += 1;
-                stack.push(OpenItem {
-                    col: m.content_col,
-                    id,
-                    ordered: m.ordered,
-                    depth: m.depth,
-                    has_content: !m.blank_content,
-                });
-                cur = blocks.len() - 1;
-                cur_item = id;
-                pending_blanks = 0;
-                let (para, fence) = classify_content(&l[m.content_start..]);
-                cur_para = para;
-                in_fence = fence;
-                i += 1;
-                continue;
-            }
-            // 不能打断段落的标记行 → 懒续为段落文本（落入下方懒续分支）
+                // 接受规则（对齐 cmark 的「last matched ≠ 段落」判定，Ex 302/312 实测）：
+                // - 弹栈（缩进够不着当前项）：当前项及其段落已被反缩进闭合，标记自由
+                //   开项——起始号非 1 / 空内容亦可（Ex 302 `3) baz` 开新列表）；
+                // - 未弹栈且当前块为开放段落：适用段落打断规则——内容非空且（无序或
+                //   起始号为 1）（Ex 285/304 的区域内形态；缩进合法性已由 valid 保证，
+                //   此处不再要求绝对缩进 ≤3——嵌套标记缩进可 >3，Ex 307）。
+                let accept = valid
+                    && (popped_len < stack.len()
+                        || !cur_para
+                        || (!m.blank_content && (!m.ordered || m.start == 1)));
+                if accept {
+                    stack.truncate(popped_len);
+                    // 子项入栈即父项内容（父项不再是「无内容项」，空行不再闭合它）
+                    if let Some(parent) = stack.last_mut() {
+                        parent.has_content = true;
+                    }
+                    let kind = BlockKind::ListItem {
+                        ordered: m.ordered,
+                        depth: m.depth,
+                        task: task_span(&l).map(|(_, _, _, done)| done),
+                    };
+                    blocks.push((kind, i, i + 1));
+                    let id = next_id;
+                    next_id += 1;
+                    stack.push(OpenItem {
+                        col: m.content_col,
+                        id,
+                        ordered: m.ordered,
+                        depth: m.depth,
+                        has_content: !m.blank_content,
+                    });
+                    cur = blocks.len() - 1;
+                    cur_item = id;
+                    pending_blanks = 0;
+                    let (para, fence) = classify_content(&l[m.content_start..]);
+                    cur_para = para;
+                    in_fence = fence;
+                    i += 1;
+                    continue;
+                }
+                // 不能打断段落的标记行 → 懒续为段落文本（落入下方懒续分支）
             }
         }
         if popped_len > 0 {
@@ -1321,15 +1394,246 @@ enum HtmlStart {
 
 /// 块级标签名（CommonMark §4.6 类型 6 列表，全部小写）。
 const BLOCK_LEVEL_TAGS: &[&str] = &[
-    "address", "article", "aside", "base", "basefont", "blockquote", "body", "caption",
-    "center", "col", "colgroup", "dd", "details", "dialog", "dir", "div", "dl", "dt", "embed",
-    "fieldset", "figcaption", "figure", "footer", "form", "frame", "frameset", "h1", "h2",
-    "h3", "h4", "h5", "h6", "head", "header", "hr", "html", "iframe", "legend", "li", "link",
-    "main", "menu", "menuitem", "nav", "noframes", "ol", "optgroup", "option", "output", "p",
-    "param", "picture", "progress", "rb", "rp", "rt", "rtc", "ruby", "section", "source",
-    "summary", "table", "tbody", "td", "template", "textarea", "tfoot", "th", "thead", "title",
-    "tr", "track", "ul", "video",
+    "address",
+    "article",
+    "aside",
+    "base",
+    "basefont",
+    "blockquote",
+    "body",
+    "caption",
+    "center",
+    "col",
+    "colgroup",
+    "dd",
+    "details",
+    "dialog",
+    "dir",
+    "div",
+    "dl",
+    "dt",
+    "embed",
+    "fieldset",
+    "figcaption",
+    "figure",
+    "footer",
+    "form",
+    "frame",
+    "frameset",
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    "head",
+    "header",
+    "hr",
+    "html",
+    "iframe",
+    "legend",
+    "li",
+    "link",
+    "main",
+    "menu",
+    "menuitem",
+    "nav",
+    "noframes",
+    "ol",
+    "optgroup",
+    "option",
+    "output",
+    "p",
+    "param",
+    "picture",
+    "progress",
+    "rb",
+    "rp",
+    "rt",
+    "rtc",
+    "ruby",
+    "section",
+    "source",
+    "summary",
+    "table",
+    "tbody",
+    "td",
+    "template",
+    "textarea",
+    "tfoot",
+    "th",
+    "thead",
+    "title",
+    "tr",
+    "track",
+    "ul",
+    "video",
 ];
+
+/// 尝试把 type6 `<details>` 开标签解析成 BlockKind::Details。
+/// 返回 None 说明不是合法 details 开标签（属性不合法等），调用方应回退 HtmlBlock。
+/// 成功则返回 `Some((BlockKind::Details { summary, open_default }, n_lines))`，
+/// n_lines = 块占行数（含开标签行、summary 行、内容、`</details>` 行）。
+fn try_details_block(
+    buf: &Buffer,
+    line: usize,
+    total: usize,
+    first_line: &str,
+) -> Option<(BlockKind, usize)> {
+    // 1) 首行必须是合法 `<details>` 开标签（标签名 + 属性 + `>` 或 `/>` 或 EOL）
+    let trimmed = first_line.trim_start();
+    let lower = trimmed.to_ascii_lowercase();
+    if !lower.starts_with("<details") {
+        return None;
+    }
+    let after = &lower[8..]; // 跳过 "<details"
+    let bytes = after.as_bytes();
+    let mut open_default = false;
+    let mut i = 0;
+    // 允许紧跟空白、`>`、`/>`
+    while i < bytes.len() && matches!(bytes[i], b' ' | b'\t' | b'\n' | b'\r') {
+        i += 1;
+    }
+    if i < bytes.len() && bytes[i] == b'/' {
+        // `<details />` 无意义——当作普通 HtmlBlock
+        return None;
+    }
+    // 属性扫描（极简）：只识别 `open`（无值）和 `>`/`/>` 终止
+    while i < bytes.len() {
+        while i < bytes.len() && matches!(bytes[i], b' ' | b'\t') {
+            i += 1;
+        }
+        if i >= bytes.len() {
+            break;
+        }
+        if bytes[i] == b'>' {
+            break;
+        }
+        if bytes[i] == b'/' {
+            // `/>` 自闭合 details 无意义
+            return None;
+        }
+        // 属性名：字母 + alnum + -/_/:/.
+        if !bytes[i].is_ascii_alphabetic() && bytes[i] != b'_' {
+            // 非法属性字符 → 整行不是合法 details 开标签
+            return None;
+        }
+        let an_start = i;
+        i += 1;
+        while i < bytes.len()
+            && (bytes[i].is_ascii_alphanumeric() || matches!(bytes[i], b'_' | b'.' | b':' | b'-'))
+        {
+            i += 1;
+        }
+        let attr_name = &after[an_start..i].to_ascii_lowercase();
+        // 跳过可选 `="..."`
+        if i < bytes.len() && bytes[i] == b'=' {
+            i += 1;
+            while i < bytes.len() && matches!(bytes[i], b' ' | b'\t') {
+                i += 1;
+            }
+            if i < bytes.len() && (bytes[i] == b'"' || bytes[i] == b'\'') {
+                let q = bytes[i];
+                i += 1;
+                while i < bytes.len() && bytes[i] != q {
+                    i += 1;
+                }
+                if i < bytes.len() {
+                    i += 1;
+                }
+            } else {
+                // 无引号值：跳过到空白或 >
+                while i < bytes.len() && !matches!(bytes[i], b' ' | b'\t' | b'>' | b'/') {
+                    i += 1;
+                }
+            }
+        }
+        if attr_name == "open" {
+            open_default = true;
+        }
+    }
+
+    // 2) 消耗行：直到配对的 `</details>`（B3：按嵌套深度配对，内层 details 不会
+    //    提前终止外层块；不要求整行闭合——与 html_block_lines 类型 1 同源扫描）
+    let mut n = 1usize; // 首行已消费
+    let mut depth = 1usize; // 当前嵌套深度（首行已含一个 `<details`）
+    let mut summary = String::new();
+    // summary 在 details 块起始处（首行之后，结束闭合标签之前）扫描 `<summary>…</summary>`
+    // 策略：逐行向前，遇到 `<summary>` 且含 `</summary>` 就提取；summary 只允许出现在块起始段
+    let mut summary_seen = false;
+    while line + n < total {
+        let l = line_text(buf, line + n);
+        let ll = l.to_ascii_lowercase();
+        let opens = ll.matches("<details").count();
+        let closes = ll.matches("</details").count();
+        depth += opens;
+        if closes > 0 {
+            depth = depth.saturating_sub(closes);
+            if depth == 0 {
+                n += 1;
+                break;
+            }
+        }
+        // 空行不算块结束——内部允许空行
+        // summary 只在闭合标签之前找（B3：与头块切分共用同一提取规则）
+        if !summary_seen {
+            if let Some(s) = summary_on_line(&l) {
+                if !s.is_empty() {
+                    summary = s;
+                }
+                summary_seen = true;
+            }
+        }
+        n += 1;
+    }
+    let kind = BlockKind::Details {
+        summary,
+        open_default,
+    };
+    Some((kind, n))
+}
+
+/// 从单行文本提取 `<summary>…</summary>` 的可见文本（B3）。
+/// 仅接受同一行内闭合的形态（与既有块级 summary 提取口径一致）；无则 None。
+fn summary_on_line(line: &str) -> Option<String> {
+    let lt = line.to_ascii_lowercase();
+    let sp = lt.find("<summary")?;
+    // 开标签名后须为空白或 `>`（排除 `<summaryfoo>`）
+    let byte_after = lt.as_bytes().get(sp + 8).copied();
+    if !matches!(byte_after, None | Some(b'>') | Some(b' ') | Some(b'\t')) {
+        return None;
+    }
+    let rel_close = lt[sp..].find("</summary")?;
+    let close_abs = sp + rel_close;
+    let ba = lt.as_bytes().get(close_abs + 9).copied();
+    if !matches!(ba, None | Some(b'>') | Some(b' ') | Some(b'\t')) {
+        return None;
+    }
+    let open_inner = &lt[sp + 8..close_abs];
+    let tag_end_rel = open_inner.find('>')?;
+    let content_abs = sp + 8 + tag_end_rel + 1;
+    if content_abs > close_abs {
+        return None;
+    }
+    Some(line[content_abs..close_abs].trim().to_string())
+}
+
+/// 单独成行的 `<img ...>`：整行只有这一个标签（属性后直接 `>`），无其他文本。
+/// 这类行按段落解析，让行内 img 走图片占位/缩略图路径。
+fn is_single_img_line(line: &str) -> bool {
+    let t = line.trim();
+    if !t.to_ascii_lowercase().starts_with("<img") {
+        return false;
+    }
+    match t.as_bytes().get(4).copied() {
+        Some(b' ') | Some(b'\t') | Some(b'>') | Some(b'/') => {}
+        _ => return false,
+    }
+    let Some(end) = t.find('>') else {
+        return false;
+    };
+    t[end + 1..].trim().is_empty() && !t[1..end].contains('<')
+}
 
 /// 判定行首是否为 HTML 块起始；返回起始类型（含终止方式）。
 fn html_block_start(line: &str) -> Option<HtmlStart> {
@@ -1355,10 +1659,7 @@ fn html_block_start(line: &str) -> Option<HtmlStart> {
         return Some(HtmlStart::Cdata);
     }
     // 类型 4：`<!` 后接大写字母
-    if rest.len() >= 3
-        && rest.as_bytes()[1] == b'!'
-        && rest.as_bytes()[2].is_ascii_uppercase()
-    {
+    if rest.len() >= 3 && rest.as_bytes()[1] == b'!' && rest.as_bytes()[2].is_ascii_uppercase() {
         return Some(HtmlStart::Doctype);
     }
     // 类型 1：script/pre/style/textarea
@@ -1366,7 +1667,10 @@ fn html_block_start(line: &str) -> Option<HtmlStart> {
     for tag in ["script", "pre", "style", "textarea"] {
         if lower.starts_with(&format!("<{tag}")) {
             let after = lower.as_bytes().get(tag.len() + 1);
-            if matches!(after, Some(b' ') | Some(b'\t') | Some(b'\n') | Some(b'\r') | Some(b'>') | Some(b'/')) {
+            if matches!(
+                after,
+                Some(b' ') | Some(b'\t') | Some(b'\n') | Some(b'\r') | Some(b'>') | Some(b'/')
+            ) {
                 return Some(HtmlStart::CloseTag(tag));
             }
         }
@@ -1388,17 +1692,20 @@ fn html_block_start(line: &str) -> Option<HtmlStart> {
         return None;
     }
     let mut n = 1usize;
-    while n < name_bytes.len()
-        && (name_bytes[n].is_ascii_alphanumeric() || name_bytes[n] == b'-')
-    {
+    while n < name_bytes.len() && (name_bytes[n].is_ascii_alphanumeric() || name_bytes[n] == b'-') {
         n += 1;
     }
-    let name = std::str::from_utf8(&name_bytes[..n]).ok()?.to_ascii_lowercase();
+    let name = std::str::from_utf8(&name_bytes[..n])
+        .ok()?
+        .to_ascii_lowercase();
     let after_name = &after_lt[name_start + n..];
     // 类型 6：块级标签，后接空白/>//
     if BLOCK_LEVEL_TAGS.contains(&name.as_str()) {
         let c = after_name.as_bytes().first().copied();
-        if matches!(c, Some(b' ') | Some(b'\t') | Some(b'\n') | Some(b'\r') | Some(b'>') | Some(b'/')) {
+        if matches!(
+            c,
+            Some(b' ') | Some(b'\t') | Some(b'\n') | Some(b'\r') | Some(b'>') | Some(b'/')
+        ) {
             return Some(HtmlStart::BlankLine { type6: true });
         }
     }
@@ -1418,13 +1725,21 @@ fn html_block_start(line: &str) -> Option<HtmlStart> {
     // 标签名后必须紧跟 `>`、`/>` 或空白（引出属性）；否则非完整标签。
     match ab.first().copied() {
         Some(b'>') => {
-            if after_name[1..].trim_end_matches(['\r', '\n']).trim().is_empty() {
+            if after_name[1..]
+                .trim_end_matches(['\r', '\n'])
+                .trim()
+                .is_empty()
+            {
                 return Some(HtmlStart::BlankLine { type6: false });
             }
             return None;
         }
         Some(b'/') if ab.get(1) == Some(&b'>') => {
-            if after_name[2..].trim_end_matches(['\r', '\n']).trim().is_empty() {
+            if after_name[2..]
+                .trim_end_matches(['\r', '\n'])
+                .trim()
+                .is_empty()
+            {
                 return Some(HtmlStart::BlankLine { type6: false });
             }
             return None;
@@ -1445,14 +1760,22 @@ fn html_block_start(line: &str) -> Option<HtmlStart> {
         if ab[i] == b'>' {
             i += 1;
             // 行尾只允许空白
-            if after_name[i..].trim_end_matches(['\r', '\n']).trim().is_empty() {
+            if after_name[i..]
+                .trim_end_matches(['\r', '\n'])
+                .trim()
+                .is_empty()
+            {
                 return Some(HtmlStart::BlankLine { type6: false });
             }
             return None;
         }
         if ab[i] == b'/' && ab.get(i + 1) == Some(&b'>') {
             i += 2;
-            if after_name[i..].trim_end_matches(['\r', '\n']).trim().is_empty() {
+            if after_name[i..]
+                .trim_end_matches(['\r', '\n'])
+                .trim()
+                .is_empty()
+            {
                 return Some(HtmlStart::BlankLine { type6: false });
             }
             return None;
@@ -1496,12 +1819,7 @@ fn html_block_interrupts_paragraph(line: &str) -> bool {
 }
 
 /// HTML 块消耗行数：按起始类型的终止条件扫描。
-fn html_block_lines(
-    buf: &Buffer,
-    line: usize,
-    total: usize,
-    start: HtmlStart,
-) -> usize {
+fn html_block_lines(buf: &Buffer, line: usize, total: usize, start: HtmlStart) -> usize {
     match start {
         HtmlStart::BlankLine { .. } => {
             // 类型 6/7：空行终止（不消耗空行）
@@ -1605,6 +1923,329 @@ fn table_rows(buf: &Buffer, line: usize, total: usize) -> Option<usize> {
         n += 1;
     }
     Some(n)
+}
+
+// ===== 容器内 GFM 表格（B2）+ details 真子块（B3） =====
+//
+// 引用/列表项/块级 details 原本整块吞掉内部行，表格无法成为独立块。这里在
+// 扫描单元产出后做一次容器展开：把容器内的表格行切成 `BlockKind::Table` 兄弟块，
+// 并携带 `BlockContainer`（渲染缩进/引用条、导出容器包裹）与容器块本身相邻。
+// B3 起块级 details 进一步拆为「summary 头块 + 内部子块序列」：头块区间只含
+// 开标签与 summary 行，内部行按常规块规则重新扫描，逐块写入 `details_depth`
+// 归属；闭标签行不进入任何块（与空行一样不占排版高度）。
+
+/// 容器展开入口：逐个扫描单元产物按块型分流。
+fn expand_container_tables(
+    buf: &Buffer,
+    blocks: Vec<(BlockKind, usize, usize)>,
+) -> Vec<ScannedBlock> {
+    expand_scan_level(buf, blocks, 0)
+}
+
+/// 按 details 嵌套层级展开：`depth` = 本层块所处的 details 层级
+/// （0 = 块外；1 = 顶层 details 的直接子块）。
+fn expand_scan_level(
+    buf: &Buffer,
+    blocks: Vec<(BlockKind, usize, usize)>,
+    depth: u8,
+) -> Vec<ScannedBlock> {
+    let mut out = Vec::with_capacity(blocks.len());
+    for (kind, s, e) in blocks {
+        match kind {
+            BlockKind::Details {
+                summary,
+                open_default,
+            } => {
+                let (header_end, close_line) = details_spans(buf, s, e);
+                out.push(ScannedBlock {
+                    kind: BlockKind::Details {
+                        summary,
+                        open_default,
+                    },
+                    start: s,
+                    end: header_end,
+                    container: depth_container(depth),
+                    table_lines: None,
+                });
+                if header_end < close_line {
+                    let inner = scan_blocks_raw(buf, header_end, close_line);
+                    let mut children = expand_scan_level(buf, inner, depth.saturating_add(1));
+                    // 兼容 B2 行为：details 内末尾为表格时，闭标签行并入该表格块，
+                    // 由 `table_lines` 限定真实表格行（渲染/导出不显示闭标签）；
+                    // 其余子块不吞闭标签行（该行不进入任何块）。
+                    if let Some(last) = children.last_mut() {
+                        if last.kind == BlockKind::Table && last.end == close_line && close_line < e
+                        {
+                            last.table_lines = Some(close_line - last.start);
+                            last.end = e;
+                        }
+                    }
+                    out.extend(children);
+                }
+            }
+            BlockKind::BlockQuote => {
+                let mark = out.len();
+                split_quote_tables(buf, s, e, &mut out);
+                tag_details_depth(&mut out[mark..], depth);
+            }
+            BlockKind::ListItem { .. } => {
+                let mark = out.len();
+                split_list_tables(buf, s, e, kind, &mut out);
+                tag_details_depth(&mut out[mark..], depth);
+            }
+            other => out.push(ScannedBlock {
+                kind: other,
+                start: s,
+                end: e,
+                container: depth_container(depth),
+                table_lines: None,
+            }),
+        }
+    }
+    out
+}
+
+/// 容器默认值：仅携带 details 归属层级。
+fn depth_container(depth: u8) -> BlockContainer {
+    BlockContainer {
+        details: depth > 0,
+        details_depth: depth,
+        ..Default::default()
+    }
+}
+
+/// 给本层产出的块写入 details 归属（保留引用/列表容器字段）。
+fn tag_details_depth(blocks: &mut [ScannedBlock], depth: u8) {
+    for b in blocks {
+        b.container.details_depth = depth;
+        b.container.details = depth > 0;
+    }
+}
+
+/// details 头块结束行与闭标签行（B3）：返回 `(header_end, close_line)`。
+/// - `header_end`：开标签行 + 紧随其后的 summary 行（中间允许空行）。
+/// - `close_line`：首个含 `</details` 的行；未闭合时为块尾（= 扫描终点）。
+fn details_spans(buf: &Buffer, start: usize, end: usize) -> (usize, usize) {
+    let close = details_close_line(buf, start, end);
+    let mut header_end = (start + 1).min(close);
+    for i in start + 1..close {
+        let line = line_text(buf, i);
+        if line.trim().is_empty() {
+            continue;
+        }
+        if summary_on_line(&line).is_some() {
+            header_end = i + 1;
+        }
+        break;
+    }
+    (header_end, close)
+}
+
+/// 与开标签配对的闭标签行（按嵌套深度计数）；未闭合时为 `end`。
+fn details_close_line(buf: &Buffer, start: usize, end: usize) -> usize {
+    let mut depth = 1usize;
+    for i in start + 1..end {
+        let lt = line_text(buf, i).to_ascii_lowercase();
+        depth += lt.matches("<details").count();
+        let closes = lt.matches("</details").count();
+        if closes > 0 {
+            depth = depth.saturating_sub(closes);
+            if depth == 0 {
+                return i;
+            }
+        }
+    }
+    end
+}
+
+fn plain_block(kind: BlockKind, start: usize, end: usize) -> ScannedBlock {
+    ScannedBlock {
+        kind,
+        start,
+        end,
+        container: BlockContainer::default(),
+        table_lines: None,
+    }
+}
+
+fn table_block(start: usize, end: usize, container: BlockContainer) -> ScannedBlock {
+    ScannedBlock {
+        kind: BlockKind::Table,
+        start,
+        end,
+        container,
+        table_lines: None,
+    }
+}
+
+/// 行内容序列 → 表格消耗行数（表头 + 分隔 + 表体）。用于容器内剥离前缀后的行。
+fn table_len_contents(rows: &[String]) -> Option<usize> {
+    if rows.len() < 2 {
+        return None;
+    }
+    let head = rows[0].trim_end_matches(['\r', '\n']);
+    if !has_unescaped_pipe(head) {
+        return None;
+    }
+    let delim = rows[1].trim_end_matches(['\r', '\n']);
+    let ncols = parse_delim_row(delim)?.len();
+    if split_row(head).len() != ncols {
+        return None;
+    }
+    let mut n = 2usize;
+    while n < rows.len() {
+        let line = rows[n].trim_end_matches(['\r', '\n']);
+        if line.trim().is_empty() || row_interrupts_table(line) {
+            break;
+        }
+        n += 1;
+    }
+    Some(n)
+}
+
+/// 表体行打断判定（与 `table_rows` 同口径；行内容已剥容器前缀）。
+fn row_interrupts_table(line: &str) -> bool {
+    let lt = line.trim_start();
+    indent_info(line).0 >= 4
+        || is_fence(lt)
+        || atx_level(lt).is_some()
+        || math_marker(line.trim()).is_some()
+        || (indent_le3(line) && is_thematic_break(lt))
+        || quote_marker_pos(line).is_some()
+        || list_mark(line).is_some_and(|m| m.indent_cols <= 3)
+        || html_block_interrupts_paragraph(line)
+}
+
+/// 单行剥离全部 `>` 前缀：返回 (层数, 内容字节偏移, 剩余内容)。
+fn strip_quote_prefix(line: &str) -> Option<(u8, usize, &str)> {
+    let mut rest = line;
+    let mut off = 0usize;
+    let mut depth = 0u8;
+    while let Some(p) = quote_marker_pos(rest) {
+        let mut e = p + 1;
+        if matches!(rest.as_bytes().get(e), Some(b' ') | Some(b'\t')) {
+            e += 1;
+        }
+        rest = &rest[e..];
+        off += e;
+        depth = depth.saturating_add(1);
+    }
+    (depth > 0).then_some((depth, off, rest))
+}
+
+/// 引用内表格识别：只在连续同层 `>` 行上判定，非 `>` 行（懒续行）不得计入表体。
+fn quote_table_len_at(rows: &[Option<(u8, String)>], i: usize) -> Option<(usize, u8)> {
+    let (depth, head) = rows.get(i)?.as_ref()?;
+    let (d2, delim) = rows.get(i + 1)?.as_ref()?;
+    if depth != d2 || !has_unescaped_pipe(head) {
+        return None;
+    }
+    let ncols = parse_delim_row(delim)?.len();
+    if split_row(head).len() != ncols {
+        return None;
+    }
+    let mut n = 2usize;
+    while i + n < rows.len() {
+        let Some((dn, line)) = rows[i + n].as_ref() else {
+            break;
+        };
+        if dn != depth || line.trim().is_empty() || row_interrupts_table(line) {
+            break;
+        }
+        n += 1;
+    }
+    Some((n, *depth))
+}
+
+/// 引用块展开：表格行切成独立 Table 块（同层 `>` 深度入容器），其余保留引用块。
+fn split_quote_tables(buf: &Buffer, start: usize, end: usize, out: &mut Vec<ScannedBlock>) {
+    let rows: Vec<Option<(u8, String)>> = (start..end)
+        .map(|i| {
+            let line = line_text(buf, i);
+            strip_quote_prefix(&line).map(|(d, _, content)| (d, content.to_string()))
+        })
+        .collect();
+    let mut seg_start = 0usize;
+    let mut i = 0usize;
+    while i < rows.len() {
+        if let Some((n, depth)) = quote_table_len_at(&rows, i) {
+            if i > seg_start {
+                out.push(plain_block(
+                    BlockKind::BlockQuote,
+                    start + seg_start,
+                    start + i,
+                ));
+            }
+            out.push(table_block(
+                start + i,
+                start + i + n,
+                BlockContainer {
+                    quote_depth: depth,
+                    ..Default::default()
+                },
+            ));
+            i += n;
+            seg_start = i;
+        } else {
+            i += 1;
+        }
+    }
+    if seg_start < rows.len() {
+        out.push(plain_block(BlockKind::BlockQuote, start + seg_start, end));
+    }
+}
+
+/// 列表项展开：表格行切成独立 Table 块（内容缩进列入容器）。
+fn split_list_tables(
+    buf: &Buffer,
+    start: usize,
+    end: usize,
+    kind: BlockKind,
+    out: &mut Vec<ScannedBlock>,
+) {
+    let first = line_text(buf, start);
+    let mark = list_mark(&first);
+    let list_indent = mark
+        .as_ref()
+        .map_or_else(|| indent_info(&first).0, |m| m.content_col)
+        .min(255) as u8;
+    let contents: Vec<String> = (start..end)
+        .map(|i| {
+            let line = line_text(buf, i);
+            if i == start {
+                match &mark {
+                    Some(m) => line[m.content_start.min(line.len())..].to_string(),
+                    None => line.trim_start().to_string(),
+                }
+            } else {
+                line.trim_start().to_string()
+            }
+        })
+        .collect();
+    let mut seg_start = 0usize;
+    let mut i = 0usize;
+    while i < contents.len() {
+        if let Some(n) = table_len_contents(&contents[i..]) {
+            if i > seg_start {
+                out.push(plain_block(kind.clone(), start + seg_start, start + i));
+            }
+            out.push(table_block(
+                start + i,
+                start + i + n,
+                BlockContainer {
+                    list_indent,
+                    ..Default::default()
+                },
+            ));
+            i += n;
+            seg_start = i;
+        } else {
+            i += 1;
+        }
+    }
+    if seg_start < contents.len() {
+        out.push(plain_block(kind, start + seg_start, end));
+    }
 }
 
 /// 分隔行 → 列对齐；非法（无竖线、空格内容、列数为零）返回 None。
@@ -1742,9 +2383,36 @@ fn push_visible(
             InlineKind::Code | InlineKind::Math => out.push_str(&src[cs..ce]),
             // 脚注引用的可见文本暂取 id（视图层有编号表时按编号渲染）
             InlineKind::FootnoteRef => out.push_str(&src[cs..ce]),
+            InlineKind::Html { tag, .. } => {
+                // `<q>` 的可见文本带双引号（与预览/PDF 的引号语义一致）。
+                if tag == super::model::HtmlTag::Q {
+                    out.push('“');
+                }
+                push_visible(src, &n.children, base, cs, ce, out);
+                if tag == super::model::HtmlTag::Q {
+                    out.push('”');
+                }
+            }
+            // `<br>` 的可见文本是硬换行（表格单元格据此换行）；
+            // `<img>` 在图片不可用（远程/缺失）时降级为 alt 文本占位。
+            InlineKind::HtmlSelfClosed { tag, ref attrs } => match tag {
+                super::model::HtmlTag::Br => out.push('\n'),
+                super::model::HtmlTag::Img => {
+                    out.push_str(
+                        attrs
+                            .alt
+                            .as_deref()
+                            .filter(|a| !a.is_empty())
+                            .unwrap_or("[图片]"),
+                    );
+                }
+                _ => {}
+            },
+            InlineKind::HtmlLiteral => {}
             InlineKind::Strong
             | InlineKind::Emph
             | InlineKind::Strikethrough
+            | InlineKind::Highlight
             | InlineKind::Link
             | InlineKind::Image => {
                 push_visible(src, &n.children, base, cs, ce, out);
@@ -1788,6 +2456,16 @@ mod tests {
                 (BlockKind::Paragraph, 2, 3),
                 (BlockKind::AtxHeading(2), 4, 5),
             ]
+        );
+    }
+
+    #[test]
+    fn single_img_line_is_paragraph_not_html_block() {
+        // 单独成行的 `<img>` 交给行内渲染（缩略图/占位 + alt），不再退化为源码卡。
+        let b = Buffer::new("<img src=\"a.png\" alt=\"图\">\n\n<img src=\"b.png\"> trailing\n");
+        assert_eq!(
+            kinds(&b),
+            vec![(BlockKind::Paragraph, 0, 1), (BlockKind::Paragraph, 2, 3),]
         );
     }
 
@@ -2080,7 +2758,15 @@ mod tests {
     // 围栏任意缩进）；项内缩进代码/HTML 块的内部结构不解析（归 P1/P2）。
 
     fn li(ordered: bool, depth: u8, s: usize, e: usize) -> (BlockKind, usize, usize) {
-        (BlockKind::ListItem { ordered, depth, task: None }, s, e)
+        (
+            BlockKind::ListItem {
+                ordered,
+                depth,
+                task: None,
+            },
+            s,
+            e,
+        )
     }
 
     #[test]
@@ -2204,14 +2890,12 @@ mod tests {
     #[test]
     fn list_item_paragraph_interruption_rules() {
         // Example 304：起始号非 1 的有序标记不打断段落
-        let b = Buffer::new("The number of windows in my house is\n14.  The number of doors is 6.\n");
+        let b =
+            Buffer::new("The number of windows in my house is\n14.  The number of doors is 6.\n");
         assert_eq!(kinds(&b), [(BlockKind::Paragraph, 0, 2)]);
         // 起始号 1 可以打断
         let b = Buffer::new("a\n1. b\n");
-        assert_eq!(
-            kinds(&b),
-            [(BlockKind::Paragraph, 0, 1), li(true, 0, 1, 2)]
-        );
+        assert_eq!(kinds(&b), [(BlockKind::Paragraph, 0, 1), li(true, 0, 1, 2)]);
         // Example 285：空内容标记（`*` / `1.` 独占行）不打断段落
         let b = Buffer::new("foo\n*\n\nfoo\n1.\n");
         assert_eq!(
@@ -2391,7 +3075,10 @@ mod tests {
         let b = Buffer::new("Foo\n--- -\n");
         assert_eq!(
             kinds(&b),
-            [(BlockKind::Paragraph, 0, 1), (BlockKind::ThematicBreak, 1, 2)]
+            [
+                (BlockKind::Paragraph, 0, 1),
+                (BlockKind::ThematicBreak, 1, 2)
+            ]
         );
     }
 
@@ -2406,7 +3093,10 @@ mod tests {
         let b = Buffer::new("Foo\n\n---\n");
         assert_eq!(
             kinds(&b),
-            [(BlockKind::Paragraph, 0, 1), (BlockKind::ThematicBreak, 2, 3)]
+            [
+                (BlockKind::Paragraph, 0, 1),
+                (BlockKind::ThematicBreak, 2, 3)
+            ]
         );
     }
 
@@ -2433,7 +3123,10 @@ mod tests {
         let b = Buffer::new("> Foo\n---\n");
         assert_eq!(
             kinds(&b),
-            [(BlockKind::BlockQuote, 0, 1), (BlockKind::ThematicBreak, 1, 2)]
+            [
+                (BlockKind::BlockQuote, 0, 1),
+                (BlockKind::ThematicBreak, 1, 2)
+            ]
         );
     }
 
@@ -2459,7 +3152,10 @@ mod tests {
         let b = Buffer::new("Foo\n* * *\n");
         assert_eq!(
             kinds(&b),
-            [(BlockKind::Paragraph, 0, 1), (BlockKind::ThematicBreak, 1, 2)]
+            [
+                (BlockKind::Paragraph, 0, 1),
+                (BlockKind::ThematicBreak, 1, 2)
+            ]
         );
     }
 
@@ -2549,6 +3245,67 @@ mod tests {
         assert_eq!(kinds(&b), [(BlockKind::FencedCode(None), 0, 3)]);
     }
 
+    // ===== B3：details 内部真子块 =====
+
+    #[test]
+    fn details_body_splits_into_native_child_blocks() {
+        let doc = "<details>\n<summary>S</summary>\n## H2\n\n- a\n- b\n\n```rust\ncode\n```\n\n| x |\n| --- |\n| 1 |\n\npara\n</details>\n";
+        let b = Buffer::new(doc);
+        let m = meta(&b);
+        // 头块只含开标签 + summary 行；闭标签行不进入任何块。
+        assert_eq!(m[0].start, 0);
+        assert_eq!(m[0].end, 2);
+        assert_eq!(m[0].container.details_depth, 0);
+        let kinds: Vec<BlockKind> = m.iter().map(|x| x.kind.clone()).collect();
+        assert!(matches!(kinds[0], BlockKind::Details { .. }));
+        assert_eq!(kinds[1], BlockKind::AtxHeading(2));
+        assert_eq!(
+            kinds[2],
+            BlockKind::ListItem {
+                ordered: false,
+                depth: 0,
+                task: None
+            }
+        );
+        assert_eq!(
+            kinds[3],
+            BlockKind::ListItem {
+                ordered: false,
+                depth: 0,
+                task: None
+            }
+        );
+        assert!(matches!(kinds[4], BlockKind::FencedCode(Some(ref l)) if l == "rust"));
+        assert_eq!(kinds[5], BlockKind::Table);
+        assert_eq!(kinds[6], BlockKind::Paragraph);
+        // 所有子块带同层归属；覆盖开头到闭标签前。
+        for blk in &m[1..] {
+            assert_eq!(blk.container.details_depth, 1, "{:?}", blk.kind);
+            assert!(blk.container.details);
+        }
+        assert_eq!(m.last().unwrap().end, 16, "正文最后一行（闭标签前）");
+        assert!(
+            m.iter().all(|blk| blk.end <= 16),
+            "闭标签行（16）不属于任何块"
+        );
+    }
+
+    #[test]
+    fn nested_details_uses_monotonic_depth() {
+        let doc = "<details>\n<summary>O</summary>\n<details>\n<summary>I</summary>\nx\n</details>\ny\n</details>\n";
+        let b = Buffer::new(doc);
+        let m = meta(&b);
+        let depths: Vec<u8> = m.iter().map(|x| x.container.details_depth).collect();
+        assert_eq!(depths, [0, 1, 2, 1]);
+        assert!(
+            matches!(m[1].kind, BlockKind::Details { .. }),
+            "嵌套 details 头块"
+        );
+        assert_eq!(m[0].end, 2);
+        // 外层闭标签行（7）不进入任何块；内层闭标签行（5）同样不留痕。
+        assert!(m.iter().all(|blk| blk.end <= 7));
+    }
+
     // ===== GFM 表格（切片 9）：块识别边界 =====
 
     #[test]
@@ -2617,6 +3374,93 @@ mod tests {
         assert_eq!(kinds(&b), [(BlockKind::Paragraph, 0, 3)]);
     }
 
+    // ===== B2：容器内表格（引用 / 列表项 / details） =====
+
+    fn meta(buf: &Buffer) -> Vec<ScannedBlock> {
+        scan_blocks_meta(buf, 0, buf.line_count())
+    }
+
+    #[test]
+    fn quote_inner_table_becomes_table_block() {
+        let b = Buffer::new("> | a | b |\n> | --- | --- |\n> | 1 | 2 |\n");
+        let m = meta(&b);
+        assert_eq!(m.len(), 1);
+        assert_eq!(m[0].kind, BlockKind::Table);
+        assert_eq!((m[0].start, m[0].end), (0, 3));
+        assert_eq!(m[0].container.quote_depth, 1);
+    }
+
+    #[test]
+    fn nested_quote_inner_table_tracks_depth() {
+        let b = Buffer::new("> > | a |\n> > | --- |\n> > | 1 |\n");
+        let m = meta(&b);
+        assert_eq!(m.len(), 1);
+        assert_eq!(m[0].kind, BlockKind::Table);
+        assert_eq!(m[0].container.quote_depth, 2);
+    }
+
+    #[test]
+    fn quote_mixed_text_and_table_splits_blocks() {
+        // GFM 表体行不要求竖线：表格后的 `> 后文` 无空行分隔时仍是表体行，
+        // 因此用引用内空行（`>`）终止表格，验证切段顺序。
+        let b = Buffer::new("> 前文\n> | a |\n> | --- |\n>\n> 后文\n");
+        assert_eq!(
+            kinds(&b),
+            [
+                (BlockKind::BlockQuote, 0, 1),
+                (BlockKind::Table, 1, 3),
+                (BlockKind::BlockQuote, 3, 5),
+            ]
+        );
+    }
+
+    #[test]
+    fn list_item_inner_table_becomes_table_block() {
+        let b = Buffer::new("- | a | b |\n  | --- | --- |\n  | 1 | 2 |\n");
+        let m = meta(&b);
+        assert_eq!(m.len(), 1, "整项即表格：{m:?}");
+        assert_eq!(m[0].kind, BlockKind::Table);
+        assert_eq!((m[0].start, m[0].end), (0, 3));
+        assert_eq!(m[0].container.list_indent, 2);
+    }
+
+    #[test]
+    fn details_inner_table_becomes_child_table_block() {
+        let b = Buffer::new("<details>\n<summary>S</summary>\n| a |\n| --- |\n| 1 |\n</details>\n");
+        let m = meta(&b);
+        assert_eq!(m.len(), 2, "{m:?}");
+        assert!(matches!(m[0].kind, BlockKind::Details { .. }));
+        assert_eq!((m[0].start, m[0].end), (0, 2));
+        assert_eq!(m[1].kind, BlockKind::Table);
+        assert_eq!((m[1].start, m[1].end), (2, 6));
+        assert!(m[1].container.details);
+        assert_eq!(m[1].table_lines, Some(3));
+    }
+
+    #[test]
+    fn non_table_container_content_is_not_reclassified() {
+        // 引用内普通段落（含竖线但不构成表格）仍是引用块
+        let b = Buffer::new("> a | b\n> --- | not-a-delim\n");
+        assert_eq!(kinds(&b), [(BlockKind::BlockQuote, 0, 2)]);
+        // 列表项内普通文本 + 竖线仍为列表项
+        let b = Buffer::new("- a | b\n  --- | ???\n");
+        assert_eq!(
+            kinds(&b),
+            [(
+                BlockKind::ListItem {
+                    ordered: false,
+                    depth: 0,
+                    task: None,
+                },
+                0,
+                2,
+            )]
+        );
+        // details 内非表格内容保持整块
+        let b = Buffer::new("<details>\n<summary>S</summary>\nplain\n</details>\n");
+        assert!(matches!(kinds(&b)[0].0, BlockKind::Details { .. }));
+    }
+
     // ===== 链接引用定义（0c P0-1）：识别边界 =====
 
     #[test]
@@ -2646,23 +3490,20 @@ mod tests {
         let b = Buffer::new("[foo]:\n/url\n\"title\"\nafter\n");
         assert_eq!(
             kinds(&b),
-            [
-                (BlockKind::LinkRefDef, 0, 3),
-                (BlockKind::Paragraph, 3, 4)
-            ]
+            [(BlockKind::LinkRefDef, 0, 3), (BlockKind::Paragraph, 3, 4)]
         );
     }
 
     #[test]
     fn link_ref_def_invalid_cases_fall_back_to_paragraph() {
         for doc in [
-            "[foo]: /url \"title\" ok\n", // title 后尾随垃圾（Example 190）
+            "[foo]: /url \"title\" ok\n",  // title 后尾随垃圾（Example 190）
             "[foo]: /url\n\"title\" ok\n", // 换行后引号开头但非纯 title 行（Example 193）
-            "[foo]: <bar>(baz)\n",      // title 与 dest 间无空白（Example 201）
-            "[foo]:\n",                 // 缺 dest
-            "[foo]: /url \"unclosed\n", // title 未闭合
-            "[]: /url\n",               // 空 label
-            "[foo]: /url(baz\n",        // 裸 dest 括号不平衡
+            "[foo]: <bar>(baz)\n",         // title 与 dest 间无空白（Example 201）
+            "[foo]:\n",                    // 缺 dest
+            "[foo]: /url \"unclosed\n",    // title 未闭合
+            "[]: /url\n",                  // 空 label
+            "[foo]: /url(baz\n",           // 裸 dest 括号不平衡
         ] {
             let b = Buffer::new(doc);
             assert!(
@@ -2733,18 +3574,33 @@ mod tests {
     #[test]
     fn indented_code_tab_stops() {
         // \t 从列 0 推进到列 4：与 4 空格等价
-        assert_eq!(kinds(&Buffer::new("\tfoo\n\tbar\n")), [(BlockKind::IndentedCode, 0, 2)]);
+        assert_eq!(
+            kinds(&Buffer::new("\tfoo\n\tbar\n")),
+            [(BlockKind::IndentedCode, 0, 2)]
+        );
         // 2 空格 + \t 同样到列 4
-        assert_eq!(kinds(&Buffer::new("  \tfoo\n")), [(BlockKind::IndentedCode, 0, 1)]);
+        assert_eq!(
+            kinds(&Buffer::new("  \tfoo\n")),
+            [(BlockKind::IndentedCode, 0, 1)]
+        );
         // 4 空格 + \t 的续行
-        assert_eq!(kinds(&Buffer::new("    foo\n\tbar\n")), [(BlockKind::IndentedCode, 0, 2)]);
+        assert_eq!(
+            kinds(&Buffer::new("    foo\n\tbar\n")),
+            [(BlockKind::IndentedCode, 0, 2)]
+        );
     }
 
     #[test]
     fn indented_code_precedes_block_markers() {
         // Example 48/69：缩进的分隔线/ATX 是代码，不是块标记
-        assert_eq!(kinds(&Buffer::new("    ***\n")), [(BlockKind::IndentedCode, 0, 1)]);
-        assert_eq!(kinds(&Buffer::new("    # foo\n")), [(BlockKind::IndentedCode, 0, 1)]);
+        assert_eq!(
+            kinds(&Buffer::new("    ***\n")),
+            [(BlockKind::IndentedCode, 0, 1)]
+        );
+        assert_eq!(
+            kinds(&Buffer::new("    # foo\n")),
+            [(BlockKind::IndentedCode, 0, 1)]
+        );
     }
 
     #[test]
@@ -2787,9 +3643,15 @@ mod tests {
     #[test]
     fn fence_info_backticks_invalid_for_backtick_fence() {
         // Example 138：``` ``` 的 info 含反引号 → 段落
-        assert_eq!(kinds(&Buffer::new("``` ```\naaa\n")), [(BlockKind::Paragraph, 0, 2)]);
+        assert_eq!(
+            kinds(&Buffer::new("``` ```\naaa\n")),
+            [(BlockKind::Paragraph, 0, 2)]
+        );
         // Example 145：``` aa ``` 同理
-        assert_eq!(kinds(&Buffer::new("``` aa ```\nfoo\n")), [(BlockKind::Paragraph, 0, 2)]);
+        assert_eq!(
+            kinds(&Buffer::new("``` aa ```\nfoo\n")),
+            [(BlockKind::Paragraph, 0, 2)]
+        );
         // ~~~ 围栏的 info 可含反引号（Example 146）
         assert_eq!(
             kinds(&Buffer::new("~~~ aa ``` ~~~\nfoo\n~~~\n")),
@@ -2801,7 +3663,10 @@ mod tests {
     fn fence_requires_three_markers() {
         // `` 只有两个反引号：不是围栏
         assert!(!is_fence("``"));
-        assert_eq!(kinds(&Buffer::new("``\nfoo\n``\n")), [(BlockKind::Paragraph, 0, 3)]);
+        assert_eq!(
+            kinds(&Buffer::new("``\nfoo\n``\n")),
+            [(BlockKind::Paragraph, 0, 3)]
+        );
     }
 
     // ===== 原始 HTML 块（CommonMark §4.6）：识别边界 =====
@@ -2810,20 +3675,14 @@ mod tests {
     fn html_block_type6_div_starts_block() {
         // `<div>` 在类型 6 块级标签列表中；空行终止
         let b = Buffer::new("<div>\nfoo\n</div>\n");
-        assert_eq!(
-            kinds(&b),
-            [(BlockKind::HtmlBlock, 0, 3)]
-        );
+        assert_eq!(kinds(&b), [(BlockKind::HtmlBlock, 0, 3)]);
     }
 
     #[test]
     fn html_block_table_not_type6() {
         // `table` 不在类型 6 列表；`<table>` 独占行为类型 7
         let b = Buffer::new("<table>\nfoo\n</table>\n");
-        assert_eq!(
-            kinds(&b),
-            [(BlockKind::HtmlBlock, 0, 3)]
-        );
+        assert_eq!(kinds(&b), [(BlockKind::HtmlBlock, 0, 3)]);
     }
 
     #[test]
@@ -2842,5 +3701,75 @@ mod tests {
             kinds(&b),
             [(BlockKind::HtmlBlock, 0, 2), (BlockKind::Paragraph, 2, 3)]
         );
+    }
+
+    // ===== 批次 3：白名单 details 块 =====
+
+    #[test]
+    fn details_block_basic_with_summary() {
+        // 核心用例：<details><summary>展开</summary>\n\n## 子标题\n\n</details>
+        // 整个区间被包成一个 Details 块（内部嵌套块级内容暂时不递归拆分）
+        let b = Buffer::new("<details>\n<summary>展开</summary>\n\n## 子标题\n\n</details>\n");
+        let ks = kinds(&b);
+        assert_eq!(ks.len(), 1);
+        match &ks[0].0 {
+            BlockKind::Details {
+                summary,
+                open_default,
+            } => {
+                assert_eq!(summary, "展开");
+                assert!(!*open_default);
+            }
+            other => panic!("expected Details, got {:?}", other),
+        }
+        // 块应包含所有 6 行（含尾空行？scan_blocks 通常不吞尾空行）
+        assert_eq!(ks[0].2, 6);
+    }
+
+    #[test]
+    fn details_block_open_attr() {
+        let b = Buffer::new("<details open>\n<summary>默认展开</summary>\n\nfoo\n</details>\n");
+        let ks = kinds(&b);
+        assert!(matches!(
+            &ks[0].0,
+            BlockKind::Details {
+                open_default: true,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn details_block_default_closed() {
+        let b = Buffer::new("<details>\n<summary>S</summary>\n\nx\n</details>\n");
+        let ks = kinds(&b);
+        assert!(matches!(
+            &ks[0].0,
+            BlockKind::Details {
+                open_default: false,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn details_block_no_summary_still_valid() {
+        let b = Buffer::new("<details>\n\nfoo\n</details>\n");
+        let ks = kinds(&b);
+        assert!(matches!(&ks[0].0, BlockKind::Details { summary, .. } if summary.is_empty()));
+    }
+
+    #[test]
+    fn non_whitelist_summary_without_details_is_html_block() {
+        // 没有外层 details 的 <summary> —— 仍然在 BLOCK_LEVEL_TAGS 里 → 进 HtmlBlock
+        let b = Buffer::new("<summary>单独</summary>\nfoo\n");
+        assert_eq!(kinds(&b), [(BlockKind::HtmlBlock, 0, 2)]);
+    }
+
+    #[test]
+    fn html_block_type6_div_still_html_block() {
+        // <div> 仍是 HtmlBlock（白名单外），details 白名单优先不影响它
+        let b = Buffer::new("<div>\nfoo\n</div>\n");
+        assert_eq!(kinds(&b), [(BlockKind::HtmlBlock, 0, 3)]);
     }
 }

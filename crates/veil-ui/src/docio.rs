@@ -15,7 +15,7 @@ pub fn decode(bytes: &[u8]) -> Result<(String, bool), String> {
     // String::from_utf8 逐字节校验：任何非法序列（含孤立代理字节、截断多字节）都拒绝
     String::from_utf8(rest.to_vec())
         .map(|t| (t, bom))
-        .map_err(|_| "文件不是有效的 UTF-8 编码".to_string())
+        .map_err(|_| crate::i18n::t(crate::i18n::Key::ErrNotUtf8).to_string())
 }
 
 /// (文本, 是否带 BOM) → 文件字节。`decode ∘ encode` 为恒等。

@@ -1237,6 +1237,7 @@ impl<'a> Ctx<'a> {
     }
 
     /// details 头块的 summary 行（B3）：PDF 恒展开，只画标题行，正文由子块排版。
+    /// 箭头用 ▼（U+25BC）而非 ▾（U+25BE），保证微软雅黑等系统字体能渲染。
     fn details_summary(&mut self, summary: &str) {
         let st = Style {
             size: 10.0,
@@ -1244,7 +1245,7 @@ impl<'a> Ctx<'a> {
             bold: true,
             ..Style::body()
         };
-        let mut items = vec![LItem::Ch('▾', st), LItem::Ch(' ', st)];
+        let mut items = vec![LItem::Ch('▼', st), LItem::Ch(' ', st)];
         items.extend(summary.chars().map(|c| LItem::Ch(c, st)));
         let size = 10.0;
         for l in fill_lines(items, self.max_w(), self.metrics) {
@@ -2086,6 +2087,45 @@ mod tests {
             "后续文本基线 {next_text_y} 应在图片底部 {} 之下",
             img_y + img_h
         );
+    }
+
+    /// B3：details 正文子块（Paragraph / BlockQuote / 列表 / 表格…）必须出现在 PDF 里。
+    /// 真机曾出现只有 summary 标题行、正文完全丢失的退化。
+    #[test]
+    fn details_body_blocks_render_in_pdf() {
+        let md = "# H\n\n\
+                  <details>\n\
+                  <summary>S</summary>\n\
+                  para inside\n\n\
+                  > quote inside\n\
+                  </details>\n\n\
+                  tail\n";
+        let session = Session::open(md);
+        let doc = lay_with(&session, false);
+        let text = all_text(&doc);
+        assert!(text.contains("para inside"), "details 内段落必须进 PDF: {text}");
+        assert!(text.contains("quote inside"), "details 内引用必须进 PDF: {text}");
+        assert!(text.contains("tail"), "details 后的尾部段落必须进 PDF: {text}");
+    }
+
+    /// 真机 b7-outline.md 复刻：details 内正文段落 + 前后空行。
+    #[test]
+    fn details_from_real_machine_walkthrough_renders_body() {
+        let md = "## 2.3 折叠块\n\n\
+                  <details>\n\
+                  <summary>展开查看中文摘要</summary>\n\n\
+                  折叠块内部的中文正文也应出现在 PDF 中。\n\n\
+                  </details>\n\n\
+                  ## 2.4 图片\n";
+        let session = Session::open(md);
+        let doc = lay_with(&session, false);
+        let text = all_text(&doc);
+        assert!(text.contains("展开查看中文摘要"), "summary 必须进 PDF: {text}");
+        assert!(
+            text.contains("折叠块内部的中文正文也应出现在 PDF 中。"),
+            "details 内正文必须进 PDF: {text}"
+        );
+        assert!(text.contains("2.4 图片"), "后续块必须进 PDF: {text}");
     }
 
     /// 证据生成（手动）：用真实字体 + 媒体管线把样例渲染为 `target/wave4-sample.pdf`。

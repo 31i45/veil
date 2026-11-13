@@ -31,6 +31,7 @@ use std::time::{Duration, Instant};
 use veil_core::{BlockId, BlockKind, InlineKind, Range};
 use winit::dpi::PhysicalPosition;
 use winit::keyboard::Key as WKey;
+use winit::keyboard::{KeyCode, NamedKey, PhysicalKey};
 
 struct NoClip;
 impl Clipboard for NoClip {
@@ -901,8 +902,8 @@ fn image_loads_relative_to_document_and_caches() {
         panic!("应为图片键")
     };
     assert_eq!(Path::new(key), Path::new("dir/img/p.png"));
-    // B4：100×50 行内图高度上限 2 行（2×22=44），等比缩放为 88×44。
-    assert_eq!((l.imgs[0].width, l.imgs[0].height), (88, 44));
+    // A：行内图限高提到 4 行（4×22=88），100×50 原图在上限内 → 不缩放。
+    assert_eq!((l.imgs[0].width, l.imgs[0].height), (100, 50));
     assert!(
         !l.layout_text().contains("alt"),
         "加载成功：整节点由占位图替换"
@@ -932,6 +933,126 @@ fn image_wider_than_content_scales_proportionally() {
             a.cache.layouts[&id].imgs[0].height
         ),
         (756, 21)
+    );
+}
+
+/// 取指定文本所在的块布局（测试辅助：按块文本定位，避开 BlockId 细节）。
+fn layout_of_text<'a>(a: &'a App, needle: &str) -> &'a crate::view::BlockLayout {
+    let session = a.editor.session();
+    let (id, _, _) = session
+        .blocks()
+        .into_iter()
+        .find(|(_, _, r)| session.text_slice(*r).is_some_and(|t| t.contains(needle)))
+        .expect("应存在目标块");
+    &a.cache.layouts[&id]
+}
+
+/// B4 回归：整块仅图片（含尾随换行）→ 按版心宽/视口高放大，不再受 4 行限高。
+#[test]
+fn standalone_markdown_image_uses_viewport_height() {
+    let (mut a, _) = app_with_images(
+        "前文\n\n![本地图](p.png)\n",
+        Some("dir/doc.md"),
+        &[("dir/p.png", 800, 600)],
+    );
+    a.window_state.test_size = Some((1280, 800));
+    a.ensure_layouts_all();
+    let l = layout_of_text(&a, "![本地图]");
+    let (w, h) = (l.imgs[0].width, l.imgs[0].height);
+    assert!(w >= 600, "独占图应接近版心宽（实测 {w}）");
+    assert!(
+        h as f32 > 4.0 * a.engine.doc_line_height() * a.input_state.scale,
+        "独占图高度应超过行内 4 行限高（实测 {h}）"
+    );
+}
+
+/// B4 回归：图片后另起一行的正文不影响该图独占自己的视觉行（真机复现形状）。
+#[test]
+fn image_alone_on_its_visual_line_uses_viewport_height() {
+    // 审计文档末块实际为 `![本地图](p.png)\nX`：整块非纯图片，但图片仍独占一行。
+    let (mut a, _) = app_with_images(
+        "前文\n\n![本地图](p.png)\nX\n",
+        Some("dir/doc.md"),
+        &[("dir/p.png", 800, 600)],
+    );
+    a.window_state.test_size = Some((1280, 800));
+    a.ensure_layouts_all();
+    let l = layout_of_text(&a, "![本地图]");
+    assert!(
+        l.imgs[0].width >= 600,
+        "图片所在视觉行只有图片时应放大（实测 {}）",
+        l.imgs[0].width
+    );
+}
+
+/// B4 回归：同一行内有正文的图片仍受 4 倍行高限制。
+#[test]
+fn inline_image_still_capped_by_four_lines() {
+    let (mut a, _) = app_with_images(
+        "a ![alt](p.png) b",
+        Some("dir/doc.md"),
+        &[("dir/p.png", 800, 600)],
+    );
+    a.window_state.test_size = Some((1280, 800));
+    a.ensure_layouts_all();
+    let l = layout_of_text(&a, "a ![alt]");
+    let line_h = a.engine.doc_line_height() * a.input_state.scale;
+    let cap = (crate::tokens::doc::IMG_INLINE_LINES * line_h).round() as u32;
+    assert_eq!(l.imgs[0].height, cap, "行内高图应夹到 4 行");
+    assert!(l.imgs[0].width < 600, "行内图不应占满版心");
+}
+
+/// B4 回归：独占一行的 `<img width>` 按显式逻辑像素显示（乘 DPI 转物理像素），
+/// 且不再被行内行高限制。
+#[test]
+fn standalone_html_img_honors_explicit_logical_width() {
+    let (mut a, _) = app_with_images(
+        "前文\n\n<img src=\"p.png\" width=\"320\">\n",
+        Some("dir/doc.md"),
+        &[("dir/p.png", 800, 600)],
+    );
+    a.window_state.test_size = Some((1280, 800));
+    a.ensure_layouts_all();
+    let l = layout_of_text(&a, "<img src");
+    assert_eq!(
+        (l.imgs[0].width, l.imgs[0].height),
+        (320, 240),
+        "scale=1 时 320 逻辑像素 = 320 物理像素"
+    );
+
+    // DPI 1.25：仍显示 320 逻辑像素（= 400 物理像素），不被行内 4 行限高压回。
+    a.input_state.scale = 1.25;
+    a.input_state.dpi_scale = 1.25;
+    a.ensure_layouts_all();
+    let l = layout_of_text(&a, "<img src");
+    assert_eq!(
+        (l.imgs[0].width, l.imgs[0].height),
+        (400, 300),
+        "显式尺寸是 CSS 逻辑像素，需随 DPI 放大"
+    );
+}
+
+/// B4 回归：窗口高度变化 → 独占图片尺寸随之变化（布局缓存键覆盖视口高度）。
+#[test]
+fn window_height_change_resizes_standalone_image() {
+    let (mut a, _) = app_with_images(
+        "前文\n\n![本地图](p.png)\n",
+        Some("dir/doc.md"),
+        &[("dir/p.png", 800, 600)],
+    );
+    a.window_state.test_size = Some((1280, 800));
+    a.ensure_layouts_all();
+    let tall = layout_of_text(&a, "![本地图]").imgs[0].height;
+
+    a.window_state.test_size = Some((1280, 400));
+    a.ensure_layouts_all();
+    let short = layout_of_text(&a, "![本地图]").imgs[0].height;
+
+    assert!(short < tall, "窗口变矮后独占图应变小: {tall} -> {short}");
+    assert_eq!(
+        short,
+        a.image_max_height().round() as u32,
+        "变矮后按新视口 80% 等比缩放"
     );
 }
 
@@ -5925,6 +6046,22 @@ fn trailing_whitespace_preserved_through_edit_save() {
     assert_eq!(text, format!("{doc}x"), "尾随空格/tab 不得被修剪");
 }
 
+/// 块索引派生的有序编号必须真正传入排版（非激活态显示 2./3.）。
+#[test]
+fn ordered_list_derived_numbers_reach_painted_layout() {
+    let store = MemStore::default();
+    let mut a = app("1. a\n1. b\n1. c", None, false, &store);
+    a.perform_action(Action::Doc(Intent::MoveDocStart));
+    a.ensure_layouts_visible();
+    let texts: Vec<String> = a
+        .index
+        .blocks
+        .iter()
+        .map(|g| a.cache.layouts[&g.id].layout_text().to_string())
+        .collect();
+    assert_eq!(texts, ["1. a", "2. b", "3. c"], "派生编号须传入排版层");
+}
+
 /// 2c 源码真值 · 列表标记重排：有序列表回车只给新行递增标记，
 /// 既有项编号（含故意乱序的 1./1./3.）绝不重排。
 #[test]
@@ -10611,6 +10748,44 @@ fn ctrl_combo_ignores_winit_text_stripped_of_ctrl() {
 }
 
 #[test]
+fn ctrl_comma_opens_settings() {
+    // 回归：map_key 曾只特判 `/`，`,` 落到 None，Ctrl+, 静默失效（菜单却标注了该快捷键）。
+    // 逻辑键与物理键任一命中即可（布局/IME 差异）。
+    assert_eq!(
+        crate::interaction::ctrl_punctuation(
+            &WKey::Character(",".into()),
+            PhysicalKey::Code(KeyCode::Comma)
+        ),
+        Some(Key::Comma)
+    );
+    assert_eq!(
+        crate::interaction::ctrl_punctuation(
+            &WKey::Named(NamedKey::Space),
+            PhysicalKey::Code(KeyCode::Comma)
+        ),
+        Some(Key::Comma),
+        "逻辑键不是字符时仍按物理键识别"
+    );
+    assert_eq!(
+        crate::interaction::ctrl_punctuation(
+            &WKey::Character(",".into()),
+            PhysicalKey::Code(KeyCode::Period)
+        ),
+        Some(Key::Comma),
+        "布局把逗号放到别的物理键时按字符识别"
+    );
+    // 无 Ctrl 的 `,` 不是快捷键（文本分支承载）
+    assert_eq!(crate::input::translate(Key::Comma, Mods::default()), None);
+
+    let store = MemStore::default();
+    let mut a = app("x\n", None, false, &store);
+    a.input_state.mods.ctrl = true;
+    a.route_key(Key::Comma);
+    a.input_state.mods.ctrl = false;
+    assert!(a.ui_state.settings.is_some(), "Ctrl+, 打开设置模态");
+}
+
+#[test]
 fn fullscreen_headless_noop_and_menu_path() {
     let store = MemStore::default();
     let mut a = app("x\n", Some("a.md"), false, &store);
@@ -12998,4 +13173,78 @@ fn startup_error_mnemonic_o() {
     a.route_key(Key::O);
     assert!(a.ui_state.modal.is_none(), "O 助记符命中「打开其他文件」");
     assert!(!a.window_state.exit_requested, "助记符出口不退出窗口");
+}
+
+// ===== 光标闪烁状态机（无 GUI，直接驱动 tick） =====
+
+/// 隐藏半周期内收到输入活跃信号：下一次 tick 必须把光标拉回可见。
+#[test]
+fn blink_activity_restores_visibility_in_hidden_half_cycle() {
+    let store = MemStore::default();
+    let mut a = app("hello", Some("a.md"), false, &store);
+    let t0 = Instant::now();
+    a.tick(t0);
+    assert!(a.cursor_visible, "初始 tick 应起算并显示光标");
+    // 进入不可见半周期
+    a.cursor_visible = false;
+    a.last_blink = Some(t0);
+    a.note_caret_activity();
+    assert!(a.cursor_visible, "活跃信号须立即恢复可见");
+    assert!(a.last_blink.is_none(), "周期起点交回 tick 重新起算");
+    a.tick(t0 + Duration::from_millis(10));
+    assert!(a.cursor_visible, "下一次 tick 后仍保持可见");
+}
+
+/// 输入活跃后 599ms 不翻转、601ms 翻转；重置后以新起点重新计周期。
+#[test]
+fn blink_flips_600ms_after_last_activity() {
+    let store = MemStore::default();
+    let mut a = app("hello", Some("a.md"), false, &store);
+    let t0 = Instant::now();
+    a.tick(t0);
+    a.tick(t0 + Duration::from_millis(599));
+    assert!(a.cursor_visible, "599ms 未到期，不翻转");
+    a.tick(t0 + Duration::from_millis(601));
+    assert!(!a.cursor_visible, "601ms 到期后翻转");
+
+    // 活跃信号把周期起点重置到 610ms 这一刻
+    a.note_caret_activity();
+    a.tick(t0 + Duration::from_millis(610));
+    assert!(a.cursor_visible);
+    a.tick(t0 + Duration::from_millis(1205)); // 610 + 595
+    assert!(a.cursor_visible, "重置后不得沿用旧到期点（610+600 才到期）");
+    a.tick(t0 + Duration::from_millis(1215)); // 610 + 605
+    assert!(!a.cursor_visible, "以新起点计满 600ms 才翻转");
+}
+
+/// IME 组合期间强制可见且不翻转（blink 不活跃）。
+#[test]
+fn blink_forced_visible_while_preedit_active() {
+    let store = MemStore::default();
+    let mut a = app("hello", Some("a.md"), false, &store);
+    a.editor.set_preedit("ni".into(), None);
+    a.cursor_visible = false;
+    let t0 = Instant::now();
+    a.tick(t0);
+    assert!(a.cursor_visible, "preedit 期间强制可见");
+    a.tick(t0 + Duration::from_millis(1200));
+    assert!(a.cursor_visible, "preedit 期间不得翻转");
+    assert!(a.last_blink.is_none());
+}
+
+/// 仅按键（Ctrl：caret 不变）也要恢复可见——tick 的位移检测覆盖不到这类输入。
+#[test]
+fn blink_key_without_caret_move_restores_visibility() {
+    let store = MemStore::default();
+    let mut a = app("hello", Some("a.md"), false, &store);
+    let t0 = Instant::now();
+    a.tick(t0);
+    a.cursor_visible = false;
+    a.last_blink = Some(t0);
+    let caret = a.editor.caret();
+    // 模拟 on_key 在 map_key 之前调用统一入口（Ctrl 不产生 Key 映射，caret 不变）
+    a.note_caret_activity();
+    a.tick(t0 + Duration::from_millis(5));
+    assert_eq!(a.editor.caret(), caret, "Ctrl 不移动 caret");
+    assert!(a.cursor_visible, "caret 不变也必须恢复可见");
 }

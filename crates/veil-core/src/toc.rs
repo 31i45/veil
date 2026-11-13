@@ -1,6 +1,6 @@
 //! 文档目录（Table of Contents）生成与 `[TOC]` 标记检测。纯函数，零 GUI 依赖。
 //!
-//! - [`generate_toc`] 从 (级别, 可见文本) 流生成 Markdown 有序列表；
+//! - [`generate_toc`] 从 (级别, 可见文本) 流生成 Markdown 无序列表；
 //! - [`is_toc_marker`] 判定段落块的 trim 内容是否为 TOC 锚点标记。
 
 use crate::slug::{heading_slug, heading_slugs};
@@ -13,7 +13,7 @@ pub fn is_toc_marker(text: &str) -> bool {
     lower == "[toc]" || lower == "[[toc]]"
 }
 
-/// 生成 Markdown 有序列表形式的 TOC 文本。
+/// 生成 Markdown 无序列表形式的 TOC 文本。
 ///
 /// # 参数
 /// `headings`：`(level: u8, visible_text: &str)` 迭代器；level 预期为 1–6。
@@ -22,7 +22,8 @@ pub fn is_toc_marker(text: &str) -> bool {
 /// - 跳过可见文本为空或纯标点/符号的条目（其 slug 为空）；
 /// - 使用 [`heading_slugs`] 进行全局去重（`a`, `a-1`, `a-2` …）；
 /// - 嵌套缩进 = 每级 3 空格（1 级无缩进，2 级 3 空格，3 级 6 空格 …）；
-/// - 列表项永远从 1 开始（Markdown 有序列表的数字是视觉占位，渲染时自动编号）；
+/// - 列表项统一用 `-`：排版层按源码列表标记显隐，不做有序列表自动编号，
+///   写 `1.` 会让每个条目都显示 `1.`（`generate_toc` 的输出是源码文本，不是渲染结果）；
 /// - 可见文本中的 `[` / `]` 在链接展示部分反斜杠转义（锚点 slug 不变）；
 /// - 空迭代器 → 返回空字符串。
 pub fn generate_toc<'a>(headings: impl Iterator<Item = (u8, &'a str)>) -> String {
@@ -61,7 +62,7 @@ pub fn generate_toc<'a>(headings: impl Iterator<Item = (u8, &'a str)>) -> String
         let indent_spaces = 3usize.saturating_mul(levels.len());
         levels.push(*effective_level);
         out.push_str(&" ".repeat(indent_spaces));
-        out.push_str("1. [");
+        out.push_str("- [");
         out.push_str(&escape_brackets(text));
         out.push_str("](#");
         out.push_str(slug);
@@ -101,69 +102,70 @@ mod tests {
     #[test]
     fn single_h1() {
         let got = generate_toc(vec![(1, "Intro")].into_iter());
-        assert_eq!(got, "1. [Intro](#intro)");
+        assert_eq!(got, "- [Intro](#intro)");
     }
 
     #[test]
     fn nested_h1_h2_h3() {
-        let got = generate_toc(
-            vec![(1, "Top"), (2, "Mid"), (3, "Deep")].into_iter(),
-        );
+        let got = generate_toc(vec![(1, "Top"), (2, "Mid"), (3, "Deep")].into_iter());
         assert_eq!(
             got,
-            "1. [Top](#top)\n   1. [Mid](#mid)\n      1. [Deep](#deep)"
+            "- [Top](#top)\n   - [Mid](#mid)\n      - [Deep](#deep)"
         );
     }
 
     #[test]
     fn duplicate_slugs_deduped() {
-        let got = generate_toc(
-            vec![(1, "A"), (2, "A"), (3, "A")].into_iter(),
-        );
-        assert_eq!(
-            got,
-            "1. [A](#a)\n   1. [A](#a-1)\n      1. [A](#a-2)"
-        );
+        let got = generate_toc(vec![(1, "A"), (2, "A"), (3, "A")].into_iter());
+        assert_eq!(got, "- [A](#a)\n   - [A](#a-1)\n      - [A](#a-2)");
     }
 
     #[test]
     fn empty_visible_text_skipped() {
-        let got = generate_toc(
-            vec![(1, ""), (2, "!!!"), (3, "Real")].into_iter(),
-        );
-        assert_eq!(got, "1. [Real](#real)");
+        let got = generate_toc(vec![(1, ""), (2, "!!!"), (3, "Real")].into_iter());
+        assert_eq!(got, "- [Real](#real)");
     }
 
     #[test]
     fn mixed_levels_with_gaps() {
         // h1 → h3（跳过 h2）：h3 仍在 h1 下缩进 3 空格
         let got = generate_toc(vec![(1, "A"), (3, "B")].into_iter());
-        assert_eq!(got, "1. [A](#a)\n   1. [B](#b)");
+        assert_eq!(got, "- [A](#a)\n   - [B](#b)");
     }
 
     #[test]
     fn gap_after_first_nests_by_depth_not_level() {
         // 从 h2 开始：h2 入栈 → indent=0；h4 作为 h2 的子级 → indent=3
         let got = generate_toc(vec![(2, "A"), (4, "B")].into_iter());
-        assert_eq!(got, "1. [A](#a)\n   1. [B](#b)");
+        assert_eq!(got, "- [A](#a)\n   - [B](#b)");
     }
 
     #[test]
     fn level_drop_pops_stack() {
         // h1→h2→h3→h2：最后一个 h2 会 pop 掉 h3 和中间的 h2，push 新 h2 → indent=3
-        let got = generate_toc(
-            vec![(1, "A"), (2, "B"), (3, "C"), (2, "D")].into_iter(),
-        );
+        let got = generate_toc(vec![(1, "A"), (2, "B"), (3, "C"), (2, "D")].into_iter());
         assert_eq!(
             got,
-            "1. [A](#a)\n   1. [B](#b)\n      1. [C](#c)\n   1. [D](#d)"
+            "- [A](#a)\n   - [B](#b)\n      - [C](#c)\n   - [D](#d)"
         );
     }
 
     #[test]
     fn brackets_in_heading_text_are_escaped_in_display_only() {
         let got = generate_toc(vec![(1, "Hea[ding]")].into_iter());
-        assert_eq!(got, r#"1. [Hea\[ding\]](#heading)"#);
+        assert_eq!(got, r#"- [Hea\[ding\]](#heading)"#);
+    }
+
+    #[test]
+    fn nested_bracket_headings_escaped_and_slugs_unaffected() {
+        // 多个含 `[`/`]` 的标题：只转义链接展示文本，锚点 slug 仍按原文生成/去重。
+        let got = generate_toc(vec![(1, "[A]"), (2, "B [C]"), (3, "[A]")].into_iter());
+        assert_eq!(
+            got,
+            r#"- [\[A\]](#a)
+   - [B \[C\]](#b-c)
+      - [\[A\]](#a-1)"#
+        );
     }
 
     #[test]
@@ -196,6 +198,6 @@ mod tests {
     #[test]
     fn setext_heading_level_two() {
         let got = generate_toc(vec![(1, "Top"), (2, "Setext H2")].into_iter());
-        assert_eq!(got, "1. [Top](#top)\n   1. [Setext H2](#setext-h2)");
+        assert_eq!(got, "- [Top](#top)\n   - [Setext H2](#setext-h2)");
     }
 }

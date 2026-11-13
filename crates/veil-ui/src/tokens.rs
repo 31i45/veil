@@ -326,10 +326,17 @@ pub(crate) mod doc {
     pub const BLANK_LINE_LINES: f32 = 1.0;
     /// 文末可点击输入空间（以正文行高为单位，B5）：末行下方至少保留 2 行空白。
     pub const BOTTOM_PAD_LINES: f32 = 2.0;
-    /// 行内图片高度上限（以正文行高为单位，B4）。
-    pub const IMG_INLINE_LINES: f32 = 2.0;
-    /// 独占一行（块级 / 段落仅含图片）图片高度上限（行高倍数，B4）。
-    pub const IMG_STANDALONE_LINES: f32 = 6.0;
+    /// 行内图片（与文字同段）高度上限（以正文行高为单位）：4 行——既能让
+    /// 小图在行内可辨认，又不至于把整段行距撑得过大。仅缩小、不放大：
+    /// 原图小于该上限时按原尺寸显示（见 `view::fit_size_box` 的 1.0 系数）。
+    pub const IMG_INLINE_LINES: f32 = 4.0;
+    /// 独占一行（块级 / 段落仅含图片）图片的高度上限占「窗口可视高度」的比例。
+    /// 不再用行高倍数：固定 6 行会把正常截图压成小黑块；改用视口比例后
+    /// 大图能占满一屏的 80%，同时避免超过一屏导致整块不可见。
+    pub const IMG_STANDALONE_VIEWPORT_RATIO: f32 = 0.8;
+    /// 显式 `width`/`height` 的极大值上限（版心可用宽的倍数）：作者写了离谱尺寸时
+    /// 仍只按此上限等比收拢，防止单张图撑出数屏宽的空白。
+    pub const IMG_EXPLICIT_MAX_RATIO: f32 = 4.0;
     /// 表格单元格内图片高度上限（行高倍数，B4）。
     pub const IMG_TABLE_LINES: f32 = 1.5;
     /// 代码卡外部内边距：左右 / 上下（绘制底色外扩）。

@@ -13,9 +13,9 @@ pub(crate) mod modal;
 pub(crate) mod outline;
 pub(crate) mod quick_open;
 pub(crate) mod search;
-pub(crate) mod settings;
 mod search_strategy;
 mod search_view;
+pub(crate) mod settings;
 mod style;
 pub(crate) mod table;
 mod table_strategy;
@@ -26,9 +26,12 @@ pub(crate) use cache::{Cache, LayoutKey, Memo, Revs, TableKey};
 pub use frame::Frame;
 pub(crate) use history::History;
 #[cfg(test)]
+pub(crate) use layout::fit_size_box;
+#[cfg(test)]
 pub(crate) use layout::MAX_BLOCK_BYTES;
-pub(crate) use layout::{block_is_image_only, fit_size_box};
 pub(crate) use layout::{cell_math_spans, inline_details_spans, node_active, oversize_notice};
+pub(crate) use layout::{image_display_size, image_is_standalone};
+pub(crate) use layout::{list_marker_of, ordered_list_epoch, ordered_list_ordinals, ListMarker};
 pub use layout::{BlockLayout, InlineAsset, InlineFold, InlineImg, LayoutEngine};
 pub(crate) use layout::{OverKind, UnderKind};
 pub(crate) use outline::{Outline, OutlineEntry};

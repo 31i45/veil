@@ -150,6 +150,13 @@ pub(crate) fn route(mode: Mode, key: Key, mods: Mods, composing: bool) -> Cmd {
                 // 必须粘进查询/替换框；文件列表/图片在查找栏语境下一律当文本粘入。
                 Key::V if ctrl => Cmd::SearchPaste,
                 Key::Text(t) if !ctrl => Cmd::SearchInput(t),
+                // 文件/视图类全局快捷键穿透查找栏：查询框聚焦时仍要能保存、打开、
+                // 切换视图与设置。文本编辑/剪贴板类不在此列（Ctrl+Z/X/B 等会误伤
+                // 正文），仍由查找栏接管。
+                _ if ctrl => match translate(key, mods) {
+                    Some(action) if passes_through_search(&action) => Cmd::Edit(action),
+                    _ => Cmd::Ignore,
+                },
                 _ => Cmd::Ignore,
             }
         }
@@ -168,6 +175,29 @@ pub(crate) fn route(mode: Mode, key: Key, mods: Mods, composing: bool) -> Cmd {
             }
         }
     }
+}
+
+/// 查找栏下可穿透的「文件/视图」类动作。
+/// 为什么只放行这些：查询框聚焦时用户仍需要保存/打开/切换视图，而这些动作
+/// 不触碰正文；`Doc` 意图与剪贴板动作会把 Ctrl+Z/X/B 变成误编辑，仍归查找栏。
+fn passes_through_search(action: &Action) -> bool {
+    matches!(
+        action,
+        Action::Save
+            | Action::SaveAs
+            | Action::Open
+            | Action::New
+            | Action::NewWindow
+            | Action::OpenOutline
+            | Action::Export
+            | Action::ExportPdf
+            | Action::VersionHistory
+            | Action::OpenSettings
+            | Action::OpenSourceMode
+            | Action::ZoomIn
+            | Action::ZoomOut
+            | Action::ZoomReset
+    )
 }
 
 impl App {
@@ -362,6 +392,23 @@ mod tests {
             route(Mode::Search, Key::H, CTRL, false),
             Cmd::Edit(Action::Replace)
         );
+        // 文件/视图类穿透：查找栏聚焦时保存、设置、源码模式仍可用
+        assert_eq!(
+            route(Mode::Search, Key::S, CTRL, false),
+            Cmd::Edit(Action::Save)
+        );
+        assert_eq!(
+            route(Mode::Search, Key::Comma, CTRL, false),
+            Cmd::Edit(Action::OpenSettings)
+        );
+        assert_eq!(
+            route(Mode::Search, Key::Slash, CTRL, false),
+            Cmd::Edit(Action::OpenSourceMode)
+        );
+        // 编辑/剪贴板类仍归查找栏：不得穿透成撤销或加粗
+        assert_eq!(route(Mode::Search, Key::Z, CTRL, false), Cmd::Ignore);
+        assert_eq!(route(Mode::Search, Key::B, CTRL, false), Cmd::Ignore);
+        assert_eq!(route(Mode::Search, Key::A, CTRL, false), Cmd::Ignore);
     }
 
     #[test]

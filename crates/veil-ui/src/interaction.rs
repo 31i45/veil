@@ -84,6 +84,9 @@ impl App {
         if event.state != ElementState::Pressed {
             return;
         }
+        // 任意按下都算活跃：Ctrl/Shift 等不产生 Action、也不移动 caret 的键
+        // 同样要让隐藏半周期里的光标立刻回来。
+        self.note_caret_activity();
         let started = Instant::now();
         let Some(key) = map_key(event, self.input_state.mods) else {
             return;
@@ -217,6 +220,8 @@ impl App {
                 if matches!(self.mode(), Mode::Menu | Mode::History) {
                     return; // 菜单/版本历史：吞掉输入，预览保持只读
                 }
+                // IME 提交同样属于输入活跃：候选框落字后光标不应继续藏着。
+                self.note_caret_activity();
                 let dirty = self.editor.commit_ime(text);
                 self.after_edit(dirty);
                 self.set_ime_area();
@@ -807,6 +812,8 @@ impl App {
         let Some(target) = self.hit_offset() else {
             return;
         };
+        // 点击定位/拖选：即使落到同一位置（caret 不变）也要让光标恢复可见。
+        self.note_caret_activity();
         if extend {
             self.editor.set_caret_extend(target);
         } else {
@@ -2521,7 +2528,7 @@ impl App {
     /// - Cancel（BTN_CANCEL）：关闭不写盘。
     #[allow(dead_code)]
     pub(crate) fn resolve_settings(&mut self, id: u16) {
-        use crate::view::settings::{BTN_OK, BTN_RESET_DEFAULTS, BTN_CANCEL};
+        use crate::view::settings::{BTN_CANCEL, BTN_OK, BTN_RESET_DEFAULTS};
         let Some(s) = self.ui_state.settings.as_mut() else {
             return;
         };
@@ -2751,6 +2758,8 @@ impl App {
             }
         }
         let vp = self.viewport();
+        // 正文滚动：光标位置不变，但用户已开始操作文档，隐藏半周期应被打断。
+        self.note_caret_activity();
         let max = chrome::max_scroll(vp, self.doc_height());
         // B3：写入 goal_y；smooth=false 时 animate() 首帧 goal_y==scroll_y 零开销同步
         self.window_state.goal_y = (self.window_state.goal_y - d).clamp(0.0, max);
@@ -3289,15 +3298,30 @@ fn image_link_target(doc: &Path, img: &Path) -> String {
 /// Ctrl 组合一律交给 `key_without_modifiers()`（还原字母）；AltGr（Ctrl+Alt）
 /// 仍需走文本，否则欧洲布局字符无法上屏。
 pub(crate) fn map_key(event: &winit::event::KeyEvent, mods: Mods) -> Option<Key> {
-    // Ctrl+/：部分布局/IME 下逻辑键给 `/` 字符，另一些给物理 Slash 键；两者都认。
-    // 仅在 Ctrl 组合时映射，普通 `/` 仍走文本分支，不被吞。
     let ctrl = mods.ctrl && !mods.alt;
-    let slash = matches!(&event.logical_key, WKey::Character(c) if c.as_str() == "/")
-        || event.physical_key == PhysicalKey::Code(KeyCode::Slash);
-    if ctrl && slash {
-        return Some(Key::Slash);
+    if ctrl {
+        if let Some(key) = ctrl_punctuation(&event.logical_key, event.physical_key) {
+            return Some(key);
+        }
     }
     map_key_parts(event.text.as_deref(), event.key_without_modifiers(), mods)
+}
+
+/// Ctrl 组合下的标点快捷键：`/`（源码模式）与 `,`（设置）。
+/// 逻辑键与物理键都认：部分布局/IME 只给其中之一（如在 Windows 中文输入法下
+/// 逻辑键可能不是字符键）。仅 Ctrl 组合调用，普通标点仍走文本分支，不被吞。
+pub(crate) fn ctrl_punctuation(logical: &WKey, physical: PhysicalKey) -> Option<Key> {
+    let logical = match logical {
+        WKey::Character(c) => Some(c.as_str()),
+        _ => None,
+    };
+    if logical == Some("/") || physical == PhysicalKey::Code(KeyCode::Slash) {
+        return Some(Key::Slash);
+    }
+    if logical == Some(",") || physical == PhysicalKey::Code(KeyCode::Comma) {
+        return Some(Key::Comma);
+    }
+    None
 }
 
 /// `map_key` 的纯函数内核：文本 / 无修饰键 / 修饰键三份输入，可穷举测试。
@@ -3422,6 +3446,14 @@ impl App {
                 0.0
             };
         (width - pad).max(32.0)
+    }
+
+    /// 独占一行图片的高度上限（物理像素）：窗口可视高度 × 80%。
+    /// 与版心宽上限一起由 `fit_size_box` 取较小比例，从而「等比适配、不溢出视口」。
+    /// 该值是布局输入（缓存键 `BaseKey::img_h_q` 收录其整数像素值），
+    /// 因此窗口高度变化会让旧布局自动失配重排。
+    pub(crate) fn image_max_height(&self) -> f32 {
+        (self.viewport().h * crate::tokens::doc::IMG_STANDALONE_VIEWPORT_RATIO).max(1.0)
     }
 
     /// 是否因祖先 details 折叠而不可见（B3）。几何重算期间块表被临时取走，

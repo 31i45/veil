@@ -3,8 +3,9 @@
 //! 正确性由因果键承载（ADR-009 决策四）：每个缓存项记录生成它时的全部外部输入，
 //! 读取时比对键，不匹配即视为缺失——不再有 `invalidate_*`/`clear_*` 失效方法族。
 //! 键的构成逐类如下（与原手工失效语义逐一对应）：
-//! - 块布局/光栅/表格网格：`BaseKey`（版心宽、DPI、主题、会话、图片基准、远程图片代次、
-//!   脚注代次）+ 激活指纹；宽/DPI/主题/新会话/另存为/远程图到达/脚注编号变化时键自然失配；
+//! - 块布局/光栅/表格网格：`BaseKey`（版心宽、DPI、独占图片限高、主题、会话、图片基准、
+//!   远程图片代次、脚注代次）+ 激活指纹；宽/DPI/窗口高度/主题/新会话/另存为/远程图到达/
+//!   脚注编号变化时键自然失配；
 //! - 块级公式图：块 id + DPI + 主题 + 会话；失败记忆不含主题（换主题不重试渲染）；
 //! - 行内公式：tex 内容寻址 + DPI + 主题；失败记忆仅按 DPI（跨文档保留）；
 //! - 文档图片：解析后路径 + 图片基准；失败记忆同键。
@@ -68,12 +69,16 @@ impl Revs {
         self,
         width: f32,
         scale: f32,
+        img_max_h: f32,
         source_mode: bool,
         footnote_epoch: u64,
     ) -> BaseKey {
         BaseKey {
             width_q: quantize(width, 100.0),
             scale_q: quantize(scale, 1000.0),
+            // 独占图片的限高随窗口高度变化：不量化入键会让「先矮后高」的窗口复用
+            // 旧的小图布局。按整数像素量化，避免亚像素尺寸抖动引发无谓重排。
+            img_h_q: quantize(img_max_h, 1.0),
             theme_rev: self.theme,
             session_rev: self.session,
             image_base: self.image_base,
@@ -81,6 +86,7 @@ impl Revs {
             source_mode,
             footnote_epoch,
             fold_epoch: 0,
+            list_epoch: 0,
         }
     }
 }
@@ -90,6 +96,8 @@ impl Revs {
 pub(crate) struct BaseKey {
     width_q: u32,
     scale_q: u32,
+    /// 独占一行图片的高度上限（整数像素）：由窗口可视高度派生，是布局输入。
+    img_h_q: u32,
     theme_rev: u32,
     session_rev: u32,
     image_base: u32,
@@ -104,6 +112,9 @@ pub(crate) struct BaseKey {
     /// 行内 details 折叠代次（B3）：折叠态改变块的排版文本（正文整段消隐），
     /// 必须换键重排；集合按「条目哈希异或」折叠，与迭代顺序无关。
     fold_epoch: u64,
+    /// 有序列表编号代次：编号是全文派生量，文首增删列表项会改变后续块的显示编号，
+    /// 而块文本与 BlockId 均可不变（增量重解析只平移），不带此代次会命中陈旧编号。
+    list_epoch: u64,
 }
 
 /// 表格网格键 = 基础键 + 活动单元格 flat 索引（`u32::MAX` = 无活动格）
@@ -345,10 +356,12 @@ impl App {
         let mut key = self.input_state.revs.base(
             self.content_width(),
             self.input_state.scale,
+            self.image_max_height(),
             self.source_mode(),
             epoch,
         );
         key.fold_epoch = self.inline_details_epoch();
+        key.list_epoch = self.index.list_epoch;
         key
     }
 
@@ -419,32 +432,71 @@ mod tests {
     #[test]
     fn base_key_quantizes_stably_and_tracks_inputs() {
         let revs = Revs::default();
-        let b = revs.base(800.0, 1.25, false, 0);
-        assert_eq!(b, revs.base(800.0, 1.25, false, 0), "同一输入必得同键");
-        assert_ne!(b, revs.base(800.5, 1.25, false, 0), "版心宽变化即换键");
-        assert_ne!(b, revs.base(800.0, 1.5, false, 0), "DPI 变化即换键");
-        assert_ne!(b, revs.base(800.0, 1.25, true, 0), "源码模式变化即换键");
-        assert_ne!(b, revs.base(800.0, 1.25, false, 1), "脚注代次变化即换键");
+        let b = revs.base(800.0, 1.25, 600.0, false, 0);
+        assert_eq!(
+            b,
+            revs.base(800.0, 1.25, 600.0, false, 0),
+            "同一输入必得同键"
+        );
+        assert_ne!(
+            b,
+            revs.base(800.5, 1.25, 600.0, false, 0),
+            "版心宽变化即换键"
+        );
+        assert_ne!(b, revs.base(800.0, 1.5, 600.0, false, 0), "DPI 变化即换键");
+        assert_ne!(
+            b,
+            revs.base(800.0, 1.25, 600.5, false, 0),
+            "独占图片限高变化即换键（按整数像素量化）"
+        );
+        assert_ne!(
+            b,
+            revs.base(800.0, 1.25, 300.0, false, 0),
+            "窗口高度变化即换键"
+        );
+        assert_eq!(
+            b,
+            revs.base(800.0, 1.25, 600.2, false, 0),
+            "亚像素抖动不得换键"
+        );
+        assert_ne!(
+            b,
+            revs.base(800.0, 1.25, 600.0, true, 0),
+            "源码模式变化即换键"
+        );
+        assert_ne!(
+            b,
+            revs.base(800.0, 1.25, 600.0, false, 1),
+            "脚注代次变化即换键"
+        );
         let revs2 = Revs { theme: 1, ..revs };
-        assert_ne!(b, revs2.base(800.0, 1.25, false, 0), "主题代次变化即换键");
+        assert_ne!(
+            b,
+            revs2.base(800.0, 1.25, 600.0, false, 0),
+            "主题代次变化即换键"
+        );
         let revs3 = Revs {
             image_base: 1,
             ..revs
         };
-        assert_ne!(b, revs3.base(800.0, 1.25, false, 0), "图片基准变化即换键");
+        assert_ne!(
+            b,
+            revs3.base(800.0, 1.25, 600.0, false, 0),
+            "图片基准变化即换键"
+        );
         let revs5 = Revs {
             remote_images: 1,
             ..revs
         };
         assert_ne!(
             b,
-            revs5.base(800.0, 1.25, false, 0),
+            revs5.base(800.0, 1.25, 600.0, false, 0),
             "远程图片代次变化即换键"
         );
         let revs4 = Revs { session: 1, ..revs };
         assert_ne!(
             b,
-            revs4.base(800.0, 1.25, false, 0),
+            revs4.base(800.0, 1.25, 600.0, false, 0),
             "新会话（BlockId 复用）即换键"
         );
     }
@@ -454,7 +506,7 @@ mod tests {
         let ids = ids();
         let mut c = Cache::default();
         let revs = Revs::default();
-        let base = revs.base(800.0, 1.0, false, 0);
+        let base = revs.base(800.0, 1.0, 600.0, false, 0);
         c.math_failed.insert(
             ids[0],
             Memo {
@@ -511,7 +563,7 @@ mod tests {
         // 主题切换：颜色相关条目过期；失败记忆与图片保留
         let mut c2 = c;
         let revs2 = Revs { theme: 1, ..revs };
-        let base2 = revs2.base(800.0, 1.0, false, 0);
+        let base2 = revs2.base(800.0, 1.0, 600.0, false, 0);
         c2.prune_alive(&alive, &revs2, &base2);
         assert!(c2.inline_math.is_empty(), "公式图随主题作废");
         assert!(
@@ -521,7 +573,7 @@ mod tests {
         assert!(c2.inline_images.contains_key("img"), "图片与主题无关，保留");
         // DPI 变化：失败记忆过期
         let revs3 = Revs { theme: 1, ..revs };
-        let base3 = revs3.base(800.0, 2.0, false, 0);
+        let base3 = revs3.base(800.0, 2.0, 600.0, false, 0);
         c2.prune_alive(&alive, &revs3, &base3);
         assert!(!c2.inline_failed.contains_key("y"), "失败记忆随 DPI 作废");
         // 新会话：块相关条目过期，行内公式与失败记忆跨文档保留
@@ -531,7 +583,7 @@ mod tests {
             image_base: 1,
             ..revs
         };
-        let base4 = revs4.base(800.0, 2.0, false, 0);
+        let base4 = revs4.base(800.0, 2.0, 600.0, false, 0);
         // 行内失败记忆按当前 DPI 代次重新登记（上一轮 DPI 变化已使其过期）
         c2.inline_failed.insert(
             "y".into(),
@@ -551,7 +603,7 @@ mod tests {
         let ids = ids();
         let mut c = Cache::default();
         let revs = Revs::default();
-        let base = revs.base(800.0, 1.0, false, 0);
+        let base = revs.base(800.0, 1.0, 600.0, false, 0);
         let lk0 = LayoutKey { base, reveal: 0 };
         let lk1 = LayoutKey { base, reveal: 0 };
 
@@ -582,7 +634,7 @@ mod tests {
 
         // base_key 不匹配的条目也被剪（双重保险：resize/DPI 风暴期间旧键残留）
         let revs2 = Revs { theme: 1, ..revs };
-        let base2 = revs2.base(800.0, 1.0, false, 0);
+        let base2 = revs2.base(800.0, 1.0, 600.0, false, 0);
         // 用 ids[1] 插 base2 条目（ids[0] 已经被 prune_viewport 保留且还是 base 的条目）
         c.rasters.insert(
             ids[1],
@@ -606,7 +658,7 @@ mod tests {
         let ids = ids();
         let mut c = Cache::default();
         let revs = Revs::default();
-        let base = revs.base(800.0, 1.0, false, 0);
+        let base = revs.base(800.0, 1.0, 600.0, false, 0);
 
         // math_imgs / inline_math / inline_images 是内容寻址（tex/path），不按 BlockId 累积
         c.math_imgs.insert(

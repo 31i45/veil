@@ -245,6 +245,14 @@ pub(crate) const BTN_CANCEL: u16 = 3;
 /// 键盘焦点顺序：OK → Cancel → Restore Defaults（值为 buttons() 中的索引）。
 const BUTTON_TAB_ORDER: [usize; 3] = [0, 2, 1];
 
+/// 「清除」按钮的水平内边距：按钮宽度按标签实测宽 + 两侧内边距，
+/// 不再用固定 120px（小于标签宽时文字会溢出描边，看起来不像按钮）。
+const GEOM_CLEAR_PAD_X: f32 = 10.0;
+/// 值文本左内边距（与只读控件内文一致）。
+const GEOM_VALUE_PAD_X: f32 = 4.0;
+/// 值文本与「清除」按钮之间的最小间隔：给按钮边界留呼吸位，避免贴边。
+const GEOM_VALUE_GAP: f32 = 8.0;
+
 /// 控件矩形：用于命中判定和键盘导航。
 #[derive(Clone, Debug)]
 pub(crate) struct FieldRects {
@@ -261,6 +269,8 @@ pub(crate) struct SettingsLayout {
     pub(crate) buttons: Vec<Rect>,
     pub(crate) button_ids: Vec<u16>,
     pub(crate) window_geom_clear: Option<Rect>,
+    /// 窗口几何值文本的可用矩形：右边界已让出按钮与间隔，绘制时必须按此裁切。
+    pub(crate) window_geom_value: Option<Rect>,
 }
 
 pub(crate) fn buttons() -> Vec<ModalButton> {
@@ -412,20 +422,38 @@ pub(crate) fn layout(
     }
 
     // "清除"窗口几何按钮位置（在 WindowGeom 控件矩形内偏右）
-    let window_geom_clear = form
+    let window_geom_idx = form
         .fields
         .iter()
-        .position(|f| matches!(f.kind, FieldKind::WindowGeom))
-        .map(|idx| {
-            let control = &field_rects[idx].control;
-            let bw = 120.0 * scale;
-            Rect {
-                x: control.x + control.w - bw,
-                y: control.y + (control.h - body_line_h) * 0.5 - 2.0,
-                w: bw,
-                h: body_line_h + 4.0,
-            }
-        });
+        .position(|f| matches!(f.kind, FieldKind::WindowGeom));
+    let window_geom_clear = window_geom_idx.map(|idx| {
+        let control = &field_rects[idx].control;
+        // 宽度按标签实测：文字必须落在描边内，否则会退化成"无边界纯文本"。
+        let label_w = text.width(t(Key::SettingsResetWindowGeom));
+        let bw = (label_w + 2.0 * GEOM_CLEAR_PAD_X * scale)
+            .min(control.w)
+            .max(0.0);
+        Rect {
+            x: control.x + control.w - bw,
+            y: control.y + (control.h - body_line_h) * 0.5 - 2.0,
+            w: bw,
+            h: body_line_h + 4.0,
+        }
+    });
+
+    // 值文本可用宽度 = 控件宽 − 左内边距 − 按钮宽 − 间隔；剩余宽度交给截断，
+    // 从布局层面保证值文本与按钮永不重叠（绘制只按这个矩形裁切）。
+    let window_geom_value = window_geom_idx.zip(window_geom_clear).map(|(idx, clear)| {
+        let control = &field_rects[idx].control;
+        let line_h = typography::UI_LINE_HEIGHT * scale;
+        let x = control.x + GEOM_VALUE_PAD_X * scale;
+        Rect {
+            x,
+            y: control.y + (control.h - line_h) * 0.5,
+            w: (clear.x - GEOM_VALUE_GAP * scale - x).max(0.0),
+            h: line_h,
+        }
+    });
 
     SettingsLayout {
         card,
@@ -433,6 +461,7 @@ pub(crate) fn layout(
         buttons: button_rects,
         button_ids: ids,
         window_geom_clear,
+        window_geom_value,
     }
 }
 
@@ -750,14 +779,33 @@ pub(crate) fn paint(
         paint_field_control(frame, text, f, fr, theme, scale, is_focused);
     }
 
-    // 窗口几何 "清除" 按钮
-    if let Some(r) = layout.window_geom_clear.as_ref() {
-        let wg_field = form
-            .fields
+    // 窗口几何行：值文本先按可用宽度截断，再画按钮。两者共用 layout 的矩形，
+    // 因此绘制区域与命中区域天然一致，且值文本永远不会覆盖按钮。
+    if let (Some(f), Some(value_rect)) = (
+        form.fields
             .iter()
-            .find(|f| matches!(f.kind, FieldKind::WindowGeom));
-        match wg_field {
-            Some(f) if matches!(&f.value, FieldValue::Geom(Some(_))) => {
+            .find(|f| matches!(f.kind, FieldKind::WindowGeom)),
+        layout.window_geom_value,
+    ) {
+        let full = match &f.value {
+            FieldValue::Geom(Some((w, h, x, y))) => {
+                format!("{} × {}  (x={}, y={})", w, h, x, y)
+            }
+            FieldValue::Geom(None) => t(Key::SettingsWindowGeomNone).into(),
+            _ => String::new(),
+        };
+        // 用真实文本度量做二分截断：复用 Text::width，不另造一套估算表。
+        let fitted = elide_with_ellipsis(&full, value_rect.w, |s| text.width(s));
+        text.draw(
+            frame,
+            &fitted,
+            theme.muted,
+            value_rect.x as i32,
+            value_rect.y as i32,
+        );
+
+        if let Some(r) = layout.window_geom_clear.as_ref() {
+            if matches!(&f.value, FieldValue::Geom(Some(_))) {
                 paint_buttonish(
                     frame,
                     text,
@@ -767,8 +815,7 @@ pub(crate) fn paint(
                     scale,
                     state.hovered_clear,
                 );
-            }
-            _ => {
+            } else {
                 paint_clear_stub(frame, theme, r);
             }
         }
@@ -786,10 +833,12 @@ fn paint_field_label(
     theme: &crate::theme::Theme,
 ) {
     let label_text = t(f.label);
+    // 只读字段（窗口几何）仍可操作「清除」，标签不能画成禁用灰，
+    // 否则整行会被误读为不可用。
     text.draw(
         frame,
         label_text,
-        if f.read_only { theme.muted } else { theme.text },
+        theme.text,
         fr.label.x as i32,
         fr.label.y as i32,
     );
@@ -808,7 +857,8 @@ fn paint_field_control(
     let cr = surface::corner_radius(scale);
 
     if f.read_only {
-        // 只读：画浅灰底 + 值文本（不加描边）
+        // 只读：画浅灰底；值文本由 paint() 统一按可用矩形的裁切后绘制，
+        // 这里不再直接落字（避免值文本越过右侧「清除」按钮）。
         frame.fill_rounded_rect(
             c.x.round() as i32,
             c.y.round() as i32,
@@ -817,23 +867,6 @@ fn paint_field_control(
             cr,
             palette::surface_popup(theme),
         );
-        // 窗口几何值
-        if let FieldKind::WindowGeom = f.kind {
-            let value_text = match &f.value {
-                FieldValue::Geom(Some((w, h, x, y))) => {
-                    format!("{} × {}  (x={}, y={})", w, h, x, y)
-                }
-                FieldValue::Geom(None) => t(Key::SettingsWindowGeomNone).into(),
-                _ => String::new(),
-            };
-            text.draw(
-                frame,
-                &value_text,
-                theme.muted,
-                (c.x + 4.0 * scale) as i32,
-                (c.y + (c.h - typography::UI_LINE_HEIGHT * scale) * 0.5) as i32,
-            );
-        }
         return;
     }
 
@@ -1037,7 +1070,8 @@ fn paint_clear_stub(frame: &mut Frame, theme: &crate::theme::Theme, r: &Rect) {
     let y = r.y.round() as i32;
     let w = r.w.round() as u32;
     let h = r.h.round() as u32;
-    // 画灰底禁用态
+    // 半透明占位：有位置但无描边/无文字，明确不是可点按钮
+    // （之前实心灰块更像"禁用按钮"，反而暗示这里能点）。
     frame.fill_rounded_rect(
         x,
         y,
@@ -1048,10 +1082,9 @@ fn paint_clear_stub(frame: &mut Frame, theme: &crate::theme::Theme, r: &Rect) {
             theme.chrome_border[0],
             theme.chrome_border[1],
             theme.chrome_border[2],
-            255,
+            48,
         ],
     );
-    _ = palette::surface_popup(theme);
 }
 
 fn paint_buttonish(
@@ -1068,17 +1101,18 @@ fn paint_buttonish(
     let w = r.w.round() as u32;
     let h = r.h.round() as u32;
     let cr = surface::corner_radius(scale);
-    stroke_frame(
-        frame,
-        *r,
-        cr,
+    // 浅底（Card 档）+ 1px 描边：与只读控件的 Popup 底色区分，hover 时描边转强调色。
+    let bg = palette::surface_card(theme);
+    let border = if hovered {
+        theme.accent
+    } else {
         [
             theme.chrome_border[0],
             theme.chrome_border[1],
             theme.chrome_border[2],
-        ],
-        palette::surface_popup(theme),
-    );
+        ]
+    };
+    stroke_frame(frame, *r, cr, border, bg);
     if hovered {
         frame.fill_hover(
             x,
@@ -1094,6 +1128,43 @@ fn paint_buttonish(
     let tx = r.x + (r.w - tw) * 0.5;
     let ty = r.y + (r.h - line_h) * 0.5;
     text.draw(frame, label, theme.text, tx as i32, ty as i32);
+}
+
+/// 尾部省略：在 `max_w` 内尽量保留前缀，末尾补 `…`。
+///
+/// `measure` 由调用方注入（生产即 `Text::width`，测试用等宽假度量），
+/// 复用真实栅格化度量，避免另造一套与绘制不一致的宽度估算；
+/// 前缀越长越宽，故二分找最长可行前缀，只需 O(log n) 次度量。
+pub(crate) fn elide_with_ellipsis(
+    text: &str,
+    max_w: f32,
+    mut measure: impl FnMut(&str) -> f32,
+) -> String {
+    if max_w <= 0.0 {
+        return String::new();
+    }
+    if measure(text) <= max_w {
+        return text.to_string();
+    }
+    // 连省略号都放不下：留空，避免画出半截字形更难辨认。
+    if measure("…") > max_w {
+        return String::new();
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let (mut lo, mut hi) = (0usize, chars.len());
+    while lo < hi {
+        let mid = (lo + hi).div_ceil(2);
+        let mut candidate: String = chars[..mid].iter().collect();
+        candidate.push('…');
+        if measure(&candidate) <= max_w {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    let mut out: String = chars[..lo].iter().collect();
+    out.push('…');
+    out
 }
 
 #[cfg(test)]
@@ -1388,6 +1459,76 @@ mod tests {
             assert_eq!(
                 state.on_key(&space, Mods::default(), &mut form, &layout),
                 Some(id)
+            );
+        }
+    }
+
+    /// 等宽假度量：每字符固定宽度，便于把"字符宽度"作为纯函数入参验证。
+    fn equal_width(char_w: f32) -> impl Fn(&str) -> f32 {
+        move |s: &str| s.chars().count() as f32 * char_w
+    }
+
+    #[test]
+    fn elide_keeps_text_when_it_fits() {
+        assert_eq!(
+            elide_with_ellipsis("abcde", 50.0, equal_width(10.0)),
+            "abcde"
+        );
+    }
+
+    #[test]
+    fn elide_drops_last_char_when_one_char_too_wide() {
+        // 全文 60 > 59：5 字符 + … = 60 仍超，故只保留 4 字符。
+        assert_eq!(
+            elide_with_ellipsis("abcdef", 59.0, equal_width(10.0)),
+            "abcd…"
+        );
+    }
+
+    #[test]
+    fn elide_is_empty_when_even_ellipsis_does_not_fit() {
+        assert_eq!(elide_with_ellipsis("abcdef", 9.0, equal_width(10.0)), "");
+    }
+
+    fn geom_form(w: u32, h: u32, x: i32, y: i32) -> SettingsForm {
+        let config = Config {
+            window: Some(crate::theme::WindowGeom {
+                width: w,
+                height: h,
+                x,
+                y,
+            }),
+            ..Config::default()
+        };
+        SettingsForm::from_config(&config)
+    }
+
+    #[test]
+    fn geom_value_text_stays_left_of_clear_button() {
+        for (w, h, x, y) in [(2560u32, 1440u32, -1920i32, -200i32), (1681, 864, 8, 8)] {
+            let form = geom_form(w, h, x, y);
+            let layout = layout_for(viewport(1280.0, 800.0), &form);
+            let value_rect = layout
+                .window_geom_value
+                .expect("窗口几何行必须有值文本矩形");
+            let clear = layout
+                .window_geom_clear
+                .expect("窗口几何行必须有清除按钮矩形");
+
+            // 可用宽度必须整体落在按钮左侧（含间隔）。
+            assert!(
+                value_rect.x + value_rect.w <= clear.x + EPSILON,
+                "值文本矩形越过清除按钮: {value_rect:?} clear={clear:?}"
+            );
+
+            // 按生产同一截断函数 + 等宽度量验证绘制右边界。
+            let full = format!("{} × {}  (x={}, y={})", w, h, x, y);
+            let fitted = elide_with_ellipsis(&full, value_rect.w, equal_width(8.0));
+            let right = value_rect.x + 8.0 * fitted.chars().count() as f32;
+            assert!(
+                right <= clear.x + EPSILON,
+                "值文本 {fitted:?} 右边界 {right} 越过清除按钮左边界 {}",
+                clear.x
             );
         }
     }

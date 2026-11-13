@@ -464,7 +464,7 @@ fn collect_bare_links(nodes: &[InlineNode], out: &mut Vec<InlineNode>) {
 ///
 /// - 白名单内 Html → `<tag attrs...>` 原样保留（attrs 已由解析层剥 on*= 并净化 style）
 /// - HtmlSelfClosed::Br → `<br>`
-/// - HtmlSelfClosed::Img → `<img src="..." alt="...">`（远程 src 已置空则降级为
+/// - HtmlSelfClosed::Img → `<img src="..." alt="..." width= height=>`（远程 src 已置空则降级为
 ///   `<img alt="..."> <!-- veil blocked remote -->`）
 /// - HtmlLiteral / 非白名单 tag → escape 为 `&lt;…>`
 /// - 危险 tag（script/style/iframe 等）→ 整块剥除（替换为空）
@@ -555,6 +555,14 @@ fn collect_html_inlines(
                             if !alt.is_empty() {
                                 img.push_str(&format!(" alt=\"{}\"", escape_attr(alt)));
                             }
+                            // 显式尺寸与 UI 排版同源：作者写了 width/height 就保留，
+                            // 否则导出图会退回浏览器原生尺寸、与编辑器内观感不一致。
+                            if let Some(width) = attrs.width {
+                                img.push_str(&format!(" width=\"{width}\""));
+                            }
+                            if let Some(height) = attrs.height {
+                                img.push_str(&format!(" height=\"{height}\""));
+                            }
                             img.push('>');
                             img
                         }
@@ -588,6 +596,13 @@ fn format_html_attrs(attrs: &veil_core::HtmlAttrs) -> String {
     }
     if let Some(alt) = attrs.alt.as_deref() {
         parts.push(format!("alt=\"{}\"", escape_attr(alt)));
+    }
+    // 显式像素宽高：解析层只收纯十进制数字，导出原样写回即可（浏览器按 CSS 像素解释）。
+    if let Some(width) = attrs.width {
+        parts.push(format!("width=\"{width}\""));
+    }
+    if let Some(height) = attrs.height {
+        parts.push(format!("height=\"{height}\""));
     }
     // style 已由解析层净化（仅白名单属性与合法值），导出原样保留。
     if let Some(style) = attrs.style.as_deref() {
@@ -1210,6 +1225,19 @@ mod tests {
             body_of("![示例](img/a.png)\n"),
             "<p><img src=\"img/a.png\" alt=\"示例\" /></p>\n"
         );
+    }
+
+    #[test]
+    fn html_img_explicit_size_exported() {
+        // `<img width height>` 的显式尺寸须写回导出 HTML（parse_open_tag 白名单收集）。
+        let body = body_of("<img src=\"img/a.png\" alt=\"示例\" width=\"120\" height=\"80\">\n");
+        assert!(body.contains("src=\"img/a.png\""), "实际输出: {body}");
+        assert!(body.contains("width=\"120\""), "实际输出: {body}");
+        assert!(body.contains("height=\"80\""), "实际输出: {body}");
+        // 非法值被解析层丢弃 → 导出不得出现 width/height
+        let body = body_of("<img src=\"img/a.png\" width=\"100px\">\n");
+        assert!(!body.contains("width="), "实际输出: {body}");
+        assert!(!body.contains("height="), "实际输出: {body}");
     }
 
     #[test]

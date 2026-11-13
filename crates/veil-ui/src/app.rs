@@ -1168,6 +1168,29 @@ impl App {
         }
     }
 
+    /// 输入活跃信号：键按下 / 鼠标落点 / 拖选 / IME 提交 / 正文滚轮。
+    /// 立即让光标回到可见态，并把闪烁周期的起点清空交由下一次 `tick` 重新起算。
+    /// 只靠 `tick` 检测 caret 位移不够：Ctrl/Shift、点击原位、滚轮等输入不改变
+    /// caret，光标会继续停在被隐藏的半周期里，用户感知为「闪烁响应慢」。
+    pub(crate) fn note_caret_activity(&mut self) {
+        // 本来可见时不需要为了闪烁重置而重绘（像素不变）；只在隐藏半周期里补帧。
+        let was_hidden = !self.cursor_visible;
+        self.cursor_visible = true;
+        // None 而非 Some(now)：周期起点由后续 tick 的 `now` 决定，
+        // 避免事件处理与下一帧之间存在时差时把到期点算偏。
+        self.last_blink = None;
+        if was_hidden {
+            self.request_redraw();
+        }
+    }
+
+    /// 闪烁是否活跃：文档已加载 + 非打印 + 无 IME 组合串。
+    fn blink_active(&self) -> bool {
+        self.doc.path.is_some()
+            && self.window_state.print.is_none()
+            && self.editor.preedit().is_none()
+    }
+
     /// 窗口焦点变化（winit `WindowEvent::Focused`）：写入焦点表达状态，仅在
     /// 真的变化时请求一次重绘（失焦 → 空心插入点）。不注册任何定时器/周期回调。
     pub(crate) fn set_window_focused(&mut self, focused: bool) {
@@ -1258,7 +1281,7 @@ impl App {
 
     /// 时间输入的唯一入口：外部轮询、系统外观、自动保存、恢复写盘都只读调用方注入的
     /// `now`（ADR-009 决策三「时间作为输入」）。顺序不可交换：外部修改须先挂起自动保存。
-    fn tick(&mut self, now: Instant) {
+    pub(crate) fn tick(&mut self, now: Instant) {
         self.poll_external();
         self.poll_system_theme(now);
         self.poll_remote_images();
@@ -1273,11 +1296,11 @@ impl App {
             self.cursor_visible = true;
             self.last_blink = Some(now);
             self.last_seen_caret = caret;
+            // 显式补帧：不能依赖各编辑路径自带的重绘。只有光标移动、无脏块时
+            // 没有任何 after_edit 调用，画面会停留在隐藏半周期的旧帧（光标没跟上）。
+            self.request_redraw();
         }
-        let blink_active = self.doc.path.is_some()
-            && self.window_state.print.is_none()
-            && self.editor.preedit().is_none();
-        if blink_active {
+        if self.blink_active() {
             match self.last_blink {
                 None => {
                     self.last_blink = Some(now);
@@ -1731,12 +1754,15 @@ impl App {
             let remote_at = now + REMOTE_POLL;
             next = Some(next.map_or(remote_at, |t| t.min(remote_at)));
         }
-        // 光标闪烁：文档已加载 + 非打印 + 无 preedit 时，每 600 ms 翻转可见性需要被唤醒。
-        if self.doc.path.is_some()
-            && self.window_state.print.is_none()
-            && self.editor.preedit().is_none()
-        {
-            let blink_at = now + CURSOR_BLINK;
+        // 光标闪烁：以「最近一次翻转/活跃重置」时刻为基准算下一次到期点。
+        // 若改用 now + CURSOR_BLINK，活跃信号（note_caret_activity）刚重置的周期
+        // 会被推到「当前 + 600ms」，与 tick 实际起算的 last_blink 错位，翻转时刻抖动。
+        // 历史面板打开时 tick 会提前返回、不会推进闪烁，此时不登记唤醒，避免
+        // 陈旧的 last_blink 造成到期点已过 → 事件循环空转。
+        if self.blink_active() && !self.ui_state.history.open {
+            let blink_at = self
+                .last_blink
+                .map_or(now + CURSOR_BLINK, |t| (t + CURSOR_BLINK).max(now));
             next = Some(next.map_or(blink_at, |t| t.min(blink_at)));
         }
         // 悬停过渡（S6）：按 ~60fps 推进；帧点未到只登记唤醒，不空转重绘。

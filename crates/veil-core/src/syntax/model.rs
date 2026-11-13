@@ -191,7 +191,8 @@ impl HtmlTag {
     }
 }
 
-/// 白名单 HTML 属性（abbr.title / img.src / img.alt / a.href）。其余属性一律忽略；
+/// 白名单 HTML 属性（abbr.title / img.src / img.alt / img.width / img.height /
+/// a.href）。其余属性一律忽略；
 /// `script` 事件属性、`style`、`javascript:` href 解析层判定非法后置空，渲染层读不到。
 /// 远程（http/https）图片地址不写入 `src`（仍为空），只保存在 `remote_src` 供 UI 渲染层按需加载。
 #[derive(Clone, Default, PartialEq, Eq, Debug)]
@@ -202,6 +203,11 @@ pub struct HtmlAttrs {
     /// `src` 仍为空，导出/PDF 读不到该地址，以保持单文件自包含。
     pub remote_src: Option<String>,
     pub alt: Option<String>,
+    /// `<img width="...">` 的显式像素宽（仅十进制数字；非法值不收集）。
+    /// 显式尺寸让作者覆盖编辑器默认的图片限高，故须与 src 一同进白名单。
+    pub width: Option<u32>,
+    /// `<img height="...">` 的显式像素高（口径同 `width`）。
+    pub height: Option<u32>,
     /// `<a href="...">` 的目标（仅 a 标签收集；`javascript:` 等危险 scheme 置空）。
     pub href: Option<String>,
     /// 净化后的 `style="..."`（仅允许的颜色/字体/装饰声明，已丢弃危险与未知声明）。

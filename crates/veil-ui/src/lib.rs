@@ -47,7 +47,7 @@ pub use app::{
 };
 pub use chrome::path_label;
 pub use docio::decode;
-pub use image::{AssetStore, ImageData, ImageLoader};
+pub use image::{AssetMigration, AssetStore, ImageData, ImageLoader};
 pub use math::{MathImage, MathRenderer};
 pub use print::{ExportOptions, NoPrint, Print, PrintSession};
 pub use shell::run;

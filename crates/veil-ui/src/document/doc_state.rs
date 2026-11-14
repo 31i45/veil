@@ -4,6 +4,8 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use veil_core::{HtmlTag, InlineKind, InlineNode};
+
 use crate::app::{
     ActiveModal, App, ErrorPurpose, FileEvent, FileStore, ModalPurpose, PendingIntent, StartupError,
 };
@@ -265,13 +267,14 @@ impl App {
         if !self.autosave_due(now) {
             return;
         }
-        self.persist_state.persist.note_activity(now);
+        self.persist_state.persist.note_autosave_attempt(now);
         self.save(SaveKind::Auto);
         self.request_redraw();
     }
 
     /// 恢复写盘判定（0b）：脏且非 IME 组合期即候选（无路径草稿/冲突挂起也覆盖）；
     /// 正常路径按静默期（复用自动保存的 2s），上次失败后按退避节奏重试。
+    /// 起点是「最后一次真实编辑」，自动保存尝试不得刷新它（DEF-T08-E1-001）。
     pub(crate) fn recovery_write_due(&self, now: Instant) -> bool {
         if !self.editor.is_dirty() || self.editor.preedit().is_some() {
             return false;
@@ -281,7 +284,7 @@ impl App {
         }
         self.persist_state
             .autosave
-            .deadline(self.persist_state.persist.activity())
+            .deadline(self.persist_state.persist.recovery_activity())
             .is_some_and(|at| now >= at)
     }
 
@@ -296,12 +299,15 @@ impl App {
         let hash = recovery::fnv64(&data);
         if self.persist_state.recovery_hash == Some(hash) {
             self.persist_state.recovery_failed_at = None;
+            self.persist_state.persist.clear_recovery_activity();
             return; // 磁盘已是当前内容快照
         }
         match self.ports.recovery.save(&data) {
             Ok(()) => {
                 self.persist_state.recovery_hash = Some(hash);
                 self.persist_state.recovery_failed_at = None;
+                // 已写入当前内容：下一次真实编辑再重新计时，避免无内容变化时反复唤醒。
+                self.persist_state.persist.clear_recovery_activity();
             }
             Err(e) => {
                 self.persist_state.recovery_failed_at = Some(now);
@@ -330,6 +336,7 @@ impl App {
         }
         self.persist_state.recovery_hash = None;
         self.persist_state.recovery_failed_at = None;
+        self.persist_state.persist.clear_recovery_activity();
         self.persist_state.snapshot_deadline = None;
     }
 
@@ -569,13 +576,28 @@ impl App {
         match self.ports.store.save(&path, &data) {
             Ok(()) => {
                 self.editor.mark_saved();
+                let old_path = self.doc.path.clone();
                 self.doc.path = Some(path.clone());
                 self.doc.baseline = data;
-                // 未命名草稿首次保存：临时会话键的历史迁移到路径键
+                // 未命名草稿首次保存：临时会话键的历史迁移到路径键。
+                // 迁移失败不得静默：旧历史保留在旧键（仍可在版本历史面板访问），
+                // 且明确告知用户「历史未迁移」，不能只报「已另存为」（DEF-T08-001）。
+                let mut history_notice = None;
                 if was_unnamed && old_key != new_key {
-                    let _ = self.ports.snapshot.migrate_key(old_key, new_key);
+                    match self.ports.snapshot.migrate_key(old_key, new_key) {
+                        Ok(_) => self.doc.history_key = new_key,
+                        Err(e) => {
+                            self.doc.history_key = old_key;
+                            eprintln!("版本历史迁移失败（旧历史保留，key={old_key:016x}）: {e}");
+                            history_notice = Some(tf(
+                                Key::NoticeHistoryMigrationFailed,
+                                &[&path_label(Some(path.as_path())), &e],
+                            ));
+                        }
+                    }
+                } else {
+                    self.doc.history_key = new_key;
                 }
-                self.doc.history_key = new_key;
                 self.record_current_snapshot();
                 let hhmm = self.ports.clock.local_hhmm();
                 self.persist_state.last_saved_hhmm = Some(hhmm);
@@ -584,7 +606,17 @@ impl App {
                 self.clear_recovery(); // 旧路径的恢复副本已随另存失效（0b）
                 self.note_opened(path.clone()); // 登记最近文件（0b）
                 self.ui_state.chrome.notice = tf(Key::NoticeSavedAs, &[&path_label(Some(&path))]);
-                self.watch_current(); // 监听目标随关联路径切换；失败提示覆盖成功提示
+                // 监听目标随关联路径切换；失败提示覆盖成功提示
+                self.watch_current();
+                // 跨目录另存：迁移相对图片资产，避免新位置断图（DEF-T08-002）。
+                // 资产缺失/复制失败时给可见降级，不静默断链。
+                let asset_notice = match old_path.as_deref() {
+                    Some(old) => self.migrate_assets_for_save_as(old, &path),
+                    None => None,
+                };
+                if let Some(n) = asset_notice.or(history_notice) {
+                    self.ui_state.chrome.notice = n;
+                }
                 self.update_title();
             }
             Err(e) => {
@@ -610,6 +642,53 @@ impl App {
                 );
             }
         }
+    }
+
+    /// 跨目录另存后的相对图片资产迁移（DEF-T08-002）：同目录无需处理；
+    /// 新目录不同则把文档引用的相对图片复制到新目录的同一相对位置。
+    /// 返回可见降级提示（有资产缺失/复制失败时），成功返回 None。
+    fn migrate_assets_for_save_as(&mut self, old: &Path, new: &Path) -> Option<String> {
+        let (Some(old_dir), Some(new_dir)) = (old.parent(), new.parent()) else {
+            return None;
+        };
+        if super::history::normalize_doc_path(old_dir)
+            == super::history::normalize_doc_path(new_dir)
+        {
+            return None;
+        }
+        let urls = self.relative_image_urls();
+        if urls.is_empty() {
+            return None;
+        }
+        let report = self.ports.assets.migrate_relative_assets(old, new, &urls);
+        if report.incomplete() == 0 {
+            return None;
+        }
+        eprintln!(
+            "另存为后图片资产未全部迁移（{} 个）：缺失 {}，失败 {}",
+            report.incomplete(),
+            report.missing,
+            report.failed.len()
+        );
+        Some(tf(
+            Key::NoticeAssetsMigrationIncomplete,
+            &[&path_label(Some(new)), &report.incomplete().to_string()],
+        ))
+    }
+
+    /// 文档内全部「相对路径」图片 URL（Markdown 图片 + 行内 `<img src>`）。
+    /// 绝对路径/远程 URL/带 scheme 的地址不参与迁移（位置与文档目录无关）。
+    fn relative_image_urls(&self) -> Vec<String> {
+        let session = self.editor.session();
+        let mut out = Vec::new();
+        for (id, _, _) in session.blocks() {
+            if let Some(nodes) = session.block_inlines(id) {
+                collect_image_urls(&nodes, session, &mut out);
+            }
+        }
+        out.sort();
+        out.dedup();
+        out
     }
 
     /// 打开失败：完整路径 + 原因 + 可操作出口（重试 / 重新选择 / 取消）。
@@ -1002,6 +1081,38 @@ fn retry_cancel_buttons() -> Vec<modal::ModalButton> {
         modal::ModalButton::new(1, t(Key::BtnRetry), modal::ButtonRole::Primary).with_mnemonic('r'),
         modal::ModalButton::new(3, t(Key::BtnCancel), modal::ButtonRole::Secondary),
     ]
+}
+
+/// 递归收集图片 URL：Markdown `![]()` 与行内 `<img src>` 同一口径。
+fn collect_image_urls(nodes: &[InlineNode], session: &veil_core::Session, out: &mut Vec<String>) {
+    for n in nodes {
+        let url = match &n.kind {
+            InlineKind::Image => n.url.and_then(|r| session.text_slice(r)),
+            InlineKind::HtmlSelfClosed {
+                tag: HtmlTag::Img,
+                attrs,
+            } => attrs.src.clone(),
+            _ => None,
+        };
+        if let Some(u) = url {
+            if is_relative_asset_url(&u) {
+                out.push(u);
+            }
+        }
+        collect_image_urls(&n.children, session, out);
+    }
+}
+
+/// 相对图片 URL：非空、非绝对路径、无 scheme（远程/`data:`/`file:` 不迁移）。
+fn is_relative_asset_url(url: &str) -> bool {
+    let u = url.trim();
+    if u.is_empty() || u.starts_with('/') || u.starts_with('\\') {
+        return false;
+    }
+    if Path::new(u).is_absolute() {
+        return false;
+    }
+    veil_core::link_scheme(u).is_none()
 }
 
 /// 冲突副本路径：`<stem>.conflict-<n><ext>`，n 从 1 起取首个不存在者（不覆盖既有副本）。

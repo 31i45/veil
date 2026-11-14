@@ -26,6 +26,23 @@ pub trait ImageLoader {
     }
 }
 
+/// 跨目录另存时相对图片资产的迁移结果（DEF-T08-002）。
+/// `copied` = 成功复制到新文档目录的数量；`missing` = 源文件不存在；
+/// `failed` = 目标已存在不同内容/路径越界/复制失败等逐项原因。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AssetMigration {
+    pub copied: usize,
+    pub missing: usize,
+    pub failed: Vec<String>,
+}
+
+impl AssetMigration {
+    /// 未能迁移的资产总数：调用方据此给出可见降级提示。
+    pub fn incomplete(&self) -> usize {
+        self.missing + self.failed.len()
+    }
+}
+
 /// 粘贴图片落盘抽象（切片 14）：实现由产品层注入（同 ImageLoader 模式）。
 ///
 /// 约定：实现只接受 `doc` 的所在目录作为写入根，落盘到 `<stem>.assets/` 子目录；
@@ -34,6 +51,19 @@ pub trait ImageLoader {
 /// 草稿无路径时调用方不调用本方法；失败返回 Err → 粘贴不动文档并报错。
 pub trait AssetStore {
     fn save_pasted_image(&mut self, doc: &Path, image: &ImageData) -> Result<String, String>;
+
+    /// 另存到其他目录时迁移文档引用的相对图片资产（DEF-T08-002）：保持相对 URL
+    /// 不变，把 `old_doc` 所在目录可解析的源文件复制到 `new_doc` 所在目录的同一
+    /// 相对位置，使新位置图片仍可解析。不得覆盖目标目录内内容不同的既有文件。
+    /// 默认不做事（测试与不关心资产的实现无需改动）。
+    fn migrate_relative_assets(
+        &mut self,
+        _old_doc: &Path,
+        _new_doc: &Path,
+        _urls: &[String],
+    ) -> AssetMigration {
+        AssetMigration::default()
+    }
 }
 
 /// 图片扩展名判定（拖拽分流，阶段 1）：按小写扩展名认 PNG/JPEG/WebP 等常见位图。

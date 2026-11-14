@@ -63,7 +63,7 @@ veil.exe /unregister   # 只撤销 /register 创建、且当前值仍属于自�
 8. 配置与主题：顶层 `mode` 单键（system/light/dark，兼容旧 `[theme] mode`）、跟随系统外观、深色标题栏/Mica、切换持久化
 9. 自绘 chrome：菜单栏（↑/↓ 选择、Enter 执行、Esc 关闭，主菜单与右键菜单一致）、状态栏、滚动条；系统文件对话框（打开/另存为）
 10. 写作闭环：中文口径字数统计、专注模式与打字机模式（两个视图开关彼此互斥、全关即默认模式、不持久化，启动即回默认）、Ctrl+P 快速打开（最近文件 + 当前目录候选）、Ctrl+Shift+P 打印、图片粘贴/拖拽插入
-11. 表格编辑：Tab / Shift+Tab 在单元格间导航（末格循环回首格），Ctrl+Enter 在表尾追加空行；右键菜单支持上方/下方插入行、插入左列/右列、删除行/删除列，以及列对齐（左/居中/右，仅改写分隔行），每次结构变更一次 undo
+11. 表格编辑：Tab / Shift+Tab 在单元格间导航（末格 Tab 追加一行并落到新行首格），Ctrl+Enter 在表尾追加空行；右键菜单支持上方/下方插入行、插入左列/右列、删除行/删除列，以及列对齐（左/居中/右，仅改写分隔行），每次结构变更一次 undo
 12. 代码块语法高亮：16 种语言的关键字/字符串/注释/数字/类型着色（纯 Rust 逐行状态机，不引入 syntect）
 13. 源码模式：`Ctrl+/` 全文显示 Markdown 源码（含表格与公式块），切换保持光标与滚动位置；打印/导出始终为渲染态
 14. 导出 PDF：`Ctrl+Shift+E` 或 文件 → 导出 PDF，默认输出到文档同目录 `<stem>.pdf`（重名递增 ` (2)`/` (3)`）；可选目录页、页码、页边距（默认 20 mm），配置写入 `config.toml`。原生 PDF 直出（多级书签 + CJK 字体子集化 + 标题/表格/图片/公式排版），失败时回退系统「Microsoft Print to PDF」。未保存草稿会先弹保存对话框选定输出位置（取消即中止）。
@@ -85,7 +85,7 @@ veil.exe /unregister   # 只撤销 /register 创建、且当前值仍属于自�
 - 拼写检查
 - 插件系统
 - 移动端 / PWA（仅桌面 exe）
-- 表格结构可视化编辑的剩余部分（合并/拆分单元格、列宽拖动）；内容编辑、行列增删与列对齐已支持
+- 表格结构可视化编辑的剩余部分（合并/拆分单元格）；内容编辑、行列增删、列对齐与列宽拖动已支持
 - Mermaid 渲染（Mermaid 围栏块保持为代码，不做渲染）
 - 独立富文本文档模型：正文始终是 Markdown，`Ctrl+/` 只是同一文档的视图切换
 - 任何后台网络：无同步、无更新检查、无遥测；唯一出站请求是在渲染文档中的远程图片时按需发出，可在「视图 → 阻止远程图片」一键阻止；外部链接交给系统默认程序打开，导出 / PDF 永不包含远程资源
@@ -101,11 +101,11 @@ cargo test --workspace
 cargo run -p veil -- <file.md>
 ```
 
-当前 1478 项测试全绿（`cargo test --workspace` 1478 passed / 0 failed / 14 ignored，2026-11-13 v1.4 远程图片 + details PDF 修复实测），`cargo clippy --workspace --all-targets -- -D warnings` 零警告。
+当前 1637 项测试全绿（`cargo test --workspace` 1637 passed / 0 failed / 14 ignored，2026-11-14 审计修复后复核），`cargo clippy --workspace --all-targets -- -D warnings` 零警告。
 
 ## 数字红线（目标值与实测）
 
-发布构建、探针串行；性能项 2026-11-09 复核，测试与体积项 2026-11-10 复核。命令：`cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo run --release -p veil --example bench_typing`、`cargo test -p veil-ui --release --lib -- --ignored --nocapture --test-threads=1 perf_keystroke_path`（10,500 块用 `perf_keystroke_10k_blocks`）、`(Get-Item target\release\veil.exe).Length`。方法与明细见 `docs/review/keystroke-attribution.md`。
+发布构建、探针串行；性能项 2026-11-09 复核，测试与体积项 2026-11-14 复核。命令：`cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo run --release -p veil --example bench_typing`、`cargo test -p veil-ui --release --lib -- --ignored --nocapture --test-threads=1 perf_keystroke_path`（10,500 块用 `perf_keystroke_10k_blocks`）、`(Get-Item target\release\veil.exe).Length`。方法与明细见 `docs/review/keystroke-attribution.md`。
 
 | 指标 | 目标值 | 实测 |
 |---|---|---|
@@ -116,8 +116,8 @@ cargo run -p veil -- <file.md>
 | 冷启动（窗口句柄口径；P2 对比口径） | — | 30 ms（2026-10-30，`tools/bench/measure.ps1`） |
 | 10 万字文档击键→提交上屏延迟 p95 | ≤ 16 ms | 6.781 ms / 12.379 ms（`perf_keystroke_path` 5,005 块 / `perf_keystroke_10k_blocks` 10,500 块；基线 6.677 / 12.488；2026-11-09）✅ |
 | 10 万字文档常驻内存（私有工作集） | ≤ 150 MB | 40.76 MB（20 页深滚动后 WorkingSet，2026-11-05 实测） |
-| 安装产物体积 — 运行时代码（非图标） | ≤ 6 MiB（Phase A 基准；Wave 3/4 PDF 导出门槛让步已覆盖） | 7,358,787 B（exe 减 89,277 B 图标资源：`veil.ico` 46,688 + `veil-doc.ico` 42,589，2026-11-13 图标重设计） |
-| 安装产物体积 — 合计单文件 `veil.exe` | ≤ 10 MiB = 10,485,760 B（Wave 4 用户授权；每次增量须记录） | 7,448,064 B ≈ 7.10 MiB（2026-11-13 图标重设计；较 Wave 6 基线 6,988,800 B +459,264 B；较历史基线 6,914,048 B +534,016 B；余量 3,037,696 B） |
+| 安装产物体积 — 运行时代码（非图标） | ≤ 6 MiB（Phase A 基准；Wave 3/4 PDF 导出门槛让步已覆盖） | 7,475,523 B（exe 减 89,277 B 图标资源：`veil.ico` 46,688 + `veil-doc.ico` 42,589，2026-11-14 审计修复后） |
+| 安装产物体积 — 合计单文件 `veil.exe` | ≤ 10 MiB = 10,485,760 B（Wave 4 用户授权；每次增量须记录） | 7,564,800 B ≈ 7.21 MiB（2026-11-14 审计修复后；较 Wave 6 基线 6,988,800 B +576,000 B；较历史基线 6,914,048 B +650,752 B；余量 2,920,960 B） |
 | `veil-core` 单元+属性测试数 | ≥ 80 | 209 |
 | e2e 断言数 | ≥ 20 | 41（3 个 e2e_ 场景测试：写作闭环打开→保存→重开、表格+图片粘贴落盘、查找替换→崩溃恢复→自清）✅ |
 | Markdown 往返一致率（无编辑时输出 == 输入字节；按字节比较） | 100% | 100% |

@@ -675,7 +675,7 @@ fn parse_px(v: Option<&str>) -> Option<u32> {
 /// 标签名必须以字母开头、后接 alnum/-；不满足返回 None（不是合法标签）。
 /// 属性名必须以字母开头；白名单收集 `title`/`src`/`alt`（`<a>` 另收 `href`、
 /// `<img>` 另收 `width`/`height`）与净化后的 `style`；`on*` 一律忽略；
-/// `src=http(s)://` 远程置空、`href=javascript:` 置空。
+/// `src`/`href` 统一经 [`crate::link_url_is_safe`] 过滤，非白名单 scheme 置空。
 /// 属性值支持 `"..."` / `'...'` / 无引号。
 fn parse_open_tag(src: &str) -> Option<(String, bool, HtmlAttrs)> {
     // src 形如 "kbd>" 或 "img src=\"x\" />"（不含 `<`）。须以字母开头。
@@ -781,6 +781,12 @@ fn parse_open_tag(src: &str) -> Option<(String, bool, HtmlAttrs)> {
             "title" => attrs.title = val,
             "src" => {
                 if let Some(ref v) = val {
+                    // 非白名单 scheme（javascript:/data:/file:/vbscript: 等）连 src 都不写。
+                    if !crate::link_url_is_safe(v) {
+                        attrs.src = None;
+                        attrs.remote_src = None;
+                        continue;
+                    }
                     let lower = v.to_ascii_lowercase();
                     if lower.starts_with("http://") || lower.starts_with("https://") {
                         // 远程地址不写入 src（导出/PDF 依赖 src 为空），仅存 remote_src 供 UI 加载。
@@ -797,14 +803,10 @@ fn parse_open_tag(src: &str) -> Option<(String, bool, HtmlAttrs)> {
             // 避免把非像素语义的单位误当像素放大版面。
             "width" if tag_name == "img" => attrs.width = parse_px(val.as_deref()),
             "height" if tag_name == "img" => attrs.height = parse_px(val.as_deref()),
-            // 只有 `<a>` 的 href 参与渲染/导出；javascript: 脚本 scheme 置空。
+            // 只有 `<a>` 的 href 参与渲染/导出；非白名单 scheme 置空（保留标签与文字）。
             "href" if tag_name == "a" => {
                 if let Some(ref v) = val {
-                    let unsafe_scheme = v
-                        .trim_start()
-                        .to_ascii_lowercase()
-                        .starts_with("javascript:");
-                    attrs.href = (!unsafe_scheme).then(|| v.clone());
+                    attrs.href = crate::link_url_is_safe(v).then(|| v.clone());
                 }
             }
             _ => {}

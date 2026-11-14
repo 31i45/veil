@@ -178,16 +178,16 @@ pub trait UrlOpener {
     fn open_url(&mut self, url: &str) -> Result<(), String>;
 }
 
-/// 链接协议白名单：只放行 http/https/mailto（大小写不敏感，允许前导空白）。
+/// 链接协议白名单：只放行 http/https/mailto/tel（大小写不敏感，允许前导空白）。
 /// 为什么：链接文本来自文档内容（不可信输入），相对路径、`file:`、`javascript:` 等
 /// 一旦交给系统 shell 就是任意本地程序/脚本执行入口，故一律拒绝。
+/// scheme 提取与导出/剪贴板共用 `veil_core::link_scheme`（含实体/百分号/控制字符混淆还原）。
 /// 应用内锚点（`#...`）不归本端口处理（由锚点跳转任务负责），调用方须先自行忽略。
 pub fn url_is_openable(url: &str) -> bool {
-    let u = url.trim_start();
-    ["http://", "https://", "mailto:"].iter().any(|scheme| {
-        u.get(..scheme.len())
-            .is_some_and(|h| h.eq_ignore_ascii_case(scheme))
-    })
+    matches!(
+        veil_core::link_scheme(url).as_deref(),
+        Some("http" | "https" | "mailto" | "tel")
+    )
 }
 
 /// 链接目标归一化：GFM 裸链接补全为可直接使用的目标——

@@ -61,6 +61,18 @@ pub fn open_command(exe: &str) -> String {
     format!("\"{exe}\" \"%1\"")
 }
 
+/// `/register` 的「只填空位」判定：值不存在或为空白才允许写入。
+/// 与注册表类型判断分离，便于在无注册表环境单测。
+fn value_vacant(existing: Option<&str>) -> bool {
+    existing.is_none_or(|v| v.trim().is_empty())
+}
+
+/// `/unregister` 的「仍属本程序」判定：当前值与本次写入记录逐字一致才允许删除。
+/// 记录缺失（非本程序写入）或被他人改写时返回 false。
+fn value_owned_by_us(current: Option<&str>, recorded: Option<&str>) -> bool {
+    matches!((current, recorded), (Some(c), Some(r)) if c == r)
+}
+
 /// 执行关联动作；成功返回给用户看的结果说明，失败返回可读原因。
 #[cfg(windows)]
 pub fn run(cmd: AssocCommand) -> Result<String, String> {
@@ -89,8 +101,8 @@ mod win {
     use std::ptr::{null, null_mut};
 
     use super::{
-        icon_ref, open_command, APP_ICON_KEY, MD_KEY, MD_OPEN_WITH_KEY, PROG_ID, PROG_ID_KEY,
-        STATE_KEY,
+        icon_ref, open_command, value_owned_by_us, value_vacant, APP_ICON_KEY, MD_KEY,
+        MD_OPEN_WITH_KEY, PROG_ID, PROG_ID_KEY, STATE_KEY,
     };
     use crate::platform::wide;
     use veil_ui::i18n::{t, tf, Key as I18nKey};
@@ -317,6 +329,17 @@ mod win {
         Ok(decode_sz(&read_raw(sub, name)?))
     }
 
+    /// 值是否空缺（不存在、零长度或纯空白）。非字符串类型视为已占用，不覆盖。
+    fn is_vacant(sub: &str, name: Option<&str>) -> Result<bool, String> {
+        let Some((ty, data)) = read_raw(sub, name)? else {
+            return Ok(true);
+        };
+        if ty != REG_SZ && ty != REG_EXPAND_SZ {
+            return Ok(false);
+        }
+        Ok(value_vacant(decode_sz(&Some((ty, data))).as_deref()))
+    }
+
     fn delete_value(sub: &str, name: Option<&str>) -> Result<(), String> {
         let Some(key) = open_key(sub)? else {
             return Ok(());
@@ -376,17 +399,37 @@ mod win {
     pub fn register(exe: &str) -> Result<String, String> {
         let icon = icon_ref(exe);
         let command = open_command(exe);
+        let description = t(I18nKey::AssocMarkdownDescription).to_owned();
+        let icon_key = format!("{PROG_ID_KEY}\\DefaultIcon");
+        let cmd_key = format!("{PROG_ID_KEY}\\shell\\open\\command");
         let mut notes: Vec<String> = Vec::new();
+        let mut kept: Vec<&str> = Vec::new();
 
-        // 1) 本程序命名空间：ProgID + 文档图标 + 打开命令（幂等）
-        let (prog, created) = create_key(PROG_ID_KEY)?;
-        set_sz(&prog, None, t(I18nKey::AssocMarkdownDescription))?;
-        let (icon_key, _) = create_key(&format!("{PROG_ID_KEY}\\DefaultIcon"))?;
-        set_sz(&icon_key, None, &icon)?;
-        let (cmd_key, _) = create_key(&format!("{PROG_ID_KEY}\\shell\\open\\command"))?;
-        set_sz(&cmd_key, None, &command)?;
-        if created {
-            set_state("ProgId", "1")?;
+        // 1) 本程序命名空间：只填空缺值。他人已写入的描述/图标/命令一律不改写，
+        //    并把保留项如实告知用户（DEF-T10-005）。
+        if is_vacant(PROG_ID_KEY, None)? {
+            let (prog, _) = create_key(PROG_ID_KEY)?;
+            set_sz(&prog, None, &description)?;
+            set_state("ProgIdDesc", &description)?;
+        } else {
+            kept.push("ProgID 描述");
+        }
+        if is_vacant(&icon_key, None)? {
+            let (key, _) = create_key(&icon_key)?;
+            set_sz(&key, None, &icon)?;
+            set_state("ProgIdIcon", &icon)?;
+        } else {
+            kept.push("DefaultIcon");
+        }
+        if is_vacant(&cmd_key, None)? {
+            let (key, _) = create_key(&cmd_key)?;
+            set_sz(&key, None, &command)?;
+            set_state("ProgIdCmd", &command)?;
+        } else {
+            kept.push("打开命令");
+        }
+        if !kept.is_empty() {
+            notes.push(tf(I18nKey::AssocRegisterKept, &[&kept.join("、")]));
         }
 
         // 2) `.md` 的默认值：只填空位，绝不改写他人关联（不抢默认应用）
@@ -397,23 +440,30 @@ mod win {
                 set_state("MdDefault", PROG_ID)?;
                 notes.push(t(I18nKey::AssocDefaultSet).to_owned());
             }
+            Some(v) if v.trim().is_empty() => {
+                let (md, _) = create_key(MD_KEY)?;
+                set_sz(&md, None, PROG_ID)?;
+                set_state("MdDefault", PROG_ID)?;
+                notes.push(t(I18nKey::AssocDefaultSet).to_owned());
+            }
             Some(v) if v == PROG_ID => {}
             Some(_) => notes.push(t(I18nKey::AssocDefaultOther).to_owned()),
         }
 
-        // 3) 「打开方式」列表：只加 Veil，不改默认应用
+        // 3) 「打开方式」列表：只加 Veil；已存在的项（可能由他人创建）不重写、不记所有权
         let (open_with, _) = create_key(MD_OPEN_WITH_KEY)?;
-        set_empty(&open_with, PROG_ID)?;
+        if read_raw(MD_OPEN_WITH_KEY, Some(PROG_ID))?.is_none() {
+            set_empty(&open_with, PROG_ID)?;
+            set_state("OpenWith", "1")?;
+        }
 
         // 4) 直接关联到 veil.exe 的旧关联（资源管理器里显示「V」的根因）：只补空位
-        match read_sz(APP_ICON_KEY, None)? {
-            None => {
-                let (app_icon, _) = create_key(APP_ICON_KEY)?;
-                set_sz(&app_icon, None, &icon)?;
-                set_state("AppIcon", &icon)?;
-            }
-            Some(v) if v == icon => {}
-            Some(_) => notes.push(t(I18nKey::AssocIconKept).to_owned()),
+        if is_vacant(APP_ICON_KEY, None)? {
+            let (app_icon, _) = create_key(APP_ICON_KEY)?;
+            set_sz(&app_icon, None, &icon)?;
+            set_state("AppIcon", &icon)?;
+        } else if read_sz(APP_ICON_KEY, None)?.as_deref() != Some(icon.as_str()) {
+            notes.push(t(I18nKey::AssocIconKept).to_owned());
         }
 
         notify_shell();
@@ -421,44 +471,78 @@ mod win {
         let mut text = t(I18nKey::AssocRegisteredBody).to_owned();
         if !notes.is_empty() {
             text.push('\n');
-            for n in notes {
+            for n in &notes {
                 text.push_str("\n- ");
-                text.push_str(&n);
+                text.push_str(n);
             }
         }
         text.push_str(t(I18nKey::AssocManualDefault));
         Ok(text)
     }
 
-    pub fn unregister(exe: &str) -> Result<String, String> {
-        let icon = icon_ref(exe);
+    pub fn unregister(_exe: &str) -> Result<String, String> {
+        let mut kept: Vec<&str> = Vec::new();
 
-        // 已关联到 veil.exe 的图标：只删自己写的那个值
+        // 1) 已关联到 veil.exe 的图标：只删本程序记录过、且当前值未被改写的项
         let recorded_icon = read_sz(STATE_KEY, Some("AppIcon"))?;
-        if read_sz(APP_ICON_KEY, None)?
-            .is_some_and(|v| v == icon || recorded_icon.as_deref() == Some(v.as_str()))
-        {
+        let current_icon = read_sz(APP_ICON_KEY, None)?;
+        if value_owned_by_us(current_icon.as_deref(), recorded_icon.as_deref()) {
             delete_value(APP_ICON_KEY, None)?;
             delete_key_if_empty(APP_ICON_KEY);
+        } else if current_icon.is_some() {
+            kept.push("veil.exe 图标");
         }
 
-        // 「打开方式」列表
-        delete_value(MD_OPEN_WITH_KEY, Some(PROG_ID))?;
+        // 2) 「打开方式」列表：只删本程序新建的那一项
+        let recorded_open_with = read_sz(STATE_KEY, Some("OpenWith"))?;
+        if recorded_open_with.as_deref() == Some("1") {
+            delete_value(MD_OPEN_WITH_KEY, Some(PROG_ID))?;
+        } else if read_raw(MD_OPEN_WITH_KEY, Some(PROG_ID))?.is_some() {
+            kept.push("「打开方式」项");
+        }
 
-        // `.md` 默认值：只在本程序写入的值仍在时删除
-        if read_sz(MD_KEY, None)?.as_deref() == Some(PROG_ID) {
+        // 3) `.md` 默认值：只删本程序写入且仍指向本程序的值
+        let recorded_md = read_sz(STATE_KEY, Some("MdDefault"))?;
+        let current_md = read_sz(MD_KEY, None)?;
+        if recorded_md.as_deref() == Some(PROG_ID) && current_md.as_deref() == Some(PROG_ID) {
             delete_value(MD_KEY, None)?;
+        } else if current_md.as_deref() == Some(PROG_ID) {
+            kept.push(".md 默认值");
         }
 
-        // 本程序命名空间：仅当本轮注册时新建才整树删除
-        if read_sz(STATE_KEY, Some("ProgId"))?.as_deref() == Some("1") {
-            delete_tree(PROG_ID_KEY)?;
+        // 4) 本程序命名空间：逐值核对所有权，只删自己写入且未被改写的值；
+        //    绝不整树删除（他人可能在同一 ProgID 下追加内容）。
+        let icon_key = format!("{PROG_ID_KEY}\\DefaultIcon");
+        let cmd_key = format!("{PROG_ID_KEY}\\shell\\open\\command");
+        for (sub, state, label) in [
+            (PROG_ID_KEY, "ProgIdDesc", "ProgID 描述"),
+            (icon_key.as_str(), "ProgIdIcon", "DefaultIcon"),
+            (cmd_key.as_str(), "ProgIdCmd", "打开命令"),
+        ] {
+            let current = read_sz(sub, None)?;
+            let recorded = read_sz(STATE_KEY, Some(state))?;
+            if value_owned_by_us(current.as_deref(), recorded.as_deref()) {
+                delete_value(sub, None)?;
+            } else if current.is_some() {
+                kept.push(label);
+            }
         }
+        // 只删已成空的键（有子键/子值时 Windows 会拒绝，他方内容原样保留）。
+        delete_key_if_empty(&cmd_key);
+        delete_key_if_empty(&format!("{PROG_ID_KEY}\\shell\\open"));
+        delete_key_if_empty(&format!("{PROG_ID_KEY}\\shell"));
+        delete_key_if_empty(&icon_key);
+        delete_key_if_empty(PROG_ID_KEY);
 
         delete_tree(STATE_KEY)?;
         delete_key_if_empty(r"Software\Veil");
         notify_shell();
-        Ok(t(I18nKey::AssocUnregisteredBody).to_owned())
+        let mut text = t(I18nKey::AssocUnregisteredBody).to_owned();
+        if !kept.is_empty() {
+            text.push_str("\n\n");
+            text.push_str(&tf(I18nKey::AssocUnregisterKept, &[&kept.join("、")]));
+        }
+        Ok(text)
     }
 }
 
@@ -511,6 +595,30 @@ mod tests {
         assert!(icon_ref(exe).starts_with('"'));
         assert!(open_command(exe).ends_with("\" \"%1\""));
         assert!(open_command(exe).contains("我的 工具"));
+    }
+
+    /// `/register` 只填空位：已存在的非空值一律不改写（DEF-T10-005）。
+    #[test]
+    fn register_only_fills_vacant_values() {
+        assert!(value_vacant(None), "不存在算空缺");
+        assert!(value_vacant(Some("")), "零长度算空缺");
+        assert!(value_vacant(Some("   ")), "纯空白算空缺");
+        for occupied in ["Veil.Markdown", "Other.App", "\"D:\\a.exe\",-2"] {
+            assert!(!value_vacant(Some(occupied)), "非空值不得覆盖: {occupied}");
+        }
+    }
+
+    /// `/unregister` 只删本次创建且仍属 Veil 的值（DEF-T10-006）。
+    #[test]
+    fn unregister_only_deletes_owned_values() {
+        assert!(value_owned_by_us(Some("v"), Some("v")), "值未变才可删");
+        assert!(!value_owned_by_us(Some("v2"), Some("v")), "他人改写须保留");
+        assert!(!value_owned_by_us(Some("v"), None), "无写入记录须保留");
+        assert!(
+            !value_owned_by_us(None, Some("v")),
+            "值已被删除不报错但也不删"
+        );
+        assert!(!value_owned_by_us(None, None));
     }
 
     /// 键路径必须是相对 HKCU 的路径（不以反斜杠开头），且 ProgID 一致。

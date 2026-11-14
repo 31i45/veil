@@ -396,6 +396,10 @@ keys! {
     AssocDefaultOther => "assoc.note.default_other",
         ".md 已有其他关联，未改写；如需 Veil 打开，请在「设置 → 应用 → 默认应用」中选择";
     AssocIconKept => "assoc.note.icon_kept", "已存在自定义文件图标，未改写";
+    AssocRegisterKept => "assoc.note.register_kept",
+        "以下 ProgID 值由其他程序写入，已保留未覆盖：{}";
+    AssocUnregisterKept => "assoc.note.unregister_kept",
+        "以下关联项不是本程序写入或已被改写，已保留：{}";
     AssocManualDefault => "assoc.note.manual_default",
         "\n\n要让 .md 双击默认由 Veil 打开，请在「设置 → 应用 → 默认应用」中选择 Veil：Windows 不允许程序自行修改默认应用。";
     AssocRegisteredBody => "assoc.registered_body",

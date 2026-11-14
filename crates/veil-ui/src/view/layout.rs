@@ -4625,6 +4625,14 @@ mod tests {
         assert_eq!(l.layout_text(), "see [^a] now", "源码模式不受替换影响");
     }
 
+    /// DEF-T05-001：源码模式原样显示 `[TOC]` 标记（文档字节也未被生成目录替换）。
+    #[test]
+    fn toc_marker_shows_raw_in_source_mode() {
+        let src = "[TOC]\n\n# Hello\n";
+        let (_eng, l, _) = layout_footnote_block(src, 0, usize::MAX, 400.0, true);
+        assert_eq!(l.layout_text(), "[TOC]", "源码模式必须显示原始标记");
+    }
+
     #[test]
     fn footnote_ref_hit_maps_into_source_range_after_edits() {
         // 引用前后插入/删除字符后重新排版：点击 `[1]` 任一位置都必须落在源码区间内。

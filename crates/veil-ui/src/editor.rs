@@ -1,10 +1,7 @@
 //! 编辑器交互策略核心：光标（mark）、IME preedit 视图态、文档级意图应用。
 //! 纯逻辑、零 GUI 依赖；像素级命中与坐标换算属 layout 层（机制与策略分离，INSTANCE §0）。
 
-use veil_core::{
-    emphasis_spans, generate_toc, is_toc_marker, Bias, BlockId, BlockKind, Edit, InlineKind,
-    MarkId, Range, Session,
-};
+use veil_core::{emphasis_spans, Bias, BlockId, Edit, InlineKind, MarkId, Range, Session};
 
 /// 文档级意图（input 层翻译产出；视觉行内移动/点击由 shell 经 layout 直接换算偏移，
 /// 不走这里）。preedit 激活期间一切意图被忽略——组合期按键归 IME 所有。
@@ -89,6 +86,8 @@ impl Editor {
     /// 带自定义 Callout 配置的构造：解析期据此把 `> [!NAME]` 分类为 Callout。
     /// 配置只影响块种类，不影响字节（往返仍恒等）。
     pub fn new_with_callouts(text: &str, callouts: &veil_core::CalloutRegistry) -> Self {
+        // 源码真值：打开文档不得改写其字节。`[TOC]` 标记原样保留在文档里，
+        // 源码模式因此能看到原始标记（DEF-T05-001），也不会静默写回磁盘。
         let mut session = Session::open_with_callouts(text, callouts);
         let caret = session
             .create_mark(0, Bias::Right)
@@ -96,31 +95,14 @@ impl Editor {
         let anchor = session
             .create_mark(0, Bias::Left)
             .expect("空文档 offset 0 恒合法");
-        let mut editor = Editor {
+        Editor {
             session,
             caret,
             anchor,
             preedit: None,
             dirty: false,
             line_ending: detect_line_ending(text),
-        };
-        editor.refresh_toc_force();
-        if editor.dirty {
-            // 加载期生成不属于用户编辑；新会话同时清除刷新产生的撤销历史。
-            let generated = editor.session.serialize();
-            let mut session = Session::open_with_callouts(&generated, callouts);
-            let caret = session
-                .create_mark(0, Bias::Right)
-                .expect("空文档 offset 0 恒合法");
-            let anchor = session
-                .create_mark(0, Bias::Left)
-                .expect("空文档 offset 0 恒合法");
-            editor.session = session;
-            editor.caret = caret;
-            editor.anchor = anchor;
-            editor.dirty = false;
         }
-        editor
     }
 
     /// 自上次 `mark_saved` 以来内容是否被修改（保存与标题脏标的判定依据）。
@@ -337,7 +319,6 @@ impl Editor {
         let r = self.apply_inner(intent);
         if mutating && r.is_some() {
             self.dirty = true;
-            self.refresh_toc_if_needed();
         }
         r
     }
@@ -725,78 +706,6 @@ impl Editor {
             }
             // 已于入口分流（穷尽性占位）
             Intent::ToggleWrap(_) | Intent::InsertLink => unreachable!("入口已分流"),
-        }
-    }
-
-    /// [TOC] 自动刷新：编辑完成后若文档含 TOC 标记段落，且当前光标/选区不在其区间内，
-    /// 则根据该标记之后的所有标题重新生成 Markdown 无序列表并原地替换。
-    /// 光标离开 TOC 块才替换 → 符合 Obsidian 的「静态插入」语义，避免用户在 TOC 块内
-    /// 编辑时被立即覆盖。替换本身不再产生新的 TOC 标记 → 不触发第二次刷新。
-    ///
-    /// 扫描 O(n) 块，典型文档 O(1) 命中；且仅在 `is_toc_marker` 为真时才取 heading，
-    /// 空文档 / 不含 `[TOC]` 的文档零额外开销。
-    #[allow(dead_code)]
-    fn refresh_toc_if_needed(&mut self) {
-        self.refresh_toc(false);
-    }
-
-    fn refresh_toc_force(&mut self) {
-        self.refresh_toc(true);
-    }
-
-    fn refresh_toc(&mut self, force: bool) {
-        let blocks = self.session.blocks();
-        let caret = self.caret();
-        let sel = self.selection();
-
-        // 1. 收集所有 TOC 标记段落 (id, range)
-        let toc_blocks: Vec<(BlockId, Range)> = blocks
-            .iter()
-            .filter(|(_, kind, _)| matches!(kind, BlockKind::Paragraph))
-            .filter_map(|(id, _, range)| {
-                let text = self.session.text_slice(*range)?;
-                is_toc_marker(&text).then_some((*id, *range))
-            })
-            .collect();
-        if toc_blocks.is_empty() {
-            return;
-        }
-
-        // 2. 对每个 TOC 标记：光标/选区是否在其内 → 是则跳过
-        for (_toc_id, toc_range) in &toc_blocks {
-            let caret_in = caret >= toc_range.start && caret <= toc_range.end;
-            let sel_in = sel.is_some_and(|s| s.start < toc_range.end && s.end > toc_range.start);
-            if !force && (caret_in || sel_in) {
-                continue;
-            }
-
-            // 3. 收集 toc_range.end 之后的所有 heading（按文档顺序）
-            let after_headings: Vec<(u8, String)> = blocks
-                .iter()
-                .filter(|(_, kind, range)| {
-                    range.start >= toc_range.end
-                        && matches!(kind, BlockKind::AtxHeading(_) | BlockKind::SetextHeading(_))
-                })
-                .filter_map(|(id, _, _)| self.session.heading(*id))
-                .collect();
-
-            let generated = generate_toc(after_headings.iter().map(|(l, t)| (*l, t.as_str())));
-
-            // 4. 与现有内容比较；相同则跳过（避免空换脏/空进撤销栈）
-            let existing = match self.session.text_slice(*toc_range) {
-                Some(t) => t,
-                None => continue,
-            };
-            if generated == existing {
-                continue;
-            }
-
-            // 5. 原地替换：整段一次 Replace，单撤销步；块区间将由重解析自动更新
-            let _ = self.session.apply(Edit::Replace {
-                range: *toc_range,
-                text: generated,
-            });
-            self.dirty = true;
         }
     }
 
@@ -1779,27 +1688,26 @@ mod tests {
         e
     }
 
+    /// DEF-T05-001：打开含 `[TOC]` 的文档不得被改写成生成目录——
+    /// 源码模式必须能看到原始标记，且加载不产生脏标/撤销步。
     #[test]
-    fn toc_is_generated_on_load_with_caret_inside_marker() {
-        let e = Editor::new("[TOC]\n\n# Hello\n\n# World");
-        let text = e.session().serialize();
-        assert!(text.contains("- [Hello](#hello)"));
-        assert!(text.contains("- [World](#world)"));
-        assert!(!text.contains("[TOC]"));
-    }
-
-    #[test]
-    fn toc_generation_on_load_does_not_set_dirty() {
-        let e = Editor::new("[TOC]\n\n# Hello\n\n# World");
-        assert!(!e.is_dirty());
-    }
-
-    #[test]
-    fn toc_generation_on_load_cannot_be_undone() {
-        let mut e = Editor::new("[TOC]\n\n# Hello\n\n# World");
-        assert_eq!(e.session().undo_depth(), 0);
+    fn toc_marker_is_preserved_verbatim_on_load() {
+        let src = "[TOC]\n\n# Hello\n\n# World";
+        let mut e = Editor::new(src);
+        assert_eq!(e.session().serialize(), src, "加载不得改写文档字节");
+        assert!(e.session().serialize().contains("[TOC]"));
+        assert!(!e.is_dirty(), "加载期的隐式改写不得置脏");
+        assert_eq!(e.session().undo_depth(), 0, "不得产生撤销步");
         assert_eq!(e.apply(Intent::Undo), None);
-        assert!(!e.session().serialize().contains("[TOC]"));
+    }
+
+    /// 编辑与标题增删也不得把 `[TOC]` 替换成生成内容（不写回文档）。
+    #[test]
+    fn toc_marker_survives_edits() {
+        let mut e = ed("[TOC]\n\n# Hello\n", 0);
+        e.apply(Intent::InsertText("# Second\n\n".into()));
+        assert!(e.session().serialize().contains("[TOC]"));
+        assert!(!e.session().serialize().contains("- [Hello]"));
     }
 
     // ---- CRLF 编辑一致性（阶段 2 源码真值：不引入隐式规范化）----

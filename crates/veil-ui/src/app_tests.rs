@@ -1112,6 +1112,149 @@ fn window_height_change_resizes_standalone_image() {
     );
 }
 
+/// 取指定文本所在块的几何（测试辅助：按块文本定位）。
+fn geom_of_text<'a>(a: &'a App, needle: &str) -> &'a BlockGeom {
+    let session = a.editor.session();
+    let (id, _, _) = session
+        .blocks()
+        .into_iter()
+        .find(|(_, _, r)| session.text_slice(*r).is_some_and(|t| t.contains(needle)))
+        .expect("应存在目标块");
+    a.index
+        .blocks
+        .iter()
+        .find(|g| g.id == id)
+        .expect("块几何应存在")
+}
+
+/// B4 回归：独立图片块只占图片实际显示高度，后接标题的间距与普通段落一致。
+/// 回归：占位 span 重复拼接 → NBSP 翻倍折行 → 块高 = 2×图高（半屏空白）。
+#[test]
+fn standalone_image_block_height_is_displayed_height() {
+    let (mut a, _) = app_with_images(
+        "前文\n\n![](p.png)\n\n## 1.1 背景\n\n背景介绍。\n\n普通段落\n\n## 1.2 目标\n",
+        Some("dir/doc.md"),
+        // 宽度受限的矮图：显示宽 = 版心宽，高 ≈ 155px，远小于视口 80%。
+        &[("dir/p.png", 1600, 200)],
+    );
+    a.window_state.test_size = Some((1280, 800));
+    a.ensure_layouts_all();
+    a.recompute_geometry();
+
+    let shown = layout_of_text(&a, "p.png").imgs[0].height as f32;
+    let g = geom_of_text(&a, "p.png");
+    assert!(
+        shown < a.image_max_height() * 0.5,
+        "夹具应是远矮于视口 80% 的图片（{shown} vs {}）",
+        a.image_max_height()
+    );
+    assert_eq!(g.height, shown, "独立图片块高必须等于图片实际显示高度");
+
+    let next = geom_of_text(&a, "1.1 背景");
+    let img_gap = next.top - (g.top + g.height);
+    let para = geom_of_text(&a, "普通段落");
+    let next2 = geom_of_text(&a, "1.2 目标");
+    let para_gap = next2.top - (para.top + para.height);
+    assert!(
+        (img_gap - para_gap).abs() < 0.5,
+        "图片→标题间距应与段落→标题一致：{img_gap} vs {para_gap}"
+    );
+    assert!(img_gap < 2.0 * a.engine.doc_line_height() * a.input_state.scale);
+}
+
+/// 连续独立图片与图片后接段落：块间距恢复普通块间距，不叠加图片高度。
+#[test]
+fn consecutive_standalone_images_keep_normal_gaps() {
+    let (mut a, _) = app_with_images(
+        "正文一。\n\n![](p.png)\n\n![](q.png)\n\n## 标题\n\n正文二。\n\n正文三。\n\n## 标题二\n",
+        Some("dir/doc.md"),
+        &[("dir/p.png", 1600, 200), ("dir/q.png", 1200, 300)],
+    );
+    a.window_state.test_size = Some((1280, 800));
+    a.ensure_layouts_all();
+    a.recompute_geometry();
+
+    let p = geom_of_text(&a, "p.png");
+    let q = geom_of_text(&a, "q.png");
+    let p_shown = layout_of_text(&a, "p.png").imgs[0].height as f32;
+    let q_shown = layout_of_text(&a, "q.png").imgs[0].height as f32;
+    assert_eq!(p.height, p_shown);
+    assert_eq!(q.height, q_shown);
+    let img_gap = q.top - (p.top + p.height);
+
+    let para1 = geom_of_text(&a, "正文二");
+    let para2 = geom_of_text(&a, "正文三");
+    let para_gap = para2.top - (para1.top + para1.height);
+    assert!(
+        (img_gap - para_gap).abs() < 0.5,
+        "连续图片间距应与段落间距一致：{img_gap} vs {para_gap}"
+    );
+    let heading = geom_of_text(&a, "## 标题");
+    let tail_gap = heading.top - (q.top + q.height);
+    let heading2 = geom_of_text(&a, "## 标题二");
+    let para_heading_gap = heading2.top - (para2.top + para2.height);
+    assert!(
+        (tail_gap - para_heading_gap).abs() < 0.5,
+        "图片→标题间距应与段落→标题一致：{tail_gap} vs {para_heading_gap}"
+    );
+}
+
+/// 远程图片异步到达后立即重算几何：块高与后续块顶随加载结果刷新。
+#[test]
+fn standalone_image_geometry_refreshes_after_async_load() {
+    let images = RemoteImages::default();
+    let results = images.results.clone();
+    let mut a = app_remote(
+        &format!("前文\n\n![]({REMOTE_URL})\n\n## 1.1 背景\n"),
+        Box::new(MemConfig::default()),
+        images,
+    );
+    a.window_state.test_size = Some((1280, 800));
+    a.ensure_layouts_all();
+    a.recompute_geometry();
+    let before_h = geom_of_text(&a, REMOTE_URL).height;
+    let before_top = geom_of_text(&a, "1.1 背景").top;
+
+    results
+        .borrow_mut()
+        .push((REMOTE_URL.to_string(), Ok(solid(1600, 200))));
+    a.poll_remote_images();
+
+    let shown = layout_of_text(&a, REMOTE_URL).imgs[0].height as f32;
+    let after_h = geom_of_text(&a, REMOTE_URL).height;
+    let after_top = geom_of_text(&a, "1.1 背景").top;
+    assert!(after_h > before_h, "加载后块高应增大：{before_h} -> {after_h}");
+    assert_eq!(after_h, shown, "加载后块高 = 图片实际显示高度");
+    assert!(
+        (after_top - before_top - (after_h - before_h)).abs() < 0.5,
+        "后续块顶应同步下移：{before_top} -> {after_top}（块高差 {after_h}-{before_h}）"
+    );
+}
+
+/// 窗口缩放后独立图片块高度按新视口重算，块高仍等于显示高度。
+#[test]
+fn standalone_image_block_height_recomputed_after_resize() {
+    let (mut a, _) = app_with_images(
+        "前文\n\n![](p.png)\n\n## 1.1 背景\n",
+        Some("dir/doc.md"),
+        &[("dir/p.png", 1600, 400)],
+    );
+    a.window_state.test_size = Some((1280, 800));
+    a.ensure_layouts_all();
+    a.recompute_geometry();
+    let tall = layout_of_text(&a, "p.png").imgs[0].height as f32;
+    assert_eq!(geom_of_text(&a, "p.png").height, tall);
+
+    a.window_state.test_size = Some((1280, 400));
+    a.ensure_layouts_all();
+    a.recompute_geometry();
+    let short = layout_of_text(&a, "p.png").imgs[0].height as f32;
+    let g = geom_of_text(&a, "p.png");
+    assert!(short < tall, "窗口变矮后图片应变小：{tall} -> {short}");
+    assert_eq!(short, a.image_max_height().round(), "应夹到新视口 80%");
+    assert_eq!(g.height, short, "缩放后块高必须同步重算");
+}
+
 #[test]
 fn image_failure_degrades_to_alt_and_memoizes() {
     let (mut a, calls) = app_with_images("a ![alt](img/p.png) b", Some("dir/doc.md"), &[]);
@@ -14322,3 +14465,4 @@ fn blink_key_without_caret_move_restores_visibility() {
     assert_eq!(a.editor.caret(), caret, "Ctrl 不移动 caret");
     assert!(a.cursor_visible, "caret 不变也必须恢复可见");
 }
+

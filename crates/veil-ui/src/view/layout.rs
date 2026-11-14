@@ -1008,8 +1008,13 @@ impl LayoutEngine {
                     continue; // 防御：img 区间须落在本块内（shell 按块收集，不会越界）
                 }
                 // 向上取整：占位 advance 必须 ≥ 图宽，否则图右缘会压住后续文本
-                // （CJK 前后行内公式曾因四舍五入向下而重叠）。
-                let nbsp = ((im.width as f32 / nbsp_w).ceil() as usize).max(1);
+                // （CJK 前后行内公式曾因四舍五入向下而重叠）。再夹到整行可容纳的
+                // 字形数：满宽图片时 ceil 可能多出一个 NBSP 宽度，导致占位折行 →
+                // 每个视觉行都按图高计高，独立图片块高度翻倍（半屏空白）。
+                let cap = ((width / nbsp_w).floor() as usize).max(1);
+                let nbsp = ((im.width as f32 / nbsp_w).ceil() as usize)
+                    .max(1)
+                    .min(cap);
                 subs.push(Sub::fill(rs, re, "\u{A0}".repeat(nbsp)));
                 kept.push(im);
             }
@@ -1171,10 +1176,13 @@ impl LayoutEngine {
         if !img_specs.is_empty() {
             let base = layout_text.as_ptr() as usize;
             let mut out: Vec<(&str, Attrs)> = Vec::new();
+            // 每个图片占位区间已被基础 span 覆盖的字节段：拼接式富文本里同一段
+            // 只能出现一次，否则占位文本被重复排版（图片块高度翻倍）。
+            let mut covered: Vec<Vec<(usize, usize)>> = vec![Vec::new(); img_specs.len()];
             for (txt, at) in spans.drain(..) {
                 let s = txt.as_ptr() as usize - base;
                 let mut pieces = vec![(s, s + txt.len(), at)];
-                for (is, ie, iat) in &img_specs {
+                for (idx, (is, ie, iat)) in img_specs.iter().enumerate() {
                     let mut next = Vec::new();
                     for (ps, pe, pat) in pieces {
                         if *ie <= ps || *is >= pe {
@@ -1187,6 +1195,7 @@ impl LayoutEngine {
                         let (os, oe) = (ps.max(*is), pe.min(*ie));
                         if os < oe {
                             next.push((os, oe, iat.clone()));
+                            covered[idx].push((os, oe));
                         }
                         if pe > *ie {
                             next.push((*ie, pe, pat));
@@ -1198,8 +1207,19 @@ impl LayoutEngine {
                     out.push((&layout_text[ps..pe], pat));
                 }
             }
-            for (is, ie, at) in &img_specs {
-                out.push((&layout_text[*is..*ie], at.clone()));
+            // 基础 span 未覆盖的占位字节段补默认样式（仅补空缺，不重复整段）。
+            for (idx, (is, ie, at)) in img_specs.iter().enumerate() {
+                let mut pos = *is;
+                covered[idx].sort_unstable();
+                for (cs, ce) in &covered[idx] {
+                    if *cs > pos {
+                        out.push((&layout_text[pos..*cs], at.clone()));
+                    }
+                    pos = pos.max(*ce);
+                }
+                if pos < *ie {
+                    out.push((&layout_text[pos..*ie], at.clone()));
+                }
             }
             spans = out;
         }
@@ -4127,6 +4147,23 @@ mod tests {
             13,
             "图下半区域（行高内）命中节点尾"
         );
+    }
+
+    #[test]
+    fn standalone_image_placeholder_is_single_line_without_duplication() {
+        // 满宽独立图片：NBSP 占位只能排版一次且单行，块高 = 图片显示高度。
+        // 回归：占位 span 被重复拼接时占位文本翻倍 → 折成两行，每行都按图高
+        // 计高，独立图片块高度变成 2×图高（下一标题出现半屏空白）。
+        let imgs = [image(Range::new(0, 13), 200, 100)];
+        let (_, l) = layout_with_imgs("![alt](p.png)", usize::MAX, 200.0, &imgs);
+        let runs: Vec<_> = l.buffer.layout_runs().collect();
+        assert_eq!(runs.len(), 1, "满宽占位不得折行");
+        assert_eq!(l.imgs.len(), 1);
+        assert_eq!(runs[0].line_height, 100.0, "视觉行行高 = 图高");
+        assert_eq!(l.height, 100.0, "块高只占图片实际显示高度");
+        let nbsp = l.layout_text().chars().filter(|c| *c == '\u{a0}').count();
+        let glyphs: usize = runs.iter().map(|r| r.glyphs.len()).sum();
+        assert_eq!(glyphs, nbsp, "占位文本不得被重复排版（字形数应等于 NBSP 数）");
     }
 
     #[test]

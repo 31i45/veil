@@ -296,6 +296,14 @@ pub(crate) fn resolve_redirect(base: &HttpUrl, location: &str) -> Result<HttpUrl
     if let Some(rest) = loc.strip_prefix("//") {
         return validate_url(&format!("{}://{}", base.scheme(), rest));
     }
+    if let Some(rest) = loc.strip_prefix('?') {
+        // query-only：保留当前路径，只替换查询串（DEF-T10-007）。
+        return validate_url(&format!("{}{}?{rest}", base.origin(), base.path()));
+    }
+    if loc.starts_with('#') {
+        // fragment-only：路径与查询串都沿用当前 URL，仅丢弃 fragment。
+        return validate_url(&format!("{}{}", base.origin(), base.target));
+    }
     if loc.starts_with('/') {
         return validate_url(&format!("{}{}", base.origin(), loc));
     }
@@ -964,6 +972,18 @@ mod tests {
 
         let deeper = resolve_redirect(&base, "img/e.png").unwrap();
         assert_eq!(deeper.target, "/a/img/e.png");
+
+        // query-only / fragment-only：相对当前 URL 解析，不得丢掉当前路径
+        // （DEF-T10-007）。
+        let query_only = resolve_redirect(&base, "?download=1").unwrap();
+        assert_eq!(query_only.origin(), "https://example.com");
+        assert_eq!(query_only.target, "/a/b.png?download=1");
+        let fragment_only = resolve_redirect(&base, "#section").unwrap();
+        assert_eq!(fragment_only.origin(), "https://example.com");
+        assert_eq!(
+            fragment_only.target, "/a/b.png?w=1",
+            "fragment-only 保留路径与查询串，仅丢弃 fragment"
+        );
     }
 
     #[test]

@@ -41,6 +41,9 @@ fn main() {
     let launch = match cli::parse(raw_args) {
         Ok(launch) => launch,
         Err(message) => {
+            // GUI 构建没有控制台，但参数错误仍须写入 stderr 供脚本/托管方诊断
+            // （DEF-T10-002）；可见错误对话框保留。
+            eprintln!("veil: {message}");
             platform::show_error(t(Key::MainOpenFailedTitle), &message);
             std::process::exit(2);
         }
@@ -51,6 +54,7 @@ fn main() {
             let path = match cli::absolute_path(path) {
                 Ok(path) => path,
                 Err(message) => {
+                    eprintln!("veil: {message}");
                     platform::show_error(t(Key::MainOpenFailedTitle), &message);
                     std::process::exit(2);
                 }

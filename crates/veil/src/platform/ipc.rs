@@ -113,10 +113,10 @@ mod imp {
     use super::{read_frame, write_frame, Instance, IpcRequest, PrimaryInstance};
     use std::ffi::c_void;
     use std::fs::{File, OpenOptions};
-    use std::io;
-    use std::os::windows::io::FromRawHandle;
+    use std::io::{self, Read};
+    use std::os::windows::io::{AsRawHandle, FromRawHandle};
     use std::sync::mpsc::{channel, Receiver};
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     type Handle = *mut c_void;
     const ERROR_ALREADY_EXISTS: u32 = 183;
@@ -126,6 +126,9 @@ mod imp {
     const PIPE_READMODE_BYTE: u32 = 0;
     const PIPE_WAIT: u32 = 0;
     const PIPE_REJECT_REMOTE_CLIENTS: u32 = 8;
+    /// 单个连接读完一帧的总时限：慢客户端不得长期占住唯一监听实例
+    /// （DEF-T10-004）。小于第二实例的 1s 连接重试窗口。
+    const READ_TIMEOUT: Duration = Duration::from_millis(500);
 
     #[link(name = "kernel32")]
     extern "system" {
@@ -146,6 +149,50 @@ mod imp {
         ) -> Handle;
         fn ConnectNamedPipe(pipe: Handle, overlapped: *mut c_void) -> i32;
         fn DisconnectNamedPipe(pipe: Handle) -> i32;
+        fn PeekNamedPipe(
+            pipe: Handle,
+            buffer: *mut c_void,
+            buffer_size: u32,
+            bytes_read: *mut u32,
+            total_bytes_avail: *mut u32,
+            bytes_left: *mut u32,
+        ) -> i32;
+    }
+
+    /// 带总时限的管道读取器：只有 `PeekNamedPipe` 报告可读才真正 read，
+    /// 否则在时限内轮询；超时返回 `TimedOut`，让监听线程安全关闭当前连接。
+    struct TimedPipe {
+        file: File,
+        deadline: Instant,
+    }
+
+    impl Read for TimedPipe {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            loop {
+                let mut available = 0u32;
+                // SAFETY: 句柄归 self.file 所有；输出指针均有效。
+                let ok = unsafe {
+                    PeekNamedPipe(
+                        self.file.as_raw_handle(),
+                        std::ptr::null_mut(),
+                        0,
+                        std::ptr::null_mut(),
+                        &mut available,
+                        std::ptr::null_mut(),
+                    )
+                };
+                if ok == 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                if available > 0 {
+                    return self.file.read(buf);
+                }
+                if Instant::now() >= self.deadline {
+                    return Err(io::Error::new(io::ErrorKind::TimedOut, "IPC 读帧超时"));
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
     }
 
     pub(super) struct Mutex(Handle);
@@ -227,8 +274,17 @@ mod imp {
                 let error = unsafe { GetLastError() };
                 if connected != 0 || error == ERROR_PIPE_CONNECTED {
                     // SAFETY: 所有权转交 File，作用域结束自动 CloseHandle。
-                    let mut file = unsafe { File::from_raw_handle(handle) };
-                    if let Ok(request) = read_frame(&mut file) {
+                    let file = unsafe { File::from_raw_handle(handle) };
+                    let mut reader = TimedPipe {
+                        file,
+                        deadline: Instant::now() + READ_TIMEOUT,
+                    };
+                    let request = read_frame(&mut reader);
+                    // SAFETY: reader 仍持有句柄；断开必须在 File 关闭前执行。
+                    unsafe {
+                        DisconnectNamedPipe(handle);
+                    }
+                    if let Ok(request) = request {
                         if tx.send(request).is_err() {
                             return;
                         }
@@ -239,10 +295,6 @@ mod imp {
                         CloseHandle(handle);
                     }
                     continue;
-                }
-                // SAFETY: File 仍拥有句柄；断开只结束此客户端，不重复关闭。
-                unsafe {
-                    DisconnectNamedPipe(handle);
                 }
             })
             .map_err(|e| e.to_string())?;
@@ -401,6 +453,44 @@ mod tests {
             .recv_timeout(std::time::Duration::from_secs(3))
             .unwrap();
         client.join().unwrap().unwrap();
+        assert_eq!(actual, expected);
+    }
+
+    /// DEF-T10-004：慢客户端（连上不发帧）必须在读超时后被断开，监听恢复可用；
+    /// 隔离本进程命名管道，不触碰真实 Veil 实例。
+    #[cfg(windows)]
+    #[test]
+    fn slow_client_times_out_and_listener_recovers() {
+        use std::fs::OpenOptions;
+        let endpoint = format!(
+            r"\\.\pipe\Veil.Test.Slow.{}.{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let listener = super::imp::listen_on(endpoint.clone()).unwrap();
+        // 连上但不发送任何字节。
+        let mut slow = None;
+        for _ in 0..100 {
+            match OpenOptions::new().write(true).open(&endpoint) {
+                Ok(file) => {
+                    slow = Some(file);
+                    break;
+                }
+                Err(_) => std::thread::sleep(std::time::Duration::from_millis(10)),
+            }
+        }
+        let slow = slow.expect("应能连上隔离命名管道");
+        let expected = IpcRequest::NewWindow(Some(absolute()));
+        let sent = expected.clone();
+        let client = std::thread::spawn(move || super::imp::send_to(endpoint, &sent));
+        let actual = listener
+            .recv_timeout(std::time::Duration::from_secs(3))
+            .expect("慢客户端超时后监听应恢复并收到第二实例的帧");
+        client.join().unwrap().unwrap();
+        drop(slow);
         assert_eq!(actual, expected);
     }
 }

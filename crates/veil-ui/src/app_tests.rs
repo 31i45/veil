@@ -5954,6 +5954,110 @@ fn settings_geometry_clear_is_applied_and_persisted_on_ok() {
     assert_eq!(parsed.config.window, a.config.window, "新几何必须写盘");
 }
 
+/// DEF-T10-008：设置保存失败时不得再提示「设置已保存」。
+#[test]
+fn settings_save_failure_is_not_overwritten_by_success_notice() {
+    use crate::view::settings::{FieldKind, FieldValue, BTN_OK};
+    let mut a = app_theme(Box::new(FailSaveConfig), Rc::new(Cell::new(Some(false))));
+    a.open_settings();
+    {
+        let s = a.ui_state.settings.as_mut().expect("设置已打开");
+        let idx = s
+            .form
+            .fields
+            .iter()
+            .position(|f| matches!(f.kind, FieldKind::ThemeMode))
+            .expect("主题字段存在");
+        s.form.fields[idx].value = FieldValue::ThemeMode(ThemeMode::Dark);
+    }
+    a.resolve_settings(BTN_OK);
+    assert_eq!(a.config.mode, ThemeMode::Dark, "本次操作仍然生效");
+    assert!(
+        a.ui_state.chrome.notice.contains("配置未保存"),
+        "失败提示须保留：{}",
+        a.ui_state.chrome.notice
+    );
+    assert!(
+        !a.ui_state.chrome.notice.contains("设置已保存"),
+        "不得假报保存成功：{}",
+        a.ui_state.chrome.notice
+    );
+}
+
+/// DEF-T10-008：远程图片开关保存失败同样不得假报已持久化。
+#[test]
+fn remote_image_toggle_save_failure_keeps_error_notice() {
+    let mut a = app_theme(Box::new(FailSaveConfig), Rc::new(Cell::new(Some(false))));
+    a.toggle_remote_images();
+    assert!(!a.config.allow_remote_images, "开关本身仍翻转");
+    assert!(
+        a.ui_state.chrome.notice.contains("配置未保存"),
+        "失败提示不得被开关状态提示覆盖：{}",
+        a.ui_state.chrome.notice
+    );
+    assert!(!a.ui_state.chrome.notice.contains("已阻止远程图片"));
+}
+
+/// DEF-T11-E1-002：从设置面板切深色后，导出样式快照必须同步为深色。
+#[test]
+fn settings_theme_change_updates_export_style_immediately() {
+    use crate::view::settings::{FieldKind, FieldValue, BTN_OK};
+    let mut a = app_theme(
+        Box::new(MemConfig::default()),
+        Rc::new(Cell::new(Some(false))),
+    );
+    assert!(!a.doc.export_style.dark, "初始浅色");
+    a.open_settings();
+    {
+        let s = a.ui_state.settings.as_mut().expect("设置已打开");
+        let idx = s
+            .form
+            .fields
+            .iter()
+            .position(|f| matches!(f.kind, FieldKind::ThemeMode))
+            .expect("主题字段存在");
+        s.form.fields[idx].value = FieldValue::ThemeMode(ThemeMode::Dark);
+    }
+    a.resolve_settings(BTN_OK);
+    assert!(a.input_state.theme.dark);
+    assert_eq!(
+        a.doc.export_style,
+        ExportStyle::from_theme(&a.input_state.theme),
+        "导出快照必须与当前主题一致"
+    );
+    assert!(a.doc.export_style.dark, "切深色后立即导出应为深色");
+}
+
+/// DEF-T10-E1-001：最小化期间的 Moved（-32000 哨兵）不得污染持久化几何。
+#[test]
+fn minimized_window_move_does_not_overwrite_geometry() {
+    let store = MemStore::default();
+    let mut a = app("abc\n", None, false, &store);
+    let original = crate::theme::WindowGeom {
+        width: 900,
+        height: 700,
+        x: 300,
+        y: 220,
+    };
+    a.window_state.geom = Some(original);
+    a.window_state.geom_dirty = false;
+    a.on_window_moved(-32000, -32000, true);
+    assert_eq!(a.window_state.geom, Some(original), "最小化不写坐标");
+    assert!(!a.window_state.geom_dirty, "最小化不置脏");
+    // 恢复后的正常移动仍记录（尺寸沿用已存值）
+    a.on_window_moved(40, 50, false);
+    assert_eq!(
+        a.window_state.geom,
+        Some(crate::theme::WindowGeom {
+            width: 900,
+            height: 700,
+            x: 40,
+            y: 50
+        })
+    );
+    assert!(a.window_state.geom_dirty);
+}
+
 /// DEF-T07-003：模态/浮层打开时 Ctrl+滚轮不得缩放背景文档。
 #[test]
 fn overlay_blocks_background_zoom() {
@@ -8672,6 +8776,35 @@ fn outline_click_jumps_caret_and_scrolls_heading_to_top() {
     assert_eq!(a.editor.caret(), want_start, "光标落在标题块起点");
     assert!(a.window_state.scroll_y > 0.0, "远处标题跳到视口顶");
     assert_eq!(a.ui_state.outline.hover, None, "点击不残留悬停");
+}
+
+/// DEF-T11-E1-003：打字机模式下大纲跳转首帧即落在锚点，而非视口顶部。
+#[test]
+fn typewriter_outline_jump_lands_on_anchor_without_typing() {
+    let mut text = String::from("# 开头\n");
+    for i in 0..40 {
+        text.push_str(&format!("\n段落 {i}\n"));
+    }
+    text.push_str("\n# 中部\n");
+    for i in 0..40 {
+        text.push_str(&format!("\n后文 {i}\n"));
+    }
+    text.push_str("\n# 结尾\n");
+    let store = MemStore::default();
+    let (mut a, _) = app_dialogs(&text, None, false, &store, None, None);
+    a.toggle_outline();
+    a.toggle_typewriter();
+    assert!(a.ui_state.writing.typewriter);
+    let want_start = text.find("# 中部").unwrap();
+    a.jump_outline(1);
+    assert_eq!(a.editor.caret(), want_start);
+    let vp = a.viewport();
+    let target = vp.y + vp.h * 0.42;
+    let (_, cy, ch) = a.caret_screen();
+    assert!(
+        (cy + ch / 2.0 - target).abs() <= ch,
+        "跳转首帧当前行应贴合打字机锚点：cy={cy} target={target}"
+    );
 }
 
 #[test]

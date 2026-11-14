@@ -197,6 +197,11 @@ pub(super) fn scan_one(buf: &Buffer, line: usize, total: usize) -> (BlockKind, u
     if is_thematic_break(t) {
         return (BlockKind::ThematicBreak, 1);
     }
+    // 独立一行的 `<hr>` / `<hr/>` 等价分隔线（REN-SWEEP-005）：先于 HTML 块判定，
+    // 否则会落进类型 6 的 HtmlBlock 代码卡，与 `<script>` 同外观。
+    if is_html_hr_line(t) {
+        return (BlockKind::ThematicBreak, 1);
+    }
     if quote_marker_pos(&text).is_some() {
         let n = quote_lines(buf, line, total);
         // GFM Admonition：引用块首行 `> [!TYPE]` 变体
@@ -996,6 +1001,22 @@ pub(super) fn is_thematic_break(t: &str) -> bool {
         }
     }
     count >= 3
+}
+
+/// 独立一行的 HTML 水平分隔线：`<hr>` / `<hr/>` / `<hr />`（大小写不敏感）。
+/// 仅整行只有一个 `<hr>` 标签时成立（其后只允许空白）；带其他内容的行仍走 HTML 块。
+/// 白名单不放宽：本判定只把该行映射为 ThematicBreak，`hr` 不进行内 HTML 白名单。
+fn is_html_hr_line(t: &str) -> bool {
+    let t = t.trim_end_matches(['\r', '\n']).trim();
+    let lower = t.to_ascii_lowercase();
+    let Some(rest) = lower.strip_prefix("<hr") else {
+        return false;
+    };
+    let Some(rest) = rest.trim().strip_suffix('>') else {
+        return false;
+    };
+    let rest = rest.trim();
+    rest.strip_suffix('/').unwrap_or(rest).trim().is_empty()
 }
 
 // ===== 链接引用定义（0c P0-1） =====
@@ -2883,6 +2904,34 @@ mod tests {
         // （setext 下划线只识别于段落续行位置，见下方 Setext 组）
         let b = Buffer::new("---\n");
         assert_eq!(kinds(&b), [(BlockKind::ThematicBreak, 0, 1)]);
+    }
+
+    #[test]
+    fn html_hr_line_becomes_thematic_break() {
+        // REN-SWEEP-005：独立 `<hr>` 行等价分隔线，不再落进 HtmlBlock 代码卡。
+        for line in ["<hr>", "<HR>", "<hr/>", "<hr />", "<hr  />"] {
+            let b = Buffer::new(&format!("a\n\n{line}\n\nb\n"));
+            assert_eq!(
+                kinds(&b),
+                [
+                    (BlockKind::Paragraph, 0, 1),
+                    (BlockKind::ThematicBreak, 2, 3),
+                    (BlockKind::Paragraph, 4, 5),
+                ],
+                "line={line:?}"
+            );
+        }
+        // 带属性/其他内容的行仍走 HTML 块（白名单不放宽、也不误判）。
+        let b = Buffer::new("<hr class=\"x\">\n");
+        assert_eq!(kinds(&b), [(BlockKind::HtmlBlock, 0, 1)]);
+        let b = Buffer::new("<hr> tail\n");
+        assert_eq!(kinds(&b), [(BlockKind::HtmlBlock, 0, 1)]);
+        // 段落后的 `<hr>` 可打断段落（类型 6 打断规则不变）。
+        let b = Buffer::new("para\n<hr>\n");
+        assert_eq!(
+            kinds(&b),
+            [(BlockKind::Paragraph, 0, 1), (BlockKind::ThematicBreak, 1, 2)]
+        );
     }
 
     // ===== 多行列表项 / 宽松列表 / 懒续行（0c P0-3）=====

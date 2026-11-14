@@ -1075,6 +1075,14 @@ impl LayoutEngine {
         } else {
             block_subs(kind.clone(), body, block, caret, ordinal, toc_list)
         };
+        // 容器内嵌套块标记（REN-SWEEP-002）：引用/提示/列表项里再出现的
+        // 列表、任务框、围栏代码、details 标签按块类型递归渲染。
+        let mut container_code: Vec<(usize, usize)> = Vec::new();
+        if !reveal_all {
+            let (nested, code) = container_nested_subs(&kind, body, block, caret);
+            subs.extend(nested);
+            container_code = code;
+        }
         if !reveal_all {
             let (ref_subs, links) = footnote_ref_subs(inlines, block, caret, body, footnotes);
             subs.extend(ref_subs);
@@ -1205,6 +1213,9 @@ impl LayoutEngine {
         // `[n]` 的展示文本并非源码字符，样式表里没有它的颜色来源；
         // 按替换区间切分样式段并置 link（style_spans 会把同式相邻段合并，不能整段改）。
         let style_segments = with_link_spans(style_segments, &footnote_links, body.len());
+        // 容器内嵌套围栏代码：整行覆盖为等宽 + 代码底色（覆盖行内标记样式）。
+        let style_segments =
+            with_container_code_spans(style_segments, &container_code, body.len());
         let mut spans: Vec<(&str, Attrs)> = Vec::new();
         for &(s, e, st) in &style_segments {
             let (ls, le) = (map.doc_to_layout(s), map.doc_to_layout(e));
@@ -2120,6 +2131,54 @@ fn with_link_spans(
     out
 }
 
+/// 容器内嵌套围栏代码（REN-SWEEP-002）：把围栏内容行覆盖为等宽 + 代码底色。
+/// 覆盖而非叠加：围栏内容里的 `**`/`` ` `` 等行内标记不应生效（它们属于代码）。
+fn with_container_code_spans(
+    segments: Vec<(usize, usize, Style)>,
+    code: &[(usize, usize)],
+    text_len: usize,
+) -> Vec<(usize, usize, Style)> {
+    if code.is_empty() {
+        return segments;
+    }
+    let mut bounds: Vec<usize> = vec![0, text_len];
+    for &(s, e, _) in &segments {
+        bounds.push(s);
+        bounds.push(e);
+    }
+    for &(s, e) in code {
+        bounds.push(s.min(text_len));
+        bounds.push(e.min(text_len));
+    }
+    bounds.sort_unstable();
+    bounds.dedup();
+    let mut out: Vec<(usize, usize, Style)> = Vec::new();
+    for w in bounds.windows(2) {
+        let (s, e) = (w[0], w[1]);
+        if s >= e {
+            continue;
+        }
+        let st = if code.iter().any(|&(cs, ce)| cs <= s && e <= ce) {
+            Style {
+                mono: true,
+                code_bg: true,
+                ..Default::default()
+            }
+        } else {
+            segments
+                .iter()
+                .find(|(ss, se, _)| *ss <= s && e <= *se)
+                .map(|x| x.2)
+                .unwrap_or_default()
+        };
+        match out.last_mut() {
+            Some(last) if last.2 == st && last.1 == s => last.1 = e,
+            _ => out.push((s, e, st)),
+        }
+    }
+    out
+}
+
 /// 解析脚注定义首行前缀 `[^id]: `（块相对）→ (前缀结束偏移, id 区间)。
 /// 与 core 的 `parse_footnote_def` 同口径（缩进 ≤3、id 允许字母数字/-/_、`]:`），
 /// 但只做「标记消隐 + 编号」所需的定位，不重新解释块语义。
@@ -2889,7 +2948,9 @@ pub(crate) fn toc_list_epoch(items: &HashSet<BlockId>) -> u64 {
     acc
 }
 
-/// 引用块逐行替换：非激活行的 `>` 换成空格（保留缩进与行距），激活行显源码。
+/// 引用块逐行替换：非激活行的所有层级 `>` 换成空格（保留缩进与行距），
+/// 激活行显源码。REN-SWEEP-004：嵌套引用 `> > …` 的每一级标记都要消隐，
+/// 级间原有空白自然形成层级缩进（引用条由 paint 按层级补画）。
 fn quote_line_subs(body: &str, block: Range, caret: usize) -> Vec<Sub> {
     // 块外（含 usize::MAX 无光标）→ 全部行隐标记
     let c = if block.start <= caret && caret <= block.end {
@@ -2902,8 +2963,11 @@ fn quote_line_subs(body: &str, block: Range, caret: usize) -> Vec<Sub> {
     for line in body.split_inclusive('\n') {
         let visible_end = off + line.trim_end_matches('\n').len();
         if !(off <= c && c <= visible_end) {
-            if let Some(p) = quote_marker_pos(line) {
-                out.push(Sub::fill(off + p, off + p + 1, " "));
+            let mut search = 0usize;
+            while let Some(p) = quote_marker_pos(&line[search..]) {
+                let abs = search + p;
+                out.push(Sub::fill(off + abs, off + abs + 1, " "));
+                search = abs + 1;
             }
         }
         off += line.len();
@@ -2956,6 +3020,162 @@ fn line_active(body: &str, block: Range, caret: usize, line_idx: usize) -> bool 
         off += line.len();
     }
     false
+}
+
+/// 容器内嵌套块标记的递归排版（REN-SWEEP-002）。
+///
+/// 引用/提示/自定义 Callout/列表项在块解析里仍是「一个容器块」，这里按行剥掉
+/// 容器前缀后**递归识别嵌套块语法**，把标记替换成对应块类型的视觉形式：
+/// - 无序列表 → `•`；任务列表 → `☐`/`☑`（原缩进保留为层级）
+/// - 围栏代码 → 消隐围栏行（含换行），内容行登记为等宽代码区间
+/// - `<details>`/`<summary>` 裸标签 → 消隐，正文按普通段落行内语法排版
+/// - 独立 `<hr>` 行 → 整行消隐（与块级分隔线一致）
+/// - 嵌套 `>` → 由 [`quote_line_subs`] 逐级消隐
+///
+/// 返回 `(替换段, 代码样式区间)`，均为块相对 doc 坐标。激活行（WYSIWYM）显源码。
+fn container_nested_subs(
+    kind: &BlockKind,
+    body: &str,
+    block: Range,
+    caret: usize,
+) -> (Vec<Sub>, Vec<(usize, usize)>) {
+    let quote_like = matches!(
+        kind,
+        BlockKind::BlockQuote | BlockKind::Callout(_) | BlockKind::Admonition(_)
+    );
+    let list_like = matches!(kind, BlockKind::ListItem { .. });
+    if !quote_like && !list_like {
+        return (Vec::new(), Vec::new());
+    }
+    let block_active = node_active(block, caret);
+    let mut subs = Vec::new();
+    let mut code = Vec::new();
+    let mut off = 0usize;
+    let mut in_fence: Option<u8> = None;
+    for (idx, line) in body.split_inclusive('\n').enumerate() {
+        let visible_end = off + line.trim_end_matches('\n').len();
+        let active = if quote_like {
+            line_active(body, block, caret, idx)
+        } else {
+            block_active
+        };
+        // 列表项首行标记由 `block_subs` 处理，避免重复替换。
+        if list_like && idx == 0 {
+            off += line.len();
+            continue;
+        }
+        // 内容起点：引用类跳过全部 `>` 标记（已被 quote_line_subs 换成空格）；
+        // 列表续行同样剥掉嵌套引用标记（列表项没有 quote_line_subs），
+        // 缩进只影响视觉层级，不参与后续语法识别。
+        let content_off = if quote_like {
+            let mut s = 0usize;
+            while let Some(p) = quote_marker_pos(&line[s..]) {
+                s += p + 1;
+            }
+            s
+        } else {
+            let mut s = line.len() - line.trim_start_matches([' ', '\t']).len();
+            if in_fence.is_none() {
+                while let Some(p) = quote_marker_pos(&line[s..]) {
+                    if !active {
+                        subs.push(Sub::fill(off + s + p, off + s + p + 1, " "));
+                    }
+                    s += p + 1;
+                }
+            }
+            s
+        };
+        let content = line.get(content_off..).unwrap_or("");
+        if let Some(ch) = in_fence {
+            if is_fence_close(content, ch) {
+                in_fence = None;
+                if !active {
+                    subs.push(Sub::elide(off, off + line.len()));
+                }
+            } else if !active {
+                code.push((off + content_off, visible_end));
+            }
+        } else if let Some(ch) = fence_open_char(content) {
+            in_fence = Some(ch);
+            if !active {
+                subs.push(Sub::elide(off, off + line.len()));
+            }
+        } else if !active {
+            if is_html_hr_content(content) {
+                // 嵌套分隔线：整行消隐（paint 只在块级画分隔线）。
+                subs.push(Sub::elide(off, off + line.len()));
+            } else {
+                elide_nested_details_tags(line, off, &mut subs);
+                nested_list_marker_subs(content, off + content_off, &mut subs);
+            }
+        }
+        off += line.len();
+    }
+    (subs, code)
+}
+
+/// 围栏行（≤3 空格缩进）返回围栏字符，用于进入嵌套代码态。
+fn fence_open_char(line: &str) -> Option<u8> {
+    if !fence_line(line) {
+        return None;
+    }
+    line.trim_start_matches([' ', '\t'])
+        .as_bytes()
+        .first()
+        .copied()
+        .filter(|b| *b == b'`' || *b == b'~')
+}
+
+/// 嵌套围栏闭合行：同字符、≥3 个、其后只有空白。
+fn is_fence_close(line: &str, ch: u8) -> bool {
+    let rest = line.trim_start_matches([' ', '\t']);
+    let run = rest.as_bytes().iter().take_while(|&&b| b == ch).count();
+    run >= 3 && rest[run..].trim().is_empty()
+}
+
+/// 独立成行的 `<hr>` / `<hr/>`（大小写不敏感、仅空白围绕）。
+fn is_html_hr_content(content: &str) -> bool {
+    let lower = content.trim().to_ascii_lowercase();
+    let Some(rest) = lower.strip_prefix("<hr") else {
+        return false;
+    };
+    let Some(rest) = rest.trim().strip_suffix('>') else {
+        return false;
+    };
+    let rest = rest.trim();
+    rest.strip_suffix('/').unwrap_or(rest).trim().is_empty()
+}
+
+/// 消隐容器行内的 `<details>` / `</details>` / `<summary>` / `</summary>` 裸标签。
+fn elide_nested_details_tags(line: &str, off: usize, out: &mut Vec<Sub>) {
+    let lower = line.to_ascii_lowercase();
+    for needle in ["</details>", "</summary>", "<details", "<summary"] {
+        let mut from = 0usize;
+        while let Some(i) = lower[from..].find(needle) {
+            let start = from + i;
+            let Some(rel) = line[start..].find('>') else {
+                break;
+            };
+            let end = start + rel + 1;
+            out.push(Sub::elide(off + start, off + end));
+            from = end;
+        }
+    }
+}
+
+/// 容器内嵌套列表标记：任务框 → ☐/☑，无序 → `•`；有序保留源码编号。
+fn nested_list_marker_subs(content: &str, base: usize, out: &mut Vec<Sub>) {
+    if let Some((start, _, end, done)) = task_span(content) {
+        out.push(Sub::fill(
+            base + start,
+            base + end,
+            if done { "☑ " } else { "☐ " },
+        ));
+        return;
+    }
+    if let Some(p) = bullet_pos(content) {
+        out.push(Sub::fill(base + p, base + p + 1, "•"));
+    }
 }
 
 /// Admonition 提示块：沿用引用块的逐行 `>` 消隐，并把首行 `[!TYPE]` 标记
@@ -3179,6 +3399,22 @@ mod tests {
         let mut eng = LayoutEngine::new();
         let block_text = &text[range.start..range.end];
         let l = eng.layout_block(kind, block_text, range, &inlines, width, caret, imgs, false);
+        (eng, l)
+    }
+
+    /// 按文档块序号排版（容器/嵌套回归用）：`caret` 为文档绝对偏移。
+    fn layout_doc_block(
+        text: &str,
+        block_idx: usize,
+        caret: usize,
+        width: f32,
+    ) -> (LayoutEngine, BlockLayout) {
+        let s = Session::open(text);
+        let (id, kind, range) = s.blocks()[block_idx].clone();
+        let inlines = s.block_inlines(id).unwrap();
+        let mut eng = LayoutEngine::new();
+        let block_text = &text[range.start..range.end];
+        let l = eng.layout_block(kind, block_text, range, &inlines, width, caret, &[], false);
         (eng, l)
     }
 
@@ -5978,5 +6214,120 @@ mod tests {
                 "src={src:?}: expected visible {want_visible_substr:?} in layout_text {lt:?}"
             );
         }
+    }
+
+    // ===== 容器内嵌套块（REN-SWEEP-002 / 004 / 009）=====
+
+    #[test]
+    fn nested_quote_markers_elide_all_levels() {
+        // REN-SWEEP-004：`> > > x` 的每一级 `>` 都要消隐，级间空白形成层级缩进。
+        let src = "> 一级\n> > 二级\n> > > 三级\n";
+        let (_, l) = layout_doc_block(src, 0, usize::MAX, 400.0);
+        let lt = l.layout_text();
+        assert!(!lt.contains('>'), "多层引用标记必须全部消隐: {lt:?}");
+        let lines: Vec<&str> = lt.lines().collect();
+        assert_eq!(lines.len(), 3);
+        let lead = |s: &str| s.len() - s.trim_start_matches(' ').len();
+        assert!(lead(lines[0]) < lead(lines[1]), "二级应有缩进: {lt:?}");
+        assert!(lead(lines[1]) < lead(lines[2]), "三级应有缩进: {lt:?}");
+        assert_eq!(visible_text(lt).replace('\n', ""), "一级二级三级");
+    }
+
+    #[test]
+    fn nested_quote_active_line_shows_source() {
+        // 光标进入某行只还原该行源码，其余层级标记仍消隐。
+        let src = "> 一级\n> > 二级\n> > > 三级\n";
+        let caret = src.find("二级").unwrap();
+        let (_, l) = layout_doc_block(src, 0, caret, 400.0);
+        let lines: Vec<&str> = l.layout_text().lines().collect();
+        assert!(lines[0].contains(' '), "非活动行仍消隐: {lines:?}");
+        assert!(lines[1].contains("> > 二级"), "活动行显源码: {lines:?}");
+        assert!(lines[2].contains("   "), "非活动行仍缩进消隐: {lines:?}");
+    }
+
+    #[test]
+    fn quote_container_renders_nested_list_task_and_quote() {
+        // REN-SWEEP-002：引用块内的有序/无序/任务列表与再嵌套引用不得露出裸标记。
+        let src = "> 引用中的列表：\n\
+                   >\n\
+                   > 1. 第一项\n\
+                   >    - 子项含 **加粗** 与 `code`\n\
+                   >      > 引用中再引用\n\
+                   >      >\n\
+                   >      > - [ ] 任务\n\
+                   >      > - [x] 已完成\n";
+        let (_, l) = layout_doc_block(src, 0, usize::MAX, 400.0);
+        let lt = l.layout_text();
+        assert!(!lt.contains('>'), "引用标记必须全部消隐: {lt:?}");
+        assert!(!lt.contains("- "), "无序/任务列表裸标记必须消失: {lt:?}");
+        assert!(!lt.contains("[ ]") && !lt.contains("[x]"), "复选框裸标记: {lt:?}");
+        assert!(!lt.contains("**") && !lt.contains('`'), "行内标记应消隐: {lt:?}");
+        assert!(lt.contains('•'), "无序列表应显示圆点: {lt:?}");
+        assert!(lt.contains('☐') && lt.contains('☑'), "任务框应显示: {lt:?}");
+        assert!(lt.contains("1."), "有序列表编号保留源码编号: {lt:?}");
+        assert!(lt.contains("加粗") && !lt.contains("**加粗**"));
+    }
+
+    #[test]
+    fn list_item_continuation_nested_quote_markers_elided() {
+        // REN-SWEEP-002/004：列表项续行里的嵌套引用 `>`（含多层）同样消隐。
+        let src = "- 列表中的引用：\n  > 引用段落\n  >\n  > > 二级引用\n";
+        let (_, l) = layout_doc_block(src, 0, usize::MAX, 400.0);
+        let lt = l.layout_text();
+        assert!(!lt.contains('>'), "列表项内引用标记必须消隐: {lt:?}");
+        assert!(lt.contains("引用段落") && lt.contains("二级引用"));
+    }
+
+    #[test]
+    fn list_item_nested_fence_renders_code_lines() {
+        // REN-SWEEP-002：列表项续行里的围栏代码按代码行渲染（围栏行消隐）。
+        let src = "- 列表中的代码：\n  ```text\n  code in list\n  ```\n";
+        let (_, l) = layout_doc_block(src, 0, usize::MAX, 400.0);
+        let lt = l.layout_text();
+        assert!(!lt.contains("```"), "围栏标记必须消隐: {lt:?}");
+        assert!(lt.contains("code in list"), "代码内容应可见: {lt:?}");
+        assert!(lt.contains('•'), "列表项圆点应显示: {lt:?}");
+    }
+
+    #[test]
+    fn list_item_nested_details_tags_elided() {
+        // REN-SWEEP-002：列表项续行里的 details/summary 裸标签消隐，正文按行内语法排版。
+        let src = "- 列表中的 details：\n  <details>\n  <summary>摘要</summary>\n\n  正文 **加粗**。\n  </details>\n";
+        let (_, l) = layout_doc_block(src, 0, usize::MAX, 400.0);
+        let lt = l.layout_text();
+        for raw in ["<details>", "</details>", "<summary>", "</summary>"] {
+            assert!(!lt.contains(raw), "裸标签 {raw} 必须消隐: {lt:?}");
+        }
+        assert!(!lt.contains("**"), "正文行内标记应消隐: {lt:?}");
+        assert!(lt.contains("摘要"), "summary 文本应可见: {lt:?}");
+        assert!(lt.contains("加粗"), "正文应可见: {lt:?}");
+    }
+
+    #[test]
+    fn details_body_paragraph_parses_inline_markdown() {
+        // REN-SWEEP-009：details 正文是原生子块，`**加粗**` 必须按行内语法渲染。
+        let src = "# T\n\n<details>\n<summary>折叠摘要</summary>\n\n这里是折叠正文，含 **加粗**。\n\n</details>\n";
+        let s = Session::open(src);
+        let (id, kind, range) = s
+            .blocks()
+            .into_iter()
+            .find(|(_, k, _)| matches!(k, BlockKind::Paragraph))
+            .expect("details 正文应拆为 Paragraph 子块");
+        let inlines = s.block_inlines(id).unwrap();
+        let mut eng = LayoutEngine::new();
+        let block_text = &src[range.start..range.end];
+        let l = eng.layout_block(
+            kind,
+            block_text,
+            range,
+            &inlines,
+            400.0,
+            usize::MAX,
+            &[],
+            false,
+        );
+        let lt = l.layout_text();
+        assert!(!lt.contains("**"), "加粗标记必须消隐（不得显示原文）: {lt:?}");
+        assert!(lt.contains("加粗"), "加粗文本应可见: {lt:?}");
     }
 }

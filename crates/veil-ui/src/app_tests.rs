@@ -12263,8 +12263,81 @@ fn source_mode_toggles_markup_but_keeps_caret_and_scroll() {
 }
 
 #[test]
-fn source_mode_hides_math_image_and_table_grid() {
+fn frontmatter_hidden_in_wysiwyg_and_source_shows_raw() {
+    // REN-SWEEP-001：非活动态 Front Matter 折叠为零高；光标进入/源码模式显原文。
     let store = MemStore::default();
+    let text = "---\ntitle: 演示\ntags: [a, b]\n---\n\n# 标题\n\n正文\n";
+    let mut a = app(text, None, false, &store);
+    a.editor.set_caret(text.find("正文").unwrap());
+    a.ensure_layouts_all();
+    a.render();
+    let fm = block_id_of(&a, |k| matches!(k, BlockKind::FrontMatter(_)));
+    let g = a.index.blocks.iter().find(|g| g.id == fm).unwrap();
+    assert_eq!(g.height, 0.0, "非活动态 Front Matter 应完全隐藏");
+    let fm_top = g.top;
+    let next_top = a.index.blocks.iter().find(|g| g.id != fm).unwrap().top;
+    assert_eq!(next_top, fm_top, "隐藏的 Front Matter 不占前后段距");
+
+    // 光标进入块内：WYSIWYM 显示原文（可编辑）。
+    a.editor.set_caret(text.find("title").unwrap());
+    a.ensure_layouts_all();
+    a.render();
+    let g = a.index.blocks.iter().find(|g| g.id == fm).unwrap();
+    assert!(g.height > 0.0, "光标进入时 Front Matter 应显示原文");
+    assert!(
+        a.cache.layouts[&fm].layout_text().contains("title: 演示"),
+        "应显示 YAML 原文: {:?}",
+        a.cache.layouts[&fm].layout_text()
+    );
+
+    // 源码模式：光标移出后仍显示原文。
+    a.editor.set_caret(text.find("正文").unwrap());
+    a.perform_action(Action::OpenSourceMode);
+    a.ensure_layouts_all();
+    a.render();
+    let g = a.index.blocks.iter().find(|g| g.id == fm).unwrap();
+    assert!(a.source_mode());
+    assert!(g.height > 0.0, "源码模式必须显示 Front Matter 原文");
+    assert!(a.cache.layouts[&fm].layout_text().contains("---"));
+
+    // 纯视图态：文档字节不变。
+    assert_eq!(doc_text(&a), text);
+}
+
+#[test]
+fn toml_frontmatter_paragraph_hidden_mid_document() {
+    // REN-SWEEP-001：夹具里正文中间的 TOML Front Matter 示例（内核只认文首）
+    // 在 WYSIWYG 非活动态同样隐藏；光标进入显原文。
+    let store = MemStore::default();
+    let text = "# 前\n\n+++\ntitle = \"TOML Front Matter\"\n+++\n\n后\n";
+    let mut a = app(text, None, false, &store);
+    a.editor.set_caret(text.find('后').unwrap());
+    a.ensure_layouts_all();
+    a.render();
+    let toml = a
+        .index
+        .blocks
+        .iter()
+        .find(|g| {
+            a.editor
+                .session()
+                .text_slice(g.range)
+                .is_some_and(|t| t.contains("title ="))
+        })
+        .map(|g| g.id)
+        .expect("应存在 TOML Front Matter 段落");
+    let g = a.index.blocks.iter().find(|g| g.id == toml).unwrap();
+    assert_eq!(g.height, 0.0, "非活动态 TOML Front Matter 应隐藏");
+    a.editor.set_caret(text.find("title").unwrap());
+    a.ensure_layouts_all();
+    a.render();
+    let g = a.index.blocks.iter().find(|g| g.id == toml).unwrap();
+    assert!(g.height > 0.0, "光标进入时应显示 TOML 原文");
+    assert_eq!(doc_text(&a), text, "纯视图态，文档字节不变");
+}
+
+#[test]
+fn source_mode_hides_math_image_and_table_grid() {    let store = MemStore::default();
     let text = "前言\n\n$$\nx=1\n$$\n\n| a | b |\n| - | - |\n| 1 | 2 |\n";
     let mut a = app(text, None, false, &store);
     a.editor.set_caret(0); // 光标只在首段，公式/表格块均非激活

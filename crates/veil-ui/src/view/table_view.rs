@@ -501,8 +501,7 @@ fn measure_clusters(
         .collect()
 }
 
-fn boundary_allowed(text: &str, left: &(usize, usize, f32), right: &(usize, usize, f32)) -> bool {
-    let prev = text.get(left.0..left.1).and_then(|s| s.chars().next_back());
+fn boundary_allowed(text: &str, left: &(usize, usize, f32), right: &(usize, usize, f32)) -> bool {    let prev = text.get(left.0..left.1).and_then(|s| s.chars().next_back());
     let next = text.get(right.0..right.1).and_then(|s| s.chars().next());
     match (prev, next) {
         // 占位内部（NBSP 连续段）不可断开，否则一张公式图会跨视觉行；
@@ -513,6 +512,12 @@ fn boundary_allowed(text: &str, left: &(usize, usize, f32), right: &(usize, usiz
         }
         _ => true,
     }
+}
+
+/// 引用行首 `>` 位置（缩进之后）；用于统计单行引用层级（与 layout 同规则）。
+fn nested_quote_marker_pos(line: &str) -> Option<usize> {
+    let indent = line.len() - line.trim_start_matches([' ', '\t']).len();
+    (line.as_bytes().get(indent) == Some(&b'>')).then_some(indent)
 }
 
 impl App {
@@ -533,6 +538,72 @@ impl App {
                 bh,
                 self.input_state.theme.grid,
             );
+        }
+    }
+
+    /// 引用块内嵌引用的次级引用条（REN-SWEEP-004）：标记全消隐后，按源行层级
+    /// 为第 2..=N 级补画竖条，使 `> > …` 的层级在视觉上可辨。
+    /// 行 y 由版面偏移反查（折行时仍贴合该源行的首个视觉行）。
+    pub(crate) fn paint_nested_quote_rails(
+        &self,
+        frame: &mut Frame,
+        g: &BlockGeom,
+        l: &crate::view::layout::BlockLayout,
+        top: i32,
+    ) {
+        let Some(text) = self.editor.session().text_slice(g.range) else {
+            return;
+        };
+        let mut lines: Vec<(usize, u8)> = Vec::new();
+        let mut off = 0usize;
+        for line in text.split_inclusive('\n') {
+            let mut s = 0usize;
+            let mut depth = 0u8;
+            while let Some(p) = nested_quote_marker_pos(&line[s..]) {
+                s += p + 1;
+                depth = depth.saturating_add(1);
+            }
+            lines.push((off, depth));
+            off += line.len();
+        }
+        let max = lines.iter().map(|x| x.1).max().unwrap_or(0);
+        if max < 2 {
+            return;
+        }
+        let scale = self.input_state.scale;
+        let rail_w = (crate::tokens::doc::QUOTE_RAIL * scale).max(1.0) as u32;
+        let step = crate::tokens::doc::QUOTE_STEP * scale;
+        let inset = crate::tokens::doc::QUOTE_INSET * scale;
+        for level in 2..=max {
+            let mut i = 0usize;
+            while i < lines.len() {
+                if lines[i].1 < level {
+                    i += 1;
+                    continue;
+                }
+                let start = i;
+                while i + 1 < lines.len() && lines[i + 1].1 >= level {
+                    i += 1;
+                }
+                let y0 = self.engine.caret_xy(l, lines[start].0).1;
+                let y1 = if i + 1 < lines.len() {
+                    self.engine.caret_xy(l, lines[i + 1].0).1
+                } else {
+                    l.height
+                };
+                let h = (y1 - y0).max(0.0) as u32;
+                if h > 0 {
+                    let x = self.content_x() - inset + (level as f32 - 1.0) * step;
+                    frame.fill_rect(
+                        x as i32,
+                        top + y0 as i32,
+                        rail_w,
+                        h,
+                        self.input_state.theme.grid,
+                    );
+                }
+                i += 1;
+            }
         }
     }
 

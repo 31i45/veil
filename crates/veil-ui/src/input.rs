@@ -202,18 +202,19 @@ pub fn translate(key: Key, mods: Mods) -> Option<Action> {
         Key::Right if mods.shift => Some(Action::Doc(Intent::SelectRight)),
         Key::Left => Some(Action::Doc(Intent::MoveLeft)),
         Key::Right => Some(Action::Doc(Intent::MoveRight)),
-        Key::Up if mods.shift => Some(Action::SelectVertical(-1)),
-        Key::Down if mods.shift => Some(Action::SelectVertical(1)),
-        // Alt+↑/↓ 移动行（AltGr = Ctrl+Alt 不参与，见 ctrl 防护说明）
-        Key::Up if mods.alt && !mods.ctrl => Some(Action::Doc(Intent::MoveLineUp)),
-        Key::Down if mods.alt && !mods.ctrl => Some(Action::Doc(Intent::MoveLineDown)),
-        // Shift+Alt+↑/↓ 复制行（纯 Alt 留给 move，Shift 区分复制；AltGr 同样被 ctrl 防护拦截）
+        // Shift+Alt+↑/↓ 复制行必须优先于纯 Shift 纵向扩选：否则该分支先命中，
+        // DuplicateLine 永远不可达（DEF-T06-001）。AltGr 同样被 ctrl 防护拦截。
         Key::Up if mods.alt && mods.shift && !mods.ctrl => {
             Some(Action::Doc(Intent::DuplicateLineUp))
         }
         Key::Down if mods.alt && mods.shift && !mods.ctrl => {
             Some(Action::Doc(Intent::DuplicateLineDown))
         }
+        Key::Up if mods.shift => Some(Action::SelectVertical(-1)),
+        Key::Down if mods.shift => Some(Action::SelectVertical(1)),
+        // Alt+↑/↓ 移动行（AltGr = Ctrl+Alt 不参与，见 ctrl 防护说明）
+        Key::Up if mods.alt && !mods.ctrl => Some(Action::Doc(Intent::MoveLineUp)),
+        Key::Down if mods.alt && !mods.ctrl => Some(Action::Doc(Intent::MoveLineDown)),
         Key::Up => Some(Action::MoveVertical(-1)),
         Key::Down => Some(Action::MoveVertical(1)),
         Key::Home if ctrl && mods.shift => Some(Action::Doc(Intent::SelectDocStart)),
@@ -659,7 +660,7 @@ mod tests {
             translate(Key::Down, ALT),
             Some(Action::Doc(Intent::MoveLineDown))
         );
-        // Shift+Alt 不改变既有 Shift 扩选语义（行移动仅纯 Alt）
+        // Shift+Alt 是复制行（DEF-T06-001）：优先级高于 Shift 纵向扩选
         assert_eq!(
             translate(
                 Key::Up,
@@ -669,7 +670,48 @@ mod tests {
                     alt: true,
                 }
             ),
-            Some(Action::SelectVertical(-1))
+            Some(Action::Doc(Intent::DuplicateLineUp))
+        );
+    }
+
+    #[test]
+    fn shift_alt_up_down_duplicates_lines_before_extend_selection() {
+        let shift_alt = Mods {
+            ctrl: false,
+            shift: true,
+            alt: true,
+        };
+        assert_eq!(
+            translate(Key::Up, shift_alt),
+            Some(Action::Doc(Intent::DuplicateLineUp))
+        );
+        assert_eq!(
+            translate(Key::Down, shift_alt),
+            Some(Action::Doc(Intent::DuplicateLineDown))
+        );
+        // 纯 Shift 仍是纵向扩选（复制行不吞掉既有扩选契约）
+        assert_eq!(
+            translate(
+                Key::Down,
+                Mods {
+                    ctrl: false,
+                    shift: true,
+                    alt: false,
+                }
+            ),
+            Some(Action::SelectVertical(1))
+        );
+        // AltGr（Ctrl+Alt+Shift）不触发复制行
+        assert_eq!(
+            translate(
+                Key::Down,
+                Mods {
+                    ctrl: true,
+                    shift: true,
+                    alt: true,
+                }
+            ),
+            Some(Action::SelectVertical(1))
         );
     }
 

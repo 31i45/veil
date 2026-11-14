@@ -276,6 +276,14 @@ impl Cache {
         self.image_failed.get(path).is_some_and(|m| m.matches(&key))
     }
 
+    /// 清除单张图片的成功/失败缓存，供右键“重新加载图片”重试（DEF-T67-E1-005）。
+    pub(crate) fn invalidate_image(&mut self, key: &str) {
+        self.inline_images.remove(key);
+        self.image_failed.remove(key);
+        self.remote_images.remove(key);
+        self.remote_failed.remove(key);
+    }
+
     /// 远程图片缓存查询（URL 内容寻址，无代次键）。
     pub(crate) fn remote_image(&self, url: &str) -> Option<&ImageData> {
         self.remote_images.get(url)

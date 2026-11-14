@@ -554,8 +554,9 @@ fn paste_prefers_html_over_plain() {
 
 #[test]
 fn paste_falls_back_to_plain_when_html_converts_empty() {
-    // 空结构（如纯图片复制只带 img 标签）转换无内容 → 用纯文本
-    let mut a = app_clip(Some("<p> </p><img src=\"x.png\">"), Some("fallback"));
+    // 空结构（如纯脚本/空白）转换无内容 → 用纯文本。
+    // 注：图片现已能转 Markdown（DEF-T67-E1-003），故不再用 img 作为空结构样本。
+    let mut a = app_clip(Some("<p> </p><script>x</script>"), Some("fallback"));
     a.paste_clipboard();
     assert_eq!(doc_text(&a), "fallback");
 }
@@ -5892,6 +5893,130 @@ fn config_save_failure_keeps_theme_and_notices() {
     );
 }
 
+/// DEF-T07-002：几何字段参与 apply；清除后按 OK 必须把移除结果写盘。
+#[test]
+fn settings_geometry_clear_is_applied_and_persisted_on_ok() {
+    use crate::view::settings::{FieldKind, FieldValue, BTN_OK};
+    let cfg = MemConfig::default();
+    let saves = cfg.saves.clone();
+    let mut a = app_theme(Box::new(cfg), Rc::new(Cell::new(Some(false))));
+    a.config.window = Some(crate::theme::WindowGeom {
+        width: 900,
+        height: 700,
+        x: -40,
+        y: 30,
+    });
+    a.open_settings();
+
+    // 清除按钮等价操作：表单值置 None。
+    {
+        let s = a.ui_state.settings.as_mut().expect("设置已打开");
+        let idx = s
+            .form
+            .fields
+            .iter()
+            .position(|f| matches!(f.kind, FieldKind::WindowGeom))
+            .expect("几何字段存在");
+        s.form.fields[idx].value = FieldValue::Geom(None);
+    }
+    a.resolve_settings(BTN_OK);
+
+    assert_eq!(a.config.window, None, "清除后 apply 必须移除几何");
+    let saved = saves.borrow().last().cloned().expect("OK 必须写盘");
+    let parsed = crate::theme::decode_config(saved.as_bytes()).expect("写盘 JSON 可解析");
+    assert_eq!(parsed.config.window, None, "写盘内容不得复活旧几何");
+
+    // 反向：恢复默认后再填入一组几何，OK 后写盘包含新值。
+    a.config.window = None;
+    a.open_settings();
+    {
+        let s = a.ui_state.settings.as_mut().expect("设置已打开");
+        let idx = s
+            .form
+            .fields
+            .iter()
+            .position(|f| matches!(f.kind, FieldKind::WindowGeom))
+            .expect("几何字段存在");
+        s.form.fields[idx].value = FieldValue::Geom(Some((1000, 800, 5, 6)));
+    }
+    a.resolve_settings(BTN_OK);
+    assert_eq!(
+        a.config.window,
+        Some(crate::theme::WindowGeom {
+            width: 1000,
+            height: 800,
+            x: 5,
+            y: 6
+        })
+    );
+    let saved = saves.borrow().last().cloned().expect("OK 必须写盘");
+    let parsed = crate::theme::decode_config(saved.as_bytes()).expect("写盘 JSON 可解析");
+    assert_eq!(parsed.config.window, a.config.window, "新几何必须写盘");
+}
+
+/// DEF-T07-003：模态/浮层打开时 Ctrl+滚轮不得缩放背景文档。
+#[test]
+fn overlay_blocks_background_zoom() {
+    let store = MemStore::default();
+    let mut a = app("abc\n", None, false, &store);
+    let base = a.input_state.user_zoom;
+    assert!(!a.overlay_blocks_background_wheel());
+
+    a.open_settings();
+    assert!(a.overlay_blocks_background_wheel(), "设置打开必须拦截滚轮");
+    a.resolve_settings(crate::view::settings::BTN_CANCEL);
+    assert!(!a.overlay_blocks_background_wheel());
+
+    a.open_search();
+    assert!(a.overlay_blocks_background_wheel(), "查找打开必须拦截滚轮");
+    a.close_search();
+
+    let spec = crate::view::modal::ModalSpec::new("T", "M", Vec::new());
+    a.ui_state.modal = Some(crate::app::ActiveModal {
+        state: crate::view::modal::ModalState::new(&spec),
+        spec,
+        intent: None,
+        purpose: crate::app::ModalPurpose::Unsaved,
+    });
+    assert!(a.overlay_blocks_background_wheel(), "模态打开必须拦截滚轮");
+    a.ui_state.modal = None;
+    assert_eq!(a.input_state.user_zoom, base, "守卫本身不得改变缩放");
+}
+
+/// DEF-T07-004：窗口失焦必须结束列宽拖动会话。
+#[test]
+fn window_blur_ends_column_drag() {
+    let store = MemStore::default();
+    let mut a = app("| A | B |\n| --- | --- |\n| 1 | 2 |\n", None, false, &store);
+    a.ui_state.tables.drag = Some((BlockId(1), 0, 10.0, 80.0));
+    a.on_window_focus(false);
+    assert!(a.ui_state.tables.drag.is_none(), "失焦后拖动会话必须清空");
+    assert!(!a.window_state.visible);
+
+    a.on_window_focus(true);
+    assert!(a.ui_state.tables.drag.is_none(), "回焦不得复活拖动");
+}
+
+/// DEF-T67-E1-005：识别图片命中，并区分正常/缺失图片。
+#[test]
+fn image_context_detects_missing_local_image() {
+    let store = MemStore::default();
+    let dir = std::env::temp_dir().join("veil-task06-image-missing");
+    let doc = dir.join("a.md");
+    let a = app(
+        "![图](gone.png)\n\n![图](also-gone.png)\n",
+        Some(doc.to_str().unwrap()),
+        false,
+        &store,
+    );
+    // 两个图片都指向不存在的本地文件 → missing=true，且能取到源路径。
+    assert_eq!(a.image_at(2), Some(("gone.png".to_string(), true)));
+    assert_eq!(a.image_at(0), Some(("gone.png".to_string(), true)));
+
+    let plain = app("无图片\n", None, false, &store);
+    assert!(plain.image_at(0).is_none());
+}
+
 /// 5005 块压力文档（715 × 7 块），冷启动/击键探针与惰性排版测试共用。
 fn stress_doc() -> String {
     stress_doc_n(715)
@@ -8890,6 +9015,56 @@ fn right_click_on_link_text_opens_link_menu() {
 
 // ---- 链接打开：Ctrl+左键 / 右键菜单（协议白名单 + 失败提示） ----
 
+/// DEF-T67-E1-004：危险协议链接右键仍出 Link 专用项；点击打开有可见提示且不调 opener。
+#[test]
+fn right_click_dangerous_link_shows_link_items_and_visible_hint() {
+    let calls = Rc::new(RefCell::new(Vec::new()));
+    let mut a = link_app("[x](javascript:alert(1))\n", &calls, Ok(()));
+    let (x, y) = link_point(&mut a);
+    a.input_state.mouse = PhysicalPosition::new(x as f64, y as f64);
+    a.on_right_click();
+    assert!(a.ui_state.ctx.open);
+    assert_eq!(
+        a.ui_state.ctx.link.as_deref(),
+        Some("javascript:alert(1)"),
+        "危险协议也必须进入 Link 上下文"
+    );
+
+    let items = a.ui_state.ctx.items().to_vec();
+    let open_i = items
+        .iter()
+        .position(|&(_, act)| act == ctx_menu::CtxAction::OpenLink)
+        .expect("必须提供打开链接项");
+    assert!(items
+        .iter()
+        .any(|&(_, act)| act == ctx_menu::CtxAction::CopyLink));
+
+    let vp = a.viewport();
+    let l = ctx_menu::layout(
+        a.ui_state.ctx.items(),
+        a.ui_state.ctx.x,
+        a.ui_state.ctx.y,
+        vp.x + vp.w,
+        vp.y + vp.h,
+        a.input_state.scale,
+    );
+    let iy = l.y
+        + l.rows
+            .iter()
+            .find(|&&(i, _)| i == open_i)
+            .map(|&(_, off)| off)
+            .expect("打开项可点击")
+        + 1.0;
+    click_at(&mut a, l.x + 2.0, iy);
+
+    assert!(calls.borrow().is_empty(), "危险协议不得交给系统 opener");
+    assert!(
+        a.ui_state.chrome.notice.contains("无法打开链接"),
+        "状态栏必须给出可见提示：{:?}",
+        a.ui_state.chrome.notice
+    );
+}
+
 const LINK_DOC: &str = "[链接](https://example.com)\n";
 
 /// 链接文字上的鼠标落点（与右键测试同口径：偏移 1 的字符盒 + 少量内缩）。
@@ -10920,6 +11095,40 @@ fn ctrl_combo_ignores_winit_text_stripped_of_ctrl() {
         crate::interaction::map_key_parts(Some("s"), WKey::Character(s), altgr),
         Some(Key::Text("s".into()))
     );
+}
+
+#[test]
+fn ctrl_numpad_zoom_keys_match_main_keyboard() {
+    // DEF-T06-004：小键盘 +/-/0 与主键盘缩放一致；NumLock 关时逻辑键可能不是字符，
+    // 因此物理键必须兜底识别。
+    for (logical, physical, want) in [
+        (
+            WKey::Named(NamedKey::Space),
+            KeyCode::NumpadAdd,
+            Key::Equal,
+        ),
+        (
+            WKey::Character("+".into()),
+            KeyCode::NumpadAdd,
+            Key::Equal,
+        ),
+        (
+            WKey::Named(NamedKey::ArrowDown),
+            KeyCode::NumpadSubtract,
+            Key::Minus,
+        ),
+        (
+            WKey::Named(NamedKey::Insert),
+            KeyCode::Numpad0,
+            Key::Digit0,
+        ),
+    ] {
+        assert_eq!(
+            crate::interaction::ctrl_punctuation(&logical, PhysicalKey::Code(physical)),
+            Some(want.clone()),
+            "物理键 {physical:?} 应映射到 {want:?}"
+        );
+    }
 }
 
 #[test]

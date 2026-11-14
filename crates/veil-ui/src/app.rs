@@ -1642,7 +1642,12 @@ impl App {
                 self.end_col_drag();
             }
             WindowEvent::MouseWheel { delta, .. } => {
+                // 模态/浮层打开时滚轮只服务浮层，绝不缩放背景文档（DEF-T07-003）。
+                let overlay_open = self.overlay_blocks_background_wheel();
                 if self.input_state.mods.ctrl {
+                    if overlay_open {
+                        return;
+                    }
                     // Ctrl+滚轮 / 触控板捏合（Windows 捏合上报为带 Ctrl 的滚轮事件）：
                     // 用户缩放（3c-2），不滚动。LineDelta 一格折一档像素阈值。
                     let px = match delta {
@@ -1671,8 +1676,8 @@ impl App {
             WindowEvent::Focused(focused) => {
                 // 光标焦点表达：失焦改空心框，仅在状态变化时补一次重绘（无定时器）
                 self.set_window_focused(focused);
+                self.on_window_focus(focused);
                 if !focused {
-                    self.window_state.visible = false;
                     return;
                 }
                 if !self.window_state.visible {
@@ -1691,6 +1696,24 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    /// 窗口焦点变化：失焦即隐藏并清理列宽拖动会话（DEF-T07-004），回焦恢复可见。
+    /// 抽成方法便于无事件循环的回归测试直接驱动。
+    pub(crate) fn on_window_focus(&mut self, focused: bool) {
+        if !focused {
+            self.window_state.visible = false;
+            self.end_col_drag();
+        }
+    }
+
+    /// 模态/浮层打开时背景滚轮（含 Ctrl 缩放）必须被拦截（DEF-T07-003）。
+    pub(crate) fn overlay_blocks_background_wheel(&self) -> bool {
+        self.ui_state.settings.is_some()
+            || self.ui_state.modal.is_some()
+            || self.ui_state.quick.open
+            || self.ui_state.search.open
+            || self.ui_state.history.open
     }
 
     /// 保存当前窗口几何并报告是否应关闭。Shell 据此只移除一个 WindowId。

@@ -1,7 +1,9 @@
 //! 编辑器交互策略核心：光标（mark）、IME preedit 视图态、文档级意图应用。
 //! 纯逻辑、零 GUI 依赖；像素级命中与坐标换算属 layout 层（机制与策略分离，INSTANCE §0）。
 
-use veil_core::{emphasis_spans, Bias, BlockId, Edit, InlineKind, MarkId, Range, Session};
+use veil_core::{
+    emphasis_spans, Bias, BlockId, BlockKind, Edit, InlineKind, MarkId, Range, Session,
+};
 
 /// 文档级意图（input 层翻译产出；视觉行内移动/点击由 shell 经 layout 直接换算偏移，
 /// 不走这里）。preedit 激活期间一切意图被忽略——组合期按键归 IME 所有。
@@ -429,6 +431,12 @@ impl Editor {
     fn apply_inner(&mut self, intent: Intent) -> Option<Vec<BlockId>> {
         if self.preedit.is_some() {
             return None; // 组合期按键归 IME（Windows 下 IME 消费组合键，此乃兜底）
+        }
+        // 表格单元格内 Enter：GFM 单元格不支持软换行，裸插 \n 会把一行拆成
+        // 缺首尾竖线的畸形行（DEF-T67-E1-001）。此时保持源码不变即安全行为；
+        // 需要加行请用表格右键菜单的“下方插入行”。
+        if matches!(intent, Intent::Newline) && self.touches_table() {
+            return None;
         }
         // 非编辑的光标移动/选区变化即断开撤销分组（VS Code 语义）。此处是 Intent 分派的
         // 唯一入口，故单点接线；编辑意图不在此列，否则连续输入会被拆成单字符撤销。
@@ -924,11 +932,12 @@ impl Editor {
         let line = &text[line_start..line_end];
         let local = c - line_start;
         // emphasis_spans 已按内容长度升序（最内层优先），首个命中即最内层结构。
-        // 光标取「内容起点..闭标记末尾」：包裹后光标坍缩在末尾时再按一次也能取消。
+        // 光标取「开标记起点..闭标记末尾」：既覆盖内容区，也覆盖光标恰在
+        // `**`/`*` 内部或紧邻标记的情形；否则会再叠一对标记（DEF-T67-E1-002）。
         let hit = emphasis_spans(line).into_iter().find(|sp| {
             sp.kind == kind
                 && line[sp.open.start..sp.open.end].bytes().all(|b| b == ch)
-                && local >= sp.content.start
+                && local >= sp.open.start
                 && local <= sp.close.end
         });
         if let Some(sp) = hit {
@@ -1301,6 +1310,17 @@ impl Editor {
     /// Enter（C4）：行尾且行首是列表/引用标记时续写下一项（编号递增、任务项给未勾选）；
     /// 空列表项则删去整行标记以收束列表；其余情形仍是普通换行。
     /// 行中间回车不做续行（与主流编辑器一致，避免拆词时凭空造出列表）。
+    /// 光标/选区是否触及表格块。Enter 在表格内必须保持结构（DEF-T67-E1-001）。
+    fn touches_table(&self) -> bool {
+        let start = self.selection().map_or(self.caret(), |sel| sel.start);
+        self.session
+            .blocks()
+            .iter()
+            .any(|(_, kind, range)| {
+                matches!(kind, BlockKind::Table) && range.start <= start && start < range.end
+            })
+    }
+
     fn newline(&mut self, caret: usize) -> Vec<BlockId> {
         let at_line_end = match self.session.next_grapheme(caret) {
             None => true,
@@ -2020,6 +2040,37 @@ mod tests {
         assert_eq!(e.session().serialize(), "ab");
         assert_eq!(e.caret(), 1);
         assert_eq!(e.selection(), None);
+    }
+
+    /// DEF-T67-E1-001：表格单元格内 Enter 不得裸插换行破坏表格结构。
+    #[test]
+    fn newline_inside_table_cell_keeps_structure() {
+        let src = "| A | B |\n| --- | --- |\n| 1 | 2 |\n";
+        // 表头单元格、分隔行、正文单元格都属表格块。
+        for caret in [2, 12, 25] {
+            let mut e = ed(src, caret);
+            assert_eq!(e.apply(Intent::Newline), None, "caret={caret} 应为安全 no-op");
+            assert_eq!(e.session().serialize(), src, "表格源码不得改变");
+            assert_eq!(e.session().undo_depth(), 0, "不得产生撤销步");
+        }
+
+        // 选中单元格内容后 Enter 同样不得替换成裸换行。
+        let mut e = sel_ed(src, 24, 33);
+        assert_eq!(e.apply(Intent::Newline), None);
+        assert_eq!(e.session().serialize(), src);
+        assert!(
+            e.session()
+                .serialize()
+                .lines()
+                .all(|l| l.is_empty() || (l.starts_with('|') && l.ends_with('|'))),
+            "不得出现缺首尾竖线的畸形行"
+        );
+
+        // 表格块之外 Enter 仍正常换行。
+        let outside = "| A |\n| --- |\n| 1 |\n\npara";
+        let mut e = ed(outside, outside.len());
+        assert!(e.apply(Intent::Newline).is_some());
+        assert_eq!(e.session().serialize(), format!("{outside}\n"));
     }
 
     #[test]
@@ -2857,6 +2908,32 @@ mod tests {
         e.apply(Intent::ToggleWrap("*")).unwrap();
         assert_eq!(e.session().serialize(), "b");
         assert_eq!(e.caret(), 1);
+    }
+
+    /// DEF-T67-E1-002：光标落在强调起始 `**`/`*` 内部或紧邻标记时，
+    /// 再按 Ctrl+B/I 必须解除已有结构，而不是再叠一对标记。
+    #[test]
+    fn toggle_inside_opening_marker_unwraps_instead_of_stacking() {
+        // 光标位于 `**` 两个星号之间。
+        let mut e = ed("**BOLD**", 1);
+        e.apply(Intent::ToggleWrap("**")).unwrap();
+        assert_eq!(e.session().serialize(), "BOLD");
+        assert_eq!(e.caret(), 4, "摘除后光标落在内容末尾");
+
+        // 光标紧邻开标记之前（local == open.start）。
+        let mut e = ed("**BOLD**", 0);
+        e.apply(Intent::ToggleWrap("**")).unwrap();
+        assert_eq!(e.session().serialize(), "BOLD");
+
+        // 强调单星号同理。
+        let mut e = ed("*it*", 1);
+        e.apply(Intent::ToggleWrap("*")).unwrap();
+        assert_eq!(e.session().serialize(), "it");
+
+        // 结构外的普通文本仍正常包裹，不得被误判为命中。
+        let mut e = ed("plain", 5);
+        e.apply(Intent::ToggleWrap("**")).unwrap();
+        assert_eq!(e.session().serialize(), "plain****");
     }
 
     /// 两个斜体相邻时，选中中间空白不得被误判成「已包裹」而拆掉两侧标记

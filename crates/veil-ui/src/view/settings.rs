@@ -230,6 +230,18 @@ impl SettingsForm {
                         out.tab_width = if v == 2 || v == 4 { v } else { 4 };
                     }
                 }
+                // 几何字段参与 apply（DEF-T07-002）：清除/恢复默认后的 None 必须
+                // 覆盖旧值，OK 才会把移除后的状态写盘并在重启时生效。
+                Key::SettingsWindowGeom => {
+                    if let FieldValue::Geom(geom) = f.value {
+                        out.window = geom.map(|(width, height, x, y)| crate::theme::WindowGeom {
+                            width,
+                            height,
+                            x,
+                            y,
+                        });
+                    }
+                }
                 _ => {}
             }
         }
@@ -271,6 +283,12 @@ pub(crate) struct SettingsLayout {
     pub(crate) window_geom_clear: Option<Rect>,
     /// 窗口几何值文本的可用矩形：右边界已让出按钮与间隔，绘制时必须按此裁切。
     pub(crate) window_geom_value: Option<Rect>,
+    /// 当前滚动到的首行下标（DEF-T07-E1-001）。
+    pub(crate) scroll: usize,
+    /// 当前视口内实际可显示的行数（含被滚动隐藏的字段不绘制）。
+    pub(crate) shown_rows: usize,
+    /// 最大滚动行数；0 表示所有字段都能同时显示。
+    pub(crate) max_scroll: usize,
 }
 
 pub(crate) fn buttons() -> Vec<ModalButton> {
@@ -297,6 +315,7 @@ pub(crate) fn layout(
     form: &SettingsForm,
     text: &mut dyn Text,
     buttons: &[ModalButton],
+    scroll_rows: usize,
 ) -> SettingsLayout {
     let p = surface::dialog_padding(scale);
     let title_line_h = surface::dialog_title_line_height(scale);
@@ -353,8 +372,10 @@ pub(crate) fn layout(
     let fixed_bottom = bh + surface::dialog_body_gap(scale);
     let avail_h = (max_vp_h - fixed_top - fixed_bottom).max(0.0);
     let max_rows_avail = (avail_h / (control_h + row_gap)).floor();
-    let shown_rows = n_fields.min(max_rows_avail).min(n_fields);
-    let body_h = shown_rows * control_h + (shown_rows - 1.0).max(0.0) * row_gap;
+    let shown_rows = (n_fields.min(max_rows_avail).max(1.0)) as usize;
+    let max_scroll = (form.fields.len().saturating_sub(shown_rows)).min(form.fields.len());
+    let scroll = scroll_rows.min(max_scroll);
+    let body_h = shown_rows as f32 * control_h + (shown_rows as f32 - 1.0).max(0.0) * row_gap;
     let card_h = (fixed_top + body_h + fixed_bottom).min(max_vp_h);
 
     let card = Rect {
@@ -372,8 +393,18 @@ pub(crate) fn layout(
 
     let mut field_rects = Vec::with_capacity(form.fields.len());
     let mut top_y = card.y + p + title_line_h + surface::dialog_title_gap(scale);
+    let visible_end = (scroll + shown_rows).min(form.fields.len());
 
-    for f in &form.fields {
+    for (idx, _f) in form.fields.iter().enumerate() {
+        // 超出可视区的行给零矩形：命中/绘制都按空矩形跳过，绝不越出卡片
+        // 覆盖到按钮区域（DEF-T07-E1-001）。
+        if idx < scroll || idx >= visible_end {
+            field_rects.push(FieldRects {
+                label: Rect::default(),
+                control: Rect::default(),
+            });
+            continue;
+        }
         let label = Rect {
             x: card.x + p,
             y: top_y + (control_h - body_line_h) * 0.5,
@@ -426,19 +457,22 @@ pub(crate) fn layout(
         .fields
         .iter()
         .position(|f| matches!(f.kind, FieldKind::WindowGeom));
-    let window_geom_clear = window_geom_idx.map(|idx| {
+    let window_geom_clear = window_geom_idx.and_then(|idx| {
         let control = &field_rects[idx].control;
+        if control.w <= 0.0 || control.h <= 0.0 {
+            return None;
+        }
         // 宽度按标签实测：文字必须落在描边内，否则会退化成"无边界纯文本"。
         let label_w = text.width(t(Key::SettingsResetWindowGeom));
         let bw = (label_w + 2.0 * GEOM_CLEAR_PAD_X * scale)
             .min(control.w)
             .max(0.0);
-        Rect {
+        Some(Rect {
             x: control.x + control.w - bw,
             y: control.y + (control.h - body_line_h) * 0.5 - 2.0,
             w: bw,
             h: body_line_h + 4.0,
-        }
+        })
     });
 
     // 值文本可用宽度 = 控件宽 − 左内边距 − 按钮宽 − 间隔；剩余宽度交给截断，
@@ -462,6 +496,9 @@ pub(crate) fn layout(
         button_ids: ids,
         window_geom_clear,
         window_geom_value,
+        scroll,
+        shown_rows,
+        max_scroll,
     }
 }
 
@@ -472,6 +509,8 @@ pub(crate) struct SettingsState {
     pub(crate) focused_button: Option<usize>,
     pub(crate) hovered_button: Option<usize>,
     pub(crate) hovered_clear: bool,
+    /// 低高度/窄窗口下的字段滚动首行（DEF-T07-E1-001）。
+    pub(crate) scroll_rows: usize,
 }
 
 impl SettingsState {
@@ -483,6 +522,26 @@ impl SettingsState {
             focused_button: first_editable.is_none().then_some(BUTTON_TAB_ORDER[0]),
             hovered_button: None,
             hovered_clear: false,
+            scroll_rows: 0,
+        }
+    }
+
+    /// 滚轮/键盘滚动字段区：`delta` > 0 表示向上（朝首行）。
+    /// 由 shell 在设置模态打开时调用，不触碰正文滚动。
+    pub(crate) fn scroll(&mut self, delta: i32, max_scroll: usize) {
+        let next = (self.scroll_rows as i32 + delta).clamp(0, max_scroll as i32);
+        self.scroll_rows = next as usize;
+    }
+
+    /// 保证键盘焦点行落在可视区：焦点在窗口外时把可视区滚到包含它。
+    pub(crate) fn reveal_focused(&mut self, scroll: usize, shown_rows: usize) {
+        if self.focused_button.is_some() || shown_rows == 0 {
+            return;
+        }
+        if self.focused_field < scroll {
+            self.scroll_rows = self.focused_field;
+        } else if self.focused_field >= scroll + shown_rows {
+            self.scroll_rows = self.focused_field + 1 - shown_rows;
         }
     }
 
@@ -774,6 +833,10 @@ pub(crate) fn paint(
     let _ = body_top; // body_top 通过 layout.fields 的 label rects 承载
 
     for (i, (f, fr)) in form.fields.iter().zip(layout.fields.iter()).enumerate() {
+        // 滚动隐藏的行是空矩形：不画标签也不画控件，避免溢到按钮区。
+        if fr.control.w <= 0.0 || fr.control.h <= 0.0 {
+            continue;
+        }
         let is_focused = state.focused_button.is_none() && state.focused_field == i;
         paint_field_label(frame, text, f, fr, theme);
         paint_field_control(frame, text, f, fr, theme, scale, is_focused);
@@ -1196,7 +1259,17 @@ mod tests {
 
     fn layout_for(vp: Rect, form: &SettingsForm) -> SettingsLayout {
         let mut text = FakeText;
-        layout(vp, 1.0, form, &mut text, &buttons())
+        layout(vp, 1.0, form, &mut text, &buttons(), 0)
+    }
+
+    fn layout_scrolled(
+        vp: Rect,
+        form: &SettingsForm,
+        scale: f32,
+        scroll_rows: usize,
+    ) -> SettingsLayout {
+        let mut text = FakeText;
+        layout(vp, scale, form, &mut text, &buttons(), scroll_rows)
     }
 
     fn default_form() -> SettingsForm {
@@ -1242,9 +1315,14 @@ mod tests {
         let form = default_form();
         let layout = layout_for(viewport(1280.0, 800.0), &form);
 
-        for (index, pair) in layout.fields.windows(2).enumerate() {
-            let previous = &pair[0];
-            let next = &pair[1];
+        let visible: Vec<&FieldRects> = layout
+            .fields
+            .iter()
+            .filter(|fr| fr.control.w > 0.0)
+            .collect();
+        for (index, pair) in visible.windows(2).enumerate() {
+            let previous = pair[0];
+            let next = pair[1];
             assert!(
                 next.control.y > previous.control.y + previous.control.h,
                 "控件行 {index} 与 {} 重叠",
@@ -1256,6 +1334,39 @@ mod tests {
                 index + 1
             );
         }
+    }
+
+    /// DEF-T07-E1-001：低高度下只布局可见行，隐藏行的零矩形不得进入卡片/按钮区。
+    #[test]
+    fn low_height_rows_do_not_overflow_card_or_overlap_buttons() {
+        let form = default_form();
+        // 150% DPI 下 720px 高窗口：10 行放不下，必须截断/滚动。
+        let vp = viewport(720.0, 720.0);
+        let layout = layout_scrolled(vp, &form, 1.5, 0);
+        assert!(layout.shown_rows < form.fields.len(), "低高度应截断可见行");
+        assert!(layout.max_scroll > 0, "应提供滚动余量");
+
+        let full = layout_scrolled(vp, &form, 1.5, layout.max_scroll);
+        let card = full.card;
+        for fr in &full.fields {
+            if fr.control.w <= 0.0 {
+                continue;
+            }
+            assert!(
+                fr.control.y + fr.control.h <= card.y + card.h + EPSILON,
+                "字段行越过卡片底缘: {fr:?} card={card:?}"
+            );
+            for button in &full.buttons {
+                assert!(
+                    fr.control.y + fr.control.h <= button.y + EPSILON
+                        || fr.control.y >= button.y + button.h + EPSILON,
+                    "字段行与按钮重叠: {fr:?} button={button:?}"
+                );
+            }
+        }
+        // 滚到底后最后一行必须可见（可编辑）。
+        let last = full.fields.last().expect("字段存在");
+        assert!(last.control.w > 0.0, "滚动到底后最后一行必须可见");
     }
 
     #[test]
@@ -1504,8 +1615,7 @@ mod tests {
     }
 
     #[test]
-    fn geom_value_text_stays_left_of_clear_button() {
-        for (w, h, x, y) in [(2560u32, 1440u32, -1920i32, -200i32), (1681, 864, 8, 8)] {
+    fn geom_value_text_stays_left_of_clear_button() {        for (w, h, x, y) in [(2560u32, 1440u32, -1920i32, -200i32), (1681, 864, 8, 8)] {
             let form = geom_form(w, h, x, y);
             let layout = layout_for(viewport(1280.0, 800.0), &form);
             let value_rect = layout
@@ -1531,5 +1641,38 @@ mod tests {
                 clear.x
             );
         }
+    }
+
+    /// DEF-T07-002：几何字段参与 apply；清除/恢复默认后的 None 必须覆盖旧值。
+    #[test]
+    fn geometry_field_participates_in_apply_and_can_be_cleared() {
+        let config = Config {
+            window: Some(crate::theme::WindowGeom {
+                width: 900,
+                height: 700,
+                x: -40,
+                y: 30,
+            }),
+            ..Config::default()
+        };
+        let mut form = SettingsForm::from_config(&config);
+        assert_eq!(
+            form.apply(&config).window,
+            config.window,
+            "未改动时几何原样保留"
+        );
+
+        // 模拟「清除」：值变 None，OK 后必须移除 window。
+        let geom_idx = form
+            .fields
+            .iter()
+            .position(|f| matches!(f.kind, FieldKind::WindowGeom))
+            .expect("几何字段存在");
+        form.fields[geom_idx].value = FieldValue::Geom(None);
+        assert_eq!(form.apply(&config).window, None, "清除后 apply 不得复活旧几何");
+
+        // 模拟「恢复默认」：默认 Config 无几何记录。
+        let defaults = SettingsForm::from_config(&Config::default());
+        assert_eq!(defaults.apply(&config).window, None);
     }
 }

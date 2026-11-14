@@ -4,6 +4,7 @@
 
 use crate::app::App;
 use crate::chrome;
+use crate::document::block_index::BlockGeom;
 use crate::geometry::{Rect, MARGIN};
 use crate::i18n::{t, tf, Key};
 use crate::view::table::{CellImgAsset, CellMath};
@@ -312,7 +313,126 @@ pub(crate) fn paint_over_decor(
     }
 }
 
+/// 代码块头部控件布局（物理像素，视口坐标）：复制按钮 + 语言标签。
+/// 锚定代码块首行（围栏行消隐后为空白行），不参与排版，因此不改换行/块高。
+#[derive(Clone, PartialEq, Debug)]
+pub(crate) struct CodeHeaderLayout {
+    /// 复制按钮命中/绘制矩形。
+    pub(crate) button: Rect,
+    /// 语言标签文本（无语言/未知信息时为 None）。
+    pub(crate) label: Option<String>,
+    /// 首行行顶与行高（标签垂直居中用）。
+    pub(crate) line_top: f32,
+    pub(crate) line_h: f32,
+}
+
+/// 绘制代码块头部的语言标签与复制按钮（在代码文本之后调用，保证按钮在最上层）。
+/// 独立函数而非 `App` 方法：绘制循环借用了 `self.index.blocks`，按字段借用避开整 self 冲突。
+fn paint_code_header(
+    frame: &mut Frame,
+    engine: &mut LayoutEngine,
+    labels: &mut crate::chrome::LabelCache,
+    h: &CodeHeaderLayout,
+    theme: &crate::theme::Theme,
+    scale: f32,
+    content_x: f32,
+) {
+    let b = h.button;
+    frame.fill_rounded_rect(
+        b.x.round() as i32,
+        b.y.round() as i32,
+        b.w.max(1.0) as u32,
+        b.h.max(1.0) as u32,
+        (3.0 * scale).max(1.0),
+        theme.popup_bg,
+    );
+    // 1px 描边：四边各一条，避免引入新的绘制原语。
+    let border = theme.chrome_border;
+    let (bx, by, bw, bh) = (
+        b.x.round() as i32,
+        b.y.round() as i32,
+        b.w.max(1.0) as i32,
+        b.h.max(1.0) as i32,
+    );
+    frame.fill_rect(bx, by, bw as u32, 1, border);
+    frame.fill_rect(bx, by + bh - 1, bw as u32, 1, border);
+    frame.fill_rect(bx, by, 1, bh as u32, border);
+    frame.fill_rect(bx + bw - 1, by, 1, bh as u32, border);
+    if let Some(lab) = labels.get_or_insert(engine, t(Key::CodeCopyButton), theme.muted, scale) {
+        frame.blit(
+            &lab.pixels,
+            lab.w,
+            lab.h,
+            bx + (bw - lab.w as i32) / 2,
+            by + (bh - lab.h as i32) / 2,
+        );
+    }
+    // 语言标签右对齐在按钮左侧；未知语言保留 info string 原文。
+    if let Some(text) = h.label.as_deref() {
+        if let Some(lab) = labels.get_or_insert(engine, text, theme.muted, scale) {
+            let gap = (8.0 * scale).round() as i32;
+            let x = bx - gap - lab.w as i32;
+            if x >= content_x as i32 {
+                frame.blit(
+                    &lab.pixels,
+                    lab.w,
+                    lab.h,
+                    x,
+                    h.line_top.round() as i32 + ((h.line_h - lab.h as f32) / 2.0).round() as i32,
+                );
+            }
+        }
+    }
+}
+
 impl App {
+    /// 代码块头部控件几何：只对 WYSIWYG（非源码/非打印）下的可见围栏块生效。
+    /// 位置随 `g.top` / 滚动 / scale 推导，缩放与 DPI 变化后自然稳定。
+    pub(crate) fn code_header_layout(&self, g: &BlockGeom) -> Option<CodeHeaderLayout> {
+        if self.source_mode() || self.window_state.print.is_some() || self.block_hidden(g) {
+            return None;
+        }
+        let BlockKind::FencedCode(lang) = &g.kind else {
+            return None;
+        };
+        let scale = self.input_state.scale;
+        let vp = self.viewport();
+        let line_h = self.engine.doc_line_height() * scale;
+        let line_top = vp.y + g.top - self.window_state.scroll_y;
+        if line_top >= vp.y + vp.h || line_top + line_h <= vp.y {
+            return None; // 首行不在视口：不绘制、不可命中
+        }
+        let pad_x = crate::tokens::doc::CODE_PAD_X * scale;
+        let h = (16.0 * scale).round().max(12.0);
+        let w = (40.0 * scale).round().max(28.0);
+        // 锚定代码卡右上角：卡片宽度跟随最长行（与 code_bg 同源光栅宽度）；
+        // 首帧无光栅时回退版心右缘，下一帧即稳定到卡片右缘。
+        let base = self.base_key();
+        let caret = self.effective_caret();
+        let ink_w = self
+            .cache
+            .raster_key(g.id, &g.kind, g.range, base, caret, self.toc_layout_epoch(g))
+            .and_then(|k| self.cache.raster(g.id, k))
+            .map(|r| r.1 as f32);
+        let right = match ink_w {
+            Some(rw) => self.content_x() + rw.max(w + pad_x),
+            None => self.content_x() + self.content_width() - pad_x,
+        };
+        Some(CodeHeaderLayout {
+            button: Rect {
+                x: right - w,
+                y: line_top + (line_h - h) * 0.5,
+                w,
+                h,
+            },
+            label: lang
+                .as_deref()
+                .and_then(crate::view::highlight::language_label),
+            line_top,
+            line_h,
+        })
+    }
+
     /// 行内公式图：tex 内容寻址缓存；未命中时渲染并写缓存，失败记入失败表并返回 None
     /// （调用方降级为源码/文本显示，正文与表格单元格共用同一策略与缓存）。
     fn inline_math_image(&mut self, tex: &str) -> Option<&crate::math::MathImage> {
@@ -1437,6 +1557,20 @@ impl App {
                         } else {
                             draw_arrow_right(&mut frame, arrow_x, arrow_cy, arrow_size, theme.fg);
                         }
+                    }
+                }
+                BlockKind::FencedCode(_) => {
+                    if let Some(h) = self.code_header_layout(g) {
+                        let content_x = self.content_x();
+                        paint_code_header(
+                            &mut frame,
+                            &mut self.engine,
+                            &mut self.ui_state.chrome.labels,
+                            &h,
+                            &theme,
+                            scale,
+                            content_x,
+                        );
                     }
                 }
                 BlockKind::ThematicBreak if !node_active(range, caret) => {

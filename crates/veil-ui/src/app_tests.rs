@@ -2811,6 +2811,53 @@ fn app_with(
     )
 }
 
+/// 记录型剪贴板：断言复制出的原文（不依赖系统剪贴板）。
+#[derive(Clone)]
+struct ClipLog(Rc<RefCell<Vec<String>>>);
+impl Clipboard for ClipLog {
+    fn get(&mut self) -> Option<String> {
+        self.0.borrow().last().cloned()
+    }
+    fn set(&mut self, text: &str) {
+        self.0.borrow_mut().push(text.to_string());
+    }
+}
+
+/// 可观测剪贴板的装配（代码块复制测试）。
+fn app_code_copy(text: &str) -> (App, Rc<RefCell<Vec<String>>>) {
+    let log = Rc::new(RefCell::new(Vec::new()));
+    let doc = Doc {
+        text: text.into(),
+        path: None,
+        bom: false,
+        resume: false,
+        open_error: None,
+    };
+    let m = FakeMath {
+        fail: false,
+        calls: Rc::new(RefCell::new(Vec::new())),
+    };
+    let app = App::new(
+        doc,
+        Ports {
+            clipboard: Box::new(ClipLog(log.clone())),
+            store: Box::new(MemStore::default()),
+            math: Box::new(m),
+            images: Box::new(NoImages),
+            assets: Box::new(NoAssets),
+            exporter: Box::new(NoExport),
+            dialogs: Box::new(NoDialogs),
+            watcher: Box::new(NoWatcher),
+            theme_env: theme::test_support::env(),
+            persist_env: persist_env(),
+            print: Box::new(NoPrint),
+            url_opener: no_url(),
+            clock: fixed_clock(),
+        },
+    );
+    (app, log)
+}
+
 /// 启动即失败装配：Doc 带 open_error（空白草稿 + 首帧错误模态），store 决定「重试」结果。
 const STARTUP_ERROR_MESSAGE: &str = "无法读取 a.md：文件不存在。\n\n下一步：可重试或打开其他文件。";
 
@@ -14466,3 +14513,216 @@ fn blink_key_without_caret_move_restores_visibility() {
     assert!(a.cursor_visible, "caret 不变也必须恢复可见");
 }
 
+// ---- Task 4：代码块语言标签与复制按钮 ----
+
+const CODE_MULTILINE: &str =
+    "```rust\nlet x = 1;\nlet 中 = \"你好\";\n\nprintln!(\"{}\", 中);\n```\n";
+
+/// 代码块首行（围栏行消隐后的空白行）承载头部控件：按钮必须落在该行内，
+/// 不占第二行（真正的代码行）高度。
+#[test]
+fn code_header_sits_in_first_line_and_shows_canonical_language() {
+    let (mut a, _) = app_code_copy("```py\nprint(1)\n```\n\n```\nplain\n```\n");
+    a.ensure_layouts_all();
+    let line_h = a.engine.doc_line_height() * a.input_state.scale;
+    let h0 = a
+        .code_header_layout(&a.index.blocks[0])
+        .expect("可见围栏块应绘制头部控件");
+    assert!(h0.button.y >= h0.line_top && h0.button.y + h0.button.h <= h0.line_top + line_h);
+    assert_eq!(h0.label.as_deref(), Some("Python"), "别名 py 显示规范名");
+    // 无语言：标签隐藏（按钮仍保留，保证复制入口可发现）。
+    let h1 = a
+        .code_header_layout(&a.index.blocks[1])
+        .expect("无语言代码块也应有复制按钮");
+    assert_eq!(h1.label, None, "无 info string 时标签隐藏");
+    // 版心右上角：按钮右缘不超过版心右缘。
+    assert!(h1.button.x + h1.button.w <= a.content_x() + a.content_width());
+}
+
+#[test]
+fn code_copy_button_copies_source_verbatim_without_undo_or_dirty() {
+    let (mut a, log) = app_code_copy(CODE_MULTILINE);
+    a.ensure_layouts_all();
+    let h = a
+        .code_header_layout(&a.index.blocks[0])
+        .expect("应有复制按钮");
+    let before = doc_text(&a);
+    let undo0 = a.editor.session().undo_depth();
+    click_at(
+        &mut a,
+        h.button.x + h.button.w / 2.0,
+        h.button.y + h.button.h / 2.0,
+    );
+    assert_eq!(
+        log.borrow().as_slice(),
+        ["let x = 1;\nlet 中 = \"你好\";\n\nprintln!(\"{}\", 中);"],
+        "复制内容为代码原文：无围栏/语言标记、保留内部空行、无多余结尾换行"
+    );
+    assert_eq!(doc_text(&a), before, "复制不得修改文档字节");
+    assert_eq!(a.editor.session().undo_depth(), undo0, "复制不得产生撤销步");
+    assert!(!a.editor.is_dirty(), "复制不得置脏");
+    assert!(
+        a.ui_state.chrome.notice.contains("已复制代码块"),
+        "状态栏应有可见成功反馈"
+    );
+}
+
+/// 点击代码正文（第二视觉行）不得触发复制，仍按普通点击落光标。
+#[test]
+fn code_copy_hit_area_excludes_code_text() {
+    let (mut a, log) = app_code_copy(CODE_MULTILINE);
+    a.ensure_layouts_all();
+    let (id, _, _) = a.editor.session().blocks()[0].clone();
+    let (tx, ty, th) = a.engine.caret_xy(&a.cache.layouts[&id].value, 1);
+    let vp = a.viewport();
+    let top = a.index.blocks[0].top;
+    let x = a.content_x() + tx + 1.0;
+    click_at(&mut a, x, vp.y + top + ty + th / 2.0);
+    assert!(log.borrow().is_empty(), "代码文本点击不得复制");
+    assert!(a.editor.caret() > 0, "代码文本点击应正常落光标");
+}
+
+#[test]
+fn ctrl_shift_c_copies_code_block_at_caret_without_editing() {
+    let (mut a, log) = app_code_copy(CODE_MULTILINE);
+    a.editor.set_caret(8); // 围栏后的正文内
+    let before = doc_text(&a);
+    let undo0 = a.editor.session().undo_depth();
+    a.perform_action(Action::CopyCodeBlock);
+    assert_eq!(
+        log.borrow().as_slice(),
+        ["let x = 1;\nlet 中 = \"你好\";\n\nprintln!(\"{}\", 中);"]
+    );
+    assert_eq!(doc_text(&a), before);
+    assert_eq!(a.editor.session().undo_depth(), undo0);
+    assert!(!a.editor.is_dirty());
+
+    // 光标不在代码块内：不复制，给出可行动提示。
+    let (mut b, log_b) = app_code_copy("普通段落\n");
+    b.editor.set_caret(0);
+    b.perform_action(Action::CopyCodeBlock);
+    assert!(log_b.borrow().is_empty());
+    assert!(b.ui_state.chrome.notice.contains("光标不在代码块内"));
+}
+
+#[test]
+fn code_block_context_menu_copy_action_runs_from_keyboard() {
+    let (mut a, log) = app_code_copy(CODE_MULTILINE);
+    a.ensure_layouts_all();
+    let (id, _, _) = a.editor.session().blocks()[0].clone();
+    let (tx, ty, th) = a.engine.caret_xy(&a.cache.layouts[&id].value, 1);
+    let vp = a.viewport();
+    let top = a.index.blocks[0].top;
+    a.input_state.mouse = PhysicalPosition::new(
+        (a.content_x() + tx + 1.0) as f64,
+        (vp.y + top + ty + th / 2.0) as f64,
+    );
+    a.on_right_click();
+    assert!(a.ui_state.ctx.open, "代码块右键应打开菜单");
+    assert_eq!(
+        a.ui_state.ctx.action(0),
+        Some(ctx_menu::CtxAction::CopyCodeBlock),
+        "首项为复制代码块"
+    );
+    let before = doc_text(&a);
+    let undo0 = a.editor.session().undo_depth();
+    a.menu_move(1); // ↓ 选中首项
+    a.menu_accept(); // Enter 执行
+    assert_eq!(
+        log.borrow().as_slice(),
+        ["let x = 1;\nlet 中 = \"你好\";\n\nprintln!(\"{}\", 中);"]
+    );
+    assert!(!a.ui_state.ctx.open, "执行后菜单关闭");
+    assert_eq!(doc_text(&a), before);
+    assert_eq!(a.editor.session().undo_depth(), undo0);
+    assert!(!a.editor.is_dirty());
+}
+
+/// 真帧绘制：复制按钮恒有可见描边/文字；语言标签仅在 info string 存在时出现。
+#[test]
+fn code_header_is_painted_and_label_hidden_without_language() {
+    let (mut a, _) = app_code_copy("```rust\nfn main() {}\n```\n");
+    a.ensure_layouts_all();
+    let _ = a.render(); // 先产出光栅，让头部锚定到代码卡右缘
+    let h = a.code_header_layout(&a.index.blocks[0]).expect("头部控件");
+    let cx = a.content_x();
+    let label_band_w = (h.button.x - cx).max(1.0) as u32;
+    let f = a.render();
+    assert!(
+        ink_pixels(
+            f,
+            h.button.x as i32,
+            h.button.y as i32,
+            h.button.w as u32,
+            h.button.h as u32
+        ) > 0,
+        "复制按钮应有可见描边/文字"
+    );
+    let with_lang = ink_pixels(
+        f,
+        cx as i32,
+        h.line_top as i32,
+        label_band_w,
+        h.line_h as u32,
+    );
+    let _ = f;
+    // 有光栅后按钮贴住代码卡右缘（而不是悬在版心最右）。
+    let h2 = a.code_header_layout(&a.index.blocks[0]).expect("头部控件");
+    assert!(
+        h2.button.x + h2.button.w < a.content_x() + a.content_width() - 40.0,
+        "短代码块按钮应贴卡片右缘"
+    );
+    let (mut b, _) = app_code_copy("```\nfn main() {}\n```\n");
+    b.ensure_layouts_all();
+    let _ = b.render();
+    let hb = b.code_header_layout(&b.index.blocks[0]).expect("头部控件");
+    let cbx = b.content_x();
+    let fb = b.render();
+    let without_lang = ink_pixels(
+        fb,
+        cbx as i32,
+        hb.line_top as i32,
+        label_band_w,
+        hb.line_h as u32,
+    );
+    assert!(
+        with_lang > without_lang,
+        "有语言时首行应多出标签墨迹（{with_lang} vs {without_lang}）"
+    );
+}
+
+/// 活动块（围栏行还原）仍保留头部入口，且控件仍只在首行。
+#[test]
+fn code_header_remains_available_when_block_is_active() {
+    let (mut a, log) = app_code_copy(CODE_MULTILINE);
+    a.ensure_layouts_all();
+    a.editor.set_caret(10); // 代码正文 → 整块激活，围栏行显源码
+    a.ensure_layouts_all();
+    let h = a
+        .code_header_layout(&a.index.blocks[0])
+        .expect("活动代码块仍应有复制入口");
+    click_at(
+        &mut a,
+        h.button.x + h.button.w / 2.0,
+        h.button.y + h.button.h / 2.0,
+    );
+    assert_eq!(
+        log.borrow().as_slice(),
+        ["let x = 1;\nlet 中 = \"你好\";\n\nprintln!(\"{}\", 中);"]
+    );
+}
+
+/// 源码模式展示原始围栏，不叠加头部控件（不劫持编辑点击）。
+#[test]
+fn code_header_hidden_in_source_mode() {
+    let store = MemStore::default();
+    let mut a = app(CODE_MULTILINE, None, false, &store);
+    a.perform_action(Action::OpenSourceMode);
+    a.ensure_layouts_all();
+    for g in &a.index.blocks {
+        assert!(
+            a.code_header_layout(g).is_none(),
+            "源码模式不得绘制代码块头部控件"
+        );
+    }
+}

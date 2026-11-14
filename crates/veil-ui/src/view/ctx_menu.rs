@@ -16,6 +16,8 @@ pub(crate) enum CtxAction {
     SelectAll,
     /// 复制命中链接的 URL（inline 链接才有；引用式无 url 区间不出现本项）。
     CopyLink,
+    /// 复制命中的围栏代码块源码（不含围栏行）。
+    CopyCodeBlock,
     /// 用系统默认程序打开命中链接（协议白名单在 interaction 侧统一校验）。
     OpenLink,
     InsertImage,
@@ -76,6 +78,8 @@ pub(crate) enum CtxKind {
     MermaidBlock,
     /// Mermaid 空块（内容为空或全为 `%%` 注释）：只给模板项。
     MermaidEmptyBlock,
+    /// 普通围栏代码块：首项为「复制代码块」。
+    CodeBlock { id: BlockId },
     /// Details 块：携带命中块的 BlockId 与打开时刻的展开态，
     /// 菜单只列出与当前状态匹配的折叠/展开项（DEF-T07-001）。
     Details { id: BlockId, expanded: bool },
@@ -109,6 +113,13 @@ pub(crate) fn items_for(kind: CtxKind) -> Vec<(Key, CtxAction)> {
             (Key::CtxSelectAll, CtxAction::SelectAll),
             (Key::Empty, CtxAction::Separator),
             (Key::CtxInsertImage, CtxAction::InsertImage),
+        ],
+        // 代码块：复制源码为唯一新增项；其余为标准块操作（粘贴/全选）。
+        CtxKind::CodeBlock { .. } => vec![
+            (Key::CtxCopyCode, CtxAction::CopyCodeBlock),
+            (Key::Empty, CtxAction::Separator),
+            (Key::CtxPaste, CtxAction::Paste),
+            (Key::CtxSelectAll, CtxAction::SelectAll),
         ],
         CtxKind::MermaidBlock => vec![
             (Key::CtxMermaidPreview, CtxAction::MermaidPreview),
@@ -223,6 +234,8 @@ pub(crate) struct CtxMenu {
     pub(crate) details_id: Option<BlockId>,
     /// 图片右键菜单携带的源路径（供复制路径/重新加载动作）。
     pub(crate) image_path: Option<String>,
+    /// 代码块右键菜单携带的块 id（供复制代码块动作读取源码）。
+    pub(crate) code_id: Option<BlockId>,
     items: Vec<(Key, CtxAction)>,
 }
 
@@ -254,6 +267,10 @@ impl CtxMenu {
             CtxKind::Image { path, .. } => Some(path.clone()),
             _ => None,
         };
+        self.code_id = match &kind {
+            CtxKind::CodeBlock { id } => Some(*id),
+            _ => None,
+        };
         self.items = items_for(kind);
     }
 
@@ -264,6 +281,7 @@ impl CtxMenu {
         self.table = None;
         self.mermaid_body = None;
         self.mermaid_insert_start = None;
+        self.code_id = None;
     }
 
     pub(crate) fn items(&self) -> &[(Key, CtxAction)] {
@@ -436,6 +454,22 @@ mod tests {
         assert!(missing.iter().any(|&(_, a)| a == CtxAction::ReloadImage));
     }
 
+    /// 代码块上下文：首项为复制代码块，且不混入无关项（无剪切/插入图片）。
+    #[test]
+    fn code_block_menu_offers_copy_code_first() {
+        let items = items_for(CtxKind::CodeBlock { id: BlockId(1) });
+        assert_eq!(
+            items[0],
+            (Key::CtxCopyCode, CtxAction::CopyCodeBlock),
+            "复制代码块为首项"
+        );
+        assert!(!items
+            .iter()
+            .any(|&(_, a)| matches!(a, CtxAction::Cut | CtxAction::InsertImage | CtxAction::Copy)));
+        assert!(items.iter().any(|&(_, a)| a == CtxAction::Paste));
+        assert!(items.iter().any(|&(_, a)| a == CtxAction::SelectAll));
+    }
+
     #[test]
     fn opening_image_context_caches_source_path() {
         let mut m = CtxMenu::default();
@@ -569,6 +603,7 @@ mod tests {
             CtxKind::Selection,
             CtxKind::Link,
             CtxKind::Block,
+            CtxKind::CodeBlock { id: BlockId(1) },
             CtxKind::Table(TableCtx {
                 body_row: Some(0),
                 col: 0,

@@ -783,6 +783,44 @@ fn lang_def(lang: &str) -> LangDef {
     }
 }
 
+/// 已支持语言的规范展示名（info string / 别名 → 显示名）。
+/// 未注册语言返回 `None`，由调用方回退到 info string 原文。
+pub fn display_name(lang: &str) -> Option<&'static str> {
+    let lower = lang.to_ascii_lowercase();
+    Some(match lower.as_str() {
+        "rust" => "Rust",
+        "python" | "py" => "Python",
+        "javascript" | "js" | "jsx" => "JavaScript",
+        "typescript" | "ts" | "tsx" => "TypeScript",
+        "c" => "C",
+        "cpp" | "c++" | "h" | "hpp" | "cc" => "C++",
+        "java" => "Java",
+        "go" | "golang" => "Go",
+        "json" => "JSON",
+        "yaml" | "yml" => "YAML",
+        "toml" => "TOML",
+        "bash" | "sh" | "shell" | "zsh" => "Bash",
+        "sql" => "SQL",
+        "html" | "htm" | "xml" => "HTML",
+        "css" | "scss" | "sass" | "less" => "CSS",
+        "markdown" | "md" => "Markdown",
+        "ruby" | "rb" => "Ruby",
+        "diff" | "patch" => "Diff",
+        "dockerfile" | "docker" => "Dockerfile",
+        _ => return None,
+    })
+}
+
+/// 围栏 info string → 语言标签文本：已注册语言用规范名，未知语言保留原文；
+/// 空 info string 返回 `None`（调用方隐藏标签）。
+pub fn language_label(info: &str) -> Option<String> {
+    let raw = info.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    Some(display_name(raw).map_or_else(|| raw.to_string(), str::to_string))
+}
+
 /// 扫描 `text` 按 `lang` 着色，返回致密 `(start, end, TokenKind)` 段。
 /// 文本中无 token 覆盖的间隙由调用方填默认样式。
 pub fn highlight(lang: &str, text: &str) -> Vec<(usize, usize, TokenKind)> {
@@ -1045,6 +1083,19 @@ mod tests {
                 "end={end} 非字符边界（text={text:?}）"
             );
         }
+    }
+
+    #[test]
+    fn language_labels_use_canonical_names_and_hide_when_absent() {
+        assert_eq!(language_label("rust").as_deref(), Some("Rust"));
+        assert_eq!(language_label("py").as_deref(), Some("Python"));
+        assert_eq!(language_label(" YML ").as_deref(), Some("YAML"));
+        assert_eq!(language_label("cpp").as_deref(), Some("C++"));
+        // 未注册语言保留原始字符串（只去首尾空白）。
+        assert_eq!(language_label("brainfuck").as_deref(), Some("brainfuck"));
+        assert_eq!(language_label("MyLang").as_deref(), Some("MyLang"));
+        assert_eq!(language_label(""), None);
+        assert_eq!(language_label("   "), None);
     }
 
     #[test]

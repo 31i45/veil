@@ -5,7 +5,7 @@
 pub(crate) mod cache;
 pub(crate) mod ctx_menu;
 mod frame;
-mod highlight;
+pub(crate) mod highlight;
 pub(crate) mod history;
 mod layout;
 pub(crate) mod linebreak;

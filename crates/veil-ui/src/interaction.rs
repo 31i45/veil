@@ -2633,10 +2633,14 @@ impl App {
             BTN_OK => {
                 // 应用表单值到 Config
                 self.config = s.form.apply(&self.config);
-                // 持久化完整 Config
-                self.save_config(ConfigSave::All);
+                // 持久化完整 Config；失败时 save_config 已写入可见错误，不得被
+                // 后续成功提示覆盖（DEF-T10-008）。
+                let saved = self.save_config(ConfigSave::All);
                 // 立即刷新所有受影响的 UI（主题模式、字体、平滑滚动等）
                 self.refresh_settings_effects();
+                if saved {
+                    self.ui_state.chrome.notice = t(I18nKey::NoticeSettingsSaved).into();
+                }
                 self.ui_state.settings = None;
                 self.request_redraw();
             }
@@ -2674,7 +2678,7 @@ impl App {
         //    递增代次、重排可见块并重算几何（base_key 同时含 typography/theme）。
         self.refresh_theme_visuals();
         self.set_ime_area();
-        self.ui_state.chrome.notice = t(I18nKey::NoticeSettingsSaved).into();
+        // 成功/失败提示由 resolve_settings 按落盘结果决定，这里不写 notice。
     }
 
     /// 切换专注模式（阶段 1）：只改视觉开关，不动真值/派生缓存；重绘即生效。
@@ -2799,7 +2803,12 @@ impl App {
             return;
         }
         self.window_state.goal_x = None;
-        if let Some(top) = top {
+        if self.ui_state.writing.typewriter {
+            // 打字机模式下大纲跳转也必须落到锚点（当前行而非视口顶部），
+            // 避免首帧停在顶部、要等下一次输入才被纠正（DEF-T11-E1-003）。
+            self.window_state.goal_y = self.window_state.scroll_y;
+            self.scroll_to_caret();
+        } else if let Some(top) = top {
             let vp = self.viewport();
             let max = chrome::max_scroll(vp, self.doc_height());
             let target = (top - MARGIN * self.input_state.scale).clamp(0.0, max);

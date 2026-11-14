@@ -967,6 +967,25 @@ impl App {
         let _ = &self.ports.effects;
     }
 
+    /// 记录窗口移动后的几何（尺寸沿用已存值）。`minimized` 为真时忽略事件：
+    /// 最小化窗口的 Moved 坐标是 -32000 哨兵，不得写入持久化几何。
+    pub(crate) fn on_window_moved(&mut self, x: i32, y: i32, minimized: bool) {
+        if minimized {
+            return;
+        }
+        let (width, height) = self.window_state.geom.or(self.config.window).map_or_else(
+            || self.logical_window_size_of().unwrap_or((900, 700)),
+            |g| (g.width, g.height),
+        );
+        self.window_state.geom = Some(WindowGeom {
+            width,
+            height,
+            x,
+            y,
+        });
+        self.window_state.geom_dirty = true;
+    }
+
     /// 主题切换后刷新按颜色生成的全部缓存：主题代次递增使全部颜色相关派生缓存
     /// 按因果键失效（布局含语法高亮色，自本次起同步重排）；窗口外观同步更新。
     /// pub(crate) 供性质测试（S6 阶段 B）构造主题切换序列。
@@ -1011,7 +1030,9 @@ impl App {
     }
 
     /// 配置落盘：先读最新文件，只覆盖当前动作负责的字段，避免多窗口旧快照互写。
-    pub(crate) fn save_config(&mut self, part: ConfigSave) {
+    /// 返回是否写入成功；失败时已写入可见错误提示，调用方不得再覆盖为成功提示
+    /// （DEF-T10-008）。
+    pub(crate) fn save_config(&mut self, part: ConfigSave) -> bool {
         let mut merged = self.config;
         if let Ok(text) = self.ports.config.load() {
             if let Ok(parsed) = theme::decode_config(text.as_bytes()) {
@@ -1033,7 +1054,9 @@ impl App {
         if let Err(e) = self.ports.config.save(&text) {
             self.ui_state.chrome.notice = tf(Key::NoticeConfigNotSaved, &[&e.to_string()]);
             eprintln!("配置保存失败: {e}");
+            return false;
         }
+        true
     }
 
     /// 跟随系统时轮询系统外观（限频）；外观切换则重建调色板并刷新颜色缓存。
@@ -1063,18 +1086,22 @@ impl App {
     /// 全部布局失配重排（本地图片缓存键不变，不触发重新读盘）。
     pub(crate) fn toggle_remote_images(&mut self) {
         self.config.allow_remote_images = !self.config.allow_remote_images;
-        self.save_config(ConfigSave::RemoteImages);
+        let saved = self.save_config(ConfigSave::RemoteImages);
         self.input_state.revs.remote_images += 1;
         self.refresh_index();
         self.ensure_layouts_visible();
         self.ensure_math_visible();
         self.ensure_tables_visible();
         self.recompute_geometry();
-        self.ui_state.chrome.notice = if self.config.allow_remote_images {
-            t(Key::NoticeRemoteImagesAllowed).into()
-        } else {
-            t(Key::NoticeRemoteImagesBlocked).into()
-        };
+        // 保存失败时保留 save_config 写入的「配置未保存」，不得假报开关已持久化
+        // （DEF-T10-008）。
+        if saved {
+            self.ui_state.chrome.notice = if self.config.allow_remote_images {
+                t(Key::NoticeRemoteImagesAllowed).into()
+            } else {
+                t(Key::NoticeRemoteImagesBlocked).into()
+            };
+        }
         self.request_redraw();
     }
 
@@ -1529,19 +1556,15 @@ impl App {
                 self.request_redraw();
             }
             // 窗口移动（3d）：只记录物理坐标，尺寸沿用已存值（无记录时取当前逻辑尺寸），
-            // 置脏位待退出时统一落盘。
+            // 置脏位待退出时统一落盘。最小化时 Windows 会报 -32000 哨兵坐标，
+            // 必须跳过，否则持久化会覆盖可用位置（DEF-T10-E1-001）。
             WindowEvent::Moved(pos) => {
-                let (width, height) = self.window_state.geom.or(self.config.window).map_or_else(
-                    || self.logical_window_size_of().unwrap_or((900, 700)),
-                    |g| (g.width, g.height),
-                );
-                self.window_state.geom = Some(WindowGeom {
-                    width,
-                    height,
-                    x: pos.x,
-                    y: pos.y,
-                });
-                self.window_state.geom_dirty = true;
+                let minimized = self
+                    .window_state
+                    .window
+                    .as_ref()
+                    .is_some_and(|w| w.is_minimized() == Some(true));
+                self.on_window_moved(pos.x, pos.y, minimized);
             }
             WindowEvent::ScaleFactorChanged { .. } => {
                 if let Some(w) = &self.window_state.window {

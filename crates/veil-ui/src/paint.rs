@@ -412,7 +412,14 @@ impl App {
         let caret = self.effective_caret();
         let ink_w = self
             .cache
-            .raster_key(g.id, &g.kind, g.range, base, caret, self.toc_layout_epoch(g))
+            .raster_key(
+                g.id,
+                &g.kind,
+                g.range,
+                base,
+                caret,
+                self.toc_layout_epoch(g),
+            )
             .and_then(|k| self.cache.raster(g.id, k))
             .map(|r| r.1 as f32);
         let right = match ink_w {
@@ -1097,14 +1104,14 @@ impl App {
     /// 全局阻止 / 源码模式 / 已失败记忆 / 草稿相对路径 → 跳过（降级为 alt 文本）。
     fn cell_img_assets(
         &mut self,
-        seeds: HashMap<usize, Vec<String>>,
+        seeds: HashMap<usize, Vec<CellImgSeed>>,
         doc_path: Option<&Path>,
         image_base: u32,
     ) -> HashMap<usize, Vec<CellImgAsset>> {
         let mut out = HashMap::new();
-        for (flat, urls) in seeds {
-            let mut items = Vec::with_capacity(urls.len());
-            for url in urls {
+        for (flat, seeds) in seeds {
+            let mut items = Vec::with_capacity(seeds.len());
+            for CellImgSeed { url, alt } in seeds {
                 if let Some(path) = local_image_path(&url, doc_path) {
                     let key = path.to_string_lossy().into_owned();
                     if self.cache.image_failed(&key, image_base) {
@@ -1142,6 +1149,7 @@ impl App {
                         w: nat.value.width,
                         h: nat.value.height,
                         pixels: nat.value.pixels.clone(),
+                        alt,
                     });
                 } else if is_remote_image_url(&url) {
                     if self.source_mode()
@@ -1154,6 +1162,7 @@ impl App {
                         w: nat.width,
                         h: nat.height,
                         pixels: nat.pixels.clone(),
+                        alt,
                     }) else {
                         self.request_remote_image(&url);
                         continue;
@@ -1316,9 +1325,9 @@ impl App {
                 self.paint_table(&mut frame, id, sy);
                 continue;
             }
-            let Some(lk) = self
-                .cache
-                .raster_key(id, &kind, range, base, caret, self.toc_layout_epoch(g))
+            let Some(lk) =
+                self.cache
+                    .raster_key(id, &kind, range, base, caret, self.toc_layout_epoch(g))
             else {
                 continue;
             };
@@ -1425,11 +1434,7 @@ impl App {
                 let card_h = bh + extra + pad;
                 let card_x = cx - pad;
                 let card_w = cw + 2 * pad as u32;
-                let card_bg = if expanded {
-                    [250u8, 250, 250, 255]
-                } else {
-                    [252u8, 252, 252, 255]
-                };
+                let card_bg = crate::tokens::palette::details_card_bg(&theme, expanded);
                 let card_border = [theme.grid[0], theme.grid[1], theme.grid[2], 255];
                 frame.fill_rounded_rect(card_x, card_y, card_w, card_h as u32, radius, card_border);
                 if card_w > 2 && card_h > 2 {
@@ -3053,48 +3058,80 @@ fn table_cell_math_seeds(
     out
 }
 
+/// 非活动单元格图片候选：URL + 该图 alt 在单元格可见文本中的区间。
+/// alt 区间供排版层在图片加载成功后剔除重复文本（REN-SWEEP-008）。
+struct CellImgSeed {
+    url: String,
+    alt: Option<Range>,
+}
+
 /// 收集非活动单元格的图片 URL（递归扫描 inlines，活动格跳过）。
 fn table_cell_img_seeds(
     session: &veil_core::Session,
     tbl: &veil_core::Table,
     active: u32,
-) -> HashMap<usize, Vec<String>> {
-    fn collect_urls(nodes: &[InlineNode], out: &mut Vec<String>, session: &veil_core::Session) {
+) -> HashMap<usize, Vec<CellImgSeed>> {
+    fn collect_urls(
+        nodes: &[InlineNode],
+        out: &mut Vec<CellImgSeed>,
+        session: &veil_core::Session,
+        alts: Option<&[Range]>,
+        img_idx: &mut usize,
+    ) {
         for n in nodes {
             match &n.kind {
                 InlineKind::Image => {
+                    let alt = alts.and_then(|a| a.get(*img_idx)).copied();
+                    *img_idx += 1;
                     if let Some(url_range) = n.url {
                         if let Some(url) = session.text_slice(url_range) {
-                            out.push(url);
+                            out.push(CellImgSeed { url, alt });
                         }
                     }
                 }
                 // 单元格内 HTML `<img>`：本地 src 与 Markdown Image 同路径；
                 // 远程地址在 `remote_src`（src 为空），走同一套远程加载。
+                // 标签整段不对应 Markdown alt 的 visible-text 区间，故绝不给删除区间；
+                // core 为 HTML img 派生的 alt 文本必须保留（REN-SWEEP-008）。
                 InlineKind::HtmlSelfClosed {
                     tag: HtmlTag::Img,
                     attrs,
                 } => {
                     if let Some(src) = attrs.src.as_deref().or(attrs.remote_src.as_deref()) {
-                        out.push(src.to_string());
+                        out.push(CellImgSeed {
+                            url: src.to_string(),
+                            alt: None,
+                        });
                     }
                 }
                 _ => {}
             }
-            collect_urls(&n.children, out, session);
+            collect_urls(&n.children, out, session, alts, img_idx);
         }
     }
-    let mut out: HashMap<usize, Vec<String>> = HashMap::new();
+    let mut out: HashMap<usize, Vec<CellImgSeed>> = HashMap::new();
     let cols = tbl.aligns.len();
     let mut idx = 0usize;
     for cells in std::iter::once(&tbl.header).chain(tbl.rows.iter()) {
         for col in 0..cols {
             if let Some(cell) = cells.get(col) {
                 if active as usize != idx {
-                    let mut urls = Vec::new();
-                    collect_urls(&cell.inlines, &mut urls, session);
-                    if !urls.is_empty() {
-                        out.insert(idx, urls);
+                    let alts = crate::view::cell_image_alt_spans(
+                        cell.range,
+                        cell.text.len(),
+                        &cell.inlines,
+                    );
+                    let mut seeds = Vec::new();
+                    let mut img_idx = 0usize;
+                    collect_urls(
+                        &cell.inlines,
+                        &mut seeds,
+                        session,
+                        alts.as_deref(),
+                        &mut img_idx,
+                    );
+                    if !seeds.is_empty() {
+                        out.insert(idx, seeds);
                     }
                 }
             }
@@ -3438,6 +3475,18 @@ mod tests {
 
     const TABLE: &str = "| a | b |\n| --- | --- |\n| c | d |\n";
     const TABLE_2X2_ALIGNED: &str = "| a | b |\n| :-- | --: |\n| c | d |\n| e | f |\n";
+
+    #[test]
+    fn table_html_image_seed_never_strips_visible_alt() {
+        let doc = "| 左 <img src=\"a.png\" alt=\"HTMLalt\"> 右 | ![MDalt](b.png) |\n| --- | --- |\n";
+        let session = veil_core::Session::open(doc);
+        let (id, _, _) = session.blocks()[0];
+        let table = session.table(id).unwrap();
+        let seeds = table_cell_img_seeds(&session, &table, u32::MAX);
+        assert!(seeds[&0][0].alt.is_none(), "HTML alt 不得成为删除区间");
+        assert!(seeds[&1][0].alt.is_some(), "Markdown alt 才可按区间去重");
+        assert_eq!(table.header[0].text, "左 HTMLalt 右");
+    }
 
     #[test]
     fn caret_visual_marks_focus_state() {

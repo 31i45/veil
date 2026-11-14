@@ -238,6 +238,17 @@ pub(crate) mod palette {
     pub fn table_head_bg(theme: &Theme) -> [u8; 4] {
         theme.table_head_bg
     }
+
+    /// Details 折叠卡片底色：暗色取 Card 档代码表面，浅色保留原有两档视觉。
+    pub fn details_card_bg(theme: &Theme, expanded: bool) -> [u8; 4] {
+        if theme.dark {
+            theme.code_bg
+        } else if expanded {
+            [250, 250, 250, 255]
+        } else {
+            [252, 252, 252, 255]
+        }
+    }
 }
 
 /// 交互状态矩阵（S4）：六态的单一颜色来源。
@@ -498,6 +509,45 @@ mod tests {
             assert_eq!(palette::surface_popup(&t), t.popup_bg);
             assert_eq!(palette::code_bg(&t), t.code_bg);
             assert_eq!(palette::table_head_bg(&t), t.table_head_bg);
+            for expanded in [false, true] {
+                let expected = if t.dark {
+                    t.code_bg
+                } else if expanded {
+                    [250, 250, 250, 255]
+                } else {
+                    [252, 252, 252, 255]
+                };
+                assert_eq!(palette::details_card_bg(&t, expanded), expected);
+            }
+        }
+    }
+
+    #[test]
+    fn details_card_bg_keeps_theme_foreground_readable() {
+        use super::palette;
+        use crate::theme::Theme;
+        fn lum(c: [u8; 3]) -> f32 {
+            let f = |v: u8| {
+                let v = v as f32 / 255.0;
+                if v <= 0.03928 {
+                    v / 12.92
+                } else {
+                    ((v + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            0.2126 * f(c[0]) + 0.7152 * f(c[1]) + 0.0722 * f(c[2])
+        }
+        for t in [Theme::light(), Theme::dark()] {
+            for expanded in [false, true] {
+                let bg = palette::details_card_bg(&t, expanded);
+                let (a, b) = (lum(t.fg), lum([bg[0], bg[1], bg[2]]));
+                let ratio = (a.max(b) + 0.05) / (a.min(b) + 0.05);
+                assert!(
+                    ratio >= 4.5,
+                    "details 前景/底色对比度 {ratio:.2} < 4.5（dark={} expanded={expanded}）",
+                    t.dark
+                );
+            }
         }
     }
 }

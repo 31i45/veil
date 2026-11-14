@@ -59,9 +59,17 @@ struct PendingMath {
     tex: String,
 }
 
+/// 占位后的图片段（占位文本坐标），排版后映射为 `TableCellImg`。
+struct PendingImg {
+    range: Range,
+    asset: usize,
+    w: u32,
+    h: u32,
+}
+
 /// 表格单元格内联图片（输入）：已加载的位图 + 自然尺寸（无 URL，失败已在上层过滤）。
-/// `alt` 为该图 alt 在单元格可见文本中的区间：图片已加载时从文本中剔除，
-/// 避免 alt 与缩略图重复显示（REN-SWEEP-008）；`None` 表示无法定位/无 alt。
+/// `alt` 为该图 alt 在单元格可见文本中的区间：图片已加载时替换为无字形占位，
+/// 避免 alt 与缩略图重复显示并保留原 inline 位置；`None` 表示无法定位/无 alt。
 pub(crate) struct CellImgAsset {
     pub w: u32,
     pub h: u32,
@@ -104,7 +112,7 @@ pub struct TableCellLayout {
     pub pixel_h: u32,
     /// 非活动格内联公式（相对内容原点）；空 = 无公式或活动格（源码态）。
     pub maths: Vec<TableCellMath>,
-    /// 非活动格内联图片（相对内容原点，水平并排）；空 = 无图或活动格。
+    /// 非活动格内联图片（相对内容原点的原 inline 占位位置）；空 = 无图或活动格。
     pub(crate) images: Vec<TableCellImg>,
     /// 非活动格行内前置装饰（相对内容原点的物理矩形；与正文同语义）。
     pub(crate) under: Vec<(f32, f32, f32, f32, UnderKind)>,
@@ -162,13 +170,21 @@ struct CellInput<'a> {
     doc_start: usize,
     /// 公式 NBSP 占位段（占位后文本坐标）；空 = 无公式。
     maths: Vec<PendingMath>,
+    /// 图片 NBSP 占位段（占位后文本坐标）；空 = 无可定位图片。
+    images: Vec<PendingImg>,
 }
 
-/// 把单元格可见文本中的公式区间替换为 NBSP 占位（个数 = ceil(图宽 / NBSP 宽)）。
-/// 返回 (占位后文本, 占位段)；占位段坐标为占位后文本的字节区间。
-fn math_placeholders(text: &str, maths: &[CellMath], nbsp_w: f32) -> (String, Vec<PendingMath>) {
+/// 把单元格可见文本中的公式区间替换为 NBSP 占位（个数 = ceil(图宽 / NBSP 宽)），
+/// 并同步重映射已生成的图片占位。返回 (占位后文本, 公式占位段)。
+fn math_placeholders(
+    text: &str,
+    maths: &[CellMath],
+    nbsp_w: f32,
+    images: &mut [PendingImg],
+) -> (String, Vec<PendingMath>) {
     let mut out = String::with_capacity(text.len() + maths.len() * 8);
     let mut pending = Vec::with_capacity(maths.len());
+    let mut replacements = Vec::with_capacity(maths.len());
     let mut cursor = 0usize;
     let mut sorted: Vec<&CellMath> = maths.iter().collect();
     sorted.sort_by_key(|m| (m.range.start, m.range.end));
@@ -183,15 +199,41 @@ fn math_placeholders(text: &str, maths: &[CellMath], nbsp_w: f32) -> (String, Ve
         let start = out.len();
         let nbsp = "\u{A0}".repeat(n);
         out.push_str(&nbsp);
+        let target = Range::new(start, start + nbsp.len());
         pending.push(PendingMath {
-            range: Range::new(start, start + nbsp.len()),
+            range: target,
             w: m.w,
             h: m.h,
             tex: m.tex.clone(),
         });
+        replacements.push((m.range, target));
         cursor = e;
     }
     out.push_str(&text[cursor..]);
+
+    for image in images {
+        let remap = |pos: usize, is_end: bool| -> usize {
+            let mut delta = 0isize;
+            for &(source, target) in &replacements {
+                if pos < source.start
+                    || (is_end && pos == source.start && source.start == source.end)
+                {
+                    break;
+                }
+                if pos >= source.end {
+                    delta +=
+                        (target.end - target.start) as isize - (source.end - source.start) as isize;
+                    continue;
+                }
+                return target.start;
+            }
+            (pos as isize + delta).max(0) as usize
+        };
+        image.range = Range::new(
+            remap(image.range.start, false),
+            remap(image.range.end, true),
+        );
+    }
     (out, pending)
 }
 
@@ -263,60 +305,89 @@ fn preprocess_line_breaks(
     (out, new_styles)
 }
 
-/// 已成功加载图片的 alt 可见区间从单元格显示文本中剔除（只留缩略图）。
+/// 已成功加载图片的 alt 可见区间原位替换为 NBSP 占位，排版后再把缩略图叠到占位处。
 ///
-/// `alts` 为 `cell_image_alt_spans` 的产出（与 `text` 同坐标）。样式段与同格数学
-/// 区间一起重映射，再生成数学占位，避免「含公式就保留重复 alt」的同根缺陷。
-/// 返回 None 表示没有可剔除区间（保持原文，如加载失败时显示 alt）。
+/// 样式段与同格数学区间一起重映射，再生成数学占位，避免「含公式就保留重复 alt」
+/// 的同根缺陷。返回 None 表示没有可定位区间（保持原文，如加载失败时显示 alt）。
 #[allow(clippy::type_complexity)]
-fn strip_image_alts(
+fn image_placeholders(
     text: &str,
     styles: Option<&[(usize, usize, Style)]>,
-    alts: &[Range],
+    assets: &[CellImgAsset],
     maths: &[CellMath],
-) -> Option<(String, Option<Vec<(usize, usize, Style)>>, Vec<CellMath>)> {
-    let mut cuts: Vec<(usize, usize)> = alts
+    nbsp_w: f32,
+    max_w: f32,
+    max_h: f32,
+) -> Option<(
+    String,
+    Option<Vec<(usize, usize, Style)>>,
+    Vec<CellMath>,
+    Vec<PendingImg>,
+)> {
+    let mut ordered: Vec<(usize, Range)> = assets
         .iter()
-        .map(|r| (r.start.min(text.len()), r.end.min(text.len())))
-        .filter(|&(s, e)| s < e && text.is_char_boundary(s) && text.is_char_boundary(e))
+        .enumerate()
+        .filter_map(|(i, asset)| asset.alt.map(|range| (i, range)))
+        .filter(|(_, r)| {
+            r.start <= r.end
+                && r.end <= text.len()
+                && text.is_char_boundary(r.start)
+                && text.is_char_boundary(r.end)
+        })
         .collect();
-    if cuts.is_empty() {
+    if ordered.is_empty() {
         return None;
     }
-    cuts.sort_unstable();
-    // 合并重叠/相邻区间，保证删除计划单调且不重复消费字节。
-    let mut merged: Vec<(usize, usize)> = Vec::with_capacity(cuts.len());
-    for (s, e) in cuts {
-        match merged.last_mut() {
-            Some(last) if s <= last.1 => last.1 = last.1.max(e),
-            _ => merged.push((s, e)),
-        }
-    }
+    ordered.sort_by_key(|(i, r)| (r.start, r.end, *i));
+
     let mut out = String::with_capacity(text.len());
+    let mut pending = Vec::with_capacity(ordered.len());
+    let mut replacements: Vec<(Range, Range)> = Vec::with_capacity(ordered.len());
     let mut cursor = 0usize;
-    for &(s, e) in &merged {
-        out.push_str(&text[cursor..s]);
-        cursor = e;
+    for (asset, source) in ordered {
+        if source.start < cursor {
+            continue; // 防御：重叠区间无法确定唯一 inline 顺序
+        }
+        out.push_str(&text[cursor..source.start]);
+        let (w, h) = super::layout::fit_size_box(assets[asset].w, assets[asset].h, max_w, max_h);
+        let n = ((w as f32 / nbsp_w).ceil() as usize).max(1);
+        let start = out.len();
+        out.push_str(&"\u{A0}".repeat(n));
+        let target = Range::new(start, out.len());
+        pending.push(PendingImg {
+            range: target,
+            asset,
+            w,
+            h,
+        });
+        replacements.push((source, target));
+        cursor = source.end;
+    }
+    if pending.is_empty() {
+        return None;
     }
     out.push_str(&text[cursor..]);
-    // 重映射样式段：对每个 pos 减去其前已删除的字节数。
-    let remap = |pos: usize| -> usize {
-        let mut cut = 0usize;
-        for &(s, e) in &merged {
-            if pos >= e {
-                cut += e - s;
-            } else if pos > s {
-                cut += pos - s;
-            } else {
+
+    // 起点按替换后位置映射；终点在零宽 alt 前停下，避免空 alt 占位并入前一样式。
+    let remap = |pos: usize, is_end: bool| -> usize {
+        let mut delta = 0isize;
+        for &(source, target) in &replacements {
+            if pos < source.start || (is_end && pos == source.start && source.start == source.end) {
                 break;
             }
+            if pos >= source.end {
+                delta +=
+                    (target.end - target.start) as isize - (source.end - source.start) as isize;
+                continue;
+            }
+            return target.start;
         }
-        pos.saturating_sub(cut)
+        (pos as isize + delta).max(0) as usize
     };
     let new_styles = styles.map(|list| {
         list.iter()
             .filter_map(|&(s, e, ref st)| {
-                let (s, e) = (remap(s), remap(e));
+                let (s, e) = (remap(s, false), remap(e, true));
                 (s < e).then_some((s, e, *st))
             })
             .collect()
@@ -324,14 +395,14 @@ fn strip_image_alts(
     let new_maths = maths
         .iter()
         .filter_map(|m| {
-            let (s, e) = (remap(m.range.start), remap(m.range.end));
+            let (s, e) = (remap(m.range.start, false), remap(m.range.end, true));
             (s < e).then(|| CellMath {
                 range: Range::new(s, e),
                 ..m.clone()
             })
         })
         .collect();
-    Some((out, new_styles, new_maths))
+    Some((out, new_styles, new_maths, pending))
 }
 
 impl LayoutEngine {
@@ -353,8 +424,8 @@ impl LayoutEngine {
     /// 渲染态要求保留原文，且不编号、不着色（纯文本降级）。
     /// `maths`：flat 索引 → 该格内联公式（仅非活动格），可见文本区间在排版前
     /// 替换为 NBSP 占位（宽≈图宽），排版后按占位首字形定位供视图层 blit。
-    /// `images`：flat 索引 → 该格内联图片（仅非活动格，已加载自然尺寸位图），
-    /// 排版后水平并排置于文本右侧。
+    /// `images`：flat 索引 → 该格内联图片（仅非活动格，已加载自然尺寸位图）。
+    /// 可定位的 Markdown 图片按原 alt 位置生成 NBSP 占位，排版后在占位处 blit。
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn layout_table_opts(
         &mut self,
@@ -373,7 +444,7 @@ impl LayoutEngine {
         let pad_y = CELL_PAD_Y * scale;
         let ncols = table.aligns.len();
         let link_color = self.link_color();
-        let nbsp_w = if maths.is_some() {
+        let nbsp_w = if maths.is_some() || images.is_some() {
             self.measure_nbsp(metrics)
         } else {
             1.0
@@ -392,6 +463,7 @@ impl LayoutEngine {
                 let cell = row.get(c);
                 let active_src = active.and_then(|(idx, src)| (idx == flat).then_some(src));
                 let raw = raw_cells.and_then(|m| m.get(&flat));
+                let mut cell_images = Vec::new();
                 let (raw_text, raw_styles, cell_maths) = match active_src {
                     Some(src) => (Cow::Borrowed(src), None, Vec::new()),
                     // 脚注引用单元格：源码原文 + 无样式（不编号、不着色）。
@@ -412,31 +484,42 @@ impl LayoutEngine {
                             } else {
                                 None // 含公式格沿用纯文本降级（见模块头注释）。
                             };
-                            let alts: Vec<Range> = images
+                            let assets = images
                                 .and_then(|m| m.get(&flat))
-                                .map(|list| list.iter().filter_map(|a| a.alt).collect())
-                                .unwrap_or_default();
-                            // 先删已加载图片的 alt 并同步重映射公式，再做 NBSP 占位。
-                            let (visible, styles, visible_maths) = match strip_image_alts(
-                                &cell.text,
-                                base_styles.as_deref(),
-                                &alts,
-                                &original_maths,
-                            ) {
-                                Some((t, s, m)) => (Cow::Owned(t), s, m),
-                                None => (
-                                    Cow::Borrowed(cell.text.as_str()),
-                                    base_styles,
-                                    original_maths,
-                                ),
-                            };
-                            if visible_maths.is_empty() {
+                                .map(Vec::as_slice)
+                                .unwrap_or(&[]);
+                            // 已加载图片在原 alt 位置留白，再同步重映射公式与图片占位。
+                            let (visible, styles, visible_maths, mut pending_imgs) =
+                                match image_placeholders(
+                                    &cell.text,
+                                    base_styles.as_deref(),
+                                    assets,
+                                    &original_maths,
+                                    nbsp_w,
+                                    width.max(1.0),
+                                    crate::tokens::doc::IMG_TABLE_LINES * metrics.line_height,
+                                ) {
+                                    Some((t, s, m, i)) => (Cow::Owned(t), s, m, i),
+                                    None => (
+                                        Cow::Borrowed(cell.text.as_str()),
+                                        base_styles,
+                                        original_maths,
+                                        Vec::new(),
+                                    ),
+                                };
+                            let input = if visible_maths.is_empty() {
                                 (visible, styles, Vec::new())
                             } else {
-                                let (text, pending) =
-                                    math_placeholders(&visible, &visible_maths, nbsp_w);
+                                let (text, pending) = math_placeholders(
+                                    &visible,
+                                    &visible_maths,
+                                    nbsp_w,
+                                    &mut pending_imgs,
+                                );
                                 (Cow::Owned(text), None, pending)
-                            }
+                            };
+                            cell_images = pending_imgs;
+                            input
                         }
                         (None, _) => (Cow::Borrowed(""), None, Vec::new()),
                     },
@@ -453,6 +536,7 @@ impl LayoutEngine {
                     styles,
                     doc_start: cell.map(|x| x.range.start).unwrap_or(0),
                     maths: cell_maths,
+                    images: cell_images,
                 });
                 flat += 1;
             }
@@ -460,7 +544,7 @@ impl LayoutEngine {
         }
 
         // 第一遍：内在宽度（不折行），列宽 = 该列最宽单元格 + 两侧内边距。
-        // 单元格图片总宽也算入内在宽（多图水平并排 + 2px 间距）。
+        // 可定位图片已计入文本占位；仅无法定位的降级图片沿用尾部宽度。
         let mut cols = vec![0.0f32; ncols];
         let mut flat = 0usize;
         for (row, bold) in &inputs {
@@ -477,11 +561,17 @@ impl LayoutEngine {
                 let img_w = images
                     .and_then(|m| m.get(&flat))
                     .map(|list| {
-                        if list.is_empty() {
+                        let (sum, count) = list
+                            .iter()
+                            .enumerate()
+                            .filter(|(i, _)| !cell.images.iter().any(|p| p.asset == *i))
+                            .fold((0.0, 0usize), |(sum, count), (_, img)| {
+                                (sum + img.w as f32, count + 1)
+                            });
+                        if count == 0 {
                             0.0
                         } else {
-                            list.iter().map(|img| img.w as f32).sum::<f32>()
-                                + 2.0 * (list.len() - 1) as f32 // 图片间 2px 间距
+                            sum + 2.0 * (count - 1) as f32
                         }
                     })
                     .unwrap_or(0.0);
@@ -539,7 +629,12 @@ impl LayoutEngine {
             for (c, col_w) in cols.iter().enumerate() {
                 let cell = &row[c];
                 let wrap_w = (*col_w - 2.0 * pad_x).max(1.0);
-                let probes: Vec<usize> = cell.maths.iter().map(|m| m.range.start).collect();
+                let probes: Vec<usize> = cell
+                    .maths
+                    .iter()
+                    .map(|m| m.range.start)
+                    .chain(cell.images.iter().map(|i| i.range.start))
+                    .collect();
                 let (buffer, _, h, anchors, decor) = self.shape_cell_probed(
                     metrics,
                     cell.text.as_ref(),
@@ -553,8 +648,9 @@ impl LayoutEngine {
                 // 公式图顶贴所在视觉行行顶；行高扩到图底，公式不溢出行（不缩图，
                 // v0 简化：宁可把行拉高，也不做缩放副本）。
                 let mut content_h = h;
+                let (math_anchors, img_anchors) = anchors.split_at(cell.maths.len());
                 let mut placed = Vec::with_capacity(cell.maths.len());
-                for (m, &(line_i, index)) in cell.maths.iter().zip(&anchors) {
+                for (m, &(line_i, index)) in cell.maths.iter().zip(math_anchors) {
                     if let Some((mx, my)) = glyph_anchor(&buffer, line_i, index) {
                         content_h = content_h.max(my + m.h as f32);
                         placed.push(TableCellMath {
@@ -566,52 +662,62 @@ impl LayoutEngine {
                         });
                     }
                 }
-                // 图片（水平并排置于文本右侧）。
-                // 先求 buffer 内文本的最大行宽作为图片起始 x。
                 let img_list = images.and_then(|m| m.get(&flat));
-                let placed_imgs = if let Some(list) = img_list {
-                    if list.is_empty() {
-                        Vec::new()
-                    } else {
-                        let mut max_text_w = 0.0f32;
-                        for run in buffer.layout_runs() {
-                            for g in run.glyphs {
-                                max_text_w = max_text_w.max(g.x + g.w);
-                            }
-                        }
-                        let mut px = if max_text_w > 0.0 {
-                            max_text_w + 2.0
-                        } else {
-                            0.0
-                        };
-                        let mut out = Vec::with_capacity(list.len());
-                        for img in list {
-                            // B4：单元格内图片限高 1.5×行高，且不超出单元格剩余宽度；
-                            // 等比缩放、只缩不放，位图仍按自然尺寸缓存。
-                            let avail_w = (wrap_w - px).max(1.0);
-                            let (dw, dh) = super::layout::fit_size_box(
-                                img.w,
-                                img.h,
-                                avail_w,
-                                crate::tokens::doc::IMG_TABLE_LINES * metrics.line_height,
-                            );
-                            content_h = content_h.max(dh as f32);
-                            out.push(TableCellImg {
-                                x: px,
-                                y: 0.0,
-                                w: dw,
-                                h: dh,
+                let mut placed_imgs = Vec::with_capacity(cell.images.len());
+                if let Some(list) = img_list {
+                    // Markdown 图片：按原 alt 占位所在视觉行和字形位置绘制。
+                    for (pending, &(line_i, index)) in cell.images.iter().zip(img_anchors) {
+                        if let Some((ix, iy)) = glyph_anchor(&buffer, line_i, index) {
+                            let img = &list[pending.asset];
+                            content_h = content_h.max(iy + pending.h as f32);
+                            placed_imgs.push(TableCellImg {
+                                x: ix,
+                                y: iy,
+                                w: pending.w,
+                                h: pending.h,
                                 pixel_w: img.w,
                                 pixel_h: img.h,
                                 pixels: img.pixels.clone(),
                             });
-                            px += dw as f32 + 2.0;
                         }
-                        out
                     }
-                } else {
-                    Vec::new()
-                };
+
+                    // HTML img 等没有可见文本坐标的资产保留原尾部降级，不删除其派生文本。
+                    let mut max_text_w = 0.0f32;
+                    for run in buffer.layout_runs() {
+                        for g in run.glyphs {
+                            max_text_w = max_text_w.max(g.x + g.w);
+                        }
+                    }
+                    let mut px = if max_text_w > 0.0 {
+                        max_text_w + 2.0
+                    } else {
+                        0.0
+                    };
+                    for (i, img) in list.iter().enumerate() {
+                        if cell.images.iter().any(|p| p.asset == i) {
+                            continue;
+                        }
+                        let avail_w = (wrap_w - px).max(1.0);
+                        let (dw, dh) = super::layout::fit_size_box(
+                            img.w,
+                            img.h,
+                            avail_w,
+                            crate::tokens::doc::IMG_TABLE_LINES * metrics.line_height,
+                        );
+                        content_h = content_h.max(dh as f32);
+                        placed_imgs.push(TableCellImg {
+                            x: px,
+                            y: 0.0,
+                            w: dw,
+                            h: dh,
+                            pixel_w: img.w,
+                            pixel_h: img.h,
+                            pixels: img.pixels.clone(),
+                        });
+                        px += dw as f32 + 2.0;
+                    }
+                }
                 row_h = row_h.max(content_h);
                 shaped.push((
                     buffer,
@@ -677,6 +783,31 @@ mod tests {
         let (id, _, _) = s.blocks()[0];
         let table = s.table(id).unwrap();
         LayoutEngine::new().layout_table(&table, width, [0, 0, 0], None)
+    }
+
+    fn loaded_assets(alts: &[Range]) -> Vec<CellImgAsset> {
+        alts.iter()
+            .map(|&alt| CellImgAsset {
+                w: 8,
+                h: 8,
+                pixels: vec![0; 8 * 8 * 4],
+                alt: Some(alt),
+            })
+            .collect()
+    }
+
+    fn has_ink_between(cell: &TableCellLayout, start: f32, end: f32) -> bool {
+        let x0 = start.floor().max(0.0) as u32;
+        let x1 = end.ceil().max(0.0) as u32;
+        if x0 >= x1.min(cell.pixel_w) {
+            return false;
+        }
+        (x0..x1.min(cell.pixel_w)).any(|x| {
+            (0..cell.pixel_h).any(|y| {
+                let i = ((y * cell.pixel_w + x) * 4 + 3) as usize;
+                cell.pixels[i] != 0
+            })
+        })
     }
 
     #[test]
@@ -1050,6 +1181,115 @@ mod tests {
     }
 
     #[test]
+    fn loaded_cell_image_preserves_prefix_suffix_order() {
+        let doc = "| 前缀 ![DUPLICATE_ALT](a.png) 后缀 |\n| --- |\n";
+        let s = Session::open(doc);
+        let (id, _, _) = s.blocks()[0];
+        let table = s.table(id).unwrap();
+        let cell = &table.header[0];
+        let alts =
+            crate::view::layout::cell_image_alt_spans(cell.range, cell.text.len(), &cell.inlines)
+                .expect("alt 区间应可映射");
+        assert_eq!(&cell.text[alts[0].start..alts[0].end], "DUPLICATE_ALT");
+        let mut images = HashMap::new();
+        images.insert(
+            0,
+            vec![CellImgAsset {
+                w: 12,
+                h: 8,
+                pixels: vec![0; 12 * 8 * 4],
+                alt: Some(alts[0]),
+            }],
+        );
+        let laid = LayoutEngine::new().layout_table_opts(
+            &table,
+            600.0,
+            [0, 0, 0],
+            None,
+            None,
+            None,
+            None,
+            Some(&images),
+        );
+        let cell = &laid.cells[0];
+        let img = &cell.images[0];
+        assert!(
+            has_ink_between(cell, 0.0, img.x),
+            "前缀必须排在图片左侧: x={}",
+            img.x
+        );
+        assert!(
+            !has_ink_between(cell, img.x, img.x + img.w as f32),
+            "原 alt 位置只能保留无字形的图片占位"
+        );
+        assert!(
+            has_ink_between(cell, img.x + img.w as f32, cell.pixel_w as f32),
+            "后缀必须排在图片右侧: img={}..{}, text_w={}",
+            img.x,
+            img.x + img.w as f32,
+            cell.pixel_w
+        );
+    }
+
+    #[test]
+    fn loaded_cell_images_preserve_multiple_inline_positions() {
+        let doc = "| 前 ![一](a.png) 中 ![二](b.png) 后 |\n| --- |\n";
+        let s = Session::open(doc);
+        let (id, _, _) = s.blocks()[0];
+        let table = s.table(id).unwrap();
+        let cell = &table.header[0];
+        let alts =
+            crate::view::layout::cell_image_alt_spans(cell.range, cell.text.len(), &cell.inlines)
+                .expect("多图 alt 区间应可映射");
+        assert_eq!(alts.len(), 2);
+        let mut images = HashMap::new();
+        images.insert(
+            0,
+            vec![
+                CellImgAsset {
+                    w: 8,
+                    h: 8,
+                    pixels: vec![0; 8 * 8 * 4],
+                    alt: Some(alts[0]),
+                },
+                CellImgAsset {
+                    w: 10,
+                    h: 8,
+                    pixels: vec![0; 10 * 8 * 4],
+                    alt: Some(alts[1]),
+                },
+            ],
+        );
+        let laid = LayoutEngine::new().layout_table_opts(
+            &table,
+            600.0,
+            [0, 0, 0],
+            None,
+            None,
+            None,
+            None,
+            Some(&images),
+        );
+        let cell = &laid.cells[0];
+        assert_eq!(cell.images.len(), 2);
+        let first = &cell.images[0];
+        let second = &cell.images[1];
+        assert!(second.x >= first.x + first.w as f32);
+        assert!(has_ink_between(cell, 0.0, first.x), "首图前须有前缀");
+        assert!(
+            has_ink_between(cell, first.x + first.w as f32, second.x),
+            "两图之间必须保留中间文本: first={}..{}, second.x={}",
+            first.x,
+            first.x + first.w as f32,
+            second.x
+        );
+        assert!(
+            has_ink_between(cell, second.x + second.w as f32, cell.pixel_w as f32),
+            "第二图后须有后缀"
+        );
+    }
+
+    #[test]
     fn loaded_cell_image_hides_duplicate_alt_text() {
         // REN-SWEEP-008：图片加载成功后只显示缩略图；alt 不得再以文本重复出现。
         let doc = "| ![小图](a.png) | x |\n| --- | --- |\n";
@@ -1112,15 +1352,39 @@ mod tests {
         assert_eq!(&cell.text[alts[0].start..alts[0].end], "嵌");
         assert_eq!(&cell.text[alts[1].start..alts[1].end], "二");
         assert_eq!(alts[2].start, alts[2].end, "空 alt 是零宽区间");
-        let (stripped, _, _) =
-            strip_image_alts(&cell.text, None, &alts, &[]).expect("三张成功加载的图片都应剔除 alt");
-        assert_eq!(stripped, "前  中  后  尾");
-        let (partial, _, _) =
-            strip_image_alts(&cell.text, None, &alts[..1], &[]).expect("只剔除成功加载的第一张");
-        assert_eq!(partial, "前  中 二 后  尾", "未加载第二张的 alt 必须保留");
+        let (placed, _, _, pending) = image_placeholders(
+            &cell.text,
+            None,
+            &loaded_assets(&alts),
+            &[],
+            4.0,
+            600.0,
+            36.0,
+        )
+        .expect("三张成功加载的图片都应原位占位");
+        assert_eq!(placed.replace('\u{A0}', ""), "前  中  后  尾");
+        assert_eq!(pending.len(), 3);
+        assert!(pending[0].range.start < pending[1].range.start);
+        assert!(pending[1].range.start < pending[2].range.start);
+        let (partial, _, _, pending) = image_placeholders(
+            &cell.text,
+            None,
+            &loaded_assets(&alts[..1]),
+            &[],
+            4.0,
+            600.0,
+            36.0,
+        )
+        .expect("只对成功加载的第一张生成占位");
+        assert_eq!(pending.len(), 1);
+        assert_eq!(
+            partial.replace('\u{A0}', ""),
+            "前  中 二 后  尾",
+            "未加载第二张的 alt 必须保留"
+        );
 
-        // 同格数学不能成为保留重复 alt 的例外：先删 alt，再重映射数学并占位。
-        let doc = "| 前 ![图](a.png) $x^2$ 后 |\n| --- |\n";
+        // 同格数学不能成为保留重复 alt 的例外：图片原位占位并同步重映射数学。
+        let doc = "| 前 $x^2$ 中 ![图](a.png) 后 |\n| --- |\n";
         let s = Session::open(doc);
         let (id, _, _) = s.blocks()[0];
         let table = s.table(id).unwrap();
@@ -1129,12 +1393,22 @@ mod tests {
         let alts =
             crate::view::layout::cell_image_alt_spans(cell.range, cell.text.len(), &cell.inlines)
                 .unwrap();
-        let (stripped, _, remapped) =
-            strip_image_alts(&cell.text, None, &alts, &maths).expect("同格数学的 alt 也应剔除");
-        assert_eq!(stripped, "前  x^2 后");
+        let (placed, _, remapped, pending) = image_placeholders(
+            &cell.text,
+            None,
+            &loaded_assets(&alts),
+            &maths,
+            4.0,
+            600.0,
+            36.0,
+        )
+        .expect("同格数学的图片 alt 也应原位占位");
+        assert_eq!(placed.replace('\u{A0}', ""), "前 x^2 中  后");
+        assert_eq!(pending.len(), 1);
+        assert!(remapped[0].range.end <= pending[0].range.start);
         assert_eq!(remapped.len(), 1);
         assert_eq!(
-            &stripped[remapped[0].range.start..remapped[0].range.end],
+            &placed[remapped[0].range.start..remapped[0].range.end],
             "x^2"
         );
 
@@ -1162,6 +1436,12 @@ mod tests {
         );
         assert_eq!(laid.cells[0].maths.len(), 1, "删 alt 后公式仍须定位");
         assert_eq!(laid.cells[0].images.len(), 1);
+        let math = &laid.cells[0].maths[0];
+        let image = &laid.cells[0].images[0];
+        assert!(
+            math.x + math.w as f32 <= image.x,
+            "数学在图片前时，二次占位仍须保持相对顺序"
+        );
         assert_eq!(s.serialize(), doc);
     }
 
@@ -1179,7 +1459,7 @@ mod tests {
             alts.is_none(),
             "HTML alt 是派生文本，映射不可用时必须安全保留"
         );
-        assert!(strip_image_alts(&cell.text, None, &[], &[]).is_none());
+        assert!(image_placeholders(&cell.text, None, &[], &[], 4.0, 600.0, 36.0).is_none());
         let plain = LayoutEngine::new().layout_table(&table, 600.0, [0, 0, 0], None);
         let mut images = HashMap::new();
         images.insert(

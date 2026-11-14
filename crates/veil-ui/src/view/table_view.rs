@@ -684,7 +684,7 @@ impl App {
                 }
             }
         }
-        // 单元格内联图片：自然尺寸叠在文本右侧（与公式同层序）。
+        // 单元格内联图片：按原 alt 占位位置叠在文本位图之上（与公式同层序）。
         for c in &t.cells {
             if c.images.is_empty() {
                 continue;

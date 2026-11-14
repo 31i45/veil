@@ -134,6 +134,9 @@ pub(crate) struct TableKey {
 pub(crate) struct LayoutKey {
     pub(crate) base: BaseKey,
     pub(crate) reveal: u64,
+    /// 全文标题集合指纹：仅 `[TOC]` 标记块取当前值，其余块恒 0。
+    /// 目录文本由全文标题派生，标记块自身字节/BlockId 不变，必须单列才能失效（DEF-T05-005）。
+    pub(crate) toc: u64,
 }
 
 /// 行内公式图键：按 tex 内容寻址，另含 DPI 与主题。
@@ -206,9 +209,12 @@ impl Cache {
         range: Range,
         base: BaseKey,
         caret: usize,
+        toc: u64,
     ) -> Option<LayoutKey> {
         let m = self.layouts.get(&id)?;
-        (m.key.base == base && m.key.reveal == m.value.reveal_state(kind, range, caret))
+        (m.key.base == base
+            && m.key.toc == toc
+            && m.key.reveal == m.value.reveal_state(kind, range, caret))
             .then_some(m.key)
     }
 
@@ -219,8 +225,9 @@ impl Cache {
         range: Range,
         base: BaseKey,
         caret: usize,
+        toc: u64,
     ) -> Option<&BlockLayout> {
-        self.layout_key(id, kind, range, base, caret)
+        self.layout_key(id, kind, range, base, caret, toc)
             .map(|_| &self.layouts[&id].value)
     }
 
@@ -232,8 +239,9 @@ impl Cache {
         range: Range,
         base: BaseKey,
         caret: usize,
+        toc: u64,
     ) -> Option<LayoutKey> {
-        self.layout_key(id, kind, range, base, caret)
+        self.layout_key(id, kind, range, base, caret, toc)
     }
 
     pub(crate) fn raster(&self, id: BlockId, key: LayoutKey) -> Option<&Raster> {
@@ -618,8 +626,8 @@ mod tests {
         let mut c = Cache::default();
         let revs = Revs::default();
         let base = revs.base(800.0, 1.0, 600.0, false, 0);
-        let lk0 = LayoutKey { base, reveal: 0 };
-        let lk1 = LayoutKey { base, reveal: 0 };
+        let lk0 = LayoutKey { base, reveal: 0, toc: 0 };
+        let lk1 = LayoutKey { base, reveal: 0, toc: 0 };
 
         // 为 ids[0] 和 ids[1] 填充 rasters（值 = (像素, 宽, 高) 易构造）
         c.rasters.insert(
@@ -656,6 +664,7 @@ mod tests {
                 key: LayoutKey {
                     base: base2,
                     reveal: 0,
+                    toc: 0,
                 },
                 value: (vec![0u8; 4], 1, 1),
             },

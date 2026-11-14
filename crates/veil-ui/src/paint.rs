@@ -372,12 +372,13 @@ impl App {
                 continue; // 折叠 details 的隐藏子块不排版（展开时再惰性补齐）
             }
             let (id, kind, range) = (g.id, g.kind.clone(), g.range);
+            let toc_epoch = self.toc_layout_epoch(g);
             // `[TOC]` 标记：视图态渲染生成目录，源码态/光标在块内时原样显示标记。
             let toc_rendered =
                 g.toc_marker && !reveal_all && !(range.start <= caret && caret <= range.end);
             if self
                 .cache
-                .layout(id, &kind, range, base, caret)
+                .layout(id, &kind, range, base, caret, toc_epoch)
                 .is_some_and(|l| l.toc_rendered == toc_rendered)
             {
                 continue;
@@ -456,10 +457,23 @@ impl App {
                 folds,
                 toc_text,
                 g.toc_marker,
+                toc_epoch,
             ));
         }
         let image_base = self.input_state.revs.image_base;
-        for (id, kind, range, text, inlines, maths, images, folds, toc_text, toc_marker) in pending
+        for (
+            id,
+            kind,
+            range,
+            text,
+            inlines,
+            maths,
+            images,
+            folds,
+            toc_text,
+            toc_marker,
+            toc,
+        ) in pending
         {
             let mut imgs = Vec::new();
             let container = self.editor.session().block_container(id);
@@ -597,7 +611,7 @@ impl App {
             self.cache.layouts.insert(
                 id,
                 Memo {
-                    key: LayoutKey { base, reveal },
+                    key: LayoutKey { base, reveal, toc },
                     value: l,
                 },
             );
@@ -1153,7 +1167,10 @@ impl App {
                 self.paint_table(&mut frame, id, sy);
                 continue;
             }
-            let Some(lk) = self.cache.raster_key(id, &kind, range, base, caret) else {
+            let Some(lk) = self
+                .cache
+                .raster_key(id, &kind, range, base, caret, self.toc_layout_epoch(g))
+            else {
                 continue;
             };
             if self.cache.raster(id, lk).is_none() {

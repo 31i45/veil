@@ -2634,7 +2634,18 @@ impl App {
         match id {
             BTN_OK => {
                 // 应用表单值到 Config
+                let previous_window = self.config.window;
                 self.config = s.form.apply(&self.config);
+                // 清除/恢复默认几何（DEF-T07-002）：本次 apply 明确移除了窗口几何时，
+                // 必须一并丢弃本会话的几何脏位，否则关闭时 finish_close 会把此前
+                // resize 得到的当前几何写回，覆盖刚清除的结果。用户之后再次移动/缩放
+                // 窗口会重新置脏，届时恢复正常持久化。
+                if self.config.window != previous_window {
+                    self.window_state.geom_dirty = false;
+                    if self.config.window.is_none() {
+                        self.window_state.geom = None;
+                    }
+                }
                 // 持久化完整 Config；失败时 save_config 已写入可见错误，不得被
                 // 后续成功提示覆盖（DEF-T10-008）。
                 let saved = self.save_config(ConfigSave::All);
@@ -3735,7 +3746,7 @@ impl App {
                 .map_or(g.est_h, |t| t.height);
         }
         self.cache
-            .layout(g.id, &g.kind, g.range, base, caret)
+            .layout(g.id, &g.kind, g.range, base, caret, self.toc_layout_epoch(g))
             .map_or(g.est_h, |l| l.height)
     }
 

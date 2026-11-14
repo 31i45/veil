@@ -526,7 +526,14 @@ impl App {
             if atomic {
                 continue;
             }
-            if let Some(l) = self.cache.layout(g.id, &g.kind, g.range, base, caret) {
+            if let Some(l) = self.cache.layout(
+                g.id,
+                &g.kind,
+                g.range,
+                base,
+                caret,
+                self.toc_layout_epoch(g),
+            ) {
                 for t in self.engine.line_tops(l) {
                     cands.push(g.top + t);
                 }

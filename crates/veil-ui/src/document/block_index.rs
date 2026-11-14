@@ -67,6 +67,10 @@ pub(crate) struct BlockIndex {
     /// 有序列表编号代次：任一编号变化都改变布局基础键，避免文首增删项后
     /// 后续块（文本与 BlockId 未变）命中陈旧编号。
     pub(crate) list_epoch: u64,
+    /// 全文标题集合指纹（`(BlockId, 级别)` 异或累计）：目录文本是全文派生量。
+    /// 新增/删除/改写标题时 TOC 标记块的字节与 BlockId 均可不变，故目录布局键
+    /// 必须带上本代次，标题变化后下一帧即重排（DEF-T05-005）。
+    pub(crate) toc_epoch: u64,
     /// 文档总高（含首尾外边距），即原 `doc_height()` 语义。
     pub(crate) total_h: f32,
     /// 全文块字数累计：随块索引增量维护，状态栏不必每键重扫/重加全文。
@@ -195,6 +199,8 @@ impl App {
         let byte_delta = new_range.end as isize - old.range.end as isize;
         let line_delta = new_end as isize - old.end_line as isize;
         let (old_top, old_height, old_words) = (old.top, old.height, old.words);
+        let old_toc = toc_entry_epoch(old.id, &old.kind);
+        let new_toc = toc_entry_epoch(new_id, &new_kind);
         let open_default_details = matches!(
             &new_kind,
             BlockKind::Details {
@@ -247,6 +253,8 @@ impl App {
             self.ui_state.expanded_details.insert(new_id);
         }
         self.index.total_words = self.index.total_words.saturating_sub(old_words) + words;
+        // 标题集合指纹：摘除旧块贡献、并入新块贡献（异或累计，O(1) 更新）。
+        self.index.toc_epoch ^= old_toc ^ new_toc;
         self.index.incremental_pos = Some(pos);
         self.index.est_rev = self.input_state.revs.session;
         // 旧脏块 id 的布局/光栅条目已无块引用，借判活清理（缓存条目为视口量级）。
@@ -256,6 +264,16 @@ impl App {
         self.cache
             .prune_alive(|id| session.contains_block(id), &revs, &base);
         true
+    }
+
+    /// TOC 目录布局键的标题集合代次：仅 `[TOC]` 标记块取当前指纹，其余块恒 0。
+    /// 只让目录块重排，编辑标题时不牵连视口内其他块。
+    pub(crate) fn toc_layout_epoch(&self, g: &BlockGeom) -> u64 {
+        if g.toc_marker {
+            self.index.toc_epoch
+        } else {
+            0
+        }
     }
 
     /// Details 块展开集合维护：只清理已消失 id（集合远小于块数）；
@@ -403,6 +421,7 @@ impl App {
         let prev = std::mem::take(&mut self.index.blocks);
         let mut next: Vec<BlockGeom> = Vec::with_capacity(blocks.len());
         let mut total_words = 0usize;
+        let mut toc_epoch = 0u64;
         for (i, (id, kind, range, container, start_line, end_line)) in
             blocks.into_iter().enumerate()
         {
@@ -450,6 +469,7 @@ impl App {
                     .session()
                     .text_slice(range)
                     .is_some_and(|t| veil_core::is_toc_marker(&t));
+            toc_epoch ^= toc_entry_epoch(id, &kind);
             next.push(BlockGeom {
                 id,
                 kind,
@@ -472,6 +492,7 @@ impl App {
         }
         self.index.blocks = next;
         self.index.total_words = total_words;
+        self.index.toc_epoch = toc_epoch;
         self.index.incremental_pos = None;
         self.index.est_scale = scale;
         self.index.est_cpl = chars_per_line;
@@ -738,6 +759,19 @@ fn gap_between_parts(
     } else {
         0.0
     }
+}
+
+/// 单个标题块对 TOC 指纹的贡献（非标题为 0）：级别 + BlockId。
+/// 编辑标题内容会分配新 BlockId，故文本改写同样改变指纹；标题增删/改级亦变。
+fn toc_entry_epoch(id: BlockId, kind: &BlockKind) -> u64 {
+    let level = match kind {
+        BlockKind::AtxHeading(l) | BlockKind::SetextHeading(l) => u64::from(*l),
+        _ => return 0,
+    };
+    let mut h = 0xcbf2_9ce4_8422_2325u64;
+    h = (h ^ id.0).wrapping_mul(0x0100_0000_01b3);
+    h = (h ^ level).wrapping_mul(0x0100_0000_01b3);
+    h.wrapping_mul(0x9e37_79b9_7f4a_7c15)
 }
 
 /// 廉价估算高度：块内行数 × 折行数取大（不切片、不建 String）。

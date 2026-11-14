@@ -629,9 +629,11 @@ impl BlockLayout {
                 };
                 fnv(&mut h, line);
             }
-            // 块级标记显隐按整块 caret 判定（`block_subs`）：标题 `#`/Setext 下划线/围栏
-            // ```` ``` ````/列表符号/分隔线/脚注定义前缀。漏折任一种 → caret 进出块时缓存不变，残留旧态。
-            BlockKind::ListItem { .. }
+            // 块级标记显隐按整块 caret 判定（`block_subs`/`hard_break_subs`）：普通段落
+            // 反斜杠硬换行、标题 `#`/Setext 下划线/围栏/列表符号/分隔线/脚注定义前缀。
+            // 漏折任一种 → caret 进出块时缓存不变，残留旧态。
+            BlockKind::Paragraph
+            | BlockKind::ListItem { .. }
             | BlockKind::ThematicBreak
             | BlockKind::AtxHeading(_)
             | BlockKind::SetextHeading(_)
@@ -996,8 +998,19 @@ impl LayoutEngine {
         toc_list: bool,
     ) -> BlockLayout {
         self.layout_block_full(
-            kind, text, block, inlines, width, caret, imgs, reveal_all, footnotes, folds, ordinal,
-            toc_list, &[],
+            kind,
+            text,
+            block,
+            inlines,
+            width,
+            caret,
+            imgs,
+            reveal_all,
+            footnotes,
+            folds,
+            ordinal,
+            toc_list,
+            &[],
         )
     }
 
@@ -1101,9 +1114,7 @@ impl LayoutEngine {
                 // 字形数：满宽图片时 ceil 可能多出一个 NBSP 宽度，导致占位折行 →
                 // 每个视觉行都按图高计高，独立图片块高度翻倍（半屏空白）。
                 let cap = ((width / nbsp_w).floor() as usize).max(1);
-                let nbsp = ((im.width as f32 / nbsp_w).ceil() as usize)
-                    .max(1)
-                    .min(cap);
+                let nbsp = ((im.width as f32 / nbsp_w).ceil() as usize).max(1).min(cap);
                 subs.push(Sub::fill(rs, re, "\u{A0}".repeat(nbsp)));
                 kept.push(im);
             }
@@ -1168,6 +1179,24 @@ impl LayoutEngine {
                 // 否则 summary 首字前会多出一个游标空格。
                 | BlockKind::Details { .. }
         );
+        // 反斜杠硬换行标记：非活动块消隐行尾 `\`；换行语义由源 `\n` 保留（REN-SWEEP-007）。
+        if !reveal_all
+            && !matches!(
+                kind,
+                BlockKind::FencedCode(_)
+                    | BlockKind::IndentedCode
+                    | BlockKind::Math
+                    | BlockKind::Table
+            )
+        {
+            subs.extend(hard_break_subs(
+                body,
+                block,
+                caret,
+                inlines,
+                &container_code,
+            ));
+        }
         let (layout_text, map, line_bases, source_newlines, caption_layout_spans) =
             build_layout_text(body, block, inlines, caret, &subs, apply_cjk, reveal_all);
         let mut node_ranges = Vec::new();
@@ -1214,11 +1243,17 @@ impl LayoutEngine {
         // 按替换区间切分样式段并置 link（style_spans 会把同式相邻段合并，不能整段改）。
         let style_segments = with_link_spans(style_segments, &footnote_links, body.len());
         // 容器内嵌套围栏代码：整行覆盖为等宽 + 代码底色（覆盖行内标记样式）。
-        let style_segments =
-            with_container_code_spans(style_segments, &container_code, body.len());
+        let style_segments = with_container_code_spans(style_segments, &container_code, body.len());
         let mut spans: Vec<(&str, Attrs)> = Vec::new();
+        // 装饰文本（脚注定义编号前缀 / 块末 `↩`）由下方显式 span 提供；基础样式段
+        // 必须让出这两段，否则 set_rich_text 会把同一段拼接两次 —— 表现即
+        // 定义行在返回箭头前重复出现 `n.`（REN-SWEEP-006）。
+        let decor_prefix_end = decor.prefix_len.min(layout_text.len());
+        let decor_suffix_start = layout_text.len().saturating_sub(decor.suffix_len);
         for &(s, e, st) in &style_segments {
             let (ls, le) = (map.doc_to_layout(s), map.doc_to_layout(e));
+            let ls = ls.max(decor_prefix_end);
+            let le = le.min(decor_suffix_start);
             if ls < le {
                 spans.push((
                     &layout_text[ls..le],
@@ -2459,7 +2494,15 @@ fn build_layout_text(
     if apply_cjk {
         let mut code_spans = Vec::new();
         collect_code_spans(inlines, block, &mut code_spans);
-        all.extend(build_typo_subs(body, &code_spans, &elide));
+        // 块级消隐（含硬换行反斜杠）同样不得参与 CJK 自动间距；否则同起点的
+        // 间距 fill 会压过 elide，把本应隐藏的标记重新拼回 shaped 文本。
+        let mut typo_elide = elide;
+        typo_elide.extend(
+            subs.iter()
+                .filter(|s| s.fill.is_empty() && s.doc_start < s.doc_end)
+                .map(|s| (s.doc_start, s.doc_end)),
+        );
+        all.extend(build_typo_subs(body, &code_spans, &typo_elide));
     }
     let (map, accepted) = OffsetMap::from_spans(body.len(), &all);
     // 保留段取源文本并记行基；替换段写 fill（fill 可含换行，如 `<br>` 与题注）。
@@ -2508,6 +2551,49 @@ fn collect_node_ranges(nodes: &[InlineNode], out: &mut Vec<Range>) {
         out.push(n.range);
         collect_node_ranges(&n.children, out);
     }
+}
+
+/// 反斜杠硬换行标记：CommonMark 行尾 `\` + 换行即硬换行，`\` 本身不是正文。
+/// 非活动块把该反斜杠消隐（换行仍由源 `\n` 保留，语义与命中映射不变）；
+/// 活动块/源码模式显原文。偶数个连续反斜杠已被转义为字面 `\`，不处理。
+/// `code_spans`（容器内嵌围栏代码的行区间）内的反斜杠是代码内容，同样不处理。
+fn hard_break_subs(
+    body: &str,
+    block: Range,
+    caret: usize,
+    inlines: &[InlineNode],
+    container_code: &[(usize, usize)],
+) -> Vec<Sub> {
+    if node_active(block, caret) {
+        return Vec::new();
+    }
+    let mut code_spans = container_code.to_vec();
+    collect_code_spans(inlines, block, &mut code_spans);
+    let bytes = body.as_bytes();
+    let mut out = Vec::new();
+    let mut line_start = 0usize;
+    for (i, &b) in bytes.iter().enumerate() {
+        if b != b'\n' {
+            continue;
+        }
+        if i > line_start && bytes[i - 1] == b'\\' {
+            let mut n = 0usize;
+            let mut j = i - 1;
+            loop {
+                n += 1;
+                if j == line_start || bytes[j - 1] != b'\\' {
+                    break;
+                }
+                j -= 1;
+            }
+            let in_code = code_spans.iter().any(|&(s, e)| j >= s && j < e);
+            if n % 2 == 1 && !in_code {
+                out.push(Sub::elide(j, j + 1));
+            }
+        }
+        line_start = i + 1;
+    }
+    out
 }
 
 /// 块级替换（切片 12）：任务列表复选框 `☐`/`☑`、无序列表符号 `•`、
@@ -3270,6 +3356,38 @@ pub(crate) fn cell_style_spans(
     Some(out)
 }
 
+/// 单元格内 Markdown 图片 alt 的可见文本区间（与 `cell.text` 同坐标，按 inline 先序；
+/// alt 为空的节点给零宽区间）。图片成功加载时视图层据此从显示文本中剔除 alt
+/// （只留缩略图），失败时保留原文（REN-SWEEP-008）。
+/// 映射不可用（与 `cell_style_spans` 同口径）时返回 None，调用方保留原文。
+pub(crate) fn cell_image_alt_spans(
+    cell_range: Range,
+    text_len: usize,
+    inlines: &[InlineNode],
+) -> Option<Vec<Range>> {
+    let mut elide: Vec<(usize, usize)> = Vec::new();
+    collect_elide(inlines, cell_range, usize::MAX, &mut elide);
+    let mut subs: Vec<Sub> = elide.into_iter().map(|(s, e)| Sub::elide(s, e)).collect();
+    collect_q_subs(inlines, cell_range, usize::MAX, &mut subs);
+    let (map, _) = OffsetMap::from_spans(cell_range.len(), &subs);
+    if map.layout_len != text_len {
+        return None;
+    }
+    fn walk(nodes: &[InlineNode], cell_range: Range, map: &OffsetMap, out: &mut Vec<Range>) {
+        for n in nodes {
+            if n.kind == InlineKind::Image {
+                let s = map.doc_to_layout(n.content.start.saturating_sub(cell_range.start));
+                let e = map.doc_to_layout(n.content.end.saturating_sub(cell_range.start));
+                out.push(Range::new(s, e.max(s)));
+            }
+            walk(&n.children, cell_range, map, out);
+        }
+    }
+    let mut out = Vec::new();
+    walk(inlines, cell_range, &map, &mut out);
+    Some(out)
+}
+
 /// 单元格内 Math 节点的可见文本区间：返回 `(可见起点, 可见终点, TeX 内容区间)`。
 /// 与 `cell_style_spans` 共用 `collect_elide` + `OffsetMap`，坐标口径与 `cell.text` 一致
 /// （`$x^2$` → `x^2`）。字节映射不可用（如 `\|` 转义改写长度）时返回 None，
@@ -3432,7 +3550,18 @@ mod tests {
         let mut eng = LayoutEngine::new();
         let block_text = &text[range.start..range.end];
         let l = eng.layout_block_with_captions(
-            kind, block_text, range, &inlines, width, caret, imgs, false, None, &[], None, false,
+            kind,
+            block_text,
+            range,
+            &inlines,
+            width,
+            caret,
+            imgs,
+            false,
+            None,
+            &[],
+            None,
+            false,
             captions,
         );
         (eng, l)
@@ -3841,13 +3970,22 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         // CJK 前会自动补一个中西文间距（既有排版规则），故首项为 4 空格。
-        assert_eq!(render(&mut eng, usize::MAX), ["    第一章 介绍", "      1.1 背景"]);
+        assert_eq!(
+            render(&mut eng, usize::MAX),
+            ["    第一章 介绍", "      1.1 背景"]
+        );
         // 光标进入块 → 显示源码列表标记（与其它列表项一致），离开由调用方重排恢复。
         let first_start = blocks[0].2.start;
         let active = render(&mut eng, first_start);
-        assert!(active[0].starts_with("1. "), "光标进入应显源码标记: {active:?}");
+        assert!(
+            active[0].starts_with("1. "),
+            "光标进入应显源码标记: {active:?}"
+        );
         assert!(active[0].contains("第一章 介绍"));
-        assert!(!active[0].contains("](#"), "链接标记仍按行内规则消隐: {active:?}");
+        assert!(
+            !active[0].contains("](#"),
+            "链接标记仍按行内规则消隐: {active:?}"
+        );
         assert_eq!(active[1], "      1.1 背景");
         // 无序旧目录同样只保留缩进而无 `•`。
         let src = "- [A](#a)\n- [B](#b)";
@@ -3874,26 +4012,42 @@ mod tests {
     #[test]
     fn list_content_start_matches_marker_end() {
         let cases = [
-            (BlockKind::ListItem {
-                ordered: true,
-                depth: 0,
-                task: None,
-            }, "1. x", Some(2)),
-            (BlockKind::ListItem {
-                ordered: true,
-                depth: 1,
-                task: None,
-            }, "   1. x", Some(5)),
-            (BlockKind::ListItem {
-                ordered: false,
-                depth: 0,
-                task: None,
-            }, "- x", Some(1)),
-            (BlockKind::ListItem {
-                ordered: false,
-                depth: 0,
-                task: Some(false),
-            }, "- [ ] x", None),
+            (
+                BlockKind::ListItem {
+                    ordered: true,
+                    depth: 0,
+                    task: None,
+                },
+                "1. x",
+                Some(2),
+            ),
+            (
+                BlockKind::ListItem {
+                    ordered: true,
+                    depth: 1,
+                    task: None,
+                },
+                "   1. x",
+                Some(5),
+            ),
+            (
+                BlockKind::ListItem {
+                    ordered: false,
+                    depth: 0,
+                    task: None,
+                },
+                "- x",
+                Some(1),
+            ),
+            (
+                BlockKind::ListItem {
+                    ordered: false,
+                    depth: 0,
+                    task: Some(false),
+                },
+                "- [ ] x",
+                None,
+            ),
             (BlockKind::Paragraph, "x", None),
         ];
         for (kind, body, want) in cases {
@@ -4288,14 +4442,21 @@ mod tests {
                 .map(|(_, _, st)| *st)
                 .expect("样式段应致密覆盖")
         };
-        assert_eq!(style_at(4).bold, style_at(15).bold, "<b> 与 <strong> 同为粗体");
+        assert_eq!(
+            style_at(4).bold,
+            style_at(15).bold,
+            "<b> 与 <strong> 同为粗体"
+        );
         assert_eq!(
             style_at(30).italic,
             style_at(41).italic,
             "<i> 与 <em> 同为斜体"
         );
         // 活动/非活动都走同一 style_spans 入口；光栅层权重也一致。
-        for (alias, canonical) in [("<b>B</b>", "<strong>B</strong>"), ("<i>I</i>", "<em>I</em>")] {
+        for (alias, canonical) in [
+            ("<b>B</b>", "<strong>B</strong>"),
+            ("<i>I</i>", "<em>I</em>"),
+        ] {
             let (mut e1, l1) = layout_of(alias, 400.0);
             let (p1, _, _) = e1.rasterize(&l1, [0, 0, 0]);
             let (mut e2, l2) = layout_of(canonical, 400.0);
@@ -4578,7 +4739,10 @@ mod tests {
         assert_eq!(l.height, 100.0, "块高只占图片实际显示高度");
         let nbsp = l.layout_text().chars().filter(|c| *c == '\u{a0}').count();
         let glyphs: usize = runs.iter().map(|r| r.glyphs.len()).sum();
-        assert_eq!(glyphs, nbsp, "占位文本不得被重复排版（字形数应等于 NBSP 数）");
+        assert_eq!(
+            glyphs, nbsp,
+            "占位文本不得被重复排版（字形数应等于 NBSP 数）"
+        );
     }
 
     #[test]
@@ -4717,7 +4881,10 @@ mod tests {
         assert!(l.layout_text().contains(t(Key::ImageAltFallback)));
         assert!(l.layout_text().contains("缺失图"));
         assert_eq!(l.buffer.layout_runs().count(), 2, "占位一行 + 题注一行");
-        assert!(l.layout_text().matches("缺失图").count() == 1, "alt 不重复显示");
+        assert!(
+            l.layout_text().matches("缺失图").count() == 1,
+            "alt 不重复显示"
+        );
     }
 
     #[test]
@@ -5575,6 +5742,111 @@ mod tests {
     }
 
     #[test]
+    fn hard_break_backslash_hidden_when_inactive_shown_when_active() {
+        // REN-SWEEP-007：非活动块只消隐标记，源换行与文档字节/命中坐标不变。
+        let src = "甲\\\n乙\n";
+        let (eng, l) = layout_of(src, 400.0);
+        assert_eq!(l.layout_text(), "甲\n乙", "不得显示反斜杠或遗留自动空格");
+        let runs: Vec<_> = l.buffer.layout_runs().collect();
+        assert_eq!(runs.len(), 2, "源硬换行必须保留为两个视觉行");
+        let shaped = runs.iter().map(|r| r.text).collect::<Vec<_>>().join("\n");
+        assert_eq!(shaped, l.layout_text(), "实际 shaped 文本同样不得泄露标记");
+        assert_eq!(l.source_newlines, vec![4], "源换行仍参与块内坐标");
+        let (x, y, _) = eng.caret_xy(&l, 5);
+        assert_eq!(eng.hit(&l, x + 0.1, y + 1.0), 5, "第二行命中仍映射到乙");
+
+        let raw = "a\\\nb\n";
+        let (_, active) = layout_with_caret(raw, 1, 400.0);
+        assert_eq!(active.layout_text(), "a\\\nb", "光标进入块显示源码");
+        let s = Session::open(src);
+        assert_eq!(s.serialize(), src, "视图消隐不得改写文档");
+        let raw_session = Session::open(raw);
+        let (_, kind, range) = raw_session.blocks()[0].clone();
+        let inlines = raw_session.block_inlines(raw_session.blocks()[0].0).unwrap();
+        let source = LayoutEngine::new().layout_block(
+            kind.clone(),
+            &raw[range.start..range.end],
+            range,
+            &inlines,
+            400.0,
+            usize::MAX,
+            &[],
+            true,
+        );
+        assert_eq!(source.layout_text(), "a\\\nb", "源码模式保留反斜杠");
+        assert_ne!(
+            active.reveal_state(&kind, range, usize::MAX),
+            active.reveal_state(&kind, range, 1),
+            "光标进出普通段落必须使布局缓存失效"
+        );
+    }
+
+    #[test]
+    fn hard_break_backslash_skips_even_runs_and_code_content() {
+        // 偶数反斜杠不是 CommonMark 硬换行标记；普通文本两个都保留。
+        let (_, literal) = layout_of("a\\\\\nb\n", 400.0);
+        assert_eq!(literal.layout_text(), "a\\\\\nb");
+        // 行内代码与围栏代码中的反斜杠是代码内容，不得消隐。
+        let (_, inline) = layout_of("`a\\\nb`\n", 400.0);
+        assert!(
+            inline.layout_text().contains("a\\\nb"),
+            "{:?}",
+            inline.layout_text()
+        );
+        let (_, fenced) = layout_of("```text\na\\\nb\n```\n", 400.0);
+        assert!(
+            fenced.layout_text().contains("a\\\nb"),
+            "{:?}",
+            fenced.layout_text()
+        );
+    }
+
+    #[test]
+    fn footnote_def_number_is_not_duplicated_in_shaped_text() {
+        // REN-SWEEP-006：`cell.text/layout_text` 正确不代表字形输入正确 —— 基础样式段
+        // 曾整段覆盖含装饰的 layout 文本，set_rich_text 拼接后行尾多出一份 `n.`。
+        let src =
+            "# 脚注\n\n正文[^note]与[^two]。\n\n[^note]: 第一个脚注。\n[^two]: 第二个脚注。\n";
+        let s = Session::open(src);
+        let ctx = FootnoteCtx::new(s.footnote_ids(), Theme::light().muted);
+        let mut eng = LayoutEngine::new();
+        let mut defs = 0usize;
+        for (id, kind, range) in s.blocks().iter() {
+            if !matches!(kind, BlockKind::FootnoteDef) {
+                continue;
+            }
+            let inlines = s.block_inlines(*id).unwrap_or_default();
+            let l = eng.layout_block_with_footnotes(
+                kind.clone(),
+                &src[range.start..range.end],
+                *range,
+                &inlines,
+                600.0,
+                usize::MAX,
+                &[],
+                false,
+                Some(&ctx),
+                &[],
+                None,
+                false,
+            );
+            defs += 1;
+            let shaped: String = l.buffer.layout_runs().map(|r| r.text).collect();
+            assert_eq!(
+                shaped,
+                l.layout_text(),
+                "字形输入必须与 layout 文本一致（不得重复编号）"
+            );
+            assert_eq!(
+                shaped.matches("↩").count(),
+                1,
+                "返回标记只出现一次: {shaped:?}"
+            );
+        }
+        assert_eq!(defs, 2, "夹具应有两个脚注定义块");
+    }
+
+    #[test]
     fn offset_map_insertion_at_end_keeps_suffix_out_of_caret() {
         let (m, _) = OffsetMap::from_spans(3, &[Sub::insert(3, "↩")]);
         assert_eq!(m.layout_len, 3 + "↩".len());
@@ -6260,8 +6532,14 @@ mod tests {
         let lt = l.layout_text();
         assert!(!lt.contains('>'), "引用标记必须全部消隐: {lt:?}");
         assert!(!lt.contains("- "), "无序/任务列表裸标记必须消失: {lt:?}");
-        assert!(!lt.contains("[ ]") && !lt.contains("[x]"), "复选框裸标记: {lt:?}");
-        assert!(!lt.contains("**") && !lt.contains('`'), "行内标记应消隐: {lt:?}");
+        assert!(
+            !lt.contains("[ ]") && !lt.contains("[x]"),
+            "复选框裸标记: {lt:?}"
+        );
+        assert!(
+            !lt.contains("**") && !lt.contains('`'),
+            "行内标记应消隐: {lt:?}"
+        );
         assert!(lt.contains('•'), "无序列表应显示圆点: {lt:?}");
         assert!(lt.contains('☐') && lt.contains('☑'), "任务框应显示: {lt:?}");
         assert!(lt.contains("1."), "有序列表编号保留源码编号: {lt:?}");
@@ -6327,7 +6605,10 @@ mod tests {
             false,
         );
         let lt = l.layout_text();
-        assert!(!lt.contains("**"), "加粗标记必须消隐（不得显示原文）: {lt:?}");
+        assert!(
+            !lt.contains("**"),
+            "加粗标记必须消隐（不得显示原文）: {lt:?}"
+        );
         assert!(lt.contains("加粗"), "加粗文本应可见: {lt:?}");
     }
 }

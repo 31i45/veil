@@ -34,6 +34,7 @@ pub(crate) const MIN_COL_WIDTH: f32 = 40.0;
 
 /// 单元格内联公式（输入）：`range` 为剥标记后可见文本的字节区间（`$x^2$` → `x^2`），
 /// `w/h` 为渲染图尺寸（占位宽与行高据此计算）。
+#[derive(Clone)]
 pub(crate) struct CellMath {
     pub range: Range,
     pub tex: String,
@@ -59,10 +60,13 @@ struct PendingMath {
 }
 
 /// 表格单元格内联图片（输入）：已加载的位图 + 自然尺寸（无 URL，失败已在上层过滤）。
+/// `alt` 为该图 alt 在单元格可见文本中的区间：图片已加载时从文本中剔除，
+/// 避免 alt 与缩略图重复显示（REN-SWEEP-008）；`None` 表示无法定位/无 alt。
 pub(crate) struct CellImgAsset {
     pub w: u32,
     pub h: u32,
     pub pixels: Vec<u8>,
+    pub alt: Option<Range>,
 }
 
 /// 单元格内联图片（输出）：相对单元格内容原点的绘制位置与显示尺寸。
@@ -259,6 +263,77 @@ fn preprocess_line_breaks(
     (out, new_styles)
 }
 
+/// 已成功加载图片的 alt 可见区间从单元格显示文本中剔除（只留缩略图）。
+///
+/// `alts` 为 `cell_image_alt_spans` 的产出（与 `text` 同坐标）。样式段与同格数学
+/// 区间一起重映射，再生成数学占位，避免「含公式就保留重复 alt」的同根缺陷。
+/// 返回 None 表示没有可剔除区间（保持原文，如加载失败时显示 alt）。
+#[allow(clippy::type_complexity)]
+fn strip_image_alts(
+    text: &str,
+    styles: Option<&[(usize, usize, Style)]>,
+    alts: &[Range],
+    maths: &[CellMath],
+) -> Option<(String, Option<Vec<(usize, usize, Style)>>, Vec<CellMath>)> {
+    let mut cuts: Vec<(usize, usize)> = alts
+        .iter()
+        .map(|r| (r.start.min(text.len()), r.end.min(text.len())))
+        .filter(|&(s, e)| s < e && text.is_char_boundary(s) && text.is_char_boundary(e))
+        .collect();
+    if cuts.is_empty() {
+        return None;
+    }
+    cuts.sort_unstable();
+    // 合并重叠/相邻区间，保证删除计划单调且不重复消费字节。
+    let mut merged: Vec<(usize, usize)> = Vec::with_capacity(cuts.len());
+    for (s, e) in cuts {
+        match merged.last_mut() {
+            Some(last) if s <= last.1 => last.1 = last.1.max(e),
+            _ => merged.push((s, e)),
+        }
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut cursor = 0usize;
+    for &(s, e) in &merged {
+        out.push_str(&text[cursor..s]);
+        cursor = e;
+    }
+    out.push_str(&text[cursor..]);
+    // 重映射样式段：对每个 pos 减去其前已删除的字节数。
+    let remap = |pos: usize| -> usize {
+        let mut cut = 0usize;
+        for &(s, e) in &merged {
+            if pos >= e {
+                cut += e - s;
+            } else if pos > s {
+                cut += pos - s;
+            } else {
+                break;
+            }
+        }
+        pos.saturating_sub(cut)
+    };
+    let new_styles = styles.map(|list| {
+        list.iter()
+            .filter_map(|&(s, e, ref st)| {
+                let (s, e) = (remap(s), remap(e));
+                (s < e).then_some((s, e, *st))
+            })
+            .collect()
+    });
+    let new_maths = maths
+        .iter()
+        .filter_map(|m| {
+            let (s, e) = (remap(m.range.start), remap(m.range.end));
+            (s < e).then(|| CellMath {
+                range: Range::new(s, e),
+                ..m.clone()
+            })
+        })
+        .collect();
+    Some((out, new_styles, new_maths))
+}
+
 impl LayoutEngine {
     /// 表格排版 + 单元格光栅化。`width` 为版心可用宽（物理像素），`color` 为正文色。
     /// `active` = 活动单元格 flat 索引及其源码文本（显示标记，列宽按源码测量）。
@@ -322,23 +397,47 @@ impl LayoutEngine {
                     // 脚注引用单元格：源码原文 + 无样式（不编号、不着色）。
                     None => match (cell, raw) {
                         (Some(_), Some(raw)) => (Cow::Borrowed(raw.as_str()), None, Vec::new()),
-                        (Some(cell), None) => match maths.and_then(|m| m.get(&flat)) {
-                            Some(list) if !list.is_empty() => {
-                                // 含公式：占位 + 纯文本降级（v0 已知简化，见模块头注释）。
-                                let (text, pending) = math_placeholders(&cell.text, list, nbsp_w);
-                                (Cow::Owned(text), None, pending)
-                            }
-                            _ => (
-                                Cow::Borrowed(cell.text.as_str()),
+                        (Some(cell), None) => {
+                            let original_maths = maths
+                                .and_then(|m| m.get(&flat))
+                                .cloned()
+                                .unwrap_or_default();
+                            let base_styles = if original_maths.is_empty() {
                                 cell_style_spans(
                                     cell.range,
                                     cell.text.len(),
                                     &cell.inlines,
                                     link_color,
+                                )
+                            } else {
+                                None // 含公式格沿用纯文本降级（见模块头注释）。
+                            };
+                            let alts: Vec<Range> = images
+                                .and_then(|m| m.get(&flat))
+                                .map(|list| list.iter().filter_map(|a| a.alt).collect())
+                                .unwrap_or_default();
+                            // 先删已加载图片的 alt 并同步重映射公式，再做 NBSP 占位。
+                            let (visible, styles, visible_maths) = match strip_image_alts(
+                                &cell.text,
+                                base_styles.as_deref(),
+                                &alts,
+                                &original_maths,
+                            ) {
+                                Some((t, s, m)) => (Cow::Owned(t), s, m),
+                                None => (
+                                    Cow::Borrowed(cell.text.as_str()),
+                                    base_styles,
+                                    original_maths,
                                 ),
-                                Vec::new(),
-                            ),
-                        },
+                            };
+                            if visible_maths.is_empty() {
+                                (visible, styles, Vec::new())
+                            } else {
+                                let (text, pending) =
+                                    math_placeholders(&visible, &visible_maths, nbsp_w);
+                                (Cow::Owned(text), None, pending)
+                            }
+                        }
                         (None, _) => (Cow::Borrowed(""), None, Vec::new()),
                     },
                 };
@@ -951,6 +1050,165 @@ mod tests {
     }
 
     #[test]
+    fn loaded_cell_image_hides_duplicate_alt_text() {
+        // REN-SWEEP-008：图片加载成功后只显示缩略图；alt 不得再以文本重复出现。
+        let doc = "| ![小图](a.png) | x |\n| --- | --- |\n";
+        let s = Session::open(doc);
+        let (id, _, _) = s.blocks()[0];
+        let table = s.table(id).unwrap();
+        let cell = &table.header[0];
+        assert_eq!(cell.text, "小图", "core 可见文本即 alt");
+        let alts =
+            crate::view::layout::cell_image_alt_spans(cell.range, cell.text.len(), &cell.inlines)
+                .expect("alt 区间应可映射");
+        assert_eq!(alts, vec![Range::new(0, "小图".len())]);
+        let mut images: HashMap<usize, Vec<CellImgAsset>> = HashMap::new();
+        images.insert(
+            0,
+            vec![CellImgAsset {
+                w: 8,
+                h: 8,
+                pixels: vec![0; 8 * 8 * 4],
+                alt: Some(alts[0]),
+            }],
+        );
+        let l = LayoutEngine::new().layout_table_opts(
+            &table,
+            600.0,
+            [0, 0, 0],
+            None,
+            None,
+            None,
+            None,
+            Some(&images),
+        );
+        assert_eq!(
+            l.cells[0].images[0].x, 0.0,
+            "alt 已剔除，缩略图应贴单元格内容左缘"
+        );
+        // 未加载（无 asset）时仍显示 alt 文本：缩略图不存在，文本保留。
+        let plain = LayoutEngine::new().layout_table(&table, 600.0, [0, 0, 0], None);
+        assert!(plain.cells[0].images.is_empty());
+        assert!(
+            plain.cells[0].pixel_w > l.cells[0].pixel_w,
+            "失败回退必须保留 alt 字形"
+        );
+        assert_eq!(s.serialize(), doc, "显示层去重不得改写文档");
+    }
+
+    #[test]
+    fn loaded_cell_images_remap_math_nested_multiple_and_empty_alts() {
+        // 嵌套 inline 的 alt、多图与空 alt 必须按 visible-text 坐标逐张映射。
+        let doc = "| 前 **![嵌](a.png)** 中 ![二](b.png) 后 ![](c.png) 尾 |\n| --- |\n";
+        let s = Session::open(doc);
+        let (id, _, _) = s.blocks()[0];
+        let table = s.table(id).unwrap();
+        let cell = &table.header[0];
+        assert_eq!(cell.text, "前 嵌 中 二 后  尾");
+        let alts =
+            crate::view::layout::cell_image_alt_spans(cell.range, cell.text.len(), &cell.inlines)
+                .expect("嵌套图片 alt 应可映射");
+        assert_eq!(alts.len(), 3);
+        assert_eq!(&cell.text[alts[0].start..alts[0].end], "嵌");
+        assert_eq!(&cell.text[alts[1].start..alts[1].end], "二");
+        assert_eq!(alts[2].start, alts[2].end, "空 alt 是零宽区间");
+        let (stripped, _, _) =
+            strip_image_alts(&cell.text, None, &alts, &[]).expect("三张成功加载的图片都应剔除 alt");
+        assert_eq!(stripped, "前  中  后  尾");
+        let (partial, _, _) =
+            strip_image_alts(&cell.text, None, &alts[..1], &[]).expect("只剔除成功加载的第一张");
+        assert_eq!(partial, "前  中 二 后  尾", "未加载第二张的 alt 必须保留");
+
+        // 同格数学不能成为保留重复 alt 的例外：先删 alt，再重映射数学并占位。
+        let doc = "| 前 ![图](a.png) $x^2$ 后 |\n| --- |\n";
+        let s = Session::open(doc);
+        let (id, _, _) = s.blocks()[0];
+        let table = s.table(id).unwrap();
+        let cell = &table.header[0];
+        let (_, maths) = cell_maths(&s, &table, 0);
+        let alts =
+            crate::view::layout::cell_image_alt_spans(cell.range, cell.text.len(), &cell.inlines)
+                .unwrap();
+        let (stripped, _, remapped) =
+            strip_image_alts(&cell.text, None, &alts, &maths).expect("同格数学的 alt 也应剔除");
+        assert_eq!(stripped, "前  x^2 后");
+        assert_eq!(remapped.len(), 1);
+        assert_eq!(
+            &stripped[remapped[0].range.start..remapped[0].range.end],
+            "x^2"
+        );
+
+        let mut math_map = HashMap::new();
+        math_map.insert(0, maths);
+        let mut image_map = HashMap::new();
+        image_map.insert(
+            0,
+            vec![CellImgAsset {
+                w: 8,
+                h: 8,
+                pixels: vec![0; 8 * 8 * 4],
+                alt: Some(alts[0]),
+            }],
+        );
+        let laid = LayoutEngine::new().layout_table_opts(
+            &table,
+            600.0,
+            [0, 0, 0],
+            None,
+            None,
+            Some(&math_map),
+            None,
+            Some(&image_map),
+        );
+        assert_eq!(laid.cells[0].maths.len(), 1, "删 alt 后公式仍须定位");
+        assert_eq!(laid.cells[0].images.len(), 1);
+        assert_eq!(s.serialize(), doc);
+    }
+
+    #[test]
+    fn html_cell_image_does_not_strip_visible_text() {
+        let doc = "| 左 <img src=\"a.png\" alt=\"HTMLalt\"> 右 |\n| --- |\n";
+        let s = Session::open(doc);
+        let (id, _, _) = s.blocks()[0];
+        let table = s.table(id).unwrap();
+        let cell = &table.header[0];
+        assert_eq!(cell.text, "左 HTMLalt 右");
+        let alts =
+            crate::view::layout::cell_image_alt_spans(cell.range, cell.text.len(), &cell.inlines);
+        assert!(
+            alts.is_none(),
+            "HTML alt 是派生文本，映射不可用时必须安全保留"
+        );
+        assert!(strip_image_alts(&cell.text, None, &[], &[]).is_none());
+        let plain = LayoutEngine::new().layout_table(&table, 600.0, [0, 0, 0], None);
+        let mut images = HashMap::new();
+        images.insert(
+            0,
+            vec![CellImgAsset {
+                w: 8,
+                h: 8,
+                pixels: vec![0; 8 * 8 * 4],
+                alt: None,
+            }],
+        );
+        let loaded = LayoutEngine::new().layout_table_opts(
+            &table,
+            600.0,
+            [0, 0, 0],
+            None,
+            None,
+            None,
+            None,
+            Some(&images),
+        );
+        assert_eq!(loaded.cells[0].images.len(), 1);
+        assert_eq!(
+            loaded.cells[0].pixel_w, plain.cells[0].pixel_w,
+            "HTML img 成功加载后也不得删 visible alt 文本"
+        );
+    }
+
+    #[test]
     fn image_cell_renders_alt_without_markers() {
         // core 的 cell.text 对 Image 已是 alt（切片 13）；网格只画 alt，不加载外部资源。
         let doc = "| ![图](a.png) | 图 |\n| --- | --- |\n";
@@ -986,6 +1244,7 @@ mod tests {
                 w: 100,
                 h: 200,
                 pixels: vec![0; 100 * 200 * 4],
+                alt: None,
             }],
         );
         let l = LayoutEngine::new().layout_table_opts(

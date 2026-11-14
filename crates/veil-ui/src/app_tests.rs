@@ -8898,6 +8898,39 @@ fn typewriter_outline_jump_lands_on_anchor_without_typing() {
     );
 }
 
+/// DEF-T11-E1-003（复发）：跳转前远处块高只是估算值，首帧绘制补排会让几何
+/// 漂移。要求「跳转后第一帧」就落在打字机锚点，而不是等下一次输入纠正。
+#[test]
+fn typewriter_outline_jump_first_frame_lands_on_anchor_after_real_layout() {
+    // 长中文段落放大估算高度与实际排版高度的差距（CJK 字宽约为 ASCII 两倍）。
+    let long = "这是一段用于放大行高估算误差的中文长段落，".repeat(12);
+    let mut text = String::from("# 开头\n");
+    for i in 0..30 {
+        text.push_str(&format!("\n{long}{i}\n"));
+    }
+    text.push_str("\n# 中部\n");
+    for i in 0..30 {
+        text.push_str(&format!("\n{long}{i}\n"));
+    }
+    text.push_str("\n# 结尾\n");
+    let store = MemStore::default();
+    let (mut a, _) = app_dialogs(&text, None, false, &store, None, None);
+    a.toggle_outline();
+    a.toggle_typewriter();
+    let want_start = text.find("# 中部").unwrap();
+    a.jump_outline(1);
+    assert_eq!(a.editor.caret(), want_start);
+    // 首帧：走真实渲染（补排可见块 + 重算几何），与真机第一次绘制同路径。
+    let _ = a.render();
+    let vp = a.viewport();
+    let target = vp.y + vp.h * 0.42;
+    let (_, cy, ch) = a.caret_screen();
+    assert!(
+        (cy + ch / 2.0 - target).abs() <= ch / 2.0,
+        "首帧标题行应贴合打字机锚点：cy={cy} ch={ch} target={target}"
+    );
+}
+
 #[test]
 fn outline_wheel_scrolls_panel_only_when_pointer_inside() {
     let mut text = String::from("# 目录\n");

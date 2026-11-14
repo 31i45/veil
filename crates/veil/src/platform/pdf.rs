@@ -55,17 +55,48 @@ pub fn find_cjk_font() -> Option<&'static str> {
     None
 }
 
-/// 字符回退字体候选：CJK 主字体缺字（emoji / 非 BMP 符号）时按序尝试。
+/// 字符回退字体候选：CJK 主字体缺字（emoji / 非 BMP 符号 / CJK 扩展 B 等）时按序尝试。
+///
+/// 这里只代表「可能可用」；真正是否覆盖某码点必须由 `ttf_parser` 查字形，
+/// 不能按文件名猜测——例如 Segoe UI Emoji 有 emoji 但无 `𠮷`（U+20BB7），
+/// 而 SimSun-ExtB 恰恰只覆盖 CJK 扩展区。
 #[cfg(windows)]
-pub fn find_fallback_font() -> Option<&'static str> {
-    const CANDIDATES: &[&str] = &[
-        r"C:\Windows\Fonts\seguiemj.ttf", // Segoe UI Emoji
-        r"C:\Windows\Fonts\seguisym.ttf", // Segoe UI Symbol
-    ];
-    CANDIDATES.iter().copied().find(|p| Path::new(p).exists())
+const FALLBACK_CANDIDATES: &[&str] = &[
+    r"C:\Windows\Fonts\seguiemj.ttf",              // Segoe UI Emoji
+    r"C:\Windows\Fonts\seguisym.ttf",              // Segoe UI Symbol
+    r"C:\Windows\Fonts\simsunb.ttf",               // SimSun-ExtB（CJK 扩展 B/C/D）
+    r"C:\Windows\Fonts\SimsunExtG.ttf",            // SimSun-ExtG（CJK 扩展 G）
+    r"C:\Windows\Fonts\msyh.ttc",                  // 微软雅黑
+    r"C:\Windows\Fonts\msyhbd.ttc",                // 微软雅黑 Bold
+    r"C:\Windows\Fonts\simsun.ttc",                // 宋体
+    r"C:\Windows\Fonts\NotoSansSC-VF.ttf",         // Noto Sans SC
+    r"C:\Windows\Fonts\NotoSansCJK-Regular.ttc",   // Noto Sans CJK（部分系统安装）
+    r"C:\Windows\Fonts\NotoSansCJKsc-Regular.otf", // Noto Sans CJK SC
+];
+
+/// 磁盘上真实存在的回退字体，按优先级排列。
+/// 是否用于某个字符仍须经 `FontResource::covers` / `Face::glyph_index` 探测。
+#[cfg(windows)]
+pub fn fallback_font_candidates() -> Vec<&'static str> {
+    FALLBACK_CANDIDATES
+        .iter()
+        .copied()
+        .filter(|p| Path::new(p).exists())
+        .collect()
 }
 
 #[cfg(not(windows))]
+pub fn fallback_font_candidates() -> Vec<&'static str> {
+    Vec::new()
+}
+
+/// 首个可用回退字体（emoji 等通用场景）；逐字符选择请用 `fallback_font_candidates`。
+#[cfg(all(test, windows))]
+pub fn find_fallback_font() -> Option<&'static str> {
+    fallback_font_candidates().into_iter().next()
+}
+
+#[cfg(all(test, not(windows)))]
 pub fn find_fallback_font() -> Option<&'static str> {
     None
 }
@@ -132,22 +163,30 @@ impl FontMetrics {
                 None => missing.push(c),
             }
         }
-        // 主字体缺字（emoji/非 BMP）：按回退字体真实步进测宽，避免换行按 600 单位错排。
+        // 主字体缺字（emoji / 非 BMP / CJK 扩展区）：逐个候选回退字体按真实
+        // 字形覆盖测宽。不能按文件名假设覆盖范围，也不能把所有缺字记成同一宽度，
+        // 否则换行位置与最终嵌入字体的步进不一致。
         if !missing.is_empty() {
-            if let Some(path) = find_fallback_font() {
-                if let Ok(bytes) = std::fs::read(path) {
-                    if let Ok(fb) = ttf_parser::Face::parse(&bytes, 0) {
-                        let fb_scale = 1000.0 / fb.units_per_em().max(1) as f32;
-                        for c in missing {
-                            let w = fb
-                                .glyph_index(c)
-                                .and_then(|gid| fb.glyph_hor_advance(gid))
-                                .map(|a| a as f32 * fb_scale)
-                                .unwrap_or(600.0);
-                            widths.insert(c, w);
-                        }
-                    }
+            for path in fallback_font_candidates() {
+                if missing.is_empty() {
+                    break;
                 }
+                let Ok(bytes) = std::fs::read(path) else {
+                    continue;
+                };
+                let Ok(fb) = ttf_parser::Face::parse(&bytes, 0) else {
+                    continue;
+                };
+                let fb_scale = 1000.0 / fb.units_per_em().max(1) as f32;
+                missing.retain(|&c| {
+                    match fb.glyph_index(c).and_then(|gid| fb.glyph_hor_advance(gid)) {
+                        Some(a) => {
+                            widths.insert(c, a as f32 * fb_scale);
+                            false
+                        }
+                        None => true,
+                    }
+                });
             }
         }
 
@@ -490,6 +529,7 @@ fn color_cmd(c: [u8; 3], stroke: bool) -> String {
 
 /// 把一段文本按「主字体能否覆盖」切成若干 (是否用回退字体, 片段)。
 /// 缺字且回退字体也无字形时仍留在主字体（走 `?` 兜底）。
+#[cfg(test)]
 fn split_font_runs(
     text: &str,
     primary: &FontResource,
@@ -506,11 +546,41 @@ fn split_font_runs(
     runs
 }
 
+/// 把一段文本按「第几个字体覆盖该字符」切成若干 (字体下标, 片段)。
+/// 下标 0 = 主字体，1..=n = 回退字体（/F2../Fn）。所有字体都不覆盖时留在主字体。
+fn split_font_runs_multi(text: &str, fonts: &[&FontResource]) -> Vec<(usize, String)> {
+    let mut runs: Vec<(usize, String)> = Vec::new();
+    for c in text.chars() {
+        let idx = fonts.iter().position(|f| f.covers(c)).unwrap_or(0);
+        match runs.last_mut() {
+            Some((i, s)) if *i == idx => s.push(c),
+            _ => runs.push((idx, c.to_string())),
+        }
+    }
+    runs
+}
+
+/// 内容流（测试用两字体快捷入口）：主字体 + 可选单一回退字体。
+#[cfg(test)]
 fn content_stream(
     page: &[DrawOp],
     font: &FontResource,
     fallback: Option<&FontResource>,
 ) -> Vec<u8> {
+    let fallbacks: Vec<&FontResource> = fallback.into_iter().collect();
+    content_stream_with_fonts(page, font, &fallbacks)
+}
+
+/// 内容流：文本按字体覆盖能力切 run，逐段切换 `/F1`、`/F2`…
+/// 保证 emoji、CJK 扩展 B 等主字体缺字仍以真实字形与 ToUnicode 输出。
+fn content_stream_with_fonts(
+    page: &[DrawOp],
+    font: &FontResource,
+    fallbacks: &[&FontResource],
+) -> Vec<u8> {
+    let fonts: Vec<&FontResource> = std::iter::once(font)
+        .chain(fallbacks.iter().copied())
+        .collect();
     let mut out = String::new();
     for op in page {
         match op {
@@ -544,19 +614,12 @@ fn content_stream(
                 ));
             }
             DrawOp::Text(t) => {
-                // 字符按字体覆盖能力切 run：emoji/非 BMP 用回退字体（/F2），
+                // 字符按字体覆盖能力切 run：emoji/CJK 扩展 B 等用真正覆盖的回退字体，
                 // 其余仍用主字体（/F1），保证可显示且 ToUnicode 可复制。
-                let runs = split_font_runs(&t.text, font, fallback);
-                let run_font = |is_fb: bool| -> &FontResource {
-                    if is_fb {
-                        fallback.unwrap_or(font)
-                    } else {
-                        font
-                    }
-                };
+                let runs = split_font_runs_multi(&t.text, &fonts);
                 let tw: f32 = runs
                     .iter()
-                    .map(|(fb, s)| run_font(*fb).text_width(s, t.size))
+                    .map(|(fi, s)| fonts[*fi].text_width(s, t.size))
                     .sum();
                 if let Some(bg) = t.highlight {
                     out.push_str(&format!(
@@ -576,18 +639,19 @@ fn content_stream(
                     out.push_str(&format!("{:.2} w 2 Tr\n", t.size * 0.028));
                 }
                 let mut x = t.x;
-                for (is_fb, text) in runs {
-                    let f = run_font(is_fb);
+                for (fi, text) in runs {
+                    let f = fonts[fi];
                     let tm = if t.italic {
                         format!("1 0 0.24 1 {x:.2} {tm_y:.2} Tm")
                     } else {
                         format!("1 0 0 1 {x:.2} {tm_y:.2} Tm")
                     };
-                    out.push_str(&format!(
-                        "/{} {:.2} Tf\n",
-                        if is_fb { "F2" } else { "F1" },
-                        t.size
-                    ));
+                    let name = if fi == 0 {
+                        "F1".to_string()
+                    } else {
+                        format!("F{}", fi + 1)
+                    };
+                    out.push_str(&format!("/{name} {:.2} Tf\n", t.size));
                     out.push_str(&format!("{}\n", color_cmd(t.color, false)));
                     out.push_str(&format!("{tm}\n"));
                     out.push_str(&format!("{} Tj\n", f.encode_cid_hex(&text)));
@@ -685,6 +749,47 @@ fn write_type0_font(
     drop(d);
 }
 
+/// 为主字体缺字选择回退字体：按候选顺序逐个探测字形覆盖，把字符分配给
+/// 第一个真正覆盖它的字体，并只为该字体子集化这些字符。
+/// 返回顺序即 PDF 资源名顺序（/F2、/F3…）。
+fn load_fallback_fonts(missing: &[char]) -> Vec<FontResource> {
+    let mut remaining: BTreeSet<char> = missing.iter().copied().filter(|c| *c != '\0').collect();
+    let mut fonts: Vec<FontResource> = Vec::new();
+    for path in fallback_font_candidates() {
+        if remaining.is_empty() {
+            break;
+        }
+        let Ok(bytes) = std::fs::read(path) else {
+            continue;
+        };
+        let Ok(face) = ttf_parser::Face::parse(&bytes, 0) else {
+            continue;
+        };
+        let covered: Vec<char> = remaining
+            .iter()
+            .copied()
+            .filter(|c| face.glyph_index(*c).is_some())
+            .collect();
+        if covered.is_empty() {
+            continue;
+        }
+        let Ok(f) = FontResource::load_and_subset(Path::new(path), covered.iter().copied(), false)
+        else {
+            continue;
+        };
+        // 子集化后仍以实际可写出的 CID 为准（防御 ttf-parser 与 subsetter 的口径差异）。
+        let actually: Vec<char> = covered.iter().copied().filter(|c| f.covers(*c)).collect();
+        if actually.is_empty() {
+            continue;
+        }
+        for c in &actually {
+            remaining.remove(c);
+        }
+        fonts.push(f);
+    }
+    fonts
+}
+
 /// 把版面渲染为完整 PDF 字节。
 pub fn render_pages(
     pages: &[Vec<DrawOp>],
@@ -709,22 +814,15 @@ pub fn render_pages(
     }
     let font = FontResource::load_and_subset(font_path, chars.iter().copied(), false)?;
 
-    // DEF-T09-E1-003：主字体缺字（emoji/非 BMP）时加载回退字体并子集化。
-    // 只有确实覆盖到缺失字符才启用，避免为一个缺字嵌入整套无用户形字体。
+    // DEF-T09-E1-003：主字体缺字（emoji / CJK 扩展 B 等）时按「真实字形覆盖」
+    // 逐个字符选择回退字体并子集化。不能只试 emoji 字体——`𠮷`(U+20BB7) 只
+    // 由 SimSun-ExtB 等扩展区字体覆盖；也不能按文件名假设覆盖范围。
     let missing: Vec<char> = chars
         .iter()
         .copied()
         .filter(|c| *c != '\0' && !font.covers(*c))
         .collect();
-    let fallback = if missing.is_empty() {
-        None
-    } else {
-        find_fallback_font()
-            .and_then(|path| {
-                FontResource::load_and_subset(Path::new(path), missing.iter().copied(), false).ok()
-            })
-            .filter(|f| missing.iter().any(|c| f.covers(*c)))
-    };
+    let fallback_fonts = load_fallback_fonts(&missing);
 
     let mut pdf = Pdf::new();
 
@@ -756,22 +854,19 @@ pub fn render_pages(
         })
         .collect();
 
-    // 回退字体对象引用（仅在有回退字体时分配）
-    let fallback_refs = fallback.as_ref().map(|_| {
-        let mut next = || {
-            let r = Ref::new(next_ref);
-            next_ref += 1;
-            r
-        };
-        (
-            next(),
-            next(),
-            next(),
-            next(),
-            next(),
-        )
-    });
-    let fallback_type0 = fallback_refs.map(|r| r.2);
+    // 回退字体对象引用：每套字体 5 个（FontDescriptor/CIDFont/Type0/ToUnicode/字体流）
+    let fallback_refs: Vec<(Ref, Ref, Ref, Ref, Ref)> = (0..fallback_fonts.len())
+        .map(|_| {
+            let mut next = || {
+                let r = Ref::new(next_ref);
+                next_ref += 1;
+                r
+            };
+            (next(), next(), next(), next(), next())
+        })
+        .collect();
+
+    let fb_refs: Vec<&FontResource> = fallback_fonts.iter().collect();
 
     for (i, page) in pages.iter().enumerate() {
         let mut used: BTreeSet<usize> = BTreeSet::new();
@@ -791,8 +886,9 @@ pub fn render_pages(
         {
             let mut fonts = res.insert(Name(b"Font")).dict();
             fonts.pair(Name(b"F1"), type0_ref);
-            if let Some(r) = fallback_type0 {
-                fonts.pair(Name(b"F2"), r);
+            for (k, r) in fallback_refs.iter().enumerate() {
+                let name = format!("F{}", k + 2);
+                fonts.pair(Name(name.as_bytes()), r.2);
             }
         }
         if !used.is_empty() && !image_refs.is_empty() {
@@ -807,7 +903,7 @@ pub fn render_pages(
         drop(res);
         drop(page_obj);
 
-        let content = content_stream(page, &font, fallback.as_ref());
+        let content = content_stream_with_fonts(page, &font, &fb_refs);
         pdf.stream(content_refs[i], content.as_ref());
     }
 
@@ -834,7 +930,7 @@ pub fn render_pages(
         tu_cmap_ref,
         font_stream_ref,
     );
-    if let (Some(fb), Some((fd, cid_r, type0_r, tu, stream))) = (fallback.as_ref(), fallback_refs) {
+    for (fb, (fd, cid_r, type0_r, tu, stream)) in fallback_fonts.iter().zip(fallback_refs) {
         write_type0_font(&mut pdf, fb, fd, cid_r, type0_r, tu, stream);
     }
 
@@ -1170,6 +1266,64 @@ mod tests {
         let s = String::from_utf8_lossy(&bytes);
         assert!(s.contains("/F2"), "应嵌入并使用回退字体");
         assert!(s.contains("<D83DDE00>"), "ToUnicode 应映射 emoji 代理对");
+    }
+
+    /// DEF-T09-E1-003 残留：`𠮷`（U+20BB7，CJK 扩展 B）主字体缺字，
+    /// 必须由真正覆盖该码点的系统字体承载：内容流用回退字体真实 CID，
+    /// ToUnicode 输出原码点（而不是 `?` / 替换字符）。
+    #[cfg(windows)]
+    #[test]
+    fn cjk_ext_b_falls_back_to_covering_font_with_correct_to_unicode() {
+        let font_path = Path::new(find_cjk_font().unwrap());
+        let primary = FontResource::load_and_subset(font_path, ['𠮷'], false).expect("主字体子集");
+        assert!(
+            !primary.covers('𠮷'),
+            "回归前提：主字体（雅黑/等线链）不覆盖 U+20BB7"
+        );
+        let fallbacks = load_fallback_fonts(&['𠮷']);
+        let fb = fallbacks
+            .iter()
+            .find(|f| f.covers('𠮷'))
+            .expect("系统回退字体必须真实覆盖 U+20BB7（如 SimSun-ExtB）");
+        assert!(
+            !fb.base_name.contains("seguiemj"),
+            "覆盖字体不能是 emoji 字体（其无该字形），实际：{}",
+            fb.base_name
+        );
+
+        let page = vec![DrawOp::Text(TextRun {
+            x: 56.0,
+            y: 80.0,
+            size: 11.0,
+            text: "𠮷".into(),
+            bold: false,
+            italic: false,
+            underline: false,
+            strike: false,
+            highlight: None,
+            color: [0, 0, 0],
+        })];
+        let refs: Vec<&FontResource> = fallbacks.iter().collect();
+        let content =
+            String::from_utf8_lossy(&content_stream_with_fonts(&page, &primary, &refs)).to_string();
+        let cid = fb.char_to_cid[&'𠮷'];
+        assert!(
+            content.contains(&format!("<{cid:04X}> Tj")),
+            "内容流应写回退字体的真实 CID：{content}"
+        );
+        assert!(
+            !content.contains("<0001> Tj"),
+            "不得把 U+20BB7 降级为 `?` 的 CID：{content}"
+        );
+        assert!(
+            String::from_utf8_lossy(&build_to_unicode_cmap(&fb.cid_to_char))
+                .contains("<D842DFB7>"),
+            "ToUnicode 应映射 𠮷 的 UTF-16 代理对 D842 DFB7"
+        );
+
+        // 端到端：完整 PDF 的 ToUnicode 流可复制出原字符。
+        let bytes = render_pages(&[page], &[], &[], font_path).expect("渲染 PDF");
+        assert!(String::from_utf8_lossy(&bytes).contains("<D842DFB7>"));
     }
 
     #[cfg(windows)]

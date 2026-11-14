@@ -2819,8 +2819,9 @@ impl App {
         if self.ui_state.writing.typewriter {
             // 打字机模式下大纲跳转也必须落到锚点（当前行而非视口顶部），
             // 避免首帧停在顶部、要等下一次输入才被纠正（DEF-T11-E1-003）。
-            self.window_state.goal_y = self.window_state.scroll_y;
-            self.scroll_to_caret();
+            // 远处块高可能仍是估算值：先补排并收敛几何，再计算锚点滚动量，
+            // 否则绘制阶段补排会让首帧偏离锚点（本轮复发项）。
+            self.scroll_to_typewriter_anchor();
         } else if let Some(top) = top {
             let vp = self.viewport();
             let max = chrome::max_scroll(vp, self.doc_height());

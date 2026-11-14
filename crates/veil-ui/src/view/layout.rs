@@ -510,6 +510,32 @@ pub enum OverKind {
     Overline,
 }
 
+/// 目录展示文本：用 core 的 [`veil_core::generate_toc`] 派生层级/锚点，再转成
+/// 视图可见的列表行（`• 标题`，每级 3 空格缩进）。不参与文档字节与编辑映射。
+pub(crate) fn toc_display_text(entries: &[(u8, String)]) -> String {
+    let raw = veil_core::generate_toc(entries.iter().map(|(l, t)| (*l, t.as_str())));
+    let mut out = String::new();
+    for line in raw.lines() {
+        let indent = line.len() - line.trim_start_matches(' ').len();
+        let item = line.trim_start();
+        let label = item
+            .strip_prefix("- [")
+            .and_then(|rest| rest.rsplit_once("](#"))
+            .map(|(label, _)| label)
+            .unwrap_or(item)
+            .replace("\\[", "[")
+            .replace("\\]", "]");
+        out.push_str(&" ".repeat(indent));
+        out.push_str("• ");
+        out.push_str(&label);
+        out.push('\n');
+    }
+    while out.ends_with('\n') {
+        out.pop();
+    }
+    out
+}
+
 /// 单块排版结果。`line_bases[i]` = 第 i 个逻辑行在排版文本（layout 坐标）中的起始字节偏移。
 pub struct BlockLayout {
     pub(crate) buffer: Buffer,
@@ -542,6 +568,10 @@ pub struct BlockLayout {
     pub full_len: usize,
     /// 是否因超单块上限而只排前缀（绘制层据此画降级提示）。
     pub truncated: bool,
+    /// 本块源码是否为 `[TOC]` 标记（视图层目录替换的适用对象）。
+    pub(crate) toc_source: bool,
+    /// 当前布局是否为生成的目录（false 时显示源码标记）。
+    pub(crate) toc_rendered: bool,
 }
 
 impl BlockLayout {
@@ -558,6 +588,11 @@ impl BlockLayout {
         // 但整体平移后，旧布局的指纹输入仍会与块内 caret 误配。
         let inside = block.start <= caret && caret <= block.end;
         let rel = if inside { caret - block.start } else { 0 };
+        // TOC 标记块：视图态渲染目录、编辑态显 `[TOC]` 源码。目录布局没有行内节点，
+        // 必须显式把 caret 是否在块内折进指纹，否则缓存命中路径不会随光标进出失效。
+        if self.toc_source {
+            fnv(&mut h, inside as u64);
+        }
         match kind {
             BlockKind::BlockQuote | BlockKind::Admonition(_) | BlockKind::Callout(_) => {
                 // 引用/提示块按行：line=0 即块外，天然区分「块外」与「块内任意行」。
@@ -842,6 +877,8 @@ impl LayoutEngine {
             source_newlines,
             full_len: text.len(),
             truncated: false,
+            toc_source: false,
+            toc_rendered: false,
         }
     }
 
@@ -968,7 +1005,9 @@ impl LayoutEngine {
                 if rs >= re {
                     continue; // 防御：img 区间须落在本块内（shell 按块收集，不会越界）
                 }
-                let nbsp = ((im.width as f32 / nbsp_w).round() as usize).max(1);
+                // 向上取整：占位 advance 必须 ≥ 图宽，否则图右缘会压住后续文本
+                // （CJK 前后行内公式曾因四舍五入向下而重叠）。
+                let nbsp = ((im.width as f32 / nbsp_w).ceil() as usize).max(1);
                 subs.push(Sub::fill(rs, re, "\u{A0}".repeat(nbsp)));
                 kept.push(im);
             }
@@ -1310,6 +1349,67 @@ impl LayoutEngine {
             source_newlines,
             full_len: full.len(),
             truncated,
+            toc_source: false,
+            toc_rendered: false,
+        }
+    }
+
+    /// 生成目录的视图层排版：`text` 为目录展示文本（非文档字节），按正文段落排版。
+    /// 不产生任何可编辑映射（doc 坐标按展示文本恒等），也不写回文档。
+    pub(crate) fn layout_toc(&mut self, text: &str, width: f32) -> BlockLayout {
+        let scale = block_scale(BlockKind::Paragraph) * self.scale;
+        let metrics = Metrics::new(self.doc_font_size * scale, self.doc_line_height * scale);
+        let mut buffer = Buffer::new(&mut self.font_system, metrics);
+        let attrs = attrs_of(
+            BlockKind::Paragraph,
+            Style::default(),
+            self.link_color,
+            self.doc_font,
+            self.mono_family,
+            metrics.font_size,
+        );
+        buffer.set_text(text, &attrs, Shaping::Advanced, None);
+        buffer.set_wrap(Wrap::WordOrGlyph);
+        buffer.set_size(Some(width), None);
+        buffer.shape_until_scroll(&mut self.font_system, false);
+        let mut height = buffer
+            .layout_runs()
+            .map(|r| r.line_top + r.line_height)
+            .fold(metrics.line_height, f32::max);
+        let max_line_w = buffer
+            .layout_runs()
+            .flat_map(|r| r.glyphs.iter())
+            .map(|g| g.x + g.w)
+            .fold(width, f32::max)
+            .max(1.0);
+        let budget_h = MAX_RASTER_PX as f32 / max_line_w;
+        let truncated = height > budget_h;
+        if truncated {
+            height = budget_h.max(metrics.line_height);
+        }
+        let line_bases: Vec<usize> = buffer
+            .layout_runs()
+            .map(|r| r.glyphs.first().map_or(0, |g| g.start))
+            .collect();
+        let (map, _) = OffsetMap::from_spans(text.len(), &[]);
+        BlockLayout {
+            buffer,
+            map,
+            line_bases,
+            layout_text: text.to_string(),
+            height,
+            imgs: Vec::new(),
+            strikes: Vec::new(),
+            decorations_under: Vec::new(),
+            decorations_over: Vec::new(),
+            script_ranges: Vec::new(),
+            node_ranges: Vec::new(),
+            img_ranges: Vec::new(),
+            source_newlines: Vec::new(),
+            full_len: text.len(),
+            truncated,
+            toc_source: true,
+            toc_rendered: true,
         }
     }
 
@@ -1848,7 +1948,11 @@ fn with_link_spans(
             .map(|x| x.2)
             .unwrap_or_default();
         if links.iter().any(|&(fs, fe)| fs <= s && e <= fe) {
+            // 脚注引用 `[^id]` → 上标 `[n]`（与 HTML 导出 `<sup>` 语义一致）。
+            // 光标进入引用节点时按 Reveal 契约显源码原文，编号呈现不受影响。
             st.link = true;
+            st.size_factor = Some(0.75);
+            st.baseline_shift = Some(-1.0);
         }
         match out.last_mut() {
             Some(last) if last.2 == st && last.1 == s => last.1 = e,
@@ -3596,6 +3700,56 @@ mod tests {
     }
 
     #[test]
+    fn html_alias_styles_match_strong_and_em() {
+        let src = "<b>B</b> <strong>S</strong> <i>I</i> <em>E</em>";
+        let s = Session::open(src);
+        let (id, _kind, range) = s.blocks()[0].clone();
+        let inlines = s.block_inlines(id).unwrap();
+        let spans = style_spans(src.len(), range, &inlines);
+        let style_at = |off: usize| {
+            spans
+                .iter()
+                .find(|(s, e, _)| *s <= off && off < *e)
+                .map(|(_, _, st)| *st)
+                .expect("样式段应致密覆盖")
+        };
+        assert_eq!(style_at(4).bold, style_at(15).bold, "<b> 与 <strong> 同为粗体");
+        assert_eq!(
+            style_at(30).italic,
+            style_at(41).italic,
+            "<i> 与 <em> 同为斜体"
+        );
+        // 活动/非活动都走同一 style_spans 入口；光栅层权重也一致。
+        for (alias, canonical) in [("<b>B</b>", "<strong>B</strong>"), ("<i>I</i>", "<em>I</em>")] {
+            let (mut e1, l1) = layout_of(alias, 400.0);
+            let (p1, _, _) = e1.rasterize(&l1, [0, 0, 0]);
+            let (mut e2, l2) = layout_of(canonical, 400.0);
+            let (p2, _, _) = e2.rasterize(&l2, [0, 0, 0]);
+            let ink = |p: &[u8]| p.chunks(4).filter(|x| x[3] > 0).count();
+            assert_eq!(ink(&p1), ink(&p2), "{alias} 与 {canonical} 光栅墨量一致");
+        }
+    }
+
+    #[test]
+    fn cjk_inline_math_advance_covers_image() {
+        let src = "中文 $x$ 后文";
+        let imgs = [img(Range::new(7, 10), 40, 10, 8)];
+        let (eng, l) = layout_with_imgs(src, usize::MAX, 400.0, &imgs);
+        let p = &l.imgs[0];
+        let (x_end, _, _) = eng.caret_xy(&l, 10); // 数学节点右缘（后续空格之前）
+        assert!(
+            x_end + 0.01 >= p.x + p.width as f32,
+            "占位 advance 必须覆盖公式图：end={x_end} img_right={}",
+            p.x + p.width as f32
+        );
+        assert!(
+            x_end <= p.x + p.width as f32 + 8.0,
+            "占位不应明显超过图宽（避免重复占位）：end={x_end} img_right={}",
+            p.x + p.width as f32
+        );
+    }
+
+    #[test]
     fn inline_math_placeholder_width_matches_image() {
         let imgs = [img(Range::new(2, 5), 40, 10, 8)];
         let (eng, l) = layout_with_imgs("a $x$ b", usize::MAX, 400.0, &imgs);
@@ -4592,6 +4746,16 @@ mod tests {
             .filter(|g| g.color_opt == Some(want))
             .count();
         assert!(colored >= 3, "`[1]` 字形应使用链接色: colored={colored}");
+        // 上标：`[1]` 字形按 sup（负偏移）抬升，且缩到 0.75 倍；与 HTML `<sup>` 一致。
+        assert!(
+            l.script_ranges.iter().any(|&(_, _, dy)| dy < 0.0),
+            "脚注引用应为上标（负基线偏移）: {:?}",
+            l.script_ranges
+        );
+        // 块处于活动态但光标不在引用节点内时，仍保持上标编号（活动/非活动一致）。
+        let (_eng2, l_active, _) = layout_footnote_block(src, 0, 0, 400.0, false);
+        assert_eq!(l_active.layout_text(), "see [1] now");
+        assert!(l_active.script_ranges.iter().any(|&(_, _, dy)| dy < 0.0));
     }
 
     #[test]
@@ -4631,6 +4795,17 @@ mod tests {
         let src = "[TOC]\n\n# Hello\n";
         let (_eng, l, _) = layout_footnote_block(src, 0, usize::MAX, 400.0, true);
         assert_eq!(l.layout_text(), "[TOC]", "源码模式必须显示原始标记");
+    }
+
+    #[test]
+    fn toc_display_text_lists_headings_with_indent() {
+        let entries = vec![
+            (1u8, "一".to_string()),
+            (2u8, "二 and c".to_string()),
+            (1u8, "三".to_string()),
+        ];
+        assert_eq!(toc_display_text(&entries), "• 一\n   • 二 and c\n• 三");
+        assert_eq!(toc_display_text(&[]), "");
     }
 
     #[test]

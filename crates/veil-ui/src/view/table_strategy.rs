@@ -160,7 +160,7 @@ struct CellInput<'a> {
     maths: Vec<PendingMath>,
 }
 
-/// 把单元格可见文本中的公式区间替换为 NBSP 占位（个数 = 图宽 / NBSP 宽，四舍五入）。
+/// 把单元格可见文本中的公式区间替换为 NBSP 占位（个数 = ceil(图宽 / NBSP 宽)）。
 /// 返回 (占位后文本, 占位段)；占位段坐标为占位后文本的字节区间。
 fn math_placeholders(text: &str, maths: &[CellMath], nbsp_w: f32) -> (String, Vec<PendingMath>) {
     let mut out = String::with_capacity(text.len() + maths.len() * 8);
@@ -174,7 +174,8 @@ fn math_placeholders(text: &str, maths: &[CellMath], nbsp_w: f32) -> (String, Ve
             continue; // 防御：区间须有序且不重叠
         }
         out.push_str(&text[cursor..s]);
-        let n = ((m.w as f32 / nbsp_w).round() as usize).max(1);
+        // 向上取整：占位必须覆盖图宽，避免公式压住后续文本。
+        let n = ((m.w as f32 / nbsp_w).ceil() as usize).max(1);
         let start = out.len();
         let nbsp = "\u{A0}".repeat(n);
         out.push_str(&nbsp);
@@ -397,6 +398,17 @@ impl LayoutEngine {
             let k = width / total;
             for w in &mut cols {
                 *w = (*w * k).max(MIN_COL_WIDTH * scale);
+            }
+        }
+        // 极窄窗口 + 多列：MIN_COL_WIDTH 地板可能仍让总宽超出可用宽。再按比例压一次
+        // （绝对下限 0.4×MIN_COL_WIDTH），保证表格不横向溢出、后续块不被压住；
+        // 列宽变窄只增加折行，不改变表格语义。
+        let hard_min = MIN_COL_WIDTH * scale * 0.4;
+        let sum: f32 = cols.iter().sum();
+        if sum > width && sum > 0.0 {
+            let k = width / sum;
+            for w in &mut cols {
+                *w = (*w * k).max(hard_min);
             }
         }
         // 用户拖动列宽（B2，纯视图态）：长度匹配即覆盖内在宽；

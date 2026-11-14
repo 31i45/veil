@@ -484,6 +484,7 @@ impl App {
         self.input_state.revs.image_base += 1;
         // 整篇替换：远程图片位图/失败记忆/pending 属文档会话，全部清空避免串档。
         self.cache.clear_remote();
+        self.ui_state.hover_link = None;
         // 表格列宽覆盖按块 id 生效：整篇替换即整体失效（纯视图态，无副作用）
         self.ui_state.tables.widths.clear();
         self.ui_state.tables.drag = None;
@@ -991,6 +992,8 @@ impl App {
         self.input_state.revs.image_base += 1;
         // 换文档：远程图片状态属文档会话，清空以免旧请求/结果串到新文档。
         self.cache.clear_remote();
+        // 链接提示属旧文档的命中：换文档立即清除，避免悬停浮层残留旧 URL。
+        self.ui_state.hover_link = None;
         self.window_state.scroll_y = 0.0;
         self.window_state.goal_y = 0.0;
         self.window_state.goal_x = None;
@@ -1040,6 +1043,7 @@ impl App {
         self.input_state.revs.image_base += 1;
         // 新建草稿：远程图片状态属旧文档会话，清空。
         self.cache.clear_remote();
+        self.ui_state.hover_link = None;
         self.window_state.scroll_y = 0.0;
         self.window_state.goal_y = 0.0;
         self.window_state.goal_x = None;

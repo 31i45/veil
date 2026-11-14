@@ -27,6 +27,8 @@ pub(crate) struct BlockGeom {
     pub(crate) details_parent: Option<BlockId>,
     /// 因某个祖先 details 折叠而不可见（高度 0、不绘制、光标跳过）。
     pub(crate) details_hidden: bool,
+    /// 段落块源码是否为 `[TOC]` 标记（视图层据此渲染生成目录，源码/编辑态仍显标记）。
+    pub(crate) toc_marker: bool,
 }
 
 /// 块前间距（B5）：标题块上下对称，统一为 `HEADING_GAP`；其余块为 0。
@@ -248,6 +250,14 @@ impl App {
                     }
                 }
             };
+            // 仅段落块可能是标记；限长避免为普通短段落反复读 rope。
+            let toc_marker = matches!(kind, BlockKind::Paragraph)
+                && range.end - range.start <= 16
+                && self
+                    .editor
+                    .session()
+                    .text_slice(range)
+                    .is_some_and(|t| veil_core::is_toc_marker(&t));
             next.push(BlockGeom {
                 id,
                 kind,
@@ -258,6 +268,7 @@ impl App {
                 container,
                 details_parent: None,
                 details_hidden: false,
+                toc_marker,
             });
         }
         self.index.blocks = next;

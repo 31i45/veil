@@ -23,6 +23,28 @@ pub fn link_url_is_safe(url: &str) -> bool {
     }
 }
 
+/// 百分号解码 UTF-8 路径（编辑器本地图片 / HTML 导出资产共用）；非法序列原样保留。
+pub fn percent_decode_path(value: &str) -> String {
+    if !value.contains('%') {
+        return value.to_string();
+    }
+    let b = value.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' && i + 2 < b.len() {
+            if let (Some(h), Some(l)) = (hex_val(b.get(i + 1)), hex_val(b.get(i + 2))) {
+                out.push(h * 16 + l);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 /// 提取归一化后的 scheme（小写）。相对路径、锚点、协议相对地址返回 `None`。
 ///
 /// 判定规则与浏览器一致：`:` 必须出现在第一个 `/`、`?`、`#` 之前；

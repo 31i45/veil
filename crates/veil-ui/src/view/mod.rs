@@ -32,6 +32,7 @@ pub(crate) use layout::MAX_BLOCK_BYTES;
 pub(crate) use layout::{cell_math_spans, inline_details_spans, node_active, oversize_notice};
 pub(crate) use layout::{image_display_size, image_is_standalone};
 pub(crate) use layout::{list_marker_of, ordered_list_epoch, ordered_list_ordinals, ListMarker};
+pub(crate) use layout::toc_display_text;
 pub use layout::{BlockLayout, InlineAsset, InlineFold, InlineImg, LayoutEngine};
 pub(crate) use layout::{OverKind, UnderKind};
 pub(crate) use outline::{Outline, OutlineEntry};

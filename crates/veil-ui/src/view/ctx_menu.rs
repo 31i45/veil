@@ -43,6 +43,11 @@ pub(crate) enum CtxAction {
     /// Details 块折叠 / 展开（右键菜单入口，与左键点击 summary 行同源）。
     FoldDetails,
     UnfoldDetails,
+    /// 图片专用动作（DEF-T67-E1-005）：复制源路径 / 清除失败缓存后重绘。
+    CopyImagePath,
+    ReloadImage,
+    /// 缺失图片的可见提示项：不执行动作，仅说明当前为替代文本。
+    ImageMissingHint,
 }
 
 /// 表格右键上下文：打开时刻的命中位置（表头命中时 `body_row` 为 None）。
@@ -57,7 +62,7 @@ pub(crate) struct TableCtx {
 }
 
 /// 打开时刻定的上下文类别：决定项集，打开期间不随编辑变化（菜单是瞬态）。
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub(crate) enum CtxKind {
     /// 右键落在既有选区内（选区保留不动）。
     Selection,
@@ -71,8 +76,11 @@ pub(crate) enum CtxKind {
     MermaidBlock,
     /// Mermaid 空块（内容为空或全为 `%%` 注释）：只给模板项。
     MermaidEmptyBlock,
-    /// Details 块：携带命中块的 BlockId，供 ctx_exec 定位折叠/展开目标。
-    Details(BlockId),
+    /// Details 块：携带命中块的 BlockId 与打开时刻的展开态，
+    /// 菜单只列出与当前状态匹配的折叠/展开项（DEF-T07-001）。
+    Details { id: BlockId, expanded: bool },
+    /// 图片（Markdown `![]()` 或 `<img>`）：携带源与缺失状态（DEF-T67-E1-005）。
+    Image { path: String, missing: bool },
 }
 
 /// 各类上下文的项集（单一来源：布局/命中/分发共用）。
@@ -132,16 +140,35 @@ pub(crate) fn items_for(kind: CtxKind) -> Vec<(Key, CtxAction)> {
             ),
             (Key::CtxMermaidInsertClass, CtxAction::MermaidInsertClass),
         ],
-        // Details 块：折叠 / 展开（两项都列，ctx_exec 根据实际态择一执行）
-        CtxKind::Details(_) => vec![
-            (Key::CtxFold, CtxAction::FoldDetails),
-            (Key::CtxUnfold, CtxAction::UnfoldDetails),
-            (Key::Empty, CtxAction::Separator),
-            (Key::CtxCopy, CtxAction::Copy),
-            (Key::CtxPaste, CtxAction::Paste),
-            (Key::Empty, CtxAction::Separator),
-            (Key::CtxSelectAll, CtxAction::SelectAll),
-        ],
+        // Details 块：只列与当前展开态匹配的一项（错误项不再出现且不再是 no-op）
+        CtxKind::Details { expanded, .. } => {
+            let mut items = Vec::new();
+            if expanded {
+                items.push((Key::CtxFold, CtxAction::FoldDetails));
+            } else {
+                items.push((Key::CtxUnfold, CtxAction::UnfoldDetails));
+            }
+            items.push((Key::Empty, CtxAction::Separator));
+            items.push((Key::CtxCopy, CtxAction::Copy));
+            items.push((Key::CtxPaste, CtxAction::Paste));
+            items.push((Key::Empty, CtxAction::Separator));
+            items.push((Key::CtxSelectAll, CtxAction::SelectAll));
+            items
+        }
+        // 图片：复制路径/重新加载；缺失时首项给出可见提示（DEF-T67-E1-005）。
+        CtxKind::Image { missing, .. } => {
+            let mut items = Vec::new();
+            if missing {
+                items.push((Key::CtxImageMissing, CtxAction::ImageMissingHint));
+                items.push((Key::Empty, CtxAction::Separator));
+            }
+            items.push((Key::CtxCopyImagePath, CtxAction::CopyImagePath));
+            items.push((Key::CtxReloadImage, CtxAction::ReloadImage));
+            items.push((Key::Empty, CtxAction::Separator));
+            items.push((Key::CtxPaste, CtxAction::Paste));
+            items.push((Key::CtxSelectAll, CtxAction::SelectAll));
+            items
+        }
         CtxKind::Table(tc) => {
             let mut items = Vec::new();
             // 表头只给列操作；正文行才给行操作
@@ -194,6 +221,8 @@ pub(crate) struct CtxMenu {
     pub(crate) mermaid_insert_start: Option<usize>,
     /// Details 块右键菜单携带的 BlockId（供折叠/展开动作定位目标块）。
     pub(crate) details_id: Option<BlockId>,
+    /// 图片右键菜单携带的源路径（供复制路径/重新加载动作）。
+    pub(crate) image_path: Option<String>,
     items: Vec<(Key, CtxAction)>,
 }
 
@@ -211,14 +240,18 @@ impl CtxMenu {
         self.y = y;
         self.hover = None;
         self.link = link;
-        self.table = match kind {
-            CtxKind::Table(tc) => Some(tc),
+        self.table = match &kind {
+            CtxKind::Table(tc) => Some(*tc),
             _ => None,
         };
         self.mermaid_body = mermaid_body;
         self.mermaid_insert_start = None;
-        self.details_id = match kind {
-            CtxKind::Details(id) => Some(id),
+        self.details_id = match &kind {
+            CtxKind::Details { id, .. } => Some(*id),
+            _ => None,
+        };
+        self.image_path = match &kind {
+            CtxKind::Image { path, .. } => Some(path.clone()),
             _ => None,
         };
         self.items = items_for(kind);
@@ -349,6 +382,76 @@ mod tests {
         );
     }
 
+    /// DEF-T07-001：Details 菜单只出现与当前展开态匹配的一项。
+    #[test]
+    fn details_menu_matches_expanded_state() {
+        let expanded = items_for(CtxKind::Details {
+            id: BlockId(7),
+            expanded: true,
+        });
+        assert!(expanded.iter().any(|&(_, a)| a == CtxAction::FoldDetails));
+        assert!(
+            !expanded
+                .iter()
+                .any(|&(_, a)| a == CtxAction::UnfoldDetails),
+            "已展开时不得再列展开"
+        );
+
+        let collapsed = items_for(CtxKind::Details {
+            id: BlockId(7),
+            expanded: false,
+        });
+        assert!(collapsed
+            .iter()
+            .any(|&(_, a)| a == CtxAction::UnfoldDetails));
+        assert!(
+            !collapsed.iter().any(|&(_, a)| a == CtxAction::FoldDetails),
+            "已折叠时不得再列折叠"
+        );
+    }
+
+    /// DEF-T67-E1-005：图片菜单有专用动作；缺失图片额外给出可见提示项。
+    #[test]
+    fn image_menu_has_dedicated_actions_and_missing_hint() {
+        let normal = items_for(CtxKind::Image {
+            path: "img/a.png".into(),
+            missing: false,
+        });
+        assert!(normal
+            .iter()
+            .any(|&(_, a)| a == CtxAction::CopyImagePath));
+        assert!(normal.iter().any(|&(_, a)| a == CtxAction::ReloadImage));
+        assert!(!normal
+            .iter()
+            .any(|&(_, a)| a == CtxAction::ImageMissingHint));
+
+        let missing = items_for(CtxKind::Image {
+            path: "img/gone.png".into(),
+            missing: true,
+        });
+        assert_eq!(missing[0].1, CtxAction::ImageMissingHint);
+        assert!(missing
+            .iter()
+            .any(|&(_, a)| a == CtxAction::CopyImagePath));
+        assert!(missing.iter().any(|&(_, a)| a == CtxAction::ReloadImage));
+    }
+
+    #[test]
+    fn opening_image_context_caches_source_path() {
+        let mut m = CtxMenu::default();
+        m.open_at(
+            0.0,
+            0.0,
+            CtxKind::Image {
+                path: "img/a.png".into(),
+                missing: false,
+            },
+            None,
+            None,
+        );
+        assert_eq!(m.image_path.as_deref(), Some("img/a.png"));
+    }
+
     #[test]
     fn table_header_only_offers_column_actions() {
         let tc = TableCtx {
@@ -477,7 +580,7 @@ mod tests {
                 ncols: 1,
             }),
         ] {
-            let items = items_for(kind);
+            let items = items_for(kind.clone());
             assert!(
                 items.iter().any(|&(_, a)| a == CtxAction::Separator),
                 "{kind:?} 应有分组分隔线"

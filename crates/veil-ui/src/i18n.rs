@@ -173,6 +173,9 @@ keys! {
     CtxOpenInBrowser => "ctx.open_in_browser", "在浏览器中打开";
     CtxCopyLink => "ctx.copy_link", "复制链接地址";
     CtxInsertImage => "ctx.insert_image", "插入图片";
+    CtxCopyImagePath => "ctx.copy_image_path", "复制图片路径";
+    CtxReloadImage => "ctx.reload_image", "重新加载图片";
+    CtxImageMissing => "ctx.image_missing", "图片文件缺失（当前显示替代文本）";
     CtxMermaidPreview => "ctx.mermaid.preview", "在 mermaid.live 预览";
     CtxMermaidCopySource => "ctx.mermaid.copy_source", "复制源码";
     CtxMermaidCopyLink => "ctx.mermaid.copy_link", "复制预览链接";
@@ -325,6 +328,7 @@ keys! {
     NoticeAnchorMissing => "notice.anchor_missing", "未找到锚点";
     NoticeLinkUnsupported => "notice.link_unsupported", "无法打开链接：不支持的链接地址 {}";
     NoticeLinkFailed => "notice.link_failed", "无法打开链接: {}";
+    NoticeImageMissing => "notice.image_missing", "图片文件缺失，已显示替代文本：{}";
     NoticeFocusMode => "notice.focus_mode", "专注模式：{}";
     NoticeTypewriterMode => "notice.typewriter_mode", "打字机模式：{}";
     NoticeRemoteImageFailed => "notice.remote_image_failed", "部分远程图片加载失败，已显示替代文本";

@@ -104,7 +104,10 @@ impl App {
             // 先更新 layout（scale 变化时需要）
             let layout = self.settings_layout();
             let id = if let Some(s) = self.ui_state.settings.as_mut() {
-                s.state.on_key(&key, mods, &mut s.form, &layout)
+                let id = s.state.on_key(&key, mods, &mut s.form, &layout);
+                // 低高度滚动：键盘焦点移到视口外时自动滚到可见（DEF-T07-E1-001）
+                s.state.reveal_focused(layout.scroll, layout.shown_rows);
+                id
             } else {
                 None
             };
@@ -1086,43 +1089,60 @@ impl App {
         } else {
             self.editor.set_caret(off);
             self.window_state.goal_x = None;
-            // 优先级：表格内先查 link（单元格 inline）→ 再给 table_ctx →
-            // mermaid 围栏块（带专用菜单）→ 块级查 link → 普通块
-            match self.link_at(off) {
-                Some(url) => (CtxKind::Link, Some(url), None, None),
-                None => match self.table_ctx_at(off) {
-                    Some(tc) => (CtxKind::Table(tc), None, None, None),
-                    None => match self.mermaid_block_info_at(off) {
-                        Some((body, body_start)) if mermaid_body_is_empty(&body) => {
-                            // 空块右键也把光标落到 body 起点：模板项只在这里有意义，
-                            // 落在点击位置会破坏围栏结构。
-                            self.editor.set_caret(body_start);
-                            (
-                                CtxKind::MermaidEmptyBlock,
-                                None,
-                                Some(body),
-                                Some(body_start),
-                            )
-                        }
-                        Some((body, _)) => (CtxKind::MermaidBlock, None, Some(body), None),
-                        None => {
-                            // Details 块优先于普通块：右键菜单给折叠/展开项。
-                            // B3：命中 details 子块时同样归到所属头块，菜单行为一致。
-                            let details_kind = self
-                                .index
-                                .blocks
-                                .iter()
-                                .find(|g| g.range.start <= off && off <= g.range.end)
-                                .and_then(|g| {
-                                    if matches!(&g.kind, BlockKind::Details { .. }) {
-                                        Some(g.id)
-                                    } else {
-                                        g.details_parent
-                                    }
-                                })
-                                .map(CtxKind::Details);
-                            (details_kind.unwrap_or(CtxKind::Block), None, None, None)
-                        }
+            // 优先级：图片（单元格内也命中）→ 表格内 link → table_ctx →
+            // mermaid 围栏块（带专用菜单）→ 块级 link → 普通块
+            match self.image_at(off) {
+                Some((path, missing)) => {
+                    if missing {
+                        // 缺失图片：菜单打开时给出可见提示（DEF-T67-E1-005）。
+                        self.ui_state.chrome.notice =
+                            crate::i18n::t(crate::i18n::Key::NoticeImageMissing)
+                                .replace("{}", &path);
+                    }
+                    (CtxKind::Image { path, missing }, None, None, None)
+                }
+                None => match self.link_at(off) {
+                    Some(url) => (CtxKind::Link, Some(url), None, None),
+                    None => match self.table_ctx_at(off) {
+                        Some(tc) => (CtxKind::Table(tc), None, None, None),
+                        None => match self.mermaid_block_info_at(off) {
+                            Some((body, body_start)) if mermaid_body_is_empty(&body) => {
+                                // 空块右键也把光标落到 body 起点：模板项只在这里有意义，
+                                // 落在点击位置会破坏围栏结构。
+                                self.editor.set_caret(body_start);
+                                (
+                                    CtxKind::MermaidEmptyBlock,
+                                    None,
+                                    Some(body),
+                                    Some(body_start),
+                                )
+                            }
+                            Some((body, _)) => (CtxKind::MermaidBlock, None, Some(body), None),
+                            None => {
+                                // Details 块优先于普通块：右键菜单给折叠/展开项。
+                                // B3：命中 details 子块时同样归到所属头块，菜单行为一致。
+                                let details_kind = self
+                                    .index
+                                    .blocks
+                                    .iter()
+                                    .find(|g| g.range.start <= off && off <= g.range.end)
+                                    .and_then(|g| {
+                                        let id = if matches!(&g.kind, BlockKind::Details { .. }) {
+                                            g.id
+                                        } else {
+                                            g.details_parent?
+                                        };
+                                        Some(CtxKind::Details {
+                                            id,
+                                            expanded: self
+                                                .ui_state
+                                                .expanded_details
+                                                .contains(&id),
+                                        })
+                                    });
+                                (details_kind.unwrap_or(CtxKind::Block), None, None, None)
+                            }
+                        },
                     },
                 },
             }
@@ -1509,6 +1529,54 @@ impl App {
         self.editor.session().text_slice(url)
     }
 
+    /// 命中偏移处的图片源与缺失状态（DEF-T67-E1-005）。
+    /// 支持 Markdown `![alt](src)` 与白名单自闭合 `<img src="…">`；
+    /// 远程/内联图片视为“存在”，本地图片按文档目录解析后探测文件。
+    pub(crate) fn image_at(&self, offset: usize) -> Option<(String, bool)> {
+        let nodes = self.inlines_at_offset(offset)?;
+        fn find(nodes: &[InlineNode], off: usize) -> Option<&InlineNode> {
+            nodes.iter().find_map(|n| {
+                if n.range.start <= off && off < n.range.end {
+                    if matches!(n.kind, InlineKind::Image)
+                        || matches!(
+                            &n.kind,
+                            InlineKind::HtmlSelfClosed {
+                                tag: HtmlTag::Img,
+                                ..
+                            }
+                        )
+                    {
+                        return Some(n);
+                    }
+                    find(&n.children, off)
+                } else {
+                    None
+                }
+            })
+        }
+        let node = find(&nodes, offset)?;
+        let src = match &node.kind {
+            InlineKind::Image => {
+                let range = node.url?;
+                Some(self.editor.session().text_slice(range)?)
+            }
+            InlineKind::HtmlSelfClosed {
+                tag: HtmlTag::Img,
+                attrs,
+            } => Some(attrs.src.clone().unwrap_or_default()),
+            _ => return None,
+        };
+        let src = src?.trim().to_string();
+        if src.is_empty() {
+            return None;
+        }
+        let missing = match crate::paint::local_image_path(&src, self.doc.path.as_deref()) {
+            Some(path) => !path.exists(),
+            None => false,
+        };
+        Some((src, missing))
+    }
+
     /// 命中偏移处的 `<abbr title="…">` 文本（悬停提示内容）。表格单元格同样支持；
     /// 空 title 不产出提示（HTML 语义上等同于无提示）。
     fn abbr_title_at(&self, offset: usize) -> Option<String> {
@@ -1805,6 +1873,27 @@ impl App {
                     }
                 }
             }
+            // 图片专用动作（DEF-T67-E1-005）：复制源路径；重新加载清除失败缓存后重绘。
+            CtxAction::CopyImagePath => {
+                if let Some(path) = self.ui_state.ctx.image_path.clone() {
+                    self.ports.clipboard.set(&path);
+                    self.ui_state.chrome.notice =
+                        crate::i18n::t(crate::i18n::Key::CtxCopyImagePath).to_string();
+                }
+            }
+            CtxAction::ReloadImage => {
+                let Some(src) = self.ui_state.ctx.image_path.clone() else {
+                    return;
+                };
+                let key = match crate::paint::local_image_path(&src, self.doc.path.as_deref()) {
+                    Some(path) => path.to_string_lossy().into_owned(),
+                    None => src,
+                };
+                self.cache.invalidate_image(&key);
+                self.request_redraw();
+            }
+            // 提示项无动作：文案已在菜单中可见。
+            CtxAction::ImageMissingHint => {}
         }
         self.request_redraw();
     }
@@ -2726,6 +2815,16 @@ impl App {
     /// 滚轮：右键菜单打开时吞掉（瞬态菜单不滚动正文）；快速打开浮层内滚动候选，
     /// 指针在大纲面板内时滚动面板，否则滚动正文。
     pub(crate) fn on_wheel(&mut self, d: f32) {
+        // 设置模态滚动的是字段区，不是背景正文（DEF-T07-E1-001）。
+        if self.ui_state.settings.is_some() {
+            let layout = self.settings_layout();
+            if let Some(s) = self.ui_state.settings.as_mut() {
+                let step = if d > 0.0 { -1 } else { 1 };
+                s.state.scroll(step, layout.max_scroll);
+            }
+            self.request_redraw();
+            return;
+        }
         if self.ui_state.modal.is_some() {
             return; // 模态优先：遮罩下不滚动正文
         }
@@ -3334,9 +3433,11 @@ pub(crate) fn map_key(event: &winit::event::KeyEvent, mods: Mods) -> Option<Key>
     map_key_parts(event.text.as_deref(), event.key_without_modifiers(), mods)
 }
 
-/// Ctrl 组合下的标点快捷键：`/`（源码模式）与 `,`（设置）。
+/// Ctrl 组合下的标点快捷键：`/`（源码模式）、`,`（设置）与小键盘缩放键。
 /// 逻辑键与物理键都认：部分布局/IME 只给其中之一（如在 Windows 中文输入法下
 /// 逻辑键可能不是字符键）。仅 Ctrl 组合调用，普通标点仍走文本分支，不被吞。
+/// 小键盘 `+`/`-`/`0` 在 NumLock 开/关时逻辑键可能是 `+`/`-`/`0` 或导航键，
+/// 故同时按物理键识别，缩放语义与主键盘 `Ctrl+=/-/0` 一致（DEF-T06-004）。
 pub(crate) fn ctrl_punctuation(logical: &WKey, physical: PhysicalKey) -> Option<Key> {
     let logical = match logical {
         WKey::Character(c) => Some(c.as_str()),
@@ -3347,6 +3448,15 @@ pub(crate) fn ctrl_punctuation(logical: &WKey, physical: PhysicalKey) -> Option<
     }
     if logical == Some(",") || physical == PhysicalKey::Code(KeyCode::Comma) {
         return Some(Key::Comma);
+    }
+    if logical == Some("+") || physical == PhysicalKey::Code(KeyCode::NumpadAdd) {
+        return Some(Key::Equal);
+    }
+    if physical == PhysicalKey::Code(KeyCode::NumpadSubtract) {
+        return Some(Key::Minus);
+    }
+    if physical == PhysicalKey::Code(KeyCode::Numpad0) {
+        return Some(Key::Digit0);
     }
     None
 }

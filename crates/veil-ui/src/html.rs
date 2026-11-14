@@ -1,9 +1,9 @@
 //! 富文本粘贴（切片 11）：剪贴板 HTML → Markdown 子集。
 //!
 //! 纯函数、零 GUI 依赖。覆盖 Chrome/Word 纯文本复制出的常见结构：
-//! 段落/标题/粗斜体/行内代码/链接/换行/分隔线/代码块/列表（嵌套）/引用块/常见实体。
+//! 段落/标题/粗斜体/行内代码/链接/换行/分隔线/代码块/列表（嵌套）/引用块/表格/图片/常见实体。
 //! 未知标签递归取子节点；未知实体原样保留（不猜测语义）。
-//! 非目标：图片落盘、表格、样式属性（class/style 一律忽略）。
+//! 非目标：图片落盘、样式属性（class/style 一律忽略）。
 
 /// HTML → Markdown。空/纯空白输入返回空串；输出非空时保证以单个换行结尾。
 pub fn html_to_markdown(html: &str) -> String {
@@ -328,6 +328,7 @@ fn is_block(name: &str) -> bool {
             | "aside"
             | "nav"
             | "figure"
+            | "table"
     )
 }
 
@@ -392,6 +393,8 @@ fn render_block(node: &Node) -> Option<String> {
             (!t.is_empty()).then(|| format!("{} {t}", "#".repeat(level)))
         }
         "pre" => render_pre(children),
+        // HTML 表格 → GFM 表格（DEF-T67-E1-003）：首行作表头，列数按最宽行补齐。
+        "table" => render_table(children),
         "blockquote" => {
             let inner = render_blocks(children);
             if inner.is_empty() {
@@ -426,8 +429,68 @@ fn render_block(node: &Node) -> Option<String> {
     }
 }
 
-fn render_pre(children: &[Node]) -> Option<String> {
-    let mut raw = String::new();
+/// `<table>` → GFM 表格。`thead`/`tbody`/`tfoot` 递归收集 `tr`，`th`/`td`
+/// 都作为单元格；首行作表头，缺失行按最宽行补空列，避免畸形表格。
+fn render_table(children: &[Node]) -> Option<String> {
+    fn collect(node: &Node, rows: &mut Vec<Vec<String>>) {
+        let Node::Elem { name, children, .. } = node else {
+            return;
+        };
+        if name == "tr" {
+            let mut cells = Vec::new();
+            for c in children {
+                let Node::Elem {
+                    name: cell_name,
+                    children: cell_children,
+                    ..
+                } = c
+                else {
+                    continue;
+                };
+                if cell_name != "td" && cell_name != "th" {
+                    continue;
+                }
+                let mut inner = String::new();
+                for x in cell_children {
+                    render_inline(x, &mut inner);
+                }
+                // 单元格内换行无法在 GFM 表格表达：改用 `<br>`；竖线必须转义。
+                let cell = inner.trim().replace('|', "\\|").replace(['\n', '\r'], "<br>");
+                cells.push(cell);
+            }
+            if !cells.is_empty() {
+                rows.push(cells);
+            }
+        } else {
+            for c in children {
+                collect(c, rows);
+            }
+        }
+    }
+
+    let mut rows: Vec<Vec<String>> = Vec::new();
+    for c in children {
+        collect(c, &mut rows);
+    }
+    if rows.is_empty() {
+        return None;
+    }
+    let ncols = rows.iter().map(Vec::len).max().unwrap_or(0);
+    if ncols == 0 {
+        return None;
+    }
+    for row in &mut rows {
+        row.resize(ncols, String::new());
+    }
+    let mut out = format!("| {} |\n| {} |", rows[0].join(" | "), vec!["---"; ncols].join(" | "));
+    for row in rows.iter().skip(1) {
+        out.push('\n');
+        out.push_str(&format!("| {} |", row.join(" | ")));
+    }
+    Some(out)
+}
+
+fn render_pre(children: &[Node]) -> Option<String> {    let mut raw = String::new();
     for c in children {
         raw_text(c, &mut raw);
     }
@@ -521,6 +584,19 @@ fn render_inline(node: &Node, out: &mut String) {
             "strong" | "b" => wrap(out, "**", children),
             "em" | "i" => wrap(out, "*", children),
             "code" => render_code(children, out),
+            // `<img src alt>` → Markdown 图片；危险/空 src 只保留 alt 文字。
+            "img" => {
+                let src = attr(attrs, "src").map(str::trim).unwrap_or("");
+                let alt = attr(attrs, "alt").map(str::trim).unwrap_or("");
+                let alt_md = alt.replace(['[', ']'], "");
+                if src.is_empty() || !veil_core::link_url_is_safe(src) {
+                    out.push_str(&alt_md);
+                } else if alt.is_empty() {
+                    out.push_str(&format!("![]({src})"));
+                } else {
+                    out.push_str(&format!("![{alt_md}]({src})"));
+                }
+            }
             "a" => {
                 let mut inner = String::new();
                 for c in children {
@@ -765,6 +841,37 @@ mod tests {
             html_to_markdown("<p><a href=\"img/a.png\">图</a></p>"),
             "[图](img/a.png)\n"
         );
+    }
+
+    /// DEF-T67-E1-003：HTML 粘贴保留表格结构与图片。
+    #[test]
+    fn paste_table_preserves_structure_and_images() {
+        let src = "<table><thead><tr><th>A</th><th>B</th></tr></thead>\
+                   <tbody><tr><td>1</td><td><img src=\"img/a.png\" alt=\"x\"></td></tr>\
+                   <tr><td>2</td><td>3</td></tr></tbody></table>";
+        assert_eq!(
+            html_to_markdown(src),
+            "| A | B |\n| --- | --- |\n| 1 | ![x](img/a.png) |\n| 2 | 3 |\n"
+        );
+        // 缺 th 时首行作表头；短行补空列；竖线转义。
+        assert_eq!(
+            html_to_markdown("<table><tr><td>a|b</td></tr><tr><td>c</td><td>d</td></tr></table>"),
+            "| a\\|b |  |\n| --- | --- |\n| c | d |\n"
+        );
+    }
+
+    #[test]
+    fn paste_image_drops_unsafe_source_but_keeps_alt() {
+        assert_eq!(
+            html_to_markdown("<p>前 <img src=\"https://a.b/i.png\" alt=\"图\"> 后</p>"),
+            "前 ![图](https://a.b/i.png) 后\n"
+        );
+        assert_eq!(
+            html_to_markdown("<p><img src=\"javascript:alert(1)\" alt=\"图\"></p>"),
+            "图\n",
+            "危险图片协议不得进入文档"
+        );
+        assert_eq!(html_to_markdown("<p><img src=\"\"></p>"), "");
     }
 
     #[test]

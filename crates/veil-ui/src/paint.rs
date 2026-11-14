@@ -1644,6 +1644,9 @@ impl App {
                 button_ids: Vec::new(),
                 window_geom_clear: None,
                 window_geom_value: None,
+                scroll: 0,
+                shown_rows: 0,
+                max_scroll: 0,
             };
         };
         let mut text = ModalText {
@@ -1651,7 +1654,14 @@ impl App {
             engine: &mut self.engine,
             scale,
         };
-        crate::view::settings::layout(vp, scale, &s.form, &mut text, &s.buttons)
+        crate::view::settings::layout(
+            vp,
+            scale,
+            &s.form,
+            &mut text,
+            &s.buttons,
+            s.state.scroll_rows,
+        )
     }
 
     /// 设置模态绘制：遮罩 + 卡片 + 字段 + 按钮。

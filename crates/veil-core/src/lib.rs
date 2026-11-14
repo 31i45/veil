@@ -6,6 +6,7 @@
 mod buffer;
 mod callouts;
 mod history;
+mod link_safety;
 mod mermaid;
 mod range;
 mod session;
@@ -14,7 +15,7 @@ mod syntax;
 pub mod toc;
 
 pub use callouts::CalloutRegistry;
-pub use toc::{generate_toc, is_toc_marker};
+pub use link_safety::{link_scheme, link_url_is_safe};
 pub use mermaid::{
     detect_type, mermaid_live_url, MermaidTemplate, CLASS_TEMPLATE, ER_TEMPLATE,
     FLOWCHART_TEMPLATE, MERMAID_LIVE_BASE, SEQUENCE_TEMPLATE, STATE_TEMPLATE,
@@ -25,5 +26,6 @@ pub use slug::{heading_slug, heading_slugs};
 pub use syntax::{
     emphasis_spans, list_signature, sanitize_style, should_strip_html, task_span, AdmonitionType,
     BlockContainer, BlockId, BlockKind, Callout, CellAlign, EmphasisSpan, HtmlAttrs, HtmlStyle,
-    HtmlTag, InlineKind, InlineNode, Table, TableCell,
+    HtmlTag, InlineKind, InlineNode, Table, TableCell, HTML_INLINE_WHITELIST,
 };
+pub use toc::{generate_toc, is_toc_marker};

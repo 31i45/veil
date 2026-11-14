@@ -528,6 +528,12 @@ fn render_inline(node: &Node, out: &mut String) {
                 }
                 let text = inner.trim();
                 let href = attr(attrs, "href").map(str::trim).unwrap_or("");
+                // 危险 scheme 不得经粘贴进入文档：只保留文字，丢弃目标。
+                let href = if href.is_empty() || !veil_core::link_url_is_safe(href) {
+                    ""
+                } else {
+                    href
+                };
                 if href.is_empty() {
                     out.push_str(text);
                 } else if text.is_empty() {
@@ -739,6 +745,26 @@ mod tests {
             "https://a.b\n"
         );
         assert_eq!(html_to_markdown("<p><a>裸文本</a></p>"), "裸文本\n");
+    }
+
+    /// 粘贴是链接进入文档的另一条通道：危险 scheme 只保留文字。
+    #[test]
+    fn paste_drops_dangerous_link_scheme() {
+        for href in [
+            "javascript:alert(1)",
+            "JaVaScRiPt:alert(1)",
+            "data:text/html;base64,AA",
+            "file:///C:/x",
+            "vbscript:MsgBox(1)",
+        ] {
+            let src = format!("<p><a href=\"{href}\">文字</a></p>");
+            assert_eq!(html_to_markdown(&src), "文字\n", "{href}");
+        }
+        // 相对路径与锚点仍可粘贴为链接
+        assert_eq!(
+            html_to_markdown("<p><a href=\"img/a.png\">图</a></p>"),
+            "[图](img/a.png)\n"
+        );
     }
 
     #[test]

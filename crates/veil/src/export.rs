@@ -219,6 +219,20 @@ pub fn html_of(session: &Session, style: &ExportStyle, font: &latex_rust::MathFo
             i = j;
             continue;
         }
+        // 块级原始 HTML（`HtmlBlock`）：pulldown 的 Html 事件会原样输出源码，
+        // 直接交 `push_html` 等于把 `<script>`/`onerror` 直出到导出件。
+        // 这里单独渲染：危险标签整段剥除，白名单标签过滤属性后保留，其余转义。
+        if kind == BlockKind::HtmlBlock {
+            if let Some(text) = session.text_slice(range) {
+                let safe = sanitize_block_html(&text);
+                body.push_str(&safe);
+                if !safe.is_empty() && !safe.ends_with('\n') {
+                    body.push('\n');
+                }
+            }
+            i += 1;
+            continue;
+        }
         // v0 其余块类型均自包含（段落/代码/表格/引用/分隔线），逐块独立解析无跨块上下文
         // B2：details 内表格的块区间可能吞入闭标签行，导出只取真实表格区间。
         let span = if kind == BlockKind::Table {
@@ -263,7 +277,10 @@ pub fn html_of(session: &Session, style: &ExportStyle, font: &latex_rust::MathFo
         details_stack.pop();
     }
     let notes = footnotes_html(session, &footnote_defs, opts);
-    format!("{}{body}{notes}</body>\n</html>\n", head(style))
+    // 最后一道 scheme 白名单：Markdown 链接（含引用式定义的 dest）由 pulldown 直接写
+    // `href`，只能在成品标签上复核；非白名单目标整条属性删除，文字保留。
+    let content = sanitize_html_urls(&format!("{body}{notes}"));
+    format!("{}{content}</body>\n</html>\n", head(style))
 }
 
 /// 引用块首行 `[!NAME]` 标记区间（字节，行内相对块起点）：缩进 + `>` + 空白 +
@@ -584,7 +601,7 @@ fn collect_html_inlines(
 /// 把 attrs 结构体格式化为 `key="value"` 对（解析层已过滤危险键）。
 fn format_html_attrs(attrs: &veil_core::HtmlAttrs) -> String {
     let mut parts = Vec::new();
-    // `<a href>`：目标仅来自解析层白名单（javascript: 已在解析层置空）
+    // `<a href>`：目标已由解析层按统一 scheme 白名单过滤（非白名单置空）。
     if let Some(href) = attrs.href.as_deref() {
         parts.push(format!("href=\"{}\"", escape_attr(href)));
     }
@@ -631,6 +648,406 @@ fn render_html_children(
     }
     out.push_str(&text[p..end]);
     out
+}
+
+/// 标签名长度（字母开头，后续 alnum/-）；不是合法标签返回 `None`。
+fn tag_head_len(inner: &str) -> Option<usize> {
+    let b = inner.as_bytes();
+    if b.first().is_none_or(|c| !c.is_ascii_alphabetic()) {
+        return None;
+    }
+    let mut i = 1;
+    while i < b.len() && (b[i].is_ascii_alphanumeric() || b[i] == b'-') {
+        i += 1;
+    }
+    Some(i)
+}
+
+/// `<` 之后找标签结束 `>`（跳过引号内的 `>`），返回 `>` 之后的位置。
+fn tag_end(b: &[u8], start: usize) -> Option<usize> {
+    let mut quote = 0u8;
+    let mut i = start;
+    while i < b.len() {
+        let c = b[i];
+        if quote != 0 {
+            if c == quote {
+                quote = 0;
+            }
+        } else if c == b'"' || c == b'\'' {
+            quote = c;
+        } else if c == b'>' {
+            return Some(i + 1);
+        }
+        i += 1;
+    }
+    None
+}
+
+fn tag_boundary(b: Option<&u8>) -> bool {
+    matches!(
+        b,
+        None | Some(b'>') | Some(b'/') | Some(b' ') | Some(b'\t') | Some(b'\n') | Some(b'\r')
+    )
+}
+
+/// 跳过危险标签的内容，返回其闭标签之后的位置；无闭标签则吞到末尾。
+/// `script`/`style`/`textarea` 的内容是原始文本，不参与嵌套计数。
+fn skip_element(src: &str, from: usize, name: &str) -> usize {
+    let lower = src.to_ascii_lowercase();
+    let close = format!("</{name}");
+    let raw_text = matches!(name, "script" | "style" | "textarea");
+    let mut depth = 1usize;
+    let mut pos = from;
+    while let Some(rel) = lower[pos..].find('<') {
+        let at = pos + rel;
+        if lower[at..].starts_with(&close) && tag_boundary(lower.as_bytes().get(at + close.len())) {
+            depth -= 1;
+            if depth == 0 {
+                return lower[at..].find('>').map_or(src.len(), |r| at + r + 1);
+            }
+        } else if !raw_text {
+            let open = format!("<{name}");
+            if lower[at..].starts_with(&open) && tag_boundary(lower.as_bytes().get(at + open.len()))
+            {
+                depth += 1;
+            }
+        }
+        pos = at + 1;
+    }
+    src.len()
+}
+
+/// 块级 HTML 标签白名单：只保留 core 认定的行内安全标签。
+fn block_tag_allowed(tag: &str) -> bool {
+    veil_core::HTML_INLINE_WHITELIST.contains(&tag)
+}
+
+/// 属性名是否承载 URL（需要 scheme 白名单校验）。
+fn is_url_attr(name: &str) -> bool {
+    matches!(
+        name,
+        "href"
+            | "src"
+            | "action"
+            | "formaction"
+            | "poster"
+            | "background"
+            | "cite"
+            | "data"
+            | "longdesc"
+            | "usemap"
+            | "manifest"
+            | "xlink:href"
+    )
+}
+
+/// 块级 HTML 属性过滤：剥 `on*`、危险 URL 属性、`srcdoc`/`srcset`/`ping`，
+/// `style` 经 core 净化，其余属性保留并转义值。
+fn sanitize_block_attrs(attr_src: &str) -> String {
+    let mut out = String::new();
+    let b = attr_src.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r' | b'/') {
+            i += 1;
+        }
+        if i >= b.len() {
+            break;
+        }
+        let ns = i;
+        while i < b.len() && !matches!(b[i], b' ' | b'\t' | b'\n' | b'\r' | b'=' | b'/') {
+            i += 1;
+        }
+        let name = attr_src[ns..i].to_ascii_lowercase();
+        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') {
+            i += 1;
+        }
+        let mut val: Option<&str> = None;
+        if b.get(i) == Some(&b'=') {
+            i += 1;
+            while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') {
+                i += 1;
+            }
+            let quote = b.get(i).copied().filter(|c| *c == b'"' || *c == b'\'');
+            if let Some(q) = quote {
+                i += 1;
+                let vs = i;
+                while i < b.len() && b[i] != q {
+                    i += 1;
+                }
+                val = Some(&attr_src[vs..i.min(attr_src.len())]);
+                i = (i + 1).min(b.len());
+            } else {
+                let vs = i;
+                while i < b.len() && !matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') {
+                    i += 1;
+                }
+                val = Some(&attr_src[vs..i]);
+            }
+        }
+        if name.is_empty()
+            || name.starts_with("on")
+            || matches!(name.as_str(), "srcdoc" | "srcset" | "ping")
+        {
+            continue;
+        }
+        if name == "style" {
+            if let Some(style) = val.and_then(veil_core::sanitize_style) {
+                out.push_str(&format!(" style=\"{}\"", escape_attr(&style)));
+            }
+            continue;
+        }
+        if is_url_attr(&name) {
+            if let Some(v) = val {
+                if veil_core::link_url_is_safe(v) {
+                    out.push_str(&format!(" {name}=\"{}\"", escape_attr(v)));
+                }
+            }
+            continue;
+        }
+        match val {
+            Some(v) => out.push_str(&format!(" {name}=\"{}\"", escape_attr(v))),
+            None => {
+                out.push(' ');
+                out.push_str(&name);
+            }
+        }
+    }
+    out
+}
+
+/// 块级原始 HTML 的安全化渲染。
+///
+/// pulldown 会把块级 HTML 原样写进导出件，因此这里必须自行过滤：
+/// - `script`/`style`/`iframe`/`object`/`embed`/`form`/`textarea`：整段剥除（含内容）；
+/// - 白名单标签：保留标签语义，属性经 [`sanitize_block_attrs`] 过滤；
+/// - 其余标签与正文：HTML 转义为可见文本；注释/CDATA/声明整体丢弃。
+fn sanitize_block_html(src: &str) -> String {
+    let b = src.as_bytes();
+    let mut out = String::with_capacity(src.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] != b'<' {
+            let start = i;
+            while i < b.len() && b[i] != b'<' {
+                i += 1;
+            }
+            out.push_str(&escape_html(&src[start..i]));
+            continue;
+        }
+        let rest = &src[i..];
+        if rest.starts_with("<!--") {
+            i = rest.find("-->").map_or(b.len(), |rel| i + rel + 3);
+            continue;
+        }
+        if rest.starts_with("<![CDATA[") {
+            i = rest.find("]]>").map_or(b.len(), |rel| i + rel + 3);
+            continue;
+        }
+        if rest.starts_with("<!") || rest.starts_with("<?") {
+            i = rest.find('>').map_or(b.len(), |rel| i + rel + 1);
+            continue;
+        }
+        // `<` 后不是标签起始字符（如正文里的 `a < b`）：按文本转义，
+        // 否则会把下一段真实标签一起吞进“标签”里。
+        if !matches!(b.get(i + 1), Some(c) if c.is_ascii_alphabetic() || *c == b'/') {
+            out.push_str("&lt;");
+            i += 1;
+            continue;
+        }
+        let Some(end) = tag_end(b, i + 1) else {
+            out.push_str("&lt;");
+            i += 1;
+            continue;
+        };
+        let inner = &src[i + 1..end - 1];
+        if let Some(close) = inner.strip_prefix('/') {
+            let Some(len) = tag_head_len(close) else {
+                out.push_str(&escape_html(&src[i..end]));
+                i = end;
+                continue;
+            };
+            let raw = &close[..len];
+            let name = raw.to_ascii_lowercase();
+            if veil_core::should_strip_html(&name) {
+                // 孤立闭标签：丢弃
+            } else if block_tag_allowed(&name) {
+                out.push_str("</");
+                out.push_str(raw);
+                out.push('>');
+            } else {
+                out.push_str(&escape_html(&src[i..end]));
+            }
+            i = end;
+            continue;
+        }
+        let Some(len) = tag_head_len(inner) else {
+            out.push_str(&escape_html(&src[i..end]));
+            i = end;
+            continue;
+        };
+        let raw = &inner[..len];
+        let name = raw.to_ascii_lowercase();
+        let self_closed = inner.trim_end().ends_with('/');
+        if veil_core::should_strip_html(&name) {
+            i = if self_closed || name == "embed" {
+                end
+            } else {
+                skip_element(src, end, &name)
+            };
+            continue;
+        }
+        if block_tag_allowed(&name) {
+            out.push('<');
+            out.push_str(raw);
+            out.push_str(&sanitize_block_attrs(&inner[len..]));
+            if self_closed {
+                out.push_str(" />");
+            } else {
+                out.push('>');
+            }
+        } else {
+            out.push_str(&escape_html(&src[i..end]));
+        }
+        i = end;
+    }
+    out
+}
+
+/// 成品 HTML 的 scheme 白名单复核：逐个标签删除不安全的 URL 属性与 `on*`。
+/// 只处理标签本身，正文/代码块里的字面 `href="…"` 不受影响。
+fn sanitize_html_urls(html: &str) -> String {
+    let b = html.as_bytes();
+    let mut out = String::with_capacity(html.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] != b'<' {
+            let start = i;
+            while i < b.len() && b[i] != b'<' {
+                i += 1;
+            }
+            out.push_str(&html[start..i]);
+            continue;
+        }
+        let Some(end) = tag_end(b, i + 1) else {
+            out.push_str(&html[i..]);
+            break;
+        };
+        // `<` 后不是标签起始字符：原样输出该字符，继续扫描后续真实标签。
+        if !matches!(b.get(i + 1), Some(c) if c.is_ascii_alphabetic() || *c == b'/') {
+            out.push_str(&html[i..i + 1]);
+            i += 1;
+            continue;
+        }
+        let inner = &html[i + 1..end - 1];
+        if let Some(close) = inner.strip_prefix('/') {
+            // 闭标签：危险标签整体丢弃（开标签处已吞掉内容），其余原样保留。
+            if let Some(len) = tag_head_len(close) {
+                if veil_core::should_strip_html(&close[..len].to_ascii_lowercase()) {
+                    i = end;
+                    continue;
+                }
+            }
+            out.push_str(&html[i..end]);
+            i = end;
+            continue;
+        }
+        let Some(len) = tag_head_len(inner) else {
+            // 注释/声明/处理指令：原样保留
+            out.push_str(&html[i..end]);
+            i = end;
+            continue;
+        };
+        let raw = &inner[..len];
+        let name = raw.to_ascii_lowercase();
+        let self_closed = inner.trim_end().ends_with('/');
+        if veil_core::should_strip_html(&name) {
+            // 段落里漏出的 `<object>`/`<iframe>` 等：整段剥除（含内容）。
+            i = if self_closed || name == "embed" {
+                end
+            } else {
+                skip_element(html, end, &name)
+            };
+            continue;
+        }
+        match strip_unsafe_url_attrs(&inner[len..]) {
+            // 无属性被删：原样保留（保住 `<input .../>` 之类的既有字节形态）。
+            None => out.push_str(&html[i..end]),
+            Some(attrs) => {
+                out.push('<');
+                out.push_str(raw);
+                out.push_str(&attrs);
+                if self_closed {
+                    out.push_str(" />");
+                } else {
+                    out.push('>');
+                }
+            }
+        }
+        i = end;
+    }
+    out
+}
+
+/// 保留属性原文，只删除 `on*`、`srcdoc`/`srcset`/`ping` 与非白名单 URL 目标。
+/// 没有任何属性被删时返回 `None`（调用方据此原样输出标签）。
+fn strip_unsafe_url_attrs(attr_src: &str) -> Option<String> {
+    let mut out = String::new();
+    let mut changed = false;
+    let b = attr_src.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        let ws = i;
+        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r' | b'/') {
+            i += 1;
+        }
+        if i >= b.len() {
+            break;
+        }
+        let ns = i;
+        while i < b.len() && !matches!(b[i], b' ' | b'\t' | b'\n' | b'\r' | b'=' | b'/') {
+            i += 1;
+        }
+        let name = attr_src[ns..i].to_ascii_lowercase();
+        let mut val: Option<&str> = None;
+        let mut j = i;
+        while j < b.len() && matches!(b[j], b' ' | b'\t' | b'\n' | b'\r') {
+            j += 1;
+        }
+        if b.get(j) == Some(&b'=') {
+            j += 1;
+            while j < b.len() && matches!(b[j], b' ' | b'\t' | b'\n' | b'\r') {
+                j += 1;
+            }
+            let quote = b.get(j).copied().filter(|c| *c == b'"' || *c == b'\'');
+            if let Some(q) = quote {
+                j += 1;
+                let vs = j;
+                while j < b.len() && b[j] != q {
+                    j += 1;
+                }
+                val = Some(&attr_src[vs..j.min(attr_src.len())]);
+                j = (j + 1).min(b.len());
+            } else {
+                let vs = j;
+                while j < b.len() && !matches!(b[j], b' ' | b'\t' | b'\n' | b'\r') {
+                    j += 1;
+                }
+                val = Some(&attr_src[vs..j]);
+            }
+            i = j;
+        }
+        let drop = name.is_empty()
+            || name.starts_with("on")
+            || matches!(name.as_str(), "srcdoc" | "srcset" | "ping")
+            || (is_url_attr(&name) && val.is_none_or(|v| !veil_core::link_url_is_safe(v)));
+        if drop {
+            changed = true;
+        } else {
+            out.push_str(&attr_src[ws..i]);
+        }
+    }
+    changed.then_some(out)
 }
 
 /// 把块源码里的脚注引用与裸链接替换为 raw HTML。
@@ -698,6 +1115,12 @@ fn render_block_inlines(
             continue;
         }
         let href = veil_ui::normalize_link_url(&url);
+        // 裸链接的可见文本就是 URL 本身：危险 scheme 不产出 <a>，只保留文本
+        // （成品 HTML 还有 sanitize_html_urls 兜底，这里提前降级以免留下空链）。
+        if !veil_core::link_url_is_safe(&href) {
+            reps.push((s, e, escape_link_text(&url)));
+            continue;
+        }
         reps.push((
             s,
             e,
@@ -1099,12 +1522,13 @@ mod tests {
 
     #[test]
     fn bare_links_export_as_anchors() {
-        // GFM 自动链接扩展：`www.` 补 http、任意 scheme 原样、裸邮箱补 mailto；
-        // URL 中的 `&` 在 href 与可见文本里都必须转义
+        // GFM 自动链接扩展：`www.` 补 http、裸邮箱补 mailto；
+        // URL 中的 `&` 在 href 与可见文本里都必须转义。
+        // 非白名单 scheme（ftp 等）只保留可见文本，不产出 `<a>`。
         assert_eq!(
             body_of("Visit www.a.com/x, or ftp://a.b/c\n"),
             "<p>Visit <a href=\"http://www.a.com/x\">www.a.com/x</a>, or \
-             <a href=\"ftp://a.b/c\">ftp://a.b/c</a></p>\n"
+             ftp://a.b/c</p>\n"
         );
         assert_eq!(
             body_of("mail foo@bar.baz\n"),
@@ -1488,6 +1912,97 @@ mod tests {
         for bad in ["javascript:", "position", "url(", "expression"] {
             assert!(!body.contains(bad), "输出不应含 {bad}: {body}");
         }
+    }
+
+    #[test]
+    fn block_html_strips_scripts_styles_and_embeds() {
+        // DEF-T11-001：块级原始 HTML 不得原样交给 push_html。
+        let body = body_of(
+            "<script>alert(1)</script>\n\n<style>body{display:none}</style>\n\n\
+             <iframe src=\"https://evil/x\"></iframe>\n\n<object data=\"file:///C:/x\"></object>\n\n\
+             <embed src=\"data:text/html;base64,AA\">\n\n\
+             <form action=\"https://evil\"><input value=\"x\"></form>\n\n\
+             <textarea>do not submit</textarea>\n",
+        );
+        for bad in [
+            "<script",
+            "</script",
+            "<style",
+            "<iframe",
+            "<object",
+            "<embed",
+            "<form",
+            "<textarea",
+        ] {
+            assert!(!body.contains(bad), "不应含 {bad}: {body}");
+        }
+        for leaked in ["alert(1)", "display:none", "do not submit"] {
+            assert!(!body.contains(leaked), "危险标签内容须整段剥除: {body}");
+        }
+    }
+
+    #[test]
+    fn block_html_keeps_whitelisted_tags_with_safe_attrs() {
+        // 块级白名单标签保留语义；on* 与危险 style 声明被剥除。
+        let body = body_of("<pre class=\"x\" onclick=\"alert(1)\" style=\"color:red;position:fixed\">a < b</pre>\n");
+        assert!(
+            body.contains("<pre class=\"x\" style=\"color:red\">"),
+            "{body}"
+        );
+        assert!(!body.contains("onclick"), "{body}");
+        assert!(!body.contains("position"), "{body}");
+        assert!(body.contains("a &lt; b"), "正文须转义: {body}");
+        assert!(body.contains("</pre>"), "闭标签须保留: {body}");
+        // 注释与声明整体丢弃，不残留隐藏载体。
+        let body = body_of("<!-- <script>alert(1)</script> -->\n\n<!DOCTYPE html>\n");
+        assert!(!body.contains("<script"), "{body}");
+        assert!(!body.contains("DOCTYPE"), "{body}");
+    }
+
+    #[test]
+    fn dangerous_link_schemes_are_stripped_from_export() {
+        // DEF-T11-002：Markdown 链接、行内 <a>、图片目标与引用式定义统一过滤。
+        let body = body_of(
+            "[JS](javascript:alert(1))\n[JS mixed](JaVaScRiPt:alert(1))\n\
+             [entity](javascript&#58;alert(1))\n[data](data:text/html;base64,AA)\n\
+             [file](file:///C:/x)\n[vb](vbscript:MsgBox(1))\n\
+             [ws](java%0ascript:alert(1))\n\n\
+             <a href=\"javascript:alert(1)\">html</a>\n\n\
+             ![img](javascript:alert(1))\n",
+        );
+        let lower = body.to_ascii_lowercase();
+        for bad in ["javascript:", "data:", "file:", "vbscript:"] {
+            assert!(!lower.contains(bad), "不应含 {bad}: {body}");
+        }
+        assert!(body.contains(">html</a>"), "标签文字保留: {body}");
+    }
+
+    #[test]
+    fn safe_link_schemes_and_relative_targets_are_preserved() {
+        let body = body_of(
+            "[a](https://example.com/x) [b](mailto:a@b.c) [c](tel:+123) \
+             [d](#install) [e](img/a.png)\n",
+        );
+        for good in [
+            "href=\"https://example.com/x\"",
+            "href=\"mailto:a@b.c\"",
+            "href=\"tel:+123\"",
+            "href=\"#install\"",
+            "href=\"img/a.png\"",
+        ] {
+            assert!(body.contains(good), "应保留 {good}: {body}");
+        }
+    }
+
+    #[test]
+    fn dangerous_reference_link_definition_is_stripped() {
+        // 引用式目标的 href 由 pulldown 从定义处生成，须在成品标签上复核。
+        let body = body_of("[x][r]\n\n[r]: javascript:alert(1)\n");
+        assert!(
+            !body.to_ascii_lowercase().contains("javascript:"),
+            "实际输出: {body}"
+        );
+        assert!(body.contains('x'), "可见文字保留: {body}");
     }
 
     #[test]

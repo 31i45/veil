@@ -1731,8 +1731,16 @@ impl App {
             CtxAction::SelectAll => self.perform_action(Action::Doc(Intent::SelectAll)),
             CtxAction::CopyLink => {
                 if let Some(u) = self.ui_state.ctx.link.clone() {
-                    // 复制出去的是可直接使用的目标：`www.` 补全协议
-                    self.ports.clipboard.set(&crate::normalize_link_url(&u));
+                    // 复制出去的是可直接使用的目标：`www.` 补全协议；
+                    // 非白名单 scheme 与打开同口径拒绝，不把危险地址带出程序。
+                    let target = crate::normalize_link_url(&u);
+                    if veil_core::link_url_is_safe(&target) {
+                        self.ports.clipboard.set(&target);
+                    } else {
+                        self.ui_state.chrome.notice =
+                            tf(I18nKey::NoticeLinkUnsupported, &[&target]);
+                        self.request_redraw();
+                    }
                 }
             }
             CtxAction::OpenLink => {

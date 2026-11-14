@@ -266,6 +266,7 @@ impl App {
             Action::SelectLineStart => self.move_line_edge(true, true),
             Action::SelectLineEnd => self.move_line_edge(false, true),
             Action::Copy => self.copy_selection(),
+            Action::CopyCodeBlock => self.copy_code_block_at_caret(),
             Action::Cut => self.cut_selection(),
             Action::Paste => self.paste_clipboard(),
             Action::Save => self.save_now(),
@@ -1038,6 +1039,86 @@ impl App {
         }
     }
 
+    /// 复制某围栏代码块的源码（不含围栏行与语言标记）。
+    /// 纯剪贴板/视图动作：不写文档、不开撤销步、不置脏。
+    pub(crate) fn copy_code_block(&mut self, id: BlockId) {
+        let Some((_, body)) = self.editor.session().fenced_code_source(id) else {
+            return;
+        };
+        self.ports.clipboard.set(&body);
+        self.ui_state.chrome.notice = t(I18nKey::NoticeCodeCopied).into();
+        self.request_redraw();
+    }
+
+    /// 键盘路径（Ctrl+Shift+C）：复制光标所在围栏代码块；不在代码块内时给出提示。
+    pub(crate) fn copy_code_block_at_caret(&mut self) {
+        let off = self.editor.caret();
+        let id = self
+            .index
+            .blocks
+            .iter()
+            .find(|g| {
+                g.range.start <= off
+                    && off <= g.range.end
+                    && matches!(&g.kind, BlockKind::FencedCode(_))
+            })
+            .map(|g| g.id);
+        match id {
+            Some(id) => self.copy_code_block(id),
+            None => {
+                self.ui_state.chrome.notice = t(I18nKey::NoticeCodeBlockRequired).into();
+                self.request_redraw();
+            }
+        }
+    }
+
+    /// 左键命中代码块复制按钮：返回块 id（先按 y 粗筛，避免对全部块求几何）。
+    fn code_copy_hit(&self) -> Option<BlockId> {
+        let (mx, my) = (
+            self.input_state.mouse.x as f32,
+            self.input_state.mouse.y as f32,
+        );
+        let vp = self.viewport();
+        self.index.blocks.iter().find_map(|g| {
+            if !matches!(&g.kind, BlockKind::FencedCode(_)) {
+                return None;
+            }
+            let line_h = self.engine.doc_line_height() * self.input_state.scale;
+            let top = vp.y + g.top - self.window_state.scroll_y;
+            if my < top || my >= top + line_h {
+                return None;
+            }
+            let h = self.code_header_layout(g)?;
+            h.button.contains(mx, my).then_some(g.id)
+        })
+    }
+
+    /// 代码块复制按钮点击：消费点击，避免落到光标/选区路径。
+    fn try_copy_code_block(&mut self) -> bool {
+        let Some(id) = self.code_copy_hit() else {
+            return false;
+        };
+        self.copy_code_block(id);
+        true
+    }
+
+    /// 右键命中的普通围栏代码块（mermaid 有专用菜单，不归此路径）。
+    fn plain_code_block_at(&self, off: usize) -> Option<BlockId> {
+        self.index
+            .blocks
+            .iter()
+            .find(|g| {
+                g.range.start <= off
+                    && off <= g.range.end
+                    && matches!(
+                        &g.kind,
+                        BlockKind::FencedCode(l)
+                            if !l.as_deref().is_some_and(|l| l.eq_ignore_ascii_case("mermaid"))
+                    )
+            })
+            .map(|g| g.id)
+    }
+
     pub(crate) fn cut_selection(&mut self) {
         if let Some((t, dirty)) = self.editor.cut() {
             self.ports.clipboard.set(&t);
@@ -1107,43 +1188,47 @@ impl App {
                     Some(url) => (CtxKind::Link, Some(url), None, None),
                     None => match self.table_ctx_at(off) {
                         Some(tc) => (CtxKind::Table(tc), None, None, None),
-                        None => match self.mermaid_block_info_at(off) {
-                            Some((body, body_start)) if mermaid_body_is_empty(&body) => {
-                                // 空块右键也把光标落到 body 起点：模板项只在这里有意义，
-                                // 落在点击位置会破坏围栏结构。
-                                self.editor.set_caret(body_start);
-                                (
-                                    CtxKind::MermaidEmptyBlock,
-                                    None,
-                                    Some(body),
-                                    Some(body_start),
-                                )
-                            }
-                            Some((body, _)) => (CtxKind::MermaidBlock, None, Some(body), None),
-                            None => {
-                                // Details 块优先于普通块：右键菜单给折叠/展开项。
-                                // B3：命中 details 子块时同样归到所属头块，菜单行为一致。
-                                let details_kind = self
-                                    .index
-                                    .blocks
-                                    .iter()
-                                    .find(|g| g.range.start <= off && off <= g.range.end)
-                                    .and_then(|g| {
-                                        let id = if matches!(&g.kind, BlockKind::Details { .. }) {
-                                            g.id
-                                        } else {
-                                            g.details_parent?
-                                        };
-                                        Some(CtxKind::Details {
-                                            id,
-                                            expanded: self
-                                                .ui_state
-                                                .expanded_details
-                                                .contains(&id),
-                                        })
-                                    });
-                                (details_kind.unwrap_or(CtxKind::Block), None, None, None)
-                            }
+                        None => match self.plain_code_block_at(off) {
+                            Some(id) => (CtxKind::CodeBlock { id }, None, None, None),
+                            None => match self.mermaid_block_info_at(off) {
+                                Some((body, body_start)) if mermaid_body_is_empty(&body) => {
+                                    // 空块右键也把光标落到 body 起点：模板项只在这里有意义，
+                                    // 落在点击位置会破坏围栏结构。
+                                    self.editor.set_caret(body_start);
+                                    (
+                                        CtxKind::MermaidEmptyBlock,
+                                        None,
+                                        Some(body),
+                                        Some(body_start),
+                                    )
+                                }
+                                Some((body, _)) => (CtxKind::MermaidBlock, None, Some(body), None),
+                                None => {
+                                    // Details 块优先于普通块：右键菜单给折叠/展开项。
+                                    // B3：命中 details 子块时同样归到所属头块，菜单行为一致。
+                                    let details_kind = self
+                                        .index
+                                        .blocks
+                                        .iter()
+                                        .find(|g| g.range.start <= off && off <= g.range.end)
+                                        .and_then(|g| {
+                                            let id = if matches!(&g.kind, BlockKind::Details { .. })
+                                            {
+                                                g.id
+                                            } else {
+                                                g.details_parent?
+                                            };
+                                            Some(CtxKind::Details {
+                                                id,
+                                                expanded: self
+                                                    .ui_state
+                                                    .expanded_details
+                                                    .contains(&id),
+                                            })
+                                        });
+                                    (details_kind.unwrap_or(CtxKind::Block), None, None, None)
+                                }
+                            },
                         },
                     },
                 },
@@ -1797,6 +1882,11 @@ impl App {
             CtxAction::Separator => {}
             CtxAction::Cut => self.cut_selection(),
             CtxAction::Copy => self.copy_selection(),
+            CtxAction::CopyCodeBlock => {
+                if let Some(id) = self.ui_state.ctx.code_id {
+                    self.copy_code_block(id);
+                }
+            }
             CtxAction::Paste => self.paste_clipboard(),
             CtxAction::SelectAll => self.perform_action(Action::Doc(Intent::SelectAll)),
             CtxAction::CopyLink => {
@@ -2290,6 +2380,10 @@ impl App {
                 }
                 return false;
             }
+        }
+        // 代码块复制按钮优先于落光标：命中即复制并吞掉点击。
+        if self.try_copy_code_block() {
+            return false;
         }
         // Ctrl+左键：应用内跳转（`#anchor` → 脚注引用 → 定义末尾返回）优先，
         // 其余 http/https/mailto 才交给系统默认程序。必须在此提前返回——

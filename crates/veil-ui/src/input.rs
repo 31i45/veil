@@ -92,6 +92,8 @@ pub enum Action {
     Copy,
     Cut,
     Paste,
+    /// 复制光标所在围栏代码块的源码（Ctrl+Shift+C）：不含围栏行，不修改文档。
+    CopyCodeBlock,
     /// 保存（Ctrl+S）：文件读写由 shell 经 `FileStore` trait 完成（此处不产文档意图）。
     Save,
     /// 另存为（Ctrl+Shift+S）：路径由 shell 经 `FileDialog` 选择。
@@ -149,6 +151,7 @@ pub fn translate(key: Key, mods: Mods) -> Option<Action> {
         Key::Z if ctrl => Some(Action::Doc(Intent::Undo)),
         Key::Y if ctrl => Some(Action::Doc(Intent::Redo)),
         Key::Z | Key::Y => None, // 无 ctrl 的 z/y 文本由 Text 变体承载
+        Key::C if ctrl && mods.shift => Some(Action::CopyCodeBlock),
         Key::C if ctrl => Some(Action::Copy),
         Key::X if ctrl => Some(Action::Cut),
         Key::V if ctrl => Some(Action::Paste),
@@ -480,6 +483,7 @@ mod tests {
     #[test]
     fn clipboard_bindings() {
         assert_eq!(translate(Key::C, CTRL), Some(Action::Copy));
+        assert_eq!(translate(Key::C, CTRL_SHIFT), Some(Action::CopyCodeBlock));
         assert_eq!(translate(Key::X, CTRL), Some(Action::Cut));
         assert_eq!(translate(Key::V, CTRL), Some(Action::Paste));
         // 无 ctrl 的 c/x/v 文本由 Text 变体承载，字母变体不产意图

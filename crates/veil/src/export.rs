@@ -31,7 +31,8 @@ fn head(style: &ExportStyle) -> String {
          <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\
          <title>veil</title>\n<style>\n{scheme}\
          body{{max-width:44em;margin:2em auto;padding:0 1em;\
-         font:16px/1.6 system-ui,sans-serif;background:{bg};color:{text}}}\n\
+         font:16px/1.6 system-ui,sans-serif;background:{bg};color:{text};\
+         overflow-wrap:anywhere;word-break:break-word}}\n\
          a{{color:{link}}}\n\
          code,pre{{background:{code_bg};border:1px solid {border};\
          font-family:Consolas,Menlo,monospace}}\n\
@@ -73,6 +74,17 @@ fn hex(c: [u8; 3]) -> String {
 /// 会话 → 自包含 HTML 文档（纯函数，headless 可测）。
 /// `style` 为当前主题快照（值语义），由调用方（App）在主题切换点同步，本函数不感知主题。
 pub fn html_of(session: &Session, style: &ExportStyle, font: &latex_rust::MathFont) -> String {
+    html_of_doc(session, style, font, None)
+}
+
+/// 同 [`html_of`]，但可用 `base_dir` 把文档内相对图片内嵌为 data URI。
+/// `None` = 调用方无文档目录（纯内存测试/草稿），相对图片保持原样。
+pub fn html_of_doc(
+    session: &Session,
+    style: &ExportStyle,
+    font: &latex_rust::MathFont,
+    base_dir: Option<&Path>,
+) -> String {
     let mut body = String::new();
     let blocks = session.blocks();
     // 表格依赖 GFM 扩展，须显式开启（Parser::new 默认关闭 tables）
@@ -149,8 +161,12 @@ pub fn html_of(session: &Session, style: &ExportStyle, font: &latex_rust::MathFo
             i += 1;
             continue;
         }
-        // 定义块自身无输出（链接定义已并入 defs 前缀；脚注定义统一在文末输出）
-        if matches!(kind, BlockKind::LinkRefDef | BlockKind::FootnoteDef) {
+        // 定义块自身无输出（链接定义已并入 defs 前缀；脚注定义统一在文末输出）；
+        // Front Matter 是元数据，按产品语义隐藏，正文从元数据之后开始。
+        if matches!(
+            kind,
+            BlockKind::LinkRefDef | BlockKind::FootnoteDef | BlockKind::FrontMatter(_)
+        ) {
             i += 1;
             continue;
         }
@@ -277,9 +293,12 @@ pub fn html_of(session: &Session, style: &ExportStyle, font: &latex_rust::MathFo
         details_stack.pop();
     }
     let notes = footnotes_html(session, &footnote_defs, opts);
+    // 图片自包含：远程 src 一律删除（导出件不得隐式联网），本地图片按文档目录
+    // 内嵌为 data URI；无法读取/超限/格式不支持时降级为 alt-only，不保留断链。
+    let localized = localize_images(&format!("{body}{notes}"), base_dir);
     // 最后一道 scheme 白名单：Markdown 链接（含引用式定义的 dest）由 pulldown 直接写
     // `href`，只能在成品标签上复核；非白名单目标整条属性删除，文字保留。
-    let content = sanitize_html_urls(&format!("{body}{notes}"));
+    let content = sanitize_html_urls(&localized);
     format!("{}{content}</body>\n</html>\n", head(style))
 }
 
@@ -552,19 +571,14 @@ fn collect_html_inlines(
                 let rendered = match tag {
                     HtmlTag::Br => "<br>".to_string(),
                     HtmlTag::Img => {
-                        // 远程 src 被 core 解析到 remote_src（v1.4）：HTML 导出须还原 URL，
-                        // 让浏览器按需加载（与 Markdown 远程图片同口径、Typora/Obsidian 同行为）。
-                        // src 与 remote_src 可能同时为空（非法/缺失），此时降级为 alt-only。
-                        let src = attrs
-                            .src
-                            .as_deref()
-                            .or(attrs.remote_src.as_deref())
-                            .unwrap_or("");
+                        // 远程 URL 解析层放进 remote_src（不写 src）：导出件不得引用任何
+                        // 远程资源。只保留本地 src，后续 localize_images 再按需内嵌；
+                        // 两者皆空时降级为 alt-only（缺图提示，不留断链）。
+                        let src = attrs.src.as_deref().unwrap_or("");
                         let alt = attrs.alt.as_deref().unwrap_or("");
                         if src.is_empty() {
-                            // src 与 remote_src 皆空：降级为带注释的 alt-only（HTML 解析层剥离或本地缺失）
                             format!(
-                                "<img alt=\"{}\"> <!-- veil blocked remote -->",
+                                "<img alt=\"{}\"> <!-- veil image unavailable -->",
                                 escape_attr(alt)
                             )
                         } else {
@@ -741,9 +755,17 @@ fn is_url_attr(name: &str) -> bool {
     )
 }
 
+/// URL 属性是否可写出：普通链接走统一 scheme 白名单；`<img src>` 额外允许
+/// 位图 data URI（自包含导出产物；SVG/文本 data URI 仍拒绝）。
+fn url_attr_is_safe(tag: &str, attr: &str, value: &str) -> bool {
+    veil_core::link_url_is_safe(value)
+        || (tag.eq_ignore_ascii_case("img") && attr == "src" && is_data_image(value))
+}
+
 /// 块级 HTML 属性过滤：剥 `on*`、危险 URL 属性、`srcdoc`/`srcset`/`ping`，
 /// `style` 经 core 净化，其余属性保留并转义值。
-fn sanitize_block_attrs(attr_src: &str) -> String {
+/// `<img src>` 额外允许位图 data URI（导出内嵌图片的唯一合法 `data:` 用法）。
+fn sanitize_block_attrs(attr_src: &str, tag: &str) -> String {
     let mut out = String::new();
     let b = attr_src.as_bytes();
     let mut i = 0;
@@ -799,7 +821,7 @@ fn sanitize_block_attrs(attr_src: &str) -> String {
         }
         if is_url_attr(&name) {
             if let Some(v) = val {
-                if veil_core::link_url_is_safe(v) {
+                if url_attr_is_safe(tag, &name, v) {
                     out.push_str(&format!(" {name}=\"{}\"", escape_attr(v)));
                 }
             }
@@ -900,7 +922,7 @@ fn sanitize_block_html(src: &str) -> String {
         if block_tag_allowed(&name) {
             out.push('<');
             out.push_str(raw);
-            out.push_str(&sanitize_block_attrs(&inner[len..]));
+            out.push_str(&sanitize_block_attrs(&inner[len..], &name));
             if self_closed {
                 out.push_str(" />");
             } else {
@@ -970,7 +992,7 @@ fn sanitize_html_urls(html: &str) -> String {
             };
             continue;
         }
-        match strip_unsafe_url_attrs(&inner[len..]) {
+        match strip_unsafe_url_attrs(&inner[len..], &name) {
             // 无属性被删：原样保留（保住 `<input .../>` 之类的既有字节形态）。
             None => out.push_str(&html[i..end]),
             Some(attrs) => {
@@ -991,7 +1013,7 @@ fn sanitize_html_urls(html: &str) -> String {
 
 /// 保留属性原文，只删除 `on*`、`srcdoc`/`srcset`/`ping` 与非白名单 URL 目标。
 /// 没有任何属性被删时返回 `None`（调用方据此原样输出标签）。
-fn strip_unsafe_url_attrs(attr_src: &str) -> Option<String> {
+fn strip_unsafe_url_attrs(attr_src: &str, tag: &str) -> Option<String> {
     let mut out = String::new();
     let mut changed = false;
     let b = attr_src.as_bytes();
@@ -1040,7 +1062,8 @@ fn strip_unsafe_url_attrs(attr_src: &str) -> Option<String> {
         let drop = name.is_empty()
             || name.starts_with("on")
             || matches!(name.as_str(), "srcdoc" | "srcset" | "ping")
-            || (is_url_attr(&name) && val.is_none_or(|v| !veil_core::link_url_is_safe(v)));
+            || (is_url_attr(&name)
+                && val.is_none_or(|v| !url_attr_is_safe(tag, &name, v)));
         if drop {
             changed = true;
         } else {
@@ -1310,6 +1333,373 @@ fn escape_html(s: &str) -> String {
         .replace('>', "&gt;")
 }
 
+// =============================================================================
+// 图片自包含（DEF-T09-001 / DEF-T09-002）
+// =============================================================================
+
+/// 单张图片内嵌上限：超过则不内嵌（避免导出件因单张大图失控）。
+const MAX_INLINE_IMAGE_BYTES: u64 = 8 * 1024 * 1024;
+/// 全部内嵌图片总量上限：超出的图片降级为 alt-only。
+const MAX_INLINE_IMAGE_TOTAL_BYTES: u64 = 24 * 1024 * 1024;
+
+/// 图片 `src` 的处置结果。
+enum ImageSrc {
+    /// 原标签保持不变（无 src、已是安全 data URI、或调用方无基准目录）。
+    Keep,
+    /// 改写为内嵌 data URI。
+    Data(String),
+    /// 远程地址：删除 src，绝不产生远程请求。
+    Blocked,
+    /// 本地不可用/超限/格式不支持：删除 src，保留 alt。
+    Unavailable,
+}
+
+/// 成品 HTML 的 `<img>` 自包含化：远程 src 删除，本地图片按 `base_dir` 内嵌。
+/// 只处理标签本身；正文/代码块里的字面 `<img ...>` 文本不受影响。
+fn localize_images(html: &str, base_dir: Option<&Path>) -> String {
+    let b = html.as_bytes();
+    let mut out = String::with_capacity(html.len());
+    let mut budget = MAX_INLINE_IMAGE_TOTAL_BYTES;
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] != b'<' {
+            let start = i;
+            while i < b.len() && b[i] != b'<' {
+                i += 1;
+            }
+            out.push_str(&html[start..i]);
+            continue;
+        }
+        let Some(end) = tag_end(b, i + 1) else {
+            out.push_str(&html[i..]);
+            break;
+        };
+        let inner = &html[i + 1..end - 1];
+        let Some(len) = tag_head_len(inner) else {
+            out.push_str(&html[i..end]);
+            i = end;
+            continue;
+        };
+        if !inner[..len].eq_ignore_ascii_case("img") {
+            out.push_str(&html[i..end]);
+            i = end;
+            continue;
+        }
+        let attrs = parse_tag_attrs(&inner[len..]);
+        let src = attrs
+            .iter()
+            .find(|(name, _)| name == "src")
+            .and_then(|(_, value)| value.as_deref());
+        match decide_image_src(src, base_dir, &mut budget) {
+            ImageSrc::Keep => out.push_str(&html[i..end]),
+            ImageSrc::Data(uri) => out.push_str(&render_img_tag(&attrs, Some(&uri))),
+            ImageSrc::Blocked => {
+                out.push_str(&render_img_tag(&attrs, None));
+                out.push_str(" <!-- veil blocked remote -->");
+            }
+            ImageSrc::Unavailable => {
+                out.push_str(&render_img_tag(&attrs, None));
+                out.push_str(" <!-- veil image unavailable -->");
+            }
+        }
+        i = end;
+    }
+    out
+}
+
+/// 判定单个图片 src 的处置方式（`budget` 为剩余可内嵌字节数）。
+fn decide_image_src(src: Option<&str>, base_dir: Option<&Path>, budget: &mut u64) -> ImageSrc {
+    let Some(raw) = src else {
+        return ImageSrc::Keep;
+    };
+    let value = raw.trim();
+    if value.is_empty() {
+        return ImageSrc::Keep;
+    }
+    match veil_core::link_scheme(value).as_deref() {
+        // 远程资源：导出件不得隐式联网（离线打开也不该产生第三方请求）。
+        Some("http" | "https") => ImageSrc::Blocked,
+        // 作者已写成 data URI：只接受位图 MIME，SVG 等可携带脚本的一律删除。
+        Some("data") => {
+            if is_data_image(value) {
+                ImageSrc::Keep
+            } else {
+                ImageSrc::Blocked
+            }
+        }
+        // file:/javascript:/盘符绝对路径等：不读取、不写出，降级为 alt。
+        Some(_) => ImageSrc::Unavailable,
+        None => {
+            let Some(dir) = base_dir else {
+                return ImageSrc::Keep;
+            };
+            let path = dir.join(percent_decode_path(strip_query_fragment(value)));
+            let Ok(meta) = std::fs::metadata(&path) else {
+                return ImageSrc::Unavailable;
+            };
+            if !meta.is_file() || meta.len() > MAX_INLINE_IMAGE_BYTES || meta.len() > *budget {
+                return ImageSrc::Unavailable;
+            }
+            let Ok(bytes) = std::fs::read(&path) else {
+                return ImageSrc::Unavailable;
+            };
+            let Some(mime) = image_mime(&bytes) else {
+                return ImageSrc::Unavailable;
+            };
+            *budget -= bytes.len() as u64;
+            ImageSrc::Data(format!("data:{mime};base64,{}", base64_encode(&bytes)))
+        }
+    }
+}
+
+/// 按原属性顺序重建 `<img>`：`src` 有值时写内嵌 URI，否则整条省略（alt 仍在）。
+fn render_img_tag(attrs: &[(String, Option<String>)], src: Option<&str>) -> String {
+    let mut out = String::from("<img");
+    for (name, value) in attrs {
+        if name == "src" {
+            if let Some(uri) = src {
+                out.push_str(&format!(" src=\"{}\"", escape_attr(uri)));
+            }
+            continue;
+        }
+        match value {
+            Some(v) => out.push_str(&format!(" {name}=\"{}\"", escape_attr(v))),
+            None => {
+                out.push(' ');
+                out.push_str(name);
+            }
+        }
+    }
+    out.push('>');
+    out
+}
+
+/// 解析标签属性为 `(小写名, 原始值)`；值已做 HTML 实体还原，重建时统一转义。
+fn parse_tag_attrs(attr_src: &str) -> Vec<(String, Option<String>)> {
+    let mut out = Vec::new();
+    let b = attr_src.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r' | b'/') {
+            i += 1;
+        }
+        if i >= b.len() {
+            break;
+        }
+        let ns = i;
+        while i < b.len() && !matches!(b[i], b' ' | b'\t' | b'\n' | b'\r' | b'=' | b'/') {
+            i += 1;
+        }
+        let name = attr_src[ns..i].to_ascii_lowercase();
+        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') {
+            i += 1;
+        }
+        let mut value = None;
+        if b.get(i) == Some(&b'=') {
+            i += 1;
+            while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') {
+                i += 1;
+            }
+            let quote = b.get(i).copied().filter(|c| *c == b'"' || *c == b'\'');
+            if let Some(q) = quote {
+                i += 1;
+                let vs = i;
+                while i < b.len() && b[i] != q {
+                    i += 1;
+                }
+                value = Some(decode_attr(&attr_src[vs..i.min(attr_src.len())]));
+                i = (i + 1).min(b.len());
+            } else {
+                let vs = i;
+                while i < b.len() && !matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') {
+                    i += 1;
+                }
+                value = Some(decode_attr(&attr_src[vs..i]));
+            }
+        }
+        if !name.is_empty() {
+            out.push((name, value));
+        }
+    }
+    out
+}
+
+/// 还原常见 HTML 实体（属性值解析用；重建时由 `escape_attr` 统一再转义）。
+fn decode_attr(s: &str) -> String {
+    if !s.contains('&') {
+        return s.to_string();
+    }
+    let mut out = String::with_capacity(s.len());
+    let b = s.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'&' {
+            if let Some((ch, used)) = decode_entity(&s[i..]) {
+                out.push(ch);
+                i += used;
+                continue;
+            }
+        }
+        let ch = s[i..].chars().next().unwrap_or('\u{0}');
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
+}
+
+/// 解码 `&#NN;` / `&#xNN;` / `&amp;` 等实体；无法识别返回 None。
+fn decode_entity(s: &str) -> Option<(char, usize)> {
+    let semi = s[1..].find(';').map(|p| p + 1)?;
+    let body = &s[1..semi];
+    let ch = if let Some(hex) = body.strip_prefix("#x").or_else(|| body.strip_prefix("#X")) {
+        char::from_u32(u32::from_str_radix(hex, 16).ok()?)?
+    } else if let Some(dec) = body.strip_prefix('#') {
+        char::from_u32(dec.parse::<u32>().ok()?)?
+    } else {
+        match body {
+            "amp" => '&',
+            "lt" => '<',
+            "gt" => '>',
+            "quot" => '"',
+            "apos" => '\'',
+            _ => return None,
+        }
+    };
+    Some((ch, semi + 1))
+}
+
+/// 去掉本地路径上的 `?query` 与 `#fragment`（导出只关心文件本身）。
+fn strip_query_fragment(value: &str) -> &str {
+    let cut = value
+        .find(['?', '#'])
+        .unwrap_or(value.len());
+    &value[..cut]
+}
+
+/// 百分号解码（UTF-8 路径）；非法序列原样保留。
+fn percent_decode_path(value: &str) -> String {
+    if !value.contains('%') {
+        return value.to_string();
+    }
+    let b = value.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' && i + 2 < b.len() {
+            if let (Some(h), Some(l)) = (hex_val(b[i + 1]), hex_val(b[i + 2])) {
+                out.push(h * 16 + l);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn hex_val(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
+}
+
+/// 按魔数判定位图 MIME；SVG 等文本格式不内嵌（可携带脚本）。
+fn image_mime(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]) {
+        Some("image/png")
+    } else if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        Some("image/jpeg")
+    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        Some("image/gif")
+    } else if bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" {
+        Some("image/webp")
+    } else if bytes.starts_with(b"BM") && bytes.len() > 26 {
+        Some("image/bmp")
+    } else {
+        None
+    }
+}
+
+/// `data:image/<位图>;base64,` 判定（大小写不敏感；payload 须为纯 base64）。
+fn is_data_image(value: &str) -> bool {
+    let Some((head, payload)) = value.split_once(',') else {
+        return false;
+    };
+    let lower = head.to_ascii_lowercase();
+    let Some(rest) = lower.strip_prefix("data:") else {
+        return false;
+    };
+    let Some(mime) = rest.strip_suffix(";base64") else {
+        return false;
+    };
+    let known = ["image/png", "image/jpeg", "image/gif", "image/webp", "image/bmp"];
+    if !known.contains(&mime) {
+        return false;
+    }
+    !payload.is_empty()
+        && payload
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'+' | b'/' | b'='))
+}
+
+/// 无依赖 base64 编码（标准字母表，带 `=` 填充）。
+fn base64_encode(bytes: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = chunk.get(1).copied().unwrap_or(0) as u32;
+        let b2 = chunk.get(2).copied().unwrap_or(0) as u32;
+        let n = (b0 << 16) | (b1 << 8) | b2;
+        out.push(TABLE[((n >> 18) & 0x3F) as usize] as char);
+        out.push(TABLE[((n >> 12) & 0x3F) as usize] as char);
+        if chunk.len() > 1 {
+            out.push(TABLE[((n >> 6) & 0x3F) as usize] as char);
+        } else {
+            out.push('=');
+        }
+        if chunk.len() > 2 {
+            out.push(TABLE[(n & 0x3F) as usize] as char);
+        } else {
+            out.push('=');
+        }
+    }
+    out
+}
+
+/// 重名导出递增命名：`name.ext` 已存在时改用 `name (2).ext`、`name (3).ext`……
+/// 只用于导出目标（不替换既有文件）；任何 IO 异常按「可用」处理，交由写入报错。
+pub(crate) fn unique_file_path(path: &Path) -> PathBuf {
+    if !path.exists() {
+        return path.to_path_buf();
+    }
+    let stem = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let ext = path
+        .extension()
+        .map(|e| e.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    for n in 2..1000u32 {
+        let name = if ext.is_empty() {
+            format!("{stem} ({n})")
+        } else {
+            format!("{stem} ({n}).{ext}")
+        };
+        let candidate = path.with_file_name(name);
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    path.to_path_buf()
+}
+
+
 /// 产品层导出器：HTML 写到源文件同名的 .html（经 FileStore 原子写）。
 pub struct HtmlExporter {
     pub font: latex_rust::MathFont,
@@ -1332,8 +1722,15 @@ impl Exporter for HtmlExporter {
                 })?
                 .with_extension("html"),
         };
-        self.store
-            .save(&out, html_of(session, &style, &self.font).as_bytes())?;
+        // DEF-T09-004：重名导出递增命名，绝不替换既有文件。
+        let out = unique_file_path(&out);
+        // 本地图片按文档所在目录解析并内嵌（草稿无源路径时保留相对外链）。
+        let base_dir = source_path.and_then(|p| p.parent());
+        let html = match base_dir {
+            Some(dir) => html_of_doc(session, &style, &self.font, Some(dir)),
+            None => html_of(session, &style, &self.font),
+        };
+        self.store.save(&out, html.as_bytes())?;
         Ok(out)
     }
 }
@@ -2204,5 +2601,160 @@ mod tests {
             .unwrap();
         assert_eq!(got, PathBuf::from("out/draft.html"));
         assert_eq!(files.borrow().len(), 1);
+    }
+
+    // ===== Task 4：HTML/PDF 导出缺陷回归 =====
+
+    /// 唯一临时目录（带进程/纳秒后缀，避免并行测试互相踩踏）。
+    fn temp_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "veil_export_test_{tag}_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// 最小 PNG 头（导出只做魔数判定，不解码像素）。
+    const PNG_HEADER: &[u8] = &[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 0];
+
+    #[test]
+    fn front_matter_is_hidden_from_export() {
+        // DEF-T09-DEEP-001：元数据不得变成 <hr> + 正文标题。
+        let body = body_of("---\ntitle: 标题\ntags: [a, b]\n---\n正文\n");
+        assert!(!body.contains("title:"), "实际输出: {body}");
+        assert!(!body.contains("<hr"), "实际输出: {body}");
+        assert!(!body.contains("tags:"), "实际输出: {body}");
+        assert!(body.contains("<p>正文</p>"), "正文须保留: {body}");
+    }
+
+    #[test]
+    fn remote_image_src_is_not_exported() {
+        // DEF-T09-001：远程 URL 不得写入 src，也不得出现在导出件任何位置。
+        let body = body_of("![远程](https://example.invalid/p.png)\n");
+        assert!(!body.contains("example.invalid"), "实际输出: {body}");
+        assert!(!body.contains("src=\"http"), "实际输出: {body}");
+        assert!(
+            body.contains("<img alt=\"远程\">") && body.contains("<!-- veil blocked remote -->"),
+            "须降级为 alt-only: {body}"
+        );
+    }
+
+    #[test]
+    fn remote_inline_img_src_is_not_exported() {
+        // 行内 HTML 图片的远程地址（core 存在 remote_src）同样不得还原。
+        let body = body_of("<img src=\"https://example.invalid/a.png\" alt=\"远程\">\n");
+        assert!(!body.contains("example.invalid"), "实际输出: {body}");
+        assert!(!body.contains("src=\"http"), "实际输出: {body}");
+    }
+
+    #[test]
+    fn local_image_is_embedded_as_data_uri() {
+        // DEF-T09-002：本地图片内嵌为 data URI，移动导出件后图片仍可用。
+        let dir = temp_dir("embed");
+        std::fs::create_dir_all(dir.join("assets")).unwrap();
+        std::fs::write(dir.join("assets/p.png"), PNG_HEADER).unwrap();
+        let s = Session::open("![pic](assets/p.png)\n");
+        let html = html_of_doc(&s, &ExportStyle::default(), &font(), Some(&dir));
+        assert!(
+            html.contains("src=\"data:image/png;base64,iVBORw0KGgoAAAAA\""),
+            "须内嵌为 data URI: {html}"
+        );
+        assert!(!html.contains("src=\"assets/p.png\""), "不得保留相对外链");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn missing_local_image_degrades_without_src() {
+        let dir = temp_dir("missing");
+        let s = Session::open("![pic](assets/missing.png)\n");
+        let html = html_of_doc(&s, &ExportStyle::default(), &font(), Some(&dir));
+        assert!(!html.contains("src="), "不得保留断链: {html}");
+        assert!(
+            html.contains("<img alt=\"pic\">") && html.contains("<!-- veil image unavailable -->"),
+            "须降级为 alt-only: {html}"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn non_raster_image_is_not_embedded() {
+        // SVG 可携带脚本，导出器只内嵌位图格式。
+        let dir = temp_dir("svg");
+        std::fs::write(dir.join("v.svg"), b"<svg xmlns=\"http://www.w3.org/2000/svg\"/>")
+            .unwrap();
+        let s = Session::open("![v](v.svg)\n");
+        let html = html_of_doc(&s, &ExportStyle::default(), &font(), Some(&dir));
+        assert!(!html.contains("src="), "SVG 不得内嵌/外链: {html}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn oversized_local_image_degrades_instead_of_bloating_export() {
+        let dir = temp_dir("oversize");
+        let mut bytes = PNG_HEADER.to_vec();
+        bytes.resize(MAX_INLINE_IMAGE_BYTES as usize + 1, 0);
+        std::fs::write(dir.join("big.png"), &bytes).unwrap();
+        let s = Session::open("![big](big.png)\n");
+        let html = html_of_doc(&s, &ExportStyle::default(), &font(), Some(&dir));
+        assert!(!html.contains("src="), "超限图片应降级: {}", &html[..200.min(html.len())]);
+        assert!(html.contains("<!-- veil image unavailable -->"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn long_unbroken_line_wraps_within_page() {
+        // DEF-T09-E1-002：超长无断点行不得造成页面级横向溢出。
+        let long = "A".repeat(400);
+        let html = html_of(
+            &Session::open(&format!("{long}\n")),
+            &ExportStyle::default(),
+            &font(),
+        );
+        assert!(
+            html.contains("overflow-wrap:anywhere") && html.contains("word-break:break-word"),
+            "须有换行兜底 CSS"
+        );
+    }
+
+    #[test]
+    fn export_target_increments_on_collision() {
+        // DEF-T09-004：重名导出递增命名，不替换既有文件。
+        let dir = temp_dir("increment");
+        let first = dir.join("doc.html");
+        std::fs::write(&first, b"old").unwrap();
+        assert_eq!(unique_file_path(&first), dir.join("doc (2).html"));
+        std::fs::write(dir.join("doc (2).html"), b"old2").unwrap();
+        assert_eq!(unique_file_path(&first), dir.join("doc (3).html"));
+
+        let mut e = HtmlExporter {
+            font: font(),
+            store: Box::new(MemStore::default()),
+        };
+        let got = e
+            .export_html(
+                &Session::open("x\n"),
+                ExportStyle::default(),
+                None,
+                Some(&first),
+            )
+            .unwrap();
+        assert_eq!(got, dir.join("doc (3).html"));
+        assert_eq!(std::fs::read(&first).unwrap(), b"old", "既有文件不得被替换");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn data_uri_images_only_allow_raster_mime() {
+        // 自包含 data URI 只对位图放行；SVG/文本 data URI 仍按危险 scheme 处理。
+        let body = body_of("![x](data:image/png;base64,iVBORw0KGgo=)\n");
+        assert!(body.contains("src=\"data:image/png;base64,iVBORw0KGgo=\""), "{body}");
+        let body = body_of("![x](data:image/svg+xml;base64,PHN2Zy8+)\n");
+        assert!(!body.contains("data:image/svg"), "{body}");
+        assert!(!body.contains("src="), "{body}");
     }
 }

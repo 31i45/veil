@@ -613,6 +613,11 @@ pub(crate) struct WindowState {
     pub(crate) geom: Option<WindowGeom>,
     /// 悬停过渡上一帧时刻（S6）：按 ~60fps 限频重绘，避免窗口空转。
     pub(crate) anim_last_frame: Option<Instant>,
+    /// 最近一次绘制时编辑器光标位置：`tick` 用它判断「光标移动」是否已被
+    /// 编辑路径自带的重绘覆盖，避免同一击键再补画一帧完全相同的画面。
+    pub(crate) last_painted_caret: Option<usize>,
+    /// 已写入窗口的标题缓存：脏标只在首次编辑翻转，后续击键跳过 SetWindowText。
+    pub(crate) last_title: Option<String>,
     /// 测试专用窗口尺寸覆盖：headless 测试无 winit 窗口，需要验证超宽窗口排版时注入。
     #[cfg(test)]
     pub(crate) test_size: Option<(u32, u32)>,
@@ -638,6 +643,8 @@ impl Default for WindowState {
             geom_dirty: false,
             geom: None,
             anim_last_frame: None,
+            last_painted_caret: None,
+            last_title: None,
             #[cfg(test)]
             test_size: None,
         }
@@ -1322,10 +1329,13 @@ impl App {
         if caret != self.last_seen_caret {
             self.cursor_visible = true;
             self.last_blink = Some(now);
-            self.last_seen_caret = caret;
             // 显式补帧：不能依赖各编辑路径自带的重绘。只有光标移动、无脏块时
             // 没有任何 after_edit 调用，画面会停留在隐藏半周期的旧帧（光标没跟上）。
-            self.request_redraw();
+            // 若该位置已在最近一帧画过（编辑路径的重绘），再请求只会重复整帧。
+            if self.window_state.last_painted_caret != Some(caret) {
+                self.request_redraw();
+            }
+            self.last_seen_caret = caret;
         }
         if self.blink_active() {
             match self.last_blink {

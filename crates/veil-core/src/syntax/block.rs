@@ -65,53 +65,35 @@ fn scan_blocks_raw(buf: &Buffer, from_line: usize, total: usize) -> Vec<(BlockKi
             let start_line = line;
             let body_start = line + 1;
             let mut consumed = 1usize;
+            let mut closed = false;
             // 扫描闭围栏
             while line + consumed < total {
                 if frontmatter_close(&line_text(buf, line + consumed), ch, flen) {
                     consumed += 1;
+                    closed = true;
                     break;
                 }
                 consumed += 1;
             }
-            // Front Matter 必须有 body 内容，且 body 须"看起来像 YAML"
+            // Front Matter 必须有 body 内容，且 body 须与围栏语法匹配
+            // （`---` → YAML，`+++` → TOML）。未闭合时 body 包含至 EOF 的全部行，
+            // 不得把最后一行当作闭围栏排除掉。
             if consumed > 1 {
-                let body_lines: Vec<String> = (line + body_start..line + consumed - 1)
+                let body_end = if closed {
+                    line + consumed - 1
+                } else {
+                    line + consumed
+                };
+                let body_lines: Vec<String> = (line + body_start..body_end)
                     .map(|l| line_text(buf, l))
                     .collect();
                 let body_trimmed: Vec<&str> = body_lines.iter().map(|s| s.trim()).collect();
-                // Body 非空、且非空行须匹配 YAML 模式（key: value / key: / - item / # comment / nested key）
-                let non_empty: Vec<&&str> = body_trimmed.iter().filter(|s| !s.is_empty()).collect();
-                let looks_like_yaml = !non_empty.is_empty()
-                    && non_empty.iter().all(|s| {
-                        let t = *s;
-                        // key: value 或 key: （允许中文 key，允许缩进）
-                        let trimmed = t.trim_start();
-                        if trimmed.is_empty() {
-                            return true;
-                        }
-                        // - item（列表项）
-                        if trimmed.starts_with("- ") || trimmed == "-" {
-                            return true;
-                        }
-                        // # 注释
-                        if trimmed.starts_with('#') {
-                            return true;
-                        }
-                        // key: 或 key: value（简单 key 后面跟冒号）
-                        // key 可含字母/数字/下划线/短横线/点/中文
-                        let has_colon = trimmed.contains(':');
-                        let key_part = trimmed.split(':').next().unwrap_or("");
-                        let key_valid = !key_part.is_empty()
-                            && key_part.chars().all(|c| {
-                                c.is_alphanumeric()
-                                    || c == '_'
-                                    || c == '-'
-                                    || c == '.'
-                                    || !c.is_ascii()
-                            });
-                        has_colon && key_valid
-                    });
-                if looks_like_yaml {
+                let looks_like = if ch == b'+' {
+                    looks_like_toml_frontmatter(&body_trimmed)
+                } else {
+                    looks_like_yaml_frontmatter(&body_trimmed)
+                };
+                if looks_like {
                     let body = body_lines.join("\n");
                     out.push((
                         BlockKind::FrontMatter(body),
@@ -534,6 +516,62 @@ fn frontmatter_close(line: &str, ch: u8, len: usize) -> bool {
         n += 1;
     }
     n >= len && t[n..].trim().is_empty()
+}
+
+/// YAML Front Matter body 判定：非空行须为注释、列表项或 `key:` 形态。
+fn looks_like_yaml_frontmatter(lines: &[&str]) -> bool {
+    let non_empty: Vec<&&str> = lines.iter().filter(|s| !s.is_empty()).collect();
+    !non_empty.is_empty()
+        && non_empty.iter().all(|s| {
+            let trimmed = s.trim_start();
+            if trimmed.is_empty() {
+                return true;
+            }
+            // - item（列表项）
+            if trimmed.starts_with("- ") || trimmed == "-" {
+                return true;
+            }
+            // # 注释
+            if trimmed.starts_with('#') {
+                return true;
+            }
+            // key: 或 key: value（简单 key 后面跟冒号）
+            // key 可含字母/数字/下划线/短横线/点/中文
+            let has_colon = trimmed.contains(':');
+            let key_part = trimmed.split(':').next().unwrap_or("");
+            let key_valid = !key_part.is_empty()
+                && key_part.chars().all(|c| {
+                    c.is_alphanumeric() || c == '_' || c == '-' || c == '.' || !c.is_ascii()
+                });
+            has_colon && key_valid
+        })
+}
+
+/// TOML Front Matter body 判定：非空行须为注释、`[section]`、`key = value`，
+/// 或前一条 `key = value` 的延续（数组/内联表跨行时的 `,`/`]`/`}` 结尾）。
+fn looks_like_toml_frontmatter(lines: &[&str]) -> bool {
+    let non_empty: Vec<&&str> = lines.iter().filter(|s| !s.is_empty()).collect();
+    !non_empty.is_empty()
+        && non_empty.iter().all(|s| {
+            let trimmed = s.trim_start();
+            if trimmed.is_empty() {
+                return true;
+            }
+            if trimmed.starts_with('#') || trimmed.starts_with('[') {
+                return true;
+            }
+            if trimmed.ends_with(',') || trimmed.ends_with(']') || trimmed.ends_with('}') {
+                return true;
+            }
+            let Some((key, _)) = trimmed.split_once('=') else {
+                return false;
+            };
+            let key = key.trim();
+            !key.is_empty()
+                && key.chars().all(|c| {
+                    c.is_alphanumeric() || matches!(c, '_' | '-' | '.' | '"' | '\'')
+                })
+        })
 }
 
 /// v0 数学块标记（pandoc 风格 `$$`）：`$$` 独占行 = 开/闭标记（Some(false)）；
@@ -2277,7 +2315,7 @@ fn delim_align(raw: &str) -> Option<CellAlign> {
     })
 }
 
-/// 按未转义 `|` 切分表格行；剥除首尾空白与可选外层竖线。
+/// 按未转义且不在 code span 内的 `|` 切分表格行；剥除首尾空白与可选外层竖线。
 /// 返回行内字节区间（含单元格两侧空白；trim 由调用方完成）。
 fn split_row(line: &str) -> Vec<(usize, usize)> {
     let b = line.as_bytes();
@@ -2297,19 +2335,44 @@ fn split_row(line: &str) -> Vec<(usize, usize)> {
     let mut cells = Vec::new();
     let mut start = s;
     let mut i = s;
+    // code span 内的 `|` 是代码内容，不参与切列（GFM：`` `x|y` `` 是一格）。
+    let mut code_run = 0usize;
     while i < e {
-        match b[i] {
-            b'\\' => i += 2, // 转义字符不参与切分（`\|` 留在格内）
-            b'|' => {
-                cells.push((start, i));
-                start = i + 1;
-                i += 1;
+        if code_run == 0 {
+            match b[i] {
+                b'\\' => i += 2, // 转义字符不参与切分（`\|` 留在格内）
+                b'`' => {
+                    code_run = count_backtick_run(b, i, e);
+                    i += code_run;
+                }
+                b'|' => {
+                    cells.push((start, i));
+                    start = i + 1;
+                    i += 1;
+                }
+                _ => i += 1,
             }
-            _ => i += 1,
+        } else if b[i] == b'`' {
+            let run = count_backtick_run(b, i, e);
+            if run == code_run {
+                code_run = 0;
+            }
+            i += run;
+        } else {
+            i += 1;
         }
     }
     cells.push((start, e));
     cells
+}
+
+/// `i` 处反引号 run 的长度（最多扫到 `end`）。
+fn count_backtick_run(b: &[u8], i: usize, end: usize) -> usize {
+    let mut n = 0usize;
+    while i + n < end && b[i + n] == b'`' {
+        n += 1;
+    }
+    n
 }
 
 /// 行内是否有未转义竖线（UTF-8 下 `|` 只会以单字节出现，区间恒为字符边界）。
@@ -2457,6 +2520,80 @@ mod tests {
                 (BlockKind::AtxHeading(2), 4, 5),
             ]
         );
+    }
+
+    // ===== Front Matter（TASK04-D001 / D002）=====
+
+    #[test]
+    fn yaml_front_matter_closed() {
+        let b = Buffer::new("---\ntitle: Veil\n---\nbody\n");
+        let ks = kinds(&b);
+        assert_eq!(ks[0].0, BlockKind::FrontMatter("title: Veil\n".to_string()));
+        assert_eq!(ks[0].2, 3);
+        assert_eq!(ks[1], (BlockKind::Paragraph, 3, 4));
+    }
+
+    #[test]
+    fn toml_front_matter_is_recognized() {
+        // TASK04-D001：`+++` 围栏 + TOML key = value 也必须归为 FrontMatter。
+        let b = Buffer::new("+++\ntitle = \"Veil\"\n[draft]\nlist = [1, 2]\n+++\nbody\n");
+        let ks = kinds(&b);
+        assert_eq!(
+            ks[0].0,
+            BlockKind::FrontMatter(
+                "title = \"Veil\"\n\n[draft]\n\nlist = [1, 2]\n".to_string()
+            )
+        );
+        assert_eq!(ks[0].2, 5);
+        assert_eq!(ks[1], (BlockKind::Paragraph, 5, 6));
+    }
+
+    #[test]
+    fn toml_like_plus_text_without_metadata_is_paragraph() {
+        // `+++` 后不是 TOML 元数据时不误判（仍按普通段落/分隔线处理，不吞文档）。
+        let b = Buffer::new("+++\n普通段落\n+++\n");
+        assert_eq!(kinds(&b), vec![(BlockKind::Paragraph, 0, 3)]);
+    }
+
+    #[test]
+    fn unclosed_front_matter_keeps_last_line() {
+        // TASK04-D002：无闭围栏时最后一行属于 body，不能被当成闭围栏排除。
+        let b = Buffer::new("---\na: 1\nb: 2");
+        let ks = kinds(&b);
+        assert_eq!(ks.len(), 1);
+        assert_eq!(ks[0].0, BlockKind::FrontMatter("a: 1\n\nb: 2".to_string()));
+        assert_eq!(ks[0].2, 3);
+    }
+
+    #[test]
+    fn yaml_like_dashes_without_metadata_stay_thematic_break() {
+        let b = Buffer::new("---\nplain text\n\n---\n");
+        assert_eq!(
+            kinds(&b),
+            vec![
+                (BlockKind::ThematicBreak, 0, 1),
+                (BlockKind::Paragraph, 1, 2),
+                (BlockKind::ThematicBreak, 3, 4),
+            ]
+        );
+    }
+
+    #[test]
+    fn table_code_span_pipe_is_not_a_cell_delimiter() {
+        // TASK04-D009：code span 内的 `|` 不拆列（GFM）。
+        let cells = parse_table_cells("| `x|y` | z |", 0, 2, &RefMap::new());
+        assert_eq!(cells.len(), 2);
+        assert_eq!(cells[0].text, "x|y");
+        assert_eq!(cells[1].text, "z");
+    }
+
+    #[test]
+    fn table_escaped_pipe_outside_code_still_single_cell() {
+        // 对照：`\|` 仍留在同一格，并还原为字面竖线。
+        let cells = parse_table_cells("| x\\|y | z |", 0, 2, &RefMap::new());
+        assert_eq!(cells.len(), 2);
+        assert_eq!(cells[0].text, "x|y");
+        assert_eq!(cells[1].text, "z");
     }
 
     #[test]

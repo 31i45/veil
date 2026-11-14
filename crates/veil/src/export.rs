@@ -615,6 +615,10 @@ fn collect_html_inlines(
 /// 把 attrs 结构体格式化为 `key="value"` 对（解析层已过滤危险键）。
 fn format_html_attrs(attrs: &veil_core::HtmlAttrs) -> String {
     let mut parts = Vec::new();
+    // `<details open>`：布尔属性只需写出属性名。
+    if attrs.open {
+        parts.push("open".to_string());
+    }
     // `<a href>`：目标已由解析层按统一 scheme 白名单过滤（非白名单置空）。
     if let Some(href) = attrs.href.as_deref() {
         parts.push(format!("href=\"{}\"", escape_attr(href)));
@@ -1203,11 +1207,72 @@ fn render_block_inlines(
 }
 
 /// href 属性值转义（`&` 与引号必须转义，裸 URL 常见 `?a=1&b=2`）。
+/// 已是完整字符引用（`&amp;` / `&#38;` / `&#x26;`）的 `&` 保持原样，
+/// 输入 `A &amp; B` 不会被二次转义成 `A &amp;amp; B`。
 fn escape_attr(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('"', "&quot;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(pos) = rest.find(['&', '"', '<', '>']) {
+        out.push_str(&rest[..pos]);
+        let tail = &rest[pos..];
+        let c = tail.chars().next().unwrap_or('&');
+        match c {
+            '&' => {
+                if let Some(len) = html_entity_len(tail) {
+                    out.push_str(&tail[..len]);
+                    rest = &tail[len..];
+                    continue;
+                }
+                out.push_str("&amp;");
+            }
+            '"' => out.push_str("&quot;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            _ => {}
+        }
+        rest = &tail[c.len_utf8()..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// `s`（以 `&` 开头）为完整字符引用时返回其字节长度：`&name;` / `&#123;` /
+/// `&#x1F;`。非法/未闭合返回 None（调用方按裸 `&` 转义）。
+fn html_entity_len(s: &str) -> Option<usize> {
+    let b = s.as_bytes();
+    if b.first() != Some(&b'&') {
+        return None;
+    }
+    let mut i = 1usize;
+    if b.get(i) == Some(&b'#') {
+        i += 1;
+        let hex = matches!(b.get(i), Some(b'x' | b'X'));
+        if hex {
+            i += 1;
+        }
+        let start = i;
+        while i < b.len()
+            && if hex {
+                b[i].is_ascii_hexdigit()
+            } else {
+                b[i].is_ascii_digit()
+            }
+        {
+            i += 1;
+        }
+        if i == start || i - start > 8 {
+            return None;
+        }
+    } else {
+        if !b.get(i).is_some_and(|c| c.is_ascii_alphabetic()) {
+            return None;
+        }
+        i += 1;
+        while i < b.len() && b[i].is_ascii_alphanumeric() && i < 32 {
+            i += 1;
+        }
+    }
+    (b.get(i) == Some(&b';')).then_some(i + 1)
 }
 
 /// 裸链接可见文本：HTML 转义后再把 markdown 行内标记字符改写为数字实体，
@@ -1771,6 +1836,27 @@ mod tests {
             body.find("<p>inner</p>").unwrap() < outer_end,
             "嵌套正文应在外层闭合前输出：{body}"
         );
+    }
+
+    #[test]
+    fn inline_abbr_title_entity_is_not_double_escaped() {
+        // TASK04-D007：作者已写好的实体只做一次处理，不得变成 `&amp;amp;`。
+        let body = body_of("<abbr title=\"A &amp; B\">AB</abbr>\n");
+        assert_eq!(body, "<p><abbr title=\"A &amp; B\">AB</abbr></p>\n");
+        // 裸 `&` 仍必须转义为实体。
+        let body = body_of("<abbr title=\"A & B\">AB</abbr>\n");
+        assert_eq!(body, "<p><abbr title=\"A &amp; B\">AB</abbr></p>\n");
+    }
+
+    #[test]
+    fn inline_details_open_attribute_is_exported() {
+        // TASK04-D008：行内 `<details open>` 的布尔属性在导出件中保留。
+        let body = body_of("before <details open><summary>Sum</summary>body</details> after\n");
+        assert!(
+            body.contains("<details open><summary>Sum</summary>"),
+            "实际输出: {body}"
+        );
+        assert!(!body.contains("<details >"), "不得产生空属性: {body}");
     }
 
     #[test]

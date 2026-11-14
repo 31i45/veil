@@ -109,7 +109,7 @@ fn link_bare_urls_in(text: &str, base: usize, nodes: &mut Vec<InlineNode>) {
             i += 1;
             continue;
         }
-        let j = url_end(bytes, i, prefix);
+        let j = url_end(text, i, prefix);
         if j > i + prefix {
             push_bare_link(nodes, &mut covered, base, i, j);
         }
@@ -123,30 +123,31 @@ fn is_covered(covered: &[(usize, usize)], abs: usize) -> bool {
 }
 
 /// 位置是否处于未闭合的 `<...>` 内（CommonMark autolink / 原始 HTML 标签）：
-/// 向前扫描 ≤50 字节，若存在未匹配的 `<` 说明仍在尖括号作用域。裸链接不应从
-/// 这里抢链接——由 try_autolink/HTML 逻辑接管，可能因空格/非法字符拒绝，
-/// 拒绝后该位置应保持纯文本。注意 `<` 本身允许出现在 URL 中作为终止符，
-/// 故仅在当前位置之前判定。
+/// 向前扫描 ≤50 字节，跳过成对的 `>`…`<`，若存在未匹配的 `<` 说明仍在尖括号
+/// 作用域。裸链接不应从这里抢链接——由 try_autolink/HTML 逻辑接管，可能因
+/// 空格/非法字符拒绝，拒绝后该位置应保持纯文本。注意 `<` 本身允许出现在 URL
+/// 中作为终止符，故仅在当前位置之前判定。
 fn inside_angle(bytes: &[u8], pos: usize) -> bool {
-    let mut lt_count = 0i32;
+    let mut depth = 0i32;
     let mut checked = 0usize;
     let mut k = pos;
     while k > 0 && checked < 50 {
         k -= 1;
         checked += 1;
         match bytes[k] {
-            b'>' => lt_count -= 1,
+            // 反向扫描：先遇到闭合 `>` 说明该尖括号区间在当前位置之前结束，
+            // 跳过它与其开 `<`；只有孤立未配对的 `<` 才表示当前位置在尖括号内。
+            b'>' => depth += 1,
             b'<' => {
-                lt_count += 1;
-                break;
+                if depth == 0 {
+                    return true;
+                }
+                depth -= 1;
             }
             _ => {}
         }
-        if lt_count < 0 {
-            lt_count = 0;
-        }
     }
-    lt_count > 0
+    false
 }
 
 /// 裸 URL 前缀长度（`www.` 或 `scheme://`）。scheme 规则同 CommonMark：
@@ -176,18 +177,29 @@ fn at_token_boundary(bytes: &[u8], i: usize) -> bool {
     i == 0 || !(bytes[i - 1].is_ascii_alphanumeric() || matches!(bytes[i - 1], b'+' | b'.' | b'-'))
 }
 
-/// URL 终点：扫到空白/控制符/`<`，随后按 GFM 规则剥除尾部：
+/// URL 终点：扫到空白/控制符/`<` 或 CJK 标点（`。`、`、`、全角括号等）为止，
+/// 随后按 GFM 规则剥除尾部：
 /// - `?!.,:*_~'\"` 反复剥；
 /// - 尾部 `&name;`（name 全字母）整体排除；
 /// - 尾部 `)` 按全串括号收支剥离（`(business))+ok` 的 `)` 中段不受影响）。
-fn url_end(bytes: &[u8], i: usize, prefix: usize) -> usize {
+fn url_end(text: &str, i: usize, prefix: usize) -> usize {
+    let bytes = text.as_bytes();
     let mut j = i + prefix;
     while j < bytes.len() {
         let b = bytes[j];
         if b.is_ascii_whitespace() || b < 0x20 || b == b'<' {
             break;
         }
-        j += 1;
+        if b < 0x80 {
+            j += 1;
+            continue;
+        }
+        // 非 ASCII 按字符推进：CJK 标点是句子边界，不属于裸 URL。
+        let c = text[j..].chars().next().unwrap_or('\u{fffd}');
+        if is_cjk_url_terminator(c) {
+            break;
+        }
+        j += c.len_utf8();
     }
     while j > i + prefix {
         let lb = bytes[j - 1];
@@ -226,6 +238,28 @@ fn url_end(bytes: &[u8], i: usize, prefix: usize) -> usize {
         closes -= 1;
     }
     j
+}
+
+/// CJK 标点（句子/短语边界）：裸 URL 在此终止，避免把后续中文吞进链接。
+/// 覆盖 CJK 符号标点、全角 ASCII 标点、中文引号/省略号/破折号与中点。
+fn is_cjk_url_terminator(c: char) -> bool {
+    matches!(
+        c,
+        '\u{3001}'..='\u{3003}'
+            | '\u{3008}'..='\u{3011}'
+            | '\u{3014}'..='\u{301B}'
+            | '\u{301D}'..='\u{301F}'
+            | '\u{3030}'
+            | '\u{FF01}'..='\u{FF0F}'
+            | '\u{FF1A}'..='\u{FF20}'
+            | '\u{FF3B}'..='\u{FF40}'
+            | '\u{FF5B}'..='\u{FF65}'
+            | '\u{2018}'..='\u{201F}'
+            | '\u{2013}'..='\u{2014}'
+            | '\u{2025}'..='\u{2026}'
+            | '\u{00B7}'
+            | '\u{30FB}'
+    )
 }
 
 /// 裸邮箱候选：`at` 指向 `@`。local 反向取 `[alnum .!#$%&'*+/=?^_`{|}~-]`，
@@ -292,6 +326,36 @@ fn push_bare_link(
 /// CommonMark：反斜杠可转义一切 ASCII 标点（`!` 为 Image 开标记首字符，亦在内）。
 fn is_escapable(c: char) -> bool {
     c.is_ascii_punctuation()
+}
+
+/// `text` 中第一个未被反斜杠转义的 `$` 字节偏移。连续反斜杠按奇偶判定
+/// （`\\$` 是字面反斜杠 + 定界符，`\$` 是转义美元）。
+fn find_unescaped_dollar(text: &str) -> Option<usize> {
+    let b = text.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            b'\\' => {
+                let mut n = 0usize;
+                while i + n < b.len() && b[i + n] == b'\\' {
+                    n += 1;
+                }
+                i += n;
+                if i < b.len() && b[i] == b'$' {
+                    // 奇数个反斜杠：`$` 被转义，跳过；偶数个：未转义（留待外层循环识别）。
+                    if n % 2 == 1 {
+                        i += 1;
+                        continue;
+                    }
+                    return Some(i);
+                }
+                continue;
+            }
+            b'$' => return Some(i),
+            _ => i += 1,
+        }
+    }
+    None
 }
 
 /// URI 自动链接（`<scheme:...>`）：scheme = `[A-Za-z][A-Za-z0-9+.-]{1,31}` + `:`。
@@ -798,6 +862,9 @@ fn parse_open_tag(src: &str) -> Option<(String, bool, HtmlAttrs)> {
                 }
             }
             "alt" => attrs.alt = val,
+            // `<details open>` 是布尔属性：只保留属性存在性，导出时写回 `open`
+            // （值本身无安全语义，任何写法都等价于 true）。
+            "open" if tag_name == "details" => attrs.open = true,
             // 显式尺寸只对 `<img>` 有意义（其它标签渲染/导出都不读这两个字段）。
             // 只接受纯十进制数字：`100px` / `50%` / 负数等一律当非法值忽略，
             // 避免把非像素语义的单位误当像素放大版面。
@@ -1339,13 +1406,14 @@ impl<'a> InlineParser<'a> {
     }
 
     /// `$math$`：内容非空、首尾非空格、闭 `$` 后不随数字（pandoc 规则）。
+    /// 反斜杠转义的 `\$` 不是闭定界符（`$6 \$` 保持纯文本）。
     fn try_math(&mut self) -> Option<InlineNode> {
         let rest = &self.s[self.pos..];
         if !rest.starts_with('$') {
             return None;
         }
         let inner = &rest[1..];
-        let rel = inner.find('$')?;
+        let rel = find_unescaped_dollar(inner)?;
         let content = &inner[..rel];
         let ok = !content.is_empty()
             && !content.starts_with(char::is_whitespace)
@@ -2025,6 +2093,76 @@ mod tests {
         assert_eq!(sexp(&parse("m://x.y")), "");
         // `www.` 紧贴单词内部不接管
         assert_eq!(sexp(&parse("awww.a.com")), "");
+    }
+
+    #[test]
+    fn bare_url_stops_at_cjk_punctuation() {
+        // TASK04-D003：`。下` 不得成为链接的一部分。
+        let src = "见 https://example.com。下";
+        let ns = parse(src);
+        let link = find_link(&ns).expect("裸 URL 应成链");
+        assert_eq!(
+            &src[link.url.unwrap().start..link.url.unwrap().end],
+            "https://example.com"
+        );
+        // 全角逗号/括号同样终止；括号后的中文保留。
+        let src = "看 https://a.example/x，后再看";
+        let ns = parse(src);
+        let link = find_link(&ns).expect("裸 URL 应成链");
+        assert_eq!(&src[link.url.unwrap().start..link.url.unwrap().end], "https://a.example/x");
+        // 对照：URL 内的非 ASCII 字母（中文路径）仍被保留。
+        let src = "https://例子.example/路径";
+        let ns = parse(src);
+        let link = find_link(&ns).expect("裸 URL 应成链");
+        assert_eq!(link.url.unwrap().end, src.len());
+    }
+
+    #[test]
+    fn bare_url_after_closed_autolink_is_linked() {
+        // TASK04-D010：闭合的 `<...>` 不能再把后续裸 URL 判为“尖括号内”而抑制。
+        let src = "<https://a.example> https://b.example www.example.com";
+        let ns = parse(src);
+        let links: Vec<&InlineNode> =
+            ns.iter().filter(|n| n.kind == InlineKind::Link).collect();
+        assert_eq!(links.len(), 3, "自动链接 + 两个裸链接: {ns:?}");
+        assert_eq!(links[0].range.end, 19);
+        assert_eq!(&src[links[1].range.start..links[1].range.end], "https://b.example");
+        assert_eq!(&src[links[2].range.start..links[2].range.end], "www.example.com");
+        // 对照：普通文本中的 `>` 不影响其后裸 URL。
+        let ns = parse("x > y https://b.example");
+        assert_eq!(ns.iter().filter(|n| n.kind == InlineKind::Link).count(), 1);
+    }
+
+    #[test]
+    fn escaped_dollar_is_not_math_closer() {
+        // TASK04-D005：`\$` 是转义美元，不是闭定界符。
+        let ns = parse("$6 \\$");
+        assert!(
+            ns.iter().all(|n| n.kind != InlineKind::Math),
+            "$6 \\$ 不应形成 Math: {ns:?}"
+        );
+        // 对照：未转义 `$` 仍闭合。
+        assert_eq!(sexp(&parse("$x$")), "Math[0..3 c=1..2]");
+        // 两个反斜杠是字面反斜杠 + 真定界符。
+        assert_eq!(sexp(&parse("$x\\\\$")), "Math[0..5 c=1..4]");
+    }
+
+    #[test]
+    fn inline_details_open_attribute_is_preserved() {
+        // TASK04-D008：布尔属性 `open` 必须记录（导出层写回 `<details open>`）。
+        let ns = parse("<details open><summary>S</summary>body</details>");
+        match &ns[0].kind {
+            InlineKind::Html { tag, attrs } => {
+                assert_eq!(*tag, HtmlTag::Details);
+                assert!(attrs.open, "open 属性应保留");
+            }
+            other => panic!("expected Html Details, got {other:?}"),
+        }
+        let ns = parse("<details><summary>S</summary>body</details>");
+        match &ns[0].kind {
+            InlineKind::Html { attrs, .. } => assert!(!attrs.open),
+            other => panic!("expected Html Details, got {other:?}"),
+        }
     }
 
     #[test]

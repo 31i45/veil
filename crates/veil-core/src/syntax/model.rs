@@ -210,6 +210,8 @@ pub struct HtmlAttrs {
     pub height: Option<u32>,
     /// `<a href="...">` 的目标（仅 a 标签收集；`javascript:` 等危险 scheme 置空）。
     pub href: Option<String>,
+    /// `<details open>` 的布尔属性存在性（仅白名单 details 标签收集）。
+    pub open: bool,
     /// 净化后的 `style="..."`（仅允许的颜色/字体/装饰声明，已丢弃危险与未知声明）。
     pub style: Option<String>,
 }

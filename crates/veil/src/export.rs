@@ -53,7 +53,10 @@ fn head(style: &ExportStyle) -> String {
          summary{{cursor:pointer;font-weight:600}}\n\
          details[open] summary{{margin-bottom:.4em}}\n\
          img{{max-width:100%;height:auto;max-height:3.2em}}\n\
-         p>img:only-child{{max-height:9.6em}}\n\
+         p>img:only-child,figure img{{max-height:9.6em}}\n\
+         figure{{margin:1em 0;text-align:center}}\n\
+         figcaption{{margin-top:.4em;color:{muted};font-size:.9em;\
+         overflow-wrap:anywhere;word-break:break-word}}\n\
          td img,th img{{max-height:2.4em}}\n\
          blockquote{{border-left:4px solid {border};margin-left:0;padding-left:1em;color:{muted}}}\n\
          table{{border-collapse:collapse}}\n\
@@ -284,10 +287,26 @@ pub fn html_of_doc(
         };
         let rendered =
             render_block_inlines(session, &mut fn_occurrences, &text, span.start, &nodes);
+        let caption = (kind == BlockKind::Paragraph)
+            .then(|| standalone_image_caption(&nodes, &text, span.start))
+            .flatten();
+        let mut html = String::new();
         pulldown_cmark::html::push_html(
-            &mut body,
+            &mut html,
             pulldown_cmark::Parser::new_ext(&format!("{defs}{rendered}"), opts),
         );
+        if let Some(caption) = caption {
+            let inner = html
+                .strip_prefix("<p>")
+                .and_then(|h| h.strip_suffix("</p>\n"))
+                .unwrap_or(&html);
+            body.push_str(&format!(
+                "<figure>\n{inner}\n<figcaption>{}</figcaption>\n</figure>\n",
+                escape_html(&caption)
+            ));
+        } else {
+            body.push_str(&html);
+        }
         i += 1;
     }
     while !details_stack.is_empty() {
@@ -405,6 +424,44 @@ fn heading_level(kind: &BlockKind) -> Option<u8> {
         BlockKind::AtxHeading(level) | BlockKind::SetextHeading(level) => Some(*level),
         _ => None,
     }
+}
+
+/// 段落只含一张独立图片时返回 alt 题注；行内、多图与空 alt 均不派生题注。
+fn standalone_image_caption(nodes: &[InlineNode], text: &str, base: usize) -> Option<String> {
+    let mut images = nodes.iter().filter(|n| {
+        matches!(n.kind, InlineKind::Image)
+            || matches!(
+                n.kind,
+                InlineKind::HtmlSelfClosed {
+                    tag: HtmlTag::Img,
+                    ..
+                }
+            )
+    });
+    let node = images.next()?;
+    if images.next().is_some() {
+        return None;
+    }
+    let start = node.range.start.checked_sub(base)?;
+    let end = node.range.end.checked_sub(base)?;
+    if start >= end
+        || end > text.len()
+        || !text.is_char_boundary(start)
+        || !text.is_char_boundary(end)
+        || !text[..start].trim().is_empty()
+        || !text[end..].trim().is_empty()
+    {
+        return None;
+    }
+    let alt = match &node.kind {
+        InlineKind::Image => {
+            text.get(node.content.start.checked_sub(base)?..node.content.end.checked_sub(base)?)?
+        }
+        InlineKind::HtmlSelfClosed { attrs, .. } => attrs.alt.as_deref()?,
+        _ => return None,
+    };
+    let caption = alt.trim().replace(['\r', '\n'], " ");
+    (!caption.is_empty()).then_some(caption)
 }
 
 /// 标题内容区间（块内字节偏移，标题块起点即首行行首）。
@@ -1843,11 +1900,40 @@ mod tests {
 
     #[test]
     fn fenced_code_escapes_html() {
-        // 代码内容 HTML 转义：< → &lt;；语言信息串 v0 不存在（veil-core 不解析 info）
         assert_eq!(
             body_of("```\nif a < b {}\n```\n"),
             "<pre><code>if a &lt; b {}\n</code></pre>\n"
         );
+    }
+
+    #[test]
+    fn fenced_code_language_class_preserves_rust_alias_and_unknown_language() {
+        for (lang, marker) in [
+            ("rust", "let rust = 1;"),
+            ("rs", "let alias = 1;"),
+            ("not-a-known-language", "let unknown = 1;"),
+        ] {
+            let body = body_of(&format!("```{lang}\n{marker}\n```\n"));
+            assert!(
+                body.contains(&format!("<code class=\"language-{lang}\">{marker}")),
+                "语言语义应保留：{body}"
+            );
+            assert!(!body.contains("<script"), "未知语言不得产生脚本：{body}");
+        }
+    }
+
+    #[test]
+    fn fenced_code_language_attribute_is_escaped() {
+        let body = body_of("```unknown\"><script>alert(1)</script>\nlet x = 1;\n```\n");
+        assert!(
+            !body.contains("<script>"),
+            "info string 不得注入标签：{body}"
+        );
+        assert!(
+            body.contains("&quot;&gt;&lt;script&gt;"),
+            "语言名应转义：{body}"
+        );
+        assert!(body.contains("let x = 1;"), "代码正文须保留：{body}");
     }
 
     #[test]
@@ -2096,12 +2182,53 @@ mod tests {
     }
 
     #[test]
-    fn image_renders_as_img_tag() {
-        // 切片 13：`![alt](path)` 由 pulldown-cmark 输出 <img>；相对路径原样保留
-        // （导出 HTML 与源文档同目录，相对引用继续有效）
+    fn standalone_image_exports_semantic_figure_and_caption() {
         assert_eq!(
             body_of("![示例](img/a.png)\n"),
-            "<p><img src=\"img/a.png\" alt=\"示例\" /></p>\n"
+            "<figure>\n<img src=\"img/a.png\" alt=\"示例\" />\n<figcaption>示例</figcaption>\n</figure>\n"
+        );
+        let body = body_of("![长 CJK 题注](img/a.png)\n");
+        assert!(body.contains("<figure>"), "独立图片应使用 figure：{body}");
+        assert!(
+            body.contains("<figcaption>长 CJK 题注</figcaption>"),
+            "{body}"
+        );
+    }
+
+    #[test]
+    fn inline_and_empty_alt_images_do_not_get_captions() {
+        for body in [
+            body_of("前文 ![行内图](img/a.png) 后文\n"),
+            body_of("![](img/a.png)\n"),
+            body_of("![   ](img/a.png)\n"),
+        ] {
+            assert!(!body.contains("<figure>"), "不得生成独立题注：{body}");
+            assert!(
+                !body.contains("<figcaption>"),
+                "不得生成 figcaption：{body}"
+            );
+        }
+    }
+
+    #[test]
+    fn standalone_html_img_exports_figure_without_relaxing_attribute_whitelist() {
+        let body = body_of(
+            "<img src=\"img/a.png\" alt=\"安全题注\" onerror=\"alert(1)\" width=\"120\">\n",
+        );
+        assert!(body.contains("<figure>"), "{body}");
+        assert!(body.contains("<figcaption>安全题注</figcaption>"), "{body}");
+        assert!(body.contains("width=\"120\""), "{body}");
+        assert!(!body.contains("onerror"), "事件属性仍须清理：{body}");
+    }
+
+    #[test]
+    fn caption_text_and_dangerous_image_scheme_stay_sanitized() {
+        let body = body_of("![<script>alert(1)</script>](javascript:alert(1))\n");
+        assert!(body.contains("<figcaption>&lt;script&gt;alert(1)&lt;/script&gt;</figcaption>"));
+        assert!(!body.contains("<script>"), "题注不得注入脚本：{body}");
+        assert!(
+            !body.contains("src=\"javascript:"),
+            "危险 scheme 仍须清理：{body}"
         );
     }
 
@@ -2244,8 +2371,12 @@ mod tests {
             "实际输出: {css}"
         );
         assert!(
-            css.contains("p>img:only-child{max-height:9.6em}"),
+            css.contains("p>img:only-child,figure img{max-height:9.6em}"),
             "实际输出: {css}"
+        );
+        assert!(
+            css.contains("figcaption{margin-top:.4em;color:#666666;font-size:.9em;overflow-wrap:anywhere;word-break:break-word}"),
+            "题注样式与换行兜底：{css}"
         );
         assert!(
             css.contains("td img,th img{max-height:2.4em}"),

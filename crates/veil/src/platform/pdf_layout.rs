@@ -194,6 +194,48 @@ fn paragraph_is_image_only(
     !trimmed.is_empty() && covered >= trimmed.len()
 }
 
+/// 段落只含一张独立图片时返回图片区间与 alt 题注；行内、多图与空 alt 不派生题注。
+fn standalone_image_caption(
+    nodes: &[InlineNode],
+    text: &str,
+    base: usize,
+) -> Option<(Range, String)> {
+    let mut images = nodes.iter().filter(|n| {
+        matches!(n.kind, InlineKind::Image)
+            || matches!(
+                n.kind,
+                InlineKind::HtmlSelfClosed {
+                    tag: HtmlTag::Img,
+                    ..
+                }
+            )
+    });
+    let node = images.next()?;
+    if images.next().is_some() {
+        return None;
+    }
+    let start = node.range.start.checked_sub(base)?;
+    let end = node.range.end.checked_sub(base)?;
+    if start >= end
+        || end > text.len()
+        || !text.is_char_boundary(start)
+        || !text.is_char_boundary(end)
+        || !text[..start].trim().is_empty()
+        || !text[end..].trim().is_empty()
+    {
+        return None;
+    }
+    let alt = match &node.kind {
+        InlineKind::Image => {
+            text.get(node.content.start.checked_sub(base)?..node.content.end.checked_sub(base)?)?
+        }
+        InlineKind::HtmlSelfClosed { attrs, .. } => attrs.alt.as_deref()?,
+        _ => return None,
+    };
+    let caption = alt.trim().replace(['\r', '\n'], " ");
+    (!caption.is_empty()).then_some((node.range, caption))
+}
+
 /// 贪心换行：优先在空格处断行；CJK 任意断行；超长串硬断。
 fn fill_lines(items: Vec<LItem>, max_w: f32, m: &dyn TextMetrics) -> Vec<Vec<LItem>> {
     let max_w = max_w.max(24.0);
@@ -259,6 +301,8 @@ struct Ctx<'a> {
     /// 行内图片高度上限（正文行高倍数，B4）：默认 2 行，独占一行放宽到 6 行，
     /// 表格单元格 1.5 行。与编辑视图同一策略，保证三通道尺寸一致。
     img_max_lines: f32,
+    /// 正在排版的带题注独立图片；加载失败时用通用占位，避免 alt 与题注重复。
+    captioned_image: Option<Range>,
     /// 已定义脚注 id → 编号（文档首次引用顺序，与 HTML 导出同源）。
     /// 缺定义的引用不进表：引用处保留可读原文，不生成断号。
     footnotes: HashMap<String, usize>,
@@ -275,6 +319,7 @@ impl<'a> Ctx<'a> {
             page: 0,
             y: geom.top(),
             img_max_lines: 2.0,
+            captioned_image: None,
             footnotes: HashMap::new(),
         }
     }
@@ -304,20 +349,22 @@ impl<'a> Ctx<'a> {
         align: CellAlign,
         line_w: f32,
     ) {
-        let mut h = self.metrics.line_height(base_size);
+        // 基线以上/以下分别取文本与 Box 的最大需求：含行内图片时图顶不得越过
+        // 当前 y 压住前一段（尤其是多行题注），文本 descent 也须留在本行高度内。
+        let text_h = self.metrics.line_height(base_size);
+        let text_above = self.metrics.ascent(base_size);
+        let has_text = line.iter().any(|it| matches!(it, LItem::Ch(..)));
+        let mut above = if has_text { text_above } else { 0.0 };
+        let mut below = if has_text { text_h - text_above } else { 0.0 };
         for it in &line {
             if let LItem::Box(b) = it {
-                h = h.max(b.h);
+                above = above.max(b.baseline);
+                below = below.max(b.h - b.baseline);
             }
         }
+        let h = above + below;
         self.ensure(h);
-        // 独占一行的 Box（如块级图片）按块级放置：图顶即当前 y，避免按基线对齐时
-        // 顶部被抬高 h - ascent 压住前文。含文本/多个条目的行仍按基线对齐。
-        let single_box = match line.as_slice() {
-            [LItem::Box(b)] => Some(b.baseline),
-            _ => None,
-        };
-        let baseline = self.y + single_box.unwrap_or_else(|| self.metrics.ascent(base_size));
+        let baseline = self.y + above;
 
         let mut x = self.geom.margin_x + indent;
         if !matches!(align, CellAlign::None | CellAlign::Left) {
@@ -433,6 +480,9 @@ impl<'a> Ctx<'a> {
         if paragraph_is_image_only(&nodes, &text, start, start, start + visible) {
             self.img_max_lines = 6.0;
         }
+        let caption = standalone_image_caption(&nodes, &text, start);
+        let prev_captioned = self.captioned_image;
+        self.captioned_image = caption.as_ref().map(|(range, _)| *range);
         self.rich(
             &text,
             start,
@@ -443,7 +493,21 @@ impl<'a> Ctx<'a> {
             indent,
             media,
         );
+        self.captioned_image = prev_captioned;
         self.img_max_lines = prev_limit;
+        if let Some((_, caption)) = caption {
+            let st = Style {
+                size: 9.5,
+                color: COL_MUTED,
+                ..Style::body()
+            };
+            let items: Vec<LItem> = caption.chars().map(|c| LItem::Ch(c, st)).collect();
+            let avail = (self.max_w() - indent).max(40.0);
+            self.y += 2.0;
+            for line in fill_lines(items, avail, self.metrics) {
+                self.emit_line(line, indent, st.size, CellAlign::None, avail);
+            }
+        }
         self.y += 5.0;
     }
 
@@ -598,7 +662,12 @@ impl<'a> Ctx<'a> {
                                 color: COL_MUTED,
                                 ..style
                             };
-                            for c in alt.chars() {
+                            let fallback = if self.captioned_image == Some(node.range) {
+                                "[图片]"
+                            } else {
+                                alt
+                            };
+                            for c in fallback.chars() {
                                 out.push(LItem::Ch(c, st));
                             }
                         }
@@ -784,7 +853,12 @@ impl<'a> Ctx<'a> {
                                     color: COL_MUTED,
                                     ..style
                                 };
-                                for c in alt.chars() {
+                                let fallback = if self.captioned_image == Some(node.range) {
+                                    "[图片]"
+                                } else {
+                                    alt
+                                };
+                                for c in fallback.chars() {
                                     out.push(LItem::Ch(c, st));
                                 }
                             }
@@ -2169,6 +2243,182 @@ mod tests {
         }
     }
 
+    fn lay_media(md: &str, media: &mut dyn MediaProvider) -> DocLayout {
+        let session = Session::open(md);
+        layout_document(
+            &session,
+            &FakeMetrics,
+            PageGeom::a4(20.0),
+            LayoutOpts::default(),
+            Some(media),
+        )
+    }
+
+    #[test]
+    fn standalone_images_emit_visible_captions_below_images() {
+        let mut media = FakeImageMedia;
+        let doc = lay_media(
+            "![独立题注](fake.png)\n\n<img src=\"fake.png\" alt=\"HTML 题注\">\n",
+            &mut media,
+        );
+        assert_eq!(
+            doc.pages
+                .iter()
+                .flatten()
+                .filter(|op| matches!(op, DrawOp::Image { .. }))
+                .count(),
+            2,
+            "Markdown 与 HTML 独立图片都应绘制"
+        );
+        for expected in ["独立题注", "HTML 题注"] {
+            let caption = doc
+                .pages
+                .iter()
+                .flatten()
+                .find_map(|op| match op {
+                    DrawOp::Text(t) if t.text == expected => Some(t),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("独立图片应输出可见题注 {expected}"));
+            assert_eq!(caption.size, 9.5);
+            assert_eq!(caption.color, COL_MUTED);
+        }
+        let first_image = doc
+            .pages
+            .iter()
+            .flatten()
+            .find_map(|op| match op {
+                DrawOp::Image { y, h, .. } => Some((*y, *h)),
+                _ => None,
+            })
+            .expect("应有独立图片");
+        let first_caption_y = doc
+            .pages
+            .iter()
+            .flatten()
+            .find_map(|op| match op {
+                DrawOp::Text(t) if t.text == "独立题注" => Some(t.y),
+                _ => None,
+            })
+            .expect("应有首个题注");
+        assert!(
+            first_caption_y >= first_image.0 + first_image.1,
+            "题注应位于图片下方"
+        );
+    }
+
+    #[test]
+    fn inline_and_empty_alt_images_do_not_emit_captions() {
+        let mut media = FakeImageMedia;
+        let doc = lay_media(
+            "前文 ![行内替代](fake.png) 后文\n\n![](fake.png)\n\n![   ](fake.png)\n",
+            &mut media,
+        );
+        let text = all_text(&doc);
+        assert!(text.contains("前文") && text.contains("后文"), "{text}");
+        assert!(!text.contains("行内替代"), "行内图片不得派生题注: {text}");
+        assert!(
+            doc.pages.iter().flatten().all(|op| !matches!(
+                op,
+                DrawOp::Text(t) if (t.size - 9.5).abs() < 0.01 && t.color == COL_MUTED
+            )),
+            "行内与空 alt 图片不得产生独立题注样式: {text}"
+        );
+    }
+
+    #[test]
+    fn long_cjk_caption_wraps_within_content_width() {
+        let caption = "长中文题注".repeat(30);
+        let mut media = FakeImageMedia;
+        let doc = lay_media(&format!("![{caption}](fake.png)\n"), &mut media);
+        let runs: Vec<&TextRun> = doc
+            .pages
+            .iter()
+            .flatten()
+            .filter_map(|op| match op {
+                DrawOp::Text(t) if (t.size - 9.5).abs() < 0.01 && t.color == COL_MUTED => Some(t),
+                _ => None,
+            })
+            .collect();
+        assert!(runs.len() >= 2, "长 CJK 题注应换成多行: {runs:?}");
+        assert_eq!(
+            runs.iter().map(|t| t.text.as_str()).collect::<String>(),
+            caption
+        );
+        let geom = PageGeom::a4(20.0);
+        for run in runs {
+            let width: f32 = run
+                .text
+                .chars()
+                .map(|c| FakeMetrics.width_of(c, run.size))
+                .sum();
+            assert!(
+                width <= geom.content_w() + 0.01,
+                "题注行宽 {width} 不得越出版心 {}",
+                geom.content_w()
+            );
+        }
+    }
+
+    #[test]
+    fn long_caption_does_not_overlap_following_inline_image() {
+        let caption = "长中文题注".repeat(30);
+        let mut media = FakeImageMedia;
+        let doc = lay_media(
+            &format!("![{caption}](fake.png)\n\n后文 ![行内](fake.png) 文本\n"),
+            &mut media,
+        );
+        let last_caption_baseline = doc
+            .pages
+            .iter()
+            .flatten()
+            .filter_map(|op| match op {
+                DrawOp::Text(t) if (t.size - 9.5).abs() < 0.01 && t.color == COL_MUTED => {
+                    Some(t.y)
+                }
+                _ => None,
+            })
+            .fold(f32::MIN, f32::max);
+        let inline_image_y = doc
+            .pages
+            .iter()
+            .flatten()
+            .filter_map(|op| match op {
+                DrawOp::Image { y, .. } => Some(*y),
+                _ => None,
+            })
+            .next_back()
+            .expect("应有后续行内图片");
+        assert!(
+            inline_image_y >= last_caption_baseline + 2.0,
+            "行内图片顶部 {inline_image_y} 不得侵入末行题注基线 {last_caption_baseline} 之上"
+        );
+    }
+
+    #[test]
+    fn missing_standalone_image_uses_placeholder_without_duplicating_caption() {
+        let doc = lay(
+            "![缺失独立题注](missing.png)\n\n\
+             <img src=\"missing.png\" alt=\"缺失 HTML 题注\">\n\n\
+             前文 ![行内缺失替代](missing.png) 后文\n",
+            false,
+        );
+        let text = all_text(&doc);
+        for caption in ["缺失独立题注", "缺失 HTML 题注"] {
+            assert_eq!(text.matches(caption).count(), 1, "{text}");
+        }
+        assert_eq!(
+            text.matches("[图片]").count(),
+            2,
+            "缺图应使用通用占位: {text}"
+        );
+        assert_eq!(
+            text.matches("行内缺失替代").count(),
+            1,
+            "行内缺图仍保留 alt: {text}"
+        );
+    }
+
     #[test]
     fn standalone_image_is_placed_below_previous_content() {
         let md =
@@ -2363,6 +2613,38 @@ mod tests {
         let text = all_text(&doc);
         assert!(!text.contains('>'), "不得残留引用标记: {text}");
         assert!(text.contains("内层文本"), "内层正文须保留: {text}");
+    }
+
+    #[test]
+    fn fenced_code_labels_keep_language_and_omit_unlabelled_blocks() {
+        let doc = lay(
+            "```rust\nlet rust = 1;\n```\n\n\
+             ```rs\nlet alias = 1;\n```\n\n\
+             ```not-a-known-language\nlet unknown = 1;\n```\n\n\
+             ```\nlet plain = 1;\n```\n",
+            false,
+        );
+        let labels: Vec<&str> = doc
+            .pages
+            .iter()
+            .flatten()
+            .filter_map(|op| match op {
+                DrawOp::Text(t) if (t.size - 8.0).abs() < 0.01 && t.color == COL_MUTED => {
+                    Some(t.text.as_str())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(labels, ["rust", "rs", "not-a-known-language"]);
+        let text = all_text(&doc);
+        for body in [
+            "let rust = 1;",
+            "let alias = 1;",
+            "let unknown = 1;",
+            "let plain = 1;",
+        ] {
+            assert!(text.contains(body), "代码正文须保留 {body}: {text}");
+        }
     }
 
     /// DEF-T09-E1-005：代码语言标题与首行代码不跨页（遍历边界位置）。

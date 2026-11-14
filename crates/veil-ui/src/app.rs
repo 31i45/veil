@@ -931,6 +931,7 @@ impl App {
         };
         app.engine.set_syntax_colors(app.input_state.theme.syntax);
         app.engine.set_link_color(app.input_state.theme.link);
+        app.engine.set_muted_color(app.input_state.theme.muted);
         // 正文排版（字号/行高/字体族）：必须在首次排版前设置；缓存此时为空，无需失效。
         app.engine.set_doc_typography(
             app.config.doc_font_size,
@@ -999,6 +1000,7 @@ impl App {
     pub(crate) fn refresh_theme_visuals(&mut self) {
         self.engine.set_syntax_colors(self.input_state.theme.syntax);
         self.engine.set_link_color(self.input_state.theme.link);
+        self.engine.set_muted_color(self.input_state.theme.muted);
         // 导出样式与渲染样式同点更新：主题切换后立即导出也应拿到新配色
         self.doc.export_style = ExportStyle::from_theme(&self.input_state.theme);
         self.input_state.revs.theme += 1;

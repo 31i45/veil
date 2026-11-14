@@ -1268,6 +1268,117 @@ fn image_failure_degrades_to_alt_and_memoizes() {
     assert_eq!(calls.borrow().len(), 1);
 }
 
+// ---- 图片题注（Task 5）：独立成行图片的 alt 显示在图片下方 ----
+
+#[test]
+fn standalone_image_alt_renders_caption_without_touching_document() {
+    let (mut a, _) = app_with_images(
+        "前文\n\n![本地题注](p.png)\n",
+        Some("dir/doc.md"),
+        &[("dir/p.png", 200, 100)],
+    );
+    a.ensure_layouts_all();
+    let before = doc_text(&a);
+    let l = layout_of_text(&a, "![本地题注]");
+    assert!(l.layout_text().contains("本地题注"), "alt 应作为题注显示");
+    assert!(
+        !l.layout_text().contains("![本地题注](p.png)"),
+        "题注不是源码"
+    );
+    assert_eq!(doc_text(&a), before, "题注不参与文档字节");
+}
+
+#[test]
+fn empty_alt_standalone_image_has_no_caption_line() {
+    let (mut a, _) = app_with_images(
+        "前文\n\n![](p.png)\n",
+        Some("dir/doc.md"),
+        &[("dir/p.png", 200, 100)],
+    );
+    a.ensure_layouts_all();
+    let l = layout_of_text(&a, "![](p.png)");
+    assert_eq!(l.buffer.layout_runs().count(), 1, "空 alt 不产生题注行");
+}
+
+#[test]
+fn inline_image_alt_is_not_rendered_as_caption() {
+    let (mut a, _) = app_with_images(
+        "正文 ![行内](p.png) 继续",
+        Some("dir/doc.md"),
+        &[("dir/p.png", 60, 20)],
+    );
+    a.ensure_layouts_all();
+    let l = layout_of_text(&a, "![行内]");
+    assert!(!l.layout_text().contains("行内"), "行内图片不显示题注");
+}
+
+#[test]
+fn missing_image_caption_stays_visible() {
+    let (mut a, _) = app_with_images(
+        "前文\n\n![找不到](missing.png)\n",
+        Some("dir/doc.md"),
+        &[],
+    );
+    a.ensure_layouts_all();
+    let l = layout_of_text(&a, "![找不到]");
+    assert!(l.layout_text().contains("找不到"), "图片缺失时题注仍可读");
+    assert!(
+        l.layout_text().contains(t(I18nKey::ImageAltFallback)),
+        "缺失图片应有通用占位提示"
+    );
+    assert_eq!(l.buffer.layout_runs().count(), 2, "占位一行 + 题注一行");
+}
+
+#[test]
+fn caption_increases_block_height_by_one_line() {
+    let (mut with, _) = app_with_images(
+        "前文\n\n![题注](p.png)\n",
+        Some("dir/doc.md"),
+        &[("dir/p.png", 200, 100)],
+    );
+    with.ensure_layouts_all();
+    with.recompute_geometry();
+    let (mut without, _) = app_with_images(
+        "前文\n\n![](q.png)\n",
+        Some("dir/doc.md"),
+        &[("dir/q.png", 200, 100)],
+    );
+    without.ensure_layouts_all();
+    without.recompute_geometry();
+    let line_h = with.engine.doc_line_height() * with.input_state.scale;
+    let d = geom_of_text(&with, "![题注]").height - geom_of_text(&without, "![](q.png)").height;
+    assert!(
+        d >= line_h * 0.9,
+        "题注须使块高增加一行: diff={d} line_h={line_h}"
+    );
+}
+
+#[test]
+fn caption_follows_alt_edits() {
+    let (mut a, _) = app_with_images(
+        "前文\n\n![旧题注](p.png)\n",
+        Some("dir/doc.md"),
+        &[("dir/p.png", 200, 100)],
+    );
+    a.ensure_layouts_all();
+    assert!(layout_of_text(&a, "![旧题注]")
+        .layout_text()
+        .contains("旧题注"));
+    // 光标进入 alt 后插入字符，再移出：题注应随文档更新。
+    assert!(a.editor.set_caret(10)); // 「旧」起始（UTF-8 字符边界）
+    let dirty = a.editor.apply(Intent::InsertText("新".into())).unwrap();
+    a.after_edit(dirty);
+    assert!(a.editor.set_caret(0));
+    a.after_edit(Vec::new());
+    a.ensure_layouts_all();
+    let l = layout_of_text(&a, "![新旧题注]");
+    assert!(
+        l.layout_text().contains("新旧题注"),
+        "修改 alt 后题注应更新: {:?}",
+        l.layout_text()
+    );
+}
+
 #[test]
 fn remote_or_draft_image_is_never_loaded() {
     let (mut a, calls) =
@@ -13559,9 +13670,10 @@ fn block_level_html_img_line_renders_placeholder_not_code_card() {
     let id = block_id_of(&a, |k| matches!(k, BlockKind::Paragraph));
     a.ensure_layouts_all();
     let l = &a.cache.layouts[&id];
+    // 独立成行的缺失 `<img>`：占位提示 + 下方题注（alt），二者都在视图文本里。
     assert!(
-        l.layout_text().contains("[缺失]"),
-        "块级 img 行应渲染占位 + alt；layout_text: {:?}",
+        l.layout_text().contains(t(I18nKey::ImageAltFallback)) && l.layout_text().contains("缺失"),
+        "块级 img 行应渲染占位 + 题注；layout_text: {:?}",
         l.layout_text()
     );
     assert!(

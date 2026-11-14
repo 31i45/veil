@@ -563,7 +563,7 @@ impl App {
         let mut y = MARGIN * scale;
         // 前块只保留间距判定所需的轻量信息（不克隆 BlockKind，也不重扫块间文本）。
         #[allow(clippy::type_complexity)]
-        let mut prev: Option<(f32, bool, bool, Range, BlockContainer, usize)> = None;
+        let mut prev: Option<(f32, bool, bool, Range, BlockContainer, usize, bool)> = None;
         for g in &mut blocks {
             g.height = self.block_height_with(g, base, caret);
             g.top = y;
@@ -571,21 +571,27 @@ impl App {
                 // 隐藏子块不占高度，也不参与后续块间距计算（上一个可见块保持不变）。
                 continue;
             }
-            if let Some((prev_gap, prev_quote, prev_details, pr, pc, prev_end_line)) = prev {
+            // REN-SWEEP-001：隐藏的 Front Matter 高 0，且不留前后段距。
+            let hidden_fm = self.frontmatter_hidden(g, caret);
+            if let Some((prev_gap, prev_quote, prev_details, pr, pc, prev_end_line, prev_hidden_fm)) =
+                prev
+            {
                 // 块间空行数 = 下一块首行 - 上一块尾行（块边界均为行首，gap 全为换行）。
                 let blank = g.start_line.saturating_sub(prev_end_line) as u32;
-                y += gap_between_parts(
-                    prev_gap,
-                    prev_quote,
-                    prev_details,
-                    pr,
-                    pc,
-                    &g.kind,
-                    g.range,
-                    g.container,
-                    blank,
-                    line_h,
-                ) * scale;
+                if !prev_hidden_fm {
+                    y += gap_between_parts(
+                        prev_gap,
+                        prev_quote,
+                        prev_details,
+                        pr,
+                        pc,
+                        &g.kind,
+                        g.range,
+                        g.container,
+                        blank,
+                        line_h,
+                    ) * scale;
+                }
                 g.top = y;
             }
             y += g.height;
@@ -596,6 +602,7 @@ impl App {
                 g.range,
                 g.container,
                 g.end_line,
+                hidden_fm,
             ));
         }
         // 文末留白（B5）：末行下方至少 `BOTTOM_PAD_LINES` 行可点击空白。
@@ -638,11 +645,18 @@ impl App {
         let start = pos.saturating_sub(1);
         let end = (pos + 2).min(n);
         // details 的隐藏/折叠会改变「是否占高度」与后续块归属：退全量。
-        if self.index.blocks[start..end].iter().any(|g| {
-            g.details_hidden
-                || matches!(g.kind, BlockKind::Details { .. })
-                || g.container.details_depth > 0
-        }) {
+        // Front Matter 的隐藏/显示会改变块高与前后段距（REN-SWEEP-001）：同样退全量。
+        if self.index.blocks[start..end]
+            .iter()
+            .any(|g| {
+                g.details_hidden
+                    || matches!(g.kind, BlockKind::Details { .. } | BlockKind::FrontMatter(_))
+                    || g.container.details_depth > 0
+            })
+            || self.index.blocks[start..end]
+                .iter()
+                .any(|g| self.block_is_frontmatter(g))
+        {
             self.recompute_geometry();
             return;
         }

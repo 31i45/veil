@@ -430,6 +430,10 @@ pub(crate) struct UIState {
     /// spec 默认收起（空 set = 全收起）；open_default = true 的块在 refresh_index
     /// 后自动预塞进此集合，尊重 HTML `<details open>`。
     pub(crate) expanded_details: std::collections::HashSet<BlockId>,
+    /// WYSIWYG 非活动态隐藏 Front Matter（REN-SWEEP-001）：光标是否停在
+    /// Front Matter 块内（最近一次 `sync_frontmatter_at_caret` 的判定）。
+    /// 状态翻转时触发几何重算，使块高在 0 与源码高之间切换。
+    pub(crate) frontmatter_revealed: bool,
     /// 行内 `<details>` 展开集合（B3）：(块 id, `<details` 开标签的块内相对字节)。
     /// 默认收起（空集）；纯视图态，不写文档字节、不进撤销栈。
     pub(crate) expanded_inline_details: std::collections::HashSet<(BlockId, usize)>,
@@ -457,6 +461,7 @@ impl Default for UIState {
             history: History::default(),
             expanded_details: std::collections::HashSet::new(),
             expanded_inline_details: std::collections::HashSet::new(),
+            frontmatter_revealed: false,
         }
     }
 }

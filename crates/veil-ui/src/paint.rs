@@ -1227,6 +1227,8 @@ impl App {
         }
         // B3：光标落在折叠 details 的隐藏区时先展开（键盘/撤销/搜索等任意路径的兜底）。
         self.sync_details_at_caret();
+        // REN-SWEEP-001：光标进入/离开 Front Matter 时切换「隐藏 ↔ 显源码」。
+        self.sync_frontmatter_at_caret();
         // 视口驱动惰性排版（P1b）：缓存命中时 ensure 只做键比对；仅当本轮真的
         // 新增了布局/公式/表格（geometry_stale）才需要 O(块数) 重算几何——
         // 编辑路径已在 after_edit 末尾重算过，击键后的首帧直接跳过整篇累计。
@@ -1285,6 +1287,9 @@ impl App {
         for g in &self.index.blocks[vis] {
             if self.block_hidden(g) {
                 continue; // B3：折叠 details 的隐藏子块整组不渲染（非光栅裁剪）
+            }
+            if self.frontmatter_hidden(g, caret) {
+                continue; // REN-SWEEP-001：非活动态 Front Matter 不绘制（也不占高度）
             }
             let (id, kind, range, top) = (g.id, g.kind.clone(), g.range, g.top);
             let sy = (vp.y + top - self.window_state.scroll_y) as i32;
@@ -1519,6 +1524,8 @@ impl App {
                         bh,
                         theme.grid,
                     );
+                    // REN-SWEEP-004：多层引用按层级补画次级引用条。
+                    self.paint_nested_quote_rails(&mut frame, g, l, sy);
                 }
                 BlockKind::Admonition(_) | BlockKind::Callout(_) => {
                     // 提示块：左竖条按类型着色（引用灰条 → 语义/配置色），不改字节。

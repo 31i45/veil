@@ -2566,10 +2566,12 @@ impl App {
         }
     }
 
-    /// 设置应用后立即生效：主题模式、字体缓存、平滑滚动。
-    /// 不要求重启。
+    /// 设置应用后立即生效：主题模式、字体缓存、平滑滚动。不要求重启。
+    ///
+    /// 走 `refresh_theme_visuals` 而非只换 `Theme` 值：主题代次必须递增，否则
+    /// Dark→System（系统为浅色）时布局/光栅缓存仍按旧深色主题命中，正文保持浅灰。
     #[allow(dead_code)]
-    fn refresh_settings_effects(&mut self) {
+    pub(crate) fn refresh_settings_effects(&mut self) {
         // 1) 主题：mode 变了需要重新取系统深色并刷新 Theme 派生值
         if self.config.mode == ThemeMode::System {
             if let Some(dark) = self.ports.system.is_dark() {
@@ -2579,14 +2581,10 @@ impl App {
         self.input_state.theme = Theme::of(self.config.mode, self.input_state.system_dark);
         // 2) 平滑滚动：WindowState 独立存储，需要同步
         self.window_state.smooth = self.config.smooth_scroll;
-        // 3) 文档字体族/字号/行高/制表符：所有 layout 失配（base_key 包含 typography）
-        self.refresh_index();
-        self.ensure_layouts_visible();
-        self.ensure_tables_visible();
-        self.recompute_geometry();
+        // 3) 文档字体族/字号/行高/制表符 + 主题配色：统一由主题刷新入口
+        //    递增代次、重排可见块并重算几何（base_key 同时含 typography/theme）。
+        self.refresh_theme_visuals();
         self.set_ime_area();
-        // 4) 主题/颜色变了 → engine 语法着色同步
-        self.engine.set_syntax_colors(self.input_state.theme.syntax);
         self.ui_state.chrome.notice = t(I18nKey::NoticeSettingsSaved).into();
     }
 
@@ -2660,6 +2658,27 @@ impl App {
         if self.ui_state.outline.hover.is_some_and(|h| h >= count) {
             self.ui_state.outline.hover = None;
         }
+    }
+
+    /// `[TOC]` 视图目录的标题输入：按文档顺序返回 (级别, 剥标记文本)。
+    /// 与大纲面板同源（`Session::heading`），空标题不入目录。
+    pub(crate) fn toc_entries(&self) -> Vec<(u8, String)> {
+        let mut out = Vec::new();
+        for g in &self.index.blocks {
+            if !matches!(
+                g.kind,
+                BlockKind::AtxHeading(_) | BlockKind::SetextHeading(_)
+            ) {
+                continue;
+            }
+            let Some((level, text)) = self.editor.session().heading(g.id) else {
+                continue;
+            };
+            if !text.is_empty() {
+                out.push((level, text));
+            }
+        }
+        out
     }
 
     /// 大纲面板矩形（关闭时 None）：右缘贴滚动条左缘，纵向占满内容视口。

@@ -15,7 +15,7 @@ mod syntax;
 pub mod toc;
 
 pub use callouts::CalloutRegistry;
-pub use link_safety::{link_scheme, link_url_is_safe};
+pub use link_safety::{link_scheme, link_url_is_safe, percent_decode_path};
 pub use mermaid::{
     detect_type, mermaid_live_url, MermaidTemplate, CLASS_TEMPLATE, ER_TEMPLATE,
     FLOWCHART_TEMPLATE, MERMAID_LIVE_BASE, SEQUENCE_TEMPLATE, STATE_TEMPLATE,

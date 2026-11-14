@@ -6,7 +6,9 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use veil_core::{heading_slugs, BlockKind, HtmlTag, InlineKind, InlineNode, Range, Session};
+use veil_core::{
+    heading_slugs, percent_decode_path, BlockKind, HtmlTag, InlineKind, InlineNode, Range, Session,
+};
 use veil_ui::{ExportStyle, Exporter, FileStore};
 
 /// 文档外壳：最小自包含模板（无外部资源）。样式由当前主题快照生成，
@@ -1639,37 +1641,6 @@ fn strip_query_fragment(value: &str) -> &str {
         .find(['?', '#'])
         .unwrap_or(value.len());
     &value[..cut]
-}
-
-/// 百分号解码（UTF-8 路径）；非法序列原样保留。
-fn percent_decode_path(value: &str) -> String {
-    if !value.contains('%') {
-        return value.to_string();
-    }
-    let b = value.as_bytes();
-    let mut out = Vec::with_capacity(b.len());
-    let mut i = 0;
-    while i < b.len() {
-        if b[i] == b'%' && i + 2 < b.len() {
-            if let (Some(h), Some(l)) = (hex_val(b[i + 1]), hex_val(b[i + 2])) {
-                out.push(h * 16 + l);
-                i += 3;
-                continue;
-            }
-        }
-        out.push(b[i]);
-        i += 1;
-    }
-    String::from_utf8_lossy(&out).into_owned()
-}
-
-fn hex_val(b: u8) -> Option<u8> {
-    match b {
-        b'0'..=b'9' => Some(b - b'0'),
-        b'a'..=b'f' => Some(b - b'a' + 10),
-        b'A'..=b'F' => Some(b - b'A' + 10),
-        _ => None,
-    }
 }
 
 /// 按魔数判定位图 MIME；SVG 等文本格式不内嵌（可携带脚本）。

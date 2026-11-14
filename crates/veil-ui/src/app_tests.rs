@@ -908,6 +908,31 @@ fn image_path_resolution_rules() {
     );
 }
 
+/// DEF-T05-004：percent 编码的中文/空格路径按 UTF-8 解码后再解析。
+#[test]
+fn percent_encoded_local_image_path_decodes() {
+    let doc = Path::new("dir/notes.md");
+    assert_eq!(
+        local_image_path("img/%E4%B8%AD%E6%96%87.png", Some(doc)),
+        Some(PathBuf::from("dir/img/中文.png"))
+    );
+    assert_eq!(
+        local_image_path("img/a%20b.png", Some(doc)),
+        Some(PathBuf::from("dir/img/a b.png"))
+    );
+    // 非法百分号序列原样保留，不 panic。
+    assert_eq!(
+        local_image_path("img/%ZZ.png", Some(doc)),
+        Some(PathBuf::from("dir/img/%ZZ.png"))
+    );
+    // 编码后的 scheme 不误判为本地路径。
+    assert_eq!(
+        local_image_path("https%3A%2F%2Fexample.com%2Fa.png", Some(doc)),
+        Some(PathBuf::from("dir/https://example.com/a.png")),
+        "解码后仍按本地相对路径处理（不以 scheme 加载）"
+    );
+}
+
 #[test]
 fn fit_size_scales_only_when_wider_than_content() {
     assert_eq!(fit_size(100, 50, 768.0), (100, 50));
@@ -5728,6 +5753,46 @@ fn system_mode_follows_live_switch_and_clears_color_caches() {
     assert!(a.cache.inline_math.is_empty(), "公式图须按新前景色重渲");
 }
 
+/// DEF-T05-007：设置面板把 Dark 改为 System（系统浅色）后，当前文档调色板完整重绘。
+#[test]
+fn settings_theme_switch_dark_to_system_repaints_palette() {
+    let sys = Rc::new(Cell::new(Some(false)));
+    let mut a = app_theme(Box::new(MemConfig::default()), sys);
+    a.config.mode = ThemeMode::Dark;
+    a.input_state.theme = crate::theme::Theme::of(ThemeMode::Dark, true);
+    a.refresh_theme_visuals();
+    a.ensure_layouts_all();
+    let (id, kind, range) = a.editor.session().blocks()[0].clone();
+    let old_base = a.base_key();
+    let old_rev = a.input_state.revs.theme;
+    a.config.mode = ThemeMode::System;
+    a.refresh_settings_effects();
+    assert!(!a.input_state.theme.dark, "System(浅色) 应切换为浅色调色板");
+    assert!(
+        a.input_state.revs.theme > old_rev,
+        "主题代次必须递增，旧颜色缓存才会失效"
+    );
+    assert_ne!(a.base_key(), old_base, "基础键应随主题变化");
+    a.ensure_layouts_all();
+    let caret = a.editor.caret();
+    let base = a.base_key();
+    let lk = a
+        .cache
+        .raster_key(id, &kind, range, base, caret)
+        .expect("当前文档应按新主题重排");
+    assert_eq!(a.cache.layouts[&id].key.base, base);
+    let (px, _, _) = a
+        .engine
+        .rasterize(&a.cache.layouts[&id].value, a.input_state.theme.fg);
+    let fg = a.input_state.theme.fg;
+    assert!(
+        px.chunks(4)
+            .any(|p| p[3] > 0 && p[0] == fg[0] && p[1] == fg[1] && p[2] == fg[2]),
+        "光栅应用新主题前景色重绘"
+    );
+    let _ = lk;
+}
+
 #[test]
 fn explicit_mode_ignores_system_switch() {
     let cfg = MemConfig::default();
@@ -9100,9 +9165,28 @@ fn link_hover_shows_normalized_url_and_clears_on_leave() {
     assert!(a.ui_state.hover_link.is_none());
 }
 
+/// DEF-T05-010：切换文档时链接 tooltip 必须复位，不残留旧 URL。
 #[test]
-fn link_hover_hits_table_cell_link() {
+fn switching_document_clears_link_tooltip() {
     let store = MemStore::default();
+    store
+        .files
+        .borrow_mut()
+        .insert(PathBuf::from("b.md"), "新文档\n".as_bytes().to_vec());
+    let mut a = app("[站点](www.example.com)\n", None, false, &store);
+    let (x, y) = point_at_doc(&mut a, 1);
+    a.input_state.mouse = PhysicalPosition::new(x as f64, y as f64);
+    a.update_hover();
+    assert!(a.ui_state.hover_link.is_some(), "前置：悬停应出提示");
+    a.open_path(PathBuf::from("b.md"));
+    assert!(
+        a.ui_state.hover_link.is_none(),
+        "换文档后不得残留旧文档链接提示"
+    );
+}
+
+#[test]
+fn link_hover_hits_table_cell_link() {    let store = MemStore::default();
     let mut a = app(
         "p\n\n| [站点](www.example.com) | b |\n| --- | --- |\n| c | d |\n",
         None,
@@ -11451,6 +11535,91 @@ fn source_mode_hides_math_image_and_table_grid() {
     assert!(a.table_shows_grid(table.0, &table.1), "关闭后恢复表格网格");
 }
 
+/// DEF-T05-002：源码模式下表格绘制原始行文本，而不是空白网格区域。
+#[test]
+fn source_mode_table_paints_raw_rows_instead_of_blank() {
+    let store = MemStore::default();
+    let mut a = app("| a | b |\n| --- | --- |\n| c | d |\n", None, false, &store);
+    a.perform_action(Action::OpenSourceMode);
+    let _ = a.render(); // 先完成排版/几何，再取稳定坐标
+    let (top, h) = a
+        .index
+        .blocks
+        .iter()
+        .find(|g| g.kind == BlockKind::Table)
+        .map(|g| (g.top, a.block_height(g)))
+        .expect("含表格块");
+    let vp = a.viewport();
+    let bg = a.input_state.theme.bg;
+    let scroll = a.window_state.scroll_y;
+    let x0 = a.content_x().max(vp.x) as u32;
+    let x1 = (a.content_x() + a.content_width()).min(vp.x + vp.w) as u32;
+    let y0 = (vp.y + top - scroll).max(vp.y) as u32;
+    let y1 = (y0 as f32 + h).min(vp.y + vp.h) as u32;
+    let f = a.render();
+    let mut ink = 0usize;
+    for y in y0..y1 {
+        for x in x0..x1 {
+            if f.get(x, y) != bg {
+                ink += 1;
+            }
+        }
+    }
+    assert!(ink > 50, "源码模式表格块应有原始行文本像素，实际 ink={ink}");
+}
+
+/// DEF-T05-005：`[TOC]` 在视图层渲染生成目录，源码/编辑态显标记，且不改文档。
+#[test]
+fn toc_marker_renders_directory_in_view_only() {
+    let store = MemStore::default();
+    let src = "[TOC]\n\n# 一\n\n## 二\n\n正文\n";
+    let mut a = app(src, None, false, &store);
+    a.editor.set_caret(src.len());
+    a.refresh_index();
+    a.ensure_layouts_all();
+    let marker = a
+        .index
+        .blocks
+        .iter()
+        .find(|g| g.toc_marker)
+        .map(|g| (g.id, g.range))
+        .expect("应识别 TOC 标记块");
+    let text = a.cache.layouts[&marker.0].layout_text().to_string();
+    assert!(text.contains("• 一"), "目录应含一级标题: {text:?}");
+    assert!(text.contains("   • 二"), "目录应含缩进的二级标题: {text:?}");
+    assert_eq!(a.editor.session().serialize(), src, "不得写回文档");
+    assert!(!a.editor.is_dirty(), "视图目录不得置脏");
+    assert_eq!(a.editor.session().undo_depth(), 0, "视图目录不得产生撤销步");
+
+    // 源码模式：原样显示 `[TOC]`。
+    a.perform_action(Action::OpenSourceMode);
+    a.ensure_layouts_all();
+    assert_eq!(a.cache.layouts[&marker.0].layout_text(), "[TOC]");
+    a.perform_action(Action::OpenSourceMode);
+    // 编辑态（光标在标记块内）：显源码，便于修改标记。
+    a.editor.set_caret(marker.1.start + 1);
+    a.ensure_layouts_all();
+    assert_eq!(a.cache.layouts[&marker.0].layout_text(), "[TOC]");
+
+    // 动态刷新：插入新标题后目录重排并包含新条目。
+    let end = a.editor.session().serialize().len();
+    a.editor.set_caret(end);
+    a.editor
+        .apply(Intent::InsertText("\n# 新章\n".into()))
+        .unwrap();
+    a.refresh_index();
+    a.ensure_layouts_all();
+    let marker_id = a
+        .index
+        .blocks
+        .iter()
+        .find(|g| g.toc_marker)
+        .expect("插入标题后仍应识别标记块")
+        .id;
+    let text = a.cache.layouts[&marker_id].layout_text().to_string();
+    assert!(text.contains("新章"), "标题增删后目录应动态刷新: {text:?}");
+}
+
 /// 打印探针：begin 后采样标题块（打印态）、end 后按屏幕态重排再采样。
 struct SourcePrintProbe {
     during_heading: Rc<RefCell<String>>,
@@ -11502,6 +11671,86 @@ fn print_ignores_source_mode_and_screen_restores_it() {
 }
 
 // ===== 排版（Task 5）：可读列宽上限 / H4–H6 缩进 / 标题段距 =====
+
+/// 420px 窄窗口 + 12 列：表格必须压回版心宽，块高覆盖所有单元格，
+/// 后续段落起点不早于表格底边（不得压字/视口异常）。
+#[test]
+fn narrow_twelve_column_table_fits_and_tail_does_not_overlap() {
+    let store = MemStore::default();
+    let cols = 12;
+    for scale in [1.0, 1.5] {
+        let head = format!(
+            "| {} |\n",
+            (1..=cols)
+                .map(|i| format!("C{i:02}_START"))
+                .collect::<Vec<_>>()
+                .join(" | ")
+        );
+        let sep = format!("| {} |\n", vec!["---"; cols].join(" | "));
+        let row = format!(
+            "| {} |\n",
+            [
+                "START_CELL",
+                "中文长内容用于窄列逐字折行测试",
+                "c03",
+                "c04",
+                "c05",
+                "c06",
+                "c07",
+                "c08",
+                "c09",
+                "c10",
+                "c11",
+                "LAST_CELL"
+            ]
+            .join(" | ")
+        );
+        let text = format!("{head}{sep}{row}\nTAIL_AFTER_OVERFLOW_TABLE\n");
+        let mut a = app(&text, None, false, &store);
+        a.window_state.test_size = Some((420, 700));
+        a.input_state.scale = scale;
+        a.editor.set_caret(text.len());
+        a.refresh_index();
+        a.ensure_layouts_all();
+        a.ensure_tables();
+        a.recompute_geometry();
+        let table = a
+            .index
+            .blocks
+            .iter()
+            .find(|g| g.kind == BlockKind::Table)
+            .expect("应有表格块");
+        let tail = a
+            .index
+            .blocks
+            .iter()
+            .find(|g| g.kind == BlockKind::Paragraph && g.range.start > table.range.start)
+            .expect("应有表格后的段落");
+        let tl = a.cache.table(table.id, a.table_key(table.id)).expect("网格已排版");
+        assert!(
+            tl.width <= a.content_width() + 0.5,
+            "scale={scale}: 表格宽 {} 超出可用宽 {}",
+            tl.width,
+            a.content_width()
+        );
+        assert!(
+            (a.block_height(table) - tl.height).abs() < 0.5,
+            "scale={scale}: 块高必须与网格高一致"
+        );
+        assert!(
+            table.top + tl.height <= tail.top + 0.5,
+            "scale={scale}: 后文起点 {} 早于表格底边 {}",
+            tail.top,
+            table.top + tl.height
+        );
+        for c in &tl.cells {
+            assert!(
+                c.y + c.pixel_h as f32 <= tl.height + 0.5,
+                "scale={scale}: 单元格内容溢出表格高度"
+            );
+        }
+    }
+}
 
 /// 超宽窗口：版心被可读列宽钳制，并在窗口内水平居中。
 #[test]

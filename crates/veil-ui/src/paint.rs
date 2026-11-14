@@ -363,6 +363,8 @@ impl App {
         let Some(blocks) = self.index.blocks.get(indices) else {
             return;
         };
+        // TOC 目录条目：仅文档含标记块且需要渲染目录时才扫描标题（编辑/源码态零成本）。
+        let mut toc_entries: Option<Vec<(u8, String)>> = None;
         // 先收集待排块与其行内公式/图片（session 借用期），再调渲染器/加载器（&mut self）
         let mut pending = Vec::new();
         for g in blocks {
@@ -370,10 +372,23 @@ impl App {
                 continue; // 折叠 details 的隐藏子块不排版（展开时再惰性补齐）
             }
             let (id, kind, range) = (g.id, g.kind.clone(), g.range);
-            if self.cache.layout(id, &kind, range, base, caret).is_some() {
+            // `[TOC]` 标记：视图态渲染生成目录，源码态/光标在块内时原样显示标记。
+            let toc_rendered =
+                g.toc_marker && !reveal_all && !(range.start <= caret && caret <= range.end);
+            if self
+                .cache
+                .layout(id, &kind, range, base, caret)
+                .is_some_and(|l| l.toc_rendered == toc_rendered)
+            {
                 continue;
             }
             let text = self.editor.session().text_slice(range).unwrap_or_default();
+            let toc_text = if toc_rendered {
+                let entries = toc_entries.get_or_insert_with(|| self.toc_entries());
+                Some(crate::view::toc_display_text(entries))
+            } else {
+                None
+            };
             let inlines = self.editor.session().block_inlines(id).unwrap_or_default();
             let mut maths: Vec<(Range, String)> = Vec::new(); // (节点区间, tex)
                                                               // (节点区间, url, 显式宽高)：Markdown 图片无显式尺寸（None, None），
@@ -430,10 +445,22 @@ impl App {
             } else {
                 Vec::new()
             };
-            pending.push((id, kind, range, text, inlines, maths, images, folds));
+            pending.push((
+                id,
+                kind,
+                range,
+                text,
+                inlines,
+                maths,
+                images,
+                folds,
+                toc_text,
+                g.toc_marker,
+            ));
         }
         let image_base = self.input_state.revs.image_base;
-        for (id, kind, range, text, inlines, maths, images, folds) in pending {
+        for (id, kind, range, text, inlines, maths, images, folds, toc_text, toc_marker) in pending
+        {
             let mut imgs = Vec::new();
             let container = self.editor.session().block_container(id);
             let img_max_w = self.image_max_width(container, width);
@@ -545,20 +572,27 @@ impl App {
                     baseline: dh, // 底边贴基线
                 });
             }
-            let l = self.engine.layout_block_with_footnotes(
-                kind.clone(),
-                &text,
-                range,
-                &inlines,
-                width,
-                caret,
-                &imgs,
-                reveal_all,
-                Some(&footnotes),
-                &folds,
-                // 有序列表显示编号：编号在块索引层按文档顺序派生（BlockKind 不含起始号）。
-                self.index.list_ordinals.get(&id).copied(),
-            );
+            let l = match toc_text {
+                Some(toc) => self.engine.layout_toc(&toc, width),
+                None => {
+                    let mut l = self.engine.layout_block_with_footnotes(
+                        kind.clone(),
+                        &text,
+                        range,
+                        &inlines,
+                        width,
+                        caret,
+                        &imgs,
+                        reveal_all,
+                        Some(&footnotes),
+                        &folds,
+                        // 有序列表显示编号：编号在块索引层按文档顺序派生（BlockKind 不含起始号）。
+                        self.index.list_ordinals.get(&id).copied(),
+                    );
+                    l.toc_source = toc_marker;
+                    l
+                }
+            };
             let reveal = l.reveal_state(&kind, range, caret);
             self.cache.layouts.insert(
                 id,
@@ -1106,7 +1140,12 @@ impl App {
                 frame.blit(&img.pixels, img.width, img.height, x, sy);
                 continue;
             }
-            if kind == BlockKind::Table && self.block_height(g) > 0.0 {
+            // 仅网格态才走表格绘制；源码模式（或光标落在结构字符上）必须落到
+            // 文本光栅路径，否则表格块只会画空白并跳过原始行。
+            if kind == BlockKind::Table
+                && self.table_shows_grid(id, &range)
+                && self.block_height(g) > 0.0
+            {
                 // 容器内表格先画引用条（表格分支会提前 continue，装饰 match 不覆盖）。
                 self.paint_quote_rails(&mut frame, g, sy);
                 self.paint_table(&mut frame, id, sy);
@@ -3146,7 +3185,10 @@ pub(crate) fn local_image_path(url: &str, doc: Option<&Path>) -> Option<PathBuf>
             return None;
         }
     }
-    let p = Path::new(url);
+    // 百分号编码的中文/空格路径（`%E4%B8%AD` / `%20`）按 UTF-8 解码后再解析；
+    // 与 HTML 导出的资产路径口径一致（veil_core::percent_decode_path）。
+    let decoded = veil_core::percent_decode_path(url);
+    let p = Path::new(&decoded);
     if p.is_absolute() {
         return Some(p.to_path_buf());
     }

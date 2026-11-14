@@ -55,6 +55,21 @@ pub fn find_cjk_font() -> Option<&'static str> {
     None
 }
 
+/// 字符回退字体候选：CJK 主字体缺字（emoji / 非 BMP 符号）时按序尝试。
+#[cfg(windows)]
+pub fn find_fallback_font() -> Option<&'static str> {
+    const CANDIDATES: &[&str] = &[
+        r"C:\Windows\Fonts\seguiemj.ttf", // Segoe UI Emoji
+        r"C:\Windows\Fonts\seguisym.ttf", // Segoe UI Symbol
+    ];
+    CANDIDATES.iter().copied().find(|p| Path::new(p).exists())
+}
+
+#[cfg(not(windows))]
+pub fn find_fallback_font() -> Option<&'static str> {
+    None
+}
+
 // =============================================================================
 // 度量
 // =============================================================================
@@ -102,16 +117,38 @@ impl FontMetrics {
         let scale = 1000.0 / upem;
 
         let mut widths = HashMap::new();
+        let mut missing: Vec<char> = Vec::new();
         for c in chars {
             if widths.contains_key(&c) {
                 continue;
             }
-            let w = face
+            match face
                 .glyph_index(c)
                 .and_then(|gid| face.glyph_hor_advance(gid))
-                .map(|a| a as f32 * scale)
-                .unwrap_or(600.0);
-            widths.insert(c, w);
+            {
+                Some(a) => {
+                    widths.insert(c, a as f32 * scale);
+                }
+                None => missing.push(c),
+            }
+        }
+        // 主字体缺字（emoji/非 BMP）：按回退字体真实步进测宽，避免换行按 600 单位错排。
+        if !missing.is_empty() {
+            if let Some(path) = find_fallback_font() {
+                if let Ok(bytes) = std::fs::read(path) {
+                    if let Ok(fb) = ttf_parser::Face::parse(&bytes, 0) {
+                        let fb_scale = 1000.0 / fb.units_per_em().max(1) as f32;
+                        for c in missing {
+                            let w = fb
+                                .glyph_index(c)
+                                .and_then(|gid| fb.glyph_hor_advance(gid))
+                                .map(|a| a as f32 * fb_scale)
+                                .unwrap_or(600.0);
+                            widths.insert(c, w);
+                        }
+                    }
+                }
+            }
         }
 
         Ok(Self {
@@ -401,6 +438,11 @@ impl FontResource {
         format!("<{hex}>")
     }
 
+    /// 字体是否覆盖该字符（有可写出的 CID）。
+    pub fn covers(&self, c: char) -> bool {
+        self.char_to_cid.contains_key(&c)
+    }
+
     /// 字符 → CID。字体无该字形时回退到 `?`（仍有 ToUnicode 与正确步进），
     /// 避免落到 CID 0/.notdef 造成「无字 + 宽度按 1em」的静默错位。
     pub fn cid_of(&self, c: char) -> u16 {
@@ -446,7 +488,29 @@ fn color_cmd(c: [u8; 3], stroke: bool) -> String {
     )
 }
 
-fn content_stream(page: &[DrawOp], font: &FontResource) -> Vec<u8> {
+/// 把一段文本按「主字体能否覆盖」切成若干 (是否用回退字体, 片段)。
+/// 缺字且回退字体也无字形时仍留在主字体（走 `?` 兜底）。
+fn split_font_runs(
+    text: &str,
+    primary: &FontResource,
+    fallback: Option<&FontResource>,
+) -> Vec<(bool, String)> {
+    let mut runs: Vec<(bool, String)> = Vec::new();
+    for c in text.chars() {
+        let use_fb = !primary.covers(c) && fallback.is_some_and(|f| f.covers(c));
+        match runs.last_mut() {
+            Some((fb, s)) if *fb == use_fb => s.push(c),
+            _ => runs.push((use_fb, c.to_string())),
+        }
+    }
+    runs
+}
+
+fn content_stream(
+    page: &[DrawOp],
+    font: &FontResource,
+    fallback: Option<&FontResource>,
+) -> Vec<u8> {
     let mut out = String::new();
     for op in page {
         match op {
@@ -480,8 +544,21 @@ fn content_stream(page: &[DrawOp], font: &FontResource) -> Vec<u8> {
                 ));
             }
             DrawOp::Text(t) => {
+                // 字符按字体覆盖能力切 run：emoji/非 BMP 用回退字体（/F2），
+                // 其余仍用主字体（/F1），保证可显示且 ToUnicode 可复制。
+                let runs = split_font_runs(&t.text, font, fallback);
+                let run_font = |is_fb: bool| -> &FontResource {
+                    if is_fb {
+                        fallback.unwrap_or(font)
+                    } else {
+                        font
+                    }
+                };
+                let tw: f32 = runs
+                    .iter()
+                    .map(|(fb, s)| run_font(*fb).text_width(s, t.size))
+                    .sum();
                 if let Some(bg) = t.highlight {
-                    let tw = font.text_width(&t.text, t.size);
                     out.push_str(&format!(
                         "{} {:.2} {:.2} {:.2} {:.2} re f\n",
                         color_cmd(bg, false),
@@ -491,27 +568,36 @@ fn content_stream(page: &[DrawOp], font: &FontResource) -> Vec<u8> {
                         t.size * 1.28
                     ));
                 }
-                let tm = if t.italic {
-                    format!("1 0 0.24 1 {:.2} {:.2} Tm", t.x, y_from_top(t.y))
-                } else {
-                    format!("1 0 0 1 {:.2} {:.2} Tm", t.x, y_from_top(t.y))
-                };
+                let tm_y = y_from_top(t.y);
                 out.push_str("BT\n");
-                out.push_str(&format!("/F1 {:.2} Tf\n", t.size));
-                out.push_str(&format!("{}\n", color_cmd(t.color, false)));
                 if t.bold {
                     // 用「填充+描边」加粗，避免二次绘制造成笔画重影。
                     out.push_str(&format!("{}\n", color_cmd(t.color, true)));
                     out.push_str(&format!("{:.2} w 2 Tr\n", t.size * 0.028));
                 }
-                out.push_str(&format!("{tm}\n"));
-                out.push_str(&format!("{} Tj\n", font.encode_cid_hex(&t.text)));
+                let mut x = t.x;
+                for (is_fb, text) in runs {
+                    let f = run_font(is_fb);
+                    let tm = if t.italic {
+                        format!("1 0 0.24 1 {x:.2} {tm_y:.2} Tm")
+                    } else {
+                        format!("1 0 0 1 {x:.2} {tm_y:.2} Tm")
+                    };
+                    out.push_str(&format!(
+                        "/{} {:.2} Tf\n",
+                        if is_fb { "F2" } else { "F1" },
+                        t.size
+                    ));
+                    out.push_str(&format!("{}\n", color_cmd(t.color, false)));
+                    out.push_str(&format!("{tm}\n"));
+                    out.push_str(&format!("{} Tj\n", f.encode_cid_hex(&text)));
+                    x += f.text_width(&text, t.size);
+                }
                 if t.bold {
                     out.push_str("0 Tr\n");
                 }
                 out.push_str("ET\n");
 
-                let tw = font.text_width(&t.text, t.size);
                 if t.underline {
                     out.push_str(&format!(
                         "{} {:.2} w {:.2} {:.2} m {:.2} {:.2} l S\n",
@@ -539,109 +625,16 @@ fn content_stream(page: &[DrawOp], font: &FontResource) -> Vec<u8> {
     out.into_bytes()
 }
 
-/// 把版面渲染为完整 PDF 字节。
-pub fn render_pages(
-    pages: &[Vec<DrawOp>],
-    images: &[ImageData],
-    outline: &[OutlineItem],
-    font_path: &Path,
-) -> Result<Vec<u8>, String> {
-    if pages.is_empty() {
-        return Err(t(Key::PrintErrNoExportPages).into());
-    }
-
-    let mut chars: Vec<char> = Vec::new();
-    for p in pages {
-        for op in p {
-            if let DrawOp::Text(t) = op {
-                chars.extend(t.text.chars());
-            }
-        }
-    }
-    for o in outline {
-        chars.extend(o.title.chars());
-    }
-    let font = FontResource::load_and_subset(font_path, chars, false)?;
-
-    let mut pdf = Pdf::new();
-
-    let page_tree_id = Ref::new(2);
-    let font_desc_ref = Ref::new(5);
-    let cid_font_ref = Ref::new(6);
-    let type0_ref = Ref::new(7);
-    let tu_cmap_ref = Ref::new(8);
-    let font_stream_ref = Ref::new(9);
-
-    // 页面引用与内容流引用依次分配
-    let mut next_ref: i32 = 10;
-    let mut page_refs: Vec<Ref> = Vec::new();
-    let mut content_refs: Vec<Ref> = Vec::new();
-    for _ in pages {
-        page_refs.push(Ref::new(next_ref));
-        next_ref += 1;
-        content_refs.push(Ref::new(next_ref));
-        next_ref += 1;
-    }
-
-    // 图片 XObject 引用
-    let image_refs: Vec<Ref> = images
-        .iter()
-        .map(|_| {
-            let r = Ref::new(next_ref);
-            next_ref += 1;
-            r
-        })
-        .collect();
-
-    for (i, page) in pages.iter().enumerate() {
-        let mut used: BTreeSet<usize> = BTreeSet::new();
-        for op in page {
-            if let DrawOp::Image { id, .. } = op {
-                used.insert(*id);
-            }
-        }
-
-        let mut page_obj = pdf.page(page_refs[i]);
-        page_obj
-            .parent(page_tree_id)
-            .media_box(Rect::new(0.0, 0.0, A4_WIDTH, A4_HEIGHT))
-            .contents(content_refs[i]);
-
-        let mut res = page_obj.insert(Name(b"Resources")).dict();
-        {
-            let mut fonts = res.insert(Name(b"Font")).dict();
-            fonts.pair(Name(b"F1"), type0_ref);
-        }
-        if !used.is_empty() && !image_refs.is_empty() {
-            let mut xobj = res.insert(Name(b"XObject")).dict();
-            for id in used {
-                if id < image_refs.len() {
-                    let name = format!("Im{id}");
-                    xobj.pair(Name(name.as_bytes()), image_refs[id]);
-                }
-            }
-        }
-        drop(res);
-        drop(page_obj);
-
-        let content = content_stream(page, &font);
-        pdf.stream(content_refs[i], content.as_ref());
-    }
-
-    pdf.pages(page_tree_id)
-        .kids(page_refs.iter().copied())
-        .count(page_refs.len() as i32);
-
-    // —— 图片对象 ——
-    for (i, img) in images.iter().enumerate() {
-        let mut x = pdf.image_xobject(image_refs[i], &img.rgb);
-        x.width(img.w as i32)
-            .height(img.h as i32)
-            .color_space_name(Name(b"DeviceRGB"))
-            .bits_per_component(8);
-    }
-
-    // —— 字体 ——
+/// 写入一套 Type0/CIDFontType2 字体对象（主字体与回退字体共用）。
+fn write_type0_font(
+    pdf: &mut Pdf,
+    font: &FontResource,
+    font_desc_ref: Ref,
+    cid_font_ref: Ref,
+    type0_ref: Ref,
+    tu_cmap_ref: Ref,
+    font_stream_ref: Ref,
+) {
     let base_name_bytes = font.base_name.as_bytes();
     pdf.font_descriptor(font_desc_ref)
         .name(Name(base_name_bytes))
@@ -690,6 +683,160 @@ pub fn render_pages(
         .primitive(cid_font_ref);
     d.pair(Name(b"ToUnicode"), tu_cmap_ref);
     drop(d);
+}
+
+/// 把版面渲染为完整 PDF 字节。
+pub fn render_pages(
+    pages: &[Vec<DrawOp>],
+    images: &[ImageData],
+    outline: &[OutlineItem],
+    font_path: &Path,
+) -> Result<Vec<u8>, String> {
+    if pages.is_empty() {
+        return Err(t(Key::PrintErrNoExportPages).into());
+    }
+
+    let mut chars: Vec<char> = Vec::new();
+    for p in pages {
+        for op in p {
+            if let DrawOp::Text(t) = op {
+                chars.extend(t.text.chars());
+            }
+        }
+    }
+    for o in outline {
+        chars.extend(o.title.chars());
+    }
+    let font = FontResource::load_and_subset(font_path, chars.iter().copied(), false)?;
+
+    // DEF-T09-E1-003：主字体缺字（emoji/非 BMP）时加载回退字体并子集化。
+    // 只有确实覆盖到缺失字符才启用，避免为一个缺字嵌入整套无用户形字体。
+    let missing: Vec<char> = chars
+        .iter()
+        .copied()
+        .filter(|c| *c != '\0' && !font.covers(*c))
+        .collect();
+    let fallback = if missing.is_empty() {
+        None
+    } else {
+        find_fallback_font()
+            .and_then(|path| {
+                FontResource::load_and_subset(Path::new(path), missing.iter().copied(), false).ok()
+            })
+            .filter(|f| missing.iter().any(|c| f.covers(*c)))
+    };
+
+    let mut pdf = Pdf::new();
+
+    let page_tree_id = Ref::new(2);
+    let font_desc_ref = Ref::new(5);
+    let cid_font_ref = Ref::new(6);
+    let type0_ref = Ref::new(7);
+    let tu_cmap_ref = Ref::new(8);
+    let font_stream_ref = Ref::new(9);
+
+    // 页面引用与内容流引用依次分配
+    let mut next_ref: i32 = 10;
+    let mut page_refs: Vec<Ref> = Vec::new();
+    let mut content_refs: Vec<Ref> = Vec::new();
+    for _ in pages {
+        page_refs.push(Ref::new(next_ref));
+        next_ref += 1;
+        content_refs.push(Ref::new(next_ref));
+        next_ref += 1;
+    }
+
+    // 图片 XObject 引用
+    let image_refs: Vec<Ref> = images
+        .iter()
+        .map(|_| {
+            let r = Ref::new(next_ref);
+            next_ref += 1;
+            r
+        })
+        .collect();
+
+    // 回退字体对象引用（仅在有回退字体时分配）
+    let fallback_refs = fallback.as_ref().map(|_| {
+        let mut next = || {
+            let r = Ref::new(next_ref);
+            next_ref += 1;
+            r
+        };
+        (
+            next(),
+            next(),
+            next(),
+            next(),
+            next(),
+        )
+    });
+    let fallback_type0 = fallback_refs.map(|r| r.2);
+
+    for (i, page) in pages.iter().enumerate() {
+        let mut used: BTreeSet<usize> = BTreeSet::new();
+        for op in page {
+            if let DrawOp::Image { id, .. } = op {
+                used.insert(*id);
+            }
+        }
+
+        let mut page_obj = pdf.page(page_refs[i]);
+        page_obj
+            .parent(page_tree_id)
+            .media_box(Rect::new(0.0, 0.0, A4_WIDTH, A4_HEIGHT))
+            .contents(content_refs[i]);
+
+        let mut res = page_obj.insert(Name(b"Resources")).dict();
+        {
+            let mut fonts = res.insert(Name(b"Font")).dict();
+            fonts.pair(Name(b"F1"), type0_ref);
+            if let Some(r) = fallback_type0 {
+                fonts.pair(Name(b"F2"), r);
+            }
+        }
+        if !used.is_empty() && !image_refs.is_empty() {
+            let mut xobj = res.insert(Name(b"XObject")).dict();
+            for id in used {
+                if id < image_refs.len() {
+                    let name = format!("Im{id}");
+                    xobj.pair(Name(name.as_bytes()), image_refs[id]);
+                }
+            }
+        }
+        drop(res);
+        drop(page_obj);
+
+        let content = content_stream(page, &font, fallback.as_ref());
+        pdf.stream(content_refs[i], content.as_ref());
+    }
+
+    pdf.pages(page_tree_id)
+        .kids(page_refs.iter().copied())
+        .count(page_refs.len() as i32);
+
+    // —— 图片对象 ——
+    for (i, img) in images.iter().enumerate() {
+        let mut x = pdf.image_xobject(image_refs[i], &img.rgb);
+        x.width(img.w as i32)
+            .height(img.h as i32)
+            .color_space_name(Name(b"DeviceRGB"))
+            .bits_per_component(8);
+    }
+
+    // —— 字体 ——
+    write_type0_font(
+        &mut pdf,
+        &font,
+        font_desc_ref,
+        cid_font_ref,
+        type0_ref,
+        tu_cmap_ref,
+        font_stream_ref,
+    );
+    if let (Some(fb), Some((fd, cid_r, type0_r, tu, stream))) = (fallback.as_ref(), fallback_refs) {
+        write_type0_font(&mut pdf, fb, fd, cid_r, type0_r, tu, stream);
+    }
 
     // —— 书签（多级）——
     let outline_root_ref = if !outline.is_empty() {
@@ -893,7 +1040,7 @@ mod tests {
                 color: [0, 0, 0],
             }),
         ];
-        let s = String::from_utf8_lossy(&content_stream(&page, &font)).to_string();
+        let s = String::from_utf8_lossy(&content_stream(&page, &font, None)).to_string();
         assert!(s.contains("re f"), "矩形应输出 re f");
         assert!(s.contains("BT") && s.contains("Tj"), "文本应输出 BT/Tj");
         assert!(s.contains("Tm"), "文本应使用 Tm 定位");
@@ -903,6 +1050,126 @@ mod tests {
     #[test]
     fn font_candidates_exist_on_windows() {
         assert!(find_cjk_font().is_some(), "Windows 上应有可用 CJK 字体");
+    }
+
+    /// DEF-T09-E1-003：主字体缺字时按 run 切换到回退字体（/F2），
+    /// 内容流保留真实 CID（而非 `?`），复制文本不失真。
+    #[test]
+    fn content_stream_switches_to_fallback_font_for_missing_glyphs() {
+        let primary = FontResource {
+            char_to_cid: HashMap::from([('\0', 0u16), ('A', 1), ('?', 2)]),
+            cid_to_char: vec!['\0', 'A', '?'],
+            subset_bytes: Vec::new(),
+            font_bbox: [0.0; 4],
+            ascent: 800.0,
+            descent: -200.0,
+            base_name: "primary".into(),
+            widths: HashMap::from([('A', 600.0f32), ('?', 500.0)]),
+        };
+        let fallback = FontResource {
+            char_to_cid: HashMap::from([('\0', 0u16), ('😀', 1)]),
+            cid_to_char: vec!['\0', '😀'],
+            subset_bytes: Vec::new(),
+            font_bbox: [0.0; 4],
+            ascent: 800.0,
+            descent: -200.0,
+            base_name: "emoji".into(),
+            widths: HashMap::from([('😀', 1000.0f32)]),
+        };
+        let page = vec![DrawOp::Text(TextRun {
+            x: 50.0,
+            y: 100.0,
+            size: 11.0,
+            text: "A😀A".into(),
+            bold: false,
+            italic: false,
+            underline: false,
+            strike: false,
+            highlight: None,
+            color: [0, 0, 0],
+        })];
+        let s = String::from_utf8_lossy(&content_stream(&page, &primary, Some(&fallback))).to_string();
+        assert!(s.contains("/F1"), "应有主字体 run: {s}");
+        let after_fallback = s
+            .split("/F2")
+            .nth(1)
+            .expect("emoji 应切到回退字体");
+        assert!(
+            after_fallback.contains("<0001> Tj"),
+            "emoji 应写回退字体真实 CID 而非 ?: {s}"
+        );
+        assert!(
+            !s.contains("<0002> Tj"),
+            "不得把 emoji 降级为 `?` 的 CID: {s}"
+        );
+        // 同一文本在主字体下只写 /F1（回归：不要无条件引用 /F2）。
+        let s = String::from_utf8_lossy(&content_stream(&page[..1], &primary, None)).to_string();
+        assert!(!s.contains("/F2"), "{s}");
+    }
+
+    #[test]
+    fn split_font_runs_groups_by_coverage() {
+        let primary = FontResource {
+            char_to_cid: HashMap::from([('\0', 0u16), ('A', 1)]),
+            cid_to_char: vec!['\0', 'A'],
+            subset_bytes: Vec::new(),
+            font_bbox: [0.0; 4],
+            ascent: 800.0,
+            descent: -200.0,
+            base_name: "p".into(),
+            widths: HashMap::new(),
+        };
+        let fallback = FontResource {
+            char_to_cid: HashMap::from([('\0', 0u16), ('😀', 1)]),
+            cid_to_char: vec!['\0', '😀'],
+            subset_bytes: Vec::new(),
+            font_bbox: [0.0; 4],
+            ascent: 800.0,
+            descent: -200.0,
+            base_name: "f".into(),
+            widths: HashMap::new(),
+        };
+        let runs = split_font_runs("AA😀😀A", &primary, Some(&fallback));
+        assert_eq!(
+            runs,
+            vec![
+                (false, "AA".to_string()),
+                (true, "😀😀".to_string()),
+                (false, "A".to_string()),
+            ]
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn render_pages_embeds_emoji_fallback_font() {
+        // DEF-T09-E1-003：真实系统字体路径下，emoji 走 /F2 且 ToUnicode 含代理对。
+        let Some(fb_path) = find_fallback_font() else {
+            return; // 无 emoji 字体的环境不强行失败
+        };
+        assert!(Path::new(fb_path).exists());
+        let pages = vec![vec![DrawOp::Text(TextRun {
+            x: 56.0,
+            y: 80.0,
+            size: 11.0,
+            text: "表情 😀 结束".into(),
+            bold: false,
+            italic: false,
+            underline: false,
+            strike: false,
+            highlight: None,
+            color: [0, 0, 0],
+        })]];
+        let bytes = render_pages(
+            &pages,
+            &[],
+            &[],
+            Path::new(find_cjk_font().unwrap()),
+        )
+        .expect("渲染 PDF");
+        let s = String::from_utf8_lossy(&bytes);
+        assert!(s.contains("/F2"), "应嵌入并使用回退字体");
+        assert!(s.contains("<D83DDE00>"), "ToUnicode 应映射 emoji 代理对");
     }
 
     #[cfg(windows)]

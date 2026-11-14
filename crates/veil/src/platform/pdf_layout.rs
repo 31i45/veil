@@ -5,6 +5,7 @@
 //! - 只依赖 `TextMetrics` 与 `MediaProvider` 两个接缝，版面逻辑可纯单测；
 //! - 无法渲染的图片/公式一律降级为文本，绝不 panic。
 
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use veil_core::{BlockId, BlockKind, CellAlign, HtmlTag, InlineKind, InlineNode, Range, Session};
@@ -258,6 +259,9 @@ struct Ctx<'a> {
     /// 行内图片高度上限（正文行高倍数，B4）：默认 2 行，独占一行放宽到 6 行，
     /// 表格单元格 1.5 行。与编辑视图同一策略，保证三通道尺寸一致。
     img_max_lines: f32,
+    /// 已定义脚注 id → 编号（文档首次引用顺序，与 HTML 导出同源）。
+    /// 缺定义的引用不进表：引用处保留可读原文，不生成断号。
+    footnotes: HashMap<String, usize>,
 }
 
 impl<'a> Ctx<'a> {
@@ -271,6 +275,7 @@ impl<'a> Ctx<'a> {
             page: 0,
             y: geom.top(),
             img_max_lines: 2.0,
+            footnotes: HashMap::new(),
         }
     }
 
@@ -634,16 +639,32 @@ impl<'a> Ctx<'a> {
                                 ..node.content.end.saturating_sub(base),
                         )
                         .unwrap_or("");
-                    let num = self.footnote_no(id_txt);
-                    for c in format!("[{num}]").chars() {
-                        out.push(LItem::Ch(
-                            c,
+                    match self.footnotes.get(id_txt).copied() {
+                        Some(num) => {
+                            for c in format!("[{num}]").chars() {
+                                out.push(LItem::Ch(
+                                    c,
+                                    Style {
+                                        color: COL_LINK,
+                                        size: style.size * 0.85,
+                                        ..style
+                                    },
+                                ));
+                            }
+                        }
+                        // 引用无定义：保留源码原文（可读），不伪造编号/断链。
+                        None => push_chars(
+                            out,
+                            text,
+                            base,
+                            node.range.start,
+                            node.range.end,
                             Style {
                                 color: COL_LINK,
                                 size: style.size * 0.85,
                                 ..style
                             },
-                        ));
+                        ),
                     }
                 }
                 // Task 3-5：PDF 渲染层按 tag 分派 Html 标签。
@@ -782,10 +803,6 @@ impl<'a> Ctx<'a> {
         }
     }
 
-    fn footnote_no(&self, _id: &str) -> usize {
-        1
-    }
-
     fn insert_image(
         &mut self,
         url: &str,
@@ -847,16 +864,35 @@ impl<'a> Ctx<'a> {
             )
         };
         let (lang, body) = code;
+        let st = Style {
+            size: CODE_SIZE,
+            ..Style::body()
+        };
+        let line_h = self.metrics.line_height(CODE_SIZE);
+        let pad = 5.0;
+        let bg_w = self.max_w() - 6.0;
+        // DEF-T09-E1-005：代码语言标题不得与代码体分页（标题孤行）。
+        // 预留「间距 + 标题行 + 首行代码（含底色内边距）」后再落排版位置。
+        let label_h = lang
+            .as_deref()
+            .filter(|l| !l.is_empty())
+            .map_or(0.0, |_| self.metrics.line_height(8.0));
+        let first_body_h = if body.lines().next().is_some() {
+            line_h + pad * 2.0
+        } else {
+            0.0
+        };
+        self.ensure(5.0 + label_h + first_body_h);
         self.y += 5.0;
         if let Some(l) = lang.as_deref().filter(|l| !l.is_empty()) {
-            let st = Style {
+            let st_label = Style {
                 size: 8.0,
                 color: COL_MUTED,
                 ..Style::body()
             };
             let mut items = Vec::new();
             for c in l.chars() {
-                items.push(LItem::Ch(c, st));
+                items.push(LItem::Ch(c, st_label));
             }
             if !items.is_empty() {
                 for line in fill_lines(items, self.max_w() - 10.0, self.metrics) {
@@ -865,13 +901,6 @@ impl<'a> Ctx<'a> {
             }
         }
 
-        let st = Style {
-            size: CODE_SIZE,
-            ..Style::body()
-        };
-        let line_h = self.metrics.line_height(CODE_SIZE);
-        let pad = 5.0;
-        let bg_w = self.max_w() - 6.0;
         for raw in body.lines() {
             let mut chars: Vec<LItem> = raw.chars().map(|c| LItem::Ch(c, st)).collect();
             if chars.is_empty() {
@@ -921,13 +950,18 @@ impl<'a> Ctx<'a> {
             let rel: usize = text.split('\n').take(li).map(|l| l.len() + 1).sum();
             let b = line.as_bytes();
             let mut i = 0;
-            while i < b.len() && b[i] == b' ' {
-                i += 1;
-            }
-            if i < b.len() && b[i] == b'>' {
-                i += 1;
-                if i < b.len() && b[i] == b' ' {
+            // 嵌套引用每行可能有多层 `>` 标记：逐层剥除，绝不把字面 `>` 带进正文。
+            loop {
+                while i < b.len() && matches!(b[i], b' ' | b'\t') {
                     i += 1;
+                }
+                if i < b.len() && b[i] == b'>' {
+                    i += 1;
+                    if i < b.len() && matches!(b[i], b' ' | b'\t') {
+                        i += 1;
+                    }
+                } else {
+                    break;
                 }
             }
             let mut cs = i;
@@ -1293,6 +1327,47 @@ impl<'a> Ctx<'a> {
         self.y += 10.0;
     }
 
+    /// 文末脚注区：只输出「被引用且已定义」的条目，编号与引用处一致。
+    /// 定义正文剥除 `[^id]:` 前缀并去掉 Markdown 标记（不留裸 `**`/反引号）。
+    fn footnote_section(&mut self, s: &Session) {
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut items: Vec<(usize, String)> = Vec::new();
+        for (_, kind, range) in s.blocks() {
+            if kind != BlockKind::FootnoteDef {
+                continue;
+            }
+            let text = slice_text(s, range.start, range.end);
+            let Some((id, body)) = split_footnote_def(&text) else {
+                continue;
+            };
+            let Some(num) = self.footnotes.get(&id).copied() else {
+                continue; // 未被引用：不占号也不输出
+            };
+            if !seen.insert(id) {
+                continue; // 重复定义 first wins
+            }
+            items.push((num, footnote_plain_text(&body)));
+        }
+        if items.is_empty() {
+            return;
+        }
+        items.sort_by_key(|(num, _)| *num);
+        self.rule();
+        let st = Style {
+            size: 9.0,
+            color: COL_MUTED,
+            ..Style::body()
+        };
+        for (num, body) in items {
+            let text = format!("[{num}] {body}");
+            let items: Vec<LItem> = text.chars().map(|c| LItem::Ch(c, st)).collect();
+            for line in fill_lines(items, self.max_w().max(24.0), self.metrics) {
+                self.emit_line(line, 0.0, 9.0, CellAlign::None, self.max_w());
+            }
+        }
+        self.y += 4.0;
+    }
+
     // —— 目录 / 页脚 ——
 
     fn insert_toc(&mut self) -> usize {
@@ -1456,6 +1531,63 @@ fn slice_text(s: &Session, start: usize, end: usize) -> String {
     s.text_slice(Range::new(start, end)).unwrap_or_default()
 }
 
+/// 已定义脚注 id → 编号（按文档首次引用递增；与 HTML 导出同口径）。
+/// 缺定义的引用不编号：引用处保留原文，避免生成指向不存在条目的断号。
+fn collect_footnote_numbers(s: &Session) -> HashMap<String, usize> {
+    let mut out = HashMap::new();
+    for (idx, id) in s.footnote_ids().iter().enumerate() {
+        if s.footnote_definition(id).is_some() {
+            out.insert(id.clone(), s.footnote_number(id).unwrap_or(idx + 1));
+        }
+    }
+    out
+}
+
+/// 脚注定义块源码 → (id, 正文)。首行剥 `[^id]:`，续行剥块要求的缩进。
+fn split_footnote_def(text: &str) -> Option<(String, String)> {
+    let mut lines = text.split_inclusive('\n');
+    let first = lines.next()?;
+    let rest = first.trim_start().strip_prefix("[^")?;
+    let (id, tail) = rest.split_once("]:")?;
+    if id.is_empty()
+        || !id
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+    {
+        return None;
+    }
+    let mut body = tail
+        .strip_prefix(' ')
+        .unwrap_or(tail)
+        .trim_end_matches(['\r', '\n'])
+        .to_string();
+    for line in lines {
+        let n = line.bytes().take(4).take_while(|&b| b == b' ').count();
+        body.push(' ');
+        body.push_str(line[n..].trim_end_matches(['\r', '\n']));
+    }
+    Some((id.to_string(), body))
+}
+
+/// 脚注定义正文 → 可读纯文本：保留文字/代码/任务标记，丢弃强调/反引号等标记。
+fn footnote_plain_text(md: &str) -> String {
+    use pulldown_cmark::{Event, Options, Parser};
+    let opts = Options::ENABLE_TABLES
+        | Options::ENABLE_STRIKETHROUGH
+        | Options::ENABLE_TASKLISTS;
+    let mut out = String::new();
+    for ev in Parser::new_ext(md, opts) {
+        match ev {
+            Event::Text(t) | Event::Code(t) => out.push_str(&t),
+            Event::SoftBreak | Event::HardBreak => out.push(' '),
+            Event::FootnoteReference(id) => out.push_str(&format!("[^{id}]")),
+            Event::TaskListMarker(done) => out.push_str(if done { "[x] " } else { "[ ] " }),
+            _ => {}
+        }
+    }
+    out.trim().to_string()
+}
+
 fn heading_size(level: u8) -> f32 {
     match level {
         1 => 22.0,
@@ -1522,6 +1654,7 @@ pub fn layout_document(
     mut media: Option<&mut dyn MediaProvider>,
 ) -> DocLayout {
     let mut ctx = Ctx::new(metrics, geom);
+    ctx.footnotes = collect_footnote_numbers(session);
     ctx.new_page();
 
     for (id, kind, range) in session.blocks() {
@@ -1557,14 +1690,19 @@ pub fn layout_document(
             ),
             BlockKind::ThematicBreak => ctx.rule(),
             BlockKind::LinkRefDef => {}
-            BlockKind::FootnoteDef => ctx.raw_text(session, start, end, 9.0),
+            // 脚注定义统一在文末按首次引用编号输出，不在此处泄漏源码标记。
+            BlockKind::FootnoteDef => {}
             BlockKind::HtmlBlock => ctx.raw_text(session, start, end, 9.0),
-            BlockKind::FrontMatter(_) => ctx.raw_text(session, start, end, 9.0),
+            // Front Matter 是元数据：按产品语义隐藏，正文从元数据之后开始。
+            BlockKind::FrontMatter(_) => {}
             // B3：Details 头块只含开标签行 + summary 行；PDF 恒按展开态，
             // 只画 summary 标题行，正文由后续子块各自按块型排版。
             BlockKind::Details { summary, .. } => ctx.details_summary(&summary),
         }
     }
+
+    // 文末脚注区（编号与正文引用同源）。
+    ctx.footnote_section(session);
 
     // 去掉末尾的空行留白（若最后一页只有极少量内容，保持原样）
     let toc_pages = if opts.toc && !ctx.heads.is_empty() {
@@ -2177,5 +2315,84 @@ mod tests {
         );
         assert!(doc.pages.len() >= 3, "样例应跨多页");
         assert!(!doc.outline.is_empty(), "样例应有书签");
+    }
+
+    // ===== Task 4：PDF 导出缺陷回归 =====
+
+    /// DEF-T09-003：脚注按首次引用递增编号；定义区不得残留 `[^id]:`/`**`/反引号。
+    #[test]
+    fn footnote_numbers_follow_first_reference_and_defs_have_no_markup() {
+        let md = "第一处[^a]，第二处[^b]，再次[^a]。\n\n\
+                  [^a]: 注**一**\n\
+                  [^b]: 注`二`\n";
+        let doc = lay(md, false);
+        let text = all_text(&doc);
+        assert!(text.contains("[1]"), "首引号应为 1: {text}");
+        assert!(text.contains("[2]"), "次引号应为 2: {text}");
+        assert!(!text.contains("[^a]"), "定义标记不得外泄: {text}");
+        assert!(!text.contains("[^b]"), "定义标记不得外泄: {text}");
+        assert!(!text.contains("**"), "强调标记不得外泄: {text}");
+        assert!(!text.contains('`'), "代码标记不得外泄: {text}");
+        assert!(text.contains("注一"), "定义正文应可读: {text}");
+        assert!(text.contains("注二"), "定义正文应可读: {text}");
+    }
+
+    /// 无定义的脚注引用保留可读原文，不生成指向空条目的断号。
+    #[test]
+    fn undefined_footnote_keeps_literal_reference() {
+        let doc = lay("引用[^missing] 后文。\n", false);
+        let text = all_text(&doc);
+        assert!(text.contains("[^missing]"), "应保留原文: {text}");
+        assert!(!text.contains("[1]"), "不得伪造编号: {text}");
+    }
+
+    /// Front Matter 是元数据：PDF 不输出元数据正文。
+    #[test]
+    fn front_matter_is_not_rendered_in_pdf() {
+        let doc = lay("---\ntitle: 标题\ntags: [a, b]\n---\n正文开始。\n", false);
+        let text = all_text(&doc);
+        assert!(!text.contains("title:"), "元数据不得输出: {text}");
+        assert!(!text.contains("tags:"), "元数据不得输出: {text}");
+        assert!(text.contains("正文开始"), "正文须保留: {text}");
+    }
+
+    /// DEF-T09-E1-004：嵌套引用不得残留字面 `>`。
+    #[test]
+    fn nested_blockquote_strips_all_level_markers() {
+        let doc = lay("> 外层\n> > 内层文本\n> > > 第三层\n", false);
+        let text = all_text(&doc);
+        assert!(!text.contains('>'), "不得残留引用标记: {text}");
+        assert!(text.contains("内层文本"), "内层正文须保留: {text}");
+    }
+
+    /// DEF-T09-E1-005：代码语言标题与首行代码不跨页（遍历边界位置）。
+    #[test]
+    fn code_language_label_never_orphans_from_body() {
+        for n in 0..90 {
+            let mut md = String::new();
+            for i in 0..n {
+                md.push_str(&format!("段落 {i} 文本 text text text text\n\n"));
+            }
+            md.push_str("```rust\nlet a = 1;\nlet b = 2;\n```\n");
+            let doc = lay(&md, false);
+            let mut label_page = None;
+            let mut body_page = None;
+            for (pi, page) in doc.pages.iter().enumerate() {
+                for op in page {
+                    if let DrawOp::Text(t) = op {
+                        if t.text == "rust" {
+                            label_page = Some(pi);
+                        }
+                        if t.text.contains("let a = 1;") {
+                            body_page = Some(pi);
+                        }
+                    }
+                }
+            }
+            assert_eq!(
+                label_page, body_page,
+                "n={n}：代码标题与代码体被分页拆开"
+            );
+        }
     }
 }

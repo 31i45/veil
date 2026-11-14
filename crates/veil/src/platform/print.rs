@@ -753,6 +753,8 @@ impl Print for WinPrint {
                 return;
             }
         };
+        // DEF-T09-004：重名导出递增命名（`name (2).pdf`），不替换既有文件。
+        let target = crate::export::unique_file_path(&target);
 
         // —— 优先走原生 PDF（Wave 3A/4：Type0/CIDFontType2 + ToUnicode，可搜索/可复制/带书签）——
         // 失败时 try_native_pdf 已保证目标文件未被改动（tmp + 原子替换），

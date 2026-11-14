@@ -1729,9 +1729,19 @@ impl App {
         // 它是比自动保存更宽的最后防线
         let dirty_editing = self.editor.is_dirty() && self.editor.preedit().is_none();
         let mut next = if dirty_editing {
-            self.persist_state
+            let autosave_at = self
+                .persist_state
                 .autosave
-                .deadline(self.persist_state.persist.activity())
+                .deadline(self.persist_state.persist.activity());
+            // 恢复快照有独立期限（最后一次真实编辑），不受自动保存失败重试影响。
+            let recovery_at = self
+                .persist_state
+                .autosave
+                .deadline(self.persist_state.persist.recovery_activity());
+            match (autosave_at, recovery_at) {
+                (Some(a), Some(r)) => Some(a.min(r)),
+                (a, r) => a.or(r),
+            }
         } else {
             None
         };

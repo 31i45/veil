@@ -44,6 +44,10 @@ pub(crate) struct Persist {
     missing: bool,
     backup: Backup,
     activity: Option<Instant>,
+    /// 最近一次内容编辑时刻（恢复写盘的独立调度输入）。
+    /// 与 `activity` 分离：自动保存尝试（含失败重试）只刷新 `activity`，不得推迟
+    /// 恢复快照的期限，否则目标文件被持续占用时 recovery 永不写（DEF-T08-E1-001）。
+    recovery_activity: Option<Instant>,
 }
 
 impl Persist {
@@ -126,18 +130,38 @@ impl Persist {
         self.missing = false;
         self.backup = Backup::None;
         self.activity = None;
+        self.recovery_activity = None;
     }
 
     pub(crate) fn activity(&self) -> Option<Instant> {
         self.activity
     }
 
+    /// 内容编辑时刻：同时作为自动保存与恢复快照的起点。
     pub(crate) fn note_activity(&mut self, now: Instant) {
         self.activity = Some(now);
+        self.recovery_activity = Some(now);
+    }
+
+    /// 自动保存尝试时刻：只推进自动保存的静默期，避免磁盘被锁时忙轮询；
+    /// 恢复快照仍按最后一次真实编辑的时刻调度（失败不得推迟最后防线）。
+    pub(crate) fn note_autosave_attempt(&mut self, now: Instant) {
+        self.activity = Some(now);
+    }
+
+    /// 恢复写盘的独立调度输入（最后一次内容编辑）。
+    pub(crate) fn recovery_activity(&self) -> Option<Instant> {
+        self.recovery_activity
+    }
+
+    /// 恢复快照已作废/无需再调度：清掉独立起点，下一次真实编辑再重新计时。
+    pub(crate) fn clear_recovery_activity(&mut self) {
+        self.recovery_activity = None;
     }
 
     pub(crate) fn clear_activity(&mut self) {
         self.activity = None;
+        self.recovery_activity = None;
     }
 }
 
@@ -210,7 +234,26 @@ mod tests {
         assert!(!p.missing());
         assert!(!p.backed_up());
         assert!(p.activity().is_none());
+        assert!(p.recovery_activity().is_none());
         assert_eq!(p.status(), ExternalState::None);
+    }
+
+    #[test]
+    fn autosave_attempt_does_not_postpone_recovery_activity() {
+        let mut p = Persist::default();
+        let edit = Instant::now();
+        p.note_activity(edit);
+        let attempt = edit + Duration::from_secs(2);
+        p.note_autosave_attempt(attempt);
+        assert_eq!(p.activity(), Some(attempt), "自动保存重试仍按尝试时刻去抖");
+        assert_eq!(
+            p.recovery_activity(),
+            Some(edit),
+            "自动保存尝试（含失败）不得推迟恢复快照的独立期限"
+        );
+        p.clear_recovery_activity();
+        assert!(p.recovery_activity().is_none());
+        assert_eq!(p.activity(), Some(attempt));
     }
 
     #[test]

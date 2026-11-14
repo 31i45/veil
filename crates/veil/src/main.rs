@@ -428,6 +428,72 @@ impl veil_ui::AssetStore for FsAssets {
             })?;
         Ok(format!("{dir_name}/{name}"))
     }
+
+    fn migrate_relative_assets(
+        &mut self,
+        old_doc: &Path,
+        new_doc: &Path,
+        urls: &[String],
+    ) -> veil_ui::AssetMigration {
+        let mut report = veil_ui::AssetMigration::default();
+        let (Some(old_dir), Some(new_dir)) = (old_doc.parent(), new_doc.parent()) else {
+            return report;
+        };
+        for url in urls {
+            let rel = Path::new(url.trim());
+            if rel.as_os_str().is_empty() || rel.is_absolute() {
+                continue;
+            }
+            let dst = new_dir.join(rel);
+            // 只允许写入新文档目录之下：相对 URL 里的 `..` 不得把资产写到任意位置。
+            if !path_is_within(new_dir, &dst) {
+                report.failed.push(format!("{url}: 相对路径越界"));
+                continue;
+            }
+            let src = old_dir.join(rel);
+            if src == dst {
+                continue;
+            }
+            let bytes = match std::fs::read(&src) {
+                Ok(b) => b,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    report.missing += 1;
+                    continue;
+                }
+                Err(e) => {
+                    report.failed.push(format!("{url}: {e}"));
+                    continue;
+                }
+            };
+            match std::fs::read(&dst) {
+                Ok(existing) if existing == bytes => continue,
+                Ok(_) => {
+                    report
+                        .failed
+                        .push(format!("{url}: 目标已存在不同内容，未覆盖"));
+                    continue;
+                }
+                Err(_) => {}
+            }
+            if let Some(parent) = dst.parent() {
+                if let Err(e) = std::fs::create_dir_all(parent) {
+                    report.failed.push(format!("{url}: 创建目录失败 {e}"));
+                    continue;
+                }
+            }
+            let mut tmp = dst.as_os_str().to_owned();
+            tmp.push(".veil-tmp");
+            let tmp = PathBuf::from(tmp);
+            match std::fs::write(&tmp, &bytes).and_then(|()| std::fs::rename(&tmp, &dst)) {
+                Ok(()) => report.copied += 1,
+                Err(e) => {
+                    let _ = std::fs::remove_file(&tmp);
+                    report.failed.push(format!("{url}: {e}"));
+                }
+            }
+        }
+        report
+    }
 }
 
 fn asset_store() -> Box<dyn veil_ui::AssetStore> {
@@ -466,6 +532,29 @@ fn safe_stem(stem: &str) -> String {
     } else {
         s
     }
+}
+
+/// 资产迁移的落点约束：`candidate` 必须位于 `root` 目录之下（按绝对路径词法比较，
+/// 消解 `.`/`..`）。相对 URL 中的 `..` 若越出新文档目录，视为不可迁移而不是写到任意位置。
+fn path_is_within(root: &Path, candidate: &Path) -> bool {
+    lexical_absolute(candidate).starts_with(lexical_absolute(root))
+}
+
+/// 绝对化 + 词法消解 `.`/`..`（不访问文件系统，目标可能尚不存在）。
+fn lexical_absolute(path: &Path) -> PathBuf {
+    use std::path::Component;
+    let abs = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+    let mut out = PathBuf::new();
+    for c in abs.components() {
+        match c {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
 }
 
 /// 资产文件名递增避让：从 `next`（0 视作 1）起找第一个不存在的 `image-<n>.png`。
@@ -804,6 +893,68 @@ mod tests {
         // 无半截 tmp 残留
         assert!(!dir.join("notes.assets/.image-1.png.tmp").exists());
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn migrate_relative_assets_copies_to_new_doc_directory() {
+        let old_dir = temp_dir("mig-old");
+        let new_dir = temp_dir("mig-new");
+        std::fs::create_dir_all(old_dir.join("notes.assets")).unwrap();
+        let png = [0x89u8, b'P', b'N', b'G', 1, 2, 3];
+        std::fs::write(old_dir.join("notes.assets/image-1.png"), png).unwrap();
+        let mut s = FsAssets { next: 0 };
+        let report = s.migrate_relative_assets(
+            &old_dir.join("notes.md"),
+            &new_dir.join("copy.md"),
+            &["notes.assets/image-1.png".to_string()],
+        );
+        assert_eq!(report.copied, 1, "相对资产应复制到新目录同一相对位置");
+        assert_eq!(report.incomplete(), 0);
+        assert_eq!(
+            std::fs::read(new_dir.join("notes.assets/image-1.png")).unwrap(),
+            png,
+            "资产字节无损"
+        );
+        assert!(
+            !new_dir.join("notes.assets/image-1.png.veil-tmp").exists(),
+            "原子写临时文件不残留"
+        );
+        // 目标已有同内容：不重复写、不算失败
+        let again = s.migrate_relative_assets(
+            &old_dir.join("notes.md"),
+            &new_dir.join("copy.md"),
+            &["notes.assets/image-1.png".to_string()],
+        );
+        assert_eq!((again.copied, again.incomplete()), (0, 0));
+        // 源缺失：可见降级（missing 计数），不 panic、不静默
+        let missing = s.migrate_relative_assets(
+            &old_dir.join("notes.md"),
+            &new_dir.join("copy.md"),
+            &["notes.assets/gone.png".to_string()],
+        );
+        assert_eq!(missing.missing, 1);
+        assert_eq!(missing.incomplete(), 1);
+        std::fs::remove_dir_all(&old_dir).ok();
+        std::fs::remove_dir_all(&new_dir).ok();
+    }
+
+    #[test]
+    fn migrate_relative_assets_rejects_escaping_paths() {
+        let old_dir = temp_dir("mig-esc-old");
+        let new_dir = temp_dir("mig-esc-new");
+        let outside = new_dir.parent().unwrap().join("veil-outside.png");
+        std::fs::write(&outside, b"x").ok();
+        let mut s = FsAssets { next: 0 };
+        let report = s.migrate_relative_assets(
+            &old_dir.join("notes.md"),
+            &new_dir.join("copy.md"),
+            &["../veil-outside.png".to_string()],
+        );
+        assert_eq!(report.copied, 0);
+        assert_eq!(report.failed.len(), 1, "越界 URL 不得写到新文档目录之外");
+        std::fs::remove_file(&outside).ok();
+        std::fs::remove_dir_all(&old_dir).ok();
+        std::fs::remove_dir_all(&new_dir).ok();
     }
 
     #[test]

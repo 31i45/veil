@@ -260,6 +260,10 @@ keys! {
         "{}\n\n原因：{}\n\n下一步：可重试导出，或取消后检查目标目录是否可写。";
     NoticeSaveAsCancelled => "notice.save_as_cancelled", "另存为已取消";
     NoticeSavedAs => "notice.saved_as", "已另存为：{}";
+    NoticeHistoryMigrationFailed => "notice.history_migration_failed",
+        "文档已保存到：{}；但版本历史迁移失败（{}），旧历史仍保留在临时会话目录";
+    NoticeAssetsMigrationIncomplete => "notice.assets_migration_incomplete",
+        "已另存为：{}；有 {} 个相对图片资产未能迁移（源缺失或复制失败），新位置可能显示断图";
     NoticeSaveAsFailed => "notice.save_as_failed", "另存为失败：{}；可 Ctrl+Shift+S 重试或换一个位置";
     ModalSaveAsFailedTitle => "modal.save_as_failed.title", "另存为失败";
     ModalSaveAsFailedBody => "modal.save_as_failed.body",

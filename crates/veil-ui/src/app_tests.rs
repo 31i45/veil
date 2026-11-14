@@ -10,7 +10,7 @@ use crate::document::ExternalState;
 use crate::editor::Intent;
 use crate::geometry::{BASE_LINE_HEIGHT, MARGIN, PARA_GAP};
 use crate::i18n::{t, Key as I18nKey};
-use crate::image::{AssetStore, ImageData, ImageLoader};
+use crate::image::{AssetMigration, AssetStore, ImageData, ImageLoader};
 use crate::input::{Action, Key, Mods};
 use crate::interaction::map_key_parts;
 use crate::math::{MathImage, MathRenderer};
@@ -157,6 +157,8 @@ fn persist_env_with(recovery: FakeRecovery, session: FakeSession) -> PersistEnv 
 struct FakeSnapshot {
     slots: Rc<RefCell<Vec<(u64, SnapshotMeta, String)>>>,
     fail_list: Rc<Cell<bool>>,
+    /// 注入历史迁移失败：返回 Err 且不移动任何快照（验证失败可见 + 旧历史保留）。
+    fail_migrate: Rc<Cell<bool>>,
 }
 
 impl FakeSnapshot {
@@ -249,6 +251,9 @@ impl SnapshotStore for FakeSnapshot {
     }
 
     fn migrate_key(&mut self, from: u64, to: u64) -> Result<usize, String> {
+        if self.fail_migrate.get() {
+            return Err("模拟历史迁移失败".into());
+        }
         let moved: Vec<_> = self
             .slots
             .borrow()
@@ -403,6 +408,31 @@ impl AssetStore for FakeAssets {
             .borrow_mut()
             .push((doc.to_path_buf(), image.width, image.height));
         self.result.clone()
+    }
+}
+
+/// 跨目录另存资产迁移 mock：记录 (旧文档, 新文档, 相对 URL 列表)，返回注入结果。
+type AssetMigrateCalls = Rc<RefCell<Vec<(PathBuf, PathBuf, Vec<String>)>>>;
+
+#[derive(Clone)]
+struct FakeMigrateAssets {
+    calls: AssetMigrateCalls,
+    report: AssetMigration,
+}
+impl AssetStore for FakeMigrateAssets {
+    fn save_pasted_image(&mut self, _doc: &Path, _image: &ImageData) -> Result<String, String> {
+        Err("测试未注入粘贴资产".into())
+    }
+    fn migrate_relative_assets(
+        &mut self,
+        old_doc: &Path,
+        new_doc: &Path,
+        urls: &[String],
+    ) -> AssetMigration {
+        self.calls
+            .borrow_mut()
+            .push((old_doc.to_path_buf(), new_doc.to_path_buf(), urls.to_vec()));
+        self.report.clone()
     }
 }
 
@@ -2663,6 +2693,18 @@ fn app_history_dialogs(
     snapshot: &FakeSnapshot,
     save: Option<&str>,
 ) -> App {
+    app_history_with_assets(text, path, store, snapshot, save, Box::new(NoAssets))
+}
+
+/// 同 `app_history_dialogs`，但可注入资产端口（另存为跨目录资产迁移测试）。
+fn app_history_with_assets(
+    text: &str,
+    path: Option<&str>,
+    store: &MemStore,
+    snapshot: &FakeSnapshot,
+    save: Option<&str>,
+    assets: Box<dyn AssetStore>,
+) -> App {
     let doc = Doc {
         text: text.into(),
         path: path.map(PathBuf::from),
@@ -2688,7 +2730,7 @@ fn app_history_dialogs(
             store: Box::new(store.clone()),
             math: Box::new(m),
             images: Box::new(NoImages),
-            assets: Box::new(NoAssets),
+            assets,
             exporter: Box::new(NoExport),
             dialogs: Box::new(d),
             watcher: Box::new(NoWatcher),
@@ -7867,6 +7909,51 @@ fn recovery_write_failure_retries_with_backoff() {
 }
 
 #[test]
+fn recovery_written_when_autosave_keeps_failing_on_locked_target() {
+    // DEF-T08-E1-001：目标文件持续被占用时自动保存反复失败，但恢复快照必须
+    // 按「最后一次真实编辑」的独立期限写入，否则崩溃会丢失全部未保存内容。
+    let store = MemStore::default();
+    store
+        .files
+        .borrow_mut()
+        .insert(PathBuf::from("a.md"), b"ab".to_vec());
+    store.fail_paths.borrow_mut().push(PathBuf::from("a.md"));
+    let rec = FakeRecovery::default();
+    let ses = FakeSession::default();
+    let mut a = app_persist("ab", Some("a.md"), &store, &rec, &ses, false);
+    a.editor.apply(Intent::InsertText("改".into())).unwrap();
+    let t0 = Instant::now();
+    a.persist_state.persist.note_activity(t0);
+    a.tick(t0 + Duration::from_secs(2));
+    assert!(a.editor.is_dirty(), "保存失败必须保持脏态");
+    assert_eq!(
+        a.persist_state.persist.activity(),
+        Some(t0 + Duration::from_secs(2)),
+        "自动保存去抖语义保留：失败尝试同样推进下次尝试"
+    );
+    assert_eq!(
+        a.persist_state.persist.recovery_activity(),
+        None,
+        "恢复快照已按独立期限写入：写成功后清零，不会被自动保存失败重试推迟"
+    );
+    assert!(
+        rec.slot.borrow().is_some(),
+        "自动保存持续失败时 recovery 仍按期限写入"
+    );
+    let (path, text) = slot_content(&rec);
+    assert_eq!(path, Some(PathBuf::from("a.md")));
+    assert_eq!(text, "改ab", "恢复快照包含未保存内容");
+    assert_eq!(
+        store.files.borrow().get(&PathBuf::from("a.md")),
+        Some(&b"ab".to_vec()),
+        "锁定期间原文件内容/哈希保持不变"
+    );
+    // 继续失败重试：已写入的恢复快照不得被顺带清掉
+    a.tick(t0 + Duration::from_secs(4));
+    assert!(rec.slot.borrow().is_some());
+}
+
+#[test]
 fn recovery_same_content_not_rewritten() {
     let store = MemStore::default();
     let rec = FakeRecovery::default();
@@ -7881,8 +7968,12 @@ fn recovery_same_content_not_rewritten() {
     // 到期但内容未变：哈希相同不重写
     a.maybe_recovery_write(t0 + Duration::from_secs(4));
     assert_eq!(saves(), 1, "内容未变不重复落盘");
-    // 内容再变：哈希失配重写
+    // 内容再变：哈希失配重写。恢复快照已与上一版一致、独立计时已清零，
+    // 真实编辑经 after_edit 重新登记时刻（本测试绕过编辑钩子，显式补登记）。
     a.editor.apply(Intent::InsertText("再".into())).unwrap();
+    a.persist_state
+        .persist
+        .note_activity(t0 + Duration::from_secs(4));
     a.maybe_recovery_write(t0 + Duration::from_secs(6));
     assert_eq!(saves(), 2, "内容变化重写快照");
     assert_eq!(slot_content(&rec).1, "改再ab");
@@ -13060,6 +13151,105 @@ fn version_history_draft_snapshots_migrate_on_first_save() {
     assert_eq!(a.doc.history_key, new_key);
     assert!(snap.texts(old).is_empty(), "临时会话键历史已迁走");
     assert_eq!(snap.texts(new_key), vec!["draft\n"]);
+}
+
+#[test]
+fn version_history_migrate_failure_is_visible_and_keeps_old_history() {
+    // DEF-T08-001：草稿首次另存时历史迁移失败，不得静默、不得只报「已另存为」。
+    let store = MemStore::default();
+    let mut snap = FakeSnapshot::default();
+    let target = r"C:\notes\b8a\migrate-fail.md";
+    let mut a = app_history_dialogs("draft\n", None, &store, &snap, Some(target));
+    let old = a.doc.history_key;
+    snap.save_snapshot(old, "draft\n").unwrap();
+    snap.fail_migrate.set(true);
+    a.save_as();
+    let new_key = crate::document::history::doc_key(Path::new(target));
+    assert_eq!(
+        a.doc.path,
+        Some(PathBuf::from(target)),
+        "文档本身保存成功（可用）"
+    );
+    assert!(
+        store.files.borrow().contains_key(&PathBuf::from(target)),
+        "保存本身已落盘"
+    );
+    assert_eq!(a.doc.history_key, old, "迁移失败保持旧键：旧历史仍可访问");
+    assert_eq!(snap.texts(old), vec!["draft\n"], "旧历史未被删除");
+    assert!(snap.texts(new_key).is_empty(), "新键下没有半迁移的历史");
+    let notice = &a.ui_state.chrome.notice;
+    assert!(
+        notice.contains("历史迁移失败"),
+        "必须明确提示历史未迁移: {notice}"
+    );
+    assert!(!notice.contains("已另存为"), "不得误报纯成功: {notice}");
+}
+
+#[test]
+fn save_as_to_other_directory_migrates_relative_images() {
+    // DEF-T08-002：跨目录另存须把相对图片资产迁到新目录（保持相对 URL 可解析）。
+    let store = MemStore::default();
+    let snap = FakeSnapshot::default();
+    let calls = Rc::new(RefCell::new(Vec::new()));
+    let assets = FakeMigrateAssets {
+        calls: calls.clone(),
+        report: AssetMigration {
+            copied: 1,
+            missing: 0,
+            failed: Vec::new(),
+        },
+    };
+    let target = r"C:\notes\new\moved.md";
+    let mut a = app_history_with_assets(
+        "![x](notes.assets/image-1.png)\n",
+        Some(r"C:\notes\old\src.md"),
+        &store,
+        &snap,
+        Some(target),
+        Box::new(assets),
+    );
+    a.save_as();
+    let got = calls.borrow();
+    assert_eq!(got.len(), 1, "跨目录另存必须触发资产迁移");
+    assert_eq!(got[0].0, PathBuf::from(r"C:\notes\old\src.md"));
+    assert_eq!(got[0].1, PathBuf::from(target));
+    assert_eq!(got[0].2, vec!["notes.assets/image-1.png".to_string()]);
+    assert!(
+        a.ui_state.chrome.notice.contains("已另存为"),
+        "资产全部迁移时保持正常成功提示"
+    );
+}
+
+#[test]
+fn save_as_asset_migration_incomplete_is_visible() {
+    // 资产缺失/复制失败：文档仍保存成功，但必须给可见降级，不静默断链。
+    let store = MemStore::default();
+    let snap = FakeSnapshot::default();
+    let calls = Rc::new(RefCell::new(Vec::new()));
+    let assets = FakeMigrateAssets {
+        calls,
+        report: AssetMigration {
+            copied: 0,
+            missing: 1,
+            failed: Vec::new(),
+        },
+    };
+    let target = r"C:\notes\new\broken.md";
+    let mut a = app_history_with_assets(
+        "![x](notes.assets/gone.png)\n",
+        Some(r"C:\notes\old\src.md"),
+        &store,
+        &snap,
+        Some(target),
+        Box::new(assets),
+    );
+    a.save_as();
+    assert_eq!(a.doc.path, Some(PathBuf::from(target)), "文档保存不受影响");
+    let notice = &a.ui_state.chrome.notice;
+    assert!(
+        notice.contains("图片资产未能迁移"),
+        "缺失资产须有可见降级: {notice}"
+    );
 }
 
 #[test]

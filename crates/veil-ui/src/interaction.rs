@@ -51,7 +51,9 @@ impl App {
         // 脏块重解析时 BlockId 新鲜分配，派生缓存按 id 即自动失配；
         // 旧 id 条目在 refresh_index 的 prune 中随块真值回收
         // 先按新块结构重建索引，ensure_* 才能只遍历索引（不再各自全量枚举）
-        self.refresh_index();
+        // 单脏块原位编辑走增量索引（只换该块 + 平移后缀区间），
+        // 几何在下面 ensure 之后统一重算一次；其余编辑回退全量重建。
+        self.refresh_index_for_edit(&dirty);
         if self.ui_state.outline.open {
             self.refresh_outline();
         }
@@ -62,8 +64,8 @@ impl App {
             self.ensure_block(id);
         }
         self.ensure_tables_visible();
-        // 布局/表格已就绪：高度来源稳定后才累计 top
-        self.recompute_geometry();
+        // 布局/表格已就绪：高度来源稳定后才累计 top；单块原位编辑只更新邻域。
+        self.recompute_geometry_after_edit();
         self.scroll_to_caret();
         self.update_title(); // 脏标随编辑翻转
 
@@ -3692,6 +3694,17 @@ impl App {
     /// 文本布局缺失（键失配或视口外未排版）时回退廉价估算高度。
     /// 数学/表格分别取渲染图与网格高度（键校验与绘制同源）。
     pub(crate) fn block_height(&self, g: &BlockGeom) -> f32 {
+        self.block_height_with(g, self.base_key(), self.effective_caret())
+    }
+
+    /// `block_height` 的内核：基础键与光标由调用方预先取好，供几何重算的
+    /// O(块数) 循环复用，避免每块重复构造全文派生键。
+    pub(crate) fn block_height_with(
+        &self,
+        g: &BlockGeom,
+        base: crate::view::cache::BaseKey,
+        caret: usize,
+    ) -> f32 {
         // B3：折叠 details 的隐藏子块不渲染、不占高度（不是光栅裁剪）。
         if self.block_hidden(g) {
             return 0.0;
@@ -3703,7 +3716,7 @@ impl App {
             if self.window_state.print.is_none()
                 && !self.ui_state.expanded_details.contains(&g.id)
                 // 光标进入头块时按 WYSIWYM 显示源码（多行），不做单行裁剪。
-                && !crate::view::node_active(g.range, self.effective_caret())
+                && !crate::view::node_active(g.range, caret)
             {
                 // 物理像素：doc_line_height 是逻辑像素基准，几何与文本光栅都乘 scale
                 return (self.engine.doc_line_height() * self.input_state.scale).round();
@@ -3722,13 +3735,7 @@ impl App {
                 .map_or(g.est_h, |t| t.height);
         }
         self.cache
-            .layout(
-                g.id,
-                &g.kind,
-                g.range,
-                self.base_key(),
-                self.effective_caret(),
-            )
+            .layout(g.id, &g.kind, g.range, base, caret)
             .map_or(g.est_h, |l| l.height)
     }
 
@@ -3739,18 +3746,23 @@ impl App {
 
     /// 光标所在块索引；文末光标可能落在最后一块的尾换行之后，回退末块。
     pub(crate) fn caret_block_index(&self) -> Option<usize> {
-        let caret = self.editor.caret();
-        self.index
-            .blocks
-            .iter()
-            .position(|g| g.range.start <= caret && caret <= g.range.end)
-            .or_else(|| {
-                if caret >= self.editor.session().text_len() {
-                    self.index.blocks.len().checked_sub(1)
-                } else {
-                    None
-                }
-            })
+        self.block_index_at_offset(self.editor.caret())
+    }
+
+    /// 字节偏移所在块的下标（块区间按文档序排列，二分定位 O(log 块数)）。
+    pub(crate) fn block_index_at_offset(&self, offset: usize) -> Option<usize> {
+        let blocks = &self.index.blocks;
+        let i = blocks.partition_point(|g| g.range.end < offset);
+        if blocks
+            .get(i)
+            .is_some_and(|g| g.range.start <= offset && offset <= g.range.end)
+        {
+            return Some(i);
+        }
+        if offset >= self.editor.session().text_len() {
+            return blocks.len().checked_sub(1);
+        }
+        None
     }
 
     /// 光标前紧邻的尾换行个数（0/1/≥2，按字素回退，多字节字符安全）。

@@ -172,6 +172,60 @@ impl Session {
             .collect()
     }
 
+    /// 视图索引快照：一次枚举同时带出容器上下文与块行号，避免调用方逐块再查
+    /// id 索引或为块间空行重新切片文本。
+    #[allow(clippy::type_complexity)]
+    pub fn block_entries(
+        &self,
+    ) -> Vec<(BlockId, BlockKind, Range, BlockContainer, usize, usize)> {
+        self.syntax
+            .blocks()
+            .iter()
+            .map(|b: &Block| {
+                (
+                    b.id,
+                    b.kind.clone(),
+                    b.range,
+                    b.container,
+                    b.start_line,
+                    b.end_line,
+                )
+            })
+            .collect()
+    }
+
+    /// 块 id 是否仍存在（O(1)，供缓存回收判活，不构建快照）。
+    pub fn contains_block(&self, block: BlockId) -> bool {
+        self.syntax.contains_block(block)
+    }
+
+    /// 块在文档中的序号（O(1)）。
+    pub fn block_position(&self, block: BlockId) -> Option<usize> {
+        self.syntax.block_position(block)
+    }
+
+    /// 第 `index` 块的轻量元信息（仅克隆种类，供增量索引替换单个脏块）。
+    #[allow(clippy::type_complexity)]
+    pub fn block_meta(
+        &self,
+        index: usize,
+    ) -> Option<(BlockId, BlockKind, Range, BlockContainer, usize, usize)> {
+        let b = self.syntax.blocks().get(index)?;
+        Some((
+            b.id,
+            b.kind.clone(),
+            b.range,
+            b.container,
+            b.start_line,
+            b.end_line,
+        ))
+    }
+
+    /// 第 `index` 块的 id（O(1)，增量索引前置校验用）。
+    pub fn block_id_at(&self, index: usize) -> Option<BlockId> {
+        self.syntax.blocks().get(index).map(|b| b.id)
+    }
+
     /// 当前块总数（只读观测值，供性能探针/测试；不构建快照）。
     pub fn block_count(&self) -> usize {
         self.syntax.blocks().len()

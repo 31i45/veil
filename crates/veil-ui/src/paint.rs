@@ -601,6 +601,8 @@ impl App {
                     value: l,
                 },
             );
+            // 块高从估算变为实测：标记几何待重算，渲染帧只做一次 O(块数) 累计。
+            self.index.geometry_stale = true;
         }
     }
 
@@ -684,6 +686,7 @@ impl App {
                             value: img,
                         },
                     );
+                    self.index.geometry_stale = true;
                 }
                 Err(e) => {
                     eprintln!("公式渲染失败（降级为源码显示）: {e}");
@@ -694,6 +697,7 @@ impl App {
                             value: (),
                         },
                     );
+                    self.index.geometry_stale = true;
                 }
             }
         }
@@ -899,6 +903,7 @@ impl App {
             );
             l.x = indent;
             self.cache.tables.insert(id, Memo { key, value: l });
+            self.index.geometry_stale = true;
         }
     }
 
@@ -1064,27 +1069,24 @@ impl App {
         }
         // B3：光标落在折叠 details 的隐藏区时先展开（键盘/撤销/搜索等任意路径的兜底）。
         self.sync_details_at_caret();
-        // 视口驱动惰性排版（P1b）：先排当前可见区间并重算几何；估算高度偏小
-        // 可能让视口底部露出未排版块，故重算可见区间后再补跑一遍即收敛。
+        // 视口驱动惰性排版（P1b）：缓存命中时 ensure 只做键比对；仅当本轮真的
+        // 新增了布局/公式/表格（geometry_stale）才需要 O(块数) 重算几何——
+        // 编辑路径已在 after_edit 末尾重算过，击键后的首帧直接跳过整篇累计。
+        // 估算高度偏小可能让视口底部露出未排版块，故补排后最多再收敛一轮。
         self.ensure_layouts_visible();
         self.ensure_math_visible();
         self.ensure_tables_visible();
-        self.recompute_geometry();
-        let range = self.visible_index_range();
-        let base = self.base_key();
-        let caret = self.effective_caret();
-        if self.index.blocks.get(range).is_some_and(|bs| {
-            bs.iter().any(|g| {
-                self.cache
-                    .layout(g.id, &g.kind, g.range, base, caret)
-                    .is_none()
-            })
-        }) {
+        if self.index.geometry_stale {
+            self.recompute_geometry();
             self.ensure_layouts_visible();
             self.ensure_math_visible();
             self.ensure_tables_visible();
-            self.recompute_geometry();
+            if self.index.geometry_stale {
+                self.recompute_geometry();
+            }
         }
+        let base = self.base_key();
+        let caret = self.effective_caret();
         // 帧缓冲跨帧复用：仅尺寸变化才重新分配（每帧只做一次底色填充）
         let mut frame = self.window_state.frame.take().unwrap_or_else(|| {
             Frame::new(
@@ -1534,6 +1536,8 @@ impl App {
         }
         keep.extend(self.cache.math_imgs.keys().copied());
         self.cache.prune_viewport(&keep, &base);
+        // 记录本帧画出的光标位置：`tick` 据此避免为同一次光标移动再补一帧。
+        self.window_state.last_painted_caret = Some(self.editor.caret());
         // 归还缓冲供下一帧复用；返回 &mut Frame 供产品层 present() 与测试断言
         self.window_state.frame = Some(frame);
         self.window_state.frame.as_mut().unwrap()

@@ -312,26 +312,32 @@ impl Cache {
 
     /// 索引重建驱动的全量回收（不承担正确性）：删除已消失块或过期代次的条目。
     /// 调用点唯一：`refresh_index → geom_fill` 末尾，与块真值同源。
-    pub(crate) fn prune_alive(&mut self, alive: &HashSet<BlockId>, revs: &Revs, base: &BaseKey) {
+    /// `alive` 以谓词判活（生产直接查 Session id 索引），避免每次击键构建 id 集合。
+    pub(crate) fn prune_alive<F: Fn(BlockId) -> bool>(
+        &mut self,
+        alive: F,
+        revs: &Revs,
+        base: &BaseKey,
+    ) {
         let inline_key = InlineKey {
             scale_q: base.scale_q,
             theme_rev: revs.theme,
         };
         self.layouts
-            .retain(|id, m| alive.contains(id) && m.key.base == *base);
+            .retain(|id, m| alive(*id) && m.key.base == *base);
         self.rasters
-            .retain(|id, m| alive.contains(id) && m.key.base == *base);
+            .retain(|id, m| alive(*id) && m.key.base == *base);
         self.tables
-            .retain(|id, m| alive.contains(id) && m.key.base == *base);
+            .retain(|id, m| alive(*id) && m.key.base == *base);
         self.math_imgs.retain(|id, m| {
-            alive.contains(id)
+            alive(*id)
                 && m.key.block == *id
                 && m.key.scale_q == base.scale_q
                 && m.key.theme_rev == revs.theme
                 && m.key.session_rev == revs.session
         });
         self.math_failed.retain(|id, m| {
-            alive.contains(id)
+            alive(*id)
                 && m.key.block == *id
                 && m.key.scale_q == base.scale_q
                 && m.key.session_rev == revs.session
@@ -560,7 +566,7 @@ mod tests {
             },
         );
         let alive: HashSet<BlockId> = ids.iter().copied().collect();
-        c.prune_alive(&alive, &revs, &base);
+        c.prune_alive(|id| alive.contains(&id), &revs, &base);
         assert!(c.math_failed.contains_key(&ids[0]), "同代次保留");
         assert!(
             c.inline_math.contains_key("x"),
@@ -572,7 +578,7 @@ mod tests {
         let mut c2 = c;
         let revs2 = Revs { theme: 1, ..revs };
         let base2 = revs2.base(800.0, 1.0, 600.0, false, 0);
-        c2.prune_alive(&alive, &revs2, &base2);
+        c2.prune_alive(|id| alive.contains(&id), &revs2, &base2);
         assert!(c2.inline_math.is_empty(), "公式图随主题作废");
         assert!(
             c2.math_failed.contains_key(&ids[0]),
@@ -582,7 +588,7 @@ mod tests {
         // DPI 变化：失败记忆过期
         let revs3 = Revs { theme: 1, ..revs };
         let base3 = revs3.base(800.0, 2.0, 600.0, false, 0);
-        c2.prune_alive(&alive, &revs3, &base3);
+        c2.prune_alive(|id| alive.contains(&id), &revs3, &base3);
         assert!(!c2.inline_failed.contains_key("y"), "失败记忆随 DPI 作废");
         // 新会话：块相关条目过期，行内公式与失败记忆跨文档保留
         let revs4 = Revs {
@@ -600,7 +606,7 @@ mod tests {
                 value: (),
             },
         );
-        c2.prune_alive(&alive, &revs4, &base4);
+        c2.prune_alive(|id| alive.contains(&id), &revs4, &base4);
         assert!(c2.math_failed.is_empty(), "新会话：块失效记忆作废");
         assert!(c2.inline_images.is_empty(), "新图片基准：位图作废");
         assert!(c2.inline_failed.contains_key("y"), "行内失败记忆跨文档保留");

@@ -3,8 +3,6 @@
 //! 连续的非 CJK 字母数字串计 1 词；空白与标点（含 Markdown 标记符）不计。
 //! 统计是全量文本的派生量，刷新点挂在 `refresh_index`（文本真值唯一重建点）。
 
-use veil_core::Range;
-
 use crate::app::App;
 
 /// 中文口径字数：CJK 逐字 + 非 CJK 字母数字串按词。
@@ -41,12 +39,11 @@ fn is_cjk(c: char) -> bool {
 }
 
 impl App {
-    /// 重算全文字数并写回状态栏数据。调用方：`refresh_index` 末尾——
-    /// 编辑/撤销/打开/新建都经此重建块结构，统计不可能落后于真值。
+    /// 重算全文字数并写回状态栏数据。调用方：`refresh_index` 末尾。
+    /// 每块字数与全文累计量随块索引增量维护（未变块直接复用），此处 O(1) 取用，
+    /// 不再每次击键切片并重扫全文。
     pub(crate) fn refresh_stats(&mut self) {
-        let s = self.editor.session();
-        let text = s.text_slice(Range::new(0, s.text_len())).unwrap_or_default();
-        self.ui_state.writing.words = count_words(&text);
+        self.ui_state.writing.words = self.index.total_words;
     }
 }
 

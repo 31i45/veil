@@ -226,6 +226,16 @@ impl Syntax {
         self.blocks.get(*idx)
     }
 
+    /// 块 id 是否仍存活（O(1)）。
+    pub fn contains_block(&self, id: BlockId) -> bool {
+        self.id_index.contains_key(&id)
+    }
+
+    /// 块在文档中的序号（O(1)）。
+    pub fn block_position(&self, id: BlockId) -> Option<usize> {
+        self.id_index.get(&id).copied()
+    }
+
     pub fn blocks(&self) -> &[Block] {
         &self.blocks
     }
@@ -594,7 +604,15 @@ impl Syntax {
         self.last_rescan_lines = line.saturating_sub(scan_from);
 
         let mut dirty = Vec::with_capacity(produced.len());
-        let mut new_blocks: Vec<Block> = self.blocks[..bi].to_vec();
+        // 前缀原样保留、后缀整片平移：旧块容器按值搬移，避免每次击键克隆
+        // 整篇 BlockKind（列表/围栏语言字符串）。旧块只在此处被释放。
+        let mut new_blocks = std::mem::take(&mut self.blocks);
+        let rest = new_blocks.split_off(bi);
+        let replaced_count = suffix_start.map_or(rest.len(), |k| k - bi);
+        let replaced_ids: Vec<BlockId> = rest.iter().take(replaced_count).map(|b| b.id).collect();
+        let produced_count = produced.len();
+        let mut produced_footnote_marker = false;
+        let mut produced_ref_definition = false;
         for (i, sb) in produced.into_iter().enumerate() {
             let kind = self.classify_callout(buf, sb.kind, sb.start);
             let (kind, s, e) = (kind, sb.start, sb.end);
@@ -602,7 +620,7 @@ impl Syntax {
             // [edit_start_line, new_end_line) ⇒ 内容必然未变 ⇒ 保留 id 不脏
             // （0c P0-3：列表区域整体重扫时，编辑点之前的同区域项由此保 id）。
             // 编辑区之前的块坐标不平移，之后的块平移 delta。
-            let reused = self.blocks.get(bi + i).and_then(|o| {
+            let reused = rest.get(i).and_then(|o| {
                 if o.kind != kind {
                     return None;
                 }
@@ -642,15 +660,16 @@ impl Syntax {
         if let Some(k) = suffix_start {
             // 编辑点之后整片平移：用首个保留块对齐出字节 delta（新首字节 - 旧首字节），
             // 其后所有块只做一次算术加法，不逐块重新做行号换算。
-            let first = &self.blocks[k];
+            let rel = k - bi;
+            let first = &rest[rel];
             let shifted_start_line = (first.start_line as isize + delta) as usize;
             let byte_delta =
                 buf.offset_of_line(shifted_start_line) as isize - first.range.start as isize;
-            for b in &self.blocks[k..] {
+            for b in rest.into_iter().skip(rel) {
                 // 已对齐块 shifted >= 0；其后块起始行更大，平移后必然非负
                 new_blocks.push(Block {
                     id: b.id,
-                    kind: b.kind.clone(),
+                    kind: b.kind,
                     start_line: (b.start_line as isize + delta) as usize,
                     end_line: (b.end_line as isize + delta) as usize,
                     range: Range::new(
@@ -662,11 +681,58 @@ impl Syntax {
                 });
             }
         }
+        // 派生表按需重建：普通文档（无脚注/引用定义）不逐块切片全文扫描。
+        for b in &new_blocks[bi..bi + produced_count] {
+            if matches!(b.kind, BlockKind::LinkRefDef) {
+                produced_ref_definition = true;
+            }
+            if b.kind == BlockKind::FootnoteDef {
+                produced_footnote_marker = true;
+            }
+            if matches!(
+                b.kind,
+                BlockKind::FencedCode(_)
+                    | BlockKind::IndentedCode
+                    | BlockKind::Math
+                    | BlockKind::Table
+                    | BlockKind::ThematicBreak
+                    | BlockKind::LinkRefDef
+                    | BlockKind::HtmlBlock
+                    | BlockKind::Details { .. }
+                    | BlockKind::FrontMatter(_)
+            ) {
+                continue;
+            }
+            let text = buf.slice(b.range.start, b.range.end);
+            if text.contains("[^") {
+                produced_footnote_marker = true;
+            }
+            if b.kind == BlockKind::BlockQuote && text.contains('[') {
+                produced_ref_definition = true;
+            }
+        }
         self.blocks = new_blocks;
-        self.build_refs(buf);
-        // 同上：编号表经 `inlines` 查块，须在 id 索引重建之后
-        self.rebuild_id_index();
-        self.build_footnotes(buf);
+        if produced_ref_definition || !self.refs.is_empty() {
+            self.build_refs(buf);
+        }
+        // 同上：编号表经 `inlines` 查块，须在 id 索引重建之后。
+        // 位次稳定（脏区新旧块数相同）时只替换脏区 id；块数变化才整表重建。
+        if produced_count == replaced_count {
+            for id in &replaced_ids {
+                self.id_index.remove(id);
+            }
+            for (i, b) in self.blocks[bi..bi + produced_count].iter().enumerate() {
+                self.id_index.insert(b.id, bi + i);
+            }
+        } else {
+            self.rebuild_id_index();
+        }
+        if produced_footnote_marker
+            || !self.footnote_numbers.is_empty()
+            || !self.footnote_defs.is_empty()
+        {
+            self.build_footnotes(buf);
+        }
         debug_assert!(self
             .blocks
             .iter()

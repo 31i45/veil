@@ -72,10 +72,15 @@ impl App {
         title
     }
 
-    pub(crate) fn update_title(&self) {
-        if let Some(w) = &self.window_state.window {
-            w.set_title(&self.title_text());
+    pub(crate) fn update_title(&mut self) {
+        let title = self.title_text();
+        if self.window_state.last_title.as_deref() == Some(title.as_str()) {
+            return; // 逐键 SetWindowText 会引入同步窗口消息开销，标题未变则跳过
         }
+        if let Some(w) = &self.window_state.window {
+            w.set_title(&title);
+        }
+        self.window_state.last_title = Some(title);
     }
 
     /// Ctrl+S：显式保存（允许在备份外部版本后覆盖）。

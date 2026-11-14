@@ -55,6 +55,15 @@ pub struct PlacedImg {
     pub height: u32,
 }
 
+/// 图片题注输入：仅**独立成行**的图片、且 alt 非空。
+/// `text` 只用于视图显示（位于图片下方、占用独立一行），不参与文档字节与编辑映射。
+pub struct ImageCaption {
+    /// 图片节点区间（doc 绝对坐标），用于激活判定与「是否已出图」比对。
+    pub range: Range,
+    /// alt 原文（已把内部换行折成空格；其余字符不改写）。
+    pub text: String,
+}
+
 /// 块级字号倍率（标题）。样式语义见 style.rs 头注。
 fn block_scale(kind: BlockKind) -> f32 {
     match kind {
@@ -231,13 +240,15 @@ pub(crate) fn image_is_standalone(text: &str, block: Range, img: Range) -> bool 
 }
 
 /// 替换段：块相对 doc 区间 `[doc_start, doc_end)` → `fill` 文本。
-/// `fill` 为空即消隐；非空时整段替换（长度可同可异）。fill 不得含换行——
-/// 行基仅在保留段计算。行内公式占位（NBSP）与块级替换（列表/引用/分隔线）共用此结构。
+/// `fill` 为空即消隐；非空时整段替换（长度可同可异）。fill 可含换行（`<br>`、题注），
+/// 行基对替换段同样扫描。行内公式占位（NBSP）与块级替换（列表/引用/分隔线）共用此结构。
 #[derive(Clone, Debug)]
 struct Sub {
     doc_start: usize,
     doc_end: usize,
     fill: String,
+    /// 图片题注段：视图派生文本，构建排版文本时回报其 layout 区间用于上色。
+    caption: bool,
 }
 
 impl Sub {
@@ -246,6 +257,7 @@ impl Sub {
             doc_start,
             doc_end,
             fill: String::new(),
+            caption: false,
         }
     }
 
@@ -254,16 +266,28 @@ impl Sub {
             doc_start,
             doc_end,
             fill: text.into(),
+            caption: false,
         }
     }
 
     /// 纯插入：零宽源码区间 → 有宽展示文本（脚注定义的编号前缀 / 块末 `↩`）。
-    /// 插入段不消费源码字符，doc 坐标只作锚点；fill 同样不得含换行。
+    /// 插入段不消费源码字符，doc 坐标只作锚点。
     fn insert(doc: usize, text: impl Into<String>) -> Self {
         Sub {
             doc_start: doc,
             doc_end: doc,
             fill: text.into(),
+            caption: false,
+        }
+    }
+
+    /// 题注插入：零宽锚点 → 独立一行题注（fill 自带前后换行）。
+    fn caption(doc: usize, text: impl Into<String>) -> Self {
+        Sub {
+            doc_start: doc,
+            doc_end: doc,
+            fill: text.into(),
+            caption: true,
         }
     }
 }
@@ -322,6 +346,7 @@ impl OffsetMap {
                     doc_start: s,
                     doc_end: s,
                     fill: sub.fill,
+                    caption: sub.caption,
                 });
                 continue;
             }
@@ -332,6 +357,7 @@ impl OffsetMap {
                     doc_start: s,
                     doc_end: e,
                     fill: sub.fill,
+                    caption: sub.caption,
                 }),
             }
         }
@@ -715,6 +741,8 @@ pub struct LayoutEngine {
     syntax: SyntaxColors,
     /// 链接前景色（随主题切换更新）。
     link_color: [u8; 3],
+    /// 次要文本色（图片题注等）：与脚注前缀同源的主题 muted，随主题切换更新。
+    muted_color: [u8; 3],
 }
 
 impl Default for LayoutEngine {
@@ -736,6 +764,7 @@ impl LayoutEngine {
             mono_family,
             syntax: SyntaxColors::default_light(),
             link_color: Theme::light().link,
+            muted_color: Theme::light().muted,
         }
     }
 
@@ -777,6 +806,11 @@ impl LayoutEngine {
     /// 更新链接前景色（主题切换时调用）。
     pub fn set_link_color(&mut self, color: [u8; 3]) {
         self.link_color = color;
+    }
+
+    /// 更新次要文本色（主题切换时调用）：图片题注与脚注前缀取同一 muted 语义。
+    pub fn set_muted_color(&mut self, color: [u8; 3]) {
+        self.muted_color = color;
     }
 
     /// 当前链接前景色（表格富文本排版复用）。
@@ -847,7 +881,7 @@ impl LayoutEngine {
             start: 0,
             end: text.len(),
         };
-        let (layout_text, map, line_bases, source_newlines) =
+        let (layout_text, map, line_bases, source_newlines, _) =
             build_layout_text(text, block, &[], usize::MAX, &[], true, false);
         let mut buffer = Buffer::new(&mut self.font_system, metrics);
         let attrs = match family {
@@ -961,6 +995,53 @@ impl LayoutEngine {
         ordinal: Option<u32>,
         toc_list: bool,
     ) -> BlockLayout {
+        self.layout_block_full(
+            kind, text, block, inlines, width, caret, imgs, reveal_all, footnotes, folds, ordinal,
+            toc_list, &[],
+        )
+    }
+
+    /// 带图片题注的排版入口：题注随图片视觉行之后插入一行（视图派生文本，不写回文档）。
+    #[allow(clippy::too_many_arguments)] // 内部布局函数参数天然多
+    pub(crate) fn layout_block_with_captions(
+        &mut self,
+        kind: BlockKind,
+        text: &str,
+        block: Range,
+        inlines: &[InlineNode],
+        width: f32,
+        caret: usize,
+        imgs: &[InlineImg],
+        reveal_all: bool,
+        footnotes: Option<&FootnoteCtx>,
+        folds: &[InlineFold],
+        ordinal: Option<u32>,
+        toc_list: bool,
+        captions: &[ImageCaption],
+    ) -> BlockLayout {
+        self.layout_block_full(
+            kind, text, block, inlines, width, caret, imgs, reveal_all, footnotes, folds, ordinal,
+            toc_list, captions,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)] // 内部布局函数参数天然多
+    fn layout_block_full(
+        &mut self,
+        kind: BlockKind,
+        text: &str,
+        block: Range,
+        inlines: &[InlineNode],
+        width: f32,
+        caret: usize,
+        imgs: &[InlineImg],
+        reveal_all: bool,
+        footnotes: Option<&FootnoteCtx>,
+        folds: &[InlineFold],
+        ordinal: Option<u32>,
+        toc_list: bool,
+        captions: &[ImageCaption],
+    ) -> BlockLayout {
         let full = text.strip_suffix('\n').unwrap_or(text);
         // 单块上限（v0）：只排前缀，超出部分不参与成形/光栅，避免内存放大
         let (body, mut truncated) = cap_body(full);
@@ -1026,14 +1107,41 @@ impl LayoutEngine {
             collect_q_subs(inlines, block, caret, &mut subs);
             // `<img>` 无可用位图（远程 src 被解析层置空 / 本地缺失 / 加载失败）时，
             // 整段替换为 `[alt]` 文本占位，并登记占位框装饰（paint 画浅灰底）。
+            // 带题注的图片改用通用占位：alt 已由下方题注给出，避免重复显示。
             collect_html_img_subs(
                 inlines,
                 block,
                 caret,
                 &kept,
+                captions,
                 &mut subs,
                 &mut img_placeholders,
             );
+            // 图片题注（仅独立成行的图片、alt 非空）：在图片所在视觉行之后插入独立一行。
+            // 视图派生文本，不进文档字节；光标进入图片（显源码）时让位，避免与 alt 重复。
+            for cap in captions {
+                if node_active(cap.range, caret) {
+                    continue;
+                }
+                let rs = cap.range.start.saturating_sub(block.start);
+                let re = cap.range.end.saturating_sub(block.start).min(body.len());
+                if rs >= re || !body.is_char_boundary(rs) || !body.is_char_boundary(re) {
+                    continue;
+                }
+                let loaded = kept.iter().any(|im| im.range == cap.range);
+                if !loaded && !img_placeholders.iter().any(|&(s, e)| s == rs && e == re) {
+                    // Markdown 图片缺失：整节点降级为通用占位，alt 由题注行给出（不重复）。
+                    subs.push(Sub::fill(rs, re, t(Key::ImageAltFallback)));
+                    img_placeholders.push((rs, re));
+                }
+                let line_end = body[re..].find('\n').map_or(body.len(), |i| re + i);
+                let (anchor, fill) = if line_end < body.len() {
+                    (line_end + 1, format!("{}\n", cap.text))
+                } else {
+                    (body.len(), format!("\n{}", cap.text))
+                };
+                subs.push(Sub::caption(anchor, fill));
+            }
             // 行内 `<details>` 折叠（B3）：收起态的正文整段消隐；标签本身由
             // `collect_elide` 按行内 HTML 规则消隐，故不出现裸标签。
             for f in folds {
@@ -1052,7 +1160,7 @@ impl LayoutEngine {
                 // 否则 summary 首字前会多出一个游标空格。
                 | BlockKind::Details { .. }
         );
-        let (layout_text, map, line_bases, source_newlines) =
+        let (layout_text, map, line_bases, source_newlines, caption_layout_spans) =
             build_layout_text(body, block, inlines, caret, &subs, apply_cjk, reveal_all);
         let mut node_ranges = Vec::new();
         collect_node_ranges(inlines, &mut node_ranges);
@@ -1222,6 +1330,28 @@ impl LayoutEngine {
                 }
             }
             spans = out;
+        }
+        // 题注：次要文本色（与脚注前缀同源的 muted），字号/行高沿用本块 metrics。
+        // 位于 layout 文本末尾/图片行之后，必须显式补样式；换行本身无字形，可留空缺。
+        for &(cs, ce) in &caption_layout_spans {
+            if cs >= ce || ce > layout_text.len() {
+                continue;
+            }
+            let st = Style {
+                color: Some(self.muted_color),
+                ..Default::default()
+            };
+            spans.push((
+                &layout_text[cs..ce],
+                attrs_of(
+                    kind.clone(),
+                    st,
+                    self.link_color,
+                    self.doc_font,
+                    self.mono_family,
+                    metrics.font_size,
+                ),
+            ));
         }
         if spans.is_empty() {
             spans.push(("", default_attrs.clone())); // 空行也需默认样式
@@ -1820,6 +1950,7 @@ fn collect_html_img_subs(
     block: Range,
     caret: usize,
     kept: &[&InlineImg],
+    captions: &[ImageCaption],
     out: &mut Vec<Sub>,
     placeholders: &mut Vec<(usize, usize)>,
 ) {
@@ -1835,16 +1966,21 @@ fn collect_html_img_subs(
                 let rs = n.range.start.saturating_sub(block.start);
                 let re = n.range.end.saturating_sub(block.start);
                 if rs < re {
-                    let label = match attrs.alt.as_deref().filter(|a| !a.is_empty()) {
-                        Some(alt) => format!("[{alt}]"),
-                        None => t(Key::ImageAltFallback).to_string(),
+                    // 带题注的图片：alt 由下方题注给出，占位只提示「图片不可用」。
+                    let label = if captions.iter().any(|c| c.range == n.range) {
+                        t(Key::ImageAltFallback).to_string()
+                    } else {
+                        match attrs.alt.as_deref().filter(|a| !a.is_empty()) {
+                            Some(alt) => format!("[{alt}]"),
+                            None => t(Key::ImageAltFallback).to_string(),
+                        }
                     };
                     out.push(Sub::fill(rs, re, label));
                     placeholders.push((rs, re));
                 }
             }
         }
-        collect_html_img_subs(&n.children, block, caret, kept, out, placeholders);
+        collect_html_img_subs(&n.children, block, caret, kept, captions, out, placeholders);
     }
 }
 
@@ -2229,6 +2365,15 @@ pub(crate) fn probe_break_violations(buffer: &Buffer, include_hard: bool) {
 /// 构造排版文本与坐标映射：行尾 `\r`、非激活节点标记、块级替换统一进替换表。
 /// 返回 (排版文本, OffsetMap, 每逻辑行布局起始偏移, 源换行符的块相对偏移)。
 /// 调用方已剥唯一尾 `\n`。
+/// 排版文本构建结果：文本、坐标映射、行基、源换行偏移、题注 layout 区间。
+type BuildLayoutText = (
+    String,
+    OffsetMap,
+    Vec<usize>,
+    Vec<usize>,
+    Vec<(usize, usize)>,
+);
+
 fn build_layout_text(
     body: &str,
     block: Range,
@@ -2237,7 +2382,7 @@ fn build_layout_text(
     subs: &[Sub],
     apply_cjk: bool,
     reveal_all: bool,
-) -> (String, OffsetMap, Vec<usize>, Vec<usize>) {
+) -> BuildLayoutText {
     let mut all: Vec<Sub> = Vec::new();
     // 行尾 \r：仅剥「后继为 \n 或文末」的 \r（行内孤 \r 保持原样，与切片 1 行为一致）
     let bytes = body.as_bytes();
@@ -2258,21 +2403,28 @@ fn build_layout_text(
         all.extend(build_typo_subs(body, &code_spans, &elide));
     }
     let (map, accepted) = OffsetMap::from_spans(body.len(), &all);
-    // 保留段取源文本并记行基；替换段写 fill（调用方保证不含换行）
+    // 保留段取源文本并记行基；替换段写 fill（fill 可含换行，如 `<br>` 与题注）。
     let mut layout_text = String::with_capacity(map.layout_len);
     let mut line_bases = vec![0];
     let mut source_newlines: Vec<usize> = Vec::new();
+    let mut caption_spans: Vec<(usize, usize)> = Vec::new();
     for seg in &map.segs {
         match seg.sub {
             Some(i) => {
-                // 替换段 fill 可能含换行（br → \n），也要扫描记行基。
-                let fill = &accepted[i].fill;
+                // 替换段 fill 可能含换行（br → \n、题注行），也要扫描记行基。
+                let sub = &accepted[i];
+                let fill = &sub.fill;
                 let layout_start = layout_text.len();
                 for (j, b) in fill.bytes().enumerate() {
                     if b == b'\n' {
                         line_bases.push(layout_start + j + 1);
                         // 替换段没有源文本坐标，source_newlines 不记（这些换行是虚拟的）。
                     }
+                }
+                if sub.caption {
+                    // 题注 fill 含起/止换行，整段作为一个 span：换行必须随 span 入文本，
+                    // 否则题注会与上一行拼在同一视觉行（set_rich_text 只拼接 span 文本）。
+                    caption_spans.push((layout_start, layout_start + fill.len()));
                 }
                 layout_text.push_str(fill);
             }
@@ -2288,7 +2440,7 @@ fn build_layout_text(
             }
         }
     }
-    (layout_text, map, line_bases, source_newlines)
+    (layout_text, map, line_bases, source_newlines, caption_spans)
 }
 
 /// 先序收集全部行内节点区间（doc 绝对坐标；调用方随即转块相对）：激活指纹按固定顺序折叠。
@@ -3028,6 +3180,33 @@ mod tests {
         let block_text = &text[range.start..range.end];
         let l = eng.layout_block(kind, block_text, range, &inlines, width, caret, imgs, false);
         (eng, l)
+    }
+
+    /// captions 为独立成行图片的题注输入（alt 非空时由 shell 派生）。
+    fn layout_with_captions(
+        text: &str,
+        caret: usize,
+        width: f32,
+        imgs: &[InlineImg],
+        captions: &[ImageCaption],
+    ) -> (LayoutEngine, BlockLayout) {
+        let s = Session::open(text);
+        let (id, kind, range) = s.blocks()[0].clone();
+        let inlines = s.block_inlines(id).unwrap();
+        let mut eng = LayoutEngine::new();
+        let block_text = &text[range.start..range.end];
+        let l = eng.layout_block_with_captions(
+            kind, block_text, range, &inlines, width, caret, imgs, false, None, &[], None, false,
+            captions,
+        );
+        (eng, l)
+    }
+
+    fn caption(range: Range, text: &str) -> ImageCaption {
+        ImageCaption {
+            range,
+            text: text.to_string(),
+        }
     }
 
     /// 整篇逐块排版：按 Session 块顺序派生有序列表编号后排版每个块。
@@ -4216,6 +4395,108 @@ mod tests {
         // 未提供图（加载失败/远程 URL）：标记消隐，只显 alt
         let (_, l) = layout_of("a ![alt](p.png) b", 400.0);
         assert_eq!(l.layout_text(), "a alt b");
+    }
+
+    // ---- 图片题注（Task 5）：独立成行图片下方显示 alt 文本 ----
+
+    #[test]
+    fn standalone_image_caption_adds_own_line_and_block_height() {
+        // 「![图注](p.png)」逐字节：!=0 [=1 图=2..5 注=5..8 ]=8 (=9 p.png=10..14 )=14
+        let text = "![图注](p.png)";
+        let node = Range::new(0, 15);
+        let imgs = [image(node, 200, 100)];
+        let caps = [caption(node, "图注")];
+        let (_, l) = layout_with_captions(text, usize::MAX, 400.0, &imgs, &caps);
+        let runs: Vec<_> = l.buffer.layout_runs().collect();
+        assert_eq!(runs.len(), 2, "图片一行 + 题注一行");
+        assert!(l.layout_text().contains("图注"), "题注须进入视图排版");
+        assert!(
+            runs[1].line_top >= runs[0].line_top + 100.0 - 0.5,
+            "题注必须位于图片下方"
+        );
+        assert!(
+            l.height >= runs[1].line_top + runs[1].line_height - 0.5,
+            "块高须覆盖题注行: h={}",
+            l.height
+        );
+        assert!(
+            l.height >= 100.0 + BASE_LINE_HEIGHT * 0.9,
+            "块高须含题注行（图片 100 + 题注行）: {}",
+            l.height
+        );
+    }
+
+    #[test]
+    fn standalone_image_without_caption_keeps_single_line() {
+        // 空 alt：shell 不传题注，块内仍只有图片一行。
+        let node = Range::new(0, 11); // 「![](p.png)」
+        let imgs = [image(node, 200, 100)];
+        let (_, l) = layout_with_captions("![](p.png)", usize::MAX, 400.0, &imgs, &[]);
+        assert_eq!(l.buffer.layout_runs().count(), 1);
+        assert_eq!(l.height, 100.0, "无题注时块高 = 图片显示高度");
+    }
+
+    #[test]
+    fn long_cjk_caption_wraps_within_content_width() {
+        let alt = "这是一段很长的中文题注用于验证窄窗口下的换行行为不应溢出也不应覆盖下一块";
+        let text = format!("![{alt}](p.png)");
+        let node = Range::new(0, text.len());
+        let imgs = [image(node, 120, 60)];
+        let caps = [caption(node, alt)];
+        let width = 160.0;
+        let (eng, l) = layout_with_captions(&text, usize::MAX, width, &imgs, &caps);
+        let runs: Vec<_> = l.buffer.layout_runs().collect();
+        assert!(runs.len() > 2, "长题注应折行: runs={}", runs.len());
+        for run in &runs {
+            assert!(
+                run.line_w <= width + 1.0,
+                "题注/占位行不得溢出: line_w={} width={width}",
+                run.line_w
+            );
+            for g in run.glyphs.iter() {
+                assert!(
+                    g.x + g.w <= width + 1.0,
+                    "字形右缘不得超出内容宽: {}",
+                    g.x + g.w
+                );
+            }
+        }
+        let last = runs.last().unwrap();
+        assert!(
+            l.height >= last.line_top + last.line_height - 0.5,
+            "块高须覆盖末行题注，避免覆盖下一块"
+        );
+        // 命中题注行只落到图片节点边界，不会产生越界的文档偏移。
+        let off = eng.hit(&l, 10.0, last.line_top + 2.0);
+        assert!(off <= text.len(), "题注上的命中须钳在块内: {off}");
+    }
+
+    #[test]
+    fn missing_image_still_renders_caption_with_placeholder() {
+        // 图片加载失败（无 InlineImg）：节点降级为通用占位，题注照常可读。
+        let text = "![缺失图](p.png)";
+        let node = Range::new(0, 18); // 「![缺失图](p.png)」= 18 字节
+        let caps = [caption(node, "缺失图")];
+        let (_, l) = layout_with_captions(text, usize::MAX, 400.0, &[], &caps);
+        assert!(l.layout_text().contains(t(Key::ImageAltFallback)));
+        assert!(l.layout_text().contains("缺失图"));
+        assert_eq!(l.buffer.layout_runs().count(), 2, "占位一行 + 题注一行");
+        assert!(l.layout_text().matches("缺失图").count() == 1, "alt 不重复显示");
+    }
+
+    #[test]
+    fn caption_hidden_while_caret_edits_image_source() {
+        let text = "![图注](p.png)";
+        let node = Range::new(0, 15);
+        let imgs = [image(node, 200, 100)];
+        let caps = [caption(node, "图注")];
+        let (_, l) = layout_with_captions(text, 5, 400.0, &imgs, &caps);
+        assert!(
+            !l.layout_text().contains('\n'),
+            "光标进入图片时显源码、不追加题注行: {:?}",
+            l.layout_text()
+        );
+        assert!(l.layout_text().contains("p.png"), "应显示图片源码");
     }
 
     #[test]

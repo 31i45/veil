@@ -9,9 +9,9 @@ use crate::geometry::{Rect, MARGIN};
 use crate::i18n::{t, tf, Key};
 use crate::view::table::{CellImgAsset, CellMath};
 use crate::view::{
-    cell_math_spans, ctx_menu, inline_details_spans, node_active, outline, oversize_notice,
-    quick_open, search, BlockLayout, Frame, InlineAsset, InlineFold, InlineImg, LayoutEngine,
-    LayoutKey, Memo, OverKind, TableKey, UnderKind,
+    cell_math_spans, ctx_menu, image_is_standalone, inline_details_spans, node_active, outline,
+    oversize_notice, quick_open, search, BlockLayout, Frame, ImageCaption, InlineAsset, InlineFold,
+    InlineImg, LayoutEngine, LayoutKey, Memo, OverKind, TableKey, UnderKind,
 };
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -20,8 +20,9 @@ use veil_core::{BlockId, BlockKind, HtmlTag, InlineKind, InlineNode, Range};
 /// 专注模式压暗强度：背景色以该 alpha 覆盖非光标块（越大越暗，255 = 全遮）。
 const FOCUS_DIM_ALPHA: u8 = 160;
 
-/// 待排版图片：(节点区间, url, 显式宽高)。显式宽高仅来自 HTML `<img width height>`。
-type PendingImage = (Range, String, (Option<u32>, Option<u32>));
+/// 待排版图片：(节点区间, url, 显式宽高, alt)。显式宽高仅来自 HTML `<img width height>`；
+/// alt 用于独立成行图片的题注（视图派生，不写回文档）。
+type PendingImage = (Range, String, (Option<u32>, Option<u32>), String);
 
 /// 打字机模式锚点：视口高比例（0.42 ≈ 上四成处），光标行中心恒定位于此处。
 const TYPEWRITER_ANCHOR: f32 = 0.42;
@@ -530,7 +531,12 @@ impl App {
                         InlineKind::Image => {
                             if let Some(url) = n.url {
                                 let url = self.editor.session().text_slice(url).unwrap_or_default();
-                                images.push((n.range, url, (None, None)));
+                                let alt = self
+                                    .editor
+                                    .session()
+                                    .text_slice(n.content)
+                                    .unwrap_or_default();
+                                images.push((n.range, url, (None, None), alt));
                             }
                         }
                         // 行内/块级 `<img src alt>`：本地 src 走与 Markdown Image 相同的
@@ -546,6 +552,7 @@ impl App {
                                     n.range,
                                     src.to_string(),
                                     (attrs.width, attrs.height),
+                                    attrs.alt.clone().unwrap_or_default(),
                                 ));
                             }
                         }
@@ -621,7 +628,10 @@ impl App {
                     baseline: img.baseline,
                 });
             }
-            for (nrange, url, explicit) in images {
+            // 图片题注候选（独立成行 + alt 非空）：与是否加载成功无关，
+            // 缺失时题注仍显示（布局层把缺失节点降级为通用占位以避免与 alt 重复）。
+            let mut captions: Vec<ImageCaption> = Vec::new();
+            for (nrange, url, explicit, alt) in images {
                 // HTML `width`/`height` 是 CSS 逻辑像素 → 乘 DPI 转布局物理像素。
                 let explicit = (
                     explicit
@@ -631,7 +641,17 @@ impl App {
                         .1
                         .map(|v| (v as f32 * scale).round().max(1.0) as u32),
                 );
-                let max_h = if crate::view::image_is_standalone(&text, range, nrange) {
+                // 独占判定按「图片所在视觉行」：行内图片不产生题注，避免打断行内排版。
+                let standalone = image_is_standalone(&text, range, nrange);
+                let alt = alt.trim();
+                if standalone && !alt.is_empty() {
+                    // 题注单行显示：alt 内部换行折成空格（其余字符不改写）。
+                    captions.push(ImageCaption {
+                        range: nrange,
+                        text: alt.replace(['\n', '\r'], " "),
+                    });
+                }
+                let max_h = if standalone {
                     self.image_max_height()
                 } else {
                     inline_max_h
@@ -711,7 +731,7 @@ impl App {
             let l = match toc_text {
                 Some(toc) => self.engine.layout_toc(&toc, width),
                 None => {
-                    let mut l = self.engine.layout_block_with_footnotes(
+                    let mut l = self.engine.layout_block_with_captions(
                         kind.clone(),
                         &text,
                         range,
@@ -725,6 +745,7 @@ impl App {
                         // 有序列表显示编号：编号在块索引层按文档顺序派生（BlockKind 不含起始号）。
                         self.index.list_ordinals.get(&id).copied(),
                         toc_list,
+                        &captions,
                     );
                     l.toc_source = toc_marker;
                     l

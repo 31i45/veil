@@ -36,7 +36,7 @@ pub(crate) use layout::{
     ListMarker,
 };
 pub(crate) use layout::toc_display_text;
-pub use layout::{BlockLayout, InlineAsset, InlineFold, InlineImg, LayoutEngine};
+pub use layout::{BlockLayout, ImageCaption, InlineAsset, InlineFold, InlineImg, LayoutEngine};
 pub(crate) use layout::{OverKind, UnderKind};
 pub(crate) use outline::{Outline, OutlineEntry};
 pub(crate) use quick_open::QuickOpen;

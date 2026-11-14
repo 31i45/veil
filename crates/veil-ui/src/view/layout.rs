@@ -6,7 +6,7 @@
 //! `OffsetMap` 负责 doc↔layout 坐标换算——对外偏移一律为文档坐标。
 //! 激活规则 v0：`range.start <= caret <= range.end` 闭区间，逐节点独立、嵌套各自生效。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 
 use cosmic_text::{
@@ -938,6 +938,7 @@ impl LayoutEngine {
             None,
             &[],
             None,
+            false,
         )
     }
 
@@ -958,6 +959,7 @@ impl LayoutEngine {
         footnotes: Option<&FootnoteCtx>,
         folds: &[InlineFold],
         ordinal: Option<u32>,
+        toc_list: bool,
     ) -> BlockLayout {
         let full = text.strip_suffix('\n').unwrap_or(text);
         // 单块上限（v0）：只排前缀，超出部分不参与成形/光栅，避免内存放大
@@ -990,7 +992,7 @@ impl LayoutEngine {
         } else if is_footnote_def {
             decor.subs.clone()
         } else {
-            block_subs(kind.clone(), body, block, caret, ordinal)
+            block_subs(kind.clone(), body, block, caret, ordinal, toc_list)
         };
         if !reveal_all {
             let (ref_subs, links) = footnote_ref_subs(inlines, block, caret, body, footnotes);
@@ -2286,6 +2288,7 @@ fn block_subs(
     block: Range,
     caret: usize,
     ordinal: Option<u32>,
+    toc_list: bool,
 ) -> Vec<Sub> {
     match kind {
         BlockKind::ListItem {
@@ -2311,17 +2314,22 @@ fn block_subs(
             if node_active(block, caret) {
                 return Vec::new();
             }
-            // 编号由文档块顺序派生（BlockKind 不含起始号）；拿不到顺序的调用方
-            //（单块排版/打印）保留源码，避免把后续项错误地重置成 1。
-            let Some(n) = ordinal else {
-                return Vec::new();
-            };
             // 续块（无标记）不编号：其缩进必然大于标记列（与 list_marker_of 同一判据）。
             let indent = body.len() - body.trim_start_matches([' ', '\t']).len();
             if indent > usize::from(depth) * 2 + 1 {
                 return Vec::new();
             }
+            // 编号由文档块顺序派生（BlockKind 不含起始号）；拿不到顺序的调用方
+            //（单块排版/打印）保留源码，避免把后续项错误地重置成 1。
             let Some((start, end, _, delim)) = ordered_marker(body) else {
+                return Vec::new();
+            };
+            // 旧版目录列表：条目文本已自带层级编号，标记替换为等宽空格，
+            // 只保留源码缩进层级，不再叠加有序序号。
+            if toc_list {
+                return vec![Sub::fill(start, end, " ".repeat(end - start))];
+            }
+            let Some(n) = ordinal else {
                 return Vec::new();
             };
             // 编号变宽（9→10）时补前导空格到源码标记宽度，保持内容列不变；
@@ -2341,6 +2349,7 @@ fn block_subs(
                 return Vec::new();
             }
             match bullet_pos(body) {
+                Some(p) if toc_list => vec![Sub::fill(p, p + 1, " ")],
                 Some(p) => vec![Sub::fill(p, p + 1, "•")],
                 None => Vec::new(),
             }
@@ -2596,6 +2605,32 @@ pub(crate) fn list_marker_of(kind: &BlockKind, body: &str) -> ListMarker {
     }
 }
 
+/// 列表项可见内容起点（标记之后，块内字节偏移）；非列表项、续块与任务项返回 None。
+/// 旧版目录列表识别用：只有「标记之后紧接一个整块链接」的项才算目录条目，
+/// 任务列表（`- [ ] …`）不参与。
+pub(crate) fn list_content_start(kind: &BlockKind, body: &str) -> Option<usize> {
+    let BlockKind::ListItem {
+        ordered,
+        depth,
+        task,
+    } = kind
+    else {
+        return None;
+    };
+    if task.is_some() {
+        return None;
+    }
+    let indent = body.len() - body.trim_start_matches([' ', '\t']).len();
+    if indent > usize::from(*depth) * 2 + 1 {
+        return None;
+    }
+    if *ordered {
+        ordered_marker(body).map(|(_, end, _, _)| end)
+    } else {
+        bullet_pos(body).map(|p| p + 1)
+    }
+}
+
 /// 有序列表显示编号派生（BlockId → 非激活态显示的编号）。
 ///
 /// `BlockKind::ListItem` 不含源码起始号，排版层又必须按语义递增显示，故编号只能在
@@ -2665,6 +2700,18 @@ pub(crate) fn ordered_list_epoch(ordinals: &HashMap<BlockId, u32>) -> u64 {
         let mut h = 0xcbf2_9ce4_8422_2325u64;
         h = (h ^ id.0).wrapping_mul(0x0100_0000_01b3);
         h = (h ^ u64::from(*n)).wrapping_mul(0x0100_0000_01b3);
+        acc ^= h.wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    }
+    acc
+}
+
+/// 旧版目录列表集合代次：块进出集合会改变「列表标记是否显示」，
+/// 与编号同属全文派生量，必须进入布局基础键（否则邻居变更后命中陈旧布局）。
+pub(crate) fn toc_list_epoch(items: &HashSet<BlockId>) -> u64 {
+    let mut acc = 0u64;
+    for id in items {
+        let mut h = 0xcbf2_9ce4_8422_2325u64;
+        h = (h ^ id.0).wrapping_mul(0x0100_0000_01b3);
         acc ^= h.wrapping_mul(0x9e37_79b9_7f4a_7c15);
     }
     acc
@@ -2997,6 +3044,7 @@ mod tests {
                     None,
                     &[],
                     ordinals.get(id).copied(),
+                    false,
                 )
             })
             .collect();
@@ -3324,6 +3372,98 @@ mod tests {
         // 单块调用拿不到文档顺序（不传 ordinal）→ 有序列表保留源码编号
         let (_, l) = layout_with_caret("1. a", usize::MAX, 200.0);
         assert_eq!(l.layout_text(), "1. a");
+    }
+
+    #[test]
+    fn legacy_toc_list_hides_list_markers_but_keeps_indent() {
+        // 旧目录列表：条目文本自带层级编号，标记换成等宽空格（不叠加 1./2.）。
+        let src = "1. [第一章 介绍](#第一章 - 介绍)\n   1. [1.1 背景](#11- 背景)";
+        let s = Session::open(src);
+        let blocks = s.blocks();
+        let mut eng = LayoutEngine::new();
+        let render = |eng: &mut LayoutEngine, caret: usize| {
+            blocks
+                .iter()
+                .map(|(id, kind, range)| {
+                    let inlines = s.block_inlines(*id).unwrap_or_default();
+                    eng.layout_block_with_footnotes(
+                        kind.clone(),
+                        &src[range.start..range.end],
+                        *range,
+                        &inlines,
+                        400.0,
+                        caret,
+                        &[],
+                        false,
+                        None,
+                        &[],
+                        Some(1),
+                        true,
+                    )
+                    .layout_text()
+                    .to_string()
+                })
+                .collect::<Vec<_>>()
+        };
+        // CJK 前会自动补一个中西文间距（既有排版规则），故首项为 4 空格。
+        assert_eq!(render(&mut eng, usize::MAX), ["    第一章 介绍", "      1.1 背景"]);
+        // 光标进入块 → 显示源码列表标记（与其它列表项一致），离开由调用方重排恢复。
+        let first_start = blocks[0].2.start;
+        let active = render(&mut eng, first_start);
+        assert!(active[0].starts_with("1. "), "光标进入应显源码标记: {active:?}");
+        assert!(active[0].contains("第一章 介绍"));
+        assert!(!active[0].contains("](#"), "链接标记仍按行内规则消隐: {active:?}");
+        assert_eq!(active[1], "      1.1 背景");
+        // 无序旧目录同样只保留缩进而无 `•`。
+        let src = "- [A](#a)\n- [B](#b)";
+        let s = Session::open(src);
+        let (id, kind, range) = s.blocks()[0].clone();
+        let inlines = s.block_inlines(id).unwrap_or_default();
+        let l = eng.layout_block_with_footnotes(
+            kind,
+            &src[range.start..range.end],
+            range,
+            &inlines,
+            300.0,
+            usize::MAX,
+            &[],
+            false,
+            None,
+            &[],
+            None,
+            true,
+        );
+        assert_eq!(l.layout_text(), "  A");
+    }
+
+    #[test]
+    fn list_content_start_matches_marker_end() {
+        let cases = [
+            (BlockKind::ListItem {
+                ordered: true,
+                depth: 0,
+                task: None,
+            }, "1. x", Some(2)),
+            (BlockKind::ListItem {
+                ordered: true,
+                depth: 1,
+                task: None,
+            }, "   1. x", Some(5)),
+            (BlockKind::ListItem {
+                ordered: false,
+                depth: 0,
+                task: None,
+            }, "- x", Some(1)),
+            (BlockKind::ListItem {
+                ordered: false,
+                depth: 0,
+                task: Some(false),
+            }, "- [ ] x", None),
+            (BlockKind::Paragraph, "x", None),
+        ];
+        for (kind, body, want) in cases {
+            assert_eq!(list_content_start(&kind, body), want, "{body:?}");
+        }
     }
 
     #[test]
@@ -4712,6 +4852,7 @@ mod tests {
             Some(&ctx),
             &[],
             None,
+            false,
         );
         (eng, l, range)
     }
@@ -4928,6 +5069,7 @@ mod tests {
             Some(&ctx1),
             &[],
             None,
+            false,
         );
         assert_eq!(l1.layout_text(), "Y↩", "未被引用：仅隐藏标记");
         let reveal1 = l1.reveal_state(&kind1, range1, usize::MAX);
@@ -4974,6 +5116,7 @@ mod tests {
             Some(&ctx2),
             &[],
             None,
+            false,
         );
         assert_eq!(l2.layout_text(), "1. Y↩", "新引用让文末定义块获得编号");
     }

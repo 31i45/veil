@@ -671,7 +671,48 @@ fn parse_link_dest(s: &str, start: usize) -> Option<(usize, usize, usize)> {
     if pos < b.len() && b[pos] == b')' {
         Some((url_start, url_end, pos + 1))
     } else {
-        None
+        // 旧版 Veil 插入的目录锚点含空格（`(#第三章 - 结论)`、`(#11- 背景)`）：
+        // 标准裸目标在空白处即终止，整条链接会退化成纯文本。仅对同文档锚点
+        // （目标以 `#` 开头）放宽空白，其它目标/危险 scheme 保持严格解析。
+        parse_fragment_dest(s, start)
+    }
+}
+
+/// 同文档锚点容错目标：`#` 起头、允许空白、括号须平衡、不得跨行。
+/// 只放宽空白与括号——`#` 片段不会交给系统 shell，安全面与标准解析一致。
+fn parse_fragment_dest(s: &str, start: usize) -> Option<(usize, usize, usize)> {
+    let b = s.as_bytes();
+    let mut pos = start;
+    while pos < b.len() && matches!(b[pos], b' ' | b'\t') {
+        pos += 1;
+    }
+    if b.get(pos) != Some(&b'#') {
+        return None;
+    }
+    let url_start = pos;
+    let mut depth: u32 = 0;
+    let mut i = pos;
+    loop {
+        if i >= b.len() {
+            return None; // 无 `)` 闭合
+        }
+        match b[i] {
+            b')' => {
+                if depth == 0 {
+                    return Some((url_start, i, i + 1));
+                }
+                depth -= 1;
+                i += 1;
+            }
+            b'(' => {
+                depth += 1;
+                i += 1;
+            }
+            b'\\' if i + 1 < b.len() => i += 2,
+            b'\n' | b'\r' => return None,
+            c if c < 0x20 && c != b'\t' => return None,
+            _ => i += 1,
+        }
     }
 }
 
@@ -2028,6 +2069,65 @@ mod tests {
             let link = find_link(&ns).expect(src);
             assert_eq!(link.url.unwrap().end, end, "{src} 尾部标点应剥离");
         }
+    }
+
+    #[test]
+    fn legacy_spaced_anchor_destination_is_parsed() {
+        // 旧版 Veil 目录锚点含空格：仍须识别为链接，目标原文保持完整（含空白）。
+        let src = "[第三章 结论](#第三章 - 结论)";
+        let ns = parse(src);
+        let link = find_link(&ns).expect("含空格锚点应成链");
+        let url = link.url.expect("应有目标区间");
+        assert_eq!(&src[url.start..url.end], "#第三章 - 结论");
+        assert_eq!(link.range.end, src.len());
+        let src = "[1.1 背景](#11- 背景)";
+        let ns = parse(src);
+        let link = find_link(&ns).expect("带编号的含空格锚点应成链");
+        let url = link.url.unwrap();
+        assert_eq!(&src[url.start..url.end], "#11- 背景");
+        assert_eq!(link.range.end, src.len());
+        // 目标前允许空白、尾随空白：`(# 第一章 - 介绍 )`
+        let src = "[第一章 介绍](# 第一章 - 介绍 )";
+        let link = parse(src)
+            .into_iter()
+            .find(|n| n.kind == InlineKind::Link)
+            .expect("含前导/尾随空格的锚点应成链");
+        let url = link.url.unwrap();
+        assert_eq!(&src[url.start..url.end], "# 第一章 - 介绍 ");
+        // 括号平衡不跨越 `)`；未闭合仍不是链接。
+        let src = "[x](#a (b) c)";
+        let ns = parse(src);
+        let link = find_link(&ns).expect("平衡括号内的空格可容错");
+        let url = link.url.unwrap();
+        assert_eq!(&src[url.start..url.end], "#a (b) c");
+        assert_eq!(sexp(&parse("[x](#a")), "");
+    }
+
+    #[test]
+    fn spaced_non_anchor_destination_stays_invalid() {
+        // 只放宽 `#` 锚点：外部 URL / 危险 scheme 含空格仍按 CommonMark 判非法。
+        for src in [
+            "[x](https://a.example/a b)",
+            "[x](javascript:alert(1) x)",
+            "[x](a b)",
+        ] {
+            // 裸 URL 自动识别可能另建链接节点，但 `[x](...)` 整体不得成链。
+            let ns = parse(src);
+            assert!(
+                ns.iter()
+                    .filter(|n| n.kind == InlineKind::Link)
+                    .all(|n| n.range.start != 0),
+                "{src} 不得因锚点容错整体成链"
+            );
+        }
+        // 标准 `(#a \"title\")` 仍走 title 分支：目标不含 title。
+        let src = "[x](#a \"t\")";
+        let link = parse(src)
+            .into_iter()
+            .find(|n| n.kind == InlineKind::Link)
+            .expect("带 title 的锚点链接");
+        let url = link.url.unwrap();
+        assert_eq!(&src[url.start..url.end], "#a");
     }
 
     #[test]

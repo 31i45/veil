@@ -4938,13 +4938,14 @@ mod tests {
                 key: LayoutKey {
                     base: base1,
                     reveal: reveal1,
+                    toc: 0,
                 },
                 value: l1,
             },
         );
         assert!(
             cache
-                .layout(id1, &kind1, range1, base1, usize::MAX)
+                .layout(id1, &kind1, range1, base1, usize::MAX, 0)
                 .is_some(),
             "代次未变必须命中"
         );
@@ -4956,7 +4957,7 @@ mod tests {
         assert_ne!(base1, base2, "文首新增未出现的引用 → 全文编号变化");
         assert!(
             cache
-                .layout(id2, &kind2, range2, base2, usize::MAX)
+                .layout(id2, &kind2, range2, base2, usize::MAX, 0)
                 .is_none(),
             "旧布局不得以新代次命中"
         );

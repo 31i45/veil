@@ -672,7 +672,7 @@ fn visible_layout_missing(a: &App) -> bool {
         .is_some_and(|bs| {
             bs.iter().any(|g| {
                 a.cache
-                    .layout(g.id, &g.kind, g.range, base, caret)
+                    .layout(g.id, &g.kind, g.range, base, caret, a.toc_layout_epoch(g))
                     .is_none()
             })
         })
@@ -5725,7 +5725,7 @@ fn system_mode_follows_live_switch_and_clears_color_caches() {
     let base = a.base_key();
     let lk = a
         .cache
-        .raster_key(id, &kind, range, base, caret)
+        .raster_key(id, &kind, range, base, caret, 0)
         .expect("首块应已按当前键排版");
     a.cache.rasters.insert(
         id,
@@ -5779,7 +5779,7 @@ fn settings_theme_switch_dark_to_system_repaints_palette() {
     let base = a.base_key();
     let lk = a
         .cache
-        .raster_key(id, &kind, range, base, caret)
+        .raster_key(id, &kind, range, base, caret, 0)
         .expect("当前文档应按新主题重排");
     assert_eq!(a.cache.layouts[&id].key.base, base);
     let (px, _, _) = a
@@ -5952,6 +5952,86 @@ fn settings_geometry_clear_is_applied_and_persisted_on_ok() {
     let saved = saves.borrow().last().cloned().expect("OK 必须写盘");
     let parsed = crate::theme::decode_config(saved.as_bytes()).expect("写盘 JSON 可解析");
     assert_eq!(parsed.config.window, a.config.window, "新几何必须写盘");
+}
+
+/// DEF-T07-002 复发：本会话 resize 过的几何不得在清除/恢复默认后覆盖关闭写盘。
+/// 清除或恢复默认 → OK 后，正常关闭不得写回 window_*；用户再次移动窗口后恢复持久化。
+#[test]
+fn clearing_geometry_suppresses_geometry_write_on_close() {
+    use crate::view::settings::{FieldKind, FieldValue, BTN_OK, BTN_RESET_DEFAULTS};
+    let cfg = MemConfig::default();
+    let saves = cfg.saves.clone();
+    let mut a = app_theme(Box::new(cfg), Rc::new(Cell::new(Some(false))));
+    let old = crate::theme::WindowGeom {
+        width: 700,
+        height: 450,
+        x: -40,
+        y: 30,
+    };
+    a.config.window = Some(old);
+    // 模拟本会话发生过 resize：关闭时原本会把当前几何写回。
+    let resized = crate::theme::WindowGeom {
+        width: 1050,
+        height: 675,
+        x: 0,
+        y: 0,
+    };
+    a.window_state.geom = Some(resized);
+    a.window_state.geom_dirty = true;
+
+    // 清除 → OK：丢弃 resize 脏位并清空会话几何。
+    a.open_settings();
+    {
+        let s = a.ui_state.settings.as_mut().expect("设置已打开");
+        let idx = s
+            .form
+            .fields
+            .iter()
+            .position(|f| matches!(f.kind, FieldKind::WindowGeom))
+            .expect("几何字段存在");
+        s.form.fields[idx].value = FieldValue::Geom(None);
+    }
+    a.resolve_settings(BTN_OK);
+    assert_eq!(a.config.window, None, "清除后 apply 必须移除几何");
+    assert!(!a.window_state.geom_dirty, "清除后必须丢弃本会话 resize 脏位");
+    assert_eq!(a.window_state.geom, None, "清除后不得保留会话几何");
+
+    a.window_state.exit_requested = true;
+    assert!(a.finish_close());
+    let saved = saves.borrow().last().cloned().expect("OK 已写盘");
+    let parsed = crate::theme::decode_config(saved.as_bytes()).expect("写盘 JSON 可解析");
+    assert_eq!(
+        parsed.config.window, None,
+        "正常关闭不得把本会话几何写回（清除结果必须跨重启生效）"
+    );
+
+    // 恢复默认 → OK：同样抑制关闭回写。
+    a.config.window = Some(old);
+    a.window_state.geom = Some(resized);
+    a.window_state.geom_dirty = true;
+    a.open_settings();
+    a.resolve_settings(BTN_RESET_DEFAULTS);
+    a.resolve_settings(BTN_OK);
+    assert_eq!(a.config.window, None, "恢复默认后 apply 必须移除几何");
+    assert!(!a.window_state.geom_dirty, "恢复默认后同样丢弃 resize 脏位");
+    a.finish_close();
+    let saved = saves.borrow().last().cloned().expect("OK 已写盘");
+    let parsed = crate::theme::decode_config(saved.as_bytes()).expect("写盘 JSON 可解析");
+    assert_eq!(
+        parsed.config.window, None,
+        "恢复默认后正常关闭不得写回旧几何"
+    );
+
+    // 用户随后主动移动窗口：恢复正常的几何持久化。
+    a.on_window_moved(12, 34, false);
+    assert!(a.window_state.geom_dirty, "主动移动窗口应重新置脏");
+    a.finish_close();
+    let saved = saves.borrow().last().cloned().expect("移动后关闭必须写盘");
+    let parsed = crate::theme::decode_config(saved.as_bytes()).expect("写盘 JSON 可解析");
+    assert!(
+        parsed.config.window.is_some(),
+        "用户再次移动窗口后必须正常保存新几何"
+    );
 }
 
 /// DEF-T10-008：设置保存失败时不得再提示「设置已保存」。
@@ -6592,7 +6672,7 @@ fn new_paragraph_caret_with_cold_images_below() {
         .enumerate()
         .filter(|(_, g)| {
             a.cache
-                .layout(g.id, &g.kind, g.range, base, caret)
+                .layout(g.id, &g.kind, g.range, base, caret, a.toc_layout_epoch(g))
                 .is_none()
                 && g.kind != BlockKind::Math
                 && !(g.kind == BlockKind::Table && a.cache.table(g.id, a.table_key(g.id)).is_some())
@@ -6670,7 +6750,7 @@ fn new_paragraph_caret_matches_block_position_with_images() {
         .enumerate()
         .filter(|(_, g)| {
             a.cache
-                .layout(g.id, &g.kind, g.range, base, caret)
+                .layout(g.id, &g.kind, g.range, base, caret, a.toc_layout_epoch(g))
                 .is_none()
                 && g.kind != BlockKind::Math
                 && !(g.kind == BlockKind::Table && a.cache.table(g.id, a.table_key(g.id)).is_some())
@@ -6733,7 +6813,7 @@ fn new_paragraph_caret_matches_block_position_tall_cjk() {
         .enumerate()
         .filter(|(_, g)| {
             a.cache
-                .layout(g.id, &g.kind, g.range, base, caret)
+                .layout(g.id, &g.kind, g.range, base, caret, a.toc_layout_epoch(g))
                 .is_none()
                 && g.kind != BlockKind::Math
                 && !(g.kind == BlockKind::Table && a.cache.table(g.id, a.table_key(g.id)).is_some())
@@ -6782,7 +6862,14 @@ fn oversize_area_cap_keeps_height_and_raster_in_sync() {
     let g = &a.index.blocks[0];
     let key = a
         .cache
-        .raster_key(g.id, &g.kind, g.range, a.base_key(), a.editor.caret())
+        .raster_key(
+            g.id,
+            &g.kind,
+            g.range,
+            a.base_key(),
+            a.editor.caret(),
+            a.toc_layout_epoch(g),
+        )
         .expect("布局已缓存，光栅键应可用");
     let rh = a.cache.raster(g.id, key).expect("绘制后应有光栅").2;
     assert!(
@@ -6886,9 +6973,10 @@ fn ensure_block_lays_out_far_block_with_real_height() {
     let id = a.index.blocks.last().unwrap().id;
     let g = geom(&a, id);
     let (kind, range) = (g.kind.clone(), g.range);
+    let toc = a.toc_layout_epoch(g);
     assert!(
         a.cache
-            .layout(id, &kind, range, a.base_key(), a.editor.caret())
+            .layout(id, &kind, range, a.base_key(), a.editor.caret(), toc)
             .is_none(),
         "远块初始不应已排版"
     );
@@ -7666,7 +7754,10 @@ fn perf_keystroke_attribution() {
                 };
                 let kind = g.kind.clone();
                 let range = g.range;
-                let Some(lk) = a.cache.raster_key(id, &kind, range, base, caret) else {
+                let Some(lk) = a
+                    .cache
+                    .raster_key(id, &kind, range, base, caret, a.toc_layout_epoch(g))
+                else {
                     continue;
                 };
                 if a.cache.raster(id, lk).is_none() {
@@ -10053,7 +10144,7 @@ fn perf_after_edit_breakdown() {
             .iter()
             .filter(|g| {
                 a.cache
-                    .layout(g.id, &g.kind, g.range, base, caret)
+                    .layout(g.id, &g.kind, g.range, base, caret, a.toc_layout_epoch(g))
                     .is_none()
             })
             .count();
@@ -10510,7 +10601,14 @@ impl Print for FakePrint {
             let tops = s
                 .app
                 .cache
-                .layout(g.id, &g.kind, g.range, base, usize::MAX)
+                .layout(
+                    g.id,
+                    &g.kind,
+                    g.range,
+                    base,
+                    usize::MAX,
+                    s.app.toc_layout_epoch(g),
+                )
                 .map(|l| s.app.engine.line_tops(l))
                 .unwrap_or_default();
             gs.push((g.top, tops));
@@ -11960,6 +12058,62 @@ fn toc_marker_renders_directory_in_view_only() {
         .id;
     let text = a.cache.layouts[&marker_id].layout_text().to_string();
     assert!(text.contains("新章"), "标题增删后目录应动态刷新: {text:?}");
+}
+
+/// DEF-T05-005 复发：预览态新增/删除标题后目录必须下一帧即刷新，无需重开文档。
+/// 走真实编辑链路（`after_edit`），且全程不切源码模式、光标不进入标记块——
+/// 避免旧测试因标记块恰好显示源码而侥幸刷新。
+#[test]
+fn toc_refreshes_after_heading_added_and_deleted_without_reopening() {
+    let store = MemStore::default();
+    let src = "[TOC]\n\n# 一\n\n## 二\n\n正文\n";
+    let mut a = app(src, None, false, &store);
+    a.editor.set_caret(src.len());
+    a.refresh_index();
+    a.ensure_layouts_all();
+    let marker_id = a
+        .index
+        .blocks
+        .iter()
+        .find(|g| g.toc_marker)
+        .expect("应识别 TOC 标记块")
+        .id;
+    let text = a.cache.layouts[&marker_id].layout_text().to_string();
+    assert!(text.contains("• 一") && text.contains("   • 二"), "初始目录: {text:?}");
+    assert!(!text.contains("新章"));
+
+    // 文末新增二级标题：真实编辑链路（增量索引 + 视口排版）。
+    let end = a.editor.session().serialize().len();
+    a.editor.set_caret(end);
+    let dirty = a
+        .editor
+        .apply(Intent::InsertText("\n## 新章\n".into()))
+        .unwrap();
+    a.after_edit(dirty);
+    a.ensure_layouts_all();
+    let text = a.cache.layouts[&marker_id].layout_text().to_string();
+    assert!(
+        text.contains("新章"),
+        "新增标题后目录必须立即刷新（无需重开）: {text:?}"
+    );
+    assert_eq!(
+        a.editor.session().serialize(),
+        src.replace("正文\n", "正文\n\n## 新章\n"),
+        "视图目录不得改写文档字节"
+    );
+
+    // 删除刚新增的标题（退格 7 次：`\n## 新章\n`），目录须移除该条目。
+    for _ in 0..7 {
+        let dirty = a.editor.apply(Intent::DeleteBackward).unwrap();
+        a.after_edit(dirty);
+    }
+    a.ensure_layouts_all();
+    let text = a.cache.layouts[&marker_id].layout_text().to_string();
+    assert!(
+        !text.contains("新章"),
+        "删除标题后目录必须立即移除条目: {text:?}"
+    );
+    assert_eq!(a.editor.session().serialize(), src, "删除后文档回到原文");
 }
 
 /// 打印探针：begin 后采样标题块（打印态）、end 后按屏幕态重排再采样。

@@ -2698,6 +2698,40 @@ impl App {
         }
     }
 
+    /// 打字机锚点定位（跳转路径）：先把候选滚动位置附近的块补排并重算几何，
+    /// 迭代收敛后再落位。
+    ///
+    /// 大纲/搜索等远距离跳转前，目标块高度可能仍是估算值；若按估算 `top` 直接
+    /// 算滚动量，首帧绘制补排后 `top` 会整体漂移，当前行就偏离锚点，要等下一次
+    /// 输入调用 `scroll_to_caret` 才纠正（DEF-T11-E1-003）。这里与 `render`
+    /// 使用同一套可见区间补排，先收敛几何再算滚动量，保证首帧即锚点。
+    pub(crate) fn scroll_to_typewriter_anchor(&mut self) {
+        let vp0 = self.viewport();
+        let anchor = vp0.y + vp0.h * TYPEWRITER_ANCHOR;
+        let mut target = self.window_state.scroll_y;
+        for _ in 0..4 {
+            self.window_state.scroll_y = target;
+            self.ensure_layouts_visible();
+            self.ensure_math_visible();
+            self.ensure_tables_visible();
+            if self.index.geometry_stale {
+                self.recompute_geometry();
+            }
+            let vp = self.viewport();
+            let max = chrome::max_scroll(vp, self.doc_height());
+            let (_, cy, ch) = self.caret_screen();
+            let next = (target + cy + ch / 2.0 - anchor).clamp(0.0, max);
+            let converged = (next - target).abs() < 0.5;
+            target = next;
+            if converged {
+                break;
+            }
+        }
+        // 首帧即锚点：直接落位，不依赖平滑滚动动画或后续输入纠正。
+        self.window_state.scroll_y = target;
+        self.window_state.goal_y = target;
+    }
+
     /// Ctrl+Enter：在 caret 所在表格末尾追加一个空 body 行。返回 true 表示已处理。
     pub(crate) fn table_ctrl_enter(&mut self) -> bool {
         let caret = self.editor.caret();

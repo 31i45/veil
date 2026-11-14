@@ -12149,6 +12149,112 @@ fn toc_refreshes_after_heading_added_and_deleted_without_reopening() {
     assert_eq!(a.editor.session().serialize(), src, "删除后文档回到原文");
 }
 
+/// 旧版目录列表（Task 2）：整组均为标题锚点链接时按层级呈现、不叠加列表序号；
+/// 含空格锚点（`(#第三章 - 结论)` / `(#11- 背景)`）可点击跳转；不改文档。
+#[test]
+fn legacy_toc_list_renders_without_numbers_and_spaced_anchor_jumps() {
+    let src = "1. [第一章 介绍](#第一章 - 介绍)\n   1. [1.1 背景](#11- 背景)\n1. [第二章 方法](#第二章 - 方法)\n\n# 第一章 介绍\n\n## 1.1 背景\n\n# 第二章 方法\n\n正文\n";
+    let mut a = app(src, None, false, &MemStore::default());
+    a.editor.set_caret(src.len());
+    a.refresh_index();
+    a.ensure_layouts_all();
+    let items: Vec<(BlockId, Range)> = a
+        .index
+        .blocks
+        .iter()
+        .filter(|g| g.toc_list)
+        .map(|g| (g.id, g.range))
+        .collect();
+    assert_eq!(items.len(), 3, "整组目录项应全部识别");
+    let texts: Vec<String> = items
+        .iter()
+        .map(|(id, _)| a.cache.layouts[id].layout_text().to_string())
+        .collect();
+    assert_eq!(
+        texts,
+        ["    第一章 介绍", "      1.1 背景", "    第二章 方法"],
+        "旧目录不叠加序号，保留源码缩进层级"
+    );
+    assert_eq!(a.editor.session().serialize(), src, "不得改写文档字节");
+    assert!(!a.editor.is_dirty(), "不得置脏");
+    assert_eq!(a.editor.session().undo_depth(), 0, "不得产生 undo");
+
+    // 含空格锚点：Ctrl+点击跳转到对应标题。
+    ctrl_click_doc(&mut a, src.find("第一章 介绍").unwrap());
+    assert_eq!(
+        a.editor.caret(),
+        src.find("# 第一章").unwrap(),
+        "空格锚点应可跳转"
+    );
+    ctrl_click_doc(&mut a, src.find("1.1 背景").unwrap());
+    assert_eq!(
+        a.editor.caret(),
+        src.find("## 1.1 背景").unwrap(),
+        "带编号的空格锚点应可跳转"
+    );
+    assert_eq!(a.editor.session().serialize(), src, "跳转不改文档");
+}
+
+/// 普通链接列表（外部 URL / 含普通文本项 / 技能列表外的列表）不得被判为目录。
+#[test]
+fn non_toc_link_lists_keep_normal_list_rendering() {
+    let src = "- [A](https://a.example)\n- [B](https://b.example)\n\n1. [C](#目标)\n2. 普通项\n\n# 目标\n";
+    let mut a = app(src, None, false, &MemStore::default());
+    a.editor.set_caret(src.len());
+    a.refresh_index();
+    a.ensure_layouts_all();
+    assert!(
+        a.index.blocks.iter().all(|g| !g.toc_list),
+        "普通链接列表与混合列表不得判为目录"
+    );
+    let texts: Vec<String> = a
+        .index
+        .blocks
+        .iter()
+        .filter(|g| matches!(g.kind, BlockKind::ListItem { .. }))
+        .map(|g| a.cache.layouts[&g.id].layout_text().to_string())
+        .collect();
+    assert_eq!(texts, ["• A", "• B", "1. C", "2. 普通项"]);
+}
+
+/// `[TOC]` 视图目录在专注/打字机模式下继承同一渲染：同样无有序列表序号，
+/// 且两种模式切换不写回文档、不产生撤销步。
+#[test]
+fn toc_render_is_shared_in_focus_and_typewriter_modes() {
+    let store = MemStore::default();
+    let src = "[TOC]\n\n# 一\n\n## 1.1 背景\n\n正文\n";
+    let mut a = app(src, None, false, &store);
+    a.editor.set_caret(src.len());
+    a.refresh_index();
+    a.ensure_layouts_all();
+    let marker = a
+        .index
+        .blocks
+        .iter()
+        .find(|g| g.toc_marker)
+        .map(|g| g.id)
+        .expect("应识别 TOC 标记块");
+    let plain = a.cache.layouts[&marker].layout_text().to_string();
+    assert!(plain.contains("• 一") && plain.contains("   • 1.1 背景"));
+    assert!(
+        !plain.lines().any(|l| {
+            let t = l.trim_start();
+            t.starts_with("1. ") || t.starts_with("2. ")
+        }),
+        "生成目录不得叠加有序列表序号: {plain:?}"
+    );
+
+    a.toggle_focus();
+    a.ensure_layouts_all();
+    assert_eq!(a.cache.layouts[&marker].layout_text(), plain, "专注模式同一渲染");
+    a.toggle_typewriter();
+    a.ensure_layouts_all();
+    assert_eq!(a.cache.layouts[&marker].layout_text(), plain, "打字机模式同一渲染");
+    assert_eq!(a.editor.session().serialize(), src);
+    assert!(!a.editor.is_dirty());
+    assert_eq!(a.editor.session().undo_depth(), 0);
+}
+
 /// 打印探针：begin 后采样标题块（打印态）、end 后按屏幕态重排再采样。
 struct SourcePrintProbe {
     during_heading: Rc<RefCell<String>>,

@@ -2,15 +2,18 @@
 //! 本文件是生产代码唯一允许全量枚举块的位置；其余读取一律走本索引。
 //! 不依赖 cosmic-text/像素概念，属文档域而非排版细节。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-use veil_core::{BlockContainer, BlockId, BlockKind, Range, Session};
+use veil_core::{BlockContainer, BlockId, BlockKind, InlineKind, Range, Session};
 
 use crate::app::App;
 use crate::geometry::{MARGIN, PARA_GAP};
 use crate::stats::count_words;
 use crate::tokens::doc;
-use crate::view::{list_marker_of, ordered_list_epoch, ordered_list_ordinals, ListMarker};
+use crate::view::{
+    list_content_start, list_marker_of, ordered_list_epoch, ordered_list_ordinals, toc_list_epoch,
+    ListMarker,
+};
 
 /// 单块几何缓存：块清单一次枚举后复用，避免每次击键反复全量枚举（P1a）。
 pub(crate) struct BlockGeom {
@@ -37,6 +40,8 @@ pub(crate) struct BlockGeom {
     pub(crate) details_hidden: bool,
     /// 段落块源码是否为 `[TOC]` 标记（视图层据此渲染生成目录，源码/编辑态仍显标记）。
     pub(crate) toc_marker: bool,
+    /// 旧版插入的目录列表项（整块恰为指向标题锚点的链接列表）：渲染时不叠加列表序号。
+    pub(crate) toc_list: bool,
 }
 
 /// 块前间距（B5）：标题块上下对称，统一为 `HEADING_GAP`；其余块为 0。
@@ -64,6 +69,8 @@ pub(crate) struct BlockIndex {
     /// 有序列表显示编号（BlockId → 编号）：随块清单一同重建，布局按块 id 取用。
     /// 编号是全文派生量（`BlockKind` 不含源码起始号），由 `view::layout` 的纯函数派生。
     pub(crate) list_ordinals: HashMap<BlockId, u32>,
+    /// 旧版目录列表项集合（整组列表均为标题锚点链接）：列表标记按空格显示，不编号。
+    pub(crate) toc_lists: HashSet<BlockId>,
     /// 有序列表编号代次：任一编号变化都改变布局基础键，避免文首增删项后
     /// 后续块（文本与 BlockId 未变）命中陈旧编号。
     pub(crate) list_epoch: u64,
@@ -248,6 +255,8 @@ impl App {
             details_parent: None,
             details_hidden: false,
             toc_marker,
+            // 增量路径只处理非列表块（列表项变动回退全量重建），目录列表标记恒 false。
+            toc_list: false,
         };
         if open_default_details {
             self.ui_state.expanded_details.insert(new_id);
@@ -376,6 +385,37 @@ impl App {
         (ordinals, epoch)
     }
 
+    /// 旧版目录列表识别：连续列表项块中，每一项「标记之后恰为一个同文档锚点链接」。
+    ///
+    /// 只按块内结构判定（不要求锚点对应标题存在）：普通外部链接列表、含普通文本的
+    /// 列表都不会命中；标题编辑也不会让判定结果变化，避免全文布局失效。
+    fn derive_toc_lists(
+        &self,
+        blocks: &[(BlockId, BlockKind, Range, BlockContainer, usize, usize)],
+    ) -> HashSet<BlockId> {
+        let session = self.editor.session();
+        let mut out = HashSet::new();
+        let mut group: Vec<BlockId> = Vec::new();
+        let mut group_ok = true;
+        for (id, kind, range, _, _, _) in blocks {
+            if !matches!(kind, BlockKind::ListItem { .. }) {
+                flush_toc_group(&mut group, group_ok, &mut out);
+                group_ok = true;
+                continue;
+            }
+            let body = session.text_slice(*range).unwrap_or_default();
+            if list_marker_of(kind, &body) == ListMarker::None {
+                // 项内续块：该项含额外内容，整组不成立（继续收集到组结束）。
+                group_ok = false;
+                continue;
+            }
+            group.push(*id);
+            group_ok &= is_legacy_toc_entry(session, *id, kind, *range, &body);
+        }
+        flush_toc_group(&mut group, group_ok, &mut out);
+        out
+    }
+
     /// 步骤 2：填充 `BlockGeom` 向量并回收缓存（除 `blocks_enum` 外的循环体）。
     ///
     /// `est_h` 只依赖块内字节长度与块内行数；同一 `BlockId` 的块内容未变时二者不变
@@ -414,7 +454,9 @@ impl App {
             // 编号派生必须早于 base_key：代次进基础键，布局缓存才能随编号变化失效。
             let (list_ordinals, list_epoch) = self.derive_list_ordinals(&blocks);
             self.index.list_ordinals = list_ordinals;
-            self.index.list_epoch = list_epoch;
+            self.index.toc_lists = self.derive_toc_lists(&blocks);
+            // 目录列表集合同样影响标记显隐：并入列表代次，邻居变更后不得命中旧布局。
+            self.index.list_epoch = list_epoch ^ toc_list_epoch(&self.index.toc_lists);
         }
         let base = self.base_key();
         let rev = self.input_state.revs.session;
@@ -469,6 +511,7 @@ impl App {
                     .session()
                     .text_slice(range)
                     .is_some_and(|t| veil_core::is_toc_marker(&t));
+            let toc_list = self.index.toc_lists.contains(&id);
             toc_epoch ^= toc_entry_epoch(id, &kind);
             next.push(BlockGeom {
                 id,
@@ -484,6 +527,7 @@ impl App {
                 details_parent: None,
                 details_hidden: false,
                 toc_marker,
+                toc_list,
             });
             total_words += words;
             if open_default_details {
@@ -772,6 +816,51 @@ fn toc_entry_epoch(id: BlockId, kind: &BlockKind) -> u64 {
     h = (h ^ id.0).wrapping_mul(0x0100_0000_01b3);
     h = (h ^ level).wrapping_mul(0x0100_0000_01b3);
     h.wrapping_mul(0x9e37_79b9_7f4a_7c15)
+}
+
+/// 旧版目录列表项判定：标记之后恰为一个 `#锚点` 链接，链接外只剩空白。
+fn is_legacy_toc_entry(
+    session: &Session,
+    id: BlockId,
+    kind: &BlockKind,
+    block: Range,
+    body: &str,
+) -> bool {
+    let Some(content_start) = list_content_start(kind, body) else {
+        return false;
+    };
+    let inlines = session.block_inlines(id).unwrap_or_default();
+    let mut links = inlines.iter().filter(|n| n.kind == InlineKind::Link);
+    let Some(link) = links.next() else {
+        return false;
+    };
+    if links.next().is_some() {
+        return false; // 一项多个链接：普通链接列表，不是目录条目
+    }
+    let ls = link.range.start.saturating_sub(block.start);
+    let le = link.range.end.saturating_sub(block.start).min(body.len());
+    if ls < content_start || !body[content_start..ls].trim().is_empty() {
+        return false; // 标记与链接之间还有可见文本
+    }
+    if !body[le..].trim().is_empty() {
+        return false; // 链接之后还有可见文本
+    }
+    let Some(url) = link.url else {
+        return false;
+    };
+    session.text_slice(url).is_some_and(|u| {
+        let u = u.trim();
+        u.starts_with('#') && u.len() > 1
+    })
+}
+
+/// 目录组收尾：整组均合格才登记，否则丢弃（组内任一普通项即不视为目录）。
+fn flush_toc_group(group: &mut Vec<BlockId>, ok: bool, out: &mut HashSet<BlockId>) {
+    if ok && !group.is_empty() {
+        out.extend(group.drain(..));
+    } else {
+        group.clear();
+    }
 }
 
 /// 廉价估算高度：块内行数 × 折行数取大（不切片、不建 String）。

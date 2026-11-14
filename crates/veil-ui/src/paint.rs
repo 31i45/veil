@@ -457,6 +457,7 @@ impl App {
                 folds,
                 toc_text,
                 g.toc_marker,
+                g.toc_list,
                 toc_epoch,
             ));
         }
@@ -472,6 +473,7 @@ impl App {
             folds,
             toc_text,
             toc_marker,
+            toc_list,
             toc,
         ) in pending
         {
@@ -602,6 +604,7 @@ impl App {
                         &folds,
                         // 有序列表显示编号：编号在块索引层按文档顺序派生（BlockKind 不含起始号）。
                         self.index.list_ordinals.get(&id).copied(),
+                        toc_list,
                     );
                     l.toc_source = toc_marker;
                     l

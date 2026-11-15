@@ -1046,6 +1046,8 @@ impl App {
             return;
         };
         self.ports.clipboard.set(&body);
+        // 就地成功反馈：该块按钮暂时显示「已复制」（鼠标移开或提示消退后复原）。
+        self.window_state.code_copied = Some(id);
         self.ui_state.chrome.notice = t(I18nKey::NoticeCodeCopied).into();
         self.request_redraw();
     }
@@ -1073,7 +1075,7 @@ impl App {
     }
 
     /// 左键命中代码块复制按钮：返回块 id（先按 y 粗筛，避免对全部块求几何）。
-    fn code_copy_hit(&self) -> Option<BlockId> {
+    pub(crate) fn code_copy_hit(&self) -> Option<BlockId> {
         let (mx, my) = (
             self.input_state.mouse.x as f32,
             self.input_state.mouse.y as f32,
@@ -1586,6 +1588,74 @@ impl App {
             return true;
         }
         false
+    }
+
+    /// 点击生成目录（`[TOC]`）的某一行 → 跳到对应标题；源码态或光标在块内时不拦截。
+    /// 目录文本是视图派生（`toc_display_text` 一行一条目），文档字节不受点击影响。
+    fn try_jump_toc_on_click(&mut self) -> bool {
+        if self.source_mode() || self.window_state.print.is_some() {
+            return false;
+        }
+        let Some(off) = self.hit_offset() else {
+            return false;
+        };
+        let Some(g) = self
+            .index
+            .blocks
+            .iter()
+            .find(|g| g.range.start <= off && off <= g.range.end)
+        else {
+            return false;
+        };
+        if !g.toc_marker {
+            return false;
+        }
+        let (id, start, end) = (g.id, g.range.start, g.range.end);
+        let caret = self.effective_caret();
+        if start <= caret && caret <= end {
+            return false; // 光标在块内：显示 `[TOC]` 源码，按普通编辑处理
+        }
+        self.ensure_block(id);
+        let entry = {
+            let Some(m) = self.cache.layouts.get(&id) else {
+                return false;
+            };
+            if !m.value.toc_rendered {
+                return false;
+            }
+            m.value.line_at_layout(off.saturating_sub(start))
+        };
+        self.jump_to_toc_entry(entry)
+    }
+
+    /// 目录第 `entry` 行对应的标题（跳过空标题，与 `toc_entries` 同源）→ 落光标并滚动。
+    fn jump_to_toc_entry(&mut self, entry: usize) -> bool {
+        let mut seen = 0usize;
+        let target = self.index.blocks.iter().find_map(|g| {
+            if !matches!(
+                g.kind,
+                BlockKind::AtxHeading(_) | BlockKind::SetextHeading(_)
+            ) {
+                return None;
+            }
+            let (_, text) = self.editor.session().heading(g.id)?;
+            if text.is_empty() {
+                return None;
+            }
+            let hit = seen == entry;
+            seen += 1;
+            hit.then_some(g.range.start)
+        });
+        let Some(off) = target else {
+            return false;
+        };
+        if !self.editor.set_caret(off) {
+            return false;
+        }
+        self.window_state.goal_x = None;
+        self.scroll_to_caret();
+        self.request_redraw();
+        true
     }
 
     /// 命中偏移所在块的 inline 节点（表格按单元格取，其余取块 inlines）。
@@ -2456,6 +2526,10 @@ impl App {
         if self.try_open_mermaid_empty_menu() {
             return false;
         }
+        // 生成目录（`[TOC]`）条目点击：跳转到对应标题。源码态/光标在块内不改写文档。
+        if self.try_jump_toc_on_click() {
+            return false;
+        }
         // Details 块折叠/展开：收起态点击整块 = 展开（唯一交互入口）；
         // 展开态点击 summary 行 = 收起（y ∈ [top, top + line_h)），
         // 正文区点击照常落光标。优先级高于 point_caret。
@@ -2660,30 +2734,75 @@ impl App {
         // `<abbr title>` 显示 title 文本（同一浮层样式）。模态/拖动（含表格列宽）不显示；
         // 选区覆盖、鼠标移出正文区同样清除。
         let inside = x >= vp.x && x < vp.x + vp.w && y >= vp.y && y < vp.y + vp.h;
-        let tip = if !inside
+        let (tip, tip_is_link) = if !inside
             || self.ui_state.modal.is_some()
             || self.window_state.dragging
             || self.ui_state.tables.drag.is_some()
         {
-            None
+            (None, false)
         } else {
-            let off = self.hit_offset();
-            off.and_then(|off| {
-                let selected = self
-                    .editor
-                    .selection()
-                    .is_some_and(|s| s.start <= off && off < s.end);
-                if selected {
-                    return None;
+            match self.hit_offset() {
+                Some(off)
+                    if !self
+                        .editor
+                        .selection()
+                        .is_some_and(|s| s.start <= off && off < s.end) =>
+                {
+                    // 链接与 abbr 命中共享同一份 inline 解析（原实现各解析一次整块）。
+                    match self.inlines_at_offset(off) {
+                        Some(nodes) => {
+                            if let Some(u) = self.link_at_in(&nodes, off) {
+                                (Some(crate::normalize_link_url(&u)), true)
+                            } else {
+                                (
+                                    Self::abbr_title_in(&nodes, off).map(str::to_owned),
+                                    false,
+                                )
+                            }
+                        }
+                        None => (None, false),
+                    }
                 }
-                // 链接与 abbr 命中共享同一份 inline 解析（原实现各解析一次整块）。
-                let nodes = self.inlines_at_offset(off)?;
-                self.link_at_in(&nodes, off)
-                    .map(|u| crate::normalize_link_url(&u))
-                    .or_else(|| Self::abbr_title_in(&nodes, off).map(str::to_owned))
-            })
+                _ => (None, false),
+            }
         };
+        self.ui_state.hover_link_is_link = tip.is_some() && tip_is_link;
+        self.apply_pointer();
         self.set_hover_link(tip, x, y);
+    }
+
+    /// 指针形状映射：模态/按钮/链接/大纲/快速打开 = 手型；正文 = 文本；其余 = 默认。
+    /// 仅在形状变化时写窗口，避免每次鼠标移动都下发。
+    pub(crate) fn apply_pointer(&mut self) {
+        use winit::window::CursorIcon;
+        let icon = if self.ui_state.modal.is_some() {
+            CursorIcon::Default
+        } else if self.ui_state.search.hover.is_some()
+            || self.ui_state.quick.hover.is_some()
+            || self.ui_state.outline.hover.is_some()
+            || self.code_copy_hit().is_some()
+            || self.ui_state.hover_link_is_link
+        {
+            CursorIcon::Pointer
+        } else {
+            let vp = self.viewport();
+            let (mx, my) = (
+                self.input_state.mouse.x as f32,
+                self.input_state.mouse.y as f32,
+            );
+            if mx >= vp.x && mx < vp.x + vp.w && my >= vp.y && my < vp.y + vp.h {
+                CursorIcon::Text
+            } else {
+                CursorIcon::Default
+            }
+        };
+        if self.window_state.pointer == Some(icon) {
+            return;
+        }
+        self.window_state.pointer = Some(icon);
+        if let Some(w) = &self.window_state.window {
+            w.set_cursor(icon);
+        }
     }
 
     /// 写入链接悬停态：URL 未变不重绘（鼠标在链接内移动保留首次锚点，
@@ -3882,9 +4001,13 @@ impl App {
         if self.block_hidden(g) {
             return 0.0;
         }
-        // REN-SWEEP-001：非活动态 Front Matter 折叠为 0 高（不占间距、不绘制）。
+        // REN-SWEEP-001：非活动态 Front Matter 折叠为零内容高度，但保留一条
+        // 可点击折叠条（打印态仍为 0）：否则整块消失后无法用鼠标进入编辑。
         if self.frontmatter_hidden(g, caret) {
-            return 0.0;
+            if self.window_state.print.is_some() {
+                return 0.0;
+            }
+            return (crate::tokens::doc::FM_COLLAPSED_H * self.input_state.scale).round();
         }
         // Details 头块折叠态：只显示 summary 单行 + ▼/▶ 箭头。折叠态是纯 UI 状态，
         // 不参与 layout 缓存 key；直接在 block_height 层面钳高度，避免缓存污染。

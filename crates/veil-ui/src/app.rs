@@ -49,6 +49,10 @@ const REMOTE_POLL: Duration = Duration::from_millis(100);
 /// 光标闪烁半周期（600 ms 可见 / 600 ms 不可见）——标准文本编辑器节拍。
 const CURSOR_BLINK: Duration = Duration::from_millis(600);
 
+/// 状态栏提示存活时长：同一文本展示满该时长即自动消退（含错误提示，
+/// 避免释放后被永久占用）；新提示写入后重新计时。
+const NOTICE_TTL: Duration = Duration::from_secs(6);
+
 /// 系统剪贴板抽象：实现由产品层（veil）注入，本层不依赖具体剪贴板库（INSTANCE §6）。
 pub trait Clipboard {
     fn get(&mut self) -> Option<String>;
@@ -440,6 +444,8 @@ pub(crate) struct UIState {
     /// 链接悬停浮层（N5）：(归一化目标 URL, 锚点屏幕 x, y)；None = 不显示。
     /// 由 `update_hover` 每次鼠标移动即时重算，无定时器。
     pub(crate) hover_link: Option<(String, f32, f32)>,
+    /// 当前悬停浮层来自真实链接（而非 `<abbr title>`）：指针形状用（链接=手型）。
+    pub(crate) hover_link_is_link: bool,
     /// 版本历史面板（N1/B8a）：左侧快照列表 + 正文区只读预览。
     pub(crate) history: History,
 }
@@ -458,6 +464,7 @@ impl Default for UIState {
             tables: TableView::default(),
             focused: true,
             hover_link: None,
+            hover_link_is_link: false,
             history: History::default(),
             expanded_details: std::collections::HashSet::new(),
             expanded_inline_details: std::collections::HashSet::new(),
@@ -623,6 +630,13 @@ pub(crate) struct WindowState {
     pub(crate) last_painted_caret: Option<usize>,
     /// 已写入窗口的标题缓存：脏标只在首次编辑翻转，后续击键跳过 SetWindowText。
     pub(crate) last_title: Option<String>,
+    /// 状态栏提示的可见起点：(文本, 首次见到它的 tick 时刻)。同一条提示展示满
+    /// `NOTICE_TTL` 后自动消退；换文本即重新计时。
+    pub(crate) notice_seen: Option<(String, Instant)>,
+    /// 已写入窗口的指针形状：变化时才调用 `set_cursor`，避免每次鼠标移动都下发。
+    pub(crate) pointer: Option<winit::window::CursorIcon>,
+    /// 代码块复制按钮的就地成功反馈：指向最近复制的块（按钮标签临时显示「已复制」）。
+    pub(crate) code_copied: Option<BlockId>,
     /// 测试专用窗口尺寸覆盖：headless 测试无 winit 窗口，需要验证超宽窗口排版时注入。
     #[cfg(test)]
     pub(crate) test_size: Option<(u32, u32)>,
@@ -650,6 +664,9 @@ impl Default for WindowState {
             anim_last_frame: None,
             last_painted_caret: None,
             last_title: None,
+            notice_seen: None,
+            pointer: None,
+            code_copied: None,
             #[cfg(test)]
             test_size: None,
         }
@@ -1367,6 +1384,28 @@ impl App {
         self.maybe_autosave(now);
         self.maybe_recovery_write(now);
         self.maybe_snapshot(now);
+        self.expire_notice(now);
+    }
+
+    /// 状态栏提示超时消退：同一条文本从首次被看到起计时，到期清空并重绘。
+    fn expire_notice(&mut self, now: Instant) {
+        let notice = &self.ui_state.chrome.notice;
+        if notice.is_empty() {
+            self.window_state.notice_seen = None;
+            return;
+        }
+        match &self.window_state.notice_seen {
+            Some((text, at)) if text == notice => {
+                if now.duration_since(*at) >= NOTICE_TTL {
+                    self.ui_state.chrome.notice.clear();
+                    self.window_state.notice_seen = None;
+                    // 就地复制反馈与提示同寿：提示消退时按钮也回到「复制」。
+                    self.window_state.code_copied = None;
+                    self.request_redraw();
+                }
+            }
+            _ => self.window_state.notice_seen = Some((notice.clone(), now)),
+        }
     }
 
     /// 版本历史快照触发（N1）：30 分钟节流 + 保存前留档（`save` 内）。
@@ -1627,6 +1666,13 @@ impl App {
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.input_state.mouse = position;
+                // 复制成功反馈只在该按钮上保留：移开即复原（提示超时也会清）。
+                if self.window_state.code_copied.is_some()
+                    && self.code_copy_hit() != self.window_state.code_copied
+                {
+                    self.window_state.code_copied = None;
+                    self.request_redraw();
+                }
                 // 模态打开时它是唯一输入接收者：只更新悬停，不再触达其下浮层/正文
                 if self.ui_state.modal.is_some() {
                     let m = (position.x as f32, position.y as f32);
@@ -1639,6 +1685,7 @@ impl App {
                     if changed {
                         self.request_redraw();
                     }
+                    self.apply_pointer();
                     return;
                 }
                 if self.ui_state.tables.drag.is_some() {
@@ -1664,6 +1711,7 @@ impl App {
                 } else {
                     self.update_hover();
                 }
+                self.apply_pointer();
             }
             WindowEvent::MouseInput {
                 state: ElementState::Pressed,

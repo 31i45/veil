@@ -322,6 +322,8 @@ pub(crate) struct CodeHeaderLayout {
     pub(crate) button: Rect,
     /// 语言标签文本（无语言/未知信息时为 None）。
     pub(crate) label: Option<String>,
+    /// 刚复制过该块：按钮标签就地显示「已复制」。
+    pub(crate) copied: bool,
     /// 首行行顶与行高（标签垂直居中用）。
     pub(crate) line_top: f32,
     pub(crate) line_h: f32,
@@ -359,7 +361,12 @@ fn paint_code_header(
     frame.fill_rect(bx, by + bh - 1, bw as u32, 1, border);
     frame.fill_rect(bx, by, 1, bh as u32, border);
     frame.fill_rect(bx + bw - 1, by, 1, bh as u32, border);
-    if let Some(lab) = labels.get_or_insert(engine, t(Key::CodeCopyButton), theme.muted, scale) {
+    let copy_text = if h.copied {
+        t(Key::CodeCopiedButton)
+    } else {
+        t(Key::CodeCopyButton)
+    };
+    if let Some(lab) = labels.get_or_insert(engine, copy_text, theme.muted, scale) {
         frame.blit(
             &lab.pixels,
             lab.w,
@@ -382,6 +389,42 @@ fn paint_code_header(
                     h.line_top.round() as i32 + ((h.line_h - lab.h as f32) / 2.0).round() as i32,
                 );
             }
+        }
+    }
+}
+
+/// 非活动态 Front Matter 的折叠条：左侧 ▸、灰色「Front Matter」与右侧细分隔线。
+/// 整条都是可点击区域（点击由 `hit_offset` 落光标，光标进入即展开源码）。
+#[allow(clippy::too_many_arguments)] // 绘制原语参数天然多（同其它位图操作）
+fn paint_frontmatter_collapsed(
+    frame: &mut Frame,
+    engine: &mut LayoutEngine,
+    labels: &mut crate::chrome::LabelCache,
+    theme: &crate::theme::Theme,
+    scale: f32,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+) {
+    let cy = (y + h / 2.0).round() as i32;
+    let ax = x.round() as i32 + (6.0 * scale).round() as i32;
+    let arrow = (7.0 * scale).round().max(5.0) as i32;
+    draw_arrow_right(frame, ax, cy, arrow, theme.muted);
+    let tx = ax + arrow + (8.0 * scale).round() as i32;
+    if let Some(lab) = labels.get_or_insert(engine, t(Key::FrontMatterCollapsed), theme.muted, scale)
+    {
+        frame.blit(&lab.pixels, lab.w, lab.h, tx, cy - lab.h as i32 / 2);
+        let lx = tx + lab.w as i32 + (8.0 * scale).round() as i32;
+        let lw = (x + w).round() as i32 - lx;
+        if lw > 0 {
+            frame.fill_rect(
+                lx,
+                cy,
+                lw as u32,
+                1,
+                [theme.muted[0], theme.muted[1], theme.muted[2], 64],
+            );
         }
     }
 }
@@ -436,6 +479,7 @@ impl App {
             label: lang
                 .as_deref()
                 .and_then(crate::view::highlight::language_label),
+            copied: self.window_state.code_copied == Some(g.id),
             line_top,
             line_h,
         })
@@ -1301,7 +1345,26 @@ impl App {
                 continue; // B3：折叠 details 的隐藏子块整组不渲染（非光栅裁剪）
             }
             if self.frontmatter_hidden(g, caret) {
-                continue; // REN-SWEEP-001：非活动态 Front Matter 不绘制（也不占高度）
+                // REN-SWEEP-001：非活动态 Front Matter 不绘制正文，但保留一条
+                // 可点击折叠条（打印态高度仍为 0，也不绘制）。
+                if self.window_state.print.is_none() {
+                    let sy = (vp.y + g.top - self.window_state.scroll_y).round();
+                    let fh = self.block_height_with(g, base, caret);
+                    let fx = self.content_x();
+                    let fw = self.content_width();
+                    paint_frontmatter_collapsed(
+                        &mut frame,
+                        &mut self.engine,
+                        &mut self.ui_state.chrome.labels,
+                        &theme,
+                        scale,
+                        fx,
+                        sy,
+                        fw,
+                        fh,
+                    );
+                }
+                continue;
             }
             let (id, kind, range, top) = (g.id, g.kind.clone(), g.range, g.top);
             let sy = (vp.y + top - self.window_state.scroll_y) as i32;

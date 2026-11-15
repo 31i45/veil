@@ -334,6 +334,8 @@ keys! {
     NoticeCodeCopied => "notice.code_copied", "已复制代码块";
     NoticeCodeBlockRequired => "notice.code_block_required", "光标不在代码块内";
     CodeCopyButton => "code.copy_button", "复制";
+    CodeCopiedButton => "code.copied_button", "已复制";
+    FrontMatterCollapsed => "doc.frontmatter_collapsed", "Front Matter";
     NoticeFocusMode => "notice.focus_mode", "专注模式：{}";
     NoticeTypewriterMode => "notice.typewriter_mode", "打字机模式：{}";
     NoticeRemoteImageFailed => "notice.remote_image_failed", "部分远程图片加载失败，已显示替代文本";

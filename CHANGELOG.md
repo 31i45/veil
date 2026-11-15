@@ -18,18 +18,19 @@ Veil 版本迭代记录。每个版本的详细修复清单见对应 git tag 的
 - 应用内打印预览（翻页/缩放/`Esc`）与 PDF 链接注解
 
 ### Changed
-- 性能：footnote epoch 与排版键预计算、Front Matter 标志缓存，压低大文档击键成本
+- 性能：footnote epoch 与排版键预计算、Front Matter 标志缓存，压低大文档击键成本；同机复测击键 p95 1.297 ms（5,005 块）/ 1.796 ms（10,500 块），保存字节与序列化逐字节一致
 - 文档：README 纠正「不做自动配对」的过时描述（v1.5 已交付），补齐本轮能力；明确应用图标与文档图标均为自绘设计，不使用 Typedown 或任何第三方图标；测试与体积基线更新
 - 体积：release exe 7,748,096 B（≈7.39 MiB，门禁 10,485,760 B）
 
 ### Fixed
 - 渲染：Front Matter、嵌套容器引用标记、水平线、行内 details、脚注、硬换行、表格内图片位置、独立图片块高与段距
+- 打印/PDF：引用、列表容器内 `<details>` 的闭标签不再作为正文输出（真机抽查发现；回归 `container_details_tags_do_not_leak_into_pdf`）
 - 语法/导出：表格切分单一真源、图片题注规则、导出保留代码语言与题注
 - TOC：旧式列表、带空格锚点、重复编号
 - 审计批次（2026-11-14/15）：解析、渲染、交互、导出、数据安全、平台与安全共 40+ 项（明细见对应 commit log）
 
 ### Notes
-- `cargo test --workspace` 1751 passed / 0 failed / 14 ignored；clippy `-D warnings` 零警告
+- `cargo test --workspace` 1752 passed / 0 failed / 14 ignored；clippy `-D warnings` 零警告
 - Mermaid 只交付接口与降级：未捆绑任何渲染运行时，不宣称已可渲染
 
 ## v1.6.0 — 2026-11-14（波次归档，未打 tag）

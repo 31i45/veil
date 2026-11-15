@@ -109,7 +109,7 @@ cargo test --workspace
 cargo run -p veil -- <file.md>
 ```
 
-当前 1751 项测试全绿（`cargo test --workspace` 1751 passed / 0 failed / 14 ignored，2026-11-15 本轮收口后复核），`cargo clippy --workspace --all-targets -- -D warnings` 零警告。
+当前 1752 项测试全绿（`cargo test --workspace` 1752 passed / 0 failed / 14 ignored，2026-11-15 本轮收口后复核），`cargo clippy --workspace --all-targets -- -D warnings` 零警告。
 
 ## 数字红线（目标值与实测）
 
@@ -122,7 +122,7 @@ cargo run -p veil -- <file.md>
 | 冷启动（bench 工具，进程创建→打开→首屏排版；p50 / max） | 观察项 | 576.46 / 599.98 ms（2026-11-09，`cargo run --release -p veil --example bench_typing`；基线 520.87 / 533.85 → +10.7% / +12.4%，回退门禁 ≤ 20%） |
 | 冷启动（墙钟，进程创建→首帧；环境观察项） | ≤ 300 ms | 450–529 ms（其中 440–470 ms 在 `main` 之前，属本机进程创建段开销；2026-10-31） |
 | 冷启动（窗口句柄口径；P2 对比口径） | — | 30 ms（2026-10-30，`tools/bench/measure.ps1`） |
-| 10 万字文档击键→提交上屏延迟 p95 | ≤ 16 ms | 6.781 ms / 12.379 ms（`perf_keystroke_path` 5,005 块 / `perf_keystroke_10k_blocks` 10,500 块；基线 6.677 / 12.488；2026-11-09）✅ |
+| 10 万字文档击键→提交上屏延迟 p95 | ≤ 16 ms | 1.297 ms / 1.796 ms（`perf_keystroke_path` 5,005 块 / `perf_keystroke_10k_blocks` 10,500 块；同机 2026-11-15 复测；上一轮记录 6.781 / 12.379）✅ |
 | 10 万字文档常驻内存（私有工作集） | ≤ 150 MB | 40.76 MB（20 页深滚动后 WorkingSet，2026-11-05 实测） |
 | 安装产物体积 — 运行时代码（非图标） | ≤ 6 MiB（Phase A 基准；Wave 3/4 PDF 导出门槛让步已覆盖） | 7,658,819 B（exe 减 89,277 B 图标资源：`veil.ico` 46,688 + `veil-doc.ico` 42,589，2026-11-15 本轮收口后） |
 | 安装产物体积 — 合计单文件 `veil.exe` | ≤ 10 MiB = 10,485,760 B（Wave 4 用户授权；每次增量须记录） | 7,748,096 B ≈ 7.39 MiB（2026-11-15 本轮收口后；较 Wave 6 基线 6,988,800 B +759,296 B；较历史基线 6,914,048 B +834,048 B；余量 2,737,664 B） |

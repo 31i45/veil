@@ -109,7 +109,7 @@ cargo test --workspace
 cargo run -p veil -- <file.md>
 ```
 
-Baseline: 1751 passed / 0 failed / 14 ignored (2026-11-15, re-verified after this round); `cargo clippy --workspace --all-targets -- -D warnings` zero warnings.
+Baseline: 1752 passed / 0 failed / 14 ignored (2026-11-15, re-verified after this round); `cargo clippy --workspace --all-targets -- -D warnings` zero warnings.
 
 ## Red Numbers (targets vs measured)
 
@@ -122,7 +122,7 @@ Measured on release build, probe-serialized; performance rows re-verified 2026-1
 | Cold start (bench harness, process create → open → first layout; p50 / max) | observation only | 576.46 / 599.98 ms (2026-11-09, `cargo run --release -p veil --example bench_typing`; baseline 520.87 / 533.85 → +10.7% / +12.4%, regression gate ≤ 20%) |
 | Cold start (wall clock, process create → first frame; observation only) | ≤ 300 ms | 450–529 ms (440–470 ms before `main`, process-create overhead on this machine; 2026-10-31) |
 | Cold start (window handle; P2 comparison口径) | — | 30 ms (2026-10-30, `tools/bench/measure.ps1`) |
-| Keystroke→commit p95 on 100 K-word doc | ≤ 16 ms | 6.781 ms / 12.379 ms (`perf_keystroke_path` 5,005 blocks / `perf_keystroke_10k_blocks` 10,500 blocks; baseline 6.677 / 12.488; 2026-11-09) ✅ |
+| Keystroke→commit p95 on 100 K-word doc | ≤ 16 ms | 1.297 ms / 1.796 ms (`perf_keystroke_path` 5,005 blocks / `perf_keystroke_10k_blocks` 10,500 blocks; same machine, re-measured 2026-11-15; previous record 6.781 / 12.379) ✅ |
 | Resident memory, 100 K-word doc (private working set) | ≤ 150 MB | 40.76 MB (2026-11-05) |
 | Installed size — code + data (non-icon) | ≤ 6 MiB (Phase A baseline; superseded by the Wave 3/4 PDF export gate allowance) | 7,658,819 B (exe minus 89,277 B icons: `veil.ico` 46,688 + `veil-doc.ico` 42,589; 2026-11-15 after this round) |
 | Installed size — total single-file `veil.exe` | ≤ 10 MiB = 10,485,760 B (Wave 4 authorization; every increment must be recorded) | 7,748,096 B ≈ 7.39 MiB (2026-11-15 after this round; +759,296 B vs Wave 6 baseline 6,988,800 B; +834,048 B vs historical baseline 6,914,048 B); margin 2,737,664 B |

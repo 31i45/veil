@@ -5,6 +5,7 @@
 //! - 只依赖 `TextMetrics` 与 `MediaProvider` 两个接缝，版面逻辑可纯单测；
 //! - 无法渲染的图片/公式一律降级为文本，绝不 panic。
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
@@ -1179,7 +1180,8 @@ impl<'a> Ctx<'a> {
         callout: Option<(String, String, [u8; 3])>,
         media: &mut Option<&mut dyn MediaProvider>,
     ) {
-        let text = slice_text(s, start, end);
+        let raw = slice_text(s, start, end);
+        let text = blank_container_details_tags(&raw);
         let nodes = s.block_inlines(id).unwrap_or_default();
         let rail_color = callout.as_ref().map_or(COL_RULE, |(_, _, c)| *c);
         let start_y = self.y;
@@ -1187,7 +1189,7 @@ impl<'a> Ctx<'a> {
         let bg_at = self.pages[page].len();
         let indent = 16.0;
         let mut first = true;
-        for (li, line) in text.split('\n').enumerate() {
+        for ((li, line), raw_line) in text.split('\n').enumerate().zip(raw.split('\n')) {
             // 该行在块文本中的相对起点
             let rel: usize = text.split('\n').take(li).map(|l| l.len() + 1).sum();
             let b = line.as_bytes();
@@ -1230,6 +1232,10 @@ impl<'a> Ctx<'a> {
             let from = start + rel + cs;
             let to = start + rel + line.trim_end().len();
             if from >= to && label.is_none() {
+                // 纯 `<details>`/`</details>` 结构行：消隐且不占行高。
+                if raw_line.contains('<') {
+                    continue;
+                }
                 self.blank(BODY_SIZE);
                 continue;
             }
@@ -1246,7 +1252,7 @@ impl<'a> Ctx<'a> {
                 }
             }
             if from < to {
-                self.rich(&text, start, from, to, &nodes, Style::body(), indent, media);
+                self.rich(text.as_ref(), start, from, to, &nodes, Style::body(), indent, media);
             }
         }
         let h = self.y - start_y;
@@ -1288,7 +1294,8 @@ impl<'a> Ctx<'a> {
         task: Option<bool>,
         media: &mut Option<&mut dyn MediaProvider>,
     ) {
-        let text = slice_text(s, start, end);
+        let raw = slice_text(s, start, end);
+        let text = blank_container_details_tags(&raw);
         let visible = text.trim_end().len();
         let (prefix, content_rel) = list_prefix(&text, ordered, task.is_some());
         let nodes = s.block_inlines(id).unwrap_or_default();
@@ -1808,6 +1815,34 @@ fn push_chars(out: &mut Vec<LItem>, text: &str, base: usize, from: usize, to: us
 
 fn slice_text(s: &Session, start: usize, end: usize) -> String {
     s.text_slice(Range::new(start, end)).unwrap_or_default()
+}
+
+/// 容器块（引用/提示/列表项）内的 `<details>` 开闭标签是结构标记，不得作为正文进 PDF。
+///
+/// 屏幕层把这些区间折叠消隐，但容器块不是 Details 头块，标签夹在块文本里
+/// （闭标签常被行内解析退化为普通文本）。这里按字节等长替换为空格，
+/// 保持块内行内节点的偏移与行结构不变。
+fn blank_container_details_tags(text: &str) -> Cow<'_, str> {
+    let lower = text.to_ascii_lowercase();
+    let mut out: Option<String> = None;
+    let mut i = 0;
+    while let Some(rel) = lower[i..].find('<') {
+        let s = i + rel;
+        let Some(gt) = lower[s..].find('>') else {
+            break;
+        };
+        let e = s + gt + 1;
+        let tag = &lower[s..e];
+        if tag.starts_with("<details") || tag.starts_with("</details") {
+            let buf = out.get_or_insert_with(|| text.to_string());
+            buf.replace_range(s..e, &" ".repeat(e - s));
+        }
+        i = e;
+    }
+    match out {
+        Some(v) => Cow::Owned(v),
+        None => Cow::Borrowed(text),
+    }
 }
 
 /// 已定义脚注 id → 编号（按文档首次引用递增；与 HTML 导出同口径）。
@@ -2899,6 +2934,36 @@ mod tests {
             "details 内正文必须进 PDF: {text}"
         );
         assert!(text.contains("2.4 图片"), "后续块必须进 PDF: {text}");
+    }
+
+    /// Task 11 真机抽查：引用/列表容器内的 `<details>` 标签不得作为正文进 PDF。
+    /// 容器块不是 Details 头块，标签藏在块文本里；屏幕层由折叠区间消隐，
+    /// PDF 层必须同样只输出 summary 与正文。
+    #[test]
+    fn container_details_tags_do_not_leak_into_pdf() {
+        let md = "> <details>\n\
+                  > <summary>引用摘要</summary>\n\
+                  > 引用正文\n\
+                  > </details>\n\n\
+                  - 列表项\n\
+                  \x20 <details>\n\
+                  \x20 <summary>列表摘要</summary>\n\
+                  \x20 列表正文\n\
+                  \x20 </details>\n\n\
+                  尾\n";
+        let session = Session::open(md);
+        let doc = lay_with(&session, false);
+        let text = all_text(&doc);
+        assert!(text.contains("引用摘要"), "summary 必须进 PDF: {text}");
+        assert!(text.contains("引用正文"), "容器内正文必须进 PDF: {text}");
+        assert!(text.contains("列表摘要"), "列表 summary 必须进 PDF: {text}");
+        assert!(text.contains("列表正文"), "列表容器内正文必须进 PDF: {text}");
+        assert!(text.contains("尾"), "后续段落必须进 PDF: {text}");
+        let lower = text.to_lowercase();
+        assert!(
+            !lower.contains("<details") && !lower.contains("</details") && !lower.contains("<summary"),
+            "容器内 details 标签不得进 PDF: {text}"
+        );
     }
 
     /// 证据生成（手动）：用真实字体 + 媒体管线把样例渲染为 `target/wave4-sample.pdf`。

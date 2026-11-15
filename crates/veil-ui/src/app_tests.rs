@@ -9382,7 +9382,7 @@ fn perf_keystroke_10k_blocks() {
         ));
     }
     let store = MemStore::default();
-    let mut a = app(&text, None, false, &store);
+    let mut a = app(&text, Some("perf.md"), false, &store);
     a.editor.apply(Intent::MoveDocStart).unwrap();
     for _ in 0..5 {
         a.editor.apply(Intent::MoveRight).unwrap();
@@ -9410,6 +9410,27 @@ fn perf_keystroke_10k_blocks() {
     println!(
         "perf_10k_keystroke_ms_max={:.3}",
         samples[samples.len() - 1]
+    );
+    // 零丢字：300 次击键必须一字不少地落在文档里（Task 11 门禁）。
+    let caret = a.editor.caret();
+    let g = a
+        .index
+        .blocks
+        .iter()
+        .find(|g| g.range.start <= caret && caret < g.range.end)
+        .expect("光标应落在块内");
+    let txt = a.editor.session().text_slice(g.range).unwrap_or_default();
+    assert!(
+        txt.contains(&"a".repeat(300)),
+        "连续 300 次击键不得丢字：{txt:?}"
+    );
+    // 保存后逐字节一致：落盘字节必须等于会话序列化字节（Task 11 门禁）。
+    let expected = a.editor.session().serialize().into_bytes();
+    a.save_now();
+    assert_eq!(
+        store.files.borrow()[Path::new("perf.md")],
+        expected,
+        "保存字节必须与会话序列化逐字节一致"
     );
 }
 

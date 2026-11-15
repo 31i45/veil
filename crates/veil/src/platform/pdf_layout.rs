@@ -1090,6 +1090,84 @@ impl<'a> Ctx<'a> {
         self.y += 6.0;
     }
 
+    /// Mermaid 矢量场景：与屏幕预览同一 `MermaidScene`，按版心等比缩放后
+    /// 直接转成 DrawOp（矩形/线段/文本），不经过图片栅格。
+    fn mermaid(&mut self, scene: &veil_ui::MermaidScene) {
+        let max_w = self.max_w();
+        // 单图不超过一页可用高度（超出时整体缩小，避免跨页切断图）。
+        let max_h = (self.geom.bottom() - self.geom.top()) - 20.0;
+        let (w, h) = scene.fit(max_w, max_h.max(40.0));
+        if w < 1.0 || h < 1.0 {
+            return;
+        }
+        let s = w / scene.width.max(1) as f32;
+        self.ensure(h + 11.0);
+        self.y += 5.0;
+        let top = self.y;
+        let ox = self.geom.margin_x + ((max_w - w) * 0.5).max(0.0);
+        for item in &scene.items {
+            match item {
+                veil_ui::MermaidItem::Rect { x, y, w, h, fill } => {
+                    if fill[3] == 0 {
+                        continue;
+                    }
+                    self.pages[self.page].push(DrawOp::Rect {
+                        x: ox + x * s,
+                        y: top + y * s,
+                        w: (w * s).max(0.5),
+                        h: (h * s).max(0.5),
+                        color: [fill[0], fill[1], fill[2]],
+                    });
+                }
+                veil_ui::MermaidItem::Line {
+                    x1,
+                    y1,
+                    x2,
+                    y2,
+                    width,
+                    color,
+                } => {
+                    if color[3] == 0 {
+                        continue;
+                    }
+                    self.pages[self.page].push(DrawOp::Line {
+                        x1: ox + x1 * s,
+                        y1: top + y1 * s,
+                        x2: ox + x2 * s,
+                        y2: top + y2 * s,
+                        width: (width * s).max(0.3),
+                        color: [color[0], color[1], color[2]],
+                    });
+                }
+                veil_ui::MermaidItem::Text {
+                    x,
+                    y,
+                    size,
+                    text,
+                    color,
+                } => {
+                    if text.is_empty() {
+                        continue;
+                    }
+                    // 场景文本坐标按左上角记；PDF 文本 y 取基线。
+                    self.pages[self.page].push(DrawOp::Text(TextRun {
+                        x: ox + x * s,
+                        y: top + (y + size) * s,
+                        size: (size * s).max(4.0),
+                        text: text.clone(),
+                        bold: false,
+                        italic: false,
+                        underline: false,
+                        strike: false,
+                        highlight: None,
+                        color: *color,
+                    }));
+                }
+            }
+        }
+        self.y = top + h + 6.0;
+    }
+
     /// 引用/提示块。`callout` 为 `(标签, 图标, 强调色)`；None = 普通引用块。
     /// 标签与图标来自内核统一类型（内置五种 / 自定义配置），三通道同源。
     fn quote(
@@ -1853,6 +1931,9 @@ pub fn layout_document(
     geom: PageGeom,
     opts: LayoutOpts,
     mut media: Option<&mut dyn MediaProvider>,
+    // Mermaid 矢量场景（键 = 块 id）：与屏幕/HTML 共用同一渲染入口；
+    // 未安装渲染器时为空，mermaid 块走既有代码块排版。
+    mermaid_scenes: &HashMap<BlockId, veil_ui::MermaidScene>,
 ) -> DocLayout {
     let mut ctx = Ctx::new(metrics, geom);
     ctx.footnotes = collect_footnote_numbers(session);
@@ -1863,7 +1944,18 @@ pub fn layout_document(
         match kind {
             BlockKind::Paragraph => ctx.paragraph(session, id, start, end, 0.0, &mut media),
             BlockKind::AtxHeading(l) | BlockKind::SetextHeading(l) => ctx.heading(session, id, l),
-            BlockKind::FencedCode(_) => ctx.code(session, id, start, end, true),
+            BlockKind::FencedCode(lang) => {
+                if lang
+                    .as_deref()
+                    .is_some_and(|l| l.eq_ignore_ascii_case("mermaid"))
+                {
+                    if let Some(scene) = mermaid_scenes.get(&id) {
+                        ctx.mermaid(scene);
+                        continue;
+                    }
+                }
+                ctx.code(session, id, start, end, true);
+            }
             BlockKind::IndentedCode => ctx.code(session, id, start, end, false),
             BlockKind::Math => ctx.block_math(session, id, &mut media),
             BlockKind::Table => ctx.table(session, id),
@@ -1997,6 +2089,7 @@ mod tests {
                 page_numbers: true,
             },
             None,
+            &HashMap::new(),
         )
     }
 
@@ -2012,6 +2105,7 @@ mod tests {
                 page_numbers: true,
             },
             None,
+            &HashMap::new(),
         )
     }
 
@@ -2508,6 +2602,7 @@ mod tests {
             PageGeom::a4(20.0),
             LayoutOpts::default(),
             Some(media),
+            &HashMap::new(),
         )
     }
 
@@ -2721,6 +2816,7 @@ mod tests {
             PageGeom::a4(20.0),
             LayoutOpts::default(),
             Some(&mut media),
+            &HashMap::new(),
         );
         let ops: Vec<&DrawOp> = doc.pages.iter().flat_map(|p| p.iter()).collect();
         let img_idx = ops
@@ -2835,6 +2931,7 @@ mod tests {
                 page_numbers: true,
             },
             Some(&mut media),
+            &HashMap::new(),
         );
         let bytes = render_pages(
             &doc.pages,
@@ -2855,6 +2952,62 @@ mod tests {
         );
         assert!(doc.pages.len() >= 3, "样例应跨多页");
         assert!(!doc.outline.is_empty(), "样例应有书签");
+    }
+
+    /// Task 9：Mermaid 场景经同一矢量接口进 PDF（矩形/线段/文本），不再排源码块。
+    #[test]
+    fn mermaid_scene_map_renders_vector_ops_instead_of_code_block() {
+        let session = Session::open("```mermaid\ngraph TD\nA-->B\n```\n");
+        let id = session.blocks()[0].0;
+        let mut scenes = HashMap::new();
+        scenes.insert(
+            id,
+            veil_ui::MermaidScene::new(100, 50)
+                .rect(0.0, 0.0, 100.0, 50.0, [200, 220, 240, 255])
+                .line(5.0, 5.0, 95.0, 5.0, 1.0, [0, 0, 0, 255])
+                .text(6.0, 6.0, 8.0, "A", [0, 0, 0]),
+        );
+        let doc = layout_document(
+            &session,
+            &FakeMetrics,
+            PageGeom::a4(20.0),
+            LayoutOpts::default(),
+            None,
+            &scenes,
+        );
+        let ops: Vec<&DrawOp> = doc.pages.iter().flat_map(|p| p.iter()).collect();
+        assert!(
+            ops.iter().any(|op| matches!(op, DrawOp::Rect { .. })),
+            "场景矩形应进 PDF"
+        );
+        assert!(
+            ops.iter().any(|op| matches!(op, DrawOp::Line { .. })),
+            "场景线段应进 PDF"
+        );
+        assert!(
+            ops.iter()
+                .any(|op| matches!(op, DrawOp::Text(t) if t.text == "A")),
+            "场景文本应进 PDF"
+        );
+        assert!(
+            !ops.iter()
+                .any(|op| matches!(op, DrawOp::Text(t) if t.text == "mermaid")),
+            "启用场景后不应再输出代码块语言标签"
+        );
+
+        // 未提供场景（未安装渲染器）：保持既有代码块排版。
+        let plain = layout_document(
+            &session,
+            &FakeMetrics,
+            PageGeom::a4(20.0),
+            LayoutOpts::default(),
+            None,
+            &HashMap::new(),
+        );
+        let plain_ops: Vec<&DrawOp> = plain.pages.iter().flat_map(|p| p.iter()).collect();
+        assert!(plain_ops
+            .iter()
+            .any(|op| matches!(op, DrawOp::Text(t) if t.text == "mermaid")));
     }
 
     // ===== Task 4：PDF 导出缺陷回归 =====

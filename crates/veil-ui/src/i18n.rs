@@ -214,6 +214,9 @@ keys! {
     MermaidUnknown => "mermaid.unknown", "mermaid";
     MermaidBadge => "mermaid.badge", "◈ {}";
     MermaidEmptyHint => "mermaid.empty_hint", "空 Mermaid 块 — 点击插入模板";
+    MermaidPreviewTitle => "mermaid.preview.title", "Mermaid 预览 — {}";
+    MermaidPreviewHint => "mermaid.preview.hint", "Esc 或点击任意处关闭";
+    MermaidPreviewError => "mermaid.preview.error", "Mermaid 渲染失败：{}";
 
     // ---- 正文降级提示 ----
     BlockOversizeNotice => "doc.block_oversize", "该块约 {} MB，超出单块渲染上限，后续内容未渲染；源码完整保留";

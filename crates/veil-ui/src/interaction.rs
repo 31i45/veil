@@ -110,6 +110,14 @@ impl App {
             self.print_preview_key(&key);
             return;
         }
+        // Mermaid 预览覆盖层：Esc 关闭，其余按键吞掉（不与编辑器抢输入）。
+        if self.ui_state.mermaid_preview.is_some() {
+            if matches!(key, Key::Escape) {
+                self.ui_state.mermaid_preview = None;
+                self.request_redraw();
+            }
+            return;
+        }
         // 设置模态优先（优先级高于普通 modal）：打开时它是唯一输入接收者
         if self.ui_state.settings.is_some() {
             let mods = self.input_state.mods;
@@ -2171,8 +2179,38 @@ impl App {
                 };
                 match action {
                     CtxAction::MermaidPreview => {
-                        let url = veil_core::mermaid_live_url(&body);
-                        let _ = self.ports.url_opener.open_url(&url);
+                        // 已启用渲染器：应用内预览面板展示同一矢量结果；
+                        // 未启用：保持既有 mermaid.live 在线预览（降级不变）。
+                        let theme = crate::view::mermaid::MermaidTheme::from_theme(
+                            &self.input_state.theme,
+                            self.input_state.scale,
+                        );
+                        let title = veil_core::detect_type(&body).unwrap_or("mermaid");
+                        match self.mermaid.render(&body, &theme) {
+                            Some(Ok(drawing)) => {
+                                self.ui_state.mermaid_preview =
+                                    Some(crate::view::mermaid::MermaidPreview {
+                                        title: title.to_string(),
+                                        drawing: Some(drawing),
+                                        error: None,
+                                    });
+                                self.request_redraw();
+                            }
+                            Some(Err(e)) => {
+                                // 错误可见：面板内直接展示后端消息，不静默吞掉。
+                                self.ui_state.mermaid_preview =
+                                    Some(crate::view::mermaid::MermaidPreview {
+                                        title: title.to_string(),
+                                        drawing: None,
+                                        error: Some(e.message),
+                                    });
+                                self.request_redraw();
+                            }
+                            None => {
+                                let url = veil_core::mermaid_live_url(&body);
+                                let _ = self.ports.url_opener.open_url(&url);
+                            }
+                        }
                     }
                     CtxAction::MermaidCopySource => {
                         self.ports.clipboard.set(&body);
@@ -2444,6 +2482,12 @@ impl App {
             if !inside {
                 self.close_image_preview();
             }
+            return false;
+        }
+        // Mermaid 预览：点击任意处关闭（模态语义，透明遮罩不穿透）。
+        if self.ui_state.mermaid_preview.is_some() {
+            self.ui_state.mermaid_preview = None;
+            self.request_redraw();
             return false;
         }
         // 设置模态优先（优先级高于普通 modal）：只判定按钮/字段命中，遮罩/空白点击一律吞掉
@@ -3810,9 +3854,7 @@ impl App {
 /// 空 mermaid 块判定：body trim 后为空，或所有非空行都以 `%%` 开头（纯注释块）。
 /// 与 `view/layout.rs::fenced_subs` 的提示行判定保持同口径。
 fn mermaid_body_is_empty(body: &str) -> bool {
-    body.lines()
-        .map(str::trim)
-        .all(|l| l.is_empty() || l.starts_with("%%"))
+    crate::view::mermaid::is_empty_source(body)
 }
 
 /// 解析脚注定义块首行 `[^id]: ` 的 id。
@@ -4183,6 +4225,14 @@ impl App {
                 .cache
                 .math(g.id, self.math_key(g.id))
                 .map_or(g.est_h, |m| m.height as f32);
+        }
+        // Mermaid 渲染态：高度取场景等比缩放后的像素高（与绘制同一 fit 口径）。
+        if let BlockKind::FencedCode(Some(lang)) = &g.kind {
+            if lang.eq_ignore_ascii_case("mermaid") && self.mermaid_shows_image(g.id, &g.range) {
+                if let Some((_, h)) = self.mermaid_display_size(g.id) {
+                    return h;
+                }
+            }
         }
         if g.kind == BlockKind::Table && self.table_shows_grid(g.id, &g.range) {
             return self

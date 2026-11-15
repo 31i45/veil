@@ -57,3 +57,8 @@ pub use theme::{
 };
 // bench_typing（产品层纯度量 example）需要 LayoutEngine / Frame 做纯排版与帧分配基准
 pub use view::{BlockLayout, Frame, LayoutEngine, BASE_FONT_SIZE, BASE_LINE_HEIGHT};
+// Mermaid 后端中立接口：产品层 HTML/PDF 导出与外部嵌入方安装渲染器时使用
+pub use view::mermaid::{
+    is_empty_source, sanitize_svg, scene_to_svg, svg_of, MermaidDrawing, MermaidError, MermaidItem,
+    MermaidRenderer, MermaidRenderers, MermaidScene, MermaidTheme,
+};

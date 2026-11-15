@@ -167,12 +167,14 @@ pub trait FileWatcher {
 pub trait Exporter {
     /// `target` 为调用方已选定的输出路径（草稿态经对话框选定）；None 表示沿用
     /// 源文件同目录同名规则（`source_path.with_extension("html")`）。
+    /// `mermaid`：已安装的 Mermaid 渲染后端（None = 保持既有源码代码块输出）。
     fn export_html(
         &mut self,
         session: &veil_core::Session,
         style: ExportStyle,
         source_path: Option<&Path>,
         target: Option<&Path>,
+        mermaid: Option<&dyn crate::view::mermaid::MermaidRenderer>,
     ) -> Result<PathBuf, String>;
 }
 
@@ -452,6 +454,8 @@ pub(crate) struct UIState {
     pub(crate) print_preview: Option<crate::print::PrintPreview>,
     /// 图片放大预览覆盖层：纯视图态，关闭后文档字节与光标不变。
     pub(crate) image_preview: Option<ImagePreview>,
+    /// Mermaid 预览覆盖层：渲染器已启用时展示矢量结果或错误（未启用走 mermaid.live）。
+    pub(crate) mermaid_preview: Option<crate::view::mermaid::MermaidPreview>,
 }
 
 /// 图片放大预览（覆盖层）：键为本地绝对路径或远程 URL（与行内图片缓存同键）。
@@ -483,6 +487,7 @@ impl Default for UIState {
             history: History::default(),
             print_preview: None,
             image_preview: None,
+            mermaid_preview: None,
             expanded_details: std::collections::HashSet::new(),
             expanded_inline_details: std::collections::HashSet::new(),
             frontmatter_revealed: false,
@@ -713,6 +718,8 @@ pub(crate) struct App {
     pub(crate) index: BlockIndex,
     /// 派生缓存（布局/光栅/公式/图片/表格）与因果键查询。
     pub(crate) cache: Cache,
+    /// Mermaid 渲染后端注册表：默认为空（保持 v0 源码卡片降级）。
+    pub(crate) mermaid: crate::view::mermaid::MermaidRenderers,
     pub(crate) input_state: InputState,
     /// 11 个外部注入的端口（Clipboard / FileStore / MathRenderer / ImageLoader /
     /// AssetStore / Exporter / FileDialog / FileWatcher / ConfigStore / SystemTheme /
@@ -933,6 +940,7 @@ impl App {
             engine: LayoutEngine::new(),
             index: BlockIndex::default(),
             cache: Cache::default(),
+            mermaid: crate::view::mermaid::MermaidRenderers::new(),
             callouts,
             input_state: InputState {
                 revs: Revs::default(),

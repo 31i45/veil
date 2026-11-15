@@ -622,8 +622,36 @@ impl Exporter for NoExport {
         _style: ExportStyle,
         _p: Option<&Path>,
         _t: Option<&Path>,
+        _m: Option<&dyn crate::view::mermaid::MermaidRenderer>,
     ) -> Result<PathBuf, String> {
         Err("未注入导出器".into())
+    }
+}
+
+/// Mermaid 测试替身：固定 120×60 场景（1 矩形 + 1 线 + 1 文本）与可选失败注入。
+/// 记录收到的源码，用于断言三端共用同一渲染入口。
+struct FakeMermaid {
+    calls: Rc<RefCell<Vec<String>>>,
+    fail: bool,
+}
+
+impl crate::view::mermaid::MermaidRenderer for FakeMermaid {
+    fn render(
+        &self,
+        source: &str,
+        _theme: &crate::view::mermaid::MermaidTheme,
+    ) -> Result<crate::view::mermaid::MermaidDrawing, crate::view::mermaid::MermaidError> {
+        self.calls.borrow_mut().push(source.to_string());
+        if self.fail {
+            return Err(crate::view::mermaid::MermaidError::new("引擎不可用"));
+        }
+        Ok(crate::view::mermaid::MermaidDrawing::with_svg(
+            crate::view::mermaid::MermaidScene::new(120, 60)
+                .rect(0.0, 0.0, 120.0, 60.0, [230, 240, 250, 255])
+                .line(10.0, 30.0, 110.0, 30.0, 2.0, [40, 90, 160, 255])
+                .text(12.0, 8.0, 10.0, "A", [20, 20, 20]),
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"><rect width=\"1\" height=\"1\"/></svg>",
+        ))
     }
 }
 
@@ -3229,6 +3257,7 @@ impl Exporter for FakeExport {
         style: ExportStyle,
         source_path: Option<&Path>,
         target: Option<&Path>,
+        _mermaid: Option<&dyn crate::view::mermaid::MermaidRenderer>,
     ) -> Result<PathBuf, String> {
         self.calls.borrow_mut().push((
             session.serialize(),
@@ -13410,6 +13439,146 @@ fn non_empty_mermaid_right_click_keeps_full_menu() {
         a.ui_state.ctx.mermaid_insert_start.is_none(),
         "非空块不启用空块插入锚点"
     );
+}
+
+/// 通过右键菜单执行「预览」项（菜单动作与键盘路径共用 `ctx_exec`）。
+fn exec_mermaid_preview(a: &mut App) {
+    hover_mermaid_block(a);
+    a.on_right_click();
+    assert!(a.ui_state.ctx.open, "mermaid 块右键应打开菜单");
+    let i = a
+        .ui_state
+        .ctx
+        .items()
+        .iter()
+        .position(|&(_, act)| act == ctx_menu::CtxAction::MermaidPreview)
+        .expect("菜单应含预览项");
+    a.ui_state.ctx.hover = Some(i);
+    a.route_key(Key::Enter);
+}
+
+/// Task 9：测试替身渲染器贯通 L1 内嵌块与预览面板（同一入口 / 同一场景）；
+/// 光标进入块内仍显源码，卸载后回到源码卡片降级，文档字节始终不变。
+#[test]
+fn mermaid_renderer_draws_block_and_preview_uses_same_scene() {
+    let store = MemStore::default();
+    let doc = "p\n\n```mermaid\ngraph TD\nA-->B\n```\n";
+    let mut a = app(doc, None, false, &store);
+    let calls = Rc::new(RefCell::new(Vec::new()));
+    a.install_mermaid_renderer(Box::new(FakeMermaid {
+        calls: calls.clone(),
+        fail: false,
+    }));
+    a.editor.set_caret(0);
+    a.refresh_index();
+    a.ensure_layouts_all();
+    a.ensure_math_visible();
+    a.recompute_geometry();
+    let id = block_id_of(&a, |k| {
+        matches!(k, BlockKind::FencedCode(Some(l)) if l.eq_ignore_ascii_case("mermaid"))
+    });
+    let range = geom(&a, id).range;
+    assert!(a.mermaid_shows_image(id, &range), "启用后块内应显示渲染图");
+    assert_eq!(calls.borrow().len(), 1, "同一块只渲染一次（缓存）");
+    let (_, h) = a.mermaid_display_size(id).expect("应有显示尺寸");
+    assert!(
+        (geom(&a, id).height - h).abs() < 0.01,
+        "块高应取场景缩放高：{} vs {h}",
+        geom(&a, id).height
+    );
+
+    // 光标进入块内 → 显源码编辑（与原有 mermaid 块/数学块同语义）。
+    a.editor.set_caret(doc.find("graph TD").unwrap());
+    a.recompute_geometry();
+    assert!(!a.mermaid_shows_image(id, &range));
+
+    exec_mermaid_preview(&mut a);
+    let pv = a
+        .ui_state
+        .mermaid_preview
+        .as_ref()
+        .expect("应用内预览面板应打开");
+    assert_eq!(pv.error, None);
+    assert_eq!(pv.title, "flowchart");
+    assert_eq!(pv.drawing.as_ref().unwrap().scene.width, 120);
+    assert_eq!(calls.borrow().len(), 2, "预览走同一渲染入口");
+
+    a.route_key(Key::Escape);
+    assert!(a.ui_state.mermaid_preview.is_none(), "Esc 关闭预览");
+    assert_eq!(a.editor.session().serialize(), doc, "预览不改文档字节");
+
+    // 卸载 → 恢复源码卡片（高度回到文本布局）。
+    a.clear_mermaid_renderer();
+    a.editor.set_caret(0);
+    a.ensure_layouts_all();
+    a.ensure_math_visible();
+    a.recompute_geometry();
+    assert!(!a.mermaid_shows_image(id, &geom(&a, id).range));
+    assert_eq!(a.editor.session().serialize(), doc);
+}
+
+/// Task 9：渲染失败在预览面板可见（不静默吞错），块内回退源码卡片。
+#[test]
+fn mermaid_render_error_is_visible_in_preview_panel() {
+    let store = MemStore::default();
+    let doc = "p\n\n```mermaid\ngraph TD\nA-->B\n```\n";
+    let mut a = app(doc, None, false, &store);
+    a.install_mermaid_renderer(Box::new(FakeMermaid {
+        calls: Rc::new(RefCell::new(Vec::new())),
+        fail: true,
+    }));
+    a.editor.set_caret(0);
+    a.ensure_layouts_all();
+    a.ensure_math_visible();
+    a.recompute_geometry();
+    let id = block_id_of(&a, |k| {
+        matches!(k, BlockKind::FencedCode(Some(l)) if l.eq_ignore_ascii_case("mermaid"))
+    });
+    assert!(
+        !a.mermaid_shows_image(id, &geom(&a, id).range),
+        "失败时块内保持源码卡片"
+    );
+    assert!(
+        a.cache.mermaid_error(id, a.mermaid_key(id)).is_some(),
+        "失败按块记忆，不每帧重试"
+    );
+
+    exec_mermaid_preview(&mut a);
+    let pv = a.ui_state.mermaid_preview.as_ref().expect("预览面板应打开");
+    assert!(pv.drawing.is_none());
+    assert_eq!(pv.error.as_deref(), Some("引擎不可用"));
+    // 点击任意处关闭（模态语义）。
+    a.input_state.mouse = PhysicalPosition::new(4.0, 4.0);
+    a.on_left_click();
+    assert!(a.ui_state.mermaid_preview.is_none());
+    assert_eq!(a.editor.session().serialize(), doc);
+}
+
+/// Task 9：未启用渲染器时预览保持既有 mermaid.live 外链降级。
+#[test]
+fn mermaid_preview_without_renderer_keeps_mermaid_live_fallback() {
+    let store = MemStore::default();
+    let doc = "p\n\n```mermaid\ngraph TD\nA-->B\n```\n";
+    let calls = Rc::new(RefCell::new(Vec::new()));
+    let mut a = app_with(
+        doc,
+        None,
+        false,
+        &store,
+        Box::new(FakeUrl {
+            calls: calls.clone(),
+            result: Ok(()),
+        }),
+    );
+    exec_mermaid_preview(&mut a);
+    assert!(
+        a.ui_state.mermaid_preview.is_none(),
+        "未启用渲染器不开应用内面板"
+    );
+    let urls = calls.borrow();
+    assert_eq!(urls.len(), 1, "应走在线预览");
+    assert!(urls[0].starts_with("https://mermaid.live/"), "{}", urls[0]);
+    assert_eq!(a.editor.session().serialize(), doc);
 }
 
 #[test]

@@ -22,6 +22,7 @@ use std::ops::Deref;
 use veil_core::{BlockId, BlockKind, Range};
 
 use super::layout::{BlockLayout, FootnoteCtx};
+use super::mermaid::MermaidDrawing;
 use super::table::TableLayout;
 use crate::app::App;
 use crate::image::ImageData;
@@ -177,6 +178,16 @@ pub(crate) struct MathFailKey {
     pub(crate) session_rev: u32,
 }
 
+/// Mermaid 渲染键：块 id + DPI + 主题 + 会话。安装/卸载渲染器时整体清空
+/// （后端变化不属于上述任何代次，由 `install`/`clear` 显式清理）。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct MermaidKey {
+    pub(crate) block: BlockId,
+    pub(crate) scale_q: u32,
+    pub(crate) theme_rev: u32,
+    pub(crate) session_rev: u32,
+}
+
 fn quantize(v: f32, factor: f32) -> u32 {
     (v * factor).round().clamp(0.0, u32::MAX as f32) as u32
 }
@@ -197,6 +208,9 @@ pub(crate) struct Cache {
     /// 数学块渲染图与失败记忆。
     pub(crate) math_imgs: HashMap<BlockId, Memo<MathKey, MathImage>>,
     pub(crate) math_failed: HashMap<BlockId, Memo<MathFailKey, ()>>,
+    /// Mermaid 块渲染结果与失败记忆（未安装渲染器时为空）。
+    pub(crate) mermaid_drawings: HashMap<BlockId, Memo<MermaidKey, MermaidDrawing>>,
+    pub(crate) mermaid_failed: HashMap<BlockId, Memo<MermaidKey, String>>,
     /// 行内公式图与失败记忆：按 tex 内容寻址。
     pub(crate) inline_math: HashMap<String, Memo<InlineKey, MathImage>>,
     pub(crate) inline_failed: HashMap<String, Memo<u32, ()>>,
@@ -276,6 +290,21 @@ impl Cache {
 
     pub(crate) fn math_failed(&self, id: BlockId, key: MathFailKey) -> bool {
         self.math_failed.get(&id).is_some_and(|m| m.matches(&key))
+    }
+
+    pub(crate) fn mermaid(&self, id: BlockId, key: MermaidKey) -> Option<&MermaidDrawing> {
+        self.mermaid_drawings
+            .get(&id)
+            .filter(|m| m.matches(&key))
+            .map(|m| &m.value)
+    }
+
+    /// 失败记忆：返回错误消息（None = 未失败）。失败后不再每帧重试。
+    pub(crate) fn mermaid_error(&self, id: BlockId, key: MermaidKey) -> Option<&str> {
+        self.mermaid_failed
+            .get(&id)
+            .filter(|m| m.matches(&key))
+            .map(|m| m.value.as_str())
     }
 
     pub(crate) fn inline_math(&self, tex: &str, key: InlineKey) -> Option<&MathImage> {
@@ -366,6 +395,20 @@ impl Cache {
                 && m.key.scale_q == base.scale_q
                 && m.key.session_rev == revs.session
         });
+        self.mermaid_drawings.retain(|id, m| {
+            alive(*id)
+                && m.key.block == *id
+                && m.key.scale_q == base.scale_q
+                && m.key.theme_rev == revs.theme
+                && m.key.session_rev == revs.session
+        });
+        self.mermaid_failed.retain(|id, m| {
+            alive(*id)
+                && m.key.block == *id
+                && m.key.scale_q == base.scale_q
+                && m.key.theme_rev == revs.theme
+                && m.key.session_rev == revs.session
+        });
         self.inline_math.retain(|_, m| m.matches(&inline_key));
         self.inline_failed.retain(|_, m| m.key == base.scale_q);
         self.inline_images.retain(|_, m| m.key == revs.image_base);
@@ -449,6 +492,43 @@ impl App {
             theme_rev: self.input_state.revs.theme,
             session_rev: self.input_state.revs.session,
         }
+    }
+
+    /// Mermaid 渲染键：块 id + DPI + 主题 + 会话。
+    pub(crate) fn mermaid_key(&self, block: BlockId) -> MermaidKey {
+        MermaidKey {
+            block,
+            scale_q: scale_q(self.input_state.scale),
+            theme_rev: self.input_state.revs.theme,
+            session_rev: self.input_state.revs.session,
+        }
+    }
+
+    /// 安装/替换 Mermaid 渲染后端（嵌入方调用）。后端变化不是任何代次的函数，
+    /// 因此显式清空两类缓存并重算几何：后续帧按新后端重渲。
+    /// 预留嵌入点：本轮只保留接口与测试替身，产品层尚无后端可装（故允许暂未调用）。
+    #[allow(dead_code)]
+    pub fn install_mermaid_renderer(
+        &mut self,
+        renderer: Box<dyn crate::view::mermaid::MermaidRenderer>,
+    ) {
+        self.mermaid.install(renderer);
+        self.reset_mermaid_caches();
+    }
+
+    /// 卸载 Mermaid 渲染后端：回到既有源码卡片降级（不改变文档字节）。
+    #[allow(dead_code)]
+    pub fn clear_mermaid_renderer(&mut self) {
+        self.mermaid.clear();
+        self.reset_mermaid_caches();
+    }
+
+    #[allow(dead_code)]
+    fn reset_mermaid_caches(&mut self) {
+        self.cache.mermaid_drawings.clear();
+        self.cache.mermaid_failed.clear();
+        self.index.geometry_stale = true;
+        self.request_redraw();
     }
 
     pub(crate) fn math_fail_key(&self, block: BlockId) -> MathFailKey {

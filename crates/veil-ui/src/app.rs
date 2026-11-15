@@ -448,6 +448,8 @@ pub(crate) struct UIState {
     pub(crate) hover_link_is_link: bool,
     /// 版本历史面板（N1/B8a）：左侧快照列表 + 正文区只读预览。
     pub(crate) history: History,
+    /// 打印预览覆盖层：与 PDF 导出同源的整页位图 + 当前页/缩放。
+    pub(crate) print_preview: Option<crate::print::PrintPreview>,
 }
 
 impl Default for UIState {
@@ -466,6 +468,7 @@ impl Default for UIState {
             hover_link: None,
             hover_link_is_link: false,
             history: History::default(),
+            print_preview: None,
             expanded_details: std::collections::HashSet::new(),
             expanded_inline_details: std::collections::HashSet::new(),
             frontmatter_revealed: false,

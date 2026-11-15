@@ -19,6 +19,21 @@ pub struct ExportOptions {
     pub toc: bool,
 }
 
+/// 打印预览页：与 PDF 导出同源的整页位图（RGBA 顶向下，straight alpha）。
+#[derive(Clone)]
+pub struct PreviewPage {
+    pub width: u32,
+    pub height: u32,
+    pub pixels: Vec<u8>,
+}
+
+/// 打印预览瞬态：整页位图 + 当前页 + 缩放（0 = 适宽，>0 = 适宽倍数）。
+pub(crate) struct PrintPreview {
+    pub(crate) pages: Vec<PreviewPage>,
+    pub(crate) index: usize,
+    pub(crate) zoom: f32,
+}
+
 /// 打印端口：实现由产品层注入（Win32 GDI；PDF 走系统「Microsoft Print to PDF」）。
 /// 一次打印 = `begin` → 逐页 `render_page` → `end`；实现方须保证 begin 之后
 /// 必调 end（含出错/中止路径），否则应用停留在打印态（尺寸/缩放未恢复）。
@@ -28,6 +43,12 @@ pub trait Print {
     /// 直接导出 PDF（无打印对话框）。默认实现仅提示，不产生输出。
     fn export_pdf(&mut self, session: &mut PrintSession) {
         session.notice(t(Key::PrintUnsupportedPdf));
+    }
+
+    /// 打印预览页（与 PDF 导出同一分页/版面）。默认实现提示不支持。
+    fn preview_pages(&mut self, session: &mut PrintSession) -> Result<Vec<PreviewPage>, String> {
+        let _ = session;
+        Err(t(Key::PrintUnsupportedPreview).into())
     }
 }
 
@@ -497,6 +518,71 @@ impl App {
         self.ports.print = port;
     }
 
+    /// 菜单「打印预览」入口：产品层按 PDF 同源版面离屏渲染整页位图，随后以覆盖层展示。
+    pub(crate) fn open_print_preview(&mut self) {
+        let mut port = std::mem::replace(&mut self.ports.print, Box::new(NoPrint));
+        let pages = port.preview_pages(&mut PrintSession { app: self });
+        self.ports.print = port;
+        match pages {
+            Ok(pages) if !pages.is_empty() => {
+                self.ui_state.print_preview = Some(PrintPreview {
+                    pages,
+                    index: 0,
+                    zoom: 0.0,
+                });
+                self.ui_state.chrome.notice.clear();
+                self.request_redraw();
+            }
+            Ok(_) => {
+                self.ui_state.chrome.notice = t(Key::PrintErrNoPrintablePages).into();
+                self.request_redraw();
+            }
+            Err(e) => {
+                self.ui_state.chrome.notice = e;
+                self.request_redraw();
+            }
+        }
+    }
+
+    /// 关闭打印预览（Esc/再点菜单）：不改文档、不写历史。
+    pub(crate) fn close_print_preview(&mut self) {
+        if self.ui_state.print_preview.take().is_some() {
+            self.request_redraw();
+        }
+    }
+
+    /// 预览态按键：翻页、缩放、关闭。打开时它是唯一输入接收者。
+    pub(crate) fn print_preview_key(&mut self, key: &crate::input::Key) {
+        use crate::input::Key as K;
+        let Some(pv) = self.ui_state.print_preview.as_mut() else {
+            return;
+        };
+        let last = pv.pages.len().saturating_sub(1);
+        match key {
+            K::Text(s) => match s.as_str() {
+                "+" | "=" => pv.zoom = next_zoom(pv.zoom, true),
+                "-" | "_" => pv.zoom = next_zoom(pv.zoom, false),
+                "0" => pv.zoom = 0.0,
+                _ => return,
+            },
+            K::Equal => pv.zoom = next_zoom(pv.zoom, true),
+            K::Minus => pv.zoom = next_zoom(pv.zoom, false),
+            K::Digit0 => pv.zoom = 0.0,
+            K::Left | K::Up => pv.index = pv.index.saturating_sub(1),
+            K::Right | K::Down => pv.index = (pv.index + 1).min(last),
+            K::PageUp => pv.index = pv.index.saturating_sub(1),
+            K::PageDown | K::Enter => pv.index = (pv.index + 1).min(last),
+            K::Home => pv.index = 0,
+            K::End => pv.index = last,
+            K::Escape => {
+                self.close_print_preview();
+                return;
+            }
+            _ => return,
+        }
+        self.request_redraw();
+    }
+
     /// 布局/绘制的有效光标：打印中恒 usize::MAX —— 一切 Reveal 收拢（无激活节点、
     /// 无源码态、无光标），全文呈最终渲染形态；非打印即编辑器光标。
     pub(crate) fn effective_caret(&self) -> usize {
@@ -558,5 +644,16 @@ impl App {
             }
         }
         breaks
+    }
+}
+
+/// 缩放一档：0（适宽）⇄ 0.5…4.0，步进 1.25。
+fn next_zoom(cur: f32, up: bool) -> f32 {
+    let base = if cur <= 0.0 { 1.0 } else { cur };
+    let next = if up { base * 1.25 } else { base / 1.25 };
+    if next < 0.4 {
+        0.0 // 缩到很小即回到适宽
+    } else {
+        next.clamp(0.5, 4.0)
     }
 }

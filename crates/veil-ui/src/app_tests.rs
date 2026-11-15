@@ -16,7 +16,7 @@ use crate::interaction::map_key_parts;
 use crate::math::{MathImage, MathRenderer};
 use crate::mode::{Mode, TextSink};
 use crate::paint::{can_present, fit_size, local_image_path};
-use crate::print::{ExportOptions, NoPrint, Print, PrintSession};
+use crate::print::{ExportOptions, NoPrint, PreviewPage, Print, PrintSession};
 use crate::theme::{self, ConfigStore, ExportStyle, SystemTheme, ThemeEnv, ThemeMode};
 use crate::view::ctx_menu;
 use crate::view::outline;
@@ -11118,6 +11118,22 @@ fn e2e_search_replace_and_crash_recovery() {
 
 // ---- 打印（3b）：分页引擎 + 干净帧 + 状态复原 ----
 
+/// 打印预览端口探针：只提供整页位图，触发打印即视为测试失败。
+#[derive(Clone)]
+struct PreviewProbe {
+    pages: Vec<PreviewPage>,
+    calls: Rc<Cell<usize>>,
+}
+impl Print for PreviewProbe {
+    fn print(&mut self, _s: &mut PrintSession) {
+        panic!("打印预览不应产生打印作业");
+    }
+    fn preview_pages(&mut self, _s: &mut PrintSession) -> Result<Vec<PreviewPage>, String> {
+        self.calls.set(self.calls.get() + 1);
+        Ok(self.pages.clone())
+    }
+}
+
 /// 打印几何采样：begin 后各块 (top, 行顶序列)，断点合法性（不劈行）的判定依据。
 type PrintGeoms = Rc<RefCell<Vec<(f32, Vec<f32>)>>>;
 /// 页帧采样：逐页 (宽, 高, 四角像素)，无 chrome 的直接证据。
@@ -14911,6 +14927,73 @@ fn startup_error_mnemonic_o() {
     assert!(a.ui_state.modal.is_none(), "O 助记符命中「打开其他文件」");
     assert!(!a.window_state.exit_requested, "助记符出口不退出窗口");
 }
+
+// ---- 打印预览（6b）：翻页/缩放/关闭，纯视图态 ----
+
+#[test]
+fn print_preview_overlay_navigates_and_closes_without_doc_change() {
+    let store = MemStore::default();
+    let mut a = app("第一页\n\n第二页\n", Some("a.md"), false, &store);
+    let text = doc_text(&a);
+    let calls = Rc::new(Cell::new(0));
+    let page = |c: u8| PreviewPage {
+        width: 80,
+        height: 120,
+        pixels: vec![c; 80 * 120 * 4],
+    };
+    a.ports.print = Box::new(PreviewProbe {
+        pages: vec![page(200), page(100), page(50)],
+        calls: calls.clone(),
+    });
+    a.perform_menu(MenuAction::PrintPreview);
+    assert_eq!(calls.get(), 1, "打开预览应只取一次整页位图");
+    let pv = a.ui_state.print_preview.as_ref().expect("预览覆盖层已打开");
+    assert_eq!((pv.index, pv.zoom), (0, 0.0), "默认首页 + 适宽");
+    a.route_key(Key::Right);
+    assert_eq!(a.ui_state.print_preview.as_ref().unwrap().index, 1);
+    a.route_key(Key::PageDown);
+    assert_eq!(a.ui_state.print_preview.as_ref().unwrap().index, 2);
+    a.route_key(Key::Right);
+    assert_eq!(
+        a.ui_state.print_preview.as_ref().unwrap().index,
+        2,
+        "末页不越界"
+    );
+    a.route_key(Key::Home);
+    assert_eq!(a.ui_state.print_preview.as_ref().unwrap().index, 0);
+    // 缩放在适宽基础上放大/缩小，0 恢复适宽。
+    a.route_key(Key::Equal);
+    let z = a.ui_state.print_preview.as_ref().unwrap().zoom;
+    assert!(z > 1.0, "放大后 zoom > 1: {z}");
+    a.route_key(Key::Minus);
+    a.route_key(Key::Text("0".into()));
+    assert_eq!(a.ui_state.print_preview.as_ref().unwrap().zoom, 0.0);
+    assert_eq!(doc_text(&a), text, "预览期间文档字节不变");
+    a.route_key(Key::Escape);
+    assert!(a.ui_state.print_preview.is_none(), "Esc 关闭预览");
+    assert_eq!(doc_text(&a), text, "关闭后文档仍不变");
+}
+
+#[test]
+fn print_preview_renders_overlay_frame() {
+    let store = MemStore::default();
+    let mut a = app("正文\n", Some("a.md"), false, &store);
+    let before = a.render().pixels[0];
+    let calls = Rc::new(Cell::new(0));
+    a.ports.print = Box::new(PreviewProbe {
+        pages: vec![PreviewPage {
+            width: 40,
+            height: 60,
+            pixels: vec![255; 40 * 60 * 4],
+        }],
+        calls,
+    });
+    a.perform_menu(MenuAction::PrintPreview);
+    let after = a.render().pixels[0];
+    let sum = |p: u32| (p & 0xff) + ((p >> 8) & 0xff) + ((p >> 16) & 0xff);
+    assert!(sum(after) < sum(before), "预览覆盖层应压暗背景");
+}
+
 
 // ===== 光标闪烁状态机（无 GUI，直接驱动 tick） =====
 

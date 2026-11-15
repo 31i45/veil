@@ -56,6 +56,7 @@ keys! {
     MenuFileExportHtml => "menu.file.export_html", "导出 HTML";
     MenuFileExportPdf => "menu.file.export_pdf", "导出 PDF";
     MenuFilePrint => "menu.file.print", "打印";
+    MenuFilePrintPreview => "menu.file.print_preview", "打印预览";
     MenuFileVersionHistory => "menu.file.version_history", "版本历史";
     MenuFileQuit => "menu.file.quit", "关闭窗口";
 
@@ -352,6 +353,11 @@ keys! {
     // ---- 打印 / 导出 ----
     PrintUnsupportedPdf => "print.unsupported_pdf", "当前平台暂不支持导出 PDF";
     PrintUnsupportedPrint => "print.unsupported_print", "当前平台暂不支持打印";
+    PrintUnsupportedPreview => "print.unsupported_preview", "当前平台暂不支持打印预览";
+    PrintErrPreviewRaster => "print.preview_raster_failed", "打印预览渲染失败（内存位图不可用）";
+    PrintPreviewTitle => "print.preview_title", "打印预览 · 第 {} / {} 页 · {}";
+    PrintPreviewHint => "print.preview_hint",
+        "←/→ 翻页 · +/- 缩放 · 0 适宽 · Esc 关闭";
     PrintTocTitle => "print.toc_title", "目录";
     PrintPageFooter => "print.page_footer", "{} / {}";
     ExportUntitledPdf => "export.untitled_pdf", "未命名.pdf";

@@ -1774,7 +1774,9 @@ impl App {
             self.paint_search_ticks(&mut frame, vp);
         }
         // 应用内设置模态（优先级高于普通 modal）：覆盖菜单栏与状态栏的最后一层；打印帧不含遮罩
-        if self.ui_state.settings.is_some() && self.window_state.print.is_none() {
+        if self.ui_state.print_preview.is_some() && self.window_state.print.is_none() {
+            crate::view::print_preview::paint(self, &mut frame);
+        } else if self.ui_state.settings.is_some() && self.window_state.print.is_none() {
             self.paint_settings(&mut frame);
         } else if self.ui_state.modal.is_some() && self.window_state.print.is_none() {
             self.paint_modal(&mut frame);

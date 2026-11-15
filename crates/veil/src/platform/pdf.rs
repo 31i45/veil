@@ -11,8 +11,10 @@
 use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
 
-use pdf_writer::types::{CidFontType, FontFlags};
+use pdf_writer::types::{ActionType, AnnotationFlags, AnnotationType, CidFontType, FontFlags};
 use pdf_writer::{Name, Pdf, Rect, Ref, Str};
+
+use super::pdf_layout::{LinkAnnot, LinkTarget};
 
 use veil_ui::i18n::{t, tf, Key};
 
@@ -37,6 +39,20 @@ const FONT_CANDIDATES: &[&str] = &[];
 /// 页面顶部起算的 Y → PDF 坐标系 Y（原点在左下角）。
 pub fn y_from_top(top_pt: f32) -> f32 {
     A4_HEIGHT - top_pt
+}
+
+/// URI 文本 → PDF 字节串可安全承载的 ASCII：非 ASCII 字节按 UTF-8 百分号编码，
+/// 避免查看器把 PDFDocEncoding 字节串误读成乱码链接。
+fn uri_ascii(uri: &str) -> String {
+    let mut out = String::with_capacity(uri.len());
+    for b in uri.bytes() {
+        if b.is_ascii() && !b.is_ascii_control() {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
 }
 
 /// 找一个可用的 Windows CJK 字体路径。
@@ -795,6 +811,7 @@ pub fn render_pages(
     pages: &[Vec<DrawOp>],
     images: &[ImageData],
     outline: &[OutlineItem],
+    links: &[LinkAnnot],
     font_path: &Path,
 ) -> Result<Vec<u8>, String> {
     if pages.is_empty() {
@@ -868,6 +885,26 @@ pub fn render_pages(
 
     let fb_refs: Vec<&FontResource> = fallback_fonts.iter().collect();
 
+    // 链接注释：按页归组并按序分配引用（与 `page_links` 一一对应）。
+    let mut page_links: Vec<Vec<&LinkAnnot>> = vec![Vec::new(); pages.len()];
+    for l in links {
+        if let Some(v) = page_links.get_mut(l.page) {
+            v.push(l);
+        }
+    }
+    let annot_refs: Vec<Vec<Ref>> = page_links
+        .iter()
+        .map(|v| {
+            v.iter()
+                .map(|_| {
+                    let r = Ref::new(next_ref);
+                    next_ref += 1;
+                    r
+                })
+                .collect()
+        })
+        .collect();
+
     for (i, page) in pages.iter().enumerate() {
         let mut used: BTreeSet<usize> = BTreeSet::new();
         for op in page {
@@ -901,10 +938,48 @@ pub fn render_pages(
             }
         }
         drop(res);
+        if !annot_refs[i].is_empty() {
+            page_obj.annotations(annot_refs[i].iter().copied());
+        }
         drop(page_obj);
 
         let content = content_stream_with_fonts(page, &font, &fb_refs);
         pdf.stream(content_refs[i], content.as_ref());
+    }
+
+    // —— 链接注释对象 ——
+    // 外部链接用 URI 动作；文档内锚点/脚注用 GoTo + XYZ 目标。
+    for (i, annots) in page_links.iter().enumerate() {
+        for (r, l) in annot_refs[i].iter().zip(annots.iter()) {
+            let mut a = pdf.annotation(*r);
+            a.subtype(AnnotationType::Link)
+                .rect(Rect::new(
+                    l.x,
+                    y_from_top(l.y + l.h),
+                    l.x + l.w,
+                    y_from_top(l.y),
+                ))
+                .border(0.0, 0.0, 0.0, None)
+                .flags(AnnotationFlags::PRINT);
+            match &l.target {
+                LinkTarget::Uri(u) => {
+                    let uri = uri_ascii(u);
+                    a.action()
+                        .action_type(ActionType::Uri)
+                        .uri(Str(uri.as_bytes()));
+                }
+                LinkTarget::Internal { page, x, y } => {
+                    let target = page_refs.get(*page).copied().unwrap_or(page_refs[0]);
+                    a.action()
+                        .action_type(ActionType::GoTo)
+                        .destination()
+                        .page(target)
+                        .xyz(*x, y_from_top(*y), None);
+                }
+                // 未解析锚点不应出现在版面产物中；防御性跳过。
+                LinkTarget::Anchor(_) => {}
+            }
+        }
     }
 
     pdf.pages(page_tree_id)
@@ -1260,6 +1335,7 @@ mod tests {
             &pages,
             &[],
             &[],
+            &[],
             Path::new(find_cjk_font().unwrap()),
         )
         .expect("渲染 PDF");
@@ -1322,7 +1398,7 @@ mod tests {
         );
 
         // 端到端：完整 PDF 的 ToUnicode 流可复制出原字符。
-        let bytes = render_pages(&[page], &[], &[], font_path).expect("渲染 PDF");
+        let bytes = render_pages(&[page], &[], &[], &[], font_path).expect("渲染 PDF");
         assert!(String::from_utf8_lossy(&bytes).contains("<D842DFB7>"));
     }
 
@@ -1370,7 +1446,7 @@ mod tests {
                 top_y: 64.0,
             },
         ];
-        let bytes = render_pages(&pages, &[], &outline, Path::new(font_path)).expect("应产出 PDF");
+        let bytes = render_pages(&pages, &[], &outline, &[], Path::new(font_path)).expect("应产出 PDF");
         assert!(bytes.starts_with(b"%PDF-"));
         assert!(bytes.ends_with(b"%%EOF"));
         let s = String::from_utf8_lossy(&bytes);
@@ -1429,7 +1505,7 @@ mod tests {
                 top_y: 320.0,
             },
         ];
-        let bytes = render_pages(&pages, &[], &outline, Path::new(font_path)).expect("应产出 PDF");
+        let bytes = render_pages(&pages, &[], &outline, &[], Path::new(font_path)).expect("应产出 PDF");
         let s = String::from_utf8_lossy(&bytes).to_uppercase();
         assert_eq!(s.matches("/TITLE").count(), outline.len(), "书签数=标题数");
         assert_eq!(
@@ -1457,5 +1533,55 @@ mod tests {
             "每个书签须有父节点"
         );
         assert!(s.contains("/DEST"), "书签须带跳转目标");
+    }
+
+    /// Task 5：外链写 URI 动作、内链写 GoTo + XYZ 目标，页对象挂 /Annots。
+    #[cfg(windows)]
+    #[test]
+    fn pdf_writes_link_annotations_for_uri_and_internal_targets() {
+        let font_path = find_cjk_font().unwrap();
+        let page = vec![DrawOp::Text(TextRun {
+            x: 56.0,
+            y: 80.0,
+            size: 11.0,
+            text: "链接".into(),
+            bold: false,
+            italic: false,
+            underline: true,
+            strike: false,
+            highlight: None,
+            color: [37, 99, 235],
+        })];
+        let links = vec![
+            LinkAnnot {
+                page: 0,
+                x: 40.0,
+                y: 80.0,
+                w: 60.0,
+                h: 12.0,
+                target: LinkTarget::Uri("https://example.com/guide".into()),
+            },
+            LinkAnnot {
+                page: 0,
+                x: 40.0,
+                y: 100.0,
+                w: 60.0,
+                h: 12.0,
+                target: LinkTarget::Internal {
+                    page: 0,
+                    x: 40.0,
+                    y: 120.0,
+                },
+            },
+        ];
+        let bytes =
+            render_pages(&[page], &[], &[], &links, Path::new(font_path)).expect("应产出 PDF");
+        let s = String::from_utf8_lossy(&bytes);
+        assert!(s.contains("/Annots"), "页面须挂注释数组");
+        assert_eq!(s.matches("/Subtype /Link").count(), 2, "两条链接注释");
+        assert!(s.contains("/URI (https://example.com/guide)"));
+        assert!(s.contains("/GoTo"), "内链使用 GoTo 动作");
+        assert!(s.contains("/XYZ"), "内链目标须带 XYZ 坐标");
+        assert_eq!(s.matches("/Rect").count(), 2, "每条注释须有矩形");
     }
 }

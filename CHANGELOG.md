@@ -2,11 +2,11 @@
 
 Veil 版本迭代记录。每个版本的详细修复清单见对应 git tag 的 commit log。
 
-## Unreleased — 2026-11-15
+## v1.7.0 — 2026-11-15
 
 「审计闭环 + 本轮能力」：交互缺陷清零、图片/折叠补齐、Mermaid 预留接口。
 
-> v1.3–v1.6 为同分支波次归档（未打 tag）；`Cargo.toml` 版本号在正式发版时统一提升。
+> v1.3–v1.6 为同分支波次归档（未单独打 tag），其变更随本版本一并发版。
 
 ### Added
 - 图片三档对齐：独占行 `<img align="left|center|right">`，屏幕按 `width` 偏移、HTML 导出为 `figure.img-center/img-right`、PDF 同步偏移，三端同语义

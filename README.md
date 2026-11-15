@@ -119,15 +119,15 @@ Baseline: 1755 passed / 0 failed / 14 ignored (2026-11-15, re-verified after thi
 
 ## Red Numbers (targets vs measured)
 
-Measured on release build, probe-serialized; performance rows re-verified 2026-11-09, test and size rows 2026-11-15. Commands: `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo run --release -p veil --example bench_typing`, `cargo test -p veil-ui --release --lib -- --ignored --nocapture --test-threads=1 perf_keystroke_path` (and `perf_keystroke_10k_blocks`), and `(Get-Item target\release\veil.exe).Length`. Keystroke attribution detail in `docs/review/keystroke-attribution.md`.
+Measured on release build, probe-serialized; performance rows re-verified 2026-11-09, test and size rows 2026-11-15. Commands: `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo run --release -p veil --example bench_typing`, `cargo test -p veil-ui --release --lib -- --ignored --nocapture --test-threads=1 perf_keystroke_path` (and `perf_keystroke_10k_blocks`), `(Get-Item target\release\veil.exe).Length`, and `cargo tree -e normal --workspace --prefix none` for dependency counts. Keystroke attribution detail in `docs/review/keystroke-attribution.md`.
 
 | Metric | Target | Measured |
 |---|---|---|
-| Cold start (release, `main` → first frame; acceptance口径; 5 runs) | ≤ 300 ms | 145–190 ms (min–max; 2026-11-05, `VEIL_BOOT_LOG` segmented probe) ✅ |
+| Cold start (release, `main` → first frame; acceptance definition; 5 runs) | ≤ 300 ms | 145–190 ms (min–max; 2026-11-05, `VEIL_BOOT_LOG` segmented probe) ✅ |
 | Cold start (in-process open + first full layout + first edit; p50 / max over 5 runs) | observation only | 290.0 ms (app 131.8 ms + first edit 158.2 ms; 130.1 ms after warm-up; 2026-11-09, `cargo test -p veil-ui --release --lib -- --ignored --nocapture --test-threads=1 perf_cold_first_edit`). Same machine only: repeats vary between 290 and 580 ms because of the OS file cache |
 | Cold start (bench harness, process create → open → first layout; p50 / max) | observation only | 576.46 / 599.98 ms (2026-11-09, `cargo run --release -p veil --example bench_typing`; baseline 520.87 / 533.85 → +10.7% / +12.4%, regression gate ≤ 20%) |
 | Cold start (wall clock, process create → first frame; observation only) | ≤ 300 ms | 450–529 ms (440–470 ms before `main`, process-create overhead on this machine; 2026-10-31) |
-| Cold start (window handle; P2 comparison口径) | — | 30 ms (2026-10-30, `tools/bench/measure.ps1`) |
+| Cold start (window handle; P2 comparison definition) | — | 30 ms (2026-10-30, `tools/bench/measure.ps1`) |
 | Keystroke→commit p95 on 100 K-word doc | ≤ 16 ms | 1.297 ms / 1.796 ms (`perf_keystroke_path` 5,005 blocks / `perf_keystroke_10k_blocks` 10,500 blocks; same machine, re-measured 2026-11-15; previous record 6.781 / 12.379) ✅ |
 | Resident memory, 100 K-word doc (private working set) | ≤ 150 MB | 40.76 MB (2026-11-05) |
 | Installed size — code + data (non-icon) | ≤ 6 MiB (Phase A baseline; superseded by the Wave 3/4 PDF export gate allowance) | 7,672,131 B (exe minus 89,277 B icons: `veil.ico` 46,688 + `veil-doc.ico` 42,589; 2026-11-15 after this round) |
@@ -139,18 +139,18 @@ Measured on release build, probe-serialized; performance rows re-verified 2026-1
 | CommonMark 0.31.2 conformance (dimension B) | — | B_EXPORT_EXACT 629/652 · B_CANON 630/652 (not full) |
 | GFM extension conformance (Tables / TaskList / Strikethrough; by test cases; dimension A / C / D) | — | A 23/23 · C 23/23 · D 23/23 ✅; B_CANON 12/23 (11 autolink cases observed only) |
 | `veil-core` GUI/async runtime deps | 0 | 0 |
-| `veil-ui` + `veil` direct deps | ≤ 8 | 8 |
-| Workspace transitive deps | ≤ 200 | 117 |
+| `veil-ui` + `veil` external direct deps | ≤ 8 (pre-PDF baseline; superseded by the Wave 3 authorization for `pdf-writer` + `subsetter` + `ttf-parser`) | 11 |
+| Workspace transitive deps (normal edges, unique crates incl. the three workspace members) | ≤ 200 | 101 |
 
 ## Same-machine Comparison (P2 public baseline, 2026-10-30)
 
-Corpus & scripts reproducible: `bench/corpus/` (generator `tools/bench/gen_corpus.py`; pathological 10MB corpus auto-generated, not committed), `tools/bench/measure.ps1`. Methodology in [P2-benchmark.md](docs/review/P2-benchmark.md).
+Corpus & scripts reproducible: generate the corpus with `tools/bench/gen_corpus.py`, then measure with `tools/bench/measure.ps1`; the corpus and results stay out of the repository (the pathological 10 MB file is generated on demand). Methodology in [P2-benchmark.md](docs/review/P2-benchmark.md).
 
 | Metric | Veil | MarkText | Ratio |
 |---|---|---|---|
 | Resident memory (process tree sum) | 21.51 MB | 365.01 MB | **17.0×** |
 | Installed size | 5.46 MB | 488.95 MB | **89.6×** |
-| Cold start (window-handle口径) | 30 ms | 30 ms | Tie (this口径 favors Electron; see §3 of the report) |
+| Cold start (window-handle definition) | 30 ms | 30 ms | Tie (this definition favors Electron; see §3 of the report) |
 
 Dependency blacklist: `tokio`, `wasmtime`, any webview crate (`webview2-com`/`wry`, etc.). Introducing any of these is a violation.
 
@@ -167,6 +167,8 @@ Dependency blacklist: `tokio`, `wasmtime`, any webview crate (`webview2-com`/`wr
   - ADR-006 external file watcher
   - ADR-007 config & themes
   - ADR-008 dependency upgrade strategy
+  - ADR-009 state model (single source of truth, orthogonal state machines, causal derivation)
+  - ADR-010 collaboration position model (v2 design, frozen at v1 — Veil stays local-only)
   - ADR-011 wgpu deferral (v1 defers, trigger-based)
 - `.trae/specs/release-and-roadmap/v1.1-roadmap.md` — v1.1 detailed plan
 - `.trae/specs/release-and-roadmap/v1.2-roadmap.md` — v1.2 candidate pool (typography settings, PDF bookmarks, font subsetting)

@@ -117,7 +117,7 @@ cargo run -p veil -- <file.md>
 
 ## 数字红线（目标值与实测）
 
-发布构建、探针串行；性能项 2026-11-09 复核，测试与体积项 2026-11-15 复核。命令：`cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo run --release -p veil --example bench_typing`、`cargo test -p veil-ui --release --lib -- --ignored --nocapture --test-threads=1 perf_keystroke_path`（10,500 块用 `perf_keystroke_10k_blocks`）、`(Get-Item target\release\veil.exe).Length`。方法与明细见 `docs/review/keystroke-attribution.md`。
+发布构建、探针串行；性能项 2026-11-09 复核，测试与体积项 2026-11-15 复核。命令：`cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo run --release -p veil --example bench_typing`、`cargo test -p veil-ui --release --lib -- --ignored --nocapture --test-threads=1 perf_keystroke_path`（10,500 块用 `perf_keystroke_10k_blocks`）、`(Get-Item target\release\veil.exe).Length`，依赖计数用 `cargo tree -e normal --workspace --prefix none`。方法与明细见 `docs/review/keystroke-attribution.md`。
 
 | 指标 | 目标值 | 实测 |
 |---|---|---|
@@ -137,12 +137,12 @@ cargo run -p veil -- <file.md>
 | CommonMark 0.31.2 一致性（B 维） | — | B_EXPORT_EXACT 629/652 · B_CANON 630/652（非全通过） |
 | GFM 扩展一致性（Tables / TaskList / Strikethrough；按用例数；A / C / D 维） | — | A 23/23 · C 23/23 · D 23/23 ✅；B_CANON 12/23（11 例 autolinks 仅观测） |
 | `veil-core` 的 GUI/异步运行时依赖数 | 0 | 0 |
-| `veil-ui`+`veil` 直接依赖总数 | ≤ 8 | 8 |
-| workspace 传递依赖总数 | ≤ 200 | 117 |
+| `veil-ui`+`veil` 外部直接依赖总数 | ≤ 8（PDF 前置基线；已被 Wave 3 授权引入的 `pdf-writer` + `subsetter` + `ttf-parser` 覆盖） | 11 |
+| workspace 传递依赖总数（normal 边、去重后的 crate 数，含三个 workspace 成员） | ≤ 200 | 101 |
 
 ## 同机对比（P2 公开基准，2026-10-30）
 
-语料与脚本可复现：`bench/corpus/`（生成器 `tools/bench/gen_corpus.py`，其中 10MB 病态语料不入库、按需生成）、`tools/bench/measure.ps1`。方法与口径声明见 [P2-benchmark.md](docs/review/P2-benchmark.md)。
+语料与脚本可复现：用 `tools/bench/gen_corpus.py` 生成语料、`tools/bench/measure.ps1` 测量；语料与结果不入库（10 MB 病态语料按需生成）。方法与口径声明见 [P2-benchmark.md](docs/review/P2-benchmark.md)。
 
 | 指标 | Veil | MarkText | 倍率 |
 |---|---|---|---|
@@ -165,6 +165,8 @@ cargo run -p veil -- <file.md>
   - ADR-006 外部文件监听
   - ADR-007 配置与主题
   - ADR-008 依赖升级策略
+  - ADR-009 状态模型（单一真值、正交状态机、因果派生）
+  - ADR-010 协作位置模型（v2 设计、v1 冻结 —— Veil 始终本地单机）
   - ADR-011 wgpu 延迟引入（v1 不引入，触发式立项）
 - `.trae/specs/release-and-roadmap/v1.1-roadmap.md` — v1.1 详细 roadmap
 - `.trae/specs/release-and-roadmap/v1.2-roadmap.md` — v1.2 候选池（排版设置、PDF 书签、字体子集化）

@@ -33,7 +33,8 @@ pub(crate) use layout::MAX_BLOCK_BYTES;
 pub(crate) use layout::{
     cell_image_alt_spans, cell_math_spans, inline_details_spans, node_active, oversize_notice,
 };
-pub(crate) use layout::{image_display_size, image_is_standalone};
+pub(crate) use layout::image_display_size;
+pub(crate) use veil_core::image_standalone as image_is_standalone;
 pub(crate) use layout::{
     list_content_start, list_marker_of, ordered_list_epoch, ordered_list_ordinals, toc_list_epoch,
     ListMarker,

@@ -8,7 +8,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use veil_core::{BlockId, BlockKind, CellAlign, HtmlTag, InlineKind, InlineNode, Range, Session};
+use veil_core::{BlockId, BlockKind, CellAlign, InlineKind, InlineNode, Range, Session};
 use veil_ui::i18n::{t, Key};
 
 use crate::platform::pdf::{
@@ -150,90 +150,6 @@ fn item_width(it: &LItem, m: &dyn TextMetrics) -> f32 {
         LItem::Ch(c, s) => m.width_of(*c, s.size),
         LItem::Box(b) => b.w,
     }
-}
-
-/// 段落是否仅含图片（B4）：可见区间被 Image / `<img>` 节点完整覆盖，且其余只剩空白。
-/// `base` 为 `text` 在文档中的起点（`from..to` 为绝对偏移）。
-fn paragraph_is_image_only(
-    nodes: &[InlineNode],
-    text: &str,
-    base: usize,
-    from: usize,
-    to: usize,
-) -> bool {
-    if to <= from {
-        return false;
-    }
-    let mut covered = 0usize;
-    let mut count = 0usize;
-    for n in nodes {
-        let is_img = matches!(n.kind, InlineKind::Image)
-            || matches!(
-                n.kind,
-                InlineKind::HtmlSelfClosed {
-                    tag: HtmlTag::Img,
-                    ..
-                }
-            );
-        if is_img {
-            let s = n.range.start.max(from);
-            let e = n.range.end.min(to);
-            if s < e {
-                count += 1;
-                covered += e - s;
-            }
-        }
-    }
-    if count == 0 {
-        return false;
-    }
-    let visible = text
-        .get(from.saturating_sub(base)..to.saturating_sub(base))
-        .unwrap_or("");
-    let trimmed = visible.trim();
-    !trimmed.is_empty() && covered >= trimmed.len()
-}
-
-/// 段落只含一张独立图片时返回图片区间与 alt 题注；行内、多图与空 alt 不派生题注。
-fn standalone_image_caption(
-    nodes: &[InlineNode],
-    text: &str,
-    base: usize,
-) -> Option<(Range, String)> {
-    let mut images = nodes.iter().filter(|n| {
-        matches!(n.kind, InlineKind::Image)
-            || matches!(
-                n.kind,
-                InlineKind::HtmlSelfClosed {
-                    tag: HtmlTag::Img,
-                    ..
-                }
-            )
-    });
-    let node = images.next()?;
-    if images.next().is_some() {
-        return None;
-    }
-    let start = node.range.start.checked_sub(base)?;
-    let end = node.range.end.checked_sub(base)?;
-    if start >= end
-        || end > text.len()
-        || !text.is_char_boundary(start)
-        || !text.is_char_boundary(end)
-        || !text[..start].trim().is_empty()
-        || !text[end..].trim().is_empty()
-    {
-        return None;
-    }
-    let alt = match &node.kind {
-        InlineKind::Image => {
-            text.get(node.content.start.checked_sub(base)?..node.content.end.checked_sub(base)?)?
-        }
-        InlineKind::HtmlSelfClosed { attrs, .. } => attrs.alt.as_deref()?,
-        _ => return None,
-    };
-    let caption = alt.trim().replace(['\r', '\n'], " ");
-    (!caption.is_empty()).then_some((node.range, caption))
 }
 
 /// 贪心换行：优先在空格处断行；CJK 任意断行；超长串硬断。
@@ -475,12 +391,17 @@ impl<'a> Ctx<'a> {
         let text = slice_text(s, start, end);
         let visible = text.trim_end().len();
         let nodes = s.block_inlines(id).unwrap_or_default();
-        // B4：段落仅含图片 → 放宽到 6 行（与编辑视图/HTML 导出同策略）。
+        // B4：段落含独立图片 → 放宽到 6 行（与编辑视图/HTML 导出同策略）。
+        // 独立图片判定与题注均取自内核单一真值，三端语义一致。
         let prev_limit = self.img_max_lines;
-        if paragraph_is_image_only(&nodes, &text, start, start, start + visible) {
+        let block = Range::new(start, start + text.len());
+        if nodes
+            .iter()
+            .any(|n| n.is_image() && veil_core::image_standalone(&text, block, n.range))
+        {
             self.img_max_lines = 6.0;
         }
-        let caption = standalone_image_caption(&nodes, &text, start);
+        let caption = veil_core::standalone_image_caption(&nodes, &text, start);
         let prev_captioned = self.captioned_image;
         self.captioned_image = caption.as_ref().map(|(range, _)| *range);
         self.rich(

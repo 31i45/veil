@@ -42,6 +42,9 @@ pub(crate) struct BlockGeom {
     pub(crate) toc_marker: bool,
     /// 旧版插入的目录列表项（整块恰为指向标题锚点的链接列表）：渲染时不叠加列表序号。
     pub(crate) toc_list: bool,
+    /// Front Matter（含段落形态 TOML）：索引期一次判定，绘制/几何每帧只读本标志。
+    /// 若每帧对全部块切片解析，10500 块文档的击键帧会平白多出数毫秒。
+    pub(crate) frontmatter_like: bool,
 }
 
 /// 块前间距（B5）：标题块上下对称，统一为 `HEADING_GAP`；其余块为 0。
@@ -233,6 +236,7 @@ impl App {
             && session
                 .text_slice(new_range)
                 .is_some_and(|t| veil_core::is_toc_marker(&t));
+        let frontmatter_like = frontmatter_like_of(session, &new_kind, new_range);
         for b in self.index.blocks[pos + 1..].iter_mut() {
             b.range = Range::new(
                 (b.range.start as isize + byte_delta) as usize,
@@ -257,6 +261,7 @@ impl App {
             toc_marker,
             // 增量路径只处理非列表块（列表项变动回退全量重建），目录列表标记恒 false。
             toc_list: false,
+            frontmatter_like,
         };
         if open_default_details {
             self.ui_state.expanded_details.insert(new_id);
@@ -512,6 +517,8 @@ impl App {
                     .text_slice(range)
                     .is_some_and(|t| veil_core::is_toc_marker(&t));
             let toc_list = self.index.toc_lists.contains(&id);
+            let frontmatter_like =
+                frontmatter_like_of(self.editor.session(), &kind, range);
             toc_epoch ^= toc_entry_epoch(id, &kind);
             next.push(BlockGeom {
                 id,
@@ -528,6 +535,7 @@ impl App {
                 details_hidden: false,
                 toc_marker,
                 toc_list,
+                frontmatter_like,
             });
             total_words += words;
             if open_default_details {
@@ -875,6 +883,57 @@ fn flush_toc_group(group: &mut Vec<BlockId>, ok: bool, out: &mut HashSet<BlockId
     } else {
         group.clear();
     }
+}
+
+/// Front Matter 标志（索引期一次判定）：顶层 `FrontMatter` 块直接命中；
+/// 段落形态的 TOML Front Matter 按同构语法识别。普通段落先做长度与首字符
+/// 预筛，不读文本，保证大文档全量重建不因本判定退化为全文解析。
+fn frontmatter_like_of(session: &Session, kind: &BlockKind, range: Range) -> bool {
+    match kind {
+        BlockKind::FrontMatter(_) => true,
+        BlockKind::Paragraph => {
+            // 最短合法形态 `+++\n+++` 为 7 字节；不足直接排除。
+            if range.end.saturating_sub(range.start) < 7 {
+                return false;
+            }
+            session.text_slice(range).is_some_and(|t| {
+                t.trim_start().starts_with("+++") && toml_frontmatter_like(&t)
+            })
+        }
+        _ => false,
+    }
+}
+
+/// 段落形态的 TOML Front Matter（`+++` 包裹的 `key = value` 行）。
+/// 与内核 `looks_like_toml_frontmatter` 同口径；仅用于视图层隐藏判定，
+/// 不改变块结构，也不把 YAML `---` 误判（那已是块级分隔线/标题下划线）。
+fn toml_frontmatter_like(text: &str) -> bool {
+    let trimmed = text.trim_end_matches(['\r', '\n']);
+    let lines: Vec<&str> = trimmed.split('\n').collect();
+    if lines.len() < 3 {
+        return false;
+    }
+    if lines[0].trim() != "+++" || lines[lines.len() - 1].trim() != "+++" {
+        return false;
+    }
+    let body = &lines[1..lines.len() - 1];
+    !body.is_empty()
+        && body.iter().all(|line| {
+            let s = line.trim();
+            s.is_empty()
+                || s.starts_with('#')
+                || s.starts_with('[')
+                || s.ends_with(',')
+                || s.ends_with(']')
+                || s.ends_with('}')
+                || s.split_once('=').is_some_and(|(key, _)| {
+                    let key = key.trim();
+                    !key.is_empty()
+                        && key.chars().all(|c| {
+                            c.is_alphanumeric() || matches!(c, '_' | '-' | '.' | '"' | '\'')
+                        })
+                })
+        })
 }
 
 /// 廉价估算高度：块内行数 × 折行数取大（不切片、不建 String）。

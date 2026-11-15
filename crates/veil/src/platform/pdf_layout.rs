@@ -63,11 +63,35 @@ pub struct LayoutOpts {
     pub page_numbers: bool,
 }
 
-/// 版面产物：页面绘制指令 + 图片资源 + 多级书签。
+/// 链接注释目标。`Anchor` 是排版中途的临时态（按页内锚点键），
+/// 全部页面就绪后统一解析为 `Internal`；解析不到的锚点不输出动作。
+#[derive(Clone, Debug, PartialEq)]
+pub enum LinkTarget {
+    /// 外部 URI（仅 http/https/mailto，且长度受限）。
+    Uri(String),
+    /// 文档内跳转：最终页下标 + 目标左上角（pt，自页面顶部）。
+    Internal { page: usize, x: f32, y: f32 },
+    /// 尚未解析的锚点键（不会出现在 `DocLayout` 输出中）。
+    Anchor(String),
+}
+
+/// 链接注释：页面内矩形（pt，y 自页面顶部）+ 目标。
+#[derive(Clone, Debug, PartialEq)]
+pub struct LinkAnnot {
+    pub page: usize,
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+    pub target: LinkTarget,
+}
+
+/// 版面产物：页面绘制指令 + 图片资源 + 多级书签 + 链接注释。
 pub struct DocLayout {
     pub pages: Vec<Vec<DrawOp>>,
     pub images: Vec<ImageData>,
     pub outline: Vec<OutlineItem>,
+    pub links: Vec<LinkAnnot>,
 }
 
 /// 媒体接缝：图片与公式解码（实现见 `pdf_media`，单测可注入假实现）。
@@ -143,12 +167,16 @@ struct BoxItem {
 enum LItem {
     Ch(char, Style),
     Box(BoxItem),
+    /// 链接起点：携带 `Ctx::link_targets` 下标；跨行时每行各成一个矩形。
+    LinkOpen(u32),
+    LinkClose,
 }
 
 fn item_width(it: &LItem, m: &dyn TextMetrics) -> f32 {
     match it {
         LItem::Ch(c, s) => m.width_of(*c, s.size),
         LItem::Box(b) => b.w,
+        LItem::LinkOpen(_) | LItem::LinkClose => 0.0,
     }
 }
 
@@ -206,6 +234,30 @@ struct Head {
     top_y: f32,
 }
 
+/// 链接目标白名单：仅 `http(s)://`、`mailto:` 与文档内 `#锚点`。
+/// 危险 scheme（javascript:/file:/data: 等）、含空白/控制字符或超长 URL
+/// 一律不生成可执行动作——保持链接样式，但不输出注释。
+fn link_target(url: &str) -> Option<LinkTarget> {
+    const MAX_URI: usize = 2048;
+    let u = url.trim();
+    if u.is_empty()
+        || u.len() > MAX_URI
+        || u.chars().any(|c| c.is_control() || c.is_whitespace())
+    {
+        return None;
+    }
+    if let Some(anchor) = u.strip_prefix('#') {
+        return (!anchor.is_empty()).then(|| LinkTarget::Anchor(anchor.to_string()));
+    }
+    let lower = u.to_ascii_lowercase();
+    if lower.starts_with("http://") || lower.starts_with("https://") || lower.starts_with("mailto:")
+    {
+        Some(LinkTarget::Uri(u.to_string()))
+    } else {
+        None
+    }
+}
+
 struct Ctx<'a> {
     metrics: &'a dyn TextMetrics,
     geom: PageGeom,
@@ -222,6 +274,14 @@ struct Ctx<'a> {
     /// 已定义脚注 id → 编号（文档首次引用顺序，与 HTML 导出同源）。
     /// 缺定义的引用不进表：引用处保留可读原文，不生成断号。
     footnotes: HashMap<String, usize>,
+    /// 链接注释（页下标为当前页；目录插页后统一平移）。
+    links: Vec<LinkAnnot>,
+    /// 页内锚点：键 → (页下标, 目标 y)。标题 slug 与脚注双向锚点共用。
+    anchors: HashMap<String, (usize, f32)>,
+    /// 本轮链接目标表（`LItem::LinkOpen` 携带下标）。
+    link_targets: Vec<LinkTarget>,
+    /// 正在跨越的链接：(目标下标, 本行起点 x)。行尾闭合本行矩形并保留跨行状态。
+    open_link: Option<(u32, f32)>,
 }
 
 impl<'a> Ctx<'a> {
@@ -237,6 +297,10 @@ impl<'a> Ctx<'a> {
             img_max_lines: 2.0,
             captioned_image: None,
             footnotes: HashMap::new(),
+            links: Vec::new(),
+            anchors: HashMap::new(),
+            link_targets: Vec::new(),
+            open_link: None,
         }
     }
 
@@ -280,6 +344,7 @@ impl<'a> Ctx<'a> {
         }
         let h = above + below;
         self.ensure(h);
+        let line_top = self.y;
         let baseline = self.y + above;
 
         let mut x = self.geom.margin_x + indent;
@@ -295,8 +360,38 @@ impl<'a> Ctx<'a> {
 
         let mut buf = String::new();
         let mut style: Option<Style> = None;
+        // 跨行链接：本行从行首重新起算，行尾再闭合（每行一个可点击矩形）。
+        if let Some((idx, _)) = self.open_link {
+            self.open_link = Some((idx, x));
+        }
         for it in line {
             match it {
+                LItem::LinkOpen(idx) => {
+                    flush_run(
+                        &mut self.pages,
+                        self.page,
+                        &mut buf,
+                        &mut style,
+                        &mut x,
+                        self.metrics,
+                        baseline,
+                    );
+                    self.open_link = Some((idx, x));
+                }
+                LItem::LinkClose => {
+                    flush_run(
+                        &mut self.pages,
+                        self.page,
+                        &mut buf,
+                        &mut style,
+                        &mut x,
+                        self.metrics,
+                        baseline,
+                    );
+                    if let Some((idx, sx)) = self.open_link.take() {
+                        self.push_link(idx, sx, x, line_top, h);
+                    }
+                }
                 LItem::Ch(c, st) => {
                     if style != Some(st) {
                         flush_run(
@@ -343,7 +438,35 @@ impl<'a> Ctx<'a> {
             self.metrics,
             baseline,
         );
+        // 行尾仍处于链接内：本行矩形到此为止，跨行状态保留给下一行。
+        if let Some((idx, sx)) = self.open_link {
+            self.push_link(idx, sx, x, line_top, h);
+        }
         self.y += h;
+    }
+
+    /// 记录一个链接标记下标（`LItem::LinkOpen` 引用它）。
+    fn link_mark(&mut self, target: LinkTarget) -> u32 {
+        self.link_targets.push(target);
+        (self.link_targets.len() - 1) as u32
+    }
+
+    /// 把 `[x0, x1)` × 本行高登记为链接矩形；零宽（空链接/行首尾相接）跳过。
+    fn push_link(&mut self, idx: u32, x0: f32, x1: f32, top: f32, h: f32) {
+        if x1 <= x0 + 0.1 {
+            return;
+        }
+        let Some(target) = self.link_targets.get(idx as usize).cloned() else {
+            return;
+        };
+        self.links.push(LinkAnnot {
+            page: self.page,
+            x: x0,
+            y: top,
+            w: x1 - x0,
+            h,
+            target,
+        });
     }
 
     fn blank(&mut self, size: f32) {
@@ -543,20 +666,36 @@ impl<'a> Ctx<'a> {
                         st,
                     );
                 }
-                InlineKind::Link => self.emit_inlines(
-                    text,
-                    base,
-                    node.content.start.max(ns),
-                    node.content.end.min(ne),
-                    &node.children,
-                    Style {
-                        color: COL_LINK,
-                        underline: true,
-                        ..style
-                    },
-                    out,
-                    media,
-                ),
+                InlineKind::Link => {
+                    // 链接注释：外部 URI / 文档内锚点；不在白名单内则只保留样式。
+                    let url = node
+                        .url
+                        .and_then(|r| {
+                            text.get(r.start.saturating_sub(base)..r.end.saturating_sub(base))
+                        })
+                        .unwrap_or("");
+                    let mark = link_target(url).map(|t| self.link_mark(t));
+                    if let Some(idx) = mark {
+                        out.push(LItem::LinkOpen(idx));
+                    }
+                    self.emit_inlines(
+                        text,
+                        base,
+                        node.content.start.max(ns),
+                        node.content.end.min(ne),
+                        &node.children,
+                        Style {
+                            color: COL_LINK,
+                            underline: true,
+                            ..style
+                        },
+                        out,
+                        media,
+                    );
+                    if mark.is_some() {
+                        out.push(LItem::LinkClose);
+                    }
+                }
                 InlineKind::Image => {
                     let url = node
                         .url
@@ -629,8 +768,16 @@ impl<'a> Ctx<'a> {
                                 ..node.content.end.saturating_sub(base),
                         )
                         .unwrap_or("");
-                    match self.footnotes.get(id_txt).copied() {
+                    let num = self.footnotes.get(id_txt).copied();
+                    match num {
                         Some(num) => {
+                            // 首次引用位置 = 文末脚注的返回锚点；引用数字链接到定义。
+                            self.anchors
+                                .entry(format!("fnref:{id_txt}"))
+                                .or_insert((self.page, self.y));
+                            let idx =
+                                self.link_mark(LinkTarget::Anchor(format!("fn:{id_txt}")));
+                            out.push(LItem::LinkOpen(idx));
                             for c in format!("[{num}]").chars() {
                                 out.push(LItem::Ch(
                                     c,
@@ -641,6 +788,7 @@ impl<'a> Ctx<'a> {
                                     },
                                 ));
                             }
+                            out.push(LItem::LinkClose);
                         }
                         // 引用无定义：保留源码原文（可读），不伪造编号/断链。
                         None => push_chars(
@@ -1119,7 +1267,9 @@ impl<'a> Ctx<'a> {
                             .map(|i| match i {
                                 LItem::Ch(c, _) => c,
                                 LItem::Box(_) => ' ',
+                                LItem::LinkOpen(_) | LItem::LinkClose => '\0',
                             })
+                            .filter(|c| *c != '\0')
                             .collect::<String>()
                     })
                     .collect();
@@ -1326,7 +1476,7 @@ impl<'a> Ctx<'a> {
     /// 定义正文剥除 `[^id]:` 前缀并去掉 Markdown 标记（不留裸 `**`/反引号）。
     fn footnote_section(&mut self, s: &Session) {
         let mut seen: HashSet<String> = HashSet::new();
-        let mut items: Vec<(usize, String)> = Vec::new();
+        let mut items: Vec<(usize, String, String)> = Vec::new();
         for (_, kind, range) in s.blocks() {
             if kind != BlockKind::FootnoteDef {
                 continue;
@@ -1338,24 +1488,36 @@ impl<'a> Ctx<'a> {
             let Some(num) = self.footnotes.get(&id).copied() else {
                 continue; // 未被引用：不占号也不输出
             };
-            if !seen.insert(id) {
+            if !seen.insert(id.clone()) {
                 continue; // 重复定义 first wins
             }
-            items.push((num, footnote_plain_text(&body)));
+            items.push((num, id, footnote_plain_text(&body)));
         }
         if items.is_empty() {
             return;
         }
-        items.sort_by_key(|(num, _)| *num);
+        items.sort_by_key(|(num, _, _)| *num);
         self.rule();
         let st = Style {
             size: 9.0,
             color: COL_MUTED,
             ..Style::body()
         };
-        for (num, body) in items {
-            let text = format!("[{num}] {body}");
-            let items: Vec<LItem> = text.chars().map(|c| LItem::Ch(c, st)).collect();
+        for (num, id, body) in items {
+            // 定义项锚点：正文引用 `[n]` → 此处；本项编号 → 首次引用位置。
+            self.ensure(self.metrics.line_height(9.0));
+            self.anchors
+                .insert(format!("fn:{id}"), (self.page, self.y));
+            let idx = self.link_mark(LinkTarget::Anchor(format!("fnref:{id}")));
+            let mut items: Vec<LItem> = Vec::new();
+            items.push(LItem::LinkOpen(idx));
+            for c in format!("[{num}]").chars() {
+                items.push(LItem::Ch(c, st));
+            }
+            items.push(LItem::LinkClose);
+            for c in format!(" {body}").chars() {
+                items.push(LItem::Ch(c, st));
+            }
             for line in fill_lines(items, self.max_w().max(24.0), self.metrics) {
                 self.emit_line(line, 0.0, 9.0, CellAlign::None, self.max_w());
             }
@@ -1384,7 +1546,8 @@ impl<'a> Ctx<'a> {
             .collect();
         let toc_n = chunks.len();
         let mut pages: Vec<Vec<DrawOp>> = Vec::new();
-        for chunk in chunks.iter() {
+        let mut toc_links: Vec<LinkAnnot> = Vec::new();
+        for (pi, chunk) in chunks.iter().enumerate() {
             let mut ops: Vec<DrawOp> = Vec::new();
             let mut y = self.geom.top();
             ops.push(DrawOp::Text(TextRun {
@@ -1411,6 +1574,19 @@ impl<'a> Ctx<'a> {
                 while self.metrics.text_width(&title, size) > avail && !title.is_empty() {
                     title.pop();
                 }
+                // 整行可点：目录页自身页码 + 最终页序中的标题位置。
+                toc_links.push(LinkAnnot {
+                    page: pi,
+                    x: self.geom.margin_x,
+                    y,
+                    w: self.geom.content_w(),
+                    h: row_h,
+                    target: LinkTarget::Internal {
+                        page: h.page + toc_n,
+                        x: self.geom.margin_x + indent,
+                        y: h.top_y,
+                    },
+                });
                 ops.push(DrawOp::Text(TextRun {
                     x: self.geom.margin_x + indent,
                     y: y + self.metrics.ascent(size),
@@ -1443,6 +1619,15 @@ impl<'a> Ctx<'a> {
         for (i, p) in pages.into_iter().enumerate() {
             self.pages.insert(i, p);
         }
+        // 目录插页后：正文链接与页内锚点的页下标整体后移；
+        // 目录行自身的注释已按最终页序生成，直接并入。
+        for l in &mut self.links {
+            l.page += n;
+        }
+        for (p, _) in self.anchors.values_mut() {
+            *p += n;
+        }
+        self.links.extend(toc_links);
         n
     }
 
@@ -1719,10 +1904,42 @@ pub fn layout_document(
         })
         .collect();
 
+    // 标题锚点：slug（按标题顺序去重）→（最终页, 标题顶）。登记两份键：
+    // 原 slug 与归一化后 slug（作者手写 `#Heading` 也能命中）。
+    let titles: Vec<&str> = ctx.heads.iter().map(|h| h.text.as_str()).collect();
+    for (h, slug) in ctx.heads.iter().zip(veil_core::heading_slugs(titles.into_iter())) {
+        let at = (h.page + toc_pages, h.top_y);
+        ctx.anchors.entry(veil_core::heading_slug(&slug)).or_insert(at);
+        ctx.anchors.entry(slug).or_insert(at);
+    }
+    // 解析文档内锚点：命中则改为 Internal；未命中的锚点丢弃（不输出可执行动作）。
+    let margin_x = ctx.geom.margin_x;
+    for l in &mut ctx.links {
+        let key = match &l.target {
+            LinkTarget::Anchor(k) => k.clone(),
+            _ => continue,
+        };
+        let at = ctx
+            .anchors
+            .get(&key)
+            .copied()
+            .or_else(|| ctx.anchors.get(&veil_core::heading_slug(&key)).copied());
+        if let Some((page, y)) = at {
+            l.target = LinkTarget::Internal {
+                page,
+                x: margin_x,
+                y,
+            };
+        }
+    }
+    ctx.links
+        .retain(|l| !matches!(l.target, LinkTarget::Anchor(_)));
+
     DocLayout {
         pages: ctx.pages,
         images: ctx.images,
         outline,
+        links: ctx.links,
     }
 }
 
@@ -1775,6 +1992,104 @@ mod tests {
             },
             None,
         )
+    }
+
+    // ===== Task 5：链接注释 =====
+
+    #[test]
+    fn external_and_anchor_links_emit_annotations() {
+        let doc = lay(
+            "[官网](https://example.com/guide)\n\n# 章节一\n\n回到[章节](#章节一)\n",
+            false,
+        );
+        let uris: Vec<&LinkAnnot> = doc
+            .links
+            .iter()
+            .filter(|l| matches!(l.target, LinkTarget::Uri(_)))
+            .collect();
+        assert_eq!(uris.len(), 1, "外链应生成一条 URI 注释: {:?}", doc.links);
+        assert!(matches!(
+            &uris[0].target,
+            LinkTarget::Uri(u) if u == "https://example.com/guide"
+        ));
+        assert!(uris[0].w > 0.0 && uris[0].h > 0.0, "矩形须非零");
+        let internal: Vec<&LinkAnnot> = doc
+            .links
+            .iter()
+            .filter(|l| matches!(l.target, LinkTarget::Internal { .. }))
+            .collect();
+        assert_eq!(internal.len(), 1, "内链应生成一条跳转注释: {:?}", doc.links);
+        if let LinkTarget::Internal { page, y, .. } = internal[0].target {
+            assert_eq!(page, 0);
+            let head_y = doc.outline[0].top_y;
+            assert!(
+                (y - head_y).abs() < 1.0,
+                "锚点应指向标题顶部: {y} vs {head_y}"
+            );
+        }
+    }
+
+    #[test]
+    fn wrapped_link_gets_one_rect_per_line() {
+        let label = "长链接文字".repeat(30);
+        let md = format!("[{label}](https://example.com/long)\n");
+        let doc = lay(&md, false);
+        let rects: Vec<&LinkAnnot> = doc
+            .links
+            .iter()
+            .filter(|l| matches!(l.target, LinkTarget::Uri(_)))
+            .collect();
+        assert!(rects.len() >= 2, "跨行链接应逐行生成矩形: {}", rects.len());
+        for r in rects {
+            assert!(r.y >= 0.0 && r.h > 0.0, "矩形坐标须有效: {r:?}");
+        }
+    }
+
+    #[test]
+    fn footnote_ref_and_definition_get_bidirectional_annotations() {
+        let doc = lay("正文[^a]\n\n[^a]: 注释\n", false);
+        let internal: Vec<&LinkAnnot> = doc
+            .links
+            .iter()
+            .filter(|l| matches!(l.target, LinkTarget::Internal { .. }))
+            .collect();
+        assert_eq!(
+            internal.len(),
+            2,
+            "引用→定义 与 定义→引用 各一条: {:?}",
+            doc.links
+        );
+        assert!(
+            (internal[0].y - internal[1].y).abs() > 1.0,
+            "两条注释应位于不同垂直位置"
+        );
+    }
+
+    #[test]
+    fn link_spanning_pages_gets_rect_on_each_page() {
+        // 跨页链接：同一 URL 的文字跨过分页，每页各自一个矩形（页下标正确）。
+        let label = "跨页链接".repeat(1500);
+        let doc = lay(&format!("[{label}](https://example.com/paged)\n"), false);
+        let pages: std::collections::HashSet<usize> =
+            doc.links.iter().map(|l| l.page).collect();
+        assert!(
+            pages.len() >= 2,
+            "跨页链接应在多页生成矩形: {:?}",
+            pages
+        );
+        assert!(doc.links.iter().all(|l| l.page < doc.pages.len()));
+    }
+
+    #[test]
+    fn dangerous_schemes_and_overlong_urls_emit_no_actions() {
+        let doc = lay(
+            "[a](javascript:alert(1)) [b](file:///C:/secret.txt) [c](data:text/html,hi)\n",
+            false,
+        );
+        assert!(doc.links.is_empty(), "危险 scheme 不得生成动作: {:?}", doc.links);
+        let long = format!("[x](https://example.com/{})\n", "x".repeat(2100));
+        let doc = lay(&long, false);
+        assert!(doc.links.is_empty(), "超长 URL 不得生成动作: {:?}", doc.links);
     }
 
     // ===== N3c / N3b：高亮与 Callout 的 PDF 通道 =====
@@ -2472,6 +2787,7 @@ mod tests {
             &doc.pages,
             &doc.images,
             &doc.outline,
+            &doc.links,
             std::path::Path::new(font_path),
         )
         .expect("渲染 PDF");

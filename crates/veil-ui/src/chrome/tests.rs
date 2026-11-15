@@ -232,6 +232,7 @@ fn menu_definitions_cover_shortcuts() {
             MenuAction::Export,
             MenuAction::ExportPdf,
             MenuAction::Print,
+            MenuAction::PrintPreview,
             MenuAction::VersionHistory,
             MenuAction::Separator,
             MenuAction::Quit

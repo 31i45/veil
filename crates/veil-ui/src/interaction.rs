@@ -100,6 +100,11 @@ impl App {
     /// 单个内部键的路由与执行：`on_key` 与测试共用同一入口。
     /// 模式优先级与各模式的按键语义只在 `mode::route` 一处表达。
     pub(crate) fn route_key(&mut self, key: Key) {
+        // 打印预览覆盖层优先：打开时它是唯一输入接收者（翻页/缩放/Esc 关闭）。
+        if self.ui_state.print_preview.is_some() {
+            self.print_preview_key(&key);
+            return;
+        }
         // 设置模态优先（优先级高于普通 modal）：打开时它是唯一输入接收者
         if self.ui_state.settings.is_some() {
             let mods = self.input_state.mods;
@@ -988,6 +993,7 @@ impl App {
             MenuAction::Export => self.export_now(),
             MenuAction::ExportPdf => self.export_pdf(),
             MenuAction::Print => self.print_document(),
+            MenuAction::PrintPreview => self.open_print_preview(),
             MenuAction::VersionHistory => self.toggle_history(),
             MenuAction::Undo => {
                 if let Some(dirty) = self.editor.apply(Intent::Undo) {

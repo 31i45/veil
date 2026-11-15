@@ -9,7 +9,7 @@
 use std::ffi::c_void;
 
 use veil_ui::i18n::{t, tf, Key};
-use veil_ui::{path_label, Print, PrintSession};
+use veil_ui::{path_label, PreviewPage, Print, PrintSession};
 
 use super::pdf::{
     find_cjk_font, DrawOp, FontMetrics, ImageData, TextMetrics, TextRun, A4_HEIGHT, A4_WIDTH,
@@ -25,6 +25,7 @@ type Hgdiobj = *mut c_void;
 type Hbrush = *mut c_void;
 type Hpen = *mut c_void;
 type Hfont = *mut c_void;
+type Hbitmap = *mut c_void;
 
 #[repr(C)]
 struct RectI32 {
@@ -90,11 +91,56 @@ struct BitmapInfoHeader {
     bi_clr_important: u32,
 }
 
+/// DEVMODEW（wingdi.h；x64 下 220 字节）。只用到 dmCopies/dmCollate，
+/// 其余字段按标准布局保留以保证偏移正确（dmCopies 在偏移 86）。
+#[repr(C)]
+struct DevModeW {
+    dm_device_name: [u16; 32],
+    dm_spec_version: u16,
+    dm_driver_version: u16,
+    dm_size: u16,
+    dm_driver_extra: u16,
+    dm_fields: u32,
+    dm_orientation: i16,
+    dm_paper_size: i16,
+    dm_paper_length: i16,
+    dm_paper_width: i16,
+    dm_scale: i16,
+    dm_copies: i16,
+    dm_default_source: i16,
+    dm_print_quality: i16,
+    dm_color: i16,
+    dm_duplex: i16,
+    dm_y_resolution: i16,
+    dm_tt_option: i16,
+    dm_collate: i16,
+    dm_form_name: [u16; 32],
+    dm_log_pixels: u16,
+    dm_bits_per_pel: u32,
+    dm_pels_width: u32,
+    dm_pels_height: u32,
+    dm_display_flags: u32,
+    dm_display_frequency: u32,
+    dm_icm_method: u32,
+    dm_icm_intent: u32,
+    dm_media_type: u32,
+    dm_dither_type: u32,
+    dm_reserved1: u32,
+    dm_reserved2: u32,
+    dm_panning_width: u32,
+    dm_panning_height: u32,
+}
+
+/// DM_COPIES / DM_COLLATE（wingdi.h）：声明 DEVMODE 中哪些字段有效。
+const DM_COPIES: u32 = 0x0000_0100;
+const DM_COLLATE: u32 = 0x0000_1000;
+
 #[cfg(target_pointer_width = "64")]
 const _: () = {
     assert!(std::mem::size_of::<PrintDlgW>() == 120);
     assert!(std::mem::size_of::<DocInfoW>() == 40);
     assert!(std::mem::size_of::<BitmapInfoHeader>() == 40);
+    assert!(std::mem::size_of::<DevModeW>() == 220);
 };
 
 #[link(name = "comdlg32")]
@@ -117,6 +163,16 @@ extern "system" {
     fn StartPage(hdc: Hdc) -> i32;
     fn EndPage(hdc: Hdc) -> i32;
     fn DeleteDC(hdc: Hdc) -> i32;
+    fn ResetDCW(hdc: Hdc, lpdm: *const c_void) -> Hdc;
+    fn CreateCompatibleDC(hdc: Hdc) -> Hdc;
+    fn CreateDIBSection(
+        hdc: Hdc,
+        pbmi: *const BitmapInfoHeader,
+        usage: u32,
+        ppv_bits: *mut *mut c_void,
+        h_section: *mut c_void,
+        offset: u32,
+    ) -> Hbitmap;
     fn SetDIBitsToDevice(
         hdc: Hdc,
         x_dest: i32,
@@ -684,6 +740,21 @@ impl Print for WinPrint {
         if unsafe { PrintDlgW(&mut pd) } == 0 {
             return; // 用户取消：静默返回，不打断工作流
         }
+        // 份数：对话框的 nCopies 写回 DEVMODE 并应用到 DC，驱动按份数/份内排序输出。
+        // 不设 PD_USEDEVMODECOPIES，保证对话框里的份数输入权威。
+        let copies = pd.n_copies.max(1);
+        let hdc = pd.h_dc;
+        if copies > 1 && !pd.h_dev_mode.is_null() {
+            let dm = pd.h_dev_mode as *mut DevModeW;
+            unsafe {
+                (*dm).dm_fields |= DM_COPIES | DM_COLLATE;
+                (*dm).dm_copies = copies.min(i16::MAX as u16) as i16;
+                (*dm).dm_collate = 1;
+                if !hdc.is_null() {
+                    ResetDCW(hdc, pd.h_dev_mode);
+                }
+            }
+        }
         // 对话框分配的全局内存句柄按约释放（PD_RETURNDC 下 hDC 由我们 DeleteDC）
         if !pd.h_dev_mode.is_null() {
             unsafe { GlobalFree(pd.h_dev_mode) };
@@ -691,7 +762,6 @@ impl Print for WinPrint {
         if !pd.h_dev_names.is_null() {
             unsafe { GlobalFree(pd.h_dev_names) };
         }
-        let hdc = pd.h_dc;
         if hdc.is_null() {
             session.notice(t(Key::PrintNoPrinterContext));
             return;
@@ -764,6 +834,92 @@ impl Print for WinPrint {
             run_gdi_pdf_export(&target, session);
         }
     }
+
+    /// 打印预览：与 PDF 导出同一 `pdf_layout` 版面，离屏 GDI 渲染为整页位图。
+    /// 覆盖层只读展示，不产生打印作业、不改文档。
+    fn preview_pages(&mut self, session: &mut PrintSession) -> Result<Vec<PreviewPage>, String> {
+        let layout = build_print_layout(session)?;
+        render_preview_pages(&layout)
+    }
+}
+
+/// 预览离屏 DPI：A4（pt）按 96dpi 光栅化，覆盖层再按窗口缩放（最近邻）。
+const PREVIEW_DPI: f32 = 96.0;
+
+/// 逐页把 DrawOp 画到 32bpp 内存位图，返回 RGBA（alpha 恒 255）。
+fn render_preview_pages(pl: &PrintLayout) -> Result<Vec<PreviewPage>, String> {
+    let s = PREVIEW_DPI / 72.0;
+    let w = (A4_WIDTH * s).round() as i32;
+    let h = (A4_HEIGHT * s).round() as i32;
+    let bmi = BitmapInfoHeader {
+        bi_size: 40,
+        bi_width: w,
+        bi_height: -h, // 顶向下，与帧行序一致
+        bi_planes: 1,
+        bi_bit_count: 32,
+        bi_compression: 0,
+        bi_size_image: 0,
+        bi_x_pels_per_meter: 0,
+        bi_y_pels_per_meter: 0,
+        bi_clr_used: 0,
+        bi_clr_important: 0,
+    };
+    let mut pages = Vec::with_capacity(pl.layout.pages.len());
+    for ops in &pl.layout.pages {
+        let mut bits: *mut c_void = std::ptr::null_mut();
+        let dc = unsafe { CreateCompatibleDC(std::ptr::null_mut()) };
+        let dib = if dc.is_null() {
+            std::ptr::null_mut()
+        } else {
+            unsafe {
+                CreateDIBSection(dc, &bmi, 0, &mut bits, std::ptr::null_mut(), 0)
+            }
+        };
+        if dc.is_null() || dib.is_null() || bits.is_null() {
+            if dib.is_null() {
+                unsafe { DeleteDC(dc) };
+            } else {
+                unsafe {
+                    DeleteObject(dib);
+                    DeleteDC(dc);
+                }
+            }
+            return Err(t(Key::PrintErrPreviewRaster).into());
+        }
+        let old = unsafe { SelectObject(dc, dib) };
+        let white = unsafe { CreateSolidBrush(rgb([255, 255, 255])) };
+        let all = RectI32 {
+            left: 0,
+            top: 0,
+            right: w,
+            bottom: h,
+        };
+        unsafe {
+            FillRect(dc, &all, white);
+            DeleteObject(white);
+        }
+        for op in ops {
+            draw_op(dc, op, &pl.layout.images, &pl.metrics, pl.font_path, s, 0.0, 0.0);
+        }
+        let mut pixels = vec![0u8; (w * h * 4) as usize];
+        unsafe {
+            std::ptr::copy_nonoverlapping(bits as *const u8, pixels.as_mut_ptr(), pixels.len());
+            SelectObject(dc, old);
+            DeleteObject(dib);
+            DeleteDC(dc);
+        }
+        // GDI 的 32bpp 位图是 BGRA 且 alpha 未定义：翻成 RGBA 并置不透明。
+        for p in pixels.chunks_exact_mut(4) {
+            p.swap(0, 2);
+            p[3] = 255;
+        }
+        pages.push(PreviewPage {
+            width: w as u32,
+            height: h as u32,
+            pixels,
+        });
+    }
+    Ok(pages)
 }
 
 // =============================================================================
@@ -854,7 +1010,13 @@ fn try_native_pdf(target: &std::path::Path, session: &mut PrintSession) -> Resul
         return Err(t(Key::PrintErrNoExportPages).into());
     }
 
-    let bytes = render_pages(&layout.pages, &layout.images, &layout.outline, font_path)?;
+    let bytes = render_pages(
+        &layout.pages,
+        &layout.images,
+        &layout.outline,
+        &layout.links,
+        font_path,
+    )?;
 
     if bytes.len() > 40 * 1024 * 1024 {
         return Err(tf(
@@ -882,7 +1044,11 @@ fn try_native_pdf(target: &std::path::Path, session: &mut PrintSession) -> Resul
 
 #[cfg(test)]
 mod tests {
-    use super::{export_frame, font_face_for, rect_i32, replace_file, rgb, temp_pdf_path};
+    use super::{
+        export_frame, find_cjk_font, font_face_for, rect_i32, render_preview_pages, replace_file,
+        rgb, temp_pdf_path, DocLayout, DrawOp, FontMetrics, PrintLayout, TextRun, A4_HEIGHT,
+        A4_WIDTH, PREVIEW_DPI,
+    };
     use std::fs;
     use std::path::PathBuf;
 
@@ -994,5 +1160,55 @@ mod tests {
         String::from_utf16_lossy(s)
             .trim_end_matches('\0')
             .to_string()
+    }
+
+    /// 6b：预览离屏渲染与 PDF 同源版面——每页产出 A4@96dpi 的整页位图，
+    /// 文字确实被画上（存在非白像素），alpha 固定不透明。
+    #[cfg(windows)]
+    #[test]
+    fn preview_pages_rasterize_same_layout() {
+        let Some(font_path) = find_cjk_font() else {
+            return;
+        };
+        let metrics =
+            FontMetrics::load(std::path::Path::new(font_path), "预览".chars()).unwrap();
+        let page = vec![DrawOp::Text(TextRun {
+            x: 56.0,
+            y: 80.0,
+            size: 12.0,
+            text: "预览".into(),
+            bold: false,
+            italic: false,
+            underline: false,
+            strike: false,
+            highlight: None,
+            color: [0, 0, 0],
+        })];
+        let pl = PrintLayout {
+            layout: DocLayout {
+                pages: vec![page.clone(), page],
+                images: Vec::new(),
+                outline: Vec::new(),
+                links: Vec::new(),
+            },
+            metrics,
+            font_path,
+        };
+        let pages = render_preview_pages(&pl).expect("离屏位图应可用");
+        assert_eq!(pages.len(), 2, "与 PDF 同页数");
+        let p = &pages[0];
+        assert_eq!(
+            (p.width, p.height),
+            (
+                (A4_WIDTH * PREVIEW_DPI / 72.0).round() as u32,
+                (A4_HEIGHT * PREVIEW_DPI / 72.0).round() as u32
+            )
+        );
+        assert_eq!(p.pixels.len(), (p.width * p.height * 4) as usize);
+        assert!(p.pixels.chunks_exact(4).all(|q| q[3] == 255), "alpha 不透明");
+        assert!(
+            p.pixels.chunks_exact(4).any(|q| q[0] < 250),
+            "文字应被绘制到纸面"
+        );
     }
 }

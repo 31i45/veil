@@ -67,6 +67,8 @@ pub enum MenuAction {
     ExportPdf,
     /// 打印 / 导出 PDF（3b）：系统打印对话框，PDF 走「Microsoft Print to PDF」。
     Print,
+    /// 打印预览（6b）：与 PDF 导出同源分页的整页位图覆盖层，支持翻页/缩放。
+    PrintPreview,
     /// 版本历史（N1/B8a）：左侧快照列表 + 正文区只读预览。
     VersionHistory,
     Undo,
@@ -149,6 +151,11 @@ pub const MENUS: [MenuDef; 3] = [
                 MenuAction::ExportPdf,
             ),
             (Key::MenuFilePrint, Key::ShortcutPrint, MenuAction::Print),
+            (
+                Key::MenuFilePrintPreview,
+                Key::Empty,
+                MenuAction::PrintPreview,
+            ),
             (
                 Key::MenuFileVersionHistory,
                 Key::ShortcutVersionHistory,

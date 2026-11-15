@@ -401,6 +401,37 @@ impl PrintSession<'_> {
         self.app.request_redraw();
     }
 
+    /// PDF/打印导出用的 Mermaid 矢量场景（键 = 块 id）。
+    /// 与屏幕共用同一渲染入口与主题快照；未安装渲染器时为空（产品层保持源码块）。
+    /// 空块与渲染失败一律跳过（与屏幕降级同口径，不阻塞导出）。
+    pub fn mermaid_scenes(
+        &mut self,
+    ) -> std::collections::HashMap<veil_core::BlockId, crate::view::mermaid::MermaidScene> {
+        let mut out = std::collections::HashMap::new();
+        if !self.app.mermaid.is_enabled() {
+            return out;
+        }
+        let theme = crate::view::mermaid::MermaidTheme::from_export(&self.app.doc.export_style);
+        for (id, kind, _) in self.app.editor.session().blocks() {
+            let veil_core::BlockKind::FencedCode(Some(lang)) = kind else {
+                continue;
+            };
+            if !lang.eq_ignore_ascii_case("mermaid") {
+                continue;
+            }
+            let Some((_, src)) = self.app.editor.session().fenced_code_source(id) else {
+                continue;
+            };
+            if crate::view::mermaid::is_empty_source(&src) {
+                continue;
+            }
+            if let Some(Ok(d)) = self.app.mermaid.render(&src, &theme) {
+                out.insert(id, d.scene);
+            }
+        }
+        out
+    }
+
     /// 打印失败/中断：与其它失败态同一错误弹窗（重试重新打印 / 取消）。
     pub fn print_error(&mut self, reason: &str) {
         self.app.ui_state.chrome.notice = tf(Key::NoticePrintFailed, &[reason]);

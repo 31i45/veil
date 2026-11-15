@@ -893,7 +893,7 @@ impl App {
         let caret = self.effective_caret();
         let scale = self.input_state.scale;
         let fg = self.input_state.theme.fg;
-        let Some(blocks) = self.index.blocks.get(indices) else {
+        let Some(blocks) = self.index.blocks.get(indices.clone()) else {
             return;
         };
         for g in blocks {
@@ -932,12 +932,93 @@ impl App {
                 }
             }
         }
+        // Mermaid 块与数学块同为「视口驱动的原子块渲染」：共用同一批调用点
+        // （单块 / 全量 / 视口），避免遗漏某条 ensured 路径。
+        if !self.source_mode() {
+            self.ensure_mermaid_range(indices);
+        }
     }
 
     /// 仅渲染视口内（含 overscan）的数学块。
     pub(crate) fn ensure_math_visible(&mut self) {
         let range = self.visible_index_range();
         self.ensure_math_range(range);
+    }
+
+    /// Mermaid 渲染（启用后端时）：光标在块内或源码模式不渲染（显源码编辑）；
+    /// 空块不渲染（保持模板提示）。失败按块记忆，不每帧重试。
+    pub(crate) fn ensure_mermaid_range(&mut self, indices: std::ops::Range<usize>) {
+        if self.source_mode() || !self.mermaid.is_enabled() {
+            return;
+        }
+        let caret = self.effective_caret();
+        let theme =
+            crate::view::mermaid::MermaidTheme::from_theme(&self.input_state.theme, self.input_state.scale);
+        let Some(blocks) = self.index.blocks.get(indices) else {
+            return;
+        };
+        for g in blocks {
+            let BlockKind::FencedCode(Some(lang)) = &g.kind else {
+                continue;
+            };
+            if !lang.eq_ignore_ascii_case("mermaid") {
+                continue;
+            }
+            let (id, range) = (g.id, g.range);
+            if range.start <= caret && caret <= range.end {
+                continue;
+            }
+            let key = self.mermaid_key(id);
+            if self.cache.mermaid(id, key).is_some() || self.cache.mermaid_error(id, key).is_some() {
+                continue;
+            }
+            let Some((_, body)) = self.editor.session().fenced_code_source(id) else {
+                continue;
+            };
+            if crate::view::mermaid::is_empty_source(&body) {
+                continue;
+            }
+            match self.mermaid.render(&body, &theme) {
+                Some(Ok(drawing)) => {
+                    self.cache
+                        .mermaid_drawings
+                        .insert(id, Memo { key, value: drawing });
+                    self.index.geometry_stale = true;
+                }
+                Some(Err(e)) => {
+                    eprintln!("Mermaid 渲染失败（降级为源码卡片）: {}", e.message);
+                    self.cache
+                        .mermaid_failed
+                        .insert(id, Memo { key, value: e.message });
+                    self.index.geometry_stale = true;
+                }
+                None => return,
+            }
+        }
+    }
+
+    /// 仅渲染视口内（含 overscan）的 Mermaid 块。
+    #[allow(dead_code)] // 由 `ensure_math_range` 统一驱动；保留单入口便于后续按需拆分
+    pub(crate) fn ensure_mermaid_visible(&mut self) {
+        let range = self.visible_index_range();
+        self.ensure_mermaid_range(range);
+    }
+
+    /// Mermaid 块当前是否按渲染图显示：光标在块内（Reveal 同语义）或未渲染时显源码。
+    pub(crate) fn mermaid_shows_image(&self, id: BlockId, range: &veil_core::Range) -> bool {
+        if self.source_mode() {
+            return false;
+        }
+        let caret = self.effective_caret();
+        !(range.start <= caret && caret <= range.end)
+            && self.cache.mermaid(id, self.mermaid_key(id)).is_some()
+    }
+
+    /// Mermaid 场景的屏幕显示尺寸（内容宽 × 可视高度上限内等比缩放）。
+    pub(crate) fn mermaid_display_size(&self, id: BlockId) -> Option<(f32, f32)> {
+        self.cache
+            .mermaid(id, self.mermaid_key(id))
+            .map(|d| d.scene.fit(self.content_width(), self.image_max_height()))
     }
 
     /// 测试专用：全量数学渲染。
@@ -1399,6 +1480,29 @@ impl App {
                 frame.blit(&img.pixels, img.width, img.height, x, sy);
                 continue;
             }
+            // Mermaid 渲染态：矢量场景整体替换源码光栅（与数学块同构）。
+            if let BlockKind::FencedCode(Some(lang)) = &kind {
+                if lang.eq_ignore_ascii_case("mermaid") && self.mermaid_shows_image(id, &range) {
+                    if let (Some((dw, _dh)), Some(drawing)) = (
+                        self.mermaid_display_size(id),
+                        self.cache.mermaid(id, self.mermaid_key(id)),
+                    ) {
+                        let scene = drawing.scene.clone();
+                        let s = dw / scene.width.max(1) as f32;
+                        let x = self.content_x() + ((self.content_width() - dw) / 2.0).max(0.0);
+                        crate::view::mermaid::paint_scene(
+                            &mut frame,
+                            &mut self.ui_state.chrome.labels,
+                            &mut self.engine,
+                            &scene,
+                            (x, sy as f32),
+                            s,
+                            scale,
+                        );
+                    }
+                    continue;
+                }
+            }
             // 仅网格态才走表格绘制；源码模式（或光标落在结构字符上）必须落到
             // 文本光栅路径，否则表格块只会画空白并跳过原始行。
             if kind == BlockKind::Table
@@ -1797,6 +1901,8 @@ impl App {
             crate::view::print_preview::paint(self, &mut frame);
         } else if self.ui_state.image_preview.is_some() && self.window_state.print.is_none() {
             crate::view::image_preview::paint(self, &mut frame);
+        } else if self.ui_state.mermaid_preview.is_some() && self.window_state.print.is_none() {
+            crate::view::mermaid::paint_preview(self, &mut frame);
         } else if self.ui_state.settings.is_some() && self.window_state.print.is_none() {
             self.paint_settings(&mut frame);
         } else if self.ui_state.modal.is_some() && self.window_state.print.is_none() {

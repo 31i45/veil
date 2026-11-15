@@ -231,6 +231,7 @@ impl veil_ui::Exporter for NoExport {
         _style: veil_ui::ExportStyle,
         _p: Option<&Path>,
         _t: Option<&Path>,
+        _m: Option<&dyn veil_ui::MermaidRenderer>,
     ) -> Result<PathBuf, String> {
         Err(t(Key::ErrMathFontUnavailable).into())
     }

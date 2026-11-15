@@ -81,7 +81,17 @@ fn hex(c: [u8; 3]) -> String {
 /// 会话 → 自包含 HTML 文档（纯函数，headless 可测）。
 /// `style` 为当前主题快照（值语义），由调用方（App）在主题切换点同步，本函数不感知主题。
 pub fn html_of(session: &Session, style: &ExportStyle, font: &latex_rust::MathFont) -> String {
-    html_of_doc(session, style, font, None)
+    html_of_with_mermaid(session, style, font, None)
+}
+
+/// 同 [`html_of`]，额外接收已安装的 Mermaid 渲染后端（None = 保持源码代码块）。
+pub fn html_of_with_mermaid(
+    session: &Session,
+    style: &ExportStyle,
+    font: &latex_rust::MathFont,
+    mermaid: Option<&dyn veil_ui::MermaidRenderer>,
+) -> String {
+    html_of_doc_with_mermaid(session, style, font, None, mermaid)
 }
 
 /// 同 [`html_of`]，但可用 `base_dir` 把文档内相对图片内嵌为 data URI。
@@ -91,6 +101,19 @@ pub fn html_of_doc(
     style: &ExportStyle,
     font: &latex_rust::MathFont,
     base_dir: Option<&Path>,
+) -> String {
+    html_of_doc_with_mermaid(session, style, font, base_dir, None)
+}
+
+/// 完整导出入口：`mermaid` 为已安装的渲染后端。启用时 mermaid 代码块输出为
+/// 内嵌 SVG（后端自带 SVG 先经 `sanitize_svg` 清理，否则由矢量场景派生）；
+/// 未启用或渲染失败时与既有行为完全一致（普通代码块）。
+pub fn html_of_doc_with_mermaid(
+    session: &Session,
+    style: &ExportStyle,
+    font: &latex_rust::MathFont,
+    base_dir: Option<&Path>,
+    mermaid: Option<&dyn veil_ui::MermaidRenderer>,
 ) -> String {
     let mut body = String::new();
     let blocks = session.blocks();
@@ -152,6 +175,28 @@ pub fn html_of_doc(
             body.push_str(&math_html(&tex, font));
             i += 1;
             continue;
+        }
+        // Mermaid：启用后端时经统一渲染入口输出内嵌 SVG 图（三端同源场景）；
+        // 未启用/空块/渲染失败一律落入下方通用代码块路径，保持既有导出不变。
+        if let BlockKind::FencedCode(Some(lang)) = &kind {
+            if lang.eq_ignore_ascii_case("mermaid") {
+                if let Some(renderer) = mermaid {
+                    if let Some((_, src)) = session.fenced_code_source(id) {
+                        if !veil_ui::is_empty_source(&src) {
+                            let theme = veil_ui::MermaidTheme::from_export(style);
+                            if let Ok(drawing) = renderer.render(&src, &theme) {
+                                if let Some(svg) = veil_ui::svg_of(&drawing) {
+                                    body.push_str("<figure class=\"mermaid\">\n");
+                                    body.push_str(&svg);
+                                    body.push_str("\n</figure>\n");
+                                    i += 1;
+                                    continue;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
         // N3b：内置 GFM Alerts 与自定义 Callout 统一输出带类型的 `<div class="callout">`
         // （内联样式自包含；引用缩进语义由内层 blockquote 内容保留）。
@@ -1803,6 +1848,7 @@ impl Exporter for HtmlExporter {
         style: ExportStyle,
         source_path: Option<&Path>,
         target: Option<&Path>,
+        mermaid: Option<&dyn veil_ui::MermaidRenderer>,
     ) -> Result<PathBuf, String> {
         let out = match target {
             Some(t) => t.to_path_buf(),
@@ -1816,9 +1862,10 @@ impl Exporter for HtmlExporter {
         let out = unique_file_path(&out);
         // 本地图片按文档所在目录解析并内嵌（草稿无源路径时保留相对外链）。
         let base_dir = source_path.and_then(|p| p.parent());
-        let html = match base_dir {
-            Some(dir) => html_of_doc(session, &style, &self.font, Some(dir)),
-            None => html_of(session, &style, &self.font),
+        let html = match (mermaid, base_dir) {
+            (Some(_), dir) => html_of_doc_with_mermaid(session, &style, &self.font, dir, mermaid),
+            (None, Some(dir)) => html_of_doc(session, &style, &self.font, Some(dir)),
+            (None, None) => html_of(session, &style, &self.font),
         };
         self.store.save(&out, html.as_bytes())?;
         Ok(out)
@@ -1861,6 +1908,55 @@ mod tests {
             body.find("<p>inner</p>").unwrap() < outer_end,
             "嵌套正文应在外层闭合前输出：{body}"
         );
+    }
+
+    /// Task 9：安装渲染器后 mermaid 块输出内嵌 SVG（后端 SVG 经清理）；
+    /// 未安装时保持既有代码块输出。
+    struct FakeMermaidSvg;
+    impl veil_ui::MermaidRenderer for FakeMermaidSvg {
+        fn render(
+            &self,
+            _s: &str,
+            _t: &veil_ui::MermaidTheme,
+        ) -> Result<veil_ui::MermaidDrawing, veil_ui::MermaidError> {
+            Ok(veil_ui::MermaidDrawing::with_svg(
+                veil_ui::MermaidScene::new(10, 10).rect(0.0, 0.0, 10.0, 10.0, [1, 2, 3, 255]),
+                "<svg xmlns=\"http://www.w3.org/2000/svg\"><script>alert(1)</script><rect width=\"10\" height=\"10\"/></svg>",
+            ))
+        }
+    }
+
+    struct FakeMermaidSceneOnly;
+    impl veil_ui::MermaidRenderer for FakeMermaidSceneOnly {
+        fn render(
+            &self,
+            _s: &str,
+            _t: &veil_ui::MermaidTheme,
+        ) -> Result<veil_ui::MermaidDrawing, veil_ui::MermaidError> {
+            // 无 SVG：导出应回落到场景派生 SVG。
+            Ok(veil_ui::MermaidDrawing::scene(
+                veil_ui::MermaidScene::new(20, 10).rect(1.0, 2.0, 8.0, 4.0, [4, 5, 6, 255]),
+            ))
+        }
+    }
+
+    #[test]
+    fn mermaid_blocks_embed_sanitized_svg_only_when_renderer_installed() {
+        let s = Session::open("```mermaid\ngraph TD\nA-->B\n```\n\n尾\n");
+        let style = ExportStyle::default();
+        let html = html_of_with_mermaid(&s, &style, &font(), Some(&FakeMermaidSvg));
+        assert!(html.contains("<figure class=\"mermaid\">"), "{html}");
+        assert!(html.contains("<rect width=\"10\" height=\"10\"/>"), "{html}");
+        assert!(!html.contains("alert(1)"), "后端 SVG 必须清理: {html}");
+        assert!(!html.contains("graph TD"), "启用后不再输出源码块: {html}");
+
+        let plain = html_of(&s, &style, &font());
+        assert!(!plain.contains("class=\"mermaid\""), "{plain}");
+        assert!(plain.contains("graph TD"), "未启用保持代码块输出: {plain}");
+
+        let derived = html_of_with_mermaid(&s, &style, &font(), Some(&FakeMermaidSceneOnly));
+        assert!(derived.contains("<svg xmlns="), "{derived}");
+        assert!(derived.contains("<rect x=\"1.0\""), "场景派生 SVG: {derived}");
     }
 
     #[test]
@@ -2776,7 +2872,7 @@ mod tests {
         let s = Session::open("# T\n");
         let style = ExportStyle::default();
         let got = e
-            .export_html(&s, style, Some(Path::new("dir/a.md")), None)
+            .export_html(&s, style, Some(Path::new("dir/a.md")), None, None)
             .unwrap();
         assert_eq!(got, PathBuf::from("dir/a.html")); // 同名换扩展名
         let bytes = files.borrow()[Path::new("dir/a.html")].clone();
@@ -2796,7 +2892,7 @@ mod tests {
         };
         let s = Session::open("x\n");
         assert!(e
-            .export_html(&s, ExportStyle::default(), None, None)
+            .export_html(&s, ExportStyle::default(), None, None, None)
             .is_err()); // 草稿：可读错误
         assert!(files.borrow().is_empty()); // 无半截产物
     }
@@ -2817,6 +2913,7 @@ mod tests {
                 ExportStyle::default(),
                 None,
                 Some(Path::new("out/draft.html")),
+                None,
             )
             .unwrap();
         assert_eq!(got, PathBuf::from("out/draft.html"));
@@ -2961,6 +3058,7 @@ mod tests {
                 ExportStyle::default(),
                 None,
                 Some(&first),
+                None,
             )
             .unwrap();
         assert_eq!(got, dir.join("doc (3).html"));

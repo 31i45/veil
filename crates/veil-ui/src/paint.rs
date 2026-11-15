@@ -20,9 +20,14 @@ use veil_core::{BlockId, BlockKind, HtmlTag, InlineKind, InlineNode, Range};
 /// 专注模式压暗强度：背景色以该 alpha 覆盖非光标块（越大越暗，255 = 全遮）。
 const FOCUS_DIM_ALPHA: u8 = 160;
 
-/// 待排版图片：(节点区间, url, 显式宽高, alt)。显式宽高仅来自 HTML `<img width height>`；
-/// alt 用于独立成行图片的题注（视图派生，不写回文档）。
-type PendingImage = (Range, String, (Option<u32>, Option<u32>), String);
+/// 待排版图片：(节点区间, url, 显式宽高, 对齐)。显式宽高仅来自 HTML
+/// `<img width height>`，对齐仅来自 `<img align>`；Markdown 图片两者皆无。
+struct PendingImage {
+    range: Range,
+    url: String,
+    explicit: (Option<u32>, Option<u32>),
+    align: Option<veil_core::ImageAlign>,
+}
 
 /// 打字机模式锚点：视口高比例（0.42 ≈ 上四成处），光标行中心恒定位于此处。
 const TYPEWRITER_ANCHOR: f32 = 0.42;
@@ -582,12 +587,12 @@ impl App {
                         InlineKind::Image => {
                             if let Some(url) = n.url {
                                 let url = self.editor.session().text_slice(url).unwrap_or_default();
-                                let alt = self
-                                    .editor
-                                    .session()
-                                    .text_slice(n.content)
-                                    .unwrap_or_default();
-                                images.push((n.range, url, (None, None), alt));
+                                images.push(PendingImage {
+                                    range: n.range,
+                                    url,
+                                    explicit: (None, None),
+                                    align: None,
+                                });
                             }
                         }
                         // 行内/块级 `<img src alt>`：本地 src 走与 Markdown Image 相同的
@@ -599,12 +604,12 @@ impl App {
                         } => {
                             if let Some(src) = attrs.src.as_deref().or(attrs.remote_src.as_deref())
                             {
-                                images.push((
-                                    n.range,
-                                    src.to_string(),
-                                    (attrs.width, attrs.height),
-                                    attrs.alt.clone().unwrap_or_default(),
-                                ));
+                                images.push(PendingImage {
+                                    range: n.range,
+                                    url: src.to_string(),
+                                    explicit: (attrs.width, attrs.height),
+                                    align: attrs.align,
+                                });
                             }
                         }
                         _ => {}
@@ -677,6 +682,7 @@ impl App {
                     width: img.width,
                     height: img.height,
                     baseline: img.baseline,
+                    align: None,
                 });
             }
             // 图片题注候选（独立图片 + alt 非空）：与 HTML/PDF 导出共用内核判定
@@ -693,7 +699,13 @@ impl App {
                     });
                 }
             }
-            for (nrange, url, explicit, _alt) in images {
+            for PendingImage {
+                range: nrange,
+                url,
+                explicit,
+                align,
+            } in images
+            {
                 // HTML `width`/`height` 是 CSS 逻辑像素 → 乘 DPI 转布局物理像素。
                 let explicit = (
                     explicit
@@ -705,6 +717,8 @@ impl App {
                 );
                 // 独占判定按「图片所在视觉行」：行内图片不产生题注，避免打断行内排版。
                 let standalone = image_is_standalone(&text, range, nrange);
+                // 对齐只对独占视觉行的图片生效；行内图片保持基线内联，不跳位。
+                let align = standalone.then_some(align).flatten();
                 let max_h = if standalone {
                     self.image_max_height()
                 } else {
@@ -765,6 +779,7 @@ impl App {
                         width: dw,
                         height: dh,
                         baseline: dh, // 底边贴基线
+                        align,
                     });
                     continue;
                 } else {
@@ -780,6 +795,7 @@ impl App {
                     width: dw,
                     height: dh,
                     baseline: dh, // 底边贴基线
+                    align,
                 });
             }
             let l = match toc_text {
@@ -1776,6 +1792,8 @@ impl App {
         // 应用内设置模态（优先级高于普通 modal）：覆盖菜单栏与状态栏的最后一层；打印帧不含遮罩
         if self.ui_state.print_preview.is_some() && self.window_state.print.is_none() {
             crate::view::print_preview::paint(self, &mut frame);
+        } else if self.ui_state.image_preview.is_some() && self.window_state.print.is_none() {
+            crate::view::image_preview::paint(self, &mut frame);
         } else if self.ui_state.settings.is_some() && self.window_state.print.is_none() {
             self.paint_settings(&mut frame);
         } else if self.ui_state.modal.is_some() && self.window_state.print.is_none() {

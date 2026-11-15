@@ -11,6 +11,7 @@ mod layout;
 pub(crate) mod linebreak;
 pub(crate) mod modal;
 pub(crate) mod outline;
+pub(crate) mod image_preview;
 pub(crate) mod print_preview;
 pub(crate) mod quick_open;
 pub(crate) mod search;

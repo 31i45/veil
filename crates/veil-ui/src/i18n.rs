@@ -358,6 +358,9 @@ keys! {
     PrintPreviewTitle => "print.preview_title", "打印预览 · 第 {} / {} 页 · {}";
     PrintPreviewHint => "print.preview_hint",
         "←/→ 翻页 · +/- 缩放 · 0 适宽 · Esc 关闭";
+    ImagePreviewTitle => "image.preview_title", "图片预览 · {} · {}";
+    ImagePreviewHint => "image.preview_hint",
+        "滚轮/方向键平移 · Ctrl+滚轮或 +/- 缩放 · 0 适应窗口 · Esc 或点击遮罩关闭";
     PrintTocTitle => "print.toc_title", "目录";
     PrintPageFooter => "print.page_footer", "{} / {}";
     ExportUntitledPdf => "export.untitled_pdf", "未命名.pdf";

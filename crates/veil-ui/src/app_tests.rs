@@ -982,6 +982,87 @@ fn image_loads_relative_to_document_and_caches() {
 }
 
 #[test]
+fn image_click_opens_preview_without_touching_document() {
+    let (mut a, _calls, _files) = app_with_images(
+        "前文\n\n![示例](img/p.png)",
+        Some("dir/doc.md"),
+        &[("dir/img/p.png", 120, 60)],
+    );
+    a.ensure_layouts_all();
+    a.recompute_geometry();
+    let before = doc_text(&a);
+    let caret = a.editor.caret();
+    let (id, _, _) = a.editor.session().blocks()[1].clone();
+    let (ix, iy, iw, ih) = {
+        let p = &a.cache.layouts[&id].imgs[0];
+        (p.x, p.y, p.width, p.height)
+    };
+    let top = a
+        .index
+        .blocks
+        .iter()
+        .find(|g| g.id == id)
+        .map(|g| g.top)
+        .unwrap();
+    let vp = a.viewport();
+    let (x, y) = (
+        a.content_x() + ix + iw as f32 * 0.5,
+        vp.y + top - a.window_state.scroll_y + iy + ih as f32 * 0.5,
+    );
+    click_at(&mut a, x, y);
+    assert!(a.ui_state.image_preview.is_some(), "点击图片应打开放大预览");
+    assert_eq!(a.editor.caret(), caret, "预览不移动光标");
+    assert_eq!(doc_text(&a), before, "预览不改文档字节");
+    // 点击图片本身保持打开；点击遮罩关闭。
+    click_at(&mut a, x, y);
+    assert!(a.ui_state.image_preview.is_some(), "点图不关闭");
+    click_at(&mut a, 2.0, 2.0);
+    assert!(a.ui_state.image_preview.is_none(), "遮罩点击应关闭");
+    assert_eq!(a.editor.caret(), caret);
+    assert_eq!(doc_text(&a), before);
+}
+
+#[test]
+fn image_preview_zoom_pan_and_escape_keep_document_intact() {
+    let (mut a, _calls, _files) = app_with_images(
+        "![示例](img/p.png)",
+        Some("dir/doc.md"),
+        &[("dir/img/p.png", 120, 60)],
+    );
+    a.ensure_layouts_all();
+    a.recompute_geometry();
+    let before = doc_text(&a);
+    a.ui_state.image_preview = Some(ImagePreview {
+        key: "dir/img/p.png".into(),
+        title: "示例".into(),
+        zoom: 1.0,
+        pan: (0.0, 0.0),
+    });
+    a.route_key(Key::Equal);
+    assert!(
+        a.ui_state.image_preview.as_ref().unwrap().zoom > 1.0,
+        "= 应放大"
+    );
+    let panned = a.ui_state.image_preview.as_ref().unwrap().pan.1;
+    a.image_preview_wheel(winit::event::MouseScrollDelta::LineDelta(0.0, -2.0));
+    assert!(
+        a.ui_state.image_preview.as_ref().unwrap().pan.1 != panned,
+        "普通滚轮应平移"
+    );
+    a.input_state.mods.ctrl = true;
+    let zoom = a.ui_state.image_preview.as_ref().unwrap().zoom;
+    a.image_preview_wheel(winit::event::MouseScrollDelta::LineDelta(0.0, 1.0));
+    assert!(
+        a.ui_state.image_preview.as_ref().unwrap().zoom > zoom,
+        "Ctrl+滚轮应缩放"
+    );
+    a.input_state.mods.ctrl = false;
+    a.route_key(Key::Escape);
+    assert!(a.ui_state.image_preview.is_none(), "Esc 应关闭预览");
+    assert_eq!(doc_text(&a), before, "缩放/平移/关闭都不改文档");
+}
+
+#[test]
 fn reload_image_invalidates_layout_and_refreshes_size() {
     let (mut a, calls, files) = app_with_images(
         "x ![alt](img/p.png)",
@@ -14989,6 +15070,26 @@ fn print_preview_renders_overlay_frame() {
         calls,
     });
     a.perform_menu(MenuAction::PrintPreview);
+    let after = a.render().pixels[0];
+    let sum = |p: u32| (p & 0xff) + ((p >> 8) & 0xff) + ((p >> 16) & 0xff);
+    assert!(sum(after) < sum(before), "预览覆盖层应压暗背景");
+}
+#[test]
+fn image_preview_renders_overlay_frame() {
+    let (mut a, _calls, _files) = app_with_images(
+        "前文\n\n![示例](img/p.png)",
+        Some("dir/doc.md"),
+        &[("dir/img/p.png", 120, 60)],
+    );
+    a.ensure_layouts_all();
+    a.recompute_geometry();
+    let before = a.render().pixels[0];
+    a.ui_state.image_preview = Some(ImagePreview {
+        key: "dir/img/p.png".into(),
+        title: "示例".into(),
+        zoom: 1.0,
+        pan: (0.0, 0.0),
+    });
     let after = a.render().pixels[0];
     let sum = |p: u32| (p & 0xff) + ((p >> 8) & 0xff) + ((p >> 16) & 0xff);
     assert!(sum(after) < sum(before), "预览覆盖层应压暗背景");

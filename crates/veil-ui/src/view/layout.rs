@@ -42,6 +42,8 @@ pub struct InlineImg {
     pub height: u32,
     /// 图顶到基线的像素（与文本行基线对齐）。图片取 height（底边贴基线）。
     pub baseline: u32,
+    /// 独占视觉行时的水平对齐（`<img align>`）；行内图片为 None（不打断行内流）。
+    pub align: Option<veil_core::ImageAlign>,
 }
 
 /// 行内资源图（输出）：排版后的块内物理像素位置。
@@ -1412,6 +1414,13 @@ impl LayoutEngine {
             let Some((x, line_y, line_top)) = at else {
                 continue;
             }; // 防御：占位段必有 NBSP 字形
+            // 独占视觉行的图片按 `<img align>` 在版心内水平对齐（占位自身不可见，
+            // 移动位图不会与文本重叠；行内图片的 align 已在 shell 侧置空）。
+            let x = match im.align {
+                Some(veil_core::ImageAlign::Center) => ((width - im.width as f32) * 0.5).max(0.0),
+                Some(veil_core::ImageAlign::Right) => (width - im.width as f32).max(0.0),
+                _ => x,
+            };
             let mut y = line_y - im.baseline as f32; // 可为负（图高出行顶），frame.blit 裁剪
             if matches!(im.key, InlineAsset::Image(_)) {
                 y = y.max(line_top);
@@ -4364,6 +4373,7 @@ mod tests {
             width,
             height,
             baseline,
+            align: None,
         }
     }
 
@@ -4375,6 +4385,7 @@ mod tests {
             width,
             height,
             baseline: height,
+            align: None,
         }
     }
 
@@ -4674,6 +4685,25 @@ mod tests {
         let p = &l.imgs[0];
         assert_eq!(eng.hit(&l, p.x + 1.0, p.y + 5.0), 2);
         assert_eq!(eng.hit(&l, p.x + 39.0, p.y + 5.0), 15);
+    }
+
+    #[test]
+    fn standalone_image_alignment_offsets_within_content_width() {
+        // 独立图片按 align 在版心宽内水平偏移；占位本身不可见，移动位图不压文本。
+        let text = r#"<img src="p.png" align="center">"#;
+        let node = Range::new(0, text.len());
+        let mut center = image(node, 40, 10);
+        center.align = Some(veil_core::ImageAlign::Center);
+        let (_, l) = layout_with_imgs(text, usize::MAX, 400.0, &[center]);
+        assert_eq!(l.imgs.len(), 1);
+        assert!((l.imgs[0].x - 180.0).abs() < 1.0, "center x={}", l.imgs[0].x);
+        let mut right = image(node, 40, 10);
+        right.align = Some(veil_core::ImageAlign::Right);
+        let (_, l) = layout_with_imgs(text, usize::MAX, 400.0, &[right]);
+        assert!((l.imgs[0].x - 360.0).abs() < 1.0, "right x={}", l.imgs[0].x);
+        // 无 align（左对齐/行内图片）：沿用占位原位置。
+        let (_, l) = layout_with_imgs(text, usize::MAX, 400.0, &[image(node, 40, 10)]);
+        assert!(l.imgs[0].x.abs() < 1.0, "left x={}", l.imgs[0].x);
     }
 
     #[test]

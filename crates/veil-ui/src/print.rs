@@ -648,7 +648,7 @@ impl App {
 }
 
 /// 缩放一档：0（适宽）⇄ 0.5…4.0，步进 1.25。
-fn next_zoom(cur: f32, up: bool) -> f32 {
+pub(crate) fn next_zoom(cur: f32, up: bool) -> f32 {
     let base = if cur <= 0.0 { 1.0 } else { cur };
     let next = if up { base * 1.25 } else { base / 1.25 };
     if next < 0.4 {

@@ -54,7 +54,9 @@ fn head(style: &ExportStyle) -> String {
          details[open] summary{{margin-bottom:.4em}}\n\
          img{{max-width:100%;height:auto;max-height:3.2em}}\n\
          p>img:only-child,figure img{{max-height:9.6em}}\n\
-         figure{{margin:1em 0;text-align:center}}\n\
+         figure{{margin:1em 0;text-align:left}}\n\
+         figure.img-center{{text-align:center}}\n\
+         figure.img-right{{text-align:right}}\n\
          figcaption{{margin-top:.4em;color:{muted};font-size:.9em;\
          overflow-wrap:anywhere;word-break:break-word}}\n\
          td img,th img{{max-height:2.4em}}\n\
@@ -292,20 +294,51 @@ pub fn html_of_doc(
             .then(|| veil_core::standalone_image_caption(&nodes, &text, span.start))
             .flatten()
             .map(|(_, caption)| caption);
+        // 独占行图片的水平对齐（`<img align>`）：与屏幕/PDF 同一白名单值；
+        // 只有整段仅含该图片时才生效，行内图片忽略。
+        let standalone_align = (kind == BlockKind::Paragraph)
+            .then(|| {
+                nodes.iter().find_map(|n| {
+                    let align = match &n.kind {
+                        InlineKind::HtmlSelfClosed {
+                            tag: HtmlTag::Img,
+                            attrs,
+                        } => attrs.align?,
+                        _ => return None,
+                    };
+                    veil_core::image_standalone(
+                        &text,
+                        Range::new(span.start, span.start + text.len()),
+                        n.range,
+                    )
+                    .then_some(align)
+                })
+            })
+            .flatten();
         let mut html = String::new();
         pulldown_cmark::html::push_html(
             &mut html,
             pulldown_cmark::Parser::new_ext(&format!("{defs}{rendered}"), opts),
         );
-        if let Some(caption) = caption {
+        if caption.is_some() || standalone_align.is_some() {
             let inner = html
                 .strip_prefix("<p>")
                 .and_then(|h| h.strip_suffix("</p>\n"))
                 .unwrap_or(&html);
-            body.push_str(&format!(
-                "<figure>\n{inner}\n<figcaption>{}</figcaption>\n</figure>\n",
-                escape_html(&caption)
-            ));
+            let class = match standalone_align {
+                Some(a @ (veil_core::ImageAlign::Center | veil_core::ImageAlign::Right)) => {
+                    format!(" class=\"img-{}\"", a.as_str())
+                }
+                _ => String::new(),
+            };
+            body.push_str(&format!("<figure{class}>\n{inner}\n"));
+            if let Some(caption) = caption {
+                body.push_str(&format!(
+                    "<figcaption>{}</figcaption>\n",
+                    escape_html(&caption)
+                ));
+            }
+            body.push_str("</figure>\n");
         } else {
             body.push_str(&html);
         }
@@ -2227,6 +2260,21 @@ mod tests {
         let body = body_of("<img src=\"img/a.png\" width=\"100px\">\n");
         assert!(!body.contains("width="), "实际输出: {body}");
         assert!(!body.contains("height="), "实际输出: {body}");
+    }
+
+    #[test]
+    fn html_img_alignment_exports_figure_class_without_leaking_attr() {
+        let body = body_of("<img src=\"img/a.png\" align=\"center\">\n");
+        assert!(body.contains("<figure class=\"img-center\">"), "{body}");
+        assert!(!body.contains("align="), "对齐属性不得原样泄漏：{body}");
+        let body = body_of("<img src=\"img/a.png\" align=\"right\">\n");
+        assert!(body.contains("<figure class=\"img-right\">"), "{body}");
+        // 行内图片 / 非法值：不改变版式，也不写 align。
+        let body = body_of("前文 <img src=\"img/a.png\" align=\"center\"> 后文\n");
+        assert!(!body.contains("<figure"), "{body}");
+        assert!(!body.contains("align="), "{body}");
+        let body = body_of("<img src=\"img/a.png\" align=\"justify\">\n");
+        assert!(!body.contains("class=\"img-"), "{body}");
     }
 
     #[test]

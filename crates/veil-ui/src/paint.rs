@@ -9,7 +9,7 @@ use crate::geometry::{Rect, MARGIN};
 use crate::i18n::{t, tf, Key};
 use crate::view::table::{CellImgAsset, CellMath};
 use crate::view::{
-    cell_math_spans, ctx_menu, image_is_standalone, inline_details_spans, node_active, outline,
+    cell_math_spans, ctx_menu, image_is_standalone, block_details_spans, node_active, outline,
     oversize_notice, quick_open, search, BlockLayout, Frame, ImageCaption, InlineAsset, InlineFold,
     InlineImg, LayoutEngine, LayoutKey, Memo, OverKind, TableKey, UnderKind,
 };
@@ -617,9 +617,12 @@ impl App {
                 }
                 stack.extend(n.children.iter());
             }
-            // B3：行内 `<details>` 折叠输入（仅含该标记的块才扫描节点，普通块零开销）。
+            // B3：行内/容器内 `<details>` 折叠输入（仅含该标记的块才扫描，普通块零开销）。
+            // 容器块（引用/列表）里的标签常退化为 HtmlLiteral，行内节点树收集不到，
+            // 由 `block_details_spans` 的逐行扫描分支补齐；两者按开标签偏移去重。
             let folds: Vec<InlineFold> = if text.contains("<details") {
-                inline_details_spans(&inlines, range)
+                let body = text.strip_suffix('\n').unwrap_or(&text);
+                block_details_spans(&kind, body, &inlines, range)
                     .into_iter()
                     .map(|s| InlineFold {
                         body: s.body,

@@ -13833,6 +13833,177 @@ fn inline_details_collapses_body_and_summary_click_toggles() {
     assert!(!again.contains("隐藏正文"));
 }
 
+/// Task 8：引用容器内的 `<details>` 默认收起，点击 summary 展开/收起。
+/// 折叠是纯视图态：文档字节与撤销栈不变；块高与后续块顶偏移随折叠更新。
+#[test]
+fn quote_container_details_collapse_toggles_by_summary_click() {
+    let store = MemStore::default();
+    let doc = "> <details>\n> <summary>更多</summary>\n> 隐藏正文XYZ\n> </details>\n\n尾\n";
+    let mut a = app(doc, None, false, &store);
+    a.refresh_index();
+    // 光标放到容器外：容器各行按非激活态渲染。
+    a.editor.set_caret(doc.find("尾").unwrap());
+    a.ensure_layouts_all();
+    a.recompute_geometry();
+    let id = block_id_of(&a, |k| *k == BlockKind::BlockQuote);
+    let next_id = block_id_of(&a, |k| *k == BlockKind::Paragraph);
+    let undo_before = a.editor.session().undo_depth();
+
+    let collapsed = a.cache.layouts[&id].value.layout_text().to_string();
+    assert!(
+        collapsed.contains("更多"),
+        "收起态应显示 summary：{collapsed:?}"
+    );
+    assert!(
+        !collapsed.contains("隐藏正文"),
+        "收起态正文必须隐藏：{collapsed:?}"
+    );
+    assert!(
+        !collapsed.to_ascii_lowercase().contains("details")
+            && !collapsed.to_ascii_lowercase().contains("summary"),
+        "不应露出裸标签：{collapsed:?}"
+    );
+
+    let geom = |a: &App, id: BlockId| {
+        a.index
+            .blocks
+            .iter()
+            .find(|g| g.id == id)
+            .map(|g| (g.top, a.block_height(g), g.range.start))
+            .expect("块应存在")
+    };
+    let (top_c, h_c, start_c) = geom(&a, id);
+    let (top_n, _, _) = geom(&a, next_id);
+    let (cx, cy) = {
+        let l = &a.cache.layouts[&id].value;
+        let (x, y, _) = a.engine.caret_xy(l, doc.find("更多").unwrap() - start_c);
+        (x, y)
+    };
+    let vp = a.viewport();
+    a.input_state.mouse = PhysicalPosition::new(
+        (a.content_x() + cx) as f64,
+        (vp.y + top_c - a.window_state.scroll_y + cy) as f64,
+    );
+    a.on_left_click();
+    assert_eq!(
+        a.ui_state.expanded_inline_details.len(),
+        1,
+        "点击容器内 summary 应展开 details"
+    );
+    a.ensure_layouts_all();
+    a.recompute_geometry();
+    let expanded = a.cache.layouts[&id].value.layout_text().to_string();
+    assert!(
+        expanded.contains("隐藏正文"),
+        "展开后正文应可见：{expanded:?}"
+    );
+    let (top_e, h_e, _) = geom(&a, id);
+    let (top_n_e, _, _) = geom(&a, next_id);
+    assert_eq!(top_e, top_c, "块顶不应因展开而移动");
+    assert!(h_e > h_c, "展开后块高应增大：{h_c} → {h_e}");
+    assert!(
+        top_n_e > top_n,
+        "后续块应随展开下移：{top_n} → {top_n_e}"
+    );
+
+    // 再点 summary → 收起。
+    a.input_state.mouse = PhysicalPosition::new(
+        (a.content_x() + cx) as f64,
+        (vp.y + top_e - a.window_state.scroll_y + cy) as f64,
+    );
+    a.on_left_click();
+    a.ensure_layouts_all();
+    assert!(a.ui_state.expanded_inline_details.is_empty());
+    let again = a.cache.layouts[&id].value.layout_text().to_string();
+    assert!(!again.contains("隐藏正文"), "收起后正文再次隐藏");
+    assert_eq!(a.editor.session().serialize(), doc, "折叠/展开不改文档字节");
+    assert_eq!(
+        a.editor.session().undo_depth(),
+        undo_before,
+        "容器内折叠/展开不得产生撤销步"
+    );
+}
+
+/// Task 8：列表项容器内的 `<details>` 同样收起正文并可点击 summary 展开。
+#[test]
+fn list_item_container_details_collapse_toggles() {
+    let store = MemStore::default();
+    let doc = "- 项\n  <details>\n  <summary>更多</summary>\n  隐藏正文XYZ\n  </details>\n\n尾\n";
+    let mut a = app(doc, None, false, &store);
+    a.refresh_index();
+    a.editor.set_caret(doc.find("尾").unwrap());
+    a.ensure_layouts_all();
+    let id = block_id_of(&a, |k| matches!(k, BlockKind::ListItem { .. }));
+    let collapsed = a.cache.layouts[&id].value.layout_text().to_string();
+    assert!(collapsed.contains("更多"), "收起态应显示 summary：{collapsed:?}");
+    assert!(
+        !collapsed.contains("隐藏正文"),
+        "收起态正文必须隐藏：{collapsed:?}"
+    );
+    // 直接写入折叠集合（点击路径已由引用容器用例覆盖），验证列表项同口径生效。
+    let start = a
+        .index
+        .blocks
+        .iter()
+        .find(|g| g.id == id)
+        .map(|g| g.range.start)
+        .unwrap();
+    let key = doc.find("<details>").unwrap() - start;
+    a.ui_state.expanded_inline_details.insert((id, key));
+    a.ensure_layouts_all();
+    let expanded = a.cache.layouts[&id].value.layout_text().to_string();
+    assert!(
+        expanded.contains("隐藏正文"),
+        "展开后正文应可见：{expanded:?}"
+    );
+    assert_eq!(a.editor.session().serialize(), doc, "折叠不改文档字节");
+}
+
+/// Task 8：光标进入容器内 details 的隐藏正文时自动展开；不同块的折叠状态互不串扰。
+#[test]
+fn caret_inside_container_details_body_auto_expands_without_cross_block_leak() {
+    let store = MemStore::default();
+    let doc = "> <details>\n> <summary>A</summary>\n> 甲正文\n> </details>\n\n> <details>\n> <summary>B</summary>\n> 乙正文\n> </details>\n";
+    let mut a = app(doc, None, false, &store);
+    a.refresh_index();
+    a.ensure_layouts_all();
+    let ids: Vec<BlockId> = a
+        .index
+        .blocks
+        .iter()
+        .filter(|g| matches!(g.kind, BlockKind::BlockQuote))
+        .map(|g| g.id)
+        .collect();
+    assert_eq!(ids.len(), 2, "两段引用应各自成块");
+    // 光标落在正文首个字符（CJK 多字节，偏移必须是字符边界）。
+    a.editor.set_caret(doc.find("甲正文").unwrap());
+    a.sync_details_at_caret();
+    assert_eq!(a.ui_state.expanded_inline_details.len(), 1);
+    assert!(
+        a.ui_state
+            .expanded_inline_details
+            .iter()
+            .all(|(id, _)| *id == ids[0]),
+        "只应展开光标所属块"
+    );
+    a.ensure_layouts_all();
+    assert!(
+        a.cache.layouts[&ids[0]]
+            .value
+            .layout_text()
+            .contains("甲正文"),
+        "光标进入后正文应展开"
+    );
+    assert!(
+        !a.cache.layouts[&ids[1]]
+            .value
+            .layout_text()
+            .contains("乙正文"),
+        "另一块的 details 不应被连带展开"
+    );
+    assert_eq!(a.editor.session().serialize(), doc, "自动展开不写文档");
+}
+
 /// details 闭标签行是纯 chrome（不属于任何块）：光标停在那里时吸附到前一块末尾。
 #[test]
 fn caret_in_details_close_line_snaps_to_previous_block() {

@@ -16,7 +16,7 @@ use crate::paint::{
 };
 use crate::theme::{Config, Theme, ThemeMode};
 use crate::view::ctx_menu::{CtxAction, CtxKind, TableCtx};
-use crate::view::{ctx_menu, history, inline_details_spans, outline, quick_open, search};
+use crate::view::{block_details_spans, ctx_menu, history, outline, quick_open, search};
 use std::path::Path;
 use std::time::{Duration, Instant};
 use veil_core::{
@@ -1513,12 +1513,19 @@ impl App {
         let Some(off) = self.hit_offset() else {
             return false;
         };
-        let Some((id, range, is_block_details)) = self
+        let Some((id, range, kind, is_block_details)) = self
             .index
             .blocks
             .iter()
             .find(|g| !self.block_hidden(g) && g.range.start <= off && off < g.range.end)
-            .map(|g| (g.id, g.range, matches!(g.kind, BlockKind::Details { .. })))
+            .map(|g| {
+                (
+                    g.id,
+                    g.range,
+                    g.kind.clone(),
+                    matches!(g.kind, BlockKind::Details { .. }),
+                )
+            })
         else {
             return false;
         };
@@ -1535,7 +1542,8 @@ impl App {
         let Some(nodes) = self.editor.session().block_inlines(id) else {
             return false;
         };
-        let spans = inline_details_spans(&nodes, range);
+        let body = text.strip_suffix('\n').unwrap_or(&text);
+        let spans = block_details_spans(&kind, body, &nodes, range);
         for s in spans {
             let Some((ss, se)) = s.summary else { continue };
             let (abs_s, abs_e) = (range.start + ss, range.start + se);
@@ -1600,7 +1608,7 @@ impl App {
                 return;
             }
         }
-        let (id, range, hidden) = {
+        let (id, range, kind, hidden) = {
             let Some(g) = self
                 .index
                 .blocks
@@ -1616,7 +1624,7 @@ impl App {
             else {
                 return;
             };
-            (g.id, g.range, self.block_hidden(g))
+            (g.id, g.range, g.kind.clone(), self.block_hidden(g))
         };
         if hidden {
             let mut p = self
@@ -1647,8 +1655,9 @@ impl App {
         let Some(nodes) = self.editor.session().block_inlines(id) else {
             return;
         };
+        let body = text.strip_suffix('\n').unwrap_or(&text);
         let mut changed = false;
-        for s in inline_details_spans(&nodes, range) {
+        for s in block_details_spans(&kind, body, &nodes, range) {
             let body = (range.start + s.body.0, range.start + s.body.1);
             if body.0 <= caret && caret < body.1 {
                 changed |= self.ui_state.expanded_inline_details.insert((id, s.key));

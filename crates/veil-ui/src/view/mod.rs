@@ -33,7 +33,7 @@ pub(crate) use layout::toc_display_text;
 #[cfg(test)]
 pub(crate) use layout::MAX_BLOCK_BYTES;
 pub(crate) use layout::{
-    cell_image_alt_spans, cell_math_spans, inline_details_spans, node_active, oversize_notice,
+    block_details_spans, cell_image_alt_spans, cell_math_spans, node_active, oversize_notice,
 };
 pub(crate) use layout::image_display_size;
 pub(crate) use veil_core::image_standalone as image_is_standalone;

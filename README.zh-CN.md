@@ -33,6 +33,8 @@ veil.exe /register     # 写入当前用户 ProgID + 内嵌文档图标，加入
 veil.exe /unregister   # 只撤销 /register 创建、且当前值仍属于自己的项
 ```
 
+应用图标（白页 + 面纱垂坠 V）与 `.md` 文档图标（折页 + M↓）均为 Veil 自绘设计，不使用任何第三方图标资源（包括 Typedown 的图标）。
+
 `/register` 不抢默认应用：只填空位，绝不改写 `UserChoice`。要让 `.md` 双击默认由 Veil 打开，请在「设置 → 应用 → 默认应用」中选择 Veil（Windows 不允许程序自行设为默认）。移动 `veil.exe` 后，在旧路径 `/unregister`、新路径 `/register`；也可以手动关联：
 
 1. 右键任意 `.md` 文件，选择 **打开方式** → **选择其他应用**。
@@ -77,8 +79,14 @@ veil.exe /unregister   # 只撤销 /register 创建、且当前值仍属于自�
 22. 光标表达焦点：窗口聚焦时实心、失焦时空心，零定时器、零空闲唤醒
 23. 状态过渡：菜单栏、菜单项、大纲、快速打开、右键菜单、查找栏与对话框按钮的悬停/按下高亮以 120 ms ease-out cubic 淡入淡出；仅在动画进行中推进，空闲路径仍然零定时器、不唤醒进程；系统关闭「显示动画」时直接跳到终态
 24. 远程图片（v1.4）：http/https 图片默认自动加载，「视图 → 阻止远程图片」可全局关闭；抓取失败降级为 alt 占位并在状态栏提示一次。请求不携带 Cookie、`Referer` 或任何凭据，UA 固定为 `Veil/<version>`，连接/读取超时 10 s，响应体上限 20 MiB，最多跟随 3 次重定向且拒绝 https→http 降级，拒绝 localhost / 回环 / 私有 / 链路本地地址。导出与 PDF 永不包含远程资源
+25. 编辑手感（v1.5）：`()` `[]` `{}` `"` `'` 五类自动配对，支持选中包裹与成对退格；光标 600 ms 闪烁在 IME 预编辑与打印时暂停；`Ctrl+,` 设置模态（10 个配置项，改动立即生效）
+26. 大纲与目录：`[TOC]` 行渲染为带标题锚点的嵌套有序列表，并随编辑自动刷新
+27. 图片工作流（v1.6 + 本轮）：alt 文本作为题注；独立图支持 `<img align="left|center|right">` 与显式 `width`/`height`；单击独立图片打开放大预览（滚轮平移、`Ctrl+滚轮` 或 `+`/`-` 缩放、`0` 适应、方向键/翻页平移、`Esc`/遮罩关闭；`Ctrl+单击` 仍落光标显示源码）
+28. 阅读与导航：折叠的 Front Matter 卡片可点击展开；标题/TOC 锚点可跳转；可交互 chrome 带指针反馈
+29. 打印与 PDF（本轮）：应用内打印预览（翻页/缩放/`Esc`），PDF 输出带链接注解，版面与渲染态一致
+30. 行内 HTML 折叠：块级 `<details>` 支持点击摘要展开/收起；引用、提示与列表项内的 `<details>` 同样可折叠（仅视图态，不改写文档字节，光标进入正文自动展开）；屏幕、打印、PDF 与 HTML 导出语义一致
 
-## 非目标（v1.2 明确不做）
+## 非目标（仍未纳入）
 
 - wgpu/GPU 渲染视图（裁决见 ADR-011：v1 不做，仅在触发条件满足时立项）
 - 协作编辑 / CRDT（**永久排除 — Veil 单机单用户定位**）
@@ -86,10 +94,10 @@ veil.exe /unregister   # 只撤销 /register 创建、且当前值仍属于自�
 - 插件系统
 - 移动端 / PWA（仅桌面 exe）
 - 表格结构可视化编辑的剩余部分（合并/拆分单元格）；内容编辑、行列增删、列对齐与列宽拖动已支持
-- Mermaid 渲染（Mermaid 围栏块保持为代码，不做渲染）
+- Mermaid 渲染本身：Mermaid 围栏块仍以代码呈现（已预留后端中立渲染接口，未捆绑任何渲染运行时）
 - 独立富文本文档模型：正文始终是 Markdown，`Ctrl+/` 只是同一文档的视图切换
 - 任何后台网络：无同步、无更新检查、无遥测；唯一出站请求是在渲染文档中的远程图片时按需发出，可在「视图 → 阻止远程图片」一键阻止；外部链接交给系统默认程序打开，导出 / PDF 永不包含远程资源
-- 竞品对齐项明确不做：正则查找（`regex` 实测使 exe 净增 1,198,592 B）、括号/引号自动配对、全词匹配开关、`Ctrl+Shift+K` 删除行（`Alt+↑` / `Alt+↓` 已覆盖行级操作）、独立 H5/H6 字阶（层级用缩进表达）
+- 竞品对齐项明确不做：正则查找（`regex` 实测使 exe 净增 1,198,592 B）、全词匹配开关、`Ctrl+Shift+K` 删除行（`Alt+↑` / `Alt+↓` 已覆盖行级操作）、独立 H5/H6 字阶（层级用缩进表达）。括号/引号自动配对已于 v1.5 交付，不再属于非目标
 
 ## 构建 / 运行 / 测试
 
@@ -101,11 +109,11 @@ cargo test --workspace
 cargo run -p veil -- <file.md>
 ```
 
-当前 1637 项测试全绿（`cargo test --workspace` 1637 passed / 0 failed / 14 ignored，2026-11-14 审计修复后复核），`cargo clippy --workspace --all-targets -- -D warnings` 零警告。
+当前 1751 项测试全绿（`cargo test --workspace` 1751 passed / 0 failed / 14 ignored，2026-11-15 本轮收口后复核），`cargo clippy --workspace --all-targets -- -D warnings` 零警告。
 
 ## 数字红线（目标值与实测）
 
-发布构建、探针串行；性能项 2026-11-09 复核，测试与体积项 2026-11-14 复核。命令：`cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo run --release -p veil --example bench_typing`、`cargo test -p veil-ui --release --lib -- --ignored --nocapture --test-threads=1 perf_keystroke_path`（10,500 块用 `perf_keystroke_10k_blocks`）、`(Get-Item target\release\veil.exe).Length`。方法与明细见 `docs/review/keystroke-attribution.md`。
+发布构建、探针串行；性能项 2026-11-09 复核，测试与体积项 2026-11-15 复核。命令：`cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo run --release -p veil --example bench_typing`、`cargo test -p veil-ui --release --lib -- --ignored --nocapture --test-threads=1 perf_keystroke_path`（10,500 块用 `perf_keystroke_10k_blocks`）、`(Get-Item target\release\veil.exe).Length`。方法与明细见 `docs/review/keystroke-attribution.md`。
 
 | 指标 | 目标值 | 实测 |
 |---|---|---|
@@ -116,8 +124,8 @@ cargo run -p veil -- <file.md>
 | 冷启动（窗口句柄口径；P2 对比口径） | — | 30 ms（2026-10-30，`tools/bench/measure.ps1`） |
 | 10 万字文档击键→提交上屏延迟 p95 | ≤ 16 ms | 6.781 ms / 12.379 ms（`perf_keystroke_path` 5,005 块 / `perf_keystroke_10k_blocks` 10,500 块；基线 6.677 / 12.488；2026-11-09）✅ |
 | 10 万字文档常驻内存（私有工作集） | ≤ 150 MB | 40.76 MB（20 页深滚动后 WorkingSet，2026-11-05 实测） |
-| 安装产物体积 — 运行时代码（非图标） | ≤ 6 MiB（Phase A 基准；Wave 3/4 PDF 导出门槛让步已覆盖） | 7,475,523 B（exe 减 89,277 B 图标资源：`veil.ico` 46,688 + `veil-doc.ico` 42,589，2026-11-14 审计修复后） |
-| 安装产物体积 — 合计单文件 `veil.exe` | ≤ 10 MiB = 10,485,760 B（Wave 4 用户授权；每次增量须记录） | 7,564,800 B ≈ 7.21 MiB（2026-11-14 审计修复后；较 Wave 6 基线 6,988,800 B +576,000 B；较历史基线 6,914,048 B +650,752 B；余量 2,920,960 B） |
+| 安装产物体积 — 运行时代码（非图标） | ≤ 6 MiB（Phase A 基准；Wave 3/4 PDF 导出门槛让步已覆盖） | 7,658,819 B（exe 减 89,277 B 图标资源：`veil.ico` 46,688 + `veil-doc.ico` 42,589，2026-11-15 本轮收口后） |
+| 安装产物体积 — 合计单文件 `veil.exe` | ≤ 10 MiB = 10,485,760 B（Wave 4 用户授权；每次增量须记录） | 7,748,096 B ≈ 7.39 MiB（2026-11-15 本轮收口后；较 Wave 6 基线 6,988,800 B +759,296 B；较历史基线 6,914,048 B +834,048 B；余量 2,737,664 B） |
 | `veil-core` 单元+属性测试数 | ≥ 80 | 209 |
 | e2e 断言数 | ≥ 20 | 41（3 个 e2e_ 场景测试：写作闭环打开→保存→重开、表格+图片粘贴落盘、查找替换→崩溃恢复→自清）✅ |
 | Markdown 往返一致率（无编辑时输出 == 输入字节；按字节比较） | 100% | 100% |

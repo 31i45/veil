@@ -2,56 +2,103 @@
 
 Veil 版本迭代记录。每个版本的详细修复清单见对应 git tag 的 commit log。
 
-## Unreleased
+## Unreleased — 2026-11-15
 
-「设计统一」：令牌单源、表面层级、状态过渡与便携文件关联。
+「审计闭环 + 本轮能力」：交互缺陷清零、图片/折叠补齐、Mermaid 预留接口。
+
+> v1.3–v1.6 为同分支波次归档（未打 tag）；`Cargo.toml` 版本号在正式发版时统一提升。
 
 ### Added
-- 原生 PDF 排版保真（Wave 4）：导出不再直出 Markdown 源码，改为按字形宽度换行、H1–H6 分级字号、列表/引用/Admonition/代码块/表格排版、图片与公式嵌入、页边距、页脚 `n / total`、目录页与 H1–H6 多级书签；图片/公式失败自动降级为 alt/源码，无字体时回退 GDI
-- 文件关联 `veil.exe /register` / `/unregister`（F1+S9+C2）：写当前用户 ProgID、内嵌文档图标（资源 ID 2，`DefaultIcon` 用 `"<exe>",-2` 引用，不分发外置 `.ico`）、把 Veil 加入「打开方式」并只补 `.md` 空位；`/unregister` 只删自己创建且当前值仍属于自己的项。`UserChoice` 从不触碰，默认应用仍需在系统设置中选择
-- 窗口几何记忆（P3）：`config.toml` 新增 `window_width` / `window_height` / `window_x` / `window_y`，启动恢复上次位置与尺寸；越界坐标夹回可见区，最大化不覆盖常规尺寸
-- 状态过渡动效（S6/A9）：菜单栏、菜单项、大纲、快速打开、右键菜单、查找栏与对话框按钮的悬停/按下高亮以 120 ms ease-out cubic 淡入淡出（仅透明度）；关闭时瞬时到位
-- 动效跟随系统：产品层读取 `SPI_GETCLIENTAREAANIMATION`（「显示动画」），关闭时不做过渡；仅动画进行中按帧调度重绘，空闲路径仍零定时器、不唤醒进程
-- 设计令牌：`tokens::palette`（`surface_base` / `surface_card` / `surface_popup` 等表面单一入口）、`tokens::state` 交互六态、`tokens::space` / `stroke` / `motion`；`Theme::surface(SurfaceLevel)` 显式表达 Base / Card / Popup 三层
+- 图片三档对齐：独占行 `<img align="left|center|right">`，屏幕按 `width` 偏移、HTML 导出为 `figure.img-center/img-right`、PDF 同步偏移，三端同语义
+- 图片点击放大预览：滚轮平移、`Ctrl+滚轮` 或 `+`/`-` 缩放、`0` 适应、方向键/翻页平移、`Esc`/遮罩关闭；`Ctrl+单击` 仍落光标显示源码
+- 容器内 `<details>` 折叠：引用/提示/列表项里点击摘要展开/收起，块高与后续块位移随排版更新、不露裸标签；折叠只进视图态（不写文档、不进撤销栈），光标进入正文自动展开
+- Mermaid 后端中立接口 `view/mermaid.rs`：`MermaidRenderer`（源码+主题→SVG 或统一矢量场景）、`MermaidScene`、SVG 清理与场景派生；屏幕内嵌块、预览面板、HTML 导出、PDF 共用同一渲染入口；默认未安装渲染器 → 保持源码卡片 + mermaid.live 降级；不引入 wasmtime/JS、零新增依赖
+- 代码块语言标签与一键复制（`Ctrl+Shift+C`、右键首项），复制原文不产生撤销/脏标
+- 图片 alt 作为题注；折叠 Front Matter 卡片可点击展开；TOC 锚点跳转与指针反馈
+- 应用内打印预览（翻页/缩放/`Esc`）与 PDF 链接注解
 
 ### Changed
-- 图标体系改为图片真源：应用图标重做为「白页 + 面纱垂坠 V」；文档图标 ≥32px 严格复刻 `icons/Markdown.png`，≤24px 用同色系简化徽标；两套各 7 档（16/20/24/32/48/64/256）在 `icons/` 下由 `build.rs` 以 `include_bytes!` 嵌入，`icon.rs` 只保留窗口图标 RGBA。体积数字见 README 门禁表
-- 浮层收敛为单线：只保留边界线，分组改用间距，不再叠加多重线条
-- 查找浮栏改版：按钮与计数重排，补无命中空态与滚动条命中刻度
-- 字体显式指定：UI 雅黑 13 px、正文 16 px、代码 Consolas 14 px，修复中西文混排的字体不一致
-- README 徽章改为 CI 状态 + 动态 Release，并补 Platform / Portable 两枚契约徽章
-- 文档口径统一：测试基线、体积、依赖数改为实测值；`.md` 关联章节改为 `/register` 流程
-- 体积门禁临时统一为单一 release exe ≤ 10 MiB（10,485,760 B）；代码/图标分档暂停，Wave 5 结束后重新裁定。当前值与基线口径以 README「体积门禁」表为唯一真源，本文不再重复记录
+- 性能：footnote epoch 与排版键预计算、Front Matter 标志缓存，压低大文档击键成本
+- 文档：README 纠正「不做自动配对」的过时描述（v1.5 已交付），补齐本轮能力；明确应用图标与文档图标均为自绘设计，不使用 Typedown 或任何第三方图标；测试与体积基线更新
+- 体积：release exe 7,748,096 B（≈7.39 MiB，门禁 10,485,760 B）
 
 ### Fixed
-- 代码块（fenced / indented / HTML / Front Matter）与行内代码的中文不再是空心/描边：根因是等宽路径用 generic `Family::Monospace`，摇字体时先耗尽等宽候选，本机命中旧 CJK 等宽字体 MS Gothic；改为显式等宽族名（探测到的 Consolas），Han 因此回到脚本回退的 `Microsoft YaHei UI`，与正文同族，Latin 仍为 Consolas
-- 空 Mermaid 块（含纯注释块）的「点击插入模板」提示现在可点击：左键命中后在鼠标处弹出三条模板项（流程图/时序图/类图），选择后插入到该块 body 起点并把光标定位到插入内容之后，单次 undo 可整体回退
+- 渲染：Front Matter、嵌套容器引用标记、水平线、行内 details、脚注、硬换行、表格内图片位置、独立图片块高与段距
+- 语法/导出：表格切分单一真源、图片题注规则、导出保留代码语言与题注
+- TOC：旧式列表、带空格锚点、重复编号
+- 审计批次（2026-11-14/15）：解析、渲染、交互、导出、数据安全、平台与安全共 40+ 项（明细见对应 commit log）
 
 ### Notes
-- 历史体积口径（Phase A 基线，仅存档；当前门禁与实测见上）：发布产物曾分两档——运行时代码（非图标）6,048,424 B（门禁 ≤ 6,291,456 B = 6 MiB）、合计 exe 6,105,088 B（门禁 ≤ 6,348,120 B）；两个图标资源合计 56,664 B（`veil.ico` 32,054 + `veil-doc.ico` 24,610），是窗口/任务栏图标与 `.md` 关联必需功能，不计入代码门禁
-- `cargo test --workspace` 1637 passed / 0 failed / 14 ignored；`cargo clippy --workspace --all-targets -- -D warnings` 零警告
+- `cargo test --workspace` 1751 passed / 0 failed / 14 ignored；clippy `-D warnings` 零警告
+- Mermaid 只交付接口与降级：未捆绑任何渲染运行时，不宣称已可渲染
+
+## v1.6.0 — 2026-11-14（波次归档，未打 tag）
+
+### Fixed
+- 链接：CJK 自动间距不再在已消隐的 `[` 上生成同起点 fill，修复「只剩左方括号」的半展开
+- TOC：生成改无序列表，消除每行字面 `1.`；排版层新增有序列表自动编号（同层连续、嵌套后继续、激活恢复源码）
+- 图片：独占一行按视口高度上限、按视觉行判定；支持 HTML `<img width height>` 显式尺寸并在导出保留；缓存键纳入高度上限
+- 设置：窗口几何值按可用宽度省略截断；清除按钮带描边与 hover
+- 光标：输入/点击/滚轮立即恢复并重置闪烁周期；闪烁到期以 `last_blink` 为基准，消除翻转抖动
+- 查找栏：文件/视图类 Ctrl 组合穿透，编辑/剪贴板类仍归查找栏
+
+## v1.5.0 — 2026-11-13（波次归档，未打 tag）
+
+### Added
+- `[TOC]`：纯函数 toc 模块生成带 slug 锚点的嵌套有序列表，随编辑自动刷新
+- 光标 600 ms 闪烁：IME 预编辑与打印态暂停
+- 自动配对：`()` `[]` `{}` `"` `'` 五类，支持选中包裹、成对退格与转义保护，不干预 IME
+- 设置模态：10 个配置项，`Ctrl+,` 打开，改动立即生效
+
+### Fixed
+- TOC 载入即刷新；设置框聚焦后值文本被焦点环覆盖；设置 Tab 焦点；闪烁到期不重绘；preedit 防护
+
+## v1.4.0 — 2026-11-13（波次归档，未打 tag）
+
+### Added
+- 远程图片默认自动加载；「视图 → 阻止远程图片」全局关闭并持久化
+- 安全口径：无 Cookie/`Referer`/凭据、UA 固定 `Veil/<version>`、10 s / 20 MiB、重定向 ≤3 且禁 https→http、SSRF 校验；请求去重、失败记忆、代次失效
+- 文档改写为零后台网络承诺：除按需抓取远程图片外不发请求，导出/PDF 永不包含远程资源
+
+### Fixed
+- HTML `<img>` 远程 `src` 导出修复；details 三角兼容微软雅黑
+
+## v1.3.0 — 2026-11-13（波次归档，未打 tag）
+
+「设计统一」：令牌单源、表面层级、状态过渡与便携文件关联；含 Wave 7 行内 HTML 白名单与 B8/B9 收口。
+
+### Added
+- 原生 PDF 排版保真（Wave 4）：按字形宽度换行、H1–H6 分级字号、列表/引用/Admonition/代码块/表格排版、图片与公式嵌入、页边距、页脚 `n / total`、目录页与多级书签；图片/公式失败降级为 alt/源码，无字体时回退 GDI
+- 文件关联 `veil.exe /register` / `/unregister`：写当前用户 ProgID、内嵌文档图标（资源 ID 2）、加入「打开方式」并只补 `.md` 空位；`UserChoice` 从不触碰，默认应用仍需在系统设置中选择
+- 窗口几何记忆：`config.toml` 新增 `window_width` / `window_height` / `window_x` / `window_y`，启动恢复上次位置与尺寸；越界坐标夹回可见区，最大化不覆盖常规尺寸
+- 状态过渡动效：菜单栏、菜单项、大纲、快速打开、右键菜单、查找栏与对话框按钮 120 ms ease-out cubic 淡入淡出；跟随系统「显示动画」，空闲路径零定时器
+- 设计令牌：`tokens::palette` / `state` / `space` / `stroke` / `motion`；`Theme::surface(SurfaceLevel)` 表达 Base / Card / Popup 三层
+- 历史、单实例多窗口与 Tab 焦点、i18n、外部变更四按钮模态、启动读取失败应用内错误模态
+- Wave 7 顶流行内 HTML 白名单：kbd/sub/sup/mark/abbr/code/a（成对）+ br/img（自闭合）+ details/summary（块级折叠）；预览/打印/PDF/HTML 导出语义一致，导出剥 script/style、白名单外 escape
+- 空 Mermaid 块「点击插入模板」：左键命中后弹出三条模板（流程图/时序图/类图），插入 body 起点并把光标定位到插入内容之后，单次 undo 可整体回退
+
+### Changed
+- 图标体系改为图片真源：应用图标重做为「白页 + 面纱垂坠 V」；文档图标以自绘设计稿 `icons/Markdown.png` 为准（≥32px 完整保留折页 M↓，≤24px 同色系简化徽标）；两套图标均为 Veil 自绘，不使用 Typedown 或任何第三方图标资源。各 7 档（16/20/24/32/48/64/256）由 `build.rs` 以 `include_bytes!` 嵌入，`icon.rs` 只保留窗口图标 RGBA
+- 浮层收敛为单线：只保留边界线，分组改用间距；查找浮栏改版（按钮与计数重排、无命中空态、滚动条命中刻度）
+- 字体显式指定：UI 雅黑 13 px、正文 16 px、代码 Consolas 14 px；README 徽章改为 CI 状态 + 动态 Release
+- 体积门禁临时统一为单一 release exe ≤ 10 MiB；当前值与基线口径以 README「体积门禁」表为唯一真源
+
+### Fixed
+- 代码块与行内代码中文不再空心/描边：等宽路径显式 Consolas，Han 回退 `Microsoft YaHei UI`，与正文同族
+- 行内 HTML 装饰（kbd/mark/abbr/sub-sup/code/pre）按下标偏移正确绘制并覆盖表格单元格；abbr 点线 + title tooltip；表格内 `<br>` 换行；块级 details 展开正文可见、折叠行高不裁切
+- 行内代码中文不再多出反引号；中置 Front Matter 不再丢行
+- 导出：编号标题不再被当有序列表、行内 `<a href>` 不再丢失、交叉标签不再畸形，补齐 kbd/mark/abbr/details/summary/img 的导出 CSS
+
+### Notes
+- 历史体积口径（Phase A 基线，仅存档）：运行时代码（非图标）6,048,424 B（门禁 ≤ 6 MiB）、合计 exe 6,105,088 B；当时两套图标合计 56,664 B，不计入代码门禁
+- Wave 7 落地时 release exe 7,031,808 B；真机走查修复后 7,056,896 B（门禁 10 MiB 内）
+- 真机走查（2026-11-10）：主界面、查找栏、文件菜单（含最近文件）、未保存确认模态、视图菜单、大纲面板渲染正常；动效时序由单元测试覆盖，未做逐帧截图取证
 - workspace 传递依赖 117（门禁 ≤ 200）
-- 真机走查（2026-11-10）：主界面、查找栏、文件菜单（含最近文件）、未保存确认模态、视图菜单、大纲面板渲染正常，无遮挡或错位；动效时序由单元测试覆盖，未做逐帧截图取证
 
 ### 战略级推翻（2026-11-12）
-- 推翻 D10⑤「HTML 白名单不做」裁决，改立项 Wave 7 N10-C 顶流行内 HTML 白名单（零脚本、零外链、纯行内 + 块级折叠）。根因：用户定调「Veil 要做顶流 Markdown 软件，所有细节必须完美」，要求对齐 Typedown / Obsidian / Notion 行为。
-- 战略级推翻的处理规范：**不得静默改写已勾选项**（如 plan-remaining-backlog SubTask 2.3），必须新建推翻 SubTask（已建 2.4）与主台账 D10 子条目，保留历史 + 明确新范围 + 交叉引用。
+- 推翻 D10⑤「HTML 白名单不做」裁决，改立项 Wave 7 N10-C 顶流行内 HTML 白名单（零脚本、零外链、纯行内 + 块级折叠）。根因：用户定调所有细节必须完美，要求对齐 Typedown / Obsidian / Notion 行为
+- 处理规范：**不得静默改写已勾选项**，必须新建推翻 SubTask 与主台账 D10 子条目，保留历史 + 明确新范围 + 交叉引用
 - 实现入口：`.trae/specs/extend-n10-top-tier-html/spec.md`
-
-### Wave 7 · 顶流行内 HTML 白名单（2026-11-12）
-- 顶流锚点下实施 10 类行内 HTML：kbd/sub/sup/mark/abbr/code/a（成对）+ br/img（自闭合）+ details/summary（块级折叠）
-- 三通道语义拉平：预览/打印/PDF/HTML 导出对白名单内标签一致；export 强制剥 script/style、白名单外 escape；remote img 降级占位 + alt
-- 解析：InlineKind 新增 Html/HtmlSelfClosed/HtmlLiteral、BlockKind 新增 Details（默认收起、open 属性自动展开、视图态折叠）
-- UI：paint 层 draw_kbd_frame 描边+圆角、draw_mark_bg 浅黄底；layout sub/sup 字号 0.75 + 基线偏移；br 硬换行；ctx_menu 新增 FoldDetails/UnfoldDetails
-- 单测：veil-core 新增 10 个 inline HTML 解析测试 + 6 个 details 块解析测试；veil-ui 新增 8 个 UI 层测试；real_world_check 差异 7 篇（阈值 18），均为预期 Front Matter / Pre 折叠 / sample.md Other 块
-- 体积：release exe 7,031,808 B（Wave 6 基线 6,988,800 B → +43 KB；历史基线 6,914,048 B → +117,760 B；门禁 10 MiB）
-
-### 真机走查修复（2026-11-12，Wave 7 N10 + N9 复验）
-- 行内 HTML 装饰（kbd/mark/abbr/sub-sup/code/pre）改为按下标偏移正确绘制，不再只覆盖首段，并覆盖表格单元格路径；abbr 改点线并在悬停时显示 title tooltip；`<img>` 行内改为占位/缩略图，块级单行 `<img>` 不再当源码卡
-- 表格单元格内 `<br>` 正常换行；块级 `<details>` 展开正文可见、折叠行高不再裁切、卡片底色不遮字
-- 行内代码中文不再多出反引号、不插空格；中置 Front Matter 不再丢行
-- 导出修复：编号标题不再被当有序列表输出、行内 `<a href>` 不再丢失、交叉标签不再畸形，并补齐 kbd/mark/abbr/details/summary/img 的导出 CSS
-- 体积：release exe 6,988,800 B → **7,056,896 B**（+68,096 B，门禁 10,485,760 B 内）
 
 ## v1.2.0
 

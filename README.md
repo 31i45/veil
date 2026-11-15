@@ -33,6 +33,8 @@ veil.exe /register     # write per-user ProgID + embedded document icon, add Vei
 veil.exe /unregister   # undo only what /register created and still owns
 ```
 
+Both the app icon (white page + veiled V) and the `.md` document icon (folded page + M↓) are original designs made for Veil; no third-party icon set — including Typedown's — is used.
+
 `/register` never steals an existing default: it fills empty slots only and never rewrites `UserChoice`. To make double-clicking `.md` open in Veil, pick Veil under **Settings → Apps → Default apps** (Windows forbids programs from setting themselves as the default). If you move `veil.exe` afterwards, run `/unregister` from the old path and `/register` from the new one — or associate manually:
 
 1. Right-click any `.md` file and choose **Open with** → **Choose another app**.
@@ -77,8 +79,14 @@ Three crates, one-way dependency (`veil` → `veil-ui` → `veil-core`, no rever
 22. Caret as focus: solid when the window is focused, hollow when it is not — no timers, no idle wake-ups
 23. State transitions: hover/press highlights in the menu bar, menus, outline, Quick Open, context menu, find bar and dialog buttons cross-fade over 120 ms (ease-out cubic); the fade advances only while it runs, so the idle path still schedules no timers and never wakes the process. Fades are skipped entirely when Windows "Show animations" is off
 24. Remote images (v1.4): http/https images load automatically; **View → Block Remote Images** disables them globally; a failed fetch degrades to an alt placeholder with a one-time status-bar notice. Requests never carry cookies, `Referer` or credentials, the User-Agent is fixed at `Veil/<version>`, connect/read timeout is 10 s, the response body is capped at 20 MiB, at most 3 redirects are followed with https→http downgrades refused, and localhost / loopback / private / link-local addresses are rejected. Export and PDF never include remote resources
+25. Editing feel (v1.5): auto-pairing for `()` `[]` `{}` `"` `'` with wrap-selection and paired backspace; the 600 ms caret blink pauses during IME preedit and printing; `Ctrl+,` opens a settings modal (10 items, applied immediately)
+26. Outline & TOC: a `[TOC]` line renders as a nested ordered list with heading anchors and refreshes as you edit
+27. Image workflow (v1.6 + this round): alt text is shown as a caption; standalone images support `<img align="left|center|right">` and explicit `width`/`height`; click a standalone image to open the zoom preview (wheel pans, `Ctrl+wheel` or `+`/`-` zooms, `0` fits, arrow keys / page keys pan, `Esc` or the mask closes; `Ctrl+click` still places the caret and reveals source)
+28. Reading & navigation: a collapsed Front Matter card expands on click; heading/TOC anchors jump; interactive chrome shows a pointer cursor
+29. Print & PDF (this round): in-app print preview (page turn / zoom / `Esc`), PDF link annotations, and layout that matches the rendered view
+30. Inline HTML folding: block-level `<details>` expands and collapses by clicking its summary; `<details>` inside quotes, callouts and list items folds the same way (view-only, never rewrites document bytes, expands when the caret enters the body); semantics are identical across screen / print / PDF / HTML export
 
-## What It Won't Do (v1.2 explicitly out of scope)
+## What It Won't Do (still out of scope)
 
 - wgpu / GPU-rendered view (ADR-011: deferred, triggered only if four conditions all trip)
 - Collaborative editing / CRDT (**permanent exclusion — Veil is single-user single-document**)
@@ -86,10 +94,10 @@ Three crates, one-way dependency (`veil` → `veil-ui` → `veil-core`, no rever
 - Plugin system
 - Mobile / PWA (desktop exe only)
 - Table visual editing beyond the delivered subset (merge/split cells); content editing, row/column insert/delete, column alignment and column-width drag are supported
-- Mermaid rendering (Mermaid fenced blocks stay as code, not rendered)
+- Mermaid rendering itself: Mermaid fenced blocks stay as code (a backend-neutral renderer interface is reserved; no rendering runtime is bundled)
 - A separate rich-text document model: the text stays Markdown, and Ctrl+/ is a view toggle over the same document
 - Background networking: no sync, no update check, no telemetry; the only outbound requests are made on demand when rendering remote images in a document, and can be disabled globally via **View → Block Remote Images**. External links are handed to the system default program; Export and PDF never include remote resources.
-- Competitor-parity items deliberately declined: regex find (the `regex` crate added 1,198,592 B to the exe), auto-pairing of brackets/quotes, a whole-word toggle, `Ctrl+Shift+K` delete-line (`Alt+↑` / `Alt+↓` already covers line operations), and a separate H5/H6 type scale (indentation expresses level)
+- Competitor-parity items deliberately declined: regex find (the `regex` crate added 1,198,592 B to the exe), a whole-word toggle, `Ctrl+Shift+K` delete-line (`Alt+↑` / `Alt+↓` already covers line operations), and a separate H5/H6 type scale (indentation expresses level). Auto-pairing of brackets/quotes shipped in v1.5 and is no longer on this list
 
 ## Build / Run / Test
 
@@ -101,11 +109,11 @@ cargo test --workspace
 cargo run -p veil -- <file.md>
 ```
 
-Baseline: 1637 passed / 0 failed / 14 ignored (2026-11-14, re-verified after audit fixes); `cargo clippy --workspace --all-targets -- -D warnings` zero warnings.
+Baseline: 1751 passed / 0 failed / 14 ignored (2026-11-15, re-verified after this round); `cargo clippy --workspace --all-targets -- -D warnings` zero warnings.
 
 ## Red Numbers (targets vs measured)
 
-Measured on release build, probe-serialized; performance rows re-verified 2026-11-09, test and size rows 2026-11-14. Commands: `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo run --release -p veil --example bench_typing`, `cargo test -p veil-ui --release --lib -- --ignored --nocapture --test-threads=1 perf_keystroke_path` (and `perf_keystroke_10k_blocks`), and `(Get-Item target\release\veil.exe).Length`. Keystroke attribution detail in `docs/review/keystroke-attribution.md`.
+Measured on release build, probe-serialized; performance rows re-verified 2026-11-09, test and size rows 2026-11-15. Commands: `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo run --release -p veil --example bench_typing`, `cargo test -p veil-ui --release --lib -- --ignored --nocapture --test-threads=1 perf_keystroke_path` (and `perf_keystroke_10k_blocks`), and `(Get-Item target\release\veil.exe).Length`. Keystroke attribution detail in `docs/review/keystroke-attribution.md`.
 
 | Metric | Target | Measured |
 |---|---|---|
@@ -116,8 +124,8 @@ Measured on release build, probe-serialized; performance rows re-verified 2026-1
 | Cold start (window handle; P2 comparison口径) | — | 30 ms (2026-10-30, `tools/bench/measure.ps1`) |
 | Keystroke→commit p95 on 100 K-word doc | ≤ 16 ms | 6.781 ms / 12.379 ms (`perf_keystroke_path` 5,005 blocks / `perf_keystroke_10k_blocks` 10,500 blocks; baseline 6.677 / 12.488; 2026-11-09) ✅ |
 | Resident memory, 100 K-word doc (private working set) | ≤ 150 MB | 40.76 MB (2026-11-05) |
-| Installed size — code + data (non-icon) | ≤ 6 MiB (Phase A baseline; superseded by the Wave 3/4 PDF export gate allowance) | 7,475,523 B (exe minus 89,277 B icons: `veil.ico` 46,688 + `veil-doc.ico` 42,589; 2026-11-14 after audit fixes) |
-| Installed size — total single-file `veil.exe` | ≤ 10 MiB = 10,485,760 B (Wave 4 authorization; every increment must be recorded) | 7,564,800 B ≈ 7.21 MiB (2026-11-14 after audit fixes; +576,000 B vs Wave 6 baseline 6,988,800 B; +650,752 B vs historical baseline 6,914,048 B); margin 2,920,960 B |
+| Installed size — code + data (non-icon) | ≤ 6 MiB (Phase A baseline; superseded by the Wave 3/4 PDF export gate allowance) | 7,658,819 B (exe minus 89,277 B icons: `veil.ico` 46,688 + `veil-doc.ico` 42,589; 2026-11-15 after this round) |
+| Installed size — total single-file `veil.exe` | ≤ 10 MiB = 10,485,760 B (Wave 4 authorization; every increment must be recorded) | 7,748,096 B ≈ 7.39 MiB (2026-11-15 after this round; +759,296 B vs Wave 6 baseline 6,988,800 B; +834,048 B vs historical baseline 6,914,048 B); margin 2,737,664 B |
 | `veil-core` unit + property tests | ≥ 80 | 209 |
 | E2E assertions | ≥ 20 | 41 (3 e2e scenarios: open→save→reopen, table+image paste, find/replace→crash recovery→self-clean) ✅ |
 | Markdown roundtrip (no edits: output == input bytes; byte comparison) | 100% | 100% |

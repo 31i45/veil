@@ -41,38 +41,6 @@ const ZOOM_STEP: f32 = 0.1;
 const ZOOM_MIN: f32 = 0.5;
 const ZOOM_MAX: f32 = 3.0;
 
-/// 段落形态的 TOML Front Matter（`+++` 包裹的 `key = value` 行）。
-/// 与内核 `looks_like_toml_frontmatter` 同口径；仅用于视图层隐藏判定，
-/// 不改变块结构，也不把 YAML `---` 误判（那已是块级分隔线/标题下划线）。
-fn toml_frontmatter_like(text: &str) -> bool {
-    let trimmed = text.trim_end_matches(['\r', '\n']);
-    let lines: Vec<&str> = trimmed.split('\n').collect();
-    if lines.len() < 3 {
-        return false;
-    }
-    if lines[0].trim() != "+++" || lines[lines.len() - 1].trim() != "+++" {
-        return false;
-    }
-    let body = &lines[1..lines.len() - 1];
-    !body.is_empty()
-        && body.iter().all(|line| {
-            let s = line.trim();
-            s.is_empty()
-                || s.starts_with('#')
-                || s.starts_with('[')
-                || s.ends_with(',')
-                || s.ends_with(']')
-                || s.ends_with('}')
-                || s.split_once('=').is_some_and(|(key, _)| {
-                    let key = key.trim();
-                    !key.is_empty()
-                        && key.chars().all(|c| {
-                            c.is_alphanumeric() || matches!(c, '_' | '-' | '.' | '"' | '\'')
-                        })
-                })
-        })
-}
-
 impl App {
     /// 编辑后统一入口：重建索引、视口跟随光标、请求重绘。
     /// 仅内容编辑重启自动保存静默期；纯光标移动不推迟落盘。
@@ -3771,17 +3739,10 @@ impl App {
     /// 也常见「正文中间单独成段的 TOML Front Matter」示例——内核只认文档首行，
     /// 视图层按同构语法识别段落形态的 TOML Front Matter（不改变块结构/字节），
     /// 使其在 WYSIWYG 非活动态同样隐藏（REN-SWEEP-001）。
+    /// 判定结果由索引期缓存（`BlockGeom::frontmatter_like`），此处只读标志：
+    /// 每帧 O(块数) 切片解析会拖慢大文档真实击键（DEF-RENDER-FINAL-001）。
     pub(crate) fn block_is_frontmatter(&self, g: &BlockGeom) -> bool {
-        if matches!(g.kind, BlockKind::FrontMatter(_)) {
-            return true;
-        }
-        if g.kind != BlockKind::Paragraph {
-            return false;
-        }
-        let Some(text) = self.editor.session().text_slice(g.range) else {
-            return false;
-        };
-        toml_frontmatter_like(&text)
+        g.frontmatter_like
     }
 
     /// 是否因祖先 details 折叠而不可见（B3）。几何重算期间块表被临时取走，

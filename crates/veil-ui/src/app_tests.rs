@@ -12337,6 +12337,62 @@ fn toml_frontmatter_paragraph_hidden_mid_document() {
 }
 
 #[test]
+fn toml_frontmatter_flag_tracks_single_block_edits() {
+    // DEF-RENDER-FINAL-001：判定缓存进 `BlockGeom` 后，单块原位编辑必须重算该标志。
+    // 每帧对全部块切片解析会拖慢大文档击键，因此判定只能缓存，但缓存不得陈旧。
+    let store = MemStore::default();
+    // 起止行起初都是 `++`（非法）；给末行补一个 `+` 才成为 `+++` 包裹形态。
+    let text = "# 前\n\n++\nkey = 1\n++\n\n后\n";
+    let mut a = app(text, None, false, &store);
+    a.editor.set_caret(text.find('后').unwrap());
+    a.ensure_layouts_all();
+    a.render();
+    let find_toml = |a: &App| {
+        a.index
+            .blocks
+            .iter()
+            .position(|g| {
+                a.editor
+                    .session()
+                    .text_slice(g.range)
+                    .is_some_and(|t| t.contains("key = 1"))
+            })
+            .expect("应存在 TOML 段落")
+    };
+    let i = find_toml(&a);
+    assert!(!a.index.blocks[i].frontmatter_like, "初始 `++` 不是 Front Matter");
+    assert!(a.index.blocks[i].height > 0.0);
+
+    // 首行与末行都补成 `+++`：同一块内变成合法 TOML Front Matter。
+    let open = text.find("++\nkey").unwrap() + 2;
+    let close = text.find("++\n\n后").unwrap() + 2;
+    a.editor.set_caret(open);
+    a.route_key(Key::Text("+".into()));
+    a.editor.set_caret(close + 1);
+    a.route_key(Key::Text("+".into()));
+    a.editor.set_caret(text.find('后').unwrap() + 2);
+    a.ensure_layouts_all();
+    a.render();
+    let i = find_toml(&a);
+    assert!(
+        a.index.blocks[i].frontmatter_like,
+        "单块编辑后缓存标志必须更新"
+    );
+    assert_eq!(a.index.blocks[i].height, 0.0, "非活动态应隐藏");
+
+    // 删掉末行补的 `+`：增量路径同样必须把标志降回 false 并恢复高度。
+    a.editor.set_caret(close + 2);
+    a.route_key(Key::Backspace);
+    a.editor.set_caret(text.find('后').unwrap());
+    a.ensure_layouts_all();
+    a.render();
+    let i = find_toml(&a);
+    assert!(!a.index.blocks[i].frontmatter_like, "删回后不得残留 Front Matter");
+    assert!(a.index.blocks[i].height > 0.0, "非 Front Matter 必须占高度");
+    assert!(doc_text(&a).contains("++\nkey = 1\n++\n"), "编辑往返后末行回到 `++`");
+}
+
+#[test]
 fn source_mode_hides_math_image_and_table_grid() {    let store = MemStore::default();
     let text = "前言\n\n$$\nx=1\n$$\n\n| a | b |\n| - | - |\n| 1 | 2 |\n";
     let mut a = app(text, None, false, &store);

@@ -14,7 +14,7 @@ mod block;
 mod inline;
 mod model;
 
-pub use block::{list_signature, task_span};
+pub use block::{list_signature, split_row as split_table_row, task_span};
 pub(crate) use model::Block;
 pub use model::{
     sanitize_style, should_strip_html, AdmonitionType, BlockContainer, BlockId, BlockKind, Callout,
@@ -161,18 +161,7 @@ impl Syntax {
                 }
                 continue;
             }
-            if matches!(
-                kind,
-                BlockKind::FencedCode(_)
-                    | BlockKind::IndentedCode
-                    | BlockKind::Math
-                    | BlockKind::Table
-                    | BlockKind::ThematicBreak
-                    | BlockKind::LinkRefDef
-                    | BlockKind::HtmlBlock
-                    | BlockKind::Details { .. }
-                    | BlockKind::FrontMatter(_)
-            ) {
+            if kind.has_no_inlines() {
                 continue;
             }
             let start = buf.offset_of_line(start_line);
@@ -253,18 +242,7 @@ impl Syntax {
     /// 列表/引用仅解析标记（`- ` / `> `）之后的内容，标记本身不得被 inline 误认。
     pub fn inlines(&self, buf: &Buffer, block: BlockId) -> Option<Vec<InlineNode>> {
         let b = self.get_block(block)?;
-        if matches!(
-            b.kind,
-            BlockKind::FencedCode(_)
-                | BlockKind::IndentedCode
-                | BlockKind::Math
-                | BlockKind::Table
-                | BlockKind::ThematicBreak
-                | BlockKind::LinkRefDef
-                | BlockKind::FootnoteDef
-                | BlockKind::HtmlBlock
-                | BlockKind::FrontMatter(_)
-        ) {
+        if b.kind.has_no_inlines() {
             return Some(Vec::new());
         }
         let start = buf.offset_of_line(b.start_line);
@@ -689,18 +667,7 @@ impl Syntax {
             if b.kind == BlockKind::FootnoteDef {
                 produced_footnote_marker = true;
             }
-            if matches!(
-                b.kind,
-                BlockKind::FencedCode(_)
-                    | BlockKind::IndentedCode
-                    | BlockKind::Math
-                    | BlockKind::Table
-                    | BlockKind::ThematicBreak
-                    | BlockKind::LinkRefDef
-                    | BlockKind::HtmlBlock
-                    | BlockKind::Details { .. }
-                    | BlockKind::FrontMatter(_)
-            ) {
+            if b.kind.has_no_inlines() {
                 continue;
             }
             let text = buf.slice(b.range.start, b.range.end);
@@ -869,6 +836,176 @@ fn collect_emphasis(nodes: &[InlineNode], out: &mut Vec<EmphasisSpan>) {
             });
         }
         collect_emphasis(&n.children, out);
+    }
+}
+
+/// 块文本剥掉给定图片源码后是否只剩空白（独占一行图片的判定基础）。
+/// `img_ranges` 为文档绝对区间；`text` 是 `block` 区间内的块文本。
+pub fn block_is_image_only(text: &str, block: Range, img_ranges: &[Range]) -> bool {
+    if img_ranges.is_empty() {
+        return false;
+    }
+    let mut keep = String::new();
+    let mut pos = 0usize;
+    let mut ranges: Vec<Range> = img_ranges.to_vec();
+    ranges.sort_by_key(|r| r.start);
+    for r in ranges {
+        let s = r.start.saturating_sub(block.start).min(text.len());
+        let e = r.end.saturating_sub(block.start).min(text.len());
+        if !(text.is_char_boundary(s) && text.is_char_boundary(e)) || s < pos || s >= e {
+            continue;
+        }
+        keep.push_str(&text[pos..s]);
+        pos = e;
+    }
+    if pos < text.len() {
+        keep.push_str(&text[pos..]);
+    }
+    keep.trim().is_empty()
+}
+
+/// 单张图片是否「独占一行」：图片所在的**视觉行**（两个换行之间）除该图源码外只剩空白。
+/// 多行段落里图片之后另起一行的正文（如 `![a](p.png)\nX`）不应把这张图降级为
+/// 行内小图——它自己的那一行仍是纯图片；同一行内有任意正文时返回 false。
+/// 视图、HTML 与 PDF 导出共用此判定。
+pub fn image_standalone(text: &str, block: Range, img: Range) -> bool {
+    if img.start < block.start || img.end > block.end || img.start >= img.end {
+        return false;
+    }
+    let s = img.start - block.start;
+    let e = img.end - block.start;
+    if e > text.len() || !text.is_char_boundary(s) || !text.is_char_boundary(e) {
+        return false;
+    }
+    let line_start = text[..s].rfind('\n').map_or(0, |i| i + 1);
+    let line_end = text[e..].find('\n').map_or(text.len(), |i| e + i);
+    let line = &text[line_start..line_end];
+    let base = block.start + line_start;
+    block_is_image_only(
+        line,
+        Range::new(base, block.start + line_end),
+        &[Range::new(base + (s - line_start), base + (e - line_start))],
+    )
+}
+
+/// 段落只含一张独立图片时返回 `(图片区间, alt 题注)`；行内、多图与空 alt 均不派生题注。
+/// 屏幕题注、HTML `<figcaption>` 与 PDF 题注共用本函数，保证三端语义一致。
+pub fn standalone_image_caption(
+    nodes: &[InlineNode],
+    text: &str,
+    base: usize,
+) -> Option<(Range, String)> {
+    let mut images = nodes.iter().filter(|n| n.is_image());
+    let node = images.next()?;
+    if images.next().is_some() {
+        return None;
+    }
+    let block = Range::new(base, base + text.len());
+    if !image_standalone(text, block, node.range) {
+        return None;
+    }
+    let alt = match &node.kind {
+        InlineKind::Image => text.get(
+            node.content.start.checked_sub(base)?..node.content.end.checked_sub(base)?,
+        )?,
+        InlineKind::HtmlSelfClosed { attrs, .. } => attrs.alt.as_deref()?,
+        _ => return None,
+    };
+    let caption = alt.trim().replace(['\r', '\n'], " ");
+    (!caption.is_empty()).then_some((node.range, caption))
+}
+
+#[cfg(test)]
+mod image_tests {
+    use super::*;
+
+    fn inlines(text: &str) -> Vec<InlineNode> {
+        parse_inlines(text, 0, &RefMap::new())
+    }
+
+    #[test]
+    fn image_only_block_ignores_surrounding_whitespace() {
+        let r = Range::new(0, 11);
+        assert!(
+            block_is_image_only("![a](p.png)", r, &[r]),
+            "整块只有图片应判定为独占一行"
+        );
+        let r = Range::new(2, 13);
+        assert!(
+            block_is_image_only("  ![a](p.png)  ", Range::new(0, 15), &[r]),
+            "图片前后空白不影响判定"
+        );
+        // 块文本常带尾换行：仅空白残留仍应算独占一行（否则会误走行内 4 行限高）
+        let r = Range::new(0, 17);
+        assert!(
+            block_is_image_only("<img src=\"a.png\">\n", Range::new(0, 18), &[r]),
+            "仅剩换行也算独占一行"
+        );
+        assert!(
+            !block_is_image_only("x ![a](p.png)", Range::new(0, 13), &[Range::new(2, 13)]),
+            "有正文时按行内图处理"
+        );
+    }
+
+    #[test]
+    fn image_standalone_by_visual_line() {
+        let r = Range::new(0, 11);
+        assert!(image_standalone("![a](p.png)\n", Range::new(0, 12), r));
+        // 图片后另起一行的正文：图片仍独占自己的视觉行
+        assert!(
+            image_standalone("![a](p.png)\nX", Range::new(0, 13), r),
+            "下一行正文不应把图片降级为行内"
+        );
+        assert!(!image_standalone(
+            "x ![a](p.png)",
+            Range::new(0, 13),
+            Range::new(2, 13)
+        ));
+        assert!(!image_standalone(
+            "![a](p.png) x",
+            Range::new(0, 13),
+            Range::new(0, 11)
+        ));
+        // 图片前一行有正文不影响本行
+        assert!(image_standalone(
+            "Y\n![a](p.png)\nX",
+            Range::new(0, 15),
+            Range::new(2, 13)
+        ));
+        // 区间越界/空区间防御
+        assert!(!image_standalone("abc", Range::new(0, 3), Range::new(0, 2)));
+        assert!(!image_standalone("abc", Range::new(0, 3), Range::new(5, 6)));
+    }
+
+    #[test]
+    fn standalone_caption_rule_is_shared_and_stable() {
+        // 单张独立图片：出题注（Markdown alt）
+        let text = "![a](p.png)\n";
+        let nodes = inlines(text);
+        assert_eq!(
+            standalone_image_caption(&nodes, text, 0),
+            Some((Range::new(0, 11), "a".to_string()))
+        );
+        // `<img>` 的 alt 同样出题注
+        let text = "<img src=\"p.png\" alt=\"图\">\n";
+        let nodes = inlines(text);
+        assert_eq!(
+            standalone_image_caption(&nodes, text, 0).unwrap().1,
+            "图".to_string()
+        );
+        // 同段落两张图（换行或同一行）都不出题注
+        for text in ["![a](p.png)\n![b](q.png)\n", "![a](p.png) ![b](q.png)\n"] {
+            let nodes = inlines(text);
+            assert_eq!(standalone_image_caption(&nodes, text, 0), None, "{text}");
+        }
+        // 行内图片（同行有正文）不出题注
+        let text = "x ![a](p.png)\n";
+        let nodes = inlines(text);
+        assert_eq!(standalone_image_caption(&nodes, text, 0), None);
+        // 空 alt 不出题注
+        let text = "![](p.png)\n";
+        let nodes = inlines(text);
+        assert_eq!(standalone_image_caption(&nodes, text, 0), None);
     }
 }
 
@@ -1600,6 +1737,53 @@ mod tests {
         // 未被引用的定义不占号
         assert_eq!(s.footnote_number("c"), None);
         assert_eq!(s.footnote_ids(), ["b", "a"]);
+    }
+
+    #[test]
+    fn footnote_ref_inside_details_body_is_numbered() {
+        // details 正文拆成兄弟块，脚注按文档顺序编号、引用与定义一一对应
+        let b = Buffer::new(
+            "<details>\n<summary>更多</summary>\n\n正文 [^d]\n\n</details>\n\n[^d]: 定义\n",
+        );
+        let s = Syntax::new(&b);
+        assert_eq!(s.footnote_number("d"), Some(1));
+        assert_eq!(s.footnote_ids(), ["d"]);
+        assert!(s.footnote_definition("d").is_some());
+    }
+
+    #[test]
+    fn no_inline_block_kinds_single_source() {
+        // 共享判定：代码/数学/表格/分隔线/引用定义/脚注定义/HTML/FrontMatter 无 inline
+        for kind in [
+            BlockKind::FencedCode(None),
+            BlockKind::IndentedCode,
+            BlockKind::Math,
+            BlockKind::Table,
+            BlockKind::ThematicBreak,
+            BlockKind::LinkRefDef,
+            BlockKind::FootnoteDef,
+            BlockKind::HtmlBlock,
+            BlockKind::FrontMatter(String::new()),
+        ] {
+            assert!(kind.has_no_inlines(), "{kind:?}");
+        }
+        // Details/段落/标题/列表/引用含 inline
+        for kind in [
+            BlockKind::Details {
+                summary: "s".into(),
+                open_default: false,
+            },
+            BlockKind::Paragraph,
+            BlockKind::AtxHeading(1),
+            BlockKind::ListItem {
+                ordered: false,
+                depth: 0,
+                task: None,
+            },
+            BlockKind::BlockQuote,
+        ] {
+            assert!(!kind.has_no_inlines(), "{kind:?}");
+        }
     }
 
     #[test]

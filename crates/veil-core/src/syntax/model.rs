@@ -618,6 +618,27 @@ pub enum BlockKind {
     FrontMatter(String),
 }
 
+impl BlockKind {
+    /// 块是否不含任何 inline 内容。脚注编号扫描、`Session::inlines` 与脏区脚注标记
+    /// 检测共用此单一判定，避免多处手写集合漂移。
+    /// `Details` 不属于此类：其正文块各自持有 inline，`<details>` 内的脚注引用
+    /// 也必须参与编号。
+    pub fn has_no_inlines(&self) -> bool {
+        matches!(
+            self,
+            BlockKind::FencedCode(_)
+                | BlockKind::IndentedCode
+                | BlockKind::Math
+                | BlockKind::Table
+                | BlockKind::ThematicBreak
+                | BlockKind::LinkRefDef
+                | BlockKind::FootnoteDef
+                | BlockKind::HtmlBlock
+                | BlockKind::FrontMatter(_)
+        )
+    }
+}
+
 /// 表格列对齐（GFM 分隔行 `:--` / `--:` / `:-:` 语法）。
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum CellAlign {
@@ -739,6 +760,21 @@ pub struct InlineNode {
     pub url: Option<Range>,
     /// 嵌套子节点（Code/Math 恒为空）。
     pub children: Vec<InlineNode>,
+}
+
+impl InlineNode {
+    /// 是否为图片节点：Markdown `![alt](url)` 或白名单 `<img ...>`。
+    /// 视图、HTML 导出与 PDF 导出共用，避免各自手写 `matches!` 漂移。
+    pub fn is_image(&self) -> bool {
+        matches!(self.kind, InlineKind::Image)
+            || matches!(
+                self.kind,
+                InlineKind::HtmlSelfClosed {
+                    tag: HtmlTag::Img,
+                    ..
+                }
+            )
+    }
 }
 
 // ===== 安全过滤辅助（export.rs / paint.rs 使用，解析层仍产出原始节点）=====

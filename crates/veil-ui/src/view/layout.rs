@@ -190,54 +190,9 @@ pub(crate) fn image_display_size(
     }
 }
 
-/// 独占一行的图片（块级 / 段落仅含图片）：块文本剥掉全部图片节点源码后只剩空白。
-/// `img_ranges` 为文档绝对区间；`text` 是 `block` 区间内的块文本。
-pub(crate) fn block_is_image_only(text: &str, block: Range, img_ranges: &[Range]) -> bool {
-    if img_ranges.is_empty() {
-        return false;
-    }
-    let mut keep = String::new();
-    let mut pos = 0usize;
-    let mut ranges: Vec<Range> = img_ranges.to_vec();
-    ranges.sort_by_key(|r| r.start);
-    for r in ranges {
-        let s = r.start.saturating_sub(block.start).min(text.len());
-        let e = r.end.saturating_sub(block.start).min(text.len());
-        if !(text.is_char_boundary(s) && text.is_char_boundary(e)) || s < pos || s >= e {
-            continue;
-        }
-        keep.push_str(&text[pos..s]);
-        pos = e;
-    }
-    if pos < text.len() {
-        keep.push_str(&text[pos..]);
-    }
-    keep.trim().is_empty()
-}
-
-/// 单张图片是否「独占一行」：图片所在的**视觉行**（两个换行之间）除该图源码外只剩空白。
-/// 与 [`block_is_image_only`] 的区别：多行段落里图片之后另起一行的正文（如
-/// `![a](p.png)\nX`）不应把这张图降级为行内小图——它自己的那一行仍是纯图片；
-/// 而同一行内有任意正文时仍返回 false（继续走行内 4 行限高）。
-pub(crate) fn image_is_standalone(text: &str, block: Range, img: Range) -> bool {
-    if img.start < block.start || img.end > block.end || img.start >= img.end {
-        return false;
-    }
-    let s = img.start - block.start;
-    let e = img.end - block.start;
-    if e > text.len() || !text.is_char_boundary(s) || !text.is_char_boundary(e) {
-        return false;
-    }
-    let line_start = text[..s].rfind('\n').map_or(0, |i| i + 1);
-    let line_end = text[e..].find('\n').map_or(text.len(), |i| e + i);
-    let line = &text[line_start..line_end];
-    let base = block.start + line_start;
-    block_is_image_only(
-        line,
-        Range::new(base, block.start + line_end),
-        &[Range::new(base + (s - line_start), base + (e - line_start))],
-    )
-}
+// 独占一行的图片判定与独立图片题注均由内核提供单一真值
+// （`veil_core::{image_standalone, standalone_image_caption}`），
+// 视图、HTML 导出与 PDF 导出共用同一语义，不再各自实现。
 
 /// 替换段：块相对 doc 区间 `[doc_start, doc_end)` → `fill` 文本。
 /// `fill` 为空即消隐；非空时整段替换（长度可同可异）。fill 可含换行（`<br>`、题注），
@@ -4621,70 +4576,6 @@ mod tests {
             image_display_size(10, 10, (Some(9999), Some(9999)), 756.0, 88.0),
             (3024, 3024)
         );
-    }
-
-    #[test]
-    fn block_is_image_only_ignores_surrounding_whitespace() {
-        let r = Range::new(0, 11);
-        assert!(
-            block_is_image_only("![a](p.png)", r, &[r]),
-            "整块只有图片应判定为独占一行"
-        );
-        let r = Range::new(2, 13);
-        assert!(
-            block_is_image_only("  ![a](p.png)  ", Range::new(0, 15), &[r]),
-            "图片前后空白不影响判定"
-        );
-        // 块文本常带尾换行：仅空白残留仍应算独占一行（否则会误走行内 4 行限高）
-        let r = Range::new(0, 17);
-        assert!(
-            block_is_image_only("<img src=\"a.png\">\n", Range::new(0, 18), &[r]),
-            "仅剩换行也算独占一行"
-        );
-        assert!(
-            !block_is_image_only("x ![a](p.png)", Range::new(0, 13), &[Range::new(2, 13)]),
-            "有正文时按行内图处理"
-        );
-    }
-
-    #[test]
-    fn image_is_standalone_by_visual_line() {
-        // 整块仅图片（含尾随换行）
-        let r = Range::new(0, 11);
-        assert!(image_is_standalone("![a](p.png)\n", Range::new(0, 12), r));
-        // 图片后另起一行的正文：图片仍独占自己的视觉行
-        assert!(
-            image_is_standalone("![a](p.png)\nX", Range::new(0, 13), r),
-            "下一行正文不应把图片降级为行内"
-        );
-        // 同一行内有正文：按行内处理
-        assert!(!image_is_standalone(
-            "x ![a](p.png)",
-            Range::new(0, 13),
-            Range::new(2, 13)
-        ));
-        assert!(!image_is_standalone(
-            "![a](p.png) x",
-            Range::new(0, 13),
-            Range::new(0, 11)
-        ));
-        // 图片前一行有正文不影响本行
-        assert!(image_is_standalone(
-            "Y\n![a](p.png)\nX",
-            Range::new(0, 15),
-            Range::new(2, 13)
-        ));
-        // 区间越界/空区间防御
-        assert!(!image_is_standalone(
-            "abc",
-            Range::new(0, 3),
-            Range::new(0, 2)
-        ));
-        assert!(!image_is_standalone(
-            "abc",
-            Range::new(0, 3),
-            Range::new(5, 6)
-        ));
     }
 
     #[test]

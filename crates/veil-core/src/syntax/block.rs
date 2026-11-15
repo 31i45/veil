@@ -2338,7 +2338,8 @@ fn delim_align(raw: &str) -> Option<CellAlign> {
 
 /// 按未转义且不在 code span 内的 `|` 切分表格行；剥除首尾空白与可选外层竖线。
 /// 返回行内字节区间（含单元格两侧空白；trim 由调用方完成）。
-fn split_row(line: &str) -> Vec<(usize, usize)> {
+/// 以 `veil_core::split_table_row` 对外暴露，供写路径（UI 表格编辑）共用同一口径。
+pub fn split_row(line: &str) -> Vec<(usize, usize)> {
     let b = line.as_bytes();
     let (mut s, mut e) = (0, b.len());
     while s < e && b[s].is_ascii_whitespace() {

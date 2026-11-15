@@ -287,9 +287,11 @@ pub fn html_of_doc(
         };
         let rendered =
             render_block_inlines(session, &mut fn_occurrences, &text, span.start, &nodes);
+        // 独立图片题注与屏幕/PDF 共用内核判定，避免三端语义漂移。
         let caption = (kind == BlockKind::Paragraph)
-            .then(|| standalone_image_caption(&nodes, &text, span.start))
-            .flatten();
+            .then(|| veil_core::standalone_image_caption(&nodes, &text, span.start))
+            .flatten()
+            .map(|(_, caption)| caption);
         let mut html = String::new();
         pulldown_cmark::html::push_html(
             &mut html,
@@ -424,44 +426,6 @@ fn heading_level(kind: &BlockKind) -> Option<u8> {
         BlockKind::AtxHeading(level) | BlockKind::SetextHeading(level) => Some(*level),
         _ => None,
     }
-}
-
-/// 段落只含一张独立图片时返回 alt 题注；行内、多图与空 alt 均不派生题注。
-fn standalone_image_caption(nodes: &[InlineNode], text: &str, base: usize) -> Option<String> {
-    let mut images = nodes.iter().filter(|n| {
-        matches!(n.kind, InlineKind::Image)
-            || matches!(
-                n.kind,
-                InlineKind::HtmlSelfClosed {
-                    tag: HtmlTag::Img,
-                    ..
-                }
-            )
-    });
-    let node = images.next()?;
-    if images.next().is_some() {
-        return None;
-    }
-    let start = node.range.start.checked_sub(base)?;
-    let end = node.range.end.checked_sub(base)?;
-    if start >= end
-        || end > text.len()
-        || !text.is_char_boundary(start)
-        || !text.is_char_boundary(end)
-        || !text[..start].trim().is_empty()
-        || !text[end..].trim().is_empty()
-    {
-        return None;
-    }
-    let alt = match &node.kind {
-        InlineKind::Image => {
-            text.get(node.content.start.checked_sub(base)?..node.content.end.checked_sub(base)?)?
-        }
-        InlineKind::HtmlSelfClosed { attrs, .. } => attrs.alt.as_deref()?,
-        _ => return None,
-    };
-    let caption = alt.trim().replace(['\r', '\n'], " ");
-    (!caption.is_empty()).then_some(caption)
 }
 
 /// 标题内容区间（块内字节偏移，标题块起点即首行行首）。
@@ -2207,6 +2171,26 @@ mod tests {
                 !body.contains("<figcaption>"),
                 "不得生成 figcaption：{body}"
             );
+        }
+    }
+
+    #[test]
+    fn consecutive_standalone_images_each_get_caption() {
+        // 与屏幕/PDF 共用内核判定：两个独占段落的图片各自出题注
+        let body = body_of("![甲](img/a.png)\n\n![乙](img/b.png)\n");
+        assert_eq!(body.matches("<figcaption>").count(), 2, "{body}");
+        assert!(body.contains("<figcaption>甲</figcaption>"), "{body}");
+        assert!(body.contains("<figcaption>乙</figcaption>"), "{body}");
+    }
+
+    #[test]
+    fn multiple_images_in_one_paragraph_get_no_caption() {
+        // 同段多图（换行或同一行）不派生题注，与屏幕语义一致
+        for body in [
+            body_of("![甲](img/a.png)\n![乙](img/b.png)\n"),
+            body_of("![甲](img/a.png) ![乙](img/b.png)\n"),
+        ] {
+            assert!(!body.contains("<figcaption>"), "{body}");
         }
     }
 

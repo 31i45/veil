@@ -635,10 +635,21 @@ impl App {
                     baseline: img.baseline,
                 });
             }
-            // 图片题注候选（独立成行 + alt 非空）：与是否加载成功无关，
-            // 缺失时题注仍显示（布局层把缺失节点降级为通用占位以避免与 alt 重复）。
+            // 图片题注候选（独立图片 + alt 非空）：与 HTML/PDF 导出共用内核判定
+            // （`veil_core::standalone_image_caption`），三端题注语义一致。
+            // 缺失图片时题注仍显示（布局层把缺失节点降级为通用占位以避免与 alt 重复）。
             let mut captions: Vec<ImageCaption> = Vec::new();
-            for (nrange, url, explicit, alt) in images {
+            if kind == BlockKind::Paragraph {
+                if let Some((nr, caption)) =
+                    veil_core::standalone_image_caption(&inlines, &text, range.start)
+                {
+                    captions.push(ImageCaption {
+                        range: nr,
+                        text: caption,
+                    });
+                }
+            }
+            for (nrange, url, explicit, _alt) in images {
                 // HTML `width`/`height` 是 CSS 逻辑像素 → 乘 DPI 转布局物理像素。
                 let explicit = (
                     explicit
@@ -650,14 +661,6 @@ impl App {
                 );
                 // 独占判定按「图片所在视觉行」：行内图片不产生题注，避免打断行内排版。
                 let standalone = image_is_standalone(&text, range, nrange);
-                let alt = alt.trim();
-                if standalone && !alt.is_empty() {
-                    // 题注单行显示：alt 内部换行折成空格（其余字符不改写）。
-                    captions.push(ImageCaption {
-                        range: nrange,
-                        text: alt.replace(['\n', '\r'], " "),
-                    });
-                }
                 let max_h = if standalone {
                     self.image_max_height()
                 } else {
@@ -3168,15 +3171,18 @@ fn first_cell_after(tbl: &veil_core::Table, caret: usize) -> Option<usize> {
 }
 
 // ---- GFM 表格行/列 Markdown 变换（T3：纯字符串，零核心依赖） ----
+/// 行 → 单元格文本：与内核解析同一转义口径（`\|`、code span 内的 `|` 不切列）。
+/// 写路径不得自行按裸 `|` 切分，否则含转义竖线的单元格会被拆散并改写源码。
 #[allow(dead_code)]
 fn split_row(row: &str) -> Vec<String> {
-    // 去掉首尾空白和首/尾管道符
-    let trimmed = row.trim();
-    let trimmed = trimmed.trim_start_matches('|').trim_end_matches('|');
-    if trimmed.is_empty() {
+    let cells: Vec<String> = veil_core::split_table_row(row)
+        .into_iter()
+        .map(|(s, e)| row[s..e].trim().to_string())
+        .collect();
+    if cells.len() == 1 && cells[0].is_empty() {
         return Vec::new();
     }
-    trimmed.split('|').map(|s| s.trim().to_string()).collect()
+    cells
 }
 
 #[allow(dead_code)]
@@ -3251,32 +3257,20 @@ pub(crate) fn table_insert_row(src: &str, body_index: usize, above: bool) -> Str
 
 /// 生成源码中第 line_index 行（0=header、1=分隔行、2+=body）第 col 列单元格
 /// 内容起点（`|` 后跳过前导空白）；行/列越界返回 0。
+/// 切列沿用内核转义口径，含 `\|` 与 code span 内 `|` 的单元格不会错位。
 pub(crate) fn table_cell_start(src: &str, line_index: usize, col: usize) -> usize {
-    let lines: Vec<&str> = src.split('\n').collect();
-    let Some(line) = lines.get(line_index) else {
-        return 0;
-    };
-    let line_off: usize = lines[..line_index].iter().map(|l| l.len() + 1).sum();
-    let mut i = line.len() - line.trim_start().len();
-    if line[i..].starts_with('|') {
-        i += 1;
+    let mut line_off = 0usize;
+    for (i, line) in src.split('\n').enumerate() {
+        if i == line_index {
+            let Some(&(s, e)) = veil_core::split_table_row(line).get(col) else {
+                return 0;
+            };
+            let cell = &line[s..e];
+            return line_off + s + (cell.len() - cell.trim_start().len());
+        }
+        line_off += line.len() + 1;
     }
-    let mut cur = 0usize;
-    loop {
-        while i < line.len() && line.as_bytes()[i] == b' ' {
-            i += 1;
-        }
-        if cur == col {
-            return line_off + i;
-        }
-        match line[i..].find('|') {
-            Some(k) => {
-                i += k + 1;
-                cur += 1;
-            }
-            None => return 0,
-        }
-    }
+    0
 }
 
 /// 删除指定 body 行（body_index 0-based；0 = 第一行 body，不是 header）。
@@ -3354,36 +3348,9 @@ pub(crate) fn table_delete_column(src: &str, col_index: usize) -> String {
     format!("{}\n", new_lines.join("\n"))
 }
 
-/// 分隔行单元格（含两侧空白）的字节区间：剥除行首尾空白与可选外层竖线后按 `|` 切分。
+/// 分隔行单元格（含两侧空白）的字节区间：与内核同一转义感知切分。
 fn sep_cell_spans(line: &str) -> Vec<(usize, usize)> {
-    let b = line.as_bytes();
-    let (mut s, mut e) = (0, b.len());
-    while s < e && b[s].is_ascii_whitespace() {
-        s += 1;
-    }
-    while e > s && b[e - 1].is_ascii_whitespace() {
-        e -= 1;
-    }
-    if s < e && b[s] == b'|' {
-        s += 1;
-    }
-    if e > s && b[e - 1] == b'|' {
-        e -= 1;
-    }
-    let mut out = Vec::new();
-    let mut seg = s;
-    let mut i = s;
-    while i < e {
-        if b[i] == b'|' {
-            out.push((seg, i));
-            i += 1;
-            seg = i;
-        } else {
-            i += 1;
-        }
-    }
-    out.push((seg, e));
-    out
+    veil_core::split_table_row(line)
 }
 
 /// 改写分隔行第 `col` 列的对齐标记（左/中/右/无），其余字节逐字保留，返回新源码。
@@ -3676,5 +3643,42 @@ mod tests {
         // 空单元格内容起点 = 闭合管道符位置（与原 Ctrl+Enter 落点一致）
         assert_eq!(table_cell_start(&src, 3, 0), 37);
         assert_eq!(table_cell_start(&src, 3, 1), 40);
+    }
+
+    #[test]
+    fn row_split_matches_kernel_escaping() {
+        // `\|` 与 code span 内的 `|` 都不是列分隔符
+        let cells = split_row("| a \\| b | `x|y` | c |");
+        assert_eq!(cells, vec!["a \\| b", "`x|y`", "c"]);
+        // 写路径整行往返不得改写单元格原文
+        assert_eq!(join_row(&cells), "| a \\| b | `x|y` | c |");
+    }
+
+    #[test]
+    fn table_column_edits_preserve_escaped_cells() {
+        let src = "| a \\| b | `x|y` |\n| --- | --- |\n| c \\| d | e |\n";
+        let inserted = table_insert_column(src, 1);
+        assert_eq!(
+            inserted,
+            "| a \\| b |  | `x|y` |\n| --- | --- | --- |\n| c \\| d |  | e |\n"
+        );
+        // 再删除同一列回到原文（列数、转义与内容逐字节一致）
+        assert_eq!(table_delete_column(&inserted, 1), src);
+        // 追加空行按 header 的 2 列补齐，不因转义竖线多出列
+        assert_eq!(
+            table_append_row(src),
+            format!("{src}|  |  |\n")
+        );
+    }
+
+    #[test]
+    fn table_align_keeps_escaped_cells_and_cell_start() {
+        let src = "| a \\| b | c |\n| --- | --- |\n";
+        assert_eq!(
+            table_set_align(src, 1, veil_core::CellAlign::Center).unwrap(),
+            "| a \\| b | c |\n| --- | :-: |\n"
+        );
+        // 第二列起点按转义口径计算，不被 `\|` 提前截断
+        assert_eq!(table_cell_start(src, 0, 1), 11);
     }
 }

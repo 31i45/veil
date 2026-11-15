@@ -2184,17 +2184,97 @@ fn table_shows_grid_when_caret_inside_cell() {
 }
 
 #[test]
-fn table_grid_hit_maps_to_cell_content_start() {
+fn table_grid_hit_is_precise_for_plain_cells() {
+    // 纯文本格（剥标记后与源码等长）可按字形精确落点；富文本格仍落格首。
     let (mut a, _) = app_math(TABLE_DOC, false);
     a.ensure_layouts_all();
     a.ensure_tables();
     let (id, kind, range) = a.editor.session().blocks()[1].clone();
     let want = a.editor.session().table(id).unwrap().rows[0][1].range.start; // 表体「d」
-    let t = a.cache.tables.get(&id).unwrap();
-    let cell = &t.cells[3]; // 第 2 行第 2 列
-    let x = cell.x + cell.w / 2.0;
-    let y = t.rows[1].top + t.rows[1].height / 2.0;
-    assert_eq!(a.hit_block(id, kind, &range, x, y), Some(want));
+    let (cell_x, cell_w, cell_y, cell_h) = {
+        let t = a.cache.tables.get(&id).unwrap();
+        let cell = &t.cells[3]; // 第 2 行第 2 列
+        (
+            cell.x,
+            cell.w,
+            t.rows[1].top,
+            t.rows[1].height,
+        )
+    };
+    let y = cell_y + cell_h / 2.0;
+    assert_eq!(
+        a.hit_block(id, kind.clone(), &range, cell_x + 0.5, y),
+        Some(want),
+        "左侧内边距落格首"
+    );
+    assert_eq!(
+        a.hit_block(id, kind, &range, cell_x + cell_w - 1.0, y),
+        Some(want + 1),
+        "单字格右侧落格尾（光标可停在字后）"
+    );
+}
+
+#[test]
+fn table_cell_first_click_lands_on_clicked_glyph() {
+    // 首次点击（caret 在表格外、该格尚非活动格）也要精确到字形。
+    let doc = "p\n\n| h | x |\n| --- | --- |\n| alpha beta | y |\n";
+    let (mut a, _) = app_math(doc, false);
+    a.ensure_layouts_all();
+    a.ensure_tables();
+    let (id, kind, range) = a.editor.session().blocks()[1].clone();
+    let start = a.editor.session().table(id).unwrap().rows[0][0].range.start;
+    let (dx, y) = {
+        let t = a.cache.tables.get(&id).unwrap();
+        let cell = &t.cells[2]; // 正文第 1 行第 1 列「alpha beta」
+        let map = cell.caret_map.as_ref().expect("纯文本格应有字形档位");
+        let (dx, _, h) = map.caret_at(6).expect("偏移 6 有位置");
+        (cell.x + dx + 0.25, t.rows[1].top + h * 0.5)
+    };
+    assert_eq!(
+        a.hit_block(id, kind, &range, dx, y),
+        Some(start + 6),
+        "首次点击应落在被点中的字形，而不是格首"
+    );
+}
+
+#[test]
+fn table_cell_second_click_lands_on_clicked_glyph() {
+    // 真机反馈：点进单元格后无法把光标移到想要的位置。
+    // 首次点击进入单元格（落内容起点），再次点击同一格内偏右的位置必须精确落点。
+    let doc = "| h | x |\n| --- | --- |\n| alpha beta | y |\n";
+    let (mut a, _) = app_math(doc, false);
+    let (id, _, _) = a.editor.session().blocks()[0].clone();
+    let start = a.editor.session().table(id).unwrap().rows[0][0].range.start;
+    assert!(a.editor.set_caret(start));
+    a.ensure_layouts_all();
+    a.ensure_tables();
+    let top = a.index.blocks[0].top;
+    let (cell_x, cell_y, grid_x) = {
+        let cell = &a.cache.tables[&id].cells[2]; // 正文第 1 行第 1 列「alpha beta」
+        assert!(cell.caret_map.is_some(), "活动格应有字形档位");
+        (cell.x, cell.y, a.cache.tables[&id].x)
+    };
+    let (dx, dy, h) = {
+        let cell = &a.cache.tables[&id].cells[2];
+        let map = cell.caret_map.as_ref().unwrap();
+        map.caret_at(6).expect("偏移 6 有位置")
+    };
+    assert!(dy.abs() < 0.01 && h > 0.0);
+    let vp = a.viewport();
+    let x = a.content_x() + grid_x + cell_x + dx + 0.25;
+    let y = vp.y + top - a.window_state.scroll_y + cell_y + dy + h * 0.5;
+    click_at(&mut a, x, y);
+    assert_eq!(
+        a.editor.caret() - start,
+        6,
+        "点击格内偏右位置应落在对应字形，而不是永远停在格首"
+    );
+    // 光标必须画在这个字形处（而非单元格左上角）。
+    let (cx, _, _) = a.caret_screen();
+    assert!(
+        (cx - (a.content_x() + grid_x + cell_x + dx)).abs() < 1.0,
+        "光标 x 应随偏移移动：{cx}"
+    );
 }
 
 #[test]
@@ -2290,7 +2370,7 @@ fn quote_container_table_renders_native_grid_with_offset() {
         id,
         kind,
         &range,
-        t.x + cell.x + cell.w / 2.0,
+        t.x + cell.x + 0.5,
         t.rows[1].top + t.rows[1].height / 2.0,
     );
     assert_eq!(hit, Some(want));

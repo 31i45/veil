@@ -66,7 +66,7 @@ Three crates, one-way dependency (`veil` → `veil-ui` → `veil-core`, no rever
 9. In-house chrome: menu bar (↑/↓ move, Enter run, Esc close — main and context menus alike), status bar, scroll bar; system file dialogs (Open / Save As)
 10. Writing loop: CJK-calibrated word count, Focus Mode & Typewriter Mode (two mutually-exclusive view toggles, not persisted, reset on launch), Ctrl+P Quick Open (recent + current-dir candidates), Ctrl+Shift+P print, image paste / drag-drop insertion
 11. Table editing: Tab / Shift+Tab navigate cells (Tab in the last cell appends a row and moves to the new row's first cell); Ctrl+Enter appends an empty row at the table tail; the right-click menu inserts/deletes rows and columns and sets column alignment (left / center / right, separator row only); each structural change is one undo step
-12. Fenced code blocks: syntax highlighting for 16 languages (keywords / strings / comments / numbers / types), implemented as a pure-Rust line-state machine — no `syntect`. Each block's top-right corner shows its language label (canonical name for supported languages, raw info string for unknown ones, hidden when absent) and a copy button that copies the code verbatim (no fence or language marker; the document, undo stack and dirty flag stay untouched). Keyboard/menu: `Ctrl+Shift+C` copies the code block at the caret, and the block's right-click menu starts with "Copy Code Block"
+12. Fenced code blocks: syntax highlighting for 17 language grammars — 19 canonical labels once aliases (`js` / `ts` / `py` / `yml` / `sh` …) are resolved — covering keywords / strings / comments / numbers / types, implemented as a pure-Rust line-state machine — no `syntect`. Each block's top-right corner shows its language label (canonical name for supported languages, raw info string for unknown ones, hidden when absent) and a copy button that copies the code verbatim (no fence or language marker; the document, undo stack and dirty flag stay untouched). Keyboard/menu: `Ctrl+Shift+C` copies the code block at the caret, and the block's right-click menu starts with "Copy Code Block"
 13. Source mode: Ctrl+/ shows the full Markdown source (tables and math blocks included); toggling keeps caret and scroll position; print and export always use the rendered view
 14. PDF export: Ctrl+Shift+E or File → Export PDF writes `<stem>.pdf` beside the document (name collisions become ` (2)`, ` (3)`); optional TOC page, page numbers and margin (default 20 mm) via `config.toml`. Native PDF output (multi-level bookmarks, CJK font subsetting, heading/table/image/math layout) with fallback to the system "Microsoft Print to PDF". Unsaved drafts first ask for an output location (cancelling aborts).
 15. Opening links: `Ctrl+click` an http/https/mailto link (a mouse gesture, not a new shortcut) to hand it to the system default browser or mail client; the caret does not move. The link context menu starts with "Open in Browser", followed by "Copy Link Address". Protocols outside the allowlist only show a notice; aside from on-demand remote-image fetches, Veil itself makes no network requests
@@ -75,7 +75,7 @@ Three crates, one-way dependency (`veil` → `veil-ui` → `veil-core`, no rever
 18. Line navigation: `Alt+↑` / `Alt+↓` move the current line (one undo step); `PgUp` / `PgDn` page the viewport while keeping the target column; `Ctrl+Backspace` / `Ctrl+Delete` delete by word and never cross a line break
 19. Find & replace: a "Match case" toggle (off by default, kept for the session); `Enter` replaces the current match and advances, `Ctrl+Enter` replaces all
 20. Readable measure: above 1600 px window width the body column is capped at ~40 full-width characters and centred; H4–H6 indent by level; heading spacing is wider than paragraph spacing
-21. Visible trust: the status bar shows "Saved · HH:MM" (or "Unsaved"); a failed CLI open raises a visible error box and exits with code 1
+21. Visible trust: the status bar shows the file name plus the last saved time (or an unsaved marker when the buffer is dirty); a failed CLI open raises a visible error box and exits with code 1
 22. Caret as focus: solid when the window is focused, hollow when it is not — no timers, no idle wake-ups
 23. State transitions: hover/press highlights in the menu bar, menus, outline, Quick Open, context menu, find bar and dialog buttons cross-fade over 120 ms (ease-out cubic); the fade advances only while it runs, so the idle path still schedules no timers and never wakes the process. Fades are skipped entirely when Windows "Show animations" is off
 24. Remote images (v1.4): http/https images load automatically; **View → Block Remote Images** disables them globally; a failed fetch degrades to an alt placeholder with a one-time status-bar notice. Requests never carry cookies, `Referer` or credentials, the User-Agent is fixed at `Veil/<version>`, connect/read timeout is 10 s, the response body is capped at 20 MiB, at most 3 redirects are followed with https→http downgrades refused, and localhost / loopback / private / link-local addresses are rejected. Export and PDF never include remote resources
@@ -85,6 +85,10 @@ Three crates, one-way dependency (`veil` → `veil-ui` → `veil-core`, no rever
 28. Reading & navigation: a collapsed Front Matter card expands on click; heading/TOC anchors jump; interactive chrome shows a pointer cursor
 29. Print & PDF (this round): in-app print preview (page turn / zoom / `Esc`), PDF link annotations, and layout that matches the rendered view
 30. Inline HTML folding: block-level `<details>` expands and collapses by clicking its summary; `<details>` inside quotes, callouts and list items folds the same way (view-only, never rewrites document bytes, expands when the caret enters the body); semantics are identical across screen / print / PDF / HTML export
+31. Version history (`Ctrl+Shift+H`): every overwrite archives the previous disk version first, and a dirty buffer is captured every 30 minutes; the panel lists snapshots with a read-only preview, restores one (a single `Ctrl+Z` undoes it), deletes a snapshot or clears the list
+32. Outline panel (`Ctrl+Shift+O`): headings of the current document as a click-to-jump list, refreshed as you edit, with an explicit empty state when the document has no headings
+33. View controls: zoom 50%–300% in 10% steps via `Ctrl+=` / `Ctrl+-` / `Ctrl+0` or `Ctrl+wheel` (trackpad pinch included; session-only, not persisted), and `F11` full screen
+34. Windows: `Ctrl+Shift+N` opens an independent window; the current window keeps its document, caret and dirty state
 
 ## What It Won't Do (still out of scope)
 
@@ -103,13 +107,15 @@ Three crates, one-way dependency (`veil` → `veil-ui` → `veil-core`, no rever
 
 Requires: Rust stable (edition 2021). Acceptance environment: Windows 11 23H2+. Mica acrylic degrades to a solid colour where it is unavailable. Windows 10 has not been recorded on real hardware and is not claimed as verified.
 
+Interface text ships in Chinese (zh-CN) only: the i18n layer keeps an empty `en-US` table, so English labels quoted in this README are translations of the shipped Chinese strings.
+
 ```powershell
 cargo build --workspace
 cargo test --workspace
 cargo run -p veil -- <file.md>
 ```
 
-Baseline: 1752 passed / 0 failed / 14 ignored (2026-11-15, re-verified after this round); `cargo clippy --workspace --all-targets -- -D warnings` zero warnings.
+Baseline: 1755 passed / 0 failed / 14 ignored (2026-11-15, re-verified after this round); `cargo clippy --workspace --all-targets -- -D warnings` zero warnings.
 
 ## Red Numbers (targets vs measured)
 
@@ -124,9 +130,9 @@ Measured on release build, probe-serialized; performance rows re-verified 2026-1
 | Cold start (window handle; P2 comparison口径) | — | 30 ms (2026-10-30, `tools/bench/measure.ps1`) |
 | Keystroke→commit p95 on 100 K-word doc | ≤ 16 ms | 1.297 ms / 1.796 ms (`perf_keystroke_path` 5,005 blocks / `perf_keystroke_10k_blocks` 10,500 blocks; same machine, re-measured 2026-11-15; previous record 6.781 / 12.379) ✅ |
 | Resident memory, 100 K-word doc (private working set) | ≤ 150 MB | 40.76 MB (2026-11-05) |
-| Installed size — code + data (non-icon) | ≤ 6 MiB (Phase A baseline; superseded by the Wave 3/4 PDF export gate allowance) | 7,658,819 B (exe minus 89,277 B icons: `veil.ico` 46,688 + `veil-doc.ico` 42,589; 2026-11-15 after this round) |
-| Installed size — total single-file `veil.exe` | ≤ 10 MiB = 10,485,760 B (Wave 4 authorization; every increment must be recorded) | 7,748,096 B ≈ 7.39 MiB (2026-11-15 after this round; +759,296 B vs Wave 6 baseline 6,988,800 B; +834,048 B vs historical baseline 6,914,048 B); margin 2,737,664 B |
-| `veil-core` unit + property tests | ≥ 80 | 209 |
+| Installed size — code + data (non-icon) | ≤ 6 MiB (Phase A baseline; superseded by the Wave 3/4 PDF export gate allowance) | 7,672,131 B (exe minus 89,277 B icons: `veil.ico` 46,688 + `veil-doc.ico` 42,589; 2026-11-15 after this round) |
+| Installed size — total single-file `veil.exe` | ≤ 10 MiB = 10,485,760 B (Wave 4 authorization; every increment must be recorded) | 7,761,408 B ≈ 7.40 MiB (2026-11-15 after this round; +772,608 B vs Wave 6 baseline 6,988,800 B; +847,360 B vs historical baseline 6,914,048 B); margin 2,724,352 B |
+| `veil-core` unit + property tests | ≥ 80 | 340 |
 | E2E assertions | ≥ 20 | 41 (3 e2e scenarios: open→save→reopen, table+image paste, find/replace→crash recovery→self-clean) ✅ |
 | Markdown roundtrip (no edits: output == input bytes; byte comparison) | 100% | 100% |
 | CommonMark 0.31.2 conformance (by test cases; dimension A / C / D) | — | A 652/652 · C 652/652 · D 652/652 ✅ |

@@ -107,6 +107,9 @@ pub struct TableCellLayout {
     pub h: f32,
     /// 内容起点（文档绝对偏移）：网格点击落点。
     pub doc_start: usize,
+    /// 活动单元格源码字形档位：网格内可按点击坐标落点、按光标偏移画光标。
+    /// 非活动格为 None（富文本字形与文档偏移不是一一对应）。
+    pub(crate) caret_map: Option<CellCaretMap>,
     pub pixels: Vec<u8>,
     pub pixel_w: u32,
     pub pixel_h: u32,
@@ -118,6 +121,100 @@ pub struct TableCellLayout {
     pub(crate) under: Vec<(f32, f32, f32, f32, UnderKind)>,
     /// 非活动格行内后置装饰（abbr 虚线下划线）。
     pub(crate) over: Vec<(f32, f32, f32, f32, OverKind)>,
+}
+
+/// 活动单元格源码的字形档位（相对内容原点，升序）。
+/// 只对活动格建立：它显示的是含标记的源码纯文本，字形与文档偏移一一对应，
+/// 因此可以精确落点、精确画光标；非活动格显示富文本，偏移不可直接映射。
+pub(crate) struct CellCaretMap {
+    runes: Vec<CellRune>,
+    /// 源码字节长度（光标偏移上限）。
+    pub len: usize,
+    /// 空行/空格的兜底行高。
+    line_h: f32,
+}
+
+struct CellRune {
+    start: usize,
+    end: usize,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+}
+
+impl CellCaretMap {
+    fn from_buffer(buffer: &cosmic_text::Buffer, line_h: f32) -> Self {
+        let mut runes = Vec::new();
+        let mut len = 0usize;
+        for run in buffer.layout_runs() {
+            for g in run.glyphs {
+                runes.push(CellRune {
+                    start: g.start,
+                    end: g.end,
+                    x: g.x,
+                    y: run.line_top,
+                    w: g.w,
+                    h: run.line_height,
+                });
+                len = len.max(g.end);
+            }
+        }
+        runes.sort_by(|a, b| a.y.total_cmp(&b.y).then(a.x.total_cmp(&b.x)));
+        Self { runes, len, line_h }
+    }
+
+    /// 内容坐标 → 字节偏移：同视觉行内按字形中点就近取插入点。
+    pub(crate) fn offset_at(&self, x: f32, y: f32) -> Option<usize> {
+        let first = self.runes.first()?;
+        // y 落在哪一视觉行（越界钳到首/末行）
+        let line_y = self
+            .runes
+            .iter()
+            .filter(|r| r.y <= y && y < r.y + r.h)
+            .map(|r| r.y)
+            .next()
+            .unwrap_or_else(|| {
+                if y < first.y {
+                    first.y
+                } else {
+                    self.runes.last().map(|r| r.y).unwrap_or(first.y)
+                }
+            });
+        let mut best = None;
+        for r in self.runes.iter().filter(|r| r.y == line_y) {
+            if x < r.x + r.w * 0.5 {
+                return Some(r.start);
+            }
+            best = Some(r.end);
+        }
+        best
+    }
+
+    /// 字节偏移 → 内容坐标 (x, y, h)。偏移在字形内按比例插值（CJK/拉丁同一口径）。
+    pub(crate) fn caret_at(&self, offset: usize) -> Option<(f32, f32, f32)> {
+        let first = self.runes.first()?;
+        if offset <= first.start {
+            return Some((first.x, first.y, first.h));
+        }
+        let mut prev = None;
+        for r in &self.runes {
+            if offset <= r.start {
+                return Some((r.x, r.y, r.h));
+            }
+            if offset <= r.end {
+                let ratio = (offset - r.start) as f32 / (r.end - r.start).max(1) as f32;
+                return Some((r.x + r.w * ratio, r.y, r.h));
+            }
+            prev = Some(r);
+        }
+        prev.map(|r| (r.x + r.w, r.y, r.h))
+    }
+
+    /// 光标矩形的行高（空单元格兜底）。
+    pub(crate) fn line_height(&self) -> f32 {
+        self.runes.first().map_or(self.line_h, |r| r.h)
+    }
 }
 
 /// 表格网格排版结果（随块缓存；宽度/DPI/内容/活动格变化时重建）。
@@ -135,7 +232,8 @@ pub struct TableLayout {
 }
 
 impl TableLayout {
-    /// 网格内物理坐标 → 该单元格内容起点（文档绝对偏移）。越界钳到首/末行、首/末列。
+    /// 网格内物理坐标 → 文档绝对偏移。活动格按源码字形精确落点；
+    /// 其余格（富文本）落到单元格内容起点。越界钳到首/末行、首/末列。
     pub fn hit(&self, x: f32, y: f32) -> usize {
         if self.cells.is_empty() || self.cols.is_empty() {
             return 0;
@@ -156,10 +254,18 @@ impl TableLayout {
             }
             acc += w;
         }
-        self.cells
+        let Some(cell) = self
+            .cells
             .get(row * self.cols.len() + col)
-            .map(|c| c.doc_start)
-            .unwrap_or(0)
+        else {
+            return 0;
+        };
+        if let Some(map) = cell.caret_map.as_ref() {
+            if let Some(rel) = map.offset_at(x - cell.x, y - cell.y) {
+                return cell.doc_start + rel.min(map.len);
+            }
+        }
+        cell.doc_start
     }
 }
 
@@ -168,6 +274,9 @@ struct CellInput<'a> {
     text: Cow<'a, str>,
     styles: Option<Vec<(usize, usize, Style)>>,
     doc_start: usize,
+    /// 源码区间字节数：展示文本与之相等（且无样式/公式/图片）时，
+    /// 字形偏移即文档偏移，可建精确落点档位。
+    src_len: usize,
     /// 公式 NBSP 占位段（占位后文本坐标）；空 = 无公式。
     maths: Vec<PendingMath>,
     /// 图片 NBSP 占位段（占位后文本坐标）；空 = 无可定位图片。
@@ -535,6 +644,7 @@ impl LayoutEngine {
                     text,
                     styles,
                     doc_start: cell.map(|x| x.range.start).unwrap_or(0),
+                    src_len: cell.map(|x| x.range.len()).unwrap_or(0),
                     maths: cell_maths,
                     images: cell_images,
                 });
@@ -645,6 +755,20 @@ impl LayoutEngine {
                     link_color,
                     &probes,
                 );
+                // 活动格是源码纯文本；纯文本格（剥标记后与源码逐字节等长）同样可精确落点。
+                // 富文本格的字形偏移与文档偏移不一一对应，保持落格首。
+                // 剥标记只会让可见文本变短（标记/转义/`<br>` 都是收缩），
+                // 因此「等长 + 无公式/图片占位」即等价于可见文本 == 源码文本，
+                // 字形偏移与文档偏移一一对应，可建精确落点档位。
+                let plain = cell.maths.is_empty()
+                    && cell.images.is_empty()
+                    && cell.text.len() == cell.src_len
+                    && cell.src_len > 0;
+                let caret_map = if plain || matches!(active, Some((idx, _)) if idx == flat) {
+                    Some(CellCaretMap::from_buffer(&buffer, metrics.line_height))
+                } else {
+                    None
+                };
                 // 公式图顶贴所在视觉行行顶；行高扩到图底，公式不溢出行（不缩图，
                 // v0 简化：宁可把行拉高，也不做缩放副本）。
                 let mut content_h = h;
@@ -727,6 +851,7 @@ impl LayoutEngine {
                     placed,
                     placed_imgs,
                     decor,
+                    caret_map,
                 ));
                 flat += 1;
             }
@@ -735,7 +860,7 @@ impl LayoutEngine {
                 height: row_h + 2.0 * pad_y,
             });
             let mut x = 0.0;
-            for (c, (buffer, text_h, h, doc_start, maths, imgs, decor)) in
+            for (c, (buffer, text_h, h, doc_start, maths, imgs, decor, caret_map)) in
                 shaped.into_iter().enumerate()
             {
                 // 与正文同一光栅化入口：sub/sup 按字形起点施加基线偏移。
@@ -748,6 +873,7 @@ impl LayoutEngine {
                     w: (col_w - 2.0 * pad_x).max(1.0),
                     h,
                     doc_start,
+                    caret_map,
                     pixels,
                     pixel_w,
                     pixel_h,
@@ -913,13 +1039,13 @@ mod tests {
                     table.rows[0][col].range.start
                 };
                 assert_eq!(cell.doc_start, want);
-                let cx = cell.x + cell.w / 2.0;
+                let cx = cell.x + 0.5; // 内容左缘：落格首
                 let cy = l.rows[row].top + l.rows[row].height / 2.0;
                 assert_eq!(l.hit(cx, cy), want, "row={row} col={col}");
             }
         }
-        // 越界钳位：右下角外仍落末行末列
-        assert_eq!(l.hit(9999.0, 9999.0), l.cells[3].doc_start);
+        // 越界钳位：右下角外落末行末列的字形末尾
+        assert_eq!(l.hit(9999.0, 9999.0), l.cells[3].doc_start + 1);
     }
 
     #[test]
@@ -993,6 +1119,36 @@ mod tests {
         };
         assert!(has_link(&l.cells[link]), "链接格应出现主题链接色像素");
         assert!(!has_link(&l.cells[plain]), "普通格不得出现链接色");
+    }
+
+    #[test]
+    fn active_cell_hit_and_caret_round_trip() {
+        // 活动格显示源码纯文本：点击落点必须精确到字形，光标也要能逐字移动。
+        let doc = "| h |\n| --- |\n| **MMMM** |\n";
+        let s = Session::open(doc);
+        let (id, _, _) = s.blocks()[0];
+        let table = s.table(id).unwrap();
+        let src = s.text_slice(table.rows[0][0].range).unwrap();
+        let start = table.rows[0][0].range.start;
+        let l = LayoutEngine::new().layout_table(&table, 800.0, [0, 0, 0], Some((1, src.as_str())));
+        let cell = &l.cells[1];
+        let map = cell.caret_map.as_ref().expect("活动格应有字形档位");
+        assert_eq!(map.len, src.len());
+        assert_eq!(l.hit(cell.x - 4.0, cell.y + 1.0), start, "左侧内边距落格首");
+        assert_eq!(
+            l.hit(cell.x + cell.w + 40.0, cell.y + 1.0),
+            start + src.len(),
+            "右侧空白落格尾"
+        );
+        let mut last_x = -1.0f32;
+        for off in 0..=src.len() {
+            let (dx, dy, h) = map.caret_at(off).expect("档位应覆盖 [0, len]");
+            assert!(h > 0.0);
+            assert!(dx >= last_x, "光标 x 应随偏移单调不减：off={off}");
+            last_x = dx;
+            let got = l.hit(cell.x + dx + 0.25, cell.y + dy + h * 0.5);
+            assert_eq!(got, start + off, "偏移 {off} 的落点应回到自身");
+        }
     }
 
     #[test]

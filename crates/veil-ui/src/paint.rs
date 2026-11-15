@@ -1122,7 +1122,7 @@ impl App {
         true
     }
 
-    /// 网格态光标矩形：活动单元格内容左上角（与点击落点、Tab 落点同源）。
+    /// 网格态光标矩形：活动单元格内按源码偏移定位（与点击落点同一字形档位）。
     /// 表格显示为网格时，源码排版坐标与所见网格不一致，直接复用会画出「悬空光标」。
     /// `doc_top` 为块的文档坐标（非视口坐标），滚动量在此统一扣除。
     pub(crate) fn table_caret_xy(
@@ -1137,11 +1137,17 @@ impl App {
         let cell = grid.cells.get(idx)?;
         let scale = self.input_state.scale;
         let vp = self.viewport();
-        Some((
-            self.content_x() + grid.x + cell.x,
-            vp.y + doc_top - self.window_state.scroll_y + cell.y,
-            self.engine.doc_line_height() * scale,
-        ))
+        let base_x = self.content_x() + grid.x;
+        let base_y = vp.y + doc_top - self.window_state.scroll_y;
+        let (dx, dy, h) = match cell.caret_map.as_ref() {
+            Some(map) => {
+                let rel = caret.saturating_sub(cell.doc_start).min(map.len);
+                map.caret_at(rel)
+                    .unwrap_or((0.0, 0.0, map.line_height()))
+            }
+            None => (0.0, 0.0, self.engine.doc_line_height() * scale),
+        };
+        Some((base_x + cell.x + dx, base_y + cell.y + dy, h))
     }
 
     /// 表格按需网格排版：caret 在结构字符上（管道/分隔行）或表外 → 排版网格；

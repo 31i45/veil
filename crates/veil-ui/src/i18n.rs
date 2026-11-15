@@ -266,6 +266,7 @@ keys! {
     NoticeSavedAs => "notice.saved_as", "已另存为：{}";
     NoticeHistoryMigrationFailed => "notice.history_migration_failed",
         "文档已保存到：{}；但版本历史迁移失败（{}），旧历史仍保留在临时会话目录";
+    NoticeSnapshotFailed => "notice.snapshot_failed", "版本历史写入失败：{}（正文已保留，可稍后重试保存）";
     NoticeAssetsMigrationIncomplete => "notice.assets_migration_incomplete",
         "已另存为：{}；有 {} 个相对图片资产未能迁移（源缺失或复制失败），新位置可能显示断图";
     NoticeSaveAsFailed => "notice.save_as_failed", "另存为失败：{}；可 Ctrl+Shift+S 重试或换一个位置";

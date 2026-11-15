@@ -1174,7 +1174,12 @@ impl App {
             self.window_state.goal_x = None;
             // 优先级：图片（单元格内也命中）→ 表格内 link → table_ctx →
             // mermaid 围栏块（带专用菜单）→ 块级 link → 普通块
-            match self.image_at(off) {
+            // 图片与链接共用同一份 inline 解析（原实现各解析一次整块）。
+            let nodes = self.inlines_at_offset(off);
+            match nodes
+                .as_deref()
+                .and_then(|n| self.image_at_in(n, off))
+            {
                 Some((path, missing)) => {
                     if missing {
                         // 缺失图片：菜单打开时给出可见提示（DEF-T67-E1-005）。
@@ -1184,7 +1189,10 @@ impl App {
                     }
                     (CtxKind::Image { path, missing }, None, None, None)
                 }
-                None => match self.link_at(off) {
+                None => match nodes
+                    .as_deref()
+                    .and_then(|n| self.link_at_in(n, off))
+                {
                     Some(url) => (CtxKind::Link, Some(url), None, None),
                     None => match self.table_ctx_at(off) {
                         Some(tc) => (CtxKind::Table(tc), None, None, None),
@@ -1616,6 +1624,11 @@ impl App {
     /// 需从 `table.cell.inlines` 逐级检索）。
     fn link_at(&self, offset: usize) -> Option<String> {
         let nodes = self.inlines_at_offset(offset)?;
+        self.link_at_in(&nodes, offset)
+    }
+
+    /// 在已解析的 inline 节点中取链接 URL：悬停/右键共用同一份解析结果。
+    fn link_at_in(&self, nodes: &[InlineNode], offset: usize) -> Option<String> {
         fn find(nodes: &[InlineNode], off: usize) -> Option<&InlineNode> {
             nodes.iter().find_map(|n| {
                 if n.range.start <= off && off < n.range.end {
@@ -1628,15 +1641,22 @@ impl App {
                 }
             })
         }
-        let url = find(&nodes, offset)?.url?;
+        let url = find(nodes, offset)?.url?;
         self.editor.session().text_slice(url)
     }
 
     /// 命中偏移处的图片源与缺失状态（DEF-T67-E1-005）。
     /// 支持 Markdown `![alt](src)` 与白名单自闭合 `<img src="…">`；
     /// 远程/内联图片视为“存在”，本地图片按文档目录解析后探测文件。
+    /// 测试辅助入口：命中偏移处的图片源与缺失状态。
+    #[cfg(test)]
     pub(crate) fn image_at(&self, offset: usize) -> Option<(String, bool)> {
         let nodes = self.inlines_at_offset(offset)?;
+        self.image_at_in(&nodes, offset)
+    }
+
+    /// 在已解析的 inline 节点中取图片源与缺失状态（右键与悬停共用单次解析）。
+    fn image_at_in(&self, nodes: &[InlineNode], offset: usize) -> Option<(String, bool)> {
         fn find(nodes: &[InlineNode], off: usize) -> Option<&InlineNode> {
             nodes.iter().find_map(|n| {
                 if n.range.start <= off && off < n.range.end {
@@ -1657,7 +1677,7 @@ impl App {
                 }
             })
         }
-        let node = find(&nodes, offset)?;
+        let node = find(nodes, offset)?;
         let src = match &node.kind {
             InlineKind::Image => {
                 let range = node.url?;
@@ -1680,10 +1700,9 @@ impl App {
         Some((src, missing))
     }
 
-    /// 命中偏移处的 `<abbr title="…">` 文本（悬停提示内容）。表格单元格同样支持；
+    /// 在已解析的 inline 节点中取 `<abbr title="…">` 文本（悬停单次解析共用）。
     /// 空 title 不产出提示（HTML 语义上等同于无提示）。
-    fn abbr_title_at(&self, offset: usize) -> Option<String> {
-        let nodes = self.inlines_at_offset(offset)?;
+    fn abbr_title_in(nodes: &[InlineNode], offset: usize) -> Option<&str> {
         fn find(nodes: &[InlineNode], off: usize) -> Option<&str> {
             nodes.iter().find_map(|n| {
                 if n.range.start <= off && off < n.range.end {
@@ -1702,7 +1721,7 @@ impl App {
                 }
             })
         }
-        find(&nodes, offset).map(str::to_owned)
+        find(nodes, offset)
     }
 
     /// 命中偏移处的脚注引用 id（`[^id]` 的整段 `range` 包含判定）。
@@ -1998,6 +2017,11 @@ impl App {
                     None => src,
                 };
                 self.cache.invalidate_image(&key);
+                // 图片文件可能已被替换：内容代次递增使引用该图的块布局键失配，
+                // 重排后块高/占位按新自然尺寸刷新（仅清位图缓存不够）。
+                self.input_state.revs.image_content += 1;
+                self.ensure_layouts_visible();
+                self.recompute_geometry();
                 self.request_redraw();
             }
             // 提示项无动作：文案已在菜单中可见。
@@ -2650,12 +2674,13 @@ impl App {
                     .selection()
                     .is_some_and(|s| s.start <= off && off < s.end);
                 if selected {
-                    None
-                } else {
-                    self.link_at(off)
-                        .map(|u| crate::normalize_link_url(&u))
-                        .or_else(|| self.abbr_title_at(off))
+                    return None;
                 }
+                // 链接与 abbr 命中共享同一份 inline 解析（原实现各解析一次整块）。
+                let nodes = self.inlines_at_offset(off)?;
+                self.link_at_in(&nodes, off)
+                    .map(|u| crate::normalize_link_url(&u))
+                    .or_else(|| Self::abbr_title_in(&nodes, off).map(str::to_owned))
             })
         };
         self.set_hover_link(tip, x, y);
@@ -2797,7 +2822,14 @@ impl App {
         self.input_state.theme = Theme::of(self.config.mode, self.input_state.system_dark);
         // 2) 平滑滚动：WindowState 独立存储，需要同步
         self.window_state.smooth = self.config.smooth_scroll;
-        // 3) 文档字体族/字号/行高/制表符 + 主题配色：统一由主题刷新入口
+        // 3) 正文排版：字号/行高/字体族先落到排版引擎；它们同时进入 `BaseKey`，
+        //    随后的主题代次递增会按新排版输入整体重排（无需重启）。
+        self.engine.set_doc_typography(
+            self.config.doc_font_size,
+            self.config.doc_line_height,
+            self.config.doc_font_family,
+        );
+        // 4) 文档字体族/字号/行高/制表符 + 主题配色：统一由主题刷新入口
         //    递增代次、重排可见块并重算几何（base_key 同时含 typography/theme）。
         self.refresh_theme_visuals();
         self.set_ime_area();

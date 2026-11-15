@@ -265,6 +265,16 @@ impl DocFontFamily {
             DocFontFamily::Mono => "mono",
         }
     }
+
+    /// 缓存键用的稳定判别值（与 `as_str` 同序，仅需进程内稳定）。
+    pub(crate) fn key(self) -> u8 {
+        match self {
+            DocFontFamily::System => 0,
+            DocFontFamily::Sans => 1,
+            DocFontFamily::Serif => 2,
+            DocFontFamily::Mono => 3,
+        }
+    }
 }
 
 /// HTML 导出样式快照：把「当前主题」压缩为导出所需的最小颜色集合。

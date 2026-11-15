@@ -157,6 +157,8 @@ fn persist_env_with(recovery: FakeRecovery, session: FakeSession) -> PersistEnv 
 struct FakeSnapshot {
     slots: Rc<RefCell<Vec<(u64, SnapshotMeta, String)>>>,
     fail_list: Rc<Cell<bool>>,
+    /// 注入写入失败：验证「失败不静默」（状态栏可见）且正文/磁盘照常保存。
+    fail_save: Rc<Cell<bool>>,
     /// 注入历史迁移失败：返回 Err 且不移动任何快照（验证失败可见 + 旧历史保留）。
     fail_migrate: Rc<Cell<bool>>,
 }
@@ -177,6 +179,9 @@ impl FakeSnapshot {
 
 impl SnapshotStore for FakeSnapshot {
     fn save_snapshot(&mut self, key: u64, text: &str) -> Result<SnapshotMeta, String> {
+        if self.fail_save.get() {
+            return Err("模拟版本历史写入失败".into());
+        }
         let hash = content_hash(text.as_bytes());
         if let Some((_, m, _)) = self
             .slots
@@ -289,14 +294,17 @@ impl ImageLoader for NoImages {
 }
 
 /// 图片加载 mock：按路径返回自然尺寸位图并记录调用；未知路径 Err。
+/// `files` 可共享修改：用于模拟「磁盘图片被替换后重新加载」。
+type ImageFiles = Rc<RefCell<HashMap<PathBuf, (u32, u32)>>>;
+
 struct FakeImages {
-    files: HashMap<PathBuf, (u32, u32)>,
+    files: ImageFiles,
     calls: Rc<RefCell<Vec<PathBuf>>>,
 }
 impl ImageLoader for FakeImages {
     fn load(&mut self, path: &Path) -> Result<ImageData, String> {
         self.calls.borrow_mut().push(path.to_path_buf());
-        match self.files.get(path) {
+        match self.files.borrow().get(path) {
             Some(&(w, h)) => Ok(ImageData {
                 pixels: vec![255; (w * h * 4) as usize],
                 width: w,
@@ -835,12 +843,14 @@ fn app_with_images(
     text: &str,
     path: Option<&str>,
     files: &[(&str, u32, u32)],
-) -> (App, Rc<RefCell<Vec<PathBuf>>>) {
+) -> (App, Rc<RefCell<Vec<PathBuf>>>, ImageFiles) {
     let calls = Rc::new(RefCell::new(Vec::new()));
-    let files = files
-        .iter()
-        .map(|(p, w, h)| (PathBuf::from(p), (*w, *h)))
-        .collect();
+    let files: ImageFiles = Rc::new(RefCell::new(
+        files
+            .iter()
+            .map(|(p, w, h)| (PathBuf::from(p), (*w, *h)))
+            .collect(),
+    ));
     let doc = Doc {
         text: text.into(),
         path: path.map(PathBuf::from),
@@ -859,7 +869,7 @@ fn app_with_images(
             store: Box::new(MemStore::default()),
             math: Box::new(m),
             images: Box::new(FakeImages {
-                files,
+                files: files.clone(),
                 calls: calls.clone(),
             }),
             assets: Box::new(NoAssets),
@@ -873,7 +883,7 @@ fn app_with_images(
             clock: fixed_clock(),
         },
     );
-    (a, calls)
+    (a, calls, files)
 }
 
 #[test]
@@ -945,7 +955,7 @@ fn fit_size_scales_only_when_wider_than_content() {
 
 #[test]
 fn image_loads_relative_to_document_and_caches() {
-    let (mut a, calls) = app_with_images(
+    let (mut a, calls, _files) = app_with_images(
         "a ![alt](img/p.png) b",
         Some("dir/doc.md"),
         &[("dir/img/p.png", 100, 50)],
@@ -972,10 +982,61 @@ fn image_loads_relative_to_document_and_caches() {
 }
 
 #[test]
+fn reload_image_invalidates_layout_and_refreshes_size() {
+    let (mut a, calls, files) = app_with_images(
+        "x ![alt](img/p.png)",
+        Some("dir/doc.md"),
+        &[("dir/img/p.png", 100, 50)],
+    );
+    a.ensure_layouts_all();
+    let (id, _, _) = a.editor.session().blocks()[0].clone();
+    let before = (
+        a.cache.layouts[&id].imgs[0].width,
+        a.cache.layouts[&id].imgs[0].height,
+        a.cache.layouts[&id].height,
+    );
+    assert_eq!((before.0, before.1), (100, 50));
+    let base_before = a.base_key();
+    // 磁盘上的图片被替换为新尺寸：要点「重新加载图片」。
+    files
+        .borrow_mut()
+        .insert(PathBuf::from("dir/img/p.png"), (120, 60));
+    a.ui_state.ctx.open_at(
+        10.0,
+        20.0,
+        ctx_menu::CtxKind::Image {
+            path: "img/p.png".into(),
+            missing: false,
+        },
+        None,
+        None,
+    );
+    let i = a
+        .ui_state
+        .ctx
+        .items()
+        .iter()
+        .position(|&(_, act)| act == ctx_menu::CtxAction::ReloadImage)
+        .expect("图片菜单应含重新加载");
+    a.ui_state.ctx.hover = Some(i);
+    a.route_key(Key::Enter);
+
+    assert_ne!(a.base_key(), base_before, "重载后布局键必须失效");
+    assert_eq!(calls.borrow().len(), 2, "重载必须重新读盘");
+    let after = &a.cache.layouts[&id];
+    assert_eq!(
+        (after.imgs[0].width, after.imgs[0].height),
+        (120, 60),
+        "占位按新自然尺寸刷新"
+    );
+    assert_ne!(after.height, before.2, "块高随新图尺寸刷新");
+}
+
+#[test]
 fn image_wider_than_content_scales_proportionally() {
     // 前缀 "x "：默认光标 0 不在图片节点区间内（否则进入源码态不加载）
     // 宽 1600 且高 45（低于 2 行限高），确保本用例仍由「宽度上限」触发缩放。
-    let (mut a, _) = app_with_images(
+    let (mut a, _, _files) = app_with_images(
         "x ![a](p.png)",
         Some("dir/doc.md"),
         &[("dir/p.png", 1600, 45)],
@@ -1006,7 +1067,7 @@ fn layout_of_text<'a>(a: &'a App, needle: &str) -> &'a crate::view::BlockLayout 
 /// B4 回归：整块仅图片（含尾随换行）→ 按版心宽/视口高放大，不再受 4 行限高。
 #[test]
 fn standalone_markdown_image_uses_viewport_height() {
-    let (mut a, _) = app_with_images(
+    let (mut a, _, _files) = app_with_images(
         "前文\n\n![本地图](p.png)\n",
         Some("dir/doc.md"),
         &[("dir/p.png", 800, 600)],
@@ -1026,7 +1087,7 @@ fn standalone_markdown_image_uses_viewport_height() {
 #[test]
 fn image_alone_on_its_visual_line_uses_viewport_height() {
     // 审计文档末块实际为 `![本地图](p.png)\nX`：整块非纯图片，但图片仍独占一行。
-    let (mut a, _) = app_with_images(
+    let (mut a, _, _files) = app_with_images(
         "前文\n\n![本地图](p.png)\nX\n",
         Some("dir/doc.md"),
         &[("dir/p.png", 800, 600)],
@@ -1044,7 +1105,7 @@ fn image_alone_on_its_visual_line_uses_viewport_height() {
 /// B4 回归：同一行内有正文的图片仍受 4 倍行高限制。
 #[test]
 fn inline_image_still_capped_by_four_lines() {
-    let (mut a, _) = app_with_images(
+    let (mut a, _, _files) = app_with_images(
         "a ![alt](p.png) b",
         Some("dir/doc.md"),
         &[("dir/p.png", 800, 600)],
@@ -1062,7 +1123,7 @@ fn inline_image_still_capped_by_four_lines() {
 /// 且不再被行内行高限制。
 #[test]
 fn standalone_html_img_honors_explicit_logical_width() {
-    let (mut a, _) = app_with_images(
+    let (mut a, _, _files) = app_with_images(
         "前文\n\n<img src=\"p.png\" width=\"320\">\n",
         Some("dir/doc.md"),
         &[("dir/p.png", 800, 600)],
@@ -1091,7 +1152,7 @@ fn standalone_html_img_honors_explicit_logical_width() {
 /// B4 回归：窗口高度变化 → 独占图片尺寸随之变化（布局缓存键覆盖视口高度）。
 #[test]
 fn window_height_change_resizes_standalone_image() {
-    let (mut a, _) = app_with_images(
+    let (mut a, _, _files) = app_with_images(
         "前文\n\n![本地图](p.png)\n",
         Some("dir/doc.md"),
         &[("dir/p.png", 800, 600)],
@@ -1131,7 +1192,7 @@ fn geom_of_text<'a>(a: &'a App, needle: &str) -> &'a BlockGeom {
 /// 回归：占位 span 重复拼接 → NBSP 翻倍折行 → 块高 = 2×图高（半屏空白）。
 #[test]
 fn standalone_image_block_height_is_displayed_height() {
-    let (mut a, _) = app_with_images(
+    let (mut a, _, _files) = app_with_images(
         "前文\n\n![](p.png)\n\n## 1.1 背景\n\n背景介绍。\n\n普通段落\n\n## 1.2 目标\n",
         Some("dir/doc.md"),
         // 宽度受限的矮图：显示宽 = 版心宽，高 ≈ 155px，远小于视口 80%。
@@ -1165,7 +1226,7 @@ fn standalone_image_block_height_is_displayed_height() {
 /// 连续独立图片与图片后接段落：块间距恢复普通块间距，不叠加图片高度。
 #[test]
 fn consecutive_standalone_images_keep_normal_gaps() {
-    let (mut a, _) = app_with_images(
+    let (mut a, _, _files) = app_with_images(
         "正文一。\n\n![](p.png)\n\n![](q.png)\n\n## 标题\n\n正文二。\n\n正文三。\n\n## 标题二\n",
         Some("dir/doc.md"),
         &[("dir/p.png", 1600, 200), ("dir/q.png", 1200, 300)],
@@ -1234,7 +1295,7 @@ fn standalone_image_geometry_refreshes_after_async_load() {
 /// 窗口缩放后独立图片块高度按新视口重算，块高仍等于显示高度。
 #[test]
 fn standalone_image_block_height_recomputed_after_resize() {
-    let (mut a, _) = app_with_images(
+    let (mut a, _, _files) = app_with_images(
         "前文\n\n![](p.png)\n\n## 1.1 背景\n",
         Some("dir/doc.md"),
         &[("dir/p.png", 1600, 400)],
@@ -1257,7 +1318,7 @@ fn standalone_image_block_height_recomputed_after_resize() {
 
 #[test]
 fn image_failure_degrades_to_alt_and_memoizes() {
-    let (mut a, calls) = app_with_images("a ![alt](img/p.png) b", Some("dir/doc.md"), &[]);
+    let (mut a, calls, _files) = app_with_images("a ![alt](img/p.png) b", Some("dir/doc.md"), &[]);
     a.ensure_layouts_all();
     let (id, _, _) = a.editor.session().blocks()[0].clone();
     assert!(a.cache.layouts[&id].imgs.is_empty());
@@ -1272,7 +1333,7 @@ fn image_failure_degrades_to_alt_and_memoizes() {
 
 #[test]
 fn standalone_image_alt_renders_caption_without_touching_document() {
-    let (mut a, _) = app_with_images(
+    let (mut a, _, _files) = app_with_images(
         "前文\n\n![本地题注](p.png)\n",
         Some("dir/doc.md"),
         &[("dir/p.png", 200, 100)],
@@ -1290,7 +1351,7 @@ fn standalone_image_alt_renders_caption_without_touching_document() {
 
 #[test]
 fn empty_alt_standalone_image_has_no_caption_line() {
-    let (mut a, _) = app_with_images(
+    let (mut a, _, _files) = app_with_images(
         "前文\n\n![](p.png)\n",
         Some("dir/doc.md"),
         &[("dir/p.png", 200, 100)],
@@ -1302,7 +1363,7 @@ fn empty_alt_standalone_image_has_no_caption_line() {
 
 #[test]
 fn inline_image_alt_is_not_rendered_as_caption() {
-    let (mut a, _) = app_with_images(
+    let (mut a, _, _files) = app_with_images(
         "正文 ![行内](p.png) 继续",
         Some("dir/doc.md"),
         &[("dir/p.png", 60, 20)],
@@ -1314,7 +1375,7 @@ fn inline_image_alt_is_not_rendered_as_caption() {
 
 #[test]
 fn missing_image_caption_stays_visible() {
-    let (mut a, _) = app_with_images(
+    let (mut a, _, _files) = app_with_images(
         "前文\n\n![找不到](missing.png)\n",
         Some("dir/doc.md"),
         &[],
@@ -1331,14 +1392,14 @@ fn missing_image_caption_stays_visible() {
 
 #[test]
 fn caption_increases_block_height_by_one_line() {
-    let (mut with, _) = app_with_images(
+    let (mut with, _, _files) = app_with_images(
         "前文\n\n![题注](p.png)\n",
         Some("dir/doc.md"),
         &[("dir/p.png", 200, 100)],
     );
     with.ensure_layouts_all();
     with.recompute_geometry();
-    let (mut without, _) = app_with_images(
+    let (mut without, _, _files) = app_with_images(
         "前文\n\n![](q.png)\n",
         Some("dir/doc.md"),
         &[("dir/q.png", 200, 100)],
@@ -1355,7 +1416,7 @@ fn caption_increases_block_height_by_one_line() {
 
 #[test]
 fn caption_follows_alt_edits() {
-    let (mut a, _) = app_with_images(
+    let (mut a, _, _files) = app_with_images(
         "前文\n\n![旧题注](p.png)\n",
         Some("dir/doc.md"),
         &[("dir/p.png", 200, 100)],
@@ -1381,14 +1442,14 @@ fn caption_follows_alt_edits() {
 
 #[test]
 fn remote_or_draft_image_is_never_loaded() {
-    let (mut a, calls) =
+    let (mut a, calls, _files) =
         app_with_images("x ![a](https://example.com/x.png)", Some("dir/doc.md"), &[]);
     a.ensure_layouts_all();
     assert!(calls.borrow().is_empty());
     let (id, _, _) = a.editor.session().blocks()[0].clone();
     assert_eq!(a.cache.layouts[&id].layout_text(), "x a");
 
-    let (mut b, calls2) = app_with_images("x ![a](p.png)", None, &[]);
+    let (mut b, calls2, _files) = app_with_images("x ![a](p.png)", None, &[]);
     b.ensure_layouts_all();
     assert!(calls2.borrow().is_empty(), "草稿相对路径无解析基准");
     let (id, _, _) = b.editor.session().blocks()[0].clone();
@@ -1397,7 +1458,7 @@ fn remote_or_draft_image_is_never_loaded() {
 
 #[test]
 fn image_shows_source_when_caret_inside() {
-    let (mut a, calls) = app_with_images(
+    let (mut a, calls, _files) = app_with_images(
         "a ![alt](img/p.png) b",
         Some("dir/doc.md"),
         &[("dir/img/p.png", 100, 50)],
@@ -1532,7 +1593,7 @@ fn paste_image_files_prefer_file_list_over_path_text() {
                 calls: Rc::new(RefCell::new(Vec::new())),
             }),
             images: Box::new(FakeImages {
-                files,
+                files: Rc::new(RefCell::new(files)),
                 calls: loads.clone(),
             }),
             assets: Box::new(FakeAssets {
@@ -1852,7 +1913,7 @@ fn app_drop(
             store: Box::new(MemStore::default()),
             math: Box::new(m),
             images: Box::new(FakeImages {
-                files: map,
+                files: Rc::new(RefCell::new(map)),
                 calls: images.clone(),
             }),
             assets: Box::new(FakeAssets {
@@ -3432,6 +3493,29 @@ fn autosave_writes_after_idle_and_clears_dirty() {
     assert!(
         a.persist_state.persist.activity().is_none(),
         "保存后取消调度"
+    );
+}
+
+/// 版本历史写入失败：状态栏可见提示，正文/磁盘照常保存（不因历史失败丢数据）。
+#[test]
+fn snapshot_failure_is_visible_and_does_not_lose_data() {
+    use crate::document::doc_state::SaveKind;
+    let store = MemStore::default();
+    let snap = FakeSnapshot::default();
+    snap.fail_save.set(true);
+    let mut a = dirty_app("ab", Some("a.md"), &store);
+    a.ports.snapshot = Box::new(snap.clone());
+    a.save(SaveKind::Auto);
+    assert!(!a.editor.is_dirty(), "正文仍走正常保存流程");
+    assert_eq!(
+        store.files.borrow()[Path::new("a.md")],
+        "改ab".as_bytes(),
+        "磁盘内容已写入，历史失败不影响正文"
+    );
+    assert!(
+        a.ui_state.chrome.notice.contains("版本历史写入失败"),
+        "失败必须可见：{}",
+        a.ui_state.chrome.notice
     );
 }
 
@@ -6095,6 +6179,29 @@ fn settings_theme_switch_dark_to_system_repaints_palette() {
     let _ = lk;
 }
 
+/// 字号/行高修改即时生效（无需重启），且进入基础键触发重排。
+#[test]
+fn settings_typography_change_applies_without_restart() {
+    let mut a = app_theme(Box::new(MemConfig::default()), Rc::new(Cell::new(Some(false))));
+    a.ensure_layouts_all();
+    let (id, _, _) = a.editor.session().blocks()[0].clone();
+    let base0 = a.base_key();
+    let h0 = a.cache.layouts[&id].height;
+    a.config.doc_font_size = 24.0;
+    a.config.doc_line_height = 36.0;
+    a.config.doc_font_family = crate::theme::DocFontFamily::Serif;
+    a.refresh_settings_effects();
+    assert_eq!(a.engine.doc_font_size(), 24.0, "排版引擎立即采用新字号");
+    assert_eq!(a.engine.doc_line_height(), 36.0, "排版引擎立即采用新行高");
+    assert_eq!(a.engine.doc_font(), crate::theme::DocFontFamily::Serif);
+    assert_ne!(a.base_key(), base0, "排版输入必须进入基础键");
+    a.ensure_layouts_all();
+    assert_ne!(
+        a.cache.layouts[&id].height, h0,
+        "布局按新字号/行高重排，块高随行高变化"
+    );
+}
+
 #[test]
 fn explicit_mode_ignores_system_switch() {
     let cfg = MemConfig::default();
@@ -6943,7 +7050,7 @@ fn new_paragraph_caret_with_cold_images_below() {
         .collect();
     let files_ref: Vec<(&str, u32, u32)> =
         files.iter().map(|(p, w, h)| (p.as_str(), *w, *h)).collect();
-    let (mut a, _calls) = app_with_images(&text, Some("doc/note.md"), &files_ref);
+    let (mut a, _calls, _files) = app_with_images(&text, Some("doc/note.md"), &files_ref);
     // 不预热：直接跳文末（复刻用户打开文档后 Ctrl+End/点击末尾）
     a.perform_action(Action::Doc(Intent::MoveDocEnd));
     a.paint();
@@ -7022,7 +7129,7 @@ fn new_paragraph_caret_matches_block_position_with_images() {
         .collect();
     let files_ref: Vec<(&str, u32, u32)> =
         files.iter().map(|(p, w, h)| (p.as_str(), *w, *h)).collect();
-    let (mut a, _calls) = app_with_images(&text, Some("doc/note.md"), &files_ref);
+    let (mut a, _calls, _files) = app_with_images(&text, Some("doc/note.md"), &files_ref);
     a.paint();
     a.perform_action(Action::Doc(Intent::MoveDocEnd));
     a.route_key(Key::Enter);
@@ -13768,7 +13875,7 @@ fn html_img_missing_or_remote_placeholder_and_alt_visible() {
 #[test]
 fn html_img_local_inline_uses_image_path() {
     let text = "行内 <img src=\"logo.png\" alt=\"本地\"> 后\n";
-    let (mut a, calls) = app_with_images(text, Some("dir/doc.md"), &[("dir/logo.png", 20, 10)]);
+    let (mut a, calls, _files) = app_with_images(text, Some("dir/doc.md"), &[("dir/logo.png", 20, 10)]);
     a.editor.set_caret(text.len() - 1);
     a.ensure_layouts_all();
     let id = a.index.blocks[0].id;

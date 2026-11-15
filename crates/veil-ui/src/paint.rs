@@ -750,7 +750,7 @@ impl App {
                         caret,
                         &imgs,
                         reveal_all,
-                        Some(&footnotes),
+                        Some(footnotes.as_ref()),
                         &folds,
                         // 有序列表显示编号：编号在块索引层按文档顺序派生（BlockKind 不含起始号）。
                         self.index.list_ordinals.get(&id).copied(),
@@ -1305,7 +1305,7 @@ impl App {
             }
             let (id, kind, range, top) = (g.id, g.kind.clone(), g.range, g.top);
             let sy = (vp.y + top - self.window_state.scroll_y) as i32;
-            if (sy as f32) >= vp.y + vp.h || sy + self.block_height(g) as i32 <= vp.y as i32 {
+            if (sy as f32) >= vp.y + vp.h || sy + self.block_height_with(g, base, caret) as i32 <= vp.y as i32 {
                 continue; // 视口外不画（布局已缓存，光栅按需）
             }
             if self.math_shows_image(id, &range) {
@@ -1321,7 +1321,7 @@ impl App {
             // 文本光栅路径，否则表格块只会画空白并跳过原始行。
             if kind == BlockKind::Table
                 && self.table_shows_grid(id, &range)
-                && self.block_height(g) > 0.0
+                && self.block_height_with(g, base, caret) > 0.0
             {
                 // 容器内表格先画引用条（表格分支会提前 continue，装饰 match 不覆盖）。
                 self.paint_quote_rails(&mut frame, g, sy);
@@ -1364,7 +1364,7 @@ impl App {
             }
             // Callout（N3b）：强调色 10% 浅底色覆盖整块（含引用缩进区），文字仍后绘。
             if let Some(accent) = callout_accent(&kind) {
-                let bh = self.block_height(g) as u32;
+                let bh = self.block_height_with(g, base, caret) as u32;
                 let inset = (crate::tokens::doc::QUOTE_INSET * scale) as i32;
                 let x = self.content_x() as i32 - inset;
                 let w = (self.content_width() as i32 + inset).max(1) as u32;
@@ -1422,7 +1422,7 @@ impl App {
             // 折叠箭头在文本之后补画（见下方块级装饰分支）。
             let details_card = if matches!(&kind, BlockKind::Details { .. }) {
                 let expanded = self.ui_state.expanded_details.contains(&id);
-                let bh = self.block_height(g) as i32;
+                let bh = self.block_height_with(g, base, caret) as i32;
                 // B2：展开态卡片覆盖紧随其后的子表格，视觉上仍是同一张卡片。
                 let extra = if expanded {
                     self.details_children_height(g) as i32
@@ -1461,7 +1461,7 @@ impl App {
                 && !self.ui_state.expanded_details.contains(&id);
             let blit_h = if is_collapsed_details {
                 // 折叠高度与几何同源（block_height 已含 DPI 缩放），保证 summary 行不被裁切
-                (self.block_height(g).round() as u32).clamp(1, *rh)
+                (self.block_height_with(g, base, caret).round() as u32).clamp(1, *rh)
             } else {
                 *rh
             };
@@ -1524,7 +1524,7 @@ impl App {
             // 块级装饰（切片 12）：引用左竖条；分隔线非激活时画居中横线
             match kind {
                 BlockKind::BlockQuote => {
-                    let bh = self.block_height(g) as u32;
+                    let bh = self.block_height_with(g, base, caret) as u32;
                     frame.fill_rect(
                         self.content_x() as i32 - (crate::tokens::doc::QUOTE_INSET * scale) as i32,
                         sy,
@@ -1537,7 +1537,7 @@ impl App {
                 }
                 BlockKind::Admonition(_) | BlockKind::Callout(_) => {
                     // 提示块：左竖条按类型着色（引用灰条 → 语义/配置色），不改字节。
-                    let bh = self.block_height(g) as u32;
+                    let bh = self.block_height_with(g, base, caret) as u32;
                     let rail_color = match callout_accent(&kind) {
                         Some([r, g, b]) => [r, g, b, 255],
                         None => theme.grid,
@@ -1610,7 +1610,7 @@ impl App {
                     }
                 }
                 BlockKind::ThematicBreak if !node_active(range, caret) => {
-                    let bh = self.block_height(g);
+                    let bh = self.block_height_with(g, base, caret);
                     frame.fill_rect(
                         self.content_x() as i32,
                         sy + (bh * 0.5) as i32,
@@ -1638,7 +1638,7 @@ impl App {
                     continue;
                 }
                 let sy = (vp.y + g.top - self.window_state.scroll_y) as i32;
-                let h = self.block_height(g).ceil() as u32;
+                let h = self.block_height_with(g, base, caret).ceil() as u32;
                 frame.fill_rect(0, sy, vp.w.ceil() as u32, h.max(1), dim);
             }
         }

@@ -7,7 +7,6 @@
 //! 激活规则 v0：`range.start <= caret <= range.end` 闭区间，逐节点独立、嵌套各自生效。
 
 use std::collections::{HashMap, HashSet};
-use std::hash::{Hash, Hasher};
 
 use cosmic_text::{
     Attrs, Buffer, Color, Cursor, Family, FontSystem, Metrics, Shaping, Style as FontStyle,
@@ -417,11 +416,11 @@ pub(crate) struct FootnoteCtx {
 }
 
 impl FootnoteCtx {
-    pub(crate) fn new(ids: Vec<String>, muted: [u8; 3]) -> Self {
+    pub(crate) fn new(ids: &[String], muted: [u8; 3]) -> Self {
         let numbers = ids
-            .into_iter()
+            .iter()
             .enumerate()
-            .map(|(i, id)| (id, i + 1))
+            .map(|(i, id)| (id.clone(), i + 1))
             .collect();
         Self { numbers, muted }
     }
@@ -434,19 +433,6 @@ impl FootnoteCtx {
     fn muted(&self) -> [u8; 3] {
         self.muted
     }
-}
-
-/// 脚注代次：`footnote_ids()` 的顺序与编号的确定性哈希。
-/// 为什么进缓存键：文首新增一个引用会改变全文编号（含文末定义块的前缀），
-/// 但定义块自身文本没变；只按文本缓存会残留旧编号。同一次运行内稳定即可。
-pub(crate) fn footnote_epoch(ids: &[String]) -> u64 {
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    ids.len().hash(&mut h);
-    for (i, id) in ids.iter().enumerate() {
-        id.hash(&mut h);
-        (i + 1).hash(&mut h);
-    }
-    h.finish()
 }
 
 /// 块级装饰段：`subs` 之外还记录装饰在 layout 中的宽度，
@@ -5772,7 +5758,7 @@ mod tests {
         let (id1, kind1, range1) = s1.blocks()[2].clone();
         assert_eq!(kind1, BlockKind::FootnoteDef);
         let ctx1 = FootnoteCtx::new(s1.footnote_ids(), Theme::light().muted);
-        let base1 = revs.base(800.0, 1.0, 600.0, false, footnote_epoch(&s1.footnote_ids()));
+        let base1 = revs.base(800.0, 1.0, 600.0, false, s1.footnote_epoch());
         let inlines1 = s1.block_inlines(id1).unwrap_or_default();
         let l1 = eng.layout_block_with_footnotes(
             kind1.clone(),
@@ -5812,7 +5798,7 @@ mod tests {
         let s2 = Session::open(after);
         let (id2, kind2, range2) = s2.blocks()[2].clone();
         let ctx2 = FootnoteCtx::new(s2.footnote_ids(), Theme::light().muted);
-        let base2 = revs.base(800.0, 1.0, 600.0, false, footnote_epoch(&s2.footnote_ids()));
+        let base2 = revs.base(800.0, 1.0, 600.0, false, s2.footnote_epoch());
         assert_ne!(base1, base2, "文首新增未出现的引用 → 全文编号变化");
         assert!(
             cache

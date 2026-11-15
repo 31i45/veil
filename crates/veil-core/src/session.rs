@@ -288,8 +288,13 @@ impl Session {
     }
 
     /// 已编号脚注 id（文档顺序，下标 + 1 = 编号）。
-    pub fn footnote_ids(&self) -> Vec<String> {
-        self.syntax.footnote_ids().to_vec()
+    pub fn footnote_ids(&self) -> &[String] {
+        self.syntax.footnote_ids()
+    }
+
+    /// 脚注编号代次（顺序与编号的确定性哈希）：随解析一次算好，供布局键直接读取。
+    pub fn footnote_epoch(&self) -> u64 {
+        self.syntax.footnote_epoch()
     }
 
     /// 脚注首个定义的首行内容区间（重复定义 first wins）；无定义返回 None。
@@ -671,8 +676,8 @@ mod tests {
         assert_eq!(s.footnote_ids(), fresh.footnote_ids(), "编号顺序不一致");
         for id in fresh.footnote_ids() {
             assert_eq!(
-                s.footnote_number(&id),
-                fresh.footnote_number(&id),
+                s.footnote_number(id),
+                fresh.footnote_number(id),
                 "id={id:?} 编号不一致"
             );
         }

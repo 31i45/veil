@@ -148,9 +148,11 @@ impl App {
         }
         // 覆盖旧版本前留档（N1/B8a）：把即将被覆盖的磁盘版本写入稳定身份目录。
         // 同内容由存储层去重；基线为空（新文档）无旧版本可留。
-        if data != self.doc.baseline {
-            self.archive_baseline();
-        }
+        let archive_notice = if data != self.doc.baseline {
+            self.archive_baseline()
+        } else {
+            None
+        };
         match self.ports.store.save(&path, &data) {
             Ok(()) => {
                 self.editor.mark_saved();
@@ -176,6 +178,10 @@ impl App {
                 self.persist_state.persist.clear_activity(); // 已干净：取消自动保存调度
                                                              // 当前版本也入历史：列表可标「当前」，且恢复面板始终能看到刚保存的版本
                 self.record_current_snapshot();
+                // 留档失败在成功提示之后落地：正文/磁盘已保存，但历史不可静默缺失。
+                if let Some(n) = archive_notice {
+                    self.ui_state.chrome.notice = n;
+                }
                 self.clear_recovery(); // 磁盘已是最新：恢复副本作废（0b）
                 self.update_title();
             }
@@ -201,6 +207,7 @@ impl App {
     }
 
     /// 保存成功后把当前内容也写入历史（同内容由存储层去重）。
+    /// 失败不沉默（release 无控制台）：状态栏可见提示，正文与磁盘均不受影响。
     fn record_current_snapshot(&mut self) {
         let text = self.editor.session().serialize();
         if text.is_empty() {
@@ -209,32 +216,41 @@ impl App {
         let key = self.doc.history_key;
         if let Err(e) = self.ports.snapshot.save_snapshot(key, &text) {
             eprintln!("版本快照写入失败（key={key:016x}）: {e}");
+            self.ui_state.chrome.notice = tf(Key::NoticeSnapshotFailed, &[&e]);
         }
     }
 
     /// 保存前留档：把当前基线（即将被覆盖的磁盘版本）写入文档稳定身份目录。
     /// 解码失败（非 UTF-8）或空内容不写入——快照是文本版本，不承担二进制备份。
-    pub(crate) fn archive_baseline(&mut self) {
+    /// 返回失败提示文案（调用方在成功提示之后落地，避免被「已保存」覆盖）。
+    pub(crate) fn archive_baseline(&mut self) -> Option<String> {
         if self.doc.baseline.is_empty() {
-            return;
+            return None;
         }
         if let Ok((text, _)) = decode(&self.doc.baseline) {
             if !text.is_empty() {
                 let key = self.doc.history_key;
                 if let Err(e) = self.ports.snapshot.save_snapshot(key, &text) {
                     eprintln!("版本快照写入失败（key={key:016x}）: {e}");
+                    return Some(tf(Key::NoticeSnapshotFailed, &[&e]));
                 }
             }
         }
+        None
     }
 
     /// 打开/另存为到已存在目标时，覆盖前留档目标文件现有内容。
-    fn archive_existing_target(&mut self, key: u64, bytes: &[u8]) {
+    /// 与 `archive_baseline` 同一策略：失败留痕（返回提示文案），不静默丢弃。
+    fn archive_existing_target(&mut self, key: u64, bytes: &[u8]) -> Option<String> {
         if let Ok((text, _)) = decode(bytes) {
             if !text.is_empty() {
-                let _ = self.ports.snapshot.save_snapshot(key, &text);
+                if let Err(e) = self.ports.snapshot.save_snapshot(key, &text) {
+                    eprintln!("版本快照写入失败（key={key:016x}）: {e}");
+                    return Some(tf(Key::NoticeSnapshotFailed, &[&e]));
+                }
             }
         }
+        None
     }
 
     /// 把磁盘现存版本写到同目录冲突副本（首个未占用序号，经 FileStore 原子写）。
@@ -573,12 +589,16 @@ impl App {
         let was_unnamed = self.doc.path.is_none();
         let old_key = self.doc.history_key;
         let new_key = super::history::doc_key(&path);
-        // 目标文件已存在：覆盖前把现有内容留档到目标路径键目录
-        if let Ok(existing) = self.ports.store.load(&path) {
+        // 目标文件已存在：覆盖前把现有内容留档到目标路径键目录（失败留痕）
+        let archive_notice = if let Ok(existing) = self.ports.store.load(&path) {
             if existing != data {
-                self.archive_existing_target(new_key, &existing);
+                self.archive_existing_target(new_key, &existing)
+            } else {
+                None
             }
-        }
+        } else {
+            None
+        };
         match self.ports.store.save(&path, &data) {
             Ok(()) => {
                 self.editor.mark_saved();
@@ -620,7 +640,7 @@ impl App {
                     Some(old) => self.migrate_assets_for_save_as(old, &path),
                     None => None,
                 };
-                if let Some(n) = asset_notice.or(history_notice) {
+                if let Some(n) = asset_notice.or(history_notice).or(archive_notice) {
                     self.ui_state.chrome.notice = n;
                 }
                 self.update_title();

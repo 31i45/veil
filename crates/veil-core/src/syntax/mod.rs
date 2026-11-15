@@ -14,6 +14,8 @@ mod block;
 mod inline;
 mod model;
 
+use std::hash::{Hash, Hasher};
+
 pub use block::{list_signature, split_row as split_table_row, task_span};
 pub(crate) use model::Block;
 pub use model::{
@@ -45,6 +47,9 @@ pub(crate) struct Syntax {
     footnote_numbers: std::collections::HashMap<String, usize>,
     /// 编号顺序的 id 列表（下标 + 1 = 编号），供视图按序渲染脚注区。
     footnote_ids: Vec<String>,
+    /// 脚注编号代次：`footnote_ids` 顺序与编号的确定性哈希，随 `build_footnotes`
+    /// 一次算好。视图布局缓存键直接读它，避免每帧克隆/哈希整张 id 表。
+    footnote_epoch: u64,
     /// 脚注定义表：id → 首个定义的首行内容区间（重复定义 first wins）。
     /// 仅用于视图取定义内容；编号与它无关（未被引用的定义不占号）。
     footnote_defs: std::collections::HashMap<String, Range>,
@@ -70,6 +75,7 @@ impl Syntax {
             refs: RefMap::new(),
             footnote_numbers: std::collections::HashMap::new(),
             footnote_ids: Vec::new(),
+            footnote_epoch: 0,
             footnote_defs: std::collections::HashMap::new(),
             id_index: std::collections::HashMap::new(),
             last_rescan_lines: 0,
@@ -184,6 +190,19 @@ impl Syntax {
                 &mut self.footnote_ids,
             );
         }
+        // 编号代次在这里一次算好：视图侧每帧都要它，不能每帧重扫整张 id 表。
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        self.footnote_ids.len().hash(&mut h);
+        for (i, id) in self.footnote_ids.iter().enumerate() {
+            id.hash(&mut h);
+            (i + 1).hash(&mut h);
+        }
+        self.footnote_epoch = h.finish();
+    }
+
+    /// 脚注编号代次（顺序与编号的确定性哈希）；无脚注时为固定值。
+    pub fn footnote_epoch(&self) -> u64 {
+        self.footnote_epoch
     }
 
     /// 脚注编号（1 起）；未引用/未知 id 返回 None。

@@ -1389,11 +1389,20 @@ impl App {
         if !text.is_empty() {
             // 先留档磁盘基线，再记当前缓冲：保证列表里旧版本早于新版本，
             // 也避免 30 分钟快照抢在保存留档之前造成顺序倒挂。
-            self.archive_baseline();
-            let _ = self
+            let archive_notice = self.archive_baseline();
+            let current_err = self
                 .ports
                 .snapshot
-                .save_snapshot(self.doc.history_key, &text);
+                .save_snapshot(self.doc.history_key, &text)
+                .err();
+            // 周期快照失败同样不可静默（release 无控制台）：状态栏留痕。
+            if let Some(e) = current_err {
+                eprintln!("版本快照写入失败: {e}");
+                self.ui_state.chrome.notice =
+                    tf(Key::NoticeSnapshotFailed, &[&e]);
+            } else if let Some(n) = archive_notice {
+                self.ui_state.chrome.notice = n;
+            }
         }
         // 重置节流 deadline
         self.persist_state.snapshot_deadline =

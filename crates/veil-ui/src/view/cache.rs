@@ -21,7 +21,7 @@ use std::ops::Deref;
 
 use veil_core::{BlockId, BlockKind, Range};
 
-use super::layout::{footnote_epoch, BlockLayout, FootnoteCtx};
+use super::layout::{BlockLayout, FootnoteCtx};
 use super::table::TableLayout;
 use crate::app::App;
 use crate::image::ImageData;
@@ -60,6 +60,9 @@ pub(crate) struct Revs {
     pub(crate) session: u32,
     /// 图片相对路径基准代次：打开/另存为时递增。
     pub(crate) image_base: u32,
+    /// 图片内容代次：「重新加载图片」等显式重读时递增，使引用该图的块布局失配
+    /// （图片自然尺寸可能已变，块高/占位必须按新图重排）。
+    pub(crate) image_content: u32,
     /// 远程图片代次：远程图到达或全局开关切换时递增，使全部布局失配重排。
     pub(crate) remote_images: u32,
 }
@@ -82,9 +85,13 @@ impl Revs {
             theme_rev: self.theme,
             session_rev: self.session,
             image_base: self.image_base,
+            image_content: self.image_content,
             remote_images: self.remote_images,
             source_mode,
             footnote_epoch,
+            font_size_q: 0,
+            line_height_q: 0,
+            font_family: 0,
             fold_epoch: 0,
             list_epoch: 0,
         }
@@ -101,6 +108,13 @@ pub(crate) struct BaseKey {
     theme_rev: u32,
     session_rev: u32,
     image_base: u32,
+    /// 图片内容代次：显式「重新加载图片」后递增，强制相关块按新自然尺寸重排。
+    image_content: u32,
+    /// 正文排版输入：字号/行高（×1000 量化）与字体族判别值。
+    /// 设置变更即时生效依赖它——布局/光栅/表格键随排版输入失配。
+    font_size_q: u32,
+    line_height_q: u32,
+    font_family: u8,
     /// 远程图片到达/开关切换代次：远程图占位转为实图时换键重排；
     /// 本地图片缓存键仍只用 `image_base`，不因远程图重读磁盘。
     remote_images: u32,
@@ -197,6 +211,8 @@ pub(crate) struct Cache {
     pub(crate) remote_failed: HashSet<String>,
     /// 已发起、尚未返回的远程请求：去重与轮询唤醒的依据。
     pub(crate) remote_pending: HashSet<String>,
+    /// 脚注渲染上下文缓存：(编号代次, 前缀色, 表)。代次与颜色均不变时复用同一份。
+    pub(crate) footnote_ctx: Option<(u64, [u8; 3], std::rc::Rc<FootnoteCtx>)>,
 }
 
 impl Cache {
@@ -373,8 +389,9 @@ impl Cache {
 /// 键构造：全部来自 App 的外部输入与当前几何，各 ensure/绘制路径共用同一口径。
 impl App {
     pub(crate) fn base_key(&self) -> BaseKey {
-        // 脚注编号是全文派生量（当前数据量小：只哈希引用 id 列表，不扫正文）。
-        let epoch = footnote_epoch(&self.editor.session().footnote_ids());
+        // 脚注编号代次随解析一次算好（`Syntax::footnote_epoch`），此处直接读，
+        // 不再每帧克隆 id 列表并整表哈希。
+        let epoch = self.editor.session().footnote_epoch();
         let mut key = self.input_state.revs.base(
             self.content_width(),
             self.input_state.scale,
@@ -382,6 +399,10 @@ impl App {
             self.source_mode(),
             epoch,
         );
+        let cfg = &self.config;
+        key.font_size_q = quantize(cfg.doc_font_size, 1000.0);
+        key.line_height_q = quantize(cfg.doc_line_height, 1000.0);
+        key.font_family = cfg.doc_font_family.key();
         key.fold_epoch = self.inline_details_epoch();
         key.list_epoch = self.index.list_epoch;
         key
@@ -404,12 +425,21 @@ impl App {
         }
     }
 
-    /// 当前文档的脚注渲染上下文：编号表一次构建、逐块 O(1) 查询；随 `base_key` 对齐。
-    pub(crate) fn footnote_ctx(&self) -> FootnoteCtx {
-        FootnoteCtx::new(
+    /// 当前文档的脚注渲染上下文：按（编号代次, 前缀色）缓存，代次不变时零重建。
+    pub(crate) fn footnote_ctx(&mut self) -> std::rc::Rc<FootnoteCtx> {
+        let epoch = self.editor.session().footnote_epoch();
+        let muted = self.input_state.theme.muted;
+        if let Some((e, m, ctx)) = &self.cache.footnote_ctx {
+            if *e == epoch && *m == muted {
+                return ctx.clone();
+            }
+        }
+        let ctx = std::rc::Rc::new(FootnoteCtx::new(
             self.editor.session().footnote_ids(),
-            self.input_state.theme.muted,
-        )
+            muted,
+        ));
+        self.cache.footnote_ctx = Some((epoch, muted, ctx.clone()));
+        ctx
     }
 
     pub(crate) fn math_key(&self, block: BlockId) -> MathKey {

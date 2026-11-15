@@ -1875,6 +1875,132 @@ pub(crate) fn inline_details_spans(nodes: &[InlineNode], block: Range) -> Vec<In
     out
 }
 
+/// 块内全部 `<details>` 折叠区间（块相对）：行内节点树 + 容器逐行扫描合并。
+///
+/// 容器块（引用/提示/列表项）里的 `<details>` 在解析层常退化为 `HtmlLiteral`，
+/// 行内节点树收集不到区间；这些块改走逐行扫描。两者按 `key`（`<details` 开标签
+/// 的块内偏移）去重，折叠状态的键口径保持唯一。
+pub(crate) fn block_details_spans(
+    kind: &BlockKind,
+    body: &str,
+    nodes: &[InlineNode],
+    block: Range,
+) -> Vec<InlineDetailsSpan> {
+    let mut spans = inline_details_spans(nodes, block);
+    for s in container_details_spans(kind, body) {
+        if !spans.iter().any(|x| x.key == s.key) {
+            spans.push(s);
+        }
+    }
+    spans
+}
+
+/// 容器内未闭合的 `<details>`（逐行扫描的栈元素）。
+struct OpenDetails {
+    /// `<details` 开标签的块内偏移（折叠状态键）。
+    key: usize,
+    /// `<summary>` 标签结束位置（尚未遇到 `</summary>` 时暂存）。
+    summary_start: Option<usize>,
+    /// 已闭合的 summary 内容区间。
+    summary: Option<(usize, usize)>,
+}
+
+/// 容器块（引用/提示/自定义 Callout/列表项）内 `<details>` 折叠区间（块相对）。
+///
+/// 口径与行内版本一致：`key` = `<details` 开标签块内偏移；`summary` 为
+/// `<summary>`…`</summary>` 的内容区间；`body` = summary 之后 → `</details>` 之前。
+/// 无 `<summary>` 的 details 不产出折叠区间——没有可点击的摘要，收起会让正文
+/// 既不可见也无法通过点击恢复（裸标签仍按既有规则消隐）。
+fn container_details_spans(kind: &BlockKind, body: &str) -> Vec<InlineDetailsSpan> {
+    let quote_like = matches!(
+        kind,
+        BlockKind::BlockQuote | BlockKind::Callout(_) | BlockKind::Admonition(_)
+    );
+    let list_like = matches!(kind, BlockKind::ListItem { .. });
+    if !quote_like && !list_like {
+        return Vec::new();
+    }
+    let mut stack: Vec<OpenDetails> = Vec::new();
+    let mut out = Vec::new();
+    let mut in_fence: Option<u8> = None;
+    let mut off = 0usize;
+    for line in body.split_inclusive('\n') {
+        // 内容起点：引用类剥全部 `>` 标记；列表项剥缩进（首行符号不影响标签定位）。
+        let content_off = if quote_like {
+            let mut s = 0usize;
+            while let Some(p) = quote_marker_pos(&line[s..]) {
+                s += p + 1;
+            }
+            s
+        } else {
+            line.len() - line.trim_start_matches([' ', '\t']).len()
+        };
+        let content = line.get(content_off..).unwrap_or("");
+        // 围栏代码内的 `<details>` 是字面量，不参与折叠（与 `container_nested_subs` 同口径）。
+        if let Some(ch) = in_fence {
+            if is_fence_close(content, ch) {
+                in_fence = None;
+            }
+        } else if let Some(ch) = fence_open_char(content) {
+            in_fence = Some(ch);
+        } else {
+            scan_details_line(content, off + content_off, &mut stack, &mut out);
+        }
+        off += line.len();
+    }
+    out
+}
+
+/// 单行标签扫描：维护 `<details>` 嵌套栈，成对闭合且有 summary 时产出折叠区间。
+fn scan_details_line(
+    line: &str,
+    base: usize,
+    stack: &mut Vec<OpenDetails>,
+    out: &mut Vec<InlineDetailsSpan>,
+) {
+    let lower = line.to_ascii_lowercase();
+    let mut i = 0usize;
+    while i < lower.len() {
+        let Some(rel) = lower[i..].find('<') else {
+            break;
+        };
+        let start = i + rel;
+        let Some(gt) = lower[start..].find('>') else {
+            break;
+        };
+        let end = start + gt + 1;
+        let tag = &lower[start..end];
+        if tag.starts_with("</details") {
+            if let Some(open) = stack.pop() {
+                if let Some((ss, se)) = open.summary {
+                    out.push(InlineDetailsSpan {
+                        key: open.key,
+                        summary: Some((ss, se)),
+                        body: (se, base + start),
+                    });
+                }
+            }
+        } else if tag.starts_with("<details") {
+            stack.push(OpenDetails {
+                key: base + start,
+                summary_start: None,
+                summary: None,
+            });
+        } else if tag.starts_with("</summary") {
+            if let Some(o) = stack.last_mut() {
+                if let Some(s) = o.summary_start.take() {
+                    o.summary = Some((s, base + start));
+                }
+            }
+        } else if tag.starts_with("<summary") {
+            if let Some(o) = stack.last_mut() {
+                o.summary_start = Some(base + end);
+            }
+        }
+        i = end;
+    }
+}
+
 /// 单个行内 `<details>` 的排版折叠输入：`expanded == false` 时 body 整段消隐。
 #[derive(Clone, Copy, Debug)]
 pub struct InlineFold {

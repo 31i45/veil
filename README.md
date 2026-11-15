@@ -131,7 +131,7 @@ Measured on release build, probe-serialized; performance rows re-verified 2026-1
 | Keystroke→commit p95 on 100 K-word doc | ≤ 16 ms | 1.297 ms / 1.796 ms (`perf_keystroke_path` 5,005 blocks / `perf_keystroke_10k_blocks` 10,500 blocks; same machine, re-measured 2026-11-15; previous record 6.781 / 12.379) ✅ |
 | Resident memory, 100 K-word doc (private working set) | ≤ 150 MB | 40.76 MB (2026-11-05) |
 | Installed size — code + data (non-icon) | ≤ 6 MiB (Phase A baseline; superseded by the Wave 3/4 PDF export gate allowance) | 7,672,131 B (exe minus 89,277 B icons: `veil.ico` 46,688 + `veil-doc.ico` 42,589; 2026-11-15 after this round) |
-| Installed size — total single-file `veil.exe` | ≤ 10 MiB = 10,485,760 B (Wave 4 authorization; every increment must be recorded) | 7,761,408 B ≈ 7.40 MiB (2026-11-15 after this round; +772,608 B vs Wave 6 baseline 6,988,800 B; +847,360 B vs historical baseline 6,914,048 B); margin 2,724,352 B |
+| Installed size — total single-file `veil.exe` | ≤ 10 MiB = 10,485,760 B (Wave 4 authorization; every increment must be recorded) | 7,761,408 B ≈ 7.40 MiB (local build, pinned toolchain; +772,608 B vs Wave 6 baseline 6,988,800 B; +847,360 B vs historical baseline 6,914,048 B; margin 2,724,352 B). The published v1.7.0 asset built on CI is 7,763,456 B |
 | `veil-core` unit + property tests | ≥ 80 | 340 |
 | E2E assertions | ≥ 20 | 41 (3 e2e scenarios: open→save→reopen, table+image paste, find/replace→crash recovery→self-clean) ✅ |
 | Markdown roundtrip (no edits: output == input bytes; byte comparison) | 100% | 100% |

@@ -20,7 +20,7 @@ pub use block::{list_signature, split_row as split_table_row, task_span};
 pub(crate) use model::Block;
 pub use model::{
     sanitize_style, should_strip_html, AdmonitionType, BlockContainer, BlockId, BlockKind, Callout,
-    CellAlign, HtmlAttrs, HtmlStyle, HtmlTag, InlineKind, InlineNode, Table, TableCell,
+    CellAlign, HtmlAttrs, HtmlStyle, HtmlTag, ImageAlign, InlineKind, InlineNode, Table, TableCell,
     HTML_INLINE_WHITELIST,
 };
 

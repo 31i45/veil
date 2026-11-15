@@ -450,6 +450,19 @@ pub(crate) struct UIState {
     pub(crate) history: History,
     /// 打印预览覆盖层：与 PDF 导出同源的整页位图 + 当前页/缩放。
     pub(crate) print_preview: Option<crate::print::PrintPreview>,
+    /// 图片放大预览覆盖层：纯视图态，关闭后文档字节与光标不变。
+    pub(crate) image_preview: Option<ImagePreview>,
+}
+
+/// 图片放大预览（覆盖层）：键为本地绝对路径或远程 URL（与行内图片缓存同键）。
+/// `zoom = 1.0` 表示适应窗口；`pan` 为相对居中的屏幕像素偏移。
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct ImagePreview {
+    pub(crate) key: String,
+    /// 标题（图片 alt 原文；空串时标题只显示「图片预览」）。
+    pub(crate) title: String,
+    pub(crate) zoom: f32,
+    pub(crate) pan: (f32, f32),
 }
 
 impl Default for UIState {
@@ -469,6 +482,7 @@ impl Default for UIState {
             hover_link_is_link: false,
             history: History::default(),
             print_preview: None,
+            image_preview: None,
             expanded_details: std::collections::HashSet::new(),
             expanded_inline_details: std::collections::HashSet::new(),
             frontmatter_revealed: false,
@@ -1742,6 +1756,11 @@ impl App {
                 self.end_col_drag();
             }
             WindowEvent::MouseWheel { delta, .. } => {
+                // 图片放大预览：滚轮只服务预览（普通=平移，Ctrl=缩放），不滚动背景文档。
+                if self.ui_state.image_preview.is_some() {
+                    self.image_preview_wheel(delta);
+                    return;
+                }
                 // 模态/浮层打开时滚轮只服务浮层，绝不缩放背景文档（DEF-T07-003）。
                 let overlay_open = self.overlay_blocks_background_wheel();
                 if self.input_state.mods.ctrl {
@@ -1814,6 +1833,7 @@ impl App {
             || self.ui_state.quick.open
             || self.ui_state.search.open
             || self.ui_state.history.open
+            || self.ui_state.print_preview.is_some()
     }
 
     /// 保存当前窗口几何并报告是否应关闭。Shell 据此只移除一个 WindowId。

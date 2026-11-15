@@ -8,7 +8,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use veil_core::{BlockId, BlockKind, CellAlign, InlineKind, InlineNode, Range, Session};
+use veil_core::{BlockId, BlockKind, CellAlign, ImageAlign, InlineKind, InlineNode, Range, Session};
 use veil_ui::i18n::{t, Key};
 
 use crate::platform::pdf::{
@@ -161,6 +161,8 @@ struct BoxItem {
     h: f32,
     /// 图顶到基线的距离（pt）。
     baseline: f32,
+    /// 独占行图片的水平对齐（`<img align>`）；行内图片为 None。
+    align: Option<ImageAlign>,
 }
 
 #[derive(Clone)]
@@ -417,15 +419,25 @@ impl<'a> Ctx<'a> {
                         self.metrics,
                         baseline,
                     );
+                    // 独占行图片按 align 在可排版宽内偏移；行内图片保持续排位置。
+                    let bx = match b.align {
+                        Some(ImageAlign::Center) => {
+                            self.geom.margin_x + indent + ((line_w - b.w) * 0.5).max(0.0)
+                        }
+                        Some(ImageAlign::Right) => {
+                            self.geom.margin_x + indent + (line_w - b.w).max(0.0)
+                        }
+                        _ => x,
+                    };
                     let top = baseline - b.baseline;
                     self.pages[self.page].push(DrawOp::Image {
-                        x,
+                        x: bx,
                         y: top,
                         w: b.w,
                         h: b.h,
                         id: b.id,
                     });
-                    x += b.w;
+                    x = bx + b.w;
                 }
             }
         }
@@ -715,6 +727,7 @@ impl<'a> Ctx<'a> {
                             w: self.images[id].pt_w(),
                             h: self.images[id].pt_h(),
                             baseline: self.images[id].pt_h(),
+                            align: None,
                         })),
                         None => {
                             let st = Style {
@@ -748,6 +761,7 @@ impl<'a> Ctx<'a> {
                                 w: im.pt_w(),
                                 h: im.pt_h(),
                                 baseline: im.baseline_pt(),
+                                align: None,
                             }))
                         }
                         None => {
@@ -915,6 +929,13 @@ impl<'a> Ctx<'a> {
                                 w: self.images[id].pt_w(),
                                 h: self.images[id].pt_h(),
                                 baseline: self.images[id].pt_h(),
+                                align: attrs.align.filter(|_| {
+                                    veil_core::image_standalone(
+                                        text,
+                                        Range::new(base, base + text.len()),
+                                        node.range,
+                                    )
+                                }),
                             })),
                             None => {
                                 let st = Style {
@@ -2540,6 +2561,38 @@ mod tests {
         assert!(
             first_caption_y >= first_image.0 + first_image.1,
             "题注应位于图片下方"
+        );
+    }
+
+    #[test]
+    fn html_img_alignment_shifts_draw_x_within_content_width() {
+        let mut media = FakeImageMedia;
+        let geom = PageGeom::a4(20.0);
+        let image_x = |md: &str, media: &mut FakeImageMedia| {
+            let doc = lay_media(md, media);
+            doc.pages
+                .iter()
+                .flatten()
+                .find_map(|op| match op {
+                    DrawOp::Image { x, w, .. } => Some((*x, *w)),
+                    _ => None,
+                })
+                .expect("应绘制图片")
+        };
+        let (x, w) = image_x("<img src=\"fake.png\" align=\"center\">\n", &mut media);
+        let expect = geom.margin_x + (geom.content_w() - w) * 0.5;
+        assert!((x - expect).abs() < 0.5, "center x={x} expect={expect}");
+        let (x, w) = image_x("<img src=\"fake.png\" align=\"right\">\n", &mut media);
+        let expect = geom.margin_x + (geom.content_w() - w);
+        assert!((x - expect).abs() < 0.5, "right x={x} expect={expect}");
+        // 无 align / 行内图片：保持版心左缘续排。
+        let (x, _) = image_x("<img src=\"fake.png\">\n", &mut media);
+        assert!((x - geom.margin_x).abs() < 0.5, "left x={x}");
+        let (x, _) = image_x("前文 <img src=\"fake.png\" align=\"center\"> 后文\n", &mut media);
+        assert!(x > geom.margin_x, "行内图片不得跳位：x={x}");
+        assert!(
+            x < geom.margin_x + w + 30.0,
+            "行内图片应紧随前文：x={x}"
         );
     }
 

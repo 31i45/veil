@@ -29,7 +29,7 @@
 //   迭代实现，不受递归上限影响。
 
 use super::block::{normalize_label, RefMap};
-use super::model::{HtmlAttrs, HtmlTag, InlineKind, InlineNode};
+use super::model::{HtmlAttrs, HtmlTag, ImageAlign, InlineKind, InlineNode};
 use crate::range::Range;
 
 /// inline 解析递归深度硬上限。超限后开标记按纯文本处理；
@@ -911,6 +911,10 @@ fn parse_open_tag(src: &str) -> Option<(String, bool, HtmlAttrs)> {
             // 避免把非像素语义的单位误当像素放大版面。
             "width" if tag_name == "img" => attrs.width = parse_px(val.as_deref()),
             "height" if tag_name == "img" => attrs.height = parse_px(val.as_deref()),
+            // 对齐只收集 left/center/right；其它值（含 CSS 单位/表达式）一律忽略。
+            "align" if tag_name == "img" => {
+                attrs.align = val.as_deref().and_then(ImageAlign::parse);
+            }
             // 只有 `<a>` 的 href 参与渲染/导出；非白名单 scheme 置空（保留标签与文字）。
             "href" if tag_name == "a" => {
                 if let Some(ref v) = val {
@@ -2879,6 +2883,39 @@ mod tests {
         match &ns[0].kind {
             InlineKind::Html { attrs, .. } => assert_eq!(attrs.width, None),
             _ => panic!("expected Html Abbr"),
+        }
+    }
+
+    #[test]
+    fn html_img_align_collected_only_for_whitelisted_values() {
+        for (input, want) in [
+            (r#"<img src="a.png" align="left">"#, Some(ImageAlign::Left)),
+            (r#"<img src="a.png" align="CENTER">"#, Some(ImageAlign::Center)),
+            (r#"<img src="a.png" align="centre">"#, Some(ImageAlign::Center)),
+            (r#"<img src="a.png" align=" right ">"#, Some(ImageAlign::Right)),
+        ] {
+            match &parse(input)[0].kind {
+                InlineKind::HtmlSelfClosed { attrs, .. } => {
+                    assert_eq!(attrs.align, want, "{input}");
+                }
+                _ => panic!("expected HtmlSelfClosed Img for {input}"),
+            }
+        }
+        // 未知值/空值不收集，标签本身仍生效（不破坏白名单）。
+        for input in [
+            r#"<img src="a.png" align="justify">"#,
+            r#"<img src="a.png" align="center; color:red">"#,
+            r#"<img src="a.png" align="">"#,
+        ] {
+            match &parse(input)[0].kind {
+                InlineKind::HtmlSelfClosed { attrs, .. } => assert_eq!(attrs.align, None, "{input}"),
+                _ => panic!("expected HtmlSelfClosed Img for {input}"),
+            }
+        }
+        // 非 img 标签不收集 align。
+        match &parse(r#"<span align="center">x</span>"#)[0].kind {
+            InlineKind::Html { attrs, .. } => assert_eq!(attrs.align, None),
+            _ => panic!("expected Html Span"),
         }
     }
 

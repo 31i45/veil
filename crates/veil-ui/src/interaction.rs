@@ -1,7 +1,7 @@
 //! 交互策略：按键到意图的翻译、编辑后的几何刷新编排、光标移动/命中/点选/
 //! 拖选、剪贴板、菜单动作。只发意图与调几何，不做像素绘制。
 
-use crate::app::{App, ConfigSave};
+use crate::app::{App, ConfigSave, ImagePreview};
 use crate::chrome::{self, MenuAction};
 use crate::document::block_index::{gap_after, gap_between, BlockGeom};
 use crate::editor::Intent;
@@ -100,6 +100,11 @@ impl App {
     /// 单个内部键的路由与执行：`on_key` 与测试共用同一入口。
     /// 模式优先级与各模式的按键语义只在 `mode::route` 一处表达。
     pub(crate) fn route_key(&mut self, key: Key) {
+        // 图片放大预览优先：打开时它是唯一输入接收者（缩放/平移/Esc 关闭）。
+        if self.ui_state.image_preview.is_some() {
+            self.image_preview_key(&key);
+            return;
+        }
         // 打印预览覆盖层优先：打开时它是唯一输入接收者（翻页/缩放/Esc 关闭）。
         if self.ui_state.print_preview.is_some() {
             self.print_preview_key(&key);
@@ -1108,6 +1113,125 @@ impl App {
         };
         self.copy_code_block(id);
         true
+    }
+
+    /// 左键命中已渲染的图片位图：打开放大预览（纯视图态）。
+    /// 源码态/打印态不拦截；光标进入图片节点后位图本就不绘制，无需额外判定。
+    pub(crate) fn try_open_image_preview(&mut self) -> bool {
+        if self.source_mode() || self.window_state.print.is_some() {
+            return false;
+        }
+        let (mx, my) = (
+            self.input_state.mouse.x as f32,
+            self.input_state.mouse.y as f32,
+        );
+        let vp = self.viewport();
+        if my < vp.y || my >= vp.y + vp.h {
+            return false;
+        }
+        self.ensure_layouts_visible();
+        let content_x = self.content_x();
+        let scroll = self.window_state.scroll_y;
+        let hit = self.index.blocks.iter().find_map(|g| {
+            let l = &self.cache.layouts.get(&g.id)?.value;
+            let sy = vp.y + g.top - scroll;
+            l.imgs.iter().find_map(|p| {
+                let crate::view::InlineAsset::Image(key) = &p.key else {
+                    return None;
+                };
+                let x = content_x + p.x;
+                let y = sy + p.y;
+                (mx >= x && mx < x + p.width as f32 && my >= y && my < y + p.height as f32)
+                    .then(|| key.clone())
+            })
+        });
+        let Some(key) = hit else {
+            return false;
+        };
+        let title = Path::new(&key)
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| key.clone());
+        self.ui_state.image_preview = Some(ImagePreview {
+            key,
+            title,
+            zoom: 1.0,
+            pan: (0.0, 0.0),
+        });
+        self.window_state.dragging = false;
+        self.request_redraw();
+        true
+    }
+
+    /// 图片预览按键：Esc 关闭、+/-/0 缩放、方向键/翻页平移。
+    /// 打开期间它是唯一输入接收者，正文文档与光标完全不变。
+    pub(crate) fn image_preview_key(&mut self, key: &Key) {
+        use crate::input::Key as K;
+        // Esc 先处理：关闭需要独占 &mut self，不能与预览字段的借用重叠。
+        if matches!(key, K::Escape) {
+            self.close_image_preview();
+            return;
+        }
+        let step = 40.0 * self.input_state.scale;
+        let page = (self.viewport().h * 0.8).max(step);
+        let Some(pv) = self.ui_state.image_preview.as_mut() else {
+            return;
+        };
+        match key {
+            K::Text(s) => match s.as_str() {
+                "+" | "=" => pv.zoom = crate::print::next_zoom(pv.zoom, true),
+                "-" | "_" => pv.zoom = crate::print::next_zoom(pv.zoom, false),
+                "0" => {
+                    pv.zoom = 1.0;
+                    pv.pan = (0.0, 0.0);
+                }
+                _ => return,
+            },
+            K::Equal => pv.zoom = crate::print::next_zoom(pv.zoom, true),
+            K::Minus => pv.zoom = crate::print::next_zoom(pv.zoom, false),
+            K::Digit0 => {
+                pv.zoom = 1.0;
+                pv.pan = (0.0, 0.0);
+            }
+            K::Left => pv.pan.0 -= step,
+            K::Right => pv.pan.0 += step,
+            K::Up => pv.pan.1 -= step,
+            K::Down => pv.pan.1 += step,
+            K::PageUp => pv.pan.1 -= page,
+            K::PageDown => pv.pan.1 += page,
+            K::Home => {
+                pv.zoom = 1.0;
+                pv.pan = (0.0, 0.0);
+            }
+            _ => return,
+        }
+        self.request_redraw();
+    }
+
+    /// 预览滚轮：Ctrl 缩放；普通滚轮上下平移。仅在预览打开时由事件层调用。
+    pub(crate) fn image_preview_wheel(&mut self, delta: winit::event::MouseScrollDelta) {
+        use winit::event::MouseScrollDelta;
+        let scale = self.input_state.scale;
+        let dy = match delta {
+            MouseScrollDelta::LineDelta(_, y) => y * 3.0 * BASE_LINE_HEIGHT * scale,
+            MouseScrollDelta::PixelDelta(p) => p.y as f32,
+        };
+        let Some(pv) = self.ui_state.image_preview.as_mut() else {
+            return;
+        };
+        if self.input_state.mods.ctrl {
+            pv.zoom = crate::print::next_zoom(pv.zoom, dy > 0.0);
+        } else {
+            pv.pan.1 += dy;
+        }
+        self.request_redraw();
+    }
+
+    /// 关闭图片预览（不触碰文档/光标/撤销栈）。
+    pub(crate) fn close_image_preview(&mut self) {
+        if self.ui_state.image_preview.take().is_some() {
+            self.request_redraw();
+        }
     }
 
     /// 右键命中的普通围栏代码块（mermaid 有专用菜单，不归此路径）。
@@ -2303,6 +2427,16 @@ impl App {
             self.input_state.mouse.x as f32,
             self.input_state.mouse.y as f32,
         );
+        // 图片放大预览：点击遮罩关闭；点在图上保持打开（与系统看图器一致），
+        // 期间不落光标、不开撤销步、不改文档。
+        if self.ui_state.image_preview.is_some() {
+            let inside = crate::view::image_preview::image_rect(self)
+                .is_some_and(|r| mx >= r.x && mx < r.x + r.w && my >= r.y && my < r.y + r.h);
+            if !inside {
+                self.close_image_preview();
+            }
+            return false;
+        }
         // 设置模态优先（优先级高于普通 modal）：只判定按钮/字段命中，遮罩/空白点击一律吞掉
         if self.ui_state.settings.is_some() {
             let l = self.settings_layout();
@@ -2520,6 +2654,10 @@ impl App {
                     return false;
                 }
             }
+        }
+        // 点击已渲染的图片 → 放大预览（Ctrl+点击保持原「落光标显源码」路径）。
+        if !self.input_state.mods.ctrl && self.try_open_image_preview() {
+            return false;
         }
         // 表格列宽拖动（B2）：优先于落光标；命中分隔线则吞掉本次点击。
         if self.try_start_col_drag() {
@@ -2781,7 +2919,10 @@ impl App {
     /// 仅在形状变化时写窗口，避免每次鼠标移动都下发。
     pub(crate) fn apply_pointer(&mut self) {
         use winit::window::CursorIcon;
-        let icon = if self.ui_state.modal.is_some() {
+        let icon = if self.ui_state.modal.is_some()
+            || self.ui_state.image_preview.is_some()
+            || self.ui_state.print_preview.is_some()
+        {
             CursorIcon::Default
         } else if self.ui_state.search.hover.is_some()
             || self.ui_state.quick.hover.is_some()

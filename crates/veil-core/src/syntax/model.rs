@@ -191,8 +191,38 @@ impl HtmlTag {
     }
 }
 
+/// 独立图片的水平对齐（`<img align="left|center|right">`）。
+/// 仅对独占视觉行的图片生效；行内图片忽略该属性，避免打断行内排版。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ImageAlign {
+    Left,
+    Center,
+    Right,
+}
+
+impl ImageAlign {
+    /// 解析属性值（大小写不敏感，`centre` 作为 `center` 别名）；未知值返回 None。
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "left" => Some(Self::Left),
+            "center" | "centre" => Some(Self::Center),
+            "right" => Some(Self::Right),
+            _ => None,
+        }
+    }
+
+    /// 规范值（导出 HTML 的 figure 类名后缀与调试输出共用）。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Left => "left",
+            Self::Center => "center",
+            Self::Right => "right",
+        }
+    }
+}
+
 /// 白名单 HTML 属性（abbr.title / img.src / img.alt / img.width / img.height /
-/// a.href）。其余属性一律忽略；
+/// img.align / a.href）。其余属性一律忽略；
 /// `script` 事件属性、`style`、`javascript:` href 解析层判定非法后置空，渲染层读不到。
 /// 远程（http/https）图片地址不写入 `src`（仍为空），只保存在 `remote_src` 供 UI 渲染层按需加载。
 #[derive(Clone, Default, PartialEq, Eq, Debug)]
@@ -208,6 +238,8 @@ pub struct HtmlAttrs {
     pub width: Option<u32>,
     /// `<img height="...">` 的显式像素高（口径同 `width`）。
     pub height: Option<u32>,
+    /// `<img align="...">` 的水平对齐（仅 left/center/right；未知值不收集）。
+    pub align: Option<ImageAlign>,
     /// `<a href="...">` 的目标（仅 a 标签收集；`javascript:` 等危险 scheme 置空）。
     pub href: Option<String>,
     /// `<details open>` 的布尔属性存在性（仅白名单 details 标签收集）。

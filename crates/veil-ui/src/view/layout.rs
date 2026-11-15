@@ -546,6 +546,15 @@ impl BlockLayout {
         &self.layout_text
     }
 
+    /// 布局文本偏移 → 逻辑行下标（越界夹到末行）。生成目录的行与条目一一对应，
+    /// 点击行据此定位要跳转的标题。
+    pub(crate) fn line_at_layout(&self, off: usize) -> usize {
+        let off = off.min(self.layout_text.len());
+        self.line_bases
+            .partition_point(|&b| b <= off)
+            .saturating_sub(1)
+    }
+
     /// Reveal 激活指纹：块级激活（引用按行、列表/分隔线按块）与全部行内节点的激活位。
     /// 仅依赖 caret 与块结构（结构随 BlockId 固化），供派生缓存按因果键判定是否重排。
     /// 指纹相等 ⇔ 排版依赖的激活状态相同（64 位 FNV 折叠；碰撞概率忽略不计）。

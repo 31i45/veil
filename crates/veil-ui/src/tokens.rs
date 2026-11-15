@@ -358,6 +358,9 @@ pub(crate) mod doc {
     pub const QUOTE_RAIL: f32 = 3.0;
     /// Details 卡片相对版心的内边距。
     pub const DETAILS_PAD: f32 = 4.0;
+    /// 非活动态 Front Matter 折叠条高度（逻辑像素）：保留可点击入口，
+    /// 避免整块 0 高后既看不见也无法点进编辑；打印态仍为 0。
+    pub const FM_COLLAPSED_H: f32 = 18.0;
     /// 表格单元格内边距（水平 / 垂直）。
     pub const TABLE_PAD_X: f32 = 8.0;
     pub const TABLE_PAD_Y: f32 = 5.0;

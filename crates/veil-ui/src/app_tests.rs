@@ -6203,6 +6203,112 @@ fn settings_typography_change_applies_without_restart() {
 }
 
 #[test]
+fn collapsed_frontmatter_bar_is_clickable() {
+    // 4.1：折叠条保留鼠标入口——点击即落光标，光标进入后展开原文。
+    let store = MemStore::default();
+    let text = "---\ntitle: 演示\n---\n\n正文\n";
+    let mut a = app(text, None, false, &store);
+    a.editor.set_caret(text.find("正文").unwrap());
+    a.ensure_layouts_all();
+    a.render();
+    let fm = block_id_of(&a, |k| matches!(k, BlockKind::FrontMatter(_)));
+    let (fr, ftop) = {
+        let g = a.index.blocks.iter().find(|g| g.id == fm).unwrap();
+        (g.range, g.top)
+    };
+    let vp = a.viewport();
+    let (x, y) = (a.content_x() + 12.0, vp.y + ftop + 4.0);
+    click_at(&mut a, x, y);
+    assert!(
+        fr.start <= a.editor.caret() && a.editor.caret() <= fr.end,
+        "点击折叠条应落光标到 Front Matter 内"
+    );
+    a.render();
+    assert!(
+        a.cache.layouts[&fm].layout_text().contains("title"),
+        "光标进入后展开原文"
+    );
+    assert_eq!(doc_text(&a), text, "点击不得改写文档");
+}
+
+#[test]
+fn generated_toc_entry_click_jumps_to_heading() {
+    // 4.2：生成目录条目可点击跳转，源码 `[TOC]` 不被改写。
+    let store = MemStore::default();
+    let text = "[TOC]\n\n# 第一章\n\n正文\n\n## 小节\n\n更多\n";
+    let mut a = app(text, None, false, &store);
+    a.editor.set_caret(text.len()); // 光标离开标记块：渲染目录
+    a.ensure_layouts_all();
+    a.render();
+    let toc_top = a
+        .index
+        .blocks
+        .iter()
+        .find(|g| g.toc_marker)
+        .expect("应有 [TOC] 标记块")
+        .top;
+    let vp = a.viewport();
+    let line_h = a.engine.doc_line_height() * a.input_state.scale;
+    let (x, y) = (a.content_x() + 12.0, vp.y + toc_top + line_h * 1.5);
+    // 第二条目录行 = 二级标题「小节」
+    click_at(&mut a, x, y);
+    assert_eq!(
+        a.editor.caret(),
+        text.find("## 小节").unwrap(),
+        "应跳到对应标题块首"
+    );
+    assert_eq!(doc_text(&a), text, "跳转不得改写 `[TOC]` 源码");
+}
+
+#[test]
+fn notice_expires_and_clears_code_copy_feedback() {
+    // 4.3：notice 超时消退；复制按钮的就地反馈与提示同寿。
+    let store = MemStore::default();
+    let text = "```rust\nlet x = 1;\n```\n\n正文\n";
+    let mut a = app(text, None, false, &store);
+    a.ensure_layouts_all();
+    let id = block_id_of(&a, |k| matches!(k, BlockKind::FencedCode(_)));
+    a.copy_code_block(id);
+    assert_eq!(a.window_state.code_copied, Some(id));
+    let g = a.index.blocks.iter().find(|g| g.id == id).unwrap();
+    assert!(
+        a.code_header_layout(g).unwrap().copied,
+        "按钮就地显示已复制"
+    );
+    let t0 = Instant::now();
+    a.tick(t0);
+    assert!(!a.ui_state.chrome.notice.is_empty());
+    a.tick(t0 + Duration::from_secs(7));
+    assert!(a.ui_state.chrome.notice.is_empty(), "提示应超时消退");
+    assert_eq!(a.window_state.code_copied, None, "就地反馈同步复原");
+}
+
+#[test]
+fn pointer_shape_follows_hover_target() {
+    // 4.3：指针形状映射——正文文本 / 代码复制按钮（手型）。
+    use winit::window::CursorIcon;
+    let store = MemStore::default();
+    let text = "正文\n\n```rust\nlet x = 1;\n```\n";
+    let mut a = app(text, None, false, &store);
+    a.ensure_layouts_all();
+    let vp = a.viewport();
+    a.input_state.mouse =
+        PhysicalPosition::new((a.content_x() + 4.0) as f64, (vp.y + 4.0) as f64);
+    a.apply_pointer();
+    assert_eq!(a.window_state.pointer, Some(CursorIcon::Text));
+    let g = a.index.blocks.iter().find(|g| {
+        matches!(g.kind, BlockKind::FencedCode(_))
+    });
+    let h = a.code_header_layout(g.unwrap()).expect("代码头部");
+    a.input_state.mouse = PhysicalPosition::new(
+        (h.button.x + h.button.w / 2.0) as f64,
+        (h.button.y + h.button.h / 2.0) as f64,
+    );
+    a.apply_pointer();
+    assert_eq!(a.window_state.pointer, Some(CursorIcon::Pointer));
+}
+
+#[test]
 fn explicit_mode_ignores_system_switch() {
     let cfg = MemConfig::default();
     *cfg.text.borrow_mut() = Some("[theme]\nmode = \"light\"".into());
@@ -12380,10 +12486,21 @@ fn frontmatter_hidden_in_wysiwyg_and_source_shows_raw() {
     a.render();
     let fm = block_id_of(&a, |k| matches!(k, BlockKind::FrontMatter(_)));
     let g = a.index.blocks.iter().find(|g| g.id == fm).unwrap();
-    assert_eq!(g.height, 0.0, "非活动态 Front Matter 应完全隐藏");
+    assert_eq!(
+        g.height,
+        crate::tokens::doc::FM_COLLAPSED_H * a.input_state.scale,
+        "非活动态 Front Matter 折叠为可点击细条（不是整块 0 高）"
+    );
+    assert!(
+        !a.cache.layouts[&fm].layout_text().is_empty(),
+        "布局仍保留原文以便展开时零重排"
+    );
     let fm_top = g.top;
     let next_top = a.index.blocks.iter().find(|g| g.id != fm).unwrap().top;
-    assert_eq!(next_top, fm_top, "隐藏的 Front Matter 不占前后段距");
+    assert!(
+        next_top >= fm_top + g.height,
+        "折叠条之后的块从条底开始，不保留整块段距"
+    );
 
     // 光标进入块内：WYSIWYM 显示原文（可编辑）。
     a.editor.set_caret(text.find("title").unwrap());
@@ -12434,7 +12551,11 @@ fn toml_frontmatter_paragraph_hidden_mid_document() {
         .map(|g| g.id)
         .expect("应存在 TOML Front Matter 段落");
     let g = a.index.blocks.iter().find(|g| g.id == toml).unwrap();
-    assert_eq!(g.height, 0.0, "非活动态 TOML Front Matter 应隐藏");
+    assert_eq!(
+        g.height,
+        crate::tokens::doc::FM_COLLAPSED_H * a.input_state.scale,
+        "非活动态 TOML Front Matter 折叠为可点击细条"
+    );
     a.editor.set_caret(text.find("title").unwrap());
     a.ensure_layouts_all();
     a.render();
@@ -12485,7 +12606,11 @@ fn toml_frontmatter_flag_tracks_single_block_edits() {
         a.index.blocks[i].frontmatter_like,
         "单块编辑后缓存标志必须更新"
     );
-    assert_eq!(a.index.blocks[i].height, 0.0, "非活动态应隐藏");
+    assert_eq!(
+        a.index.blocks[i].height,
+        crate::tokens::doc::FM_COLLAPSED_H * a.input_state.scale,
+        "非活动态折叠为可点击细条"
+    );
 
     // 删掉末行补的 `+`：增量路径同样必须把标志降回 false 并恢复高度。
     a.editor.set_caret(close + 2);

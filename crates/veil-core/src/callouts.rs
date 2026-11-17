@@ -4,6 +4,11 @@
 //! "icon": "!" }`。`name`/`label` 必填，`color`/`icon` 可省略（灰/`!`）。
 //! 宽容策略：文件级语法错误 → 空表；单条非法（字段缺失/名字不合法/颜色非法）→
 //! 静默跳过该条，不影响其余条目，也不产生任何 UI 噪音。
+//!
+//! 实现：整文件 `serde_json::from_str::<Value>` 确认数组后逐条目手动提取四个已知键的
+//! 字符串值（键缺失或值非字符串都记为 None，与手写 parser 的"跳过非字符串值"一致），
+//! 再送入 `validate` 做业务校验（CSS 类名字符集、颜色范围、label/icon 长度）。
+//! 替换手写 Parser struct（~172 行）后消除代理对缺失、转义不全、错误不可定位三个缺陷。
 
 use crate::syntax::Callout;
 
@@ -16,8 +21,16 @@ pub struct CalloutRegistry {
 impl CalloutRegistry {
     /// 从 JSON 文本解析。任何非法内容都被静默忽略（返回可用条目）。
     pub fn from_json(text: &str) -> Self {
-        let entries = Parser::new(text).parse_registry().unwrap_or_default();
-        Self { entries }
+        match serde_json::from_str::<serde_json::Value>(text) {
+            Ok(serde_json::Value::Array(arr)) => {
+                let entries = arr
+                    .iter()
+                    .filter_map(parse_entry)
+                    .collect();
+                Self { entries }
+            }
+            _ => Self::default(),
+        }
     }
 
     /// 按名查找（大小写不敏感）。
@@ -35,196 +48,31 @@ impl CalloutRegistry {
     }
 }
 
-/// 极简 JSON 读取器：只支持本配置需要的 `[ { "k": "v", ... }, ... ]` 子集。
-struct Parser {
-    b: Vec<char>,
-    i: usize,
+/// 单条提取：从 Value 对象里取 name/label/color/icon 四个已知键的字符串值，
+/// 未知键或值非字符串都忽略（保持宽容）。
+fn parse_entry(item: &serde_json::Value) -> Option<Callout> {
+    let obj = item.as_object()?;
+    let name = obj.get("name").and_then(v_as_string);
+    let label = obj.get("label").and_then(v_as_string);
+    let color = obj.get("color").and_then(v_as_string);
+    let icon = obj.get("icon").and_then(v_as_string);
+    validate(name, label, color, icon)
 }
 
-impl Parser {
-    fn new(s: &str) -> Self {
-        Self {
-            b: s.chars().collect(),
-            i: 0,
-        }
-    }
-
-    fn peek(&self) -> Option<char> {
-        self.b.get(self.i).copied()
-    }
-
-    fn skip_ws(&mut self) {
-        while matches!(self.peek(), Some(' ' | '\t' | '\r' | '\n')) {
-            self.i += 1;
-        }
-    }
-
-    fn eat(&mut self, c: char) -> bool {
-        self.skip_ws();
-        if self.peek() == Some(c) {
-            self.i += 1;
-            true
-        } else {
-            false
-        }
-    }
-
-    fn parse_string(&mut self) -> Option<String> {
-        self.skip_ws();
-        if self.peek() != Some('"') {
-            return None;
-        }
-        self.i += 1;
-        let mut out = String::new();
-        loop {
-            let c = self.peek()?;
-            self.i += 1;
-            match c {
-                '"' => return Some(out),
-                '\\' => {
-                    let e = self.peek()?;
-                    self.i += 1;
-                    match e {
-                        '"' => out.push('"'),
-                        '\\' => out.push('\\'),
-                        '/' => out.push('/'),
-                        'n' => out.push('\n'),
-                        't' => out.push('\t'),
-                        'r' => out.push('\r'),
-                        'u' => {
-                            let mut n = 0u32;
-                            for _ in 0..4 {
-                                let h = self.peek()?.to_digit(16)?;
-                                self.i += 1;
-                                n = n * 16 + h;
-                            }
-                            out.push(char::from_u32(n)?);
-                        }
-                        _ => return None,
-                    }
-                }
-                c => out.push(c),
-            }
-        }
-    }
-
-    /// 跳过任意非字符串值的原值（数字/布尔/null/对象/数组），用于忽略未知键。
-    fn skip_value(&mut self) -> Option<()> {
-        self.skip_ws();
-        match self.peek()? {
-            '"' => {
-                self.parse_string()?;
-            }
-            '{' | '[' => {
-                let (open, close) = if self.peek() == Some('{') {
-                    ('{', '}')
-                } else {
-                    ('[', ']')
-                };
-                self.i += 1;
-                let mut depth = 1usize;
-                while depth > 0 {
-                    let c = self.peek()?;
-                    self.i += 1;
-                    match c {
-                        '"' => {
-                            self.i -= 1;
-                            self.parse_string()?;
-                        }
-                        x if x == open => depth += 1,
-                        x if x == close => depth -= 1,
-                        _ => {}
-                    }
-                }
-            }
-            _ => {
-                while !matches!(self.peek(), None | Some(',' | '}' | ']')) {
-                    self.i += 1;
-                }
-            }
-        }
-        Some(())
-    }
-
-    fn parse_registry(&mut self) -> Option<Vec<Callout>> {
-        if !self.eat('[') {
-            return None;
-        }
-        let mut out = Vec::new();
-        let mut after_comma = false;
-        loop {
-            self.skip_ws();
-            if self.eat(']') {
-                // 尾随逗号非法 → 整体判非法（静默为空）
-                return (!after_comma).then_some(out);
-            }
-            let entry = self.parse_object()?;
-            if let Some(c) = validate(entry) {
-                out.push(c);
-            }
-            self.skip_ws();
-            if self.eat(',') {
-                after_comma = true;
-                continue;
-            }
-            if self.eat(']') {
-                return Some(out);
-            }
-            return None; // 语法错误：整体判非法，调用方取空表
-        }
-    }
-
-    fn parse_object(&mut self) -> Option<Vec<(String, String)>> {
-        if !self.eat('{') {
-            return None;
-        }
-        let mut fields = Vec::new();
-        loop {
-            self.skip_ws();
-            if self.eat('}') {
-                return Some(fields);
-            }
-            let key = self.parse_string()?;
-            if !self.eat(':') {
-                return None;
-            }
-            // 只有字符串值参与配置；其它类型直接跳过（该项后续按缺字段处理）。
-            self.skip_ws();
-            if self.peek() == Some('"') {
-                let val = self.parse_string()?;
-                fields.push((key, val));
-            } else {
-                self.skip_value()?;
-            }
-            self.skip_ws();
-            if self.eat(',') {
-                continue;
-            }
-            if self.eat('}') {
-                return Some(fields);
-            }
-            return None;
-        }
-    }
+/// Value → &str：只接受 String 类型；null/number/bool/array/object 全部返回 None。
+fn v_as_string(v: &serde_json::Value) -> Option<&str> {
+    v.as_str()
 }
 
-/// 单条校验：名字/标签必填，颜色解析失败则整条忽略；图标缺省 `!`。
-fn validate(fields: Vec<(String, String)>) -> Option<Callout> {
-    let mut name = None;
-    let mut label = None;
-    let mut color = None;
-    let mut icon = None;
-    for (k, v) in fields {
-        match k.as_str() {
-            "name" => name = Some(v),
-            "label" => label = Some(v),
-            "color" => color = Some(v),
-            "icon" => icon = Some(v),
-            _ => {}
-        }
-    }
-    let name = name?;
-    let name = name.trim();
+/// 单条业务校验：名字/标签必填，颜色解析失败则整条忽略；图标缺省 `!`。
+/// 只负责校验规则，不负责 JSON 语法解析。
+fn validate(
+    name: Option<&str>,
+    label: Option<&str>,
+    color: Option<&str>,
+    icon: Option<&str>,
+) -> Option<Callout> {
+    let name = name?.trim();
     // 名字进 CSS 类名与解析匹配：只接受字母/数字/下划线/短横线，且必须以字母开头。
     let mut chars = name.chars();
     let first = chars.next()?;
@@ -238,11 +86,10 @@ fn validate(fields: Vec<(String, String)>) -> Option<Callout> {
         return None;
     }
     let color = match color {
-        Some(v) => parse_hex(&v)?,
+        Some(v) => parse_hex(v)?,
         None => [136, 136, 136],
     };
-    let icon = icon.unwrap_or_else(|| "!".to_string());
-    let icon = icon.trim();
+    let icon = icon.unwrap_or("!").trim();
     if icon.chars().count() > 4 {
         return None;
     }
@@ -338,5 +185,50 @@ mod tests {
         let c = r.get("warn2").unwrap();
         assert_eq!(c.label, "注意\n换行");
         assert_eq!(c.color, [0xab, 0xcd, 0xef]);
+    }
+
+    // — 新增 serde_json 特有的覆盖（手写 parser 无法处理） —
+
+    #[test]
+    fn emoji_and_non_bmp_characters_are_valid() {
+        // 代理对 emoji 🎨 = U+1F3A8 = surrogate pair D83C DFA8
+        let r = CalloutRegistry::from_json(
+            r##"[{"name":"art","label":"艺术 🎨","icon":"🎨"}]"##,
+        );
+        let c = r.get("art").unwrap();
+        assert_eq!(c.label, "艺术 🎨");
+        assert_eq!(c.icon, "🎨");
+    }
+
+    #[test]
+    fn standard_json_escapes_are_supported() {
+        // 手写 parser 缺 \b 和 \f；serde_json 原生支持全部标准转义
+        let r = CalloutRegistry::from_json(
+            r##"[{"name":"esc","label":"退格\b换页\f引号\"反斜\\","icon":"\u0041\u0042"}]"##,
+        );
+        let c = r.get("esc").unwrap();
+        assert_eq!(c.label, "退格\x08换页\x0c引号\"反斜\\");
+        assert_eq!(c.icon, "AB");
+    }
+
+    #[test]
+    fn control_characters_in_string_are_accepted() {
+        // 手写 parser 原样 push(c) 无校验；serde_json 也接受（标准 JSON 允许 U+0000~U+001F）
+        let r = CalloutRegistry::from_json(
+            r##"[{"name":"ctrl","label":"制表\t水平","icon":"\t"}]"##,
+        );
+        let c = r.get("ctrl").unwrap();
+        assert_eq!(c.label, "制表\t水平");
+    }
+
+    #[test]
+    fn non_string_values_for_known_keys_are_ignored() {
+        // name 是 number，不是 string → v_as_string 返回 None → validate name? 返回 None → 整条跳过
+        let r = CalloutRegistry::from_json(
+            r##"[{"name":123,"label":"数字名"},{"name":"ok","label":"ok","color":["not","a","string"]}]"##,
+        );
+        let names: Vec<&str> = r.entries().iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["ok"], "name 非 string 整条跳过，color 非 string 只 color 缺省");
+        assert_eq!(r.get("ok").unwrap().color, [136, 136, 136]);
     }
 }

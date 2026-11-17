@@ -281,8 +281,9 @@ mod tests {
     use super::*;
     use std::fs;
 
-    /// 每个用例独占一个临时目录（避免并行测试互相覆盖），返回待解码路径。
-    fn temp_input(tag: &str, bytes: &[u8]) -> std::path::PathBuf {
+    /// 每个用例独占一个临时目录（避免并行测试互相覆盖），按指定文件名落盘。
+    /// WIC 按扩展名选解码器，合法图片用例必须用真实扩展名（如 `.bmp`）。
+    fn temp_input_named(tag: &str, name: &str, bytes: &[u8]) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!(
             "veil_wic_{tag}_{}_{}",
             std::process::id(),
@@ -292,9 +293,14 @@ mod tests {
                 .unwrap_or(0)
         ));
         fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("input.bin");
+        let path = dir.join(name);
         fs::write(&path, bytes).unwrap();
         path
+    }
+
+    /// 失败用例用无意义扩展名（内容是垃圾，靠解码器拒绝）。
+    fn temp_input(tag: &str, bytes: &[u8]) -> std::path::PathBuf {
+        temp_input_named(tag, "input.bin", bytes)
     }
 
     /// 垃圾字节：解码器拒绝并返回可读 Err（含归因 + HRESULT 诊断），不得 panic。
@@ -338,5 +344,85 @@ mod tests {
         };
         assert!(err.contains("打开图片解码器"), "错误须归因到解码器: {err}");
         assert!(err.contains("HRESULT"), "须保留系统诊断: {err}");
+    }
+
+    // —— 成功路径：合法 BMP 必须真的解出像素（此前 3 个用例全为失败路径） ——
+
+    /// 构造 24bpp 未压缩 BMP（BI_RGB）。`pixels_topdown` 为自顶向下的 BGR 序列，
+    /// 长度须等于 width*height。行按 4 字节对齐；positive height = 自底向上（BMP 标准），
+    /// 故文件内按行倒序写入。
+    fn bmp_24(width: u32, height: u32, pixels_topdown: &[[u8; 3]]) -> Vec<u8> {
+        assert_eq!(pixels_topdown.len(), (width * height) as usize);
+        let row = (width * 3).div_ceil(4) * 4;
+        let image = row * height;
+        let mut out = Vec::with_capacity((54 + image) as usize);
+        out.extend_from_slice(b"BM");
+        out.extend_from_slice(&(54 + image).to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out.extend_from_slice(&54u32.to_le_bytes());
+        // BITMAPINFOHEADER
+        out.extend_from_slice(&40u32.to_le_bytes());
+        out.extend_from_slice(&(width as i32).to_le_bytes());
+        out.extend_from_slice(&(height as i32).to_le_bytes());
+        out.extend_from_slice(&1u16.to_le_bytes());
+        out.extend_from_slice(&24u16.to_le_bytes());
+        out.extend_from_slice(&0u32.to_le_bytes());
+        out.extend_from_slice(&image.to_le_bytes());
+        out.extend_from_slice(&0i32.to_le_bytes());
+        out.extend_from_slice(&0i32.to_le_bytes());
+        out.extend_from_slice(&0u32.to_le_bytes());
+        out.extend_from_slice(&0u32.to_le_bytes());
+        // 自底向上写行：文件首行是图像最后一行
+        for y in (0..height as usize).rev() {
+            for x in 0..width as usize {
+                out.extend_from_slice(&pixels_topdown[y * width as usize + x]);
+            }
+            out.resize(out.len() + (row - width * 3) as usize, 0);
+        }
+        out
+    }
+
+    /// 1x1 纯红 BMP：验证 COM 解码链真的产出 RGBA，而不只是"不报错"。
+    #[test]
+    fn decodes_minimal_one_by_one_bmp() {
+        // 纯红：BGR = [0, 0, 255]
+        let path = temp_input_named("bmp1", "input.bmp", &bmp_24(1, 1, &[[0, 0, 255]]));
+        let img = decode_image(&path).expect("合法 BMP 必须解码成功");
+        assert_eq!((img.width, img.height), (1, 1));
+        assert_eq!(img.pixels.len(), 4, "1x1 RGBA8 = 4 字节");
+        assert_eq!(img.pixels[0], 255, "BGR→RGBA：红通道应还原为 255");
+        assert_eq!(img.pixels[1], 0);
+        assert_eq!(img.pixels[2], 0);
+        assert_eq!(img.pixels[3], 255, "无 alpha 的 BMP 应补为不透明");
+        let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// 2x2 四色 BMP：每行 6 字节按 4 对齐补到 8 字节。
+    /// 用四种不同颜色，才能同时验证自底向上行序、行内像素顺序与填充不串色。
+    #[test]
+    fn decodes_two_by_two_bmp_with_row_padding() {
+        // 自顶向下：红、绿、蓝、白（BGR 存储）
+        let pixels = [
+            [0u8, 0, 255],     // 左上 红
+            [0, 255, 0],       // 右上 绿
+            [255, 0, 0],       // 左下 蓝
+            [255, 255, 255],   // 右下 白
+        ];
+        let path = temp_input_named("bmp2", "input.bmp", &bmp_24(2, 2, &pixels));
+        let img = decode_image(&path).expect("2x2 BMP 必须解码成功");
+        assert_eq!((img.width, img.height), (2, 2));
+        let expected = [
+            255u8, 0, 0, 255,       // 红
+            0, 255, 0, 255,         // 绿
+            0, 0, 255, 255,         // 蓝
+            255, 255, 255, 255,     // 白
+        ];
+        assert_eq!(
+            img.pixels.as_slice(),
+            &expected[..],
+            "四色须按原行序/列序还原（自底向上翻转、行填充均不得串色）"
+        );
+        let _ = fs::remove_dir_all(path.parent().unwrap());
     }
 }

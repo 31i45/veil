@@ -735,7 +735,7 @@ impl App {
                     if self.cache.image(&key, image_base).is_none() {
                         match self.ports.images.load(&path) {
                             Ok(img) => {
-                                self.cache.inline_images.insert(
+                                self.cache.insert_inline_image(
                                     key.clone(),
                                     Memo {
                                         key: image_base,
@@ -828,7 +828,7 @@ impl App {
             self.cache.layouts.insert(
                 id,
                 Memo {
-                    key: LayoutKey { base, reveal, toc },
+                    key: LayoutKey { base, reveal, toc, highlight_epoch: self.engine.highlight_epoch },
                     value: l,
                 },
             );
@@ -852,6 +852,9 @@ impl App {
 
     /// 仅补齐视口内（含上下各一屏 overscan）缺失布局（P1b 惰性排版）。
     pub(crate) fn ensure_layouts_visible(&mut self) {
+        // 先 drain 后台 parse 结果：回填 Highlighter 缓存、递增 highlight_epoch，
+        // 让 LayoutKey 自然失配 → 重排时命中缓存同步产出颜色。
+        self.engine.drain_background();
         let range = self.visible_index_range();
         self.ensure_layouts_range(range);
     }
@@ -1273,7 +1276,7 @@ impl App {
                     if self.cache.image(&key, image_base).is_none() {
                         match self.ports.images.load(&path) {
                             Ok(img) => {
-                                self.cache.inline_images.insert(
+                                self.cache.insert_inline_image(
                                     key.clone(),
                                     Memo {
                                         key: image_base,

@@ -6,6 +6,8 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use base64::engine::general_purpose::STANDARD;
+use base64::Engine as _;
 use veil_core::{
     heading_slugs, percent_decode_path, BlockKind, HtmlTag, InlineKind, InlineNode, Range, Session,
 };
@@ -1781,29 +1783,9 @@ fn is_data_image(value: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'+' | b'/' | b'='))
 }
 
-/// 无依赖 base64 编码（标准字母表，带 `=` 填充）。
+/// base64 编码（标准字母表，带 `=` 填充）：`base64` crate 的 STANDARD 引擎。
 fn base64_encode(bytes: &[u8]) -> String {
-    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
-    for chunk in bytes.chunks(3) {
-        let b0 = chunk[0] as u32;
-        let b1 = chunk.get(1).copied().unwrap_or(0) as u32;
-        let b2 = chunk.get(2).copied().unwrap_or(0) as u32;
-        let n = (b0 << 16) | (b1 << 8) | b2;
-        out.push(TABLE[((n >> 18) & 0x3F) as usize] as char);
-        out.push(TABLE[((n >> 12) & 0x3F) as usize] as char);
-        if chunk.len() > 1 {
-            out.push(TABLE[((n >> 6) & 0x3F) as usize] as char);
-        } else {
-            out.push('=');
-        }
-        if chunk.len() > 2 {
-            out.push(TABLE[(n & 0x3F) as usize] as char);
-        } else {
-            out.push('=');
-        }
-    }
-    out
+    STANDARD.encode(bytes)
 }
 
 /// 重名导出递增命名：`name.ext` 已存在时改用 `name (2).ext`、`name (3).ext`……
@@ -1889,6 +1871,17 @@ mod tests {
         let html = html_of(&s, &ExportStyle::default(), &font());
         let body = html.split_once("<body>\n").unwrap().1;
         body.strip_suffix("</body>\n</html>\n").unwrap().to_string()
+    }
+
+    #[test]
+    fn base64_encode_matches_rfc4648_vectors() {
+        assert_eq!(base64_encode(b""), "");
+        assert_eq!(base64_encode(b"f"), "Zg==");
+        assert_eq!(base64_encode(b"fo"), "Zm8=");
+        assert_eq!(base64_encode(b"foo"), "Zm9v");
+        assert_eq!(base64_encode(b"foob"), "Zm9vYg==");
+        assert_eq!(base64_encode(b"fooba"), "Zm9vYmE=");
+        assert_eq!(base64_encode(b"foobar"), "Zm9vYmFy");
     }
 
     /// B3：details 子块导出时仍包在 <details open> 内，嵌套结构闭合正确。

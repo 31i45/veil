@@ -179,6 +179,7 @@ impl App {
             Cmd::SearchBackspace => self.search_backspace(),
             Cmd::SearchPaste => self.search_paste(),
             Cmd::SearchToggleField => self.search_toggle_field(),
+            Cmd::SearchToggleRegex => self.search_toggle_regex(),
             Cmd::SearchNext => self.search_enter(),
             Cmd::SearchPrev => self.search_prev(),
             Cmd::SearchFirstMatch => self.search_first_match(),
@@ -2621,6 +2622,10 @@ impl App {
                     self.search_toggle_case();
                     return false;
                 }
+                Some(search::Hit::ToggleRegex) => {
+                    self.search_toggle_regex();
+                    return false;
+                }
                 Some(search::Hit::QueryText) => {
                     self.ui_state.search.focus = search::Field::Query;
                     self.set_ime_area();
@@ -2634,7 +2639,7 @@ impl App {
                     return false;
                 }
                 Some(search::Hit::ReplaceOne) => {
-                    self.replace_current();
+                    let _ = self.replace_current();
                     return false;
                 }
                 Some(search::Hit::ReplaceAll) => {
@@ -3665,6 +3670,18 @@ impl App {
         self.request_redraw();
     }
 
+    /// 「正则模式」开关（点击 `. *` 或 Alt+R）：翻转后立即重扫，会话内保持。
+    /// 关闭时查询串回到逐字面量匹配，不改变已输入内容。
+    pub(crate) fn search_toggle_regex(&mut self) {
+        if !self.ui_state.search.open {
+            return;
+        }
+        self.ui_state.search.regex = !self.ui_state.search.regex;
+        self.search_rescan();
+        self.set_ime_area();
+        self.request_redraw();
+    }
+
     /// Enter：查询框内 = 下一个命中；替换框内 = 替换当前并前进到下一处
     /// （复用 `replace_current`），Ctrl+Enter = 全部替换（复用 `replace_all`）。
     fn search_enter(&mut self) {
@@ -3679,9 +3696,12 @@ impl App {
         let Some(m) = self.ui_state.search.current_match() else {
             return;
         };
-        // 替换串落盘后长度可能变化：以「旧起点 + 新串字节长度」为下一处起点。
-        let from = m.start + self.ui_state.search.replace.len();
-        self.replace_current();
+        // 替换串落盘后长度可能变化：以「旧起点 + 实际写入字节数」为下一处起点。
+        // 正则模式下写入长度由捕获组展开决定，不能用模板原串长度。
+        let Some(inserted) = self.replace_current() else {
+            return;
+        };
+        let from = m.start + inserted;
         self.ui_state.search.select_after(from);
         self.jump_to_match();
     }
@@ -3789,20 +3809,35 @@ impl App {
     }
 
     /// 单次替换：替换当前命中（一步事务），重扫后跳到剩余的首个命中。
-    pub(crate) fn replace_current(&mut self) {
+    /// 返回实际写入的字节数（正则捕获展开后可能不同于模板长度），供调用方定位下一处。
+    pub(crate) fn replace_current(&mut self) -> Option<usize> {
         if !self.ui_state.search.open || !self.ui_state.search.replace_open {
-            return;
+            return None;
         }
-        let Some(m) = self.ui_state.search.current_match() else {
-            return;
-        };
-        let text = self.ui_state.search.replace.clone();
-        let Some(dirty) = self.editor.replace_range(m, &text) else {
-            return;
-        };
+        let m = self.ui_state.search.current_match()?;
+        let text = self.replacement_text(m);
+        let dirty = self.editor.replace_range(m, &text)?;
         self.window_state.goal_x = None;
         self.after_edit(dirty);
         self.search_rescan(); // 命中缓存重建：后续替换绝不基于旧区间
+        Some(text.len())
+    }
+
+    /// 单处替换文本：正则模式下按捕获组展开模板（`$1`/`${name}`），字面量模式原样使用。
+    /// 展开失败（理论上不会，命中来自同一模式）时回退为模板原文，保证替换可用。
+    fn replacement_text(&self, m: veil_core::Range) -> String {
+        let st = &self.ui_state.search;
+        if !st.regex {
+            return st.replace.clone();
+        }
+        let n = self.editor.session().text_len();
+        let hay = self
+            .editor
+            .session()
+            .text_slice(veil_core::Range::new(0, n))
+            .unwrap_or_default();
+        search::expand_one(&hay, &st.query, st.case_sensitive, m, &st.replace)
+            .unwrap_or_else(|| st.replace.clone())
     }
 
     /// 全部替换：一次事务覆盖所有命中（单撤销步），随后重建命中缓存。
@@ -3810,9 +3845,27 @@ impl App {
         if !self.ui_state.search.open || !self.ui_state.search.replace_open {
             return;
         }
-        let matches = self.ui_state.search.matches.clone();
-        let text = self.ui_state.search.replace.clone();
-        let Some((dirty, _)) = self.editor.replace_all(&matches, &text) else {
+        let st = &self.ui_state.search;
+        let outcome = if st.regex {
+            // 正则：逐命中展开捕获组，每处替换文本可能不同。
+            let n = self.editor.session().text_len();
+            let hay = self
+                .editor
+                .session()
+                .text_slice(veil_core::Range::new(0, n))
+                .unwrap_or_default();
+            let Ok(edits) =
+                search::expand_replacements(&hay, &st.query, st.case_sensitive, &st.replace)
+            else {
+                return;
+            };
+            self.editor.replace_all_with(&edits)
+        } else {
+            let matches = st.matches.clone();
+            let text = st.replace.clone();
+            self.editor.replace_all(&matches, &text)
+        };
+        let Some((dirty, _)) = outcome else {
             return;
         };
         self.window_state.goal_x = None;

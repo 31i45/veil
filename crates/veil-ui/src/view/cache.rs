@@ -16,6 +16,7 @@
 //! `prune` 只做内存回收：删掉已不存在块或已过期代次的条目，不承担正确性——
 //! 即使某条目未被回收，读取时键不匹配同样不会命中。
 
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::ops::Deref;
 
@@ -152,6 +153,10 @@ pub(crate) struct LayoutKey {
     /// 全文标题集合指纹：仅 `[TOC]` 标记块取当前值，其余块恒 0。
     /// 目录文本由全文标题派生，标记块自身字节/BlockId 不变，必须单列才能失效（DEF-T05-005）。
     pub(crate) toc: u64,
+    /// 长代码块后台异步高亮回填代次：任何一个超限 FencedCode 的后台 parse 完成
+    /// 并回填颜色后递增。layout 重排时 epoch 自然失配 → 走完整同步路径（此时
+    /// Highlighter 缓存已命中，瞬间产出颜色）。
+    pub(crate) highlight_epoch: u64,
 }
 
 /// 行内公式图键：按 tex 内容寻址，另含 DPI 与主题。
@@ -199,7 +204,6 @@ pub(crate) fn scale_q(scale: f32) -> u32 {
 
 /// 五类派生缓存的统一存放。字段对 crate 内可见；读取一律经本文件的带键查询方法，
 /// 不经字段直接判断存在性。
-#[derive(Default)]
 pub(crate) struct Cache {
     /// 块布局：键 = 宽度/DPI/主题/图片基准 + 激活指纹。
     pub(crate) layouts: HashMap<BlockId, Memo<LayoutKey, BlockLayout>>,
@@ -227,6 +231,134 @@ pub(crate) struct Cache {
     pub(crate) remote_pending: HashSet<String>,
     /// 脚注渲染上下文缓存：(编号代次, 前缀色, 表)。代次与颜色均不变时复用同一份。
     pub(crate) footnote_ctx: Option<(u64, [u8; 3], std::rc::Rc<FootnoteCtx>)>,
+    /// 图片缓存 LRU 追踪：key（inline 路径或 remote URL）→ 最近一次使用（插入或命中）
+    /// 的相对纳秒时间戳。字节总量超上限时按时间戳升序逐出——命中即刷新时间戳，
+    /// 故仍在被绘制的图片不会被优先逐出（真 LRU，而非首次插入时间的 FIFO）。
+    /// 值用 `Cell` 包住：命中路径在 `&self` 下也能刷新最近使用时间。
+    image_last_used: HashMap<String, Cell<u64>>,
+    /// 图片缓存字节总量上限（默认 200 MiB）。0 表示不限制。
+    image_limit_bytes: usize,
+    /// Cache 创建时的 anchor 时间，用于计算相对时间戳。
+    anchor: std::time::Instant,
+}
+
+impl Default for Cache {
+    fn default() -> Self {
+        Self {
+            layouts: HashMap::new(),
+            rasters: HashMap::new(),
+            math_imgs: HashMap::new(),
+            math_failed: HashMap::new(),
+            mermaid_drawings: HashMap::new(),
+            mermaid_failed: HashMap::new(),
+            inline_math: HashMap::new(),
+            inline_failed: HashMap::new(),
+            inline_images: HashMap::new(),
+            image_failed: HashMap::new(),
+            tables: HashMap::new(),
+            remote_images: HashMap::new(),
+            remote_failed: HashSet::new(),
+            remote_pending: HashSet::new(),
+            footnote_ctx: None,
+            image_last_used: HashMap::new(),
+            image_limit_bytes: 200 * 1024 * 1024,
+            anchor: std::time::Instant::now(),
+        }
+    }
+}
+
+impl Cache {
+    /// 设置图片缓存字节上限（单位 MiB）。0 表示不限制。
+    pub(crate) fn set_image_limit_mb(&mut self, mb: u32) {
+        self.image_limit_bytes = if mb == 0 { 0 } else { (mb as usize) * 1024 * 1024 };
+    }
+
+    /// 当前相对纳秒时间戳（自 Cache 创建起算）。单调递增，可直接比较先后。
+    fn now_ns(&self) -> u64 {
+        self.anchor.elapsed().as_nanos() as u64
+    }
+
+    /// 刷新某张已缓存图片的最近使用时间。命中路径调用——这是 LRU 与 FIFO 的分界：
+    /// 只记首次插入时间的话，反复使用的旧图反而会先被逐出。
+    fn touch_image(&self, key: &str) {
+        if let Some(ts) = self.image_last_used.get(key) {
+            ts.set(self.now_ns());
+        }
+    }
+
+    /// 估算单张图片字节数（pixels.len() 即实际字节数）。
+    fn estimate_image_bytes(data: &ImageData) -> usize {
+        data.pixels.len()
+    }
+
+    /// 计算 inline + remote 图片缓存总字节。
+    fn total_image_bytes(&self) -> usize {
+        let inline_total: usize = self
+            .inline_images
+            .values()
+            .map(|m| Self::estimate_image_bytes(&m.value))
+            .sum();
+        let remote_total: usize = self
+            .remote_images
+            .values()
+            .map(Self::estimate_image_bytes)
+            .sum();
+        inline_total + remote_total
+    }
+
+    /// 图片插入后调用：按 LRU 逐出最久未使用条目直到总字节 ≤ 上限。
+    /// 只在真的有逐出时才改变 HashMap，稳态零开销。
+    fn evict_images_if_needed(&mut self) {
+        if self.image_limit_bytes == 0 {
+            return;
+        }
+        let total = self.total_image_bytes();
+        if total <= self.image_limit_bytes {
+            return;
+        }
+
+        // 收集所有图片 key 和最近使用时间，按时间戳升序（最久未用在前）
+        let mut entries: Vec<(u64, String)> = self
+            .image_last_used
+            .iter()
+            .map(|(k, ts)| (ts.get(), k.clone()))
+            .collect();
+        entries.sort_by_key(|(ts, _)| *ts);
+
+        let target = self.image_limit_bytes * 3 / 4; // 逐出到上限的 75% 留余量
+        let mut current = total;
+        for (_, key) in entries {
+            if current <= target {
+                break;
+            }
+            // 尝试从 inline 或 remote 移除
+            if let Some(memo) = self.inline_images.remove(&key) {
+                current -= Self::estimate_image_bytes(&memo.value);
+                self.image_failed.remove(&key);
+            } else if let Some(data) = self.remote_images.remove(&key) {
+                current -= Self::estimate_image_bytes(&data);
+                self.remote_failed.remove(&key);
+                self.remote_pending.remove(&key);
+            }
+            self.image_last_used.remove(&key);
+        }
+    }
+
+    /// 统一的 inline 图片插入入口：记录最近使用时间 + 逐出检查。
+    pub(crate) fn insert_inline_image(&mut self, key: String, memo: Memo<u32, ImageData>) {
+        let now = self.now_ns();
+        self.image_last_used.insert(key.clone(), Cell::new(now));
+        self.inline_images.insert(key, memo);
+        self.evict_images_if_needed();
+    }
+
+    /// 统一的 remote 图片插入入口：记录最近使用时间 + 逐出检查。
+    pub(crate) fn insert_remote_image(&mut self, url: String, img: ImageData) {
+        let now = self.now_ns();
+        self.image_last_used.insert(url.clone(), Cell::new(now));
+        self.remote_images.insert(url, img);
+        self.evict_images_if_needed();
+    }
 }
 
 impl Cache {
@@ -319,10 +451,10 @@ impl Cache {
     }
 
     pub(crate) fn image(&self, path: &str, key: u32) -> Option<&ImageData> {
-        self.inline_images
-            .get(path)
-            .filter(|m| m.matches(&key))
-            .map(|m| &m.value)
+        let hit = self.inline_images.get(path).filter(|m| m.matches(&key))?;
+        // 命中即刷新最近使用时间：真 LRU（否则退化为按首次插入时间的 FIFO）
+        self.touch_image(path);
+        Some(&hit.value)
     }
 
     pub(crate) fn image_failed(&self, path: &str, key: u32) -> bool {
@@ -335,11 +467,14 @@ impl Cache {
         self.image_failed.remove(key);
         self.remote_images.remove(key);
         self.remote_failed.remove(key);
+        self.image_last_used.remove(key);
     }
 
-    /// 远程图片缓存查询（URL 内容寻址，无代次键）。
+    /// 远程图片缓存查询（URL 内容寻址，无代次键）。命中即刷新 LRU 最近使用时间。
     pub(crate) fn remote_image(&self, url: &str) -> Option<&ImageData> {
-        self.remote_images.get(url)
+        let hit = self.remote_images.get(url)?;
+        self.touch_image(url);
+        Some(hit)
     }
 
     /// 行内图片统一查询：先本地图片（按图片基准代次），再远程会话缓存。
@@ -351,9 +486,14 @@ impl Cache {
     /// 清空全部远程图片状态（位图/失败记忆/pending）：切换文档时调用，
     /// 防止旧文档的请求与结果串到新文档。
     pub(crate) fn clear_remote(&mut self) {
+        // 先收集 URL key 以便从 LRU 追踪里移除
+        let urls: Vec<String> = self.remote_images.keys().cloned().collect();
         self.remote_images.clear();
         self.remote_failed.clear();
         self.remote_pending.clear();
+        for url in urls {
+            self.image_last_used.remove(&url);
+        }
     }
 
     pub(crate) fn table(&self, id: BlockId, key: TableKey) -> Option<&TableLayout> {
@@ -561,6 +701,73 @@ mod tests {
         s.blocks().iter().map(|(id, _, _)| *id).collect()
     }
 
+    /// 图片缓存超上限时按 LRU 逐出最旧条目（TR-3.1）。
+    #[test]
+    fn image_cache_evicts_oldest_over_limit() {
+        let mut c = Cache::default();
+        c.set_image_limit_mb(1); // 1 MiB 上限
+        let img = || crate::ImageData {
+            pixels: vec![0u8; 768 * 1024], // 每张 768 KiB
+            width: 512,
+            height: 384,
+        };
+        c.insert_inline_image("a.png".into(), Memo { key: 1, value: img() });
+        // 时间戳来自 anchor.elapsed()，间隔 2ms 确保 a 严格早于 b
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        c.insert_inline_image("b.png".into(), Memo { key: 1, value: img() });
+        // 两张共 1.5 MiB > 1 MiB：最旧的 a 被逐出，b 保留
+        assert!(c.inline_images.contains_key("b.png"), "最新条目应保留");
+        assert!(!c.inline_images.contains_key("a.png"), "最旧条目应被逐出");
+        assert!(
+            !c.image_last_used.contains_key("a.png"),
+            "追踪表须同步清理被逐出条目"
+        );
+    }
+
+    /// 命中路径刷新最近使用时间：反复绘制的旧图不得先于新的闲置图被逐出（真 LRU）。
+    #[test]
+    fn image_cache_hit_refreshes_recency() {
+        let mut c = Cache::default();
+        c.set_image_limit_mb(2); // 2 MiB 上限
+        let img = || crate::ImageData {
+            pixels: vec![0u8; 768 * 1024], // 每张 768 KiB
+            width: 512,
+            height: 384,
+        };
+        c.insert_inline_image("a.png".into(), Memo { key: 1, value: img() });
+        // 间隔 2ms 保证插入时间戳严格递增
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        c.insert_inline_image("b.png".into(), Memo { key: 1, value: img() });
+        // 命中 a：a 的最近使用时间被刷新，b 反而成为最久未用
+        assert!(c.image("a.png", 1).is_some());
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        // 第三张使总量 2.25 MiB 超上限：须逐出 b（最久未用），而不是仍在使用中的 a
+        c.insert_inline_image("c.png".into(), Memo { key: 1, value: img() });
+        assert!(c.inline_images.contains_key("a.png"), "刚命中的 a 应保留");
+        assert!(c.inline_images.contains_key("c.png"), "新插入的 c 应保留");
+        assert!(!c.inline_images.contains_key("b.png"), "最久未用的 b 应被逐出");
+    }
+
+    /// clear_remote 同步清空远程条目与 LRU 追踪（TR-3.2）。
+    #[test]
+    fn clear_remote_drops_entries_and_tracking() {
+        let mut c = Cache::default();
+        let url = "https://example.com/a.png".to_string();
+        c.insert_remote_image(
+            url.clone(),
+            crate::ImageData {
+                pixels: vec![0u8; 16],
+                width: 2,
+                height: 2,
+            },
+        );
+        assert!(c.remote_images.contains_key(&url));
+        assert!(c.image_last_used.contains_key(&url));
+        c.clear_remote();
+        assert!(c.remote_images.is_empty(), "远程缓存须清空");
+        assert!(c.image_last_used.is_empty(), "LRU 追踪须同步清空");
+    }
+
     #[test]
     fn base_key_quantizes_stably_and_tracks_inputs() {
         let revs = Revs::default();
@@ -736,8 +943,8 @@ mod tests {
         let mut c = Cache::default();
         let revs = Revs::default();
         let base = revs.base(800.0, 1.0, 600.0, false, 0);
-        let lk0 = LayoutKey { base, reveal: 0, toc: 0 };
-        let lk1 = LayoutKey { base, reveal: 0, toc: 0 };
+        let lk0 = LayoutKey { base, reveal: 0, toc: 0, highlight_epoch: 0 };
+        let lk1 = LayoutKey { base, reveal: 0, toc: 0, highlight_epoch: 0 };
 
         // 为 ids[0] 和 ids[1] 填充 rasters（值 = (像素, 宽, 高) 易构造）
         c.rasters.insert(
@@ -775,6 +982,7 @@ mod tests {
                     base: base2,
                     reveal: 0,
                     toc: 0,
+                    highlight_epoch: 0,
                 },
                 value: (vec![0u8; 4], 1, 1),
             },

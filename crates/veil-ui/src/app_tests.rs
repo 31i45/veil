@@ -5595,12 +5595,12 @@ fn replace_one_replaces_current_then_rebuilds_matches() {
     a.search_input("b");
     assert_eq!(a.ui_state.search.replace, "b");
 
-    a.replace_current();
+    let _ = a.replace_current();
     assert_eq!(doc_text(&a), "b x a", "仅替换当前命中");
     assert_eq!(a.ui_state.search.matches.len(), 1, "命中缓存重建");
     assert_eq!(a.editor.caret(), 4, "跳到剩余的首个命中");
 
-    a.replace_current();
+    let _ = a.replace_current();
     assert_eq!(doc_text(&a), "b x b");
     assert!(a.ui_state.search.matches.is_empty());
 
@@ -5641,6 +5641,54 @@ fn replace_all_without_matches_does_not_dirty() {
     a.replace_all();
     assert_eq!(doc_text(&a), "abc");
     assert!(!a.editor.is_dirty());
+}
+
+#[test]
+fn regex_replace_all_expands_capture_groups() {
+    let store = MemStore::default();
+    let mut a = app("**粗** 与 **斜**", None, false, &store);
+    a.ensure_layouts_all();
+    a.open_replace();
+    a.search_toggle_regex();
+    a.search_input(r"\*\*([^*]+)\*\*");
+    assert_eq!(a.ui_state.search.matches.len(), 2, "正则命中两处加粗");
+    assert!(!a.ui_state.search.regex_error);
+    a.search_toggle_field(); // Tab → 替换框
+    a.search_input("$1");
+    a.replace_all();
+    assert_eq!(doc_text(&a), "粗 与 斜", "捕获组展开为组 1 内容");
+    assert!(a.ui_state.search.matches.is_empty(), "替换后命中缓存重建");
+}
+
+#[test]
+fn regex_enter_replaces_current_with_capture_expansion() {
+    let store = MemStore::default();
+    let mut a = app("**粗** **斜**", None, false, &store);
+    a.ensure_layouts_all();
+    a.open_replace();
+    a.search_toggle_regex();
+    a.search_input(r"\*\*([^*]+)\*\*");
+    a.search_toggle_field();
+    a.search_input("<$1>");
+    a.route_key(Key::Enter);
+    assert_eq!(doc_text(&a), "<粗> **斜**", "仅替换当前一处且展开捕获组");
+    assert_eq!(a.ui_state.search.matches.len(), 1, "剩余命中仍可继续替换");
+}
+
+#[test]
+fn regex_invalid_pattern_marks_error_and_yields_no_matches() {
+    let store = MemStore::default();
+    let mut a = app("abc", None, false, &store);
+    a.perform_action(Action::Find);
+    a.search_toggle_regex();
+    a.search_input("(");
+    assert!(a.ui_state.search.regex_error, "非法模式须进入错误态");
+    assert!(a.ui_state.search.matches.is_empty());
+    // 修正后错误态消失并立即恢复命中
+    a.search_backspace();
+    a.search_input("a+");
+    assert!(!a.ui_state.search.regex_error);
+    assert_eq!(a.ui_state.search.matches.len(), 1);
 }
 
 #[test]
@@ -8411,7 +8459,7 @@ fn perf_keystroke_attribution() {
          total_p95_us,index_share_pct"
     );
 
-    for iters in [715usize, 1500, 2857] {
+    for iters in [286usize, 715, 1429, 2857, 5715] {
         let text = stress_doc_n(iters);
         let store = MemStore::default();
         let mut a = app(&text, None, false, &store);
@@ -8521,7 +8569,7 @@ fn perf_index_subsegments() {
          blocks_enum_share_pct,geom_fill_share_pct,recompute_share_pct,stats_share_pct"
     );
 
-    for iters in [715usize, 1500, 2857] {
+    for iters in [286usize, 715, 1429, 2857, 5715] {
         let text = stress_doc_n(iters);
         let store = MemStore::default();
         let mut a = app(&text, None, false, &store);

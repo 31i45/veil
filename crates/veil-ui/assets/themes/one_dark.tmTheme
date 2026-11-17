@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple Computer//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>name</key><string>One Dark (Veil)</string>
+    <key>settings</key>
+    <array>
+        <dict>
+            <key>settings</key>
+            <dict>
+                <key>background</key><string>#282C34</string>
+                <key>foreground</key><string>#ABB2BF</string>
+            </dict>
+        </dict>
+        <dict>
+            <key>scope</key>
+            <string>keyword, keyword.control, keyword.operator, keyword.declaration, keyword.other</string>
+            <key>settings</key><dict><key>foreground</key><string>#C678DD</string></dict>
+        </dict>
+        <dict>
+            <key>scope</key>
+            <string>string, string.quoted, string.regex, string.interpolated</string>
+            <key>settings</key><dict><key>foreground</key><string>#98C379</string></dict>
+        </dict>
+        <dict>
+            <key>scope</key>
+            <string>comment, comment.line, comment.block, punctuation.definition.comment</string>
+            <key>settings</key><dict><key>foreground</key><string>#B0B8C4</string></dict>
+        </dict>
+        <dict>
+            <key>scope</key>
+            <string>constant.numeric, constant.language, constant.character</string>
+            <key>settings</key><dict><key>foreground</key><string>#D19A66</string></dict>
+        </dict>
+        <dict>
+            <key>scope</key>
+            <string>entity.name.function, support.function, meta.function</string>
+            <key>settings</key><dict><key>foreground</key><string>#61AFEF</string></dict>
+        </dict>
+        <dict>
+            <key>scope</key>
+            <string>entity.name.type, storage.type, support.type, entity.name.class</string>
+            <key>settings</key><dict><key>foreground</key><string>#E5C07B</string></dict>
+        </dict>
+        <dict>
+            <key>scope</key>
+            <string>punctuation, punctuation.separator, punctuation.definition</string>
+            <key>settings</key><dict><key>foreground</key><string>#5C6370</string></dict>
+        </dict>
+    </array>
+</dict>
+</plist>

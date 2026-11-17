@@ -23,6 +23,11 @@ const MAX_REDIRECTS: usize = 3;
 /// 解析/连接/发送/接收统一超时（毫秒）。
 const TIMEOUT_MS: i32 = 10_000;
 
+/// 响应体是否超限：严格大于上限才拒绝（恰好 20 MiB 视为可接受）。
+fn exceeds_body_limit(len: u64) -> bool {
+    len > MAX_BYTES
+}
+
 /// 已校验的远程图片地址：方案 + 主机 + 端口 + 请求目标（路径 + 查询串）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct HttpUrl {
@@ -766,7 +771,7 @@ fn check_content_length(request: &Internet) -> Result<(), String> {
             std::ptr::null_mut(),
         )
     };
-    if ok != 0 && u64::from(value) > MAX_BYTES {
+    if ok != 0 && exceeds_body_limit(u64::from(value)) {
         return Err(too_large_text(u64::from(value)));
     }
     Ok(())
@@ -793,7 +798,7 @@ fn read_body(request: &Internet) -> Result<Vec<u8>, String> {
             break;
         }
         out.extend_from_slice(&chunk[..read as usize]);
-        if out.len() as u64 > MAX_BYTES {
+        if exceeds_body_limit(out.len() as u64) {
             return Err(too_large_text(out.len() as u64));
         }
     }
@@ -945,6 +950,15 @@ mod tests {
         assert_eq!(MAX_BYTES, 20 * 1024 * 1024);
         assert_eq!(MAX_REDIRECTS, 3);
         assert_eq!(TIMEOUT_MS, 10_000);
+    }
+
+    /// 响应体上限边界：恰好 20 MiB 可接受，多 1 字节即拒绝。
+    #[test]
+    fn body_limit_boundary_rejects_only_above_cap() {
+        assert!(!exceeds_body_limit(0));
+        assert!(!exceeds_body_limit(MAX_BYTES - 1));
+        assert!(!exceeds_body_limit(MAX_BYTES), "恰好 20 MiB 应可接受");
+        assert!(exceeds_body_limit(MAX_BYTES + 1), "20 MiB + 1 字节应拒绝");
     }
 
     #[test]

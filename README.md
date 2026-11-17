@@ -66,14 +66,14 @@ Three crates, one-way dependency (`veil` → `veil-ui` → `veil-core`, no rever
 9. In-house chrome: menu bar (↑/↓ move, Enter run, Esc close — main and context menus alike), status bar, scroll bar; system file dialogs (Open / Save As)
 10. Writing loop: CJK-calibrated word count, Focus Mode & Typewriter Mode (two mutually-exclusive view toggles, not persisted, reset on launch), Ctrl+P Quick Open (recent + current-dir candidates), Ctrl+Shift+P print, image paste / drag-drop insertion
 11. Table editing: Tab / Shift+Tab navigate cells (Tab in the last cell appends a row and moves to the new row's first cell); Ctrl+Enter appends an empty row at the table tail; the right-click menu inserts/deletes rows and columns and sets column alignment (left / center / right, separator row only); each structural change is one undo step
-12. Fenced code blocks: syntax highlighting for 17 language grammars — 19 canonical labels once aliases (`js` / `ts` / `py` / `yml` / `sh` …) are resolved — covering keywords / strings / comments / numbers / types, implemented as a pure-Rust line-state machine — no `syntect`. Each block's top-right corner shows its language label (canonical name for supported languages, raw info string for unknown ones, hidden when absent) and a copy button that copies the code verbatim (no fence or language marker; the document, undo stack and dirty flag stay untouched). Keyboard/menu: `Ctrl+Shift+C` copies the code block at the caret, and the block's right-click menu starts with "Copy Code Block"
+12. Fenced code blocks: syntax highlighting via `syntect` (fancy-regex, pure Rust) over its default grammar set (75 syntaxes); 17 of the 19 legacy canonical labels are covered (`toml` / `dockerfile` fall back to plain text). The syntax set loads lazily on the first code block, and per-line `ParseState` caching means a one-character edit reparses only the affected line. Each block's top-right corner shows its language label (canonical name for supported languages, raw info string for unknown ones, hidden when absent) and a copy button that copies the code verbatim (no fence or language marker; the document, undo stack and dirty flag stay untouched). Keyboard/menu: `Ctrl+Shift+C` copies the code block at the caret, and the block's right-click menu starts with "Copy Code Block"
 13. Source mode: Ctrl+/ shows the full Markdown source (tables and math blocks included); toggling keeps caret and scroll position; print and export always use the rendered view
 14. PDF export: Ctrl+Shift+E or File → Export PDF writes `<stem>.pdf` beside the document (name collisions become ` (2)`, ` (3)`); optional TOC page, page numbers and margin (default 20 mm) via `config.toml`. Native PDF output (multi-level bookmarks, CJK font subsetting, heading/table/image/math layout) with fallback to the system "Microsoft Print to PDF". Unsaved drafts first ask for an output location (cancelling aborts).
 15. Opening links: `Ctrl+click` an http/https/mailto link (a mouse gesture, not a new shortcut) to hand it to the system default browser or mail client; the caret does not move. The link context menu starts with "Open in Browser", followed by "Copy Link Address". Protocols outside the allowlist only show a notice; aside from on-demand remote-image fetches, Veil itself makes no network requests
 16. GFM footnotes: `[^id]` references and `[^id]: content` definitions. In rendered view, references show as a link-coloured `[n]`, while definition blocks hide the marker and show "number + content + ↩"; numbers follow first-reference order in the document. `Ctrl+click` a reference to jump to its definition, and `Ctrl+click` the trailing `↩` to jump back to the first reference. Source mode (`Ctrl+/`) shows the raw markup. HTML export emits `<sup>` references and a footnote list at the end (with backlinks)
 17. In-document anchors: `Ctrl+click` `[text](#slug)` to jump to the matching heading; exported headings carry `id="<slug>"`; duplicate headings are de-duplicated as `name`, `name-1` (the same `heading_slug` / `heading_slugs` rules used by export)
 18. Line navigation: `Alt+↑` / `Alt+↓` move the current line (one undo step); `PgUp` / `PgDn` page the viewport while keeping the target column; `Ctrl+Backspace` / `Ctrl+Delete` delete by word and never cross a line break
-19. Find & replace: a "Match case" toggle (off by default, kept for the session); `Enter` replaces the current match and advances, `Ctrl+Enter` replaces all
+19. Find & replace: a "Match case" toggle (off by default, kept for the session); a regex mode (`.*` button or `Alt+R`, kept for the session) with line-anchored `^`/`$`, capture-group replacement (`$1` / `${name}`) and an inline "invalid regex" state; `Enter` replaces the current match and advances, `Ctrl+Enter` replaces all
 20. Readable measure: above 1600 px window width the body column is capped at ~40 full-width characters and centred; H4–H6 indent by level; heading spacing is wider than paragraph spacing
 21. Visible trust: the status bar shows the file name plus the last saved time (or an unsaved marker when the buffer is dirty); a failed CLI open raises a visible error box and exits with code 1
 22. Caret as focus: solid when the window is focused, hollow when it is not — no timers, no idle wake-ups
@@ -101,13 +101,13 @@ Three crates, one-way dependency (`veil` → `veil-ui` → `veil-core`, no rever
 - Mermaid rendering itself: Mermaid fenced blocks stay as code (a backend-neutral renderer interface is reserved; no rendering runtime is bundled)
 - A separate rich-text document model: the text stays Markdown, and Ctrl+/ is a view toggle over the same document
 - Background networking: no sync, no update check, no telemetry; the only outbound requests are made on demand when rendering remote images in a document, and can be disabled globally via **View → Block Remote Images**. External links are handed to the system default program; Export and PDF never include remote resources.
-- Competitor-parity items deliberately declined: regex find (the `regex` crate added 1,198,592 B to the exe), a whole-word toggle, `Ctrl+Shift+K` delete-line (`Alt+↑` / `Alt+↓` already covers line operations), and a separate H5/H6 type scale (indentation expresses level). Auto-pairing of brackets/quotes shipped in v1.5 and is no longer on this list
+- Competitor-parity items deliberately declined: a separate whole-word toggle (the regex mode's `\b` covers it), `Ctrl+Shift+K` delete-line (`Alt+↑` / `Alt+↓` already covers line operations), and a separate H5/H6 type scale (indentation expresses level). Auto-pairing of brackets/quotes shipped in v1.5 and is no longer on this list
 
 ## Build / Run / Test
 
 Requires: Rust stable (edition 2021). Acceptance environment: Windows 11 23H2+. Mica acrylic degrades to a solid colour where it is unavailable. Windows 10 has not been recorded on real hardware and is not claimed as verified.
 
-Interface text ships in Chinese (zh-CN) only: the i18n layer keeps an empty `en-US` table, so English labels quoted in this README are translations of the shipped Chinese strings.
+Interface text ships in Chinese (zh-CN) only: the i18n layer is a single-locale table with no English entries, so English labels quoted in this README are translations of the shipped Chinese strings.
 
 ```powershell
 cargo build --workspace
@@ -115,11 +115,11 @@ cargo test --workspace
 cargo run -p veil -- <file.md>
 ```
 
-Baseline: 1755 passed / 0 failed / 14 ignored (2026-11-15, re-verified after this round); `cargo clippy --workspace --all-targets -- -D warnings` zero warnings.
+Baseline: 1797 passed / 0 failed / 14 ignored (2026-11-17, re-verified after this round); `cargo clippy --workspace --all-targets -- -D warnings` zero warnings.
 
 ## Red Numbers (targets vs measured)
 
-Measured on release build, probe-serialized; performance rows re-verified 2026-11-09, test and size rows 2026-11-15. Commands: `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo run --release -p veil --example bench_typing`, `cargo test -p veil-ui --release --lib -- --ignored --nocapture --test-threads=1 perf_keystroke_path` (and `perf_keystroke_10k_blocks`), `(Get-Item target\release\veil.exe).Length`, and `cargo tree -e normal --workspace --prefix none` for dependency counts. Keystroke attribution detail in `docs/review/keystroke-attribution.md`.
+Measured on release build, probe-serialized; performance rows re-verified 2026-11-09, test and size rows 2026-11-17. Commands: `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo run --release -p veil --example bench_typing`, `cargo test -p veil-ui --release --lib -- --ignored --nocapture --test-threads=1 perf_keystroke_path` (and `perf_keystroke_10k_blocks`), `(Get-Item target\release\veil.exe).Length`, and `cargo tree -e normal --workspace --prefix none` for dependency counts. Keystroke attribution detail in `docs/review/keystroke-attribution.md`.
 
 | Metric | Target | Measured |
 |---|---|---|
@@ -130,17 +130,17 @@ Measured on release build, probe-serialized; performance rows re-verified 2026-1
 | Cold start (window handle; P2 comparison definition) | — | 30 ms (2026-10-30, `tools/bench/measure.ps1`) |
 | Keystroke→commit p95 on 100 K-word doc | ≤ 16 ms | 1.297 ms / 1.796 ms (`perf_keystroke_path` 5,005 blocks / `perf_keystroke_10k_blocks` 10,500 blocks; same machine, re-measured 2026-11-15; previous record 6.781 / 12.379) ✅ |
 | Resident memory, 100 K-word doc (private working set) | ≤ 150 MB | 40.76 MB (2026-11-05) |
-| Installed size — code + data (non-icon) | ≤ 6 MiB (Phase A baseline; superseded by the Wave 3/4 PDF export gate allowance) | 7,672,131 B (exe minus 89,277 B icons: `veil.ico` 46,688 + `veil-doc.ico` 42,589; 2026-11-15 after this round) |
-| Installed size — total single-file `veil.exe` | ≤ 10 MiB = 10,485,760 B (Wave 4 authorization; every increment must be recorded) | 7,761,408 B ≈ 7.40 MiB (local build, pinned toolchain; +772,608 B vs Wave 6 baseline 6,988,800 B; +847,360 B vs historical baseline 6,914,048 B; margin 2,724,352 B). The published v1.7.0 asset built on CI is 7,763,456 B |
-| `veil-core` unit + property tests | ≥ 80 | 340 |
+| Installed size — code + data (non-icon) | ≤ 6 MiB (Phase A baseline; superseded by the Wave 3/4 PDF export gate allowance) | 9,880,899 B (exe minus 89,277 B icons: `veil.ico` 46,688 + `veil-doc.ico` 42,589; 2026-11-17) |
+| Installed size — total single-file `veil.exe` | ≤ 10 MiB = 10,485,760 B (Wave 4 authorization; every increment must be recorded) | 9,970,176 B ≈ 9.51 MiB (local build, pinned toolchain; +2,208,768 B vs v1.7.0 7,761,408 B; margin 515,584 B). The published v1.7.0 asset built on CI is 7,763,456 B |
+| `veil-core` unit + property tests | ≥ 80 | 343 |
 | E2E assertions | ≥ 20 | 41 (3 e2e scenarios: open→save→reopen, table+image paste, find/replace→crash recovery→self-clean) ✅ |
 | Markdown roundtrip (no edits: output == input bytes; byte comparison) | 100% | 100% |
 | CommonMark 0.31.2 conformance (by test cases; dimension A / C / D) | — | A 652/652 · C 652/652 · D 652/652 ✅ |
 | CommonMark 0.31.2 conformance (dimension B) | — | B_EXPORT_EXACT 629/652 · B_CANON 630/652 (not full) |
 | GFM extension conformance (Tables / TaskList / Strikethrough; by test cases; dimension A / C / D) | — | A 23/23 · C 23/23 · D 23/23 ✅; B_CANON 12/23 (11 autolink cases observed only) |
 | `veil-core` GUI/async runtime deps | 0 | 0 |
-| `veil-ui` + `veil` external direct deps | ≤ 8 (pre-PDF baseline; superseded by the Wave 3 authorization for `pdf-writer` + `subsetter` + `ttf-parser`) | 11 |
-| Workspace transitive deps (normal edges, unique crates incl. the three workspace members) | ≤ 200 | 101 |
+| `veil-ui` + `veil` external direct deps (`cargo tree --depth 1`, distinct crate names) | ≤ 8 (pre-PDF baseline; superseded by the Wave 3 authorization for `pdf-writer` + `subsetter` + `ttf-parser`, and by v1.8's `regex`) | 17 (8 in `veil-ui` + 9 in `veil`) |
+| Workspace transitive deps (distinct crate names, normal edges incl. the three workspace members) | ≤ 200 | 125 |
 
 ## Same-machine Comparison (P2 public baseline, 2026-10-30)
 
@@ -170,6 +170,9 @@ Dependency blacklist: `tokio`, `wasmtime`, any webview crate (`webview2-com`/`wr
   - ADR-009 state model (single source of truth, orthogonal state machines, causal derivation)
   - ADR-010 collaboration position model (v2 design, frozen at v1 — Veil stays local-only)
   - ADR-011 wgpu deferral (v1 defers, trigger-based)
+  - ADR-012 syntax highlighting migrates from the in-house state machine to `syntect` (fancy-regex) with a per-line incremental cache
+  - ADR-013 table layout stays in-house (no `comfy-table`)
+  - ADR-014 Quick Open fuzzy matching stays hand-written (no `fuzzy-matcher`/`nucleo`)
 - `.trae/specs/release-and-roadmap/v1.1-roadmap.md` — v1.1 detailed plan
 - `.trae/specs/release-and-roadmap/v1.2-roadmap.md` — v1.2 candidate pool (typography settings, PDF bookmarks, font subsetting)
 - `.trae/specs/release-and-roadmap/v2.0-roadmap.md` — v2.0 detailed plan (wgpu deferred — four trigger conditions must all trip)

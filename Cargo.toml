@@ -4,7 +4,7 @@ members = ["crates/veil-core", "crates/veil-ui", "crates/veil"]
 
 [workspace.package]
 edition = "2021"
-version = "1.7.0"
+version = "1.8.0"
 
 [profile.release]
 lto = true

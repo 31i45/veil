@@ -916,6 +916,9 @@ impl App {
         if start.missing {
             persist.set_missing(true);
         }
+        // 图片缓存字节上限来自配置（默认 200 MiB，0 = 不限制）
+        let mut cache = Cache::default();
+        cache.set_image_limit_mb(app_config.image_cache_limit_mb);
         let mut app = App {
             doc: DocState {
                 path: start.doc.path.clone(),
@@ -939,7 +942,7 @@ impl App {
             editor,
             engine: LayoutEngine::new(),
             index: BlockIndex::default(),
-            cache: Cache::default(),
+            cache,
             mermaid: crate::view::mermaid::MermaidRenderers::new(),
             callouts,
             input_state: InputState {
@@ -1090,7 +1093,9 @@ impl App {
     /// （DEF-T10-008）。
     pub(crate) fn save_config(&mut self, part: ConfigSave) -> bool {
         let mut merged = self.config;
-        if let Ok(text) = self.ports.config.load() {
+        // 保留原文：严格 TOML 时原地编辑，注释与未知键不丢（ADR-012 / S2）。
+        let raw = self.ports.config.load().ok();
+        if let Some(text) = raw.as_deref() {
             if let Ok(parsed) = theme::decode_config(text.as_bytes()) {
                 merged = parsed.config;
             }
@@ -1106,7 +1111,7 @@ impl App {
                 merged = self.config;
             }
         }
-        let text = merged.to_toml();
+        let text = merged.to_toml_preserving(raw.as_deref());
         if let Err(e) = self.ports.config.save(&text) {
             self.ui_state.chrome.notice = tf(Key::NoticeConfigNotSaved, &[&e.to_string()]);
             eprintln!("配置保存失败: {e}");
@@ -1174,7 +1179,7 @@ impl App {
             match result {
                 Ok(img) => {
                     self.cache.remote_failed.remove(&url);
-                    self.cache.remote_images.insert(url, img);
+                    self.cache.insert_remote_image(url, img);
                 }
                 Err(_) => {
                     self.cache.remote_failed.insert(url);

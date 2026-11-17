@@ -11,6 +11,9 @@ arboard = "3"
 latex-rust = { version = "3.0", features = ["png"] }
 # latex-rust 只出 PNG 字节，解码为 RGBA 供帧合成
 png = "0.18"
+# HTML 导出内嵌本地图片的 data URI：标准字母表 + `=` 填充的 base64 编码。
+# plist 已传递引入本 crate 的解码路径；spike 实测补编码路径 +4 KB。
+base64 = "0.23"
 # 仅 HTML 导出使用（INSTANCE §6 预算内）；编辑/渲染主链路不经过它
 pulldown-cmark = "0.13"
 # 外部文件监听（切片 16）：事件线程 + 非阻塞通道，策略在 veil-ui

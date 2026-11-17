@@ -53,3 +53,11 @@
 - wasmtime 跑 JS 引擎 wasm 构建：两层虚拟机，复杂度与体积双输，否决。
 - webview 渲染块（WebView2）：违反零 webview 黑名单，否决。
 - 外部 CLI（如 mermaid-cli）：部署摩擦 + 每次渲染进程冷启动延迟，且仍需 Chromium，否决。
+
+## 2026-11-16 复核：typst-math 体积与依赖下界
+
+- 方法：独立 spike `spikes/math-compare`，只链接 typst 0.15.1 的编译器与排版路径（`typst::compile::<PagedDocument>`），不含字体与 LaTeX→Typst 转换，因此测得的是体积与依赖下界。
+- 结果：exe 增量 +15,857,664 B（≈15.1 MiB）；叠加现有 7,761,408 B 后约 22.5 MiB，超 20 MiB 硬门禁。typst 子树新增 267 个 crate，workspace 传递依赖将从 101 涨到约 350，超 200 门禁。release + LTO 构建 16 分 24 秒。
+- 结论：保留 `latex-rust`（当前 3.0，PNG 路径）。未做渲染质量/单条耗时对比——体积与依赖已在渲染之前否决。
+- 重开条件：产品明确把「出版社级公式排版」列为一等目标，并同时批准放宽体积与依赖门禁；或出现可直接消费 LaTeX、输出位图/SVG、增量 ≤ 3 MiB 且依赖 ≤ 30 的纯 Rust 组件。
+- 记录：`docs/review/component-replacement-spike.md` S3。

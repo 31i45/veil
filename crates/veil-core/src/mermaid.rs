@@ -6,9 +6,11 @@
 //!
 //! 约束：本模块不执行任何网络 IO，只生成 URL 字符串供上层消费。
 //!
-//! 依赖：flate2 v1 已在 crate 依赖树中（miniz_oxide 传递依赖），零体积增量。
-//! base64url 编码器手写（~30 行），避免新增第三方 base64 crate。
+//! 依赖：flate2 v1 已在 crate 依赖树中（miniz_oxide 传递依赖），零体积增量；
+//! base64url 编码由 `base64` 0.23 的 `URL_SAFE_NO_PAD` 引擎提供。
 
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine as _;
 use flate2::read::GzEncoder;
 use flate2::Compression;
 use std::io::Read;
@@ -146,31 +148,9 @@ fn gzip_bytes(input: &str) -> Vec<u8> {
     out
 }
 
-/// base64url 编码（RFC 4648 §5，无 padding）。
-/// 字符集：A-Z a-z 0-9 '-' '_'。手写避免 base64 crate 体积增量。
+/// base64url 编码（RFC 4648 §5，无 padding）：`base64` crate 的 URL_SAFE_NO_PAD 引擎。
 fn base64url_encode(bytes: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
-    let (full, rem) = bytes.as_chunks::<3>();
-    for chunk in full {
-        let n = ((chunk[0] as u32) << 16) | ((chunk[1] as u32) << 8) | chunk[2] as u32;
-        out.push(ALPHABET[((n >> 18) & 0x3F) as usize] as char);
-        out.push(ALPHABET[((n >> 12) & 0x3F) as usize] as char);
-        out.push(ALPHABET[((n >> 6) & 0x3F) as usize] as char);
-        out.push(ALPHABET[(n & 0x3F) as usize] as char);
-    }
-    // 尾部不足 3 字节
-    if rem.len() == 1 {
-        let n = (rem[0] as u32) << 16;
-        out.push(ALPHABET[((n >> 18) & 0x3F) as usize] as char);
-        out.push(ALPHABET[((n >> 12) & 0x3F) as usize] as char);
-    } else if rem.len() == 2 {
-        let n = ((rem[0] as u32) << 16) | ((rem[1] as u32) << 8);
-        out.push(ALPHABET[((n >> 18) & 0x3F) as usize] as char);
-        out.push(ALPHABET[((n >> 12) & 0x3F) as usize] as char);
-        out.push(ALPHABET[((n >> 6) & 0x3F) as usize] as char);
-    }
-    out
+    URL_SAFE_NO_PAD.encode(bytes)
 }
 
 #[cfg(test)]
@@ -282,55 +262,7 @@ mod tests {
     }
 
     fn base64url_decode(s: &str) -> Vec<u8> {
-        const DECODE: [i8; 128] = {
-            let mut d = [-1_i8; 128];
-            let mut i = 0u8;
-            while i < 26 {
-                d[(b'A' + i) as usize] = i as i8;
-                d[(b'a' + i) as usize] = (i + 26) as i8;
-                i += 1;
-            }
-            let mut i = 0u8;
-            while i < 10 {
-                d[(b'0' + i) as usize] = (i + 52) as i8;
-                i += 1;
-            }
-            d[b'-' as usize] = 62;
-            d[b'_' as usize] = 63;
-            d
-        };
-        let bytes: Vec<u8> = s
-            .bytes()
-            .filter_map(|b| {
-                if b < 128 && DECODE[b as usize] >= 0 {
-                    Some(DECODE[b as usize] as u8)
-                } else {
-                    None
-                }
-            })
-            .collect();
-        let mut out = Vec::with_capacity(bytes.len() / 4 * 3);
-        let (full, rem) = bytes.as_chunks::<4>();
-        for c in full {
-            let n =
-                ((c[0] as u32) << 18) | ((c[1] as u32) << 12) | ((c[2] as u32) << 6) | c[3] as u32;
-            out.push(((n >> 16) & 0xFF) as u8);
-            out.push(((n >> 8) & 0xFF) as u8);
-            out.push((n & 0xFF) as u8);
-        }
-        match rem.len() {
-            2 => {
-                let n = ((rem[0] as u32) << 18) | ((rem[1] as u32) << 12);
-                out.push(((n >> 16) & 0xFF) as u8);
-            }
-            3 => {
-                let n = ((rem[0] as u32) << 18) | ((rem[1] as u32) << 12) | ((rem[2] as u32) << 6);
-                out.push(((n >> 16) & 0xFF) as u8);
-                out.push(((n >> 8) & 0xFF) as u8);
-            }
-            _ => {}
-        }
-        out
+        URL_SAFE_NO_PAD.decode(s).expect("测试 payload 应为合法 base64url")
     }
 
     fn inflate_bytes(bytes: &[u8]) -> Vec<u8> {

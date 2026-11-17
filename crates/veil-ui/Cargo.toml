@@ -10,6 +10,21 @@ veil-core = { path = "../veil-core" }
 winit = "0.30"
 softbuffer = "0.4"
 cosmic-text = "0.19"
+# 代码高亮（ADR-012）：fancy-regex 纯 Rust 后端，仅需解析、默认语法集、plist 主题加载。
+syntect = { version = "5.3", default-features = false, features = [
+    "default-syntaxes",
+    "regex-fancy",
+    "plist-load",
+] }
+plist = "1"
+# 配置保存：严格 TOML 编辑以保留注释/未知键；解析失败回退既有行解析与整文件重写。
+toml_edit = "0.22"
+# 查找引擎：memchr memmem 比 str::match_indices 快 3–10×。已是 pulldown-cmark
+# 传递依赖，此处显式声明以保证版本稳定（与 pulldown-cmark 传递的 2.8.x 对齐）。
+memchr = "2"
+# 查找·正则模式：Rust regex 为线性时间匹配（无回溯爆炸风险），且 fancy-regex
+# （syntect 传递依赖）本就链接了 regex，显式直依赖几乎不增加产物体积。
+regex = "1"
 
 [dev-dependencies]
 # 性质级测试（ADR-009 S6 阶段 B）：验证 Memo 因果键对任意编辑序列的正确性。

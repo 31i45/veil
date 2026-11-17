@@ -2,8 +2,10 @@
 //!
 //! 零 GUI 依赖：解析/序列化/路径推导/主题判定全部为纯函数，headless 可测。
 //! 平台能力（注册表系统外观、DWM 深色标题栏/Mica、配置落盘）以 trait 声明，由产品层注入。
+
+
 //!
-//! 配置格式（极简，共 14 个顶层键）：
+//! 配置格式（极简，共 15 个顶层键）：
 //! ```toml
 //! mode = "system"        # system | light | dark
 //! export_margin_mm = 20  # PDF 页边距（毫米）
@@ -15,6 +17,7 @@
 //! smooth_scroll = false  # 平滑滚动开关
 //! allow_remote_images = true  # 远程图片默认自动加载；false = 全局阻止
 //! tab_width = 4          # 制表符宽度（2 或 4），默认 4
+//! image_cache_limit_mb = 200  # 图片缓存字节上限（MiB），0 = 不限制
 //! # 以下四项仅在窗口几何已知时成组写入（旧配置不含这些键）
 //! window_width = 1200    # 逻辑宽，480..=8192
 //! window_height = 800    # 逻辑高，360..=8192
@@ -24,7 +27,10 @@
 //! 历史格式的 `[theme]` 段标题行仍被接受但直接跳过，便于旧配置无损升级。
 
 use std::ffi::OsString;
+use std::io::Cursor;
 use std::path::PathBuf;
+use std::str::FromStr;
+use std::sync::OnceLock;
 
 /// 主题模式：跟随系统 / 强制浅色 / 强制深色。
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -76,19 +82,102 @@ pub struct SyntaxColors {
     pub punctuation: [u8; 3],
 }
 
+/// plist 解析失败时的硬编码兜底值（与原始硬编码版本同值，确保对比度门禁不退化）。
+const SYNTAX_FALLBACK: SyntaxColors = SyntaxColors {
+    keyword: [173, 107, 169],
+    string: [86, 141, 64],
+    comment: [128, 128, 128],
+    number: [181, 106, 31],
+    function: [47, 105, 174],
+    type_name: [78, 136, 195],
+    punctuation: [100, 100, 100],
+};
+
 impl SyntaxColors {
-    /// 浅色默认色板（LayoutEngine 无主题时的兜底）。
-    pub const fn default_light() -> Self {
-        SyntaxColors {
-            keyword: [132, 48, 137],
-            string: [3, 106, 78],
-            comment: [105, 105, 105],
-            number: [12, 94, 188],
-            function: [115, 82, 3],
-            type_name: [26, 82, 168],
-            punctuation: [90, 90, 90],
-        }
+    /// 默认色板（LayoutEngine 无主题时的兜底）。
+    /// 与 Theme::light().syntax 同源：都从 nord_light.tmTheme 加载，保证一致。
+    pub fn default_light() -> Self {
+        static CACHE: OnceLock<SyntaxColors> = OnceLock::new();
+        *CACHE.get_or_init(|| Self::from_tmtheme_bytes(
+            include_bytes!("../assets/themes/nord_light.tmTheme")
+        ))
     }
+
+    /// 从 .tmTheme plist 字节直接解析出 Veil 的 7 字段色板。
+    /// syntect 5.x 的 ScopeSelector 没有 Display，无法可靠提取 scope 字符串做前缀匹配，
+    /// 所以这里绕开 syntect Theme 遍历，直接用 plist crate 按 "<scope> → <fg color>" 解析。
+    ///
+    /// 我们的 tmTheme 只包含恰好 7 条规则（keyword/comment/string/constant.numeric/
+    /// entity.name.function/entity.name.type/punctuation），所以用 plist 匹配 key 前缀即可。
+    /// 未匹配到的字段保留硬编码兜底值（确保对比度门禁不退化）。
+    pub(crate) fn from_tmtheme_bytes(bytes: &[u8]) -> Self {
+        let mut out = SYNTAX_FALLBACK;
+
+        let cursor = Cursor::new(bytes);
+        let root = match plist::Value::from_reader_xml(cursor) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("[theme] plist 解析失败: {e}");
+                return out;
+            }
+        };
+
+        // tmTheme 顶层是 dict → "settings" 数组 → 跳过第一个全局 settings dict → 遍历 scope rule dicts
+        let Some(root_dict) = root.as_dictionary() else { return out; };
+        let Some(settings_arr) = root_dict.get("settings").and_then(|v| v.as_array()) else {
+            return out;
+        };
+
+        for dict in settings_arr.iter().skip(1) {
+            let Some(d) = dict.as_dictionary() else { continue };
+            // scope 字符串
+            let Some(scope_str) = d.get("scope").and_then(|v| v.as_string()) else { continue };
+            // foreground 颜色 "#RRGGBB"
+            let Some(style) = d.get("settings").and_then(|v| v.as_dictionary()) else { continue };
+            let Some(fg_hex) = style.get("foreground").and_then(|v| v.as_string()) else { continue };
+
+            let rgb = match parse_hex_color(fg_hex) {
+                Some(c) => c,
+                None => continue,
+            };
+
+            if scope_str.starts_with("keyword") {
+                out.keyword = rgb;
+            } else if scope_str.starts_with("comment") {
+                out.comment = rgb;
+            } else if scope_str.starts_with("string") {
+                out.string = rgb;
+            } else if scope_str.starts_with("constant.numeric")
+                || scope_str.starts_with("constant.language")
+                || scope_str.starts_with("constant.character")
+            {
+                out.number = rgb;
+            } else if scope_str.starts_with("entity.name.function")
+                || scope_str.starts_with("support.function")
+            {
+                out.function = rgb;
+            } else if scope_str.starts_with("entity.name.type")
+                || scope_str.starts_with("storage.type")
+                || scope_str.starts_with("support.type")
+                || scope_str.starts_with("entity.name.class")
+            {
+                out.type_name = rgb;
+            } else if scope_str.starts_with("punctuation") {
+                out.punctuation = rgb;
+            }
+        }
+        out
+    }
+}
+
+fn parse_hex_color(hex: &str) -> Option<[u8; 3]> {
+    // "#RRGGBB" 或 "RRGGBB" 或 "#RRGGBBAA"
+    let hex = hex.trim_start_matches('#');
+    if hex.len() < 6 { return None; }
+    let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
+    let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
+    let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
+    Some([r, g, b])
 }
 
 /// 调色板：正文/ chrome / 交互态全套颜色。浅色值与原硬编码常量逐字节一致（视觉不回退）。
@@ -164,7 +253,7 @@ impl Theme {
         t
     }
 
-    pub const fn light() -> Self {
+    pub fn light() -> Self {
         Theme {
             mode: ThemeMode::System,
             dark: false,
@@ -185,19 +274,11 @@ impl Theme {
             danger: [178, 34, 34],
             accent: [43, 108, 176],
             accent_text: [255, 255, 255],
-            syntax: SyntaxColors {
-                keyword: [132, 48, 137],   // 紫
-                string: [3, 106, 78],      // 深绿
-                comment: [105, 105, 105],  // 灰
-                number: [12, 94, 188],     // 蓝
-                function: [115, 82, 3],    // 棕
-                type_name: [26, 82, 168],  // 蓝
-                punctuation: [90, 90, 90], // 深灰
-            },
+            syntax: light_syntax(),
         }
     }
 
-    pub const fn dark() -> Self {
+    pub fn dark() -> Self {
         Theme {
             mode: ThemeMode::System,
             dark: true,
@@ -218,17 +299,27 @@ impl Theme {
             danger: [255, 130, 130],
             accent: [14, 99, 156],
             accent_text: [255, 255, 255],
-            syntax: SyntaxColors {
-                keyword: [197, 134, 192],     // 亮紫
-                string: [125, 191, 153],      // 青绿
-                comment: [150, 150, 150],     // 灰
-                number: [104, 166, 232],      // 亮蓝
-                function: [220, 180, 100],    // 金
-                type_name: [120, 170, 230],   // 蓝
-                punctuation: [160, 160, 160], // 浅灰
-            },
+            syntax: dark_syntax(),
         }
     }
+}
+
+/// 浅色语法色板：从 embed 的 nord_light.tmTheme 加载（OnceLock 缓存，进程内只 parse 一次）。
+fn light_syntax() -> SyntaxColors {
+    static CACHE: OnceLock<SyntaxColors> = OnceLock::new();
+    *CACHE.get_or_init(|| {
+        let bytes = include_bytes!("../assets/themes/nord_light.tmTheme");
+        SyntaxColors::from_tmtheme_bytes(bytes)
+    })
+}
+
+/// 深色语法色板：从 embed 的 one_dark.tmTheme 加载（OnceLock 缓存）。
+fn dark_syntax() -> SyntaxColors {
+    static CACHE: OnceLock<SyntaxColors> = OnceLock::new();
+    *CACHE.get_or_init(|| {
+        let bytes = include_bytes!("../assets/themes/one_dark.tmTheme");
+        SyntaxColors::from_tmtheme_bytes(bytes)
+    })
 }
 
 pub(crate) use crate::tokens::surface;
@@ -353,6 +444,10 @@ const DOC_FONT_SIZE_MAX: f32 = 32.0;
 const DOC_FONT_FAMILY_MAX_LEN: usize = 64;
 /// 制表符宽度默认值（兼容 2 与 4，Task D 新增）。
 const DEFAULT_TAB_WIDTH: u8 = 4;
+/// 图片缓存字节上限默认值（MiB）：容纳一屏图文混排的若干张大图，超出后按 LRU 逐出。
+const DEFAULT_IMAGE_CACHE_LIMIT_MB: u32 = 200;
+/// 图片缓存上限允许的最大值（MiB）：防止手写配置把上限设成天文数字变相关闭逐出。
+const IMAGE_CACHE_LIMIT_MB_MAX: u32 = 4096;
 
 /// 正文字号夹取：10..=32。
 fn clamp_font_size(v: f32) -> f32 {
@@ -386,6 +481,8 @@ pub struct Config {
     pub allow_remote_images: bool,
     /// 制表符宽度（2 或 4，默认 4）；其它值夹到 4。
     pub tab_width: u8,
+    /// 图片缓存字节上限（MiB，默认 200）；0 = 不限制，超出按 LRU 逐出。
+    pub image_cache_limit_mb: u32,
     /// 上次退出时的窗口几何；首次运行或配置缺失时为 `None`。
     pub window: Option<WindowGeom>,
 }
@@ -403,6 +500,7 @@ impl Default for Config {
             smooth_scroll: false,
             allow_remote_images: true,
             tab_width: DEFAULT_TAB_WIDTH,
+            image_cache_limit_mb: DEFAULT_IMAGE_CACHE_LIMIT_MB,
             window: None,
         }
     }
@@ -415,7 +513,8 @@ impl Config {
             "# Veil 配置（自动生成）\n# mode: system（跟随系统）| light | dark\nmode = \"{}\"\n\
              export_margin_mm = {}\nexport_page_numbers = {}\nexport_toc = {}\n\
              doc_font_family = \"{}\"\ndoc_font_size = {}\ndoc_line_height = {}\n\
-             smooth_scroll = {}\nallow_remote_images = {}\ntab_width = {}\n",
+             smooth_scroll = {}\nallow_remote_images = {}\ntab_width = {}\n\
+             image_cache_limit_mb = {}\n",
             self.mode.as_str(),
             self.export_margin_mm,
             self.export_page_numbers,
@@ -426,6 +525,7 @@ impl Config {
             self.smooth_scroll,
             self.allow_remote_images,
             self.tab_width,
+            self.image_cache_limit_mb,
         );
         if let Some(w) = self.window {
             text.push_str(&format!(
@@ -434,6 +534,105 @@ impl Config {
             ));
         }
         text
+    }
+
+    /// 保存配置文本：原文是严格 TOML 且不含表段时原地编辑（保留注释、未知键与键顺序），
+    /// 否则回退整文件重生成（与替换前行为一致）。
+    ///
+    /// 「表段」一律回退：历史 `[theme]` 段的键在旧行解析里按顶层生效，保留嵌套表会改变
+    /// 下次加载的语义（ADR-012 / S2）。
+    pub fn to_toml_preserving(self, original: Option<&str>) -> String {
+        original
+            .and_then(|text| edit_existing_toml(text, self))
+            .unwrap_or_else(|| self.to_toml())
+    }
+}
+
+/// 原地编辑已存在的严格 TOML 配置；返回 `None` 表示必须回退整文件重生成。
+///
+/// 仅当整文档可被 TOML 解析且不含任何表段时启用：关键字值逐项覆盖，未知键与注释原样保留。
+fn edit_existing_toml(text: &str, cfg: Config) -> Option<String> {
+    let mut doc: toml_edit::DocumentMut = text.parse().ok()?;
+    if doc
+        .iter()
+        .any(|(_, item)| item.is_table() || item.is_array_of_tables())
+    {
+        return None;
+    }
+    set_item(&mut doc, "mode", toml_edit::value(cfg.mode.as_str()));
+    set_item(
+        &mut doc,
+        "export_margin_mm",
+        toml_edit::value(f64::from(cfg.export_margin_mm)),
+    );
+    set_item(
+        &mut doc,
+        "export_page_numbers",
+        toml_edit::value(cfg.export_page_numbers),
+    );
+    set_item(&mut doc, "export_toc", toml_edit::value(cfg.export_toc));
+    set_item(
+        &mut doc,
+        "doc_font_family",
+        toml_edit::value(cfg.doc_font_family.as_str()),
+    );
+    set_item(
+        &mut doc,
+        "doc_font_size",
+        toml_edit::value(f64::from(cfg.doc_font_size)),
+    );
+    set_item(
+        &mut doc,
+        "doc_line_height",
+        toml_edit::value(f64::from(cfg.doc_line_height)),
+    );
+    set_item(&mut doc, "smooth_scroll", toml_edit::value(cfg.smooth_scroll));
+    set_item(
+        &mut doc,
+        "allow_remote_images",
+        toml_edit::value(cfg.allow_remote_images),
+    );
+    set_item(
+        &mut doc,
+        "tab_width",
+        toml_edit::value(i64::from(cfg.tab_width)),
+    );
+    set_item(
+        &mut doc,
+        "image_cache_limit_mb",
+        toml_edit::value(i64::from(cfg.image_cache_limit_mb)),
+    );
+    const WINDOW_KEYS: [&str; 4] = ["window_width", "window_height", "window_x", "window_y"];
+    if let Some(w) = cfg.window {
+        set_item(&mut doc, WINDOW_KEYS[0], toml_edit::value(i64::from(w.width)));
+        set_item(
+            &mut doc,
+            WINDOW_KEYS[1],
+            toml_edit::value(i64::from(w.height)),
+        );
+        set_item(&mut doc, WINDOW_KEYS[2], toml_edit::value(i64::from(w.x)));
+        set_item(&mut doc, WINDOW_KEYS[3], toml_edit::value(i64::from(w.y)));
+    } else {
+        for key in WINDOW_KEYS {
+            doc.remove(key);
+        }
+    }
+    Some(doc.to_string())
+}
+
+/// 覆盖一个键的值，同时保留原有的值前后装饰（行尾注释、空格）。
+fn set_item(doc: &mut toml_edit::DocumentMut, key: &str, mut item: toml_edit::Item) {
+    match doc.get_mut(key) {
+        Some(existing) => {
+            let decor = existing.as_value().map(|v| v.decor().clone());
+            if let (Some(decor), Some(value)) = (decor, item.as_value_mut()) {
+                *value.decor_mut() = decor;
+            }
+            *existing = item;
+        }
+        None => {
+            doc.insert(key, item);
+        }
     }
 }
 
@@ -455,92 +654,102 @@ pub struct ConfigParse {
 /// 同一键重复出现时后者生效（无歧义地覆盖）。
 pub fn parse_config(text: &str) -> ConfigParse {
     let mut out = ConfigParse::default();
-    // 排版数值先收集原值，循环结束后统一夹取（避免行高早于字号出现时口径漂移）。
     let mut font_size: Option<f32> = None;
     let mut line_height: Option<f32> = None;
-    // 窗口键先逐个收集，循环结束后再成组判定（见函数尾）。
-    let mut win_seen = [false; 4]; // width / height / x / y 是否出现过
+    let mut win_seen = [false; 4];
     let mut win_w = None;
     let mut win_h = None;
     let mut win_x = None;
     let mut win_y = None;
-    for raw in text.lines() {
-        let line = strip_comment(raw).trim();
-        if line.is_empty() {
-            continue;
-        }
-        if line.starts_with('[') && line.ends_with(']') {
-            continue;
-        }
-        let Some((key, value)) = line.split_once('=') else {
-            out.ignored += 1;
-            continue;
-        };
-        let (key, value) = (key.trim(), value.trim());
-        match key {
-            "mode" => match unquote(value).and_then(ThemeMode::parse) {
+
+    // 从 toml_edit AST 或 fallback 中拉平所有 key → Value 对（段标题下的键也归入顶层）。
+    let pairs = collect_entries(text, &mut out.ignored);
+
+    for (key, value) in pairs {
+        match key.as_str() {
+            "mode" => match value.as_str().and_then(ThemeMode::parse) {
                 Some(m) => out.config.mode = m,
                 None => out.ignored += 1,
             },
-            "export_margin_mm" => match value.parse::<f32>() {
-                Ok(v) if v.is_finite() && v >= 0.0 => out.config.export_margin_mm = v,
-                _ => out.ignored += 1,
-            },
-            "export_page_numbers" => match parse_bool(value) {
+            "export_margin_mm" => {
+                let v = value.as_float().or_else(|| value.as_integer().map(|i| i as f64));
+                match v {
+                    Some(v) if v.is_finite() && v >= 0.0 => out.config.export_margin_mm = v as f32,
+                    _ => out.ignored += 1,
+                }
+            }
+            "export_page_numbers" => match value.as_bool() {
                 Some(v) => out.config.export_page_numbers = v,
                 None => out.ignored += 1,
             },
-            "export_toc" => match parse_bool(value) {
+            "export_toc" => match value.as_bool() {
                 Some(v) => out.config.export_toc = v,
                 None => out.ignored += 1,
             },
-            "doc_font_family" => match unquote(value)
+            "doc_font_family" => match value
+                .as_str()
                 .filter(|s| s.len() <= DOC_FONT_FAMILY_MAX_LEN)
                 .and_then(DocFontFamily::parse)
             {
                 Some(f) => out.config.doc_font_family = f,
                 None => out.ignored += 1,
             },
-            "doc_font_size" => match value.parse::<f32>() {
-                Ok(v) if v.is_finite() => font_size = Some(v),
-                _ => out.ignored += 1,
-            },
-            "doc_line_height" => match value.parse::<f32>() {
-                Ok(v) if v.is_finite() => line_height = Some(v),
-                _ => out.ignored += 1,
-            },
-            "smooth_scroll" => match parse_bool(value) {
+            "doc_font_size" => {
+                let v = value.as_float().or_else(|| value.as_integer().map(|i| i as f64));
+                match v {
+                    Some(v) if v.is_finite() => font_size = Some(v as f32),
+                    _ => out.ignored += 1,
+                }
+            }
+            "doc_line_height" => {
+                let v = value.as_float().or_else(|| value.as_integer().map(|i| i as f64));
+                match v {
+                    Some(v) if v.is_finite() => line_height = Some(v as f32),
+                    _ => out.ignored += 1,
+                }
+            }
+            "smooth_scroll" => match value.as_bool() {
                 Some(v) => out.config.smooth_scroll = v,
                 None => out.ignored += 1,
             },
-            "allow_remote_images" => match parse_bool(value) {
+            "allow_remote_images" => match value.as_bool() {
                 Some(v) => out.config.allow_remote_images = v,
                 None => out.ignored += 1,
             },
-            "tab_width" => match value.parse::<u8>() {
-                Ok(v) if v == 2 || v == 4 => out.config.tab_width = v,
+            "tab_width" => match value.as_integer() {
+                Some(v) if v == 2 || v == 4 => out.config.tab_width = v as u8,
+                _ => out.ignored += 1,
+            },
+            // 0 = 不限制；上限 4096 MiB 防止手写值变相关闭逐出，越界按非法计数
+            "image_cache_limit_mb" => match value.as_integer() {
+                Some(v) if (0..=i64::from(IMAGE_CACHE_LIMIT_MB_MAX)).contains(&v) => {
+                    out.config.image_cache_limit_mb = v as u32;
+                }
                 _ => out.ignored += 1,
             },
             "window_width" => {
                 win_seen[0] = true;
-                win_w = parse_window_size(value, 480);
+                win_w = value.as_integer().and_then(|n| {
+                    (480..=8192).contains(&(n as u32)).then_some(n as u32)
+                });
             }
             "window_height" => {
                 win_seen[1] = true;
-                win_h = parse_window_size(value, 360);
+                win_h = value.as_integer().and_then(|n| {
+                    (360..=8192).contains(&(n as u32)).then_some(n as u32)
+                });
             }
             "window_x" => {
                 win_seen[2] = true;
-                win_x = value.parse::<i32>().ok();
+                win_x = value.as_integer().map(|n| n as i32);
             }
             "window_y" => {
                 win_seen[3] = true;
-                win_y = value.parse::<i32>().ok();
+                win_y = value.as_integer().map(|n| n as i32);
             }
             _ => out.ignored += 1,
         }
     }
-    // 排版数值：缺省/非法用默认值，越界夹取（不产生 ignored）。
     let size = clamp_font_size(font_size.unwrap_or(DEFAULT_DOC_FONT_SIZE));
     out.config.doc_font_size = size;
     out.config.doc_line_height =
@@ -560,33 +769,55 @@ pub fn parse_config(text: &str) -> ConfigParse {
     out
 }
 
-/// 窗口宽高（逻辑像素）：只接受 `min..=8192` 的整数（宽 480、高 360）。
-fn parse_window_size(v: &str, min: u32) -> Option<u32> {
-    match v.parse::<u32>() {
-        Ok(n) if (min..=8192).contains(&n) => Some(n),
-        _ => None,
+/// 提取所有 key → Value 对。优先用 toml_edit 严格解析（合法 TOML）；
+/// 若失败（重复键等宽容场景）则 fallback 到手动逐行 key=value 提取，
+/// 值类型由 toml_edit::Value::from_str 解析（自动处理引号/布尔/数字）。
+fn collect_entries(
+    text: &str,
+    ignored: &mut usize,
+) -> Vec<(String, toml_edit::Value)> {
+    match toml_edit::DocumentMut::from_str(text) {
+        Ok(doc) => {
+            let mut out = Vec::new();
+            flatten_table(doc.as_table(), &mut out);
+            out
+        }
+        Err(_) => {
+            let mut out = Vec::new();
+            for raw in text.lines() {
+                let line = strip_comment_fallback(raw).trim();
+                if line.is_empty() || line.starts_with('[') {
+                    continue;
+                }
+                let Some((key, val_str)) = line.split_once('=') else {
+                    *ignored += 1;
+                    continue;
+                };
+                let key = key.trim().to_string();
+                let val_str = val_str.trim();
+                match toml_edit::Value::from_str(val_str) {
+                    Ok(v) => out.push((key, v)),
+                    Err(_) => *ignored += 1,
+                }
+            }
+            out
+        }
     }
 }
 
-/// TOML 布尔字面量（只接受裸 `true`/`false`）。
-fn parse_bool(v: &str) -> Option<bool> {
-    match v {
-        "true" => Some(true),
-        "false" => Some(false),
-        _ => None,
+/// 把 toml_edit 解析成功的 Table 里所有条目拉平，包括嵌套表（旧格式 [theme] 段下的键）。
+fn flatten_table(t: &toml_edit::Table, out: &mut Vec<(String, toml_edit::Value)>) {
+    for (k, item) in t.iter() {
+        match item {
+            toml_edit::Item::Value(v) => out.push((k.to_string(), v.clone())),
+            toml_edit::Item::Table(sub) => flatten_table(sub, out),
+            _ => {}
+        }
     }
 }
 
-/// 配置文件字节 → 解析结果：剥 BOM、要求合法 UTF-8（非法编码整体拒绝，用默认主题）。
-pub fn decode_config(bytes: &[u8]) -> Result<ConfigParse, String> {
-    let text = std::str::from_utf8(bytes)
-        .map_err(|_| crate::i18n::t(crate::i18n::Key::ErrConfigNotUtf8).to_string())?;
-    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
-    Ok(parse_config(text))
-}
-
-/// 行内注释剥离：引号内的 `#` 不是注释（极简子集不支持字符串内转义）。
-fn strip_comment(line: &str) -> &str {
+/// 宽容解析 fallback 用的极简注释剥离。引号内 `#` 不计；不处理转义。
+fn strip_comment_fallback(line: &str) -> &str {
     let mut quote: Option<char> = None;
     for (i, c) in line.char_indices() {
         match quote {
@@ -602,14 +833,12 @@ fn strip_comment(line: &str) -> &str {
     line
 }
 
-/// 去引号：仅接受成对单/双引号包裹的字符串（TOML 字符串值语义）。
-fn unquote(v: &str) -> Option<&str> {
-    let b = v.as_bytes();
-    if b.len() >= 2 && (b[0] == b'"' || b[0] == b'\'') && b[b.len() - 1] == b[0] {
-        Some(&v[1..v.len() - 1])
-    } else {
-        None
-    }
+/// 配置文件字节 → 解析结果：剥 BOM、要求合法 UTF-8（非法编码整体拒绝，用默认主题）。
+pub fn decode_config(bytes: &[u8]) -> Result<ConfigParse, String> {
+    let text = std::str::from_utf8(bytes)
+        .map_err(|_| crate::i18n::t(crate::i18n::Key::ErrConfigNotUtf8).to_string())?;
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+    Ok(parse_config(text))
 }
 
 /// 配置文件路径：Windows `%APPDATA%\Veil\config.toml`；其余平台
@@ -831,6 +1060,46 @@ mod tests {
     }
 
     #[test]
+    fn save_preserves_comments_unknown_keys_and_order() {
+        let original = "# 手写注释\nmode = \"light\" # 行尾注释\nmy_unknown = 123\ninline = { a = 1 }\n";
+        let cfg = Config {
+            mode: ThemeMode::Dark,
+            export_toc: false,
+            ..Config::default()
+        };
+        let out = cfg.to_toml_preserving(Some(original));
+        assert!(out.contains("# 手写注释"), "{out}");
+        assert!(out.contains("my_unknown = 123"), "{out}");
+        assert!(out.contains("inline = { a = 1 }"), "{out}");
+        assert!(out.contains("mode = \"dark\""), "{out}");
+        let p = parse(&out);
+        assert_eq!(p.config, cfg, "保存后重新加载必须等价");
+        assert_eq!(p.ignored, 2, "未知键与内联表仍按既有口径计数");
+    }
+
+    #[test]
+    fn save_falls_back_to_regeneration_for_non_strict_input() {
+        let cfg = Config {
+            mode: ThemeMode::Dark,
+            ..Config::default()
+        };
+        // 非法值、重复键、任何表段（含历史 [theme]）都必须回退整文件重生成。
+        for original in [
+            "mode = \nexport_toc = true\n",
+            "mode = \"dark\"\nmode = \"light\"\n",
+            "[theme]\nmode = \"dark\"\n",
+            "[other]\nfoo = 1\n",
+        ] {
+            assert_eq!(
+                cfg.to_toml_preserving(Some(original)),
+                cfg.to_toml(),
+                "应回退：{original:?}"
+            );
+        }
+        assert_eq!(cfg.to_toml_preserving(None), cfg.to_toml());
+    }
+
+    #[test]
     fn config_round_trips_window_geometry() {
         let cfg = Config {
             mode: ThemeMode::Dark,
@@ -1046,6 +1315,56 @@ mod tests {
         let p = parse("allow_remote_images = \"false\"");
         assert!(p.config.allow_remote_images);
         assert_eq!(p.ignored, 1);
+    }
+
+    #[test]
+    fn image_cache_limit_defaults_and_parses_integer() {
+        // 空配置 / 旧配置缺键：默认 200 MiB，且不产生 ignored
+        let p = parse("");
+        assert_eq!(p.config.image_cache_limit_mb, 200);
+        assert_eq!(p.ignored, 0);
+        assert_eq!(
+            parse("image_cache_limit_mb = 512\n")
+                .config
+                .image_cache_limit_mb,
+            512
+        );
+        // 0 = 不限制
+        assert_eq!(
+            parse("image_cache_limit_mb = 0\n")
+                .config
+                .image_cache_limit_mb,
+            0
+        );
+        // 非法（负数/超上限/字符串/浮点）：回落默认并计数
+        for text in [
+            "image_cache_limit_mb = -1",
+            "image_cache_limit_mb = 4097",
+            "image_cache_limit_mb = \"200\"",
+            "image_cache_limit_mb = 1.5",
+        ] {
+            let p = parse(text);
+            assert_eq!(p.config.image_cache_limit_mb, 200, "{text}");
+            assert_eq!(p.ignored, 1, "{text}");
+        }
+    }
+
+    #[test]
+    fn image_cache_limit_round_trips_through_toml() {
+        for limit in [0u32, 200, 512] {
+            let cfg = Config {
+                image_cache_limit_mb: limit,
+                ..Config::default()
+            };
+            let text = cfg.to_toml();
+            assert!(
+                text.contains(&format!("image_cache_limit_mb = {limit}")),
+                "序列化必须写 {limit}: {text}"
+            );
+            let p = parse(&text);
+            assert_eq!(p.config, cfg, "往返恒等");
+            assert_eq!(p.ignored, 0);
+        }
     }
 
     #[test]
@@ -1370,3 +1689,4 @@ mod tests {
         assert_eq!(config_path_of(None, None, None), None);
     }
 }
+

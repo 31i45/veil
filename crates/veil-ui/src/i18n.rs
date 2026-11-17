@@ -147,6 +147,8 @@ keys! {
     SearchReplace => "search.replace", "替换";
     SearchReplaceAll => "search.replace_all", "全部";
     SearchCaseSensitive => "search.case_sensitive", "Aa";
+    SearchRegex => "search.regex", ".*";
+    SearchRegexError => "search.regex_error", "正则错误";
     SearchCount => "search.count", "{}/{}";
 
     // ---- 版本历史 ----
@@ -544,22 +546,13 @@ pub struct Locale {
     pub entries: &'static [(Key, &'static str)],
 }
 
-/// en-US 预留：本次不翻译（空表 → 回退 zh-CN）。
-const EN_US: &[(Key, &str)] = &[];
+/// 单语言场景（zh-CN）。后续新增语言时追加非空条目 + 在此数组补 Locale。
+pub const LOCALES: &[Locale] = &[Locale {
+    code: "zh-CN",
+    entries: ZH_CN,
+}];
 
-/// 当前支持的语言（按回退顺序）。后续新增语言只需在此追加一份非空表。
-pub const LOCALES: &[Locale] = &[
-    Locale {
-        code: "zh-CN",
-        entries: ZH_CN,
-    },
-    Locale {
-        code: "en-US",
-        entries: EN_US,
-    },
-];
-
-/// 当前语言（本轮只做 key 化，固定 zh-CN）。
+/// 当前语言（固定 zh-CN；多语言支持时改为可注入）。
 pub const CURRENT_LOCALE: &str = "zh-CN";
 
 /// 词条查找：命中返回词条，缺失返回 None（纯函数，便于单测缺失回退）。
@@ -597,10 +590,15 @@ pub fn t(key: Key) -> &'static str {
     translate(LOCALES, CURRENT_LOCALE, key).unwrap_or_else(|| missing(key))
 }
 
-/// 按 `{}` 占位符顺序填充参数；参数不足时保留空串，绝不 panic。
+/// 按 `{}` 占位符顺序填充参数；参数不足时返回词条原文（占位符原样保留），
+/// 绝不静默吞成空串，也绝不 panic。多余参数忽略。
 /// 模板本身来自词条表，调用点只负责提供动态值。
 pub fn tf(key: Key, args: &[&str]) -> String {
     let template = t(key);
+    let needed = template.matches("{}").count();
+    if args.len() < needed {
+        return template.to_string();
+    }
     let mut out = String::with_capacity(template.len() + 16);
     let mut rest = template;
     let mut i = 0usize;
@@ -733,7 +731,24 @@ mod tests {
         );
         assert_eq!(tf(Key::WindowTitle, &["a.md"]), "veil — a.md");
         assert_eq!(tf(Key::StatusSaved, &["09:30"]), " · 已保存 09:30");
-        assert_eq!(tf(Key::StatusSaved, &[]), " · 已保存 ");
+        // 缺参：返回词条原文（占位符保留），不静默吞成空串
+        assert_eq!(tf(Key::StatusSaved, &[]), " · 已保存 {}");
+        assert_eq!(tf(Key::MenuFile, &["多余"]), "文件");
+    }
+
+    /// 参数不足：整体回退为词条原文，不半填、不空串、不 panic。
+    #[test]
+    fn insufficient_args_return_template_verbatim() {
+        // StatusStats 有 3 个占位符，只给 1 个 → 整体回退原文
+        assert_eq!(tf(Key::StatusStats, &["1"]), t(Key::StatusStats));
+        // 0 参数同理
+        assert_eq!(tf(Key::StatusSaved, &[]), t(Key::StatusSaved));
+        assert!(
+            tf(Key::StatusSaved, &[]).contains("{}"),
+            "缺失占位符须原样可见，不能蒸发"
+        );
+        // 参数恰好/多余时行为不变
+        assert_eq!(tf(Key::StatusSaved, &["09:30"]), " · 已保存 09:30");
         assert_eq!(tf(Key::MenuFile, &["多余"]), "文件");
     }
 }

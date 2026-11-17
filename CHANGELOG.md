@@ -18,7 +18,7 @@ Veil 版本迭代记录。每个版本的详细修复清单见对应 git tag 的
 - 文档：ADR-012 重写为「条件 Go」；spike 文档新增 S1-b 增量复核；README 中英文更新语言覆盖、ADR 索引（新增 ADR-013/014）与全部数字红线
 
 ### Notes
-- 体积：release exe 9,970,176 B（≈9.51 MiB，较 v1.7.0 本机构建 7,761,408 B +2,208,768 B，余量 515,584 B）。正则模式相对前一构建仅 +36,864 B——`regex` 早已由 `syntect` 的 `fancy-regex` 传递链接，并非早期预估的 +1.2 MB
+- 体积：release exe 9,970,176 B（≈9.51 MiB，较 v1.7.0 本机构建 7,761,408 B +2,208,768 B，余量 515,584 B）；GitHub v1.8.0 发布资产由 CI 构建，为 9,973,248 B。正则模式相对前一构建仅 +36,864 B——`regex` 早已由 `syntect` 的 `fancy-regex` 传递链接，并非早期预估的 +1.2 MB
 - 依赖：`veil-ui`+`veil` 外部直接依赖 17（`veil-ui` 8 + `veil` 9）；workspace 传递依赖 125（按 crate 名去重，normal 边，门禁 200）
 - 测试：`cargo test --workspace --release` 1797 passed / 0 failed / 14 ignored；clippy `-D warnings` 零警告
 - 性能：1000 行代码块单字符编辑 p95 < 0.5 ms（S1-b）；>200 行块首次显示存在一次性 20–100 ms 高亮成本

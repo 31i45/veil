@@ -428,6 +428,36 @@ impl Editor {
         Some((ev.dirty_blocks, ranges.len()))
     }
 
+    /// 查找替换·全部（逐命中文本）：正则模式捕获组展开后每处替换文本可能不同。
+    /// `edits` 按起点升序且互不重叠；首尾之间整段一次 `Replace`，仍为单个撤销事务。
+    /// 返回 (脏块, 替换次数)；无命中 None。
+    pub(crate) fn replace_all_with(
+        &mut self,
+        edits: &[(Range, String)],
+    ) -> Option<(Vec<BlockId>, usize)> {
+        let ((first, _), (last, _)) = (edits.first()?, edits.last()?);
+        let len = self.session.text_len();
+        let hay = self.session.text_slice(Range::new(0, len))?;
+        let mut out = String::with_capacity(len);
+        let mut at = first.start;
+        for (r, text) in edits {
+            out.push_str(&hay[at..r.start]);
+            out.push_str(text);
+            at = r.end;
+        }
+        debug_assert_eq!(at, last.end, "命中区间升序且互不重叠");
+        let ev = self
+            .session
+            .apply(Edit::Replace {
+                range: Range::new(first.start, last.end),
+                text: out,
+            })
+            .ok()?;
+        self.dirty = true;
+        self.set_caret(first.start);
+        Some((ev.dirty_blocks, edits.len()))
+    }
+
     fn apply_inner(&mut self, intent: Intent) -> Option<Vec<BlockId>> {
         if self.preedit.is_some() {
             return None; // 组合期按键归 IME（Windows 下 IME 消费组合键，此乃兜底）

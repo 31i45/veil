@@ -136,8 +136,68 @@ impl FileWatcher for NotifyWatcher {
 
 /// 事件路径是否指向监听目标：只监听父目录非递归，故文件名相等即同一文件；
 /// 规范路径/原样路径再做一次精确匹配以覆盖相对路径差异。
+///
+/// 曾评估把「文件名相等」收紧为「父目录也相等」，结论是**不收紧**：
+/// 1) 监听只挂载目标文件的父目录（`NonRecursive`），事件本就不会来自其它目录，
+///    该分支在正常路径下不存在跨目录误判；
+/// 2) 事件路径与 `target` 的目录形态可能不同（相对 vs 绝对、盘符大小写、
+///    8.3 短名/符号链接），强行比较父目录会在这些形态差异下漏掉真实变更——
+///    漏事件的代价（外部修改不被提示）高于理论上不存在的误判代价。
 fn same_target(p: &Path, target: &Path, canonical: Option<&Path>) -> bool {
     p == target
         || canonical.is_some_and(|c| p == c)
         || (p.file_name().is_some() && p.file_name() == target.file_name())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::same_target;
+    use std::path::Path;
+
+    /// 父目录非递归监听：同目录下文件名不同的变更必须被过滤掉。
+    #[test]
+    fn sibling_files_are_not_the_target() {
+        let target = Path::new("C:/docs/note.md");
+        for other in [
+            "C:/docs/other.md",
+            "C:/docs/note.md.bak",
+            "C:/docs/note.txt",
+        ] {
+            assert!(
+                !same_target(Path::new(other), target, None),
+                "同目录其它文件应被忽略：{other}"
+            );
+        }
+    }
+
+    /// 精确路径分支：原样相同即命中。
+    #[test]
+    fn exact_path_matches() {
+        let target = Path::new("C:/docs/note.md");
+        assert!(same_target(Path::new("C:/docs/note.md"), target, None));
+    }
+
+    /// 规范路径分支：basename 不同（如 8.3 短名/链接别名），只能经 canonical 命中。
+    /// 先断言"无 canonical 不命中"，再断言"有 canonical 命中"，确保确实走到该分支
+    /// 而不是被"文件名相等"规则代为通过。
+    #[test]
+    fn canonical_path_hits_even_with_different_basename() {
+        let target = Path::new("C:/docs/note.md");
+        let canonical = Path::new("C:/real/alias.md");
+        assert!(
+            !same_target(canonical, target, None),
+            "无 canonical 时不应命中（basename 不同，且目录也不同）"
+        );
+        assert!(
+            same_target(canonical, target, Some(canonical)),
+            "canonical 分支应命中"
+        );
+    }
+
+    /// 文件名相等分支：父目录非递归监听，故同名即视为目标（已记录的宽松规则）。
+    #[test]
+    fn filename_equality_matches_across_directories() {
+        let target = Path::new("C:/docs/note.md");
+        assert!(same_target(Path::new("C:/other/note.md"), target, None));
+    }
 }

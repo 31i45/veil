@@ -14,7 +14,7 @@ use cosmic_text::{
 };
 use veil_core::{task_span, BlockId, BlockKind, HtmlTag, InlineKind, InlineNode, Range};
 
-use super::highlight::{highlight, to_styles};
+use super::highlight::{to_styles, Highlighter};
 use super::linebreak;
 use super::style::{style_spans, Style};
 use crate::geometry::{BASE_FONT_SIZE, BASE_LINE_HEIGHT};
@@ -693,10 +693,23 @@ pub struct LayoutEngine {
     mono_family: Option<&'static str>,
     /// 代码块语法高亮色板（随主题切换更新）。
     syntax: SyntaxColors,
+    /// 代码块增量高亮器：语法集惰性加载，逐行状态跨布局复用。
+    highlighter: Highlighter,
     /// 链接前景色（随主题切换更新）。
     link_color: [u8; 3],
     /// 次要文本色（图片题注等）：与脚注前缀同源的主题 muted，随主题切换更新。
     muted_color: [u8; 3],
+    /// 长代码块后台异步高亮回填代次：任何一个超限 FencedCode 回填颜色后递增；
+    /// 递增会自然失效所有 LayoutKey → 触发重排（此时 Highlighter 缓存已命中，
+    /// 同步路径瞬间产出颜色）。
+    pub highlight_epoch: u64,
+    /// 后台高亮器：持有已投递但尚未回填的任务代次，防止重复投递同一块。
+    pub pending_background_ticks: std::collections::HashMap<usize, u64>,
+    /// 后台 parse 任务投递通道：LayoutEngine 构造时 spawn，每帧 layout_block 命中超限块时
+    /// 投递任务；Sender drop 后后台线程自动退出。
+    pub(crate) bg_tx: Option<std::sync::mpsc::Sender<crate::view::highlight_bg::BgTask>>,
+    /// 后台 parse 结果接收通道：App 层 update 循环每帧 try_recv drain。
+    pub(crate) bg_rx: Option<std::sync::mpsc::Receiver<crate::view::highlight_bg::BgResult>>,
 }
 
 impl Default for LayoutEngine {
@@ -708,6 +721,7 @@ impl Default for LayoutEngine {
 impl LayoutEngine {
     pub fn new() -> Self {
         let (font_system, mono_family) = new_font_system();
+        let (bg_tx, bg_rx) = crate::view::highlight_bg::spawn_background();
         LayoutEngine {
             font_system,
             swash: SwashCache::new(),
@@ -717,8 +731,13 @@ impl LayoutEngine {
             doc_font: DocFontFamily::System,
             mono_family,
             syntax: SyntaxColors::default_light(),
+            highlighter: Highlighter::default(),
             link_color: Theme::light().link,
             muted_color: Theme::light().muted,
+            highlight_epoch: 0,
+            pending_background_ticks: std::collections::HashMap::new(),
+            bg_tx: Some(bg_tx),
+            bg_rx: Some(bg_rx),
         }
     }
 
@@ -750,6 +769,20 @@ impl LayoutEngine {
     /// 启动时探测到的等宽族名（代码块/行内代码排版复用；N9）。
     pub(crate) fn mono_family(&self) -> Option<&'static str> {
         self.mono_family
+    }
+
+    /// 每帧排版前 drain 后台 parse 结果：把后台产出的 spans 缓存进 Highlighter，
+    /// 递增 highlight_epoch 让 LayoutKey 自然失配，下次 layout_block 命中缓存即同步
+    /// 产出颜色。后台 parse 期间块被编辑/删除时，Highlighter::highlight 开头会通过
+    /// text 比对兜底丢弃旧 spans —— 这里无条件缓存即可。
+    pub(crate) fn drain_background(&mut self) {
+        let Some(rx) = &self.bg_rx else { return };
+        while let Ok(result) = rx.try_recv() {
+            self.highlighter
+                .cache_spans(result.key, result.body, result.spans);
+            self.pending_background_ticks.remove(&result.key);
+            self.highlight_epoch = self.highlight_epoch.saturating_add(1);
+        }
     }
 
     /// 更新语法高亮色板（主题切换时调用）。
@@ -1186,8 +1219,38 @@ impl LayoutEngine {
         // FencedCode 块带语言标记时走语法高亮（inlines 为空，style_spans 仅产出默认段）。
         let style_segments: Vec<(usize, usize, Style)> = match &kind {
             BlockKind::FencedCode(Some(lang)) => {
-                let tk = highlight(lang, body);
-                to_styles(&tk, body.len(), &self.syntax, Style::default())
+                // 长代码块（行数/字节数超阈值）首次渲染跳过高亮：先上默认色首帧，
+                // 后台 parse 完成后通过 LayoutKey 失效触发重排，此时缓存已命中 → 同步产出颜色。
+                let is_long = body.lines().count() >= crate::view::highlight::LONG_CODE_THRESHOLD_LINES
+                    || body.len() >= crate::view::highlight::LONG_CODE_THRESHOLD_BYTES;
+                let cache_hit = self.highlighter.has(block.start);
+                if is_long && !cache_hit {
+                    // 投递后台 parse 任务；epoch 用当前 highlight_epoch，后续回填时校验。
+                    if let Some(tx) = &self.bg_tx {
+                        // 去重：同一 key 在本 epoch 已投递则不重复。
+                        let current_epoch = self.highlight_epoch;
+                        let should_send = self
+                            .pending_background_ticks
+                            .get(&block.start)
+                            .copied()
+                            .map(|e| e < current_epoch)
+                            .unwrap_or(true);
+                        if should_send {
+                            let _ = tx.send(crate::view::highlight_bg::BgTask {
+                                key: block.start,
+                                lang: lang.to_string(),
+                                body: body.to_string(),
+                                epoch: current_epoch,
+                            });
+                            self.pending_background_ticks.insert(block.start, current_epoch);
+                        }
+                    }
+                    // 返回空 spans → to_styles 产出覆盖整个 body 的全默认色段。
+                    to_styles(&[], body.len(), &self.syntax, Style::default())
+                } else {
+                    let tk = self.highlighter.highlight(block.start, lang, body);
+                    to_styles(&tk, body.len(), &self.syntax, Style::default())
+                }
             }
             _ => style_spans(body.len(), block, inlines),
         };
@@ -5949,6 +6012,7 @@ mod tests {
                     base: base1,
                     reveal: reveal1,
                     toc: 0,
+                    highlight_epoch: 0,
                 },
                 value: l1,
             },

@@ -115,6 +115,7 @@ impl App {
             (search::Hit::Next, l.next),
             (search::Hit::Close, l.close),
             (search::Hit::ToggleCase, l.case),
+            (search::Hit::ToggleRegex, l.regex),
         ];
         if let Some(r) = rl {
             buttons.push((search::Hit::ReplaceOne, r.one));
@@ -173,10 +174,16 @@ impl App {
             }
         } else {
             let shown = search::fit_query(&search.query, query_avail, scale);
+            // 非法正则：查询文本用危险色提示（计数区同时显示「正则错误」）。
+            let color = if search.regex_error {
+                theme.danger
+            } else {
+                theme.text
+            };
             if let Some(lab) = self.ui_state.chrome.labels.get_or_insert(
                 &mut self.engine,
                 &shown,
-                theme.text,
+                color,
                 scale,
             ) {
                 qw = lab.w as f32;
@@ -352,6 +359,28 @@ impl App {
         ) {
             let x = l.case.x + (l.case.w - lab.w as f32) / 2.0;
             let y = l.case.y + (l.case.h - lab.h as f32) / 2.0;
+            frame.blit(
+                &lab.pixels,
+                lab.w,
+                lab.h,
+                x.round() as i32,
+                y.round() as i32,
+            );
+        }
+        // 「正则模式」开关字形：开启时用选中态前景（与 Aa 同一表达）。
+        let regex_color = if search.regex {
+            crate::tokens::state::selected_fg(&theme)
+        } else {
+            theme.text
+        };
+        if let Some(lab) = self.ui_state.chrome.labels.get_or_insert(
+            &mut self.engine,
+            t(Key::SearchRegex),
+            regex_color,
+            scale,
+        ) {
+            let x = l.regex.x + (l.regex.w - lab.w as f32) / 2.0;
+            let y = l.regex.y + (l.regex.h - lab.h as f32) / 2.0;
             frame.blit(
                 &lab.pixels,
                 lab.w,

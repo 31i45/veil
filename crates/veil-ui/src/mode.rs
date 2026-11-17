@@ -62,6 +62,8 @@ pub(crate) enum Cmd {
     MenuAccept,
     /// 替换模式下 Tab 在查询/替换输入框之间切换焦点。
     SearchToggleField,
+    /// 切换正则搜索模式（Alt+R / 点击 `. *`）。
+    SearchToggleRegex,
     SearchNext,
     SearchPrev,
     /// 跳到首个/末个命中。
@@ -139,6 +141,8 @@ pub(crate) fn route(mode: Mode, key: Key, mods: Mods, composing: bool) -> Cmd {
                 Key::Home => Cmd::SearchFirstMatch,
                 Key::End => Cmd::SearchLastMatch,
                 Key::Tab => Cmd::SearchToggleField,
+                // Alt+R = 正则开关（AltGr = Ctrl+Alt 属于字符输入，不触发）
+                Key::R if mods.alt && !mods.ctrl => Cmd::SearchToggleRegex,
                 // Ctrl+F/H/P 穿透：重申查询焦点 / 展开替换 / 打开快速打开
                 Key::F if ctrl => Cmd::Edit(Action::Find),
                 Key::H if ctrl => Cmd::Edit(Action::Replace),
@@ -249,6 +253,17 @@ mod tests {
         ctrl: true,
         shift: true,
         alt: false,
+    };
+    const ALT: Mods = Mods {
+        ctrl: false,
+        shift: false,
+        alt: true,
+    };
+    /// AltGr（Ctrl+Alt）：字符输入，不得被当作快捷键。
+    const CTRL_ALT: Mods = Mods {
+        ctrl: true,
+        shift: false,
+        alt: true,
     };
 
     fn text(s: &str) -> Key {
@@ -377,6 +392,12 @@ mod tests {
             route(Mode::Search, text("查"), NONE, false),
             Cmd::SearchInput("查".into())
         );
+        // Alt+R 切正则；AltGr（Ctrl+Alt）是字符输入，不得当成开关
+        assert_eq!(
+            route(Mode::Search, Key::R, ALT, false),
+            Cmd::SearchToggleRegex
+        );
+        assert_eq!(route(Mode::Search, Key::R, CTRL_ALT, false), Cmd::Ignore);
         // Ctrl+文本 / 未绑定键：吞掉，不得落进查询串
         assert_eq!(route(Mode::Search, text("f"), CTRL, false), Cmd::Ignore);
         assert_eq!(route(Mode::Search, Key::Left, NONE, false), Cmd::Ignore);

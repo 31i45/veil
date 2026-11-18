@@ -2,6 +2,19 @@
 
 Veil 版本迭代记录。每个版本的详细修复清单见对应 git tag 的 commit log。
 
+## v1.9.0 — 2026-11-17
+
+Mermaid L1 内嵌渲染（QuickJS-ng 内嵌官方 Tiny mermaid + resvg 栅格化，路线 A）。
+
+### Added
+- Mermaid 图渲染（设置「Mermaid 图渲染」，默认开；关闭后行为与 v1.8 逐字节一致）：预览面板与正文内嵌块直接显示按设备 scale 重栅格化的矢量图——QuickJS-ng（rquickjs）常驻 64MB 栈 worker 线程执行 pin 版本 mermaid 12.3.0 Tiny 子集（官方 ESM chunks 自拼：flowchart/graph/sequence/pie，1,720,018 B 嵌入，无网络依赖），统一 `htmlLabels:false` 产出纯 `<text>` SVG，文本度量由 cosmic-text 注入（CJK 与正文字体栈一致），resvg 全局 fontdb（CJK 兜底 Microsoft YaHei）栅格化为 RGBA；编辑 280ms 防抖、(源码,主题)→SVG 与 (源码,主题,scale)→位图双层缓存，滚动/重绘直绘命中项不重布局
+- 安全与降级：3s 看门狗（QuickJS interrupt hook）+ 64MB 内存限制；超时/内存/校验失败转 `MermaidError` 显示并回落源码卡；Tiny 不含的图型（mindmap/architecture/class/state 等）与语法失败走既有 v0 降级卡 + mermaid.live 外链，不显示为错误；HTML 导出内嵌 `sanitize_svg` 清洗后的 SVG；PDF/打印 300dpi 位图嵌入
+- 红线更新（v1.9 授权）：exe ≤16 MiB（实测 14,683,136 B ≈ 14.00 MiB，`mermaid-render` 开）、workspace 依赖 ≤240（实测 153）；feature 关闭回落原口径（10,016,256 B ≈ 9.55 MiB / 125 包）
+
+### Notes
+- spike 实测与结论见 `spikes/quickjs-mermaid-spike/RESULTS.md`（断言三例 PASS、引擎冷启字节码路径 58ms、体积增量 4.93 MiB）
+- `mermaid-render` cargo feature 可整体裁掉渲染栈（依赖 125 包、exe 回 ≤10 MiB 口径）
+
 ## v1.8.0 — 2026-11-17
 
 组件替换（代码高亮 → `syntect`、配置写回 → `toml_edit`）+ 查找正则模式 + 缓存治理。

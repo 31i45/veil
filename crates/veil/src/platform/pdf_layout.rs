@@ -1091,81 +1091,41 @@ impl<'a> Ctx<'a> {
         self.y += 6.0;
     }
 
-    /// Mermaid 矢量场景：与屏幕预览同一 `MermaidScene`，按版心等比缩放后
-    /// 直接转成 DrawOp（矩形/线段/文本），不经过图片栅格。
-    fn mermaid(&mut self, scene: &veil_ui::MermaidScene) {
-        let max_w = self.max_w();
-        // 单图不超过一页可用高度（超出时整体缩小，避免跨页切断图）。
-        let max_h = (self.geom.bottom() - self.geom.top()) - 20.0;
-        let (w, h) = scene.fit(max_w, max_h.max(40.0));
+    /// Mermaid 位图（300dpi，键 = 块 id）：resvg 栅格化产物直接嵌 PDF 图元，
+    /// 不再经由矢量场景（QuickJS 后端的场景是尺寸 stub，无图元）。
+    /// `push_image` 已按版心宽/页限高等比钳制，这里只负责居中与独占段落。
+    fn mermaid_bitmap(&mut self, bm: &veil_ui::MermaidBitmap) {
+        // RGBA → RGB（resvg 已预填不透明背景，alpha 直接丢弃）。
+        let mut rgb = Vec::with_capacity(bm.rgba.len() / 4 * 3);
+        for px in bm.rgba.chunks_exact(4) {
+            rgb.extend_from_slice(&px[..3]);
+        }
+        let idx = self.push_image(ImageData {
+            w: bm.width,
+            h: bm.height,
+            rgb,
+            baseline_px: 0.0,
+            // 300dpi 物理像素 → pt：位图由 96dpi CSS 尺寸 × 3.125 栅格化而来。
+            px_to_pt: 72.0 / 300.0,
+        });
+        let (w, h) = {
+            let img = &self.images[idx];
+            (img.pt_w(), img.pt_h())
+        };
         if w < 1.0 || h < 1.0 {
             return;
         }
-        let s = w / scene.width.max(1) as f32;
         self.ensure(h + 11.0);
         self.y += 5.0;
         let top = self.y;
-        let ox = self.geom.margin_x + ((max_w - w) * 0.5).max(0.0);
-        for item in &scene.items {
-            match item {
-                veil_ui::MermaidItem::Rect { x, y, w, h, fill } => {
-                    if fill[3] == 0 {
-                        continue;
-                    }
-                    self.pages[self.page].push(DrawOp::Rect {
-                        x: ox + x * s,
-                        y: top + y * s,
-                        w: (w * s).max(0.5),
-                        h: (h * s).max(0.5),
-                        color: [fill[0], fill[1], fill[2]],
-                    });
-                }
-                veil_ui::MermaidItem::Line {
-                    x1,
-                    y1,
-                    x2,
-                    y2,
-                    width,
-                    color,
-                } => {
-                    if color[3] == 0 {
-                        continue;
-                    }
-                    self.pages[self.page].push(DrawOp::Line {
-                        x1: ox + x1 * s,
-                        y1: top + y1 * s,
-                        x2: ox + x2 * s,
-                        y2: top + y2 * s,
-                        width: (width * s).max(0.3),
-                        color: [color[0], color[1], color[2]],
-                    });
-                }
-                veil_ui::MermaidItem::Text {
-                    x,
-                    y,
-                    size,
-                    text,
-                    color,
-                } => {
-                    if text.is_empty() {
-                        continue;
-                    }
-                    // 场景文本坐标按左上角记；PDF 文本 y 取基线。
-                    self.pages[self.page].push(DrawOp::Text(TextRun {
-                        x: ox + x * s,
-                        y: top + (y + size) * s,
-                        size: (size * s).max(4.0),
-                        text: text.clone(),
-                        bold: false,
-                        italic: false,
-                        underline: false,
-                        strike: false,
-                        highlight: None,
-                        color: *color,
-                    }));
-                }
-            }
-        }
+        let ox = self.geom.margin_x + ((self.max_w() - w) * 0.5).max(0.0);
+        self.pages[self.page].push(DrawOp::Image {
+            x: ox,
+            y: top,
+            w,
+            h,
+            id: idx,
+        });
         self.y = top + h + 6.0;
     }
 
@@ -1966,9 +1926,9 @@ pub fn layout_document(
     geom: PageGeom,
     opts: LayoutOpts,
     mut media: Option<&mut dyn MediaProvider>,
-    // Mermaid 矢量场景（键 = 块 id）：与屏幕/HTML 共用同一渲染入口；
+    // Mermaid 位图（键 = 块 id，300dpi）：与屏幕/HTML 共用同一渲染入口；
     // 未安装渲染器时为空，mermaid 块走既有代码块排版。
-    mermaid_scenes: &HashMap<BlockId, veil_ui::MermaidScene>,
+    mermaid_bitmaps: &HashMap<BlockId, veil_ui::MermaidBitmap>,
 ) -> DocLayout {
     let mut ctx = Ctx::new(metrics, geom);
     ctx.footnotes = collect_footnote_numbers(session);
@@ -1984,8 +1944,8 @@ pub fn layout_document(
                     .as_deref()
                     .is_some_and(|l| l.eq_ignore_ascii_case("mermaid"))
                 {
-                    if let Some(scene) = mermaid_scenes.get(&id) {
-                        ctx.mermaid(scene);
+                    if let Some(bm) = mermaid_bitmaps.get(&id) {
+                        ctx.mermaid_bitmap(bm);
                         continue;
                     }
                 }
@@ -3019,18 +2979,21 @@ mod tests {
         assert!(!doc.outline.is_empty(), "样例应有书签");
     }
 
-    /// Task 9：Mermaid 场景经同一矢量接口进 PDF（矩形/线段/文本），不再排源码块。
+    /// Task 9→4.2：Mermaid 位图（300dpi）直接嵌 PDF 图元（DrawOp::Image），
+    /// 不再排源码块；未提供位图（未安装渲染器）时保持既有代码块排版。
     #[test]
-    fn mermaid_scene_map_renders_vector_ops_instead_of_code_block() {
+    fn mermaid_bitmap_map_embeds_image_ops_instead_of_code_block() {
         let session = Session::open("```mermaid\ngraph TD\nA-->B\n```\n");
         let id = session.blocks()[0].0;
-        let mut scenes = HashMap::new();
-        scenes.insert(
+        // 300dpi 位图：200×100 px（对应 48×24 pt 版面尺寸）。
+        let mut bitmaps = HashMap::new();
+        bitmaps.insert(
             id,
-            veil_ui::MermaidScene::new(100, 50)
-                .rect(0.0, 0.0, 100.0, 50.0, [200, 220, 240, 255])
-                .line(5.0, 5.0, 95.0, 5.0, 1.0, [0, 0, 0, 255])
-                .text(6.0, 6.0, 8.0, "A", [0, 0, 0]),
+            veil_ui::MermaidBitmap {
+                rgba: std::sync::Arc::new(vec![180u8; 200 * 100 * 4]),
+                width: 200,
+                height: 100,
+            },
         );
         let doc = layout_document(
             &session,
@@ -3038,29 +3001,35 @@ mod tests {
             PageGeom::a4(20.0),
             LayoutOpts::default(),
             None,
-            &scenes,
+            &bitmaps,
         );
         let ops: Vec<&DrawOp> = doc.pages.iter().flat_map(|p| p.iter()).collect();
+        // 位图按 72/300 pt/px 布局：200px → 48pt 宽、100px → 24pt 高，居中于版心。
+        let img = ops
+            .iter()
+            .find_map(|op| match op {
+                DrawOp::Image { x, y, w, h, .. } => Some((*x, *y, *w, *h)),
+                _ => None,
+            })
+            .expect("位图应进 PDF 图元");
+        assert!((img.2 - 48.0).abs() < 0.01, "300dpi 位图应保持物理尺寸: {:?}", img);
+        assert!((img.3 - 24.0).abs() < 0.01, "300dpi 位图应保持物理尺寸: {:?}", img);
+        assert!(img.1 > 0.0);
         assert!(
-            ops.iter().any(|op| matches!(op, DrawOp::Rect { .. })),
-            "场景矩形应进 PDF"
-        );
-        assert!(
-            ops.iter().any(|op| matches!(op, DrawOp::Line { .. })),
-            "场景线段应进 PDF"
-        );
-        assert!(
-            ops.iter()
-                .any(|op| matches!(op, DrawOp::Text(t) if t.text == "A")),
-            "场景文本应进 PDF"
+            img.0 > 20.0 && img.0 < 575.28 - img.2,
+            "位图应水平居中于版心: {:?}",
+            img
         );
         assert!(
             !ops.iter()
                 .any(|op| matches!(op, DrawOp::Text(t) if t.text == "mermaid")),
-            "启用场景后不应再输出代码块语言标签"
+            "启用位图后不应再输出代码块语言标签"
         );
+        // 图片 XObject 侧应登记该 RGB 图（RGBA→RGB 转换后 w×h×3 字节）。
+        assert_eq!(doc.images.len(), 1, "位图应注册为图片资源");
+        assert_eq!(doc.images[0].rgb.len(), 200 * 100 * 3);
 
-        // 未提供场景（未安装渲染器）：保持既有代码块排版。
+        // 未提供位图（未安装渲染器）：保持既有代码块排版。
         let plain = layout_document(
             &session,
             &FakeMetrics,
@@ -3073,6 +3042,7 @@ mod tests {
         assert!(plain_ops
             .iter()
             .any(|op| matches!(op, DrawOp::Text(t) if t.text == "mermaid")));
+        assert!(plain.images.is_empty());
     }
 
     // ===== Task 4：PDF 导出缺陷回归 =====

@@ -20,9 +20,15 @@
 //! 选型标准：首帧延迟、二进制体积、沙箱与超时可控性、SVG 保真度、许可证。
 //! 评测完成前只保留接口，不锁定任何后端，也不宣称 Mermaid 已可渲染。
 
+use std::collections::HashMap;
+use std::sync::mpsc;
+use std::time::Instant;
+
+use veil_core::BlockId;
+
 use crate::geometry::{BASE_FONT_SIZE, BASE_LINE_HEIGHT};
 use crate::theme::{ExportStyle, Theme};
-use crate::view::{Frame, LayoutEngine};
+use crate::view::Frame;
 
 /// 渲染主题：只包含后端需要的颜色与度量（不暴露 UI 内部结构）。
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -35,6 +41,9 @@ pub struct MermaidTheme {
     pub font_size: f32,
     pub line_height: f32,
     pub dark: bool,
+    /// 正文无衬线字体族回退链：后端把它注入度量与 SVG `font-family`，
+    /// 保证图内文字与正文字体栈一致（`typography::SANS_FAMILIES`）。
+    pub families: &'static [&'static str],
 }
 
 impl MermaidTheme {
@@ -48,6 +57,7 @@ impl MermaidTheme {
             font_size: BASE_FONT_SIZE * scale,
             line_height: BASE_LINE_HEIGHT * scale,
             dark: theme.dark,
+            families: crate::tokens::typography::SANS_FAMILIES,
         }
     }
 
@@ -61,6 +71,7 @@ impl MermaidTheme {
             font_size: 11.0,
             line_height: 16.0,
             dark: style.dark,
+            families: crate::tokens::typography::SANS_FAMILIES,
         }
     }
 }
@@ -197,16 +208,52 @@ impl std::fmt::Display for MermaidError {
 }
 
 /// 后端中立渲染抽象：实现方只依赖本文件的数据类型，不接触 UI/导出主流程。
-pub trait MermaidRenderer {
+/// 继承 [`MermaidBitmapRenderer`]（自动获得 Send + Sync 上界）：屏幕位图 blit、
+/// 后台渲染 worker 与 HTML/PDF 导出共用同一实现对象。
+pub trait MermaidRenderer: MermaidBitmapRenderer {
     /// 把 Mermaid 源码渲染为矢量结果。返回 `Err` 时由界面展示错误并回退源码卡片。
     fn render(&self, source: &str, theme: &MermaidTheme)
         -> Result<MermaidDrawing, MermaidError>;
 }
 
+/// 位图渲染结果：不透明 RGBA（每像素 4 字节，行主序）+ 物理像素尺寸。
+/// `rgba` 用 `Arc` 包裹以便缓存层零拷贝命中（滚动重绘直绘位图）。
+#[derive(Clone)]
+pub struct MermaidBitmap {
+    pub rgba: std::sync::Arc<Vec<u8>>,
+    pub width: u32,
+    pub height: u32,
+}
+
+impl std::fmt::Debug for MermaidBitmap {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // 不打印像素数据：缓冲可达数十 MB，只输出尺寸与容量。
+        f.debug_struct("MermaidBitmap")
+            .field("width", &self.width)
+            .field("height", &self.height)
+            .field("len", &self.rgba.len())
+            .finish()
+    }
+}
+
+/// 位图渲染抽象：屏幕 blit 路径用（与 [`MermaidRenderer`] 并列，后端中立）。
+/// 实现方应缓存 SVG 与位图（按 `scale` 重栅格化），同一输入重复调用不得重布局。
+pub trait MermaidBitmapRenderer: Send + Sync {
+    /// `scale` 为栅格化倍率（设备 DPI）；`theme` 建议传逻辑度量快照
+    /// （如 `MermaidTheme::from_theme(&theme, 1.0)`），避免字号与倍率双重缩放。
+    fn render_bitmap(
+        &self,
+        source: &str,
+        theme: &MermaidTheme,
+        scale: f32,
+    ) -> Result<MermaidBitmap, MermaidError>;
+}
+
 /// 渲染器注册表：`None` = 未启用，全部走既有降级。
+/// `Arc` 持有：后台渲染 worker 需要 `'static` 的后端引用（请求自带克隆）。
 #[derive(Default)]
 pub struct MermaidRenderers {
-    renderer: Option<Box<dyn MermaidRenderer>>,
+    renderer: Option<std::sync::Arc<dyn MermaidRenderer>>,
 }
 
 impl MermaidRenderers {
@@ -214,7 +261,13 @@ impl MermaidRenderers {
         Self::default()
     }
 
+    /// 安装渲染器（获得所有权，内部转 `Arc` 供 worker 线程共享）。
     pub fn install(&mut self, renderer: Box<dyn MermaidRenderer>) {
+        self.renderer = Some(std::sync::Arc::from(renderer));
+    }
+
+    /// 安装共享渲染器（产品层已持有 `Arc`，如 `QuickJSRenderer::new()` 的返回值）。
+    pub fn install_shared(&mut self, renderer: std::sync::Arc<dyn MermaidRenderer>) {
         self.renderer = Some(renderer);
     }
 
@@ -224,6 +277,11 @@ impl MermaidRenderers {
 
     pub fn is_enabled(&self) -> bool {
         self.renderer.is_some()
+    }
+
+    /// 共享克隆：后台渲染 worker 的请求自带 `'static` 后端引用，跨线程执行。
+    pub fn arc(&self) -> Option<std::sync::Arc<dyn MermaidRenderer>> {
+        self.renderer.clone()
     }
 
     /// 当前渲染器（HTML/PDF 导出挂点需要借用它；未启用返回 None）。
@@ -248,6 +306,35 @@ pub fn is_empty_source(source: &str) -> bool {
         .lines()
         .map(str::trim)
         .any(|l| !l.is_empty() && !l.starts_with("%%"))
+}
+
+/// Tiny mermaid bundle 支持的图型（KEEP 集）：flowchart / sequence / pie。
+/// 其余图型（class/state/er/gantt…）不提交渲染，保持源码卡片（与未安装渲染器一致，
+/// 避免产出无图形的空结果）。
+pub fn mermaid_supported_source(source: &str) -> bool {
+    matches!(
+        veil_core::detect_type(source),
+        Some("flowchart" | "sequence" | "pie")
+    )
+}
+
+/// 引擎级错误前缀白名单（与 veil-mermaid worker 的错误消息口径一致）：
+/// 命中 = 引擎/基础设施问题（超时、引擎不可用、输出无效、worker 断线等）；
+/// 其余消息（QuickJS 抛出的 JS 解析异常等）是用户源码问题。
+/// 两者都按块记忆不重试；目前仅用于日志与将来错误卡分级。
+pub fn is_engine_failure(message: &str) -> bool {
+    const ENGINE_PREFIXES: [&str; 9] = [
+        "渲染超时",
+        "渲染引擎",
+        "Mermaid 渲染输出无效",
+        "Mermaid 源码为空",
+        "读取渲染结果",
+        "渲染未产出",
+        "QuickJS",
+        "DOM shim",
+        "bundle",
+    ];
+    ENGINE_PREFIXES.iter().any(|p| message.starts_with(p))
 }
 
 /// 场景 → SVG（后端未提供 SVG 时由 HTML 导出派生；所有文本经 XML 转义）。
@@ -469,94 +556,310 @@ fn xml_escape(s: &str) -> String {
     out
 }
 
-/// 把场景画到窗口帧：矩形/线段用 Frame 原语，文本走 UI 标签位图缓存。
-/// `origin` 为场景左上角屏幕坐标；场景坐标乘 `scale` 映射到物理像素。
-#[allow(clippy::too_many_arguments)] // 绘制入口参数天然多（与 paint_under_decor 同）
-pub(crate) fn paint_scene(
-    frame: &mut Frame,
-    labels: &mut crate::chrome::LabelCache,
-    engine: &mut LayoutEngine,
-    scene: &MermaidScene,
-    origin: (f32, f32),
-    scale: f32,
-    ui_scale: f32,
+// =============================================================================
+// 后台渲染调度（渲染不占 UI 帧：防抖合并提交，单 worker 串行执行，tick 收割）
+// =============================================================================
+
+/// 防抖窗口：击键 / 滚动 / resize 引发的重复提交在此窗口内合并为一次后台渲染。
+const JOB_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(280);
+/// 在途结果收割间隔：worker 无法主动唤醒事件循环，按此节奏 try_recv。
+const JOB_POLL: std::time::Duration = std::time::Duration::from_millis(30);
+
+/// 一次后台渲染请求：数据自持（renderer 克隆 + 快照），worker 线程零借用。
+pub(crate) struct MermaidJobRequest {
+    /// 提交时的渲染后端快照：install/clear 换代后旧请求照旧执行，结果按 epoch 丢弃。
+    pub(crate) renderer: std::sync::Arc<dyn MermaidRenderer>,
+    /// 后端代次：与请求同批提交，回包时与 App 当前值比对。
+    pub(crate) epoch: u32,
+    pub(crate) kind: MermaidJobKind,
+}
+
+/// 请求类别：L1 内嵌块（结果进位图缓存）与预览面板（结果回填单槽）。
+pub(crate) enum MermaidJobKind {
+    Block {
+        id: BlockId,
+        source: std::sync::Arc<str>,
+        /// 屏幕 1x 主题快照（字号不随 DPI，缩放全部由 fit 倍率承担，避免双重缩放）。
+        theme: MermaidTheme,
+        /// 目标物理像素框（版心宽 × 图片限高的提交时快照）。
+        fit_w: f32,
+        fit_h: f32,
+        theme_rev: u32,
+        session_rev: u32,
+    },
+    Preview {
+        title: String,
+        source: std::sync::Arc<str>,
+        theme: MermaidTheme,
+        fit_w: f32,
+        fit_h: f32,
+    },
+}
+
+/// 块渲染成功产物：位图 + 栅格化倍率 + 1x 场景尺寸（即位图缓存条目的全部原料）。
+pub(crate) struct MermaidBlockBitmap {
+    pub(crate) bitmap: MermaidBitmap,
+    /// 生成位图时的 fit 倍率（1x 场景尺寸 → 物理像素；resize 后据此判断是否重栅格化）。
+    pub(crate) k: f32,
+    pub(crate) scene_w: u32,
+    pub(crate) scene_h: u32,
+}
+
+impl MermaidBlockBitmap {
+    /// 当前目标框下的 fit 倍率（与 [`MermaidScene::fit`] 同口径）。
+    pub(crate) fn fit_scale(&self, max_w: f32, max_h: f32) -> f32 {
+        let w = self.scene_w.max(1) as f32;
+        let h = self.scene_h.max(1) as f32;
+        (max_w / w).min(max_h / h).max(0.01)
+    }
+
+    /// 当前目标框下的显示尺寸（物理像素）。
+    pub(crate) fn display_size(&self, max_w: f32, max_h: f32) -> (f32, f32) {
+        let s = self.fit_scale(max_w, max_h);
+        let w = self.scene_w.max(1) as f32;
+        let h = self.scene_h.max(1) as f32;
+        ((w * s).round().max(1.0), (h * s).round().max(1.0))
+    }
+
+    /// 显示尺寸的量化倍率（×100 取整）：与条目 `k` 比对判断是否需要重栅格化。
+    pub(crate) fn scale_bucket(k: f32) -> u32 {
+        (k * 100.0).round().max(0.0) as u32
+    }
+}
+
+/// worker 回包：块渲染 = [`MermaidBlockBitmap`]；预览 = 位图。
+pub(crate) enum MermaidJobOutcome {
+    Block {
+        epoch: u32,
+        id: BlockId,
+        theme_rev: u32,
+        session_rev: u32,
+        result: Result<MermaidBlockBitmap, MermaidError>,
+    },
+    Preview {
+        title: String,
+        result: Result<MermaidBitmap, MermaidError>,
+    },
+}
+
+/// 渲染管线（worker 线程执行）：`render` 得 1x 场景 → fit 出倍率 → 位图重栅格化。
+/// 两步共用后端 SVG 缓存：同一输入只做一次 JS 布局（Task 3.2「缓存命中直绘」）。
+fn render_job(
+    renderer: &dyn MermaidRenderer,
+    source: &str,
+    theme: &MermaidTheme,
+    fit_w: f32,
+    fit_h: f32,
+) -> Result<MermaidBlockBitmap, MermaidError> {
+    let drawing = renderer.render(source, theme)?;
+    let (dw, _dh) = drawing.scene.fit(fit_w, fit_h);
+    let k = dw / drawing.scene.width.max(1) as f32;
+    let bitmap = renderer.render_bitmap(source, theme, k)?;
+    Ok(MermaidBlockBitmap {
+        bitmap,
+        k,
+        scene_w: drawing.scene.width,
+        scene_h: drawing.scene.height,
+    })
+}
+
+/// 单 worker 线程主循环：串行消费请求（QuickJS 引擎生命周期钉在单线程内，串行即互斥）。
+/// 请求通道关闭（App 已丢弃）时退出线程。
+fn dispatch_loop(
+    rx: mpsc::Receiver<MermaidJobRequest>,
+    tx: mpsc::Sender<MermaidJobOutcome>,
 ) {
-    for item in &scene.items {
-        match item {
-            MermaidItem::Rect { x, y, w, h, fill } => {
-                if fill[3] == 0 {
-                    continue;
-                }
-                frame.fill_rect(
-                    (origin.0 + x * scale).round() as i32,
-                    (origin.1 + y * scale).round() as i32,
-                    (w * scale).max(1.0) as u32,
-                    (h * scale).max(1.0) as u32,
-                    *fill,
-                );
-            }
-            MermaidItem::Line {
-                x1,
-                y1,
-                x2,
-                y2,
-                width,
-                color,
-            } => {
-                if color[3] == 0 {
-                    continue;
-                }
-                draw_scene_line(
-                    frame,
-                    origin.0 + x1 * scale,
-                    origin.1 + y1 * scale,
-                    origin.0 + x2 * scale,
-                    origin.1 + y2 * scale,
-                    (width * scale).max(1.0),
-                    *color,
-                );
-            }
-            MermaidItem::Text {
-                x,
-                y,
-                text,
-                color,
-                ..
-            } => {
-                if text.is_empty() {
-                    continue;
-                }
-                if let Some(lab) = labels.get_or_insert(engine, text, *color, ui_scale) {
-                    frame.blit(
-                        &lab.pixels,
-                        lab.w,
-                        lab.h,
-                        (origin.0 + x * scale).round() as i32,
-                        (origin.1 + y * scale).round() as i32,
-                    );
-                }
-            }
+    while let Ok(req) = rx.recv() {
+        let outcome = match req.kind {
+            MermaidJobKind::Block {
+                id,
+                source,
+                theme,
+                fit_w,
+                fit_h,
+                theme_rev,
+                session_rev,
+            } => MermaidJobOutcome::Block {
+                epoch: req.epoch,
+                id,
+                theme_rev,
+                session_rev,
+                result: render_job(&*req.renderer, &source, &theme, fit_w, fit_h),
+            },
+            MermaidJobKind::Preview {
+                title,
+                source,
+                theme,
+                fit_w,
+                fit_h,
+            } => MermaidJobOutcome::Preview {
+                title,
+                result: render_job(&*req.renderer, &source, &theme, fit_w, fit_h)
+                    .map(|b| b.bitmap),
+            },
+        };
+        if tx.send(outcome).is_err() {
+            break; // 回包通道已断（App 已丢弃）：退出线程
         }
     }
 }
 
-/// 直线像素化：沿主轴逐点落 1×1 方块（场景以横竖线为主，等价于细矩形）。
-fn draw_scene_line(
-    frame: &mut Frame,
-    x1: f32,
-    y1: f32,
-    x2: f32,
-    y2: f32,
-    width: f32,
-    color: [u8; 4],
-) {
-    let steps = (x2 - x1).abs().max((y2 - y1).abs()).round().max(1.0) as i32;
-    let w = width.round().max(1.0) as u32;
-    for i in 0..=steps {
-        let t = i as f32 / steps as f32;
-        let x = x1 + (x2 - x1) * t;
-        let y = y1 + (y2 - y1) * t;
-        frame.fill_rect(x.round() as i32, y.round() as i32, w, w, color);
+/// 后台渲染调度器：App 主线程提交（防抖合并），单 worker 线程执行，tick 收割结果。
+/// 全部字段 owned（mpsc + Arc + 快照），随 App 一起只活在主线程；worker 只触碰请求。
+pub(crate) struct MermaidJobs {
+    pending: HashMap<BlockId, MermaidJobRequest>,
+    /// 预览单槽：同一时刻只渲染最后一次请求的面板。
+    preview: Option<MermaidJobRequest>,
+    /// 防抖到期时刻：最后一次提交后 `JOB_DEBOUNCE` 统一投递。
+    debounce_at: Option<Instant>,
+    /// 在途结果收割点：有任务在途时按 `JOB_POLL` 轮询，收齐即撤。
+    poll_at: Option<Instant>,
+    /// 已投递未收割的请求数。
+    in_flight: u32,
+    /// 后端代次：install/clear 时递增，回包按此丢弃旧后端结果。
+    epoch: u32,
+    /// 后端是否已拉起（懒启动：首个投递才创建线程）。
+    spawned: bool,
+    /// 请求通道发送端（App → worker）。
+    tx: Option<mpsc::Sender<MermaidJobRequest>>,
+    /// 请求通道接收端：随线程移入 dispatch_loop。
+    req_rx: Option<mpsc::Receiver<MermaidJobRequest>>,
+    /// 回包通道发送端（worker → App）：随线程移入 dispatch_loop。
+    out_tx: Option<mpsc::Sender<MermaidJobOutcome>>,
+    /// 回包通道接收端（App 收割结果）。
+    rx: Option<mpsc::Receiver<MermaidJobOutcome>>,
+}
+
+impl MermaidJobs {
+    pub(crate) fn new() -> Self {
+        let (tx, req_rx) = mpsc::channel::<MermaidJobRequest>();
+        let (out_tx, rx) = mpsc::channel::<MermaidJobOutcome>();
+        Self {
+            pending: HashMap::new(),
+            preview: None,
+            debounce_at: None,
+            poll_at: None,
+            in_flight: 0,
+            epoch: 0,
+            spawned: false,
+            tx: Some(tx),
+            req_rx: Some(req_rx),
+            out_tx: Some(out_tx),
+            rx: Some(rx),
+        }
+    }
+
+    /// 提交块渲染请求：同块覆盖旧快照（只渲染最新内容），并刷新防抖窗口。
+    pub(crate) fn submit_block(&mut self, req: MermaidJobRequest) {
+        let MermaidJobKind::Block { id, .. } = &req.kind else {
+            return;
+        };
+        self.pending.insert(*id, req);
+        self.debounce_at = Some(Instant::now() + JOB_DEBOUNCE);
+    }
+
+    /// 提交预览请求（覆盖旧请求：面板只展示最后一次点击的图）。
+    pub(crate) fn submit_preview(&mut self, req: MermaidJobRequest) {
+        if !matches!(req.kind, MermaidJobKind::Preview { .. }) {
+            return;
+        }
+        self.preview = Some(req);
+        self.debounce_at = Some(Instant::now() + JOB_DEBOUNCE);
+    }
+
+    /// 某块是否已有待投递请求（防重复提交）。
+    pub(crate) fn is_pending(&self, id: BlockId) -> bool {
+        self.pending.contains_key(&id)
+    }
+
+    /// 当前后端代次（提交时随请求盖章）。
+    pub(crate) fn epoch(&self) -> u32 {
+        self.epoch
+    }
+
+    /// 后端换代（install/clear）：丢弃待投递请求并递增代次，旧后端在途回包按代次丢弃。
+    pub(crate) fn clear(&mut self) {
+        self.pending.clear();
+        self.preview = None;
+        self.debounce_at = None;
+        self.epoch += 1;
+    }
+
+    /// 下一次需要唤醒事件循环的时刻（防抖到期 / 在途收割，取较早者）。
+    pub(crate) fn wake_at(&self) -> Option<Instant> {
+        match (self.debounce_at, self.poll_at) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
+    }
+
+    /// 防抖窗口是否已到（`now` 来自 tick 注入的时钟）。
+    pub(crate) fn debounce_due(&self, now: Instant) -> bool {
+        self.debounce_at.is_some_and(|t| now >= t)
+    }
+
+    /// 投递全部待渲染请求：拉起（或复用）worker 线程，登记收割点。
+    pub(crate) fn flush(&mut self, now: Instant) {
+        self.debounce_at = None;
+        let preview = self.preview.take();
+        let batch: Vec<MermaidJobRequest> = self.pending.drain().map(|(_, r)| r).collect();
+        if batch.is_empty() && preview.is_none() {
+            return;
+        }
+        // 懒启动：首次投递才拉起 worker（无 mermaid 块的会话零线程开销）。
+        if !self.spawned {
+            self.spawned = true;
+            let (Some(req_rx), Some(out_tx)) = (self.req_rx.take(), self.out_tx.take()) else {
+                return;
+            };
+            // 线程启动失败：请求就地丢弃（退回源码卡片降级），不 panic。
+            let _ = std::thread::Builder::new()
+                .name("mermaid-render".into())
+                .spawn(move || dispatch_loop(req_rx, out_tx));
+        }
+        let mut sent = 0u32;
+        for req in batch {
+            if self.send(req) {
+                sent += 1;
+            }
+        }
+        if let Some(p) = preview {
+            if self.send(p) {
+                sent += 1;
+            }
+        }
+        self.in_flight += sent;
+        if sent > 0 {
+            self.poll_at = Some(now + JOB_POLL);
+        }
+    }
+
+    fn send(&mut self, req: MermaidJobRequest) -> bool {
+        match &self.tx {
+            Some(tx) => tx.send(req).is_ok(),
+            None => false,
+        }
+    }
+
+    /// 非阻塞收割全部在途结果（无结果返回空Vec；收齐后撤掉轮询点）。
+    pub(crate) fn drain(&mut self) -> Vec<MermaidJobOutcome> {
+        let mut out = Vec::new();
+        if let Some(rx) = self.rx.as_ref() {
+            while let Ok(o) = rx.try_recv() {
+                self.in_flight = self.in_flight.saturating_sub(1);
+                out.push(o);
+            }
+        }
+        if self.in_flight == 0 {
+            self.poll_at = None;
+        }
+        out
+    }
+
+    /// 全部任务已结清（无待投递 / 无在途）：测试泵循环的退出条件。
+    #[cfg(test)]
+    pub(crate) fn idle(&self) -> bool {
+        self.pending.is_empty() && self.preview.is_none() && self.in_flight == 0
     }
 }
 
@@ -569,7 +872,7 @@ pub fn svg_of(drawing: &MermaidDrawing) -> Option<String> {
         .or_else(|| Some(scene_to_svg(&drawing.scene)))
 }
 
-/// 预览面板：压暗背景 + 居中矢量图 + 标题/关闭提示；失败时居中显示错误消息。
+/// 预览面板：压暗背景 + 居中位图 + 标题/关闭提示；渲染中显示占位、失败时居中显示错误消息。
 /// 纯视图态：不写文档、不动光标、不进撤销栈。
 pub(crate) fn paint_preview(app: &mut crate::app::App, frame: &mut Frame) {
     let (win_w, win_h) = app.win_size();
@@ -578,7 +881,8 @@ pub(crate) fn paint_preview(app: &mut crate::app::App, frame: &mut Frame) {
     let Some(pv) = app.ui_state.mermaid_preview.as_ref() else {
         return;
     };
-    let (title, drawing, error) = (pv.title.clone(), pv.drawing.clone(), pv.error.clone());
+    let (title, bitmap, error, loading) =
+        (pv.title.clone(), pv.bitmap.clone(), pv.error.clone(), pv.loading);
     let pad = (40.0 * scale).max(8.0);
     let title = crate::i18n::tf(crate::i18n::Key::MermaidPreviewTitle, &[&title]);
     let hint = crate::i18n::t(crate::i18n::Key::MermaidPreviewHint).to_string();
@@ -591,31 +895,26 @@ pub(crate) fn paint_preview(app: &mut crate::app::App, frame: &mut Frame) {
         let x = ((win_w as f32 - lab.w as f32) * 0.5).max(0.0) as i32;
         frame.blit(&lab.pixels, lab.w, lab.h, x, (pad * 0.4) as i32);
     }
-    match (drawing, error) {
-        (Some(drawing), _) => {
-            let scene = &drawing.scene;
-            let (dw, dh) = scene.fit(win_w as f32 - 2.0 * pad, win_h as f32 - 3.0 * pad);
-            let x = (win_w as f32 - dw) * 0.5;
-            let y = (win_h as f32 - dh) * 0.5;
-            frame.fill_rect(
-                x as i32 - 3,
-                y as i32 - 3,
-                dw as u32 + 6,
-                dh as u32 + 6,
-                [0, 0, 0, 160],
-            );
-            let s = dw / scene.width.max(1) as f32;
-            paint_scene(
-                frame,
-                &mut app.ui_state.chrome.labels,
-                &mut app.engine,
-                scene,
-                (x, y),
-                s,
-                scale,
-            );
+    match (bitmap, error, loading) {
+        // 位图已按提交时的目标框栅格化：居中 blit；窗口变小后等比缩小即时重绘。
+        (Some(bm), _, _) => {
+            let avail_w = (win_w as f32 - 2.0 * pad).max(1.0);
+            let avail_h = (win_h as f32 - 3.0 * pad).max(1.0);
+            let s = (avail_w / bm.width as f32)
+                .min(avail_h / bm.height as f32)
+                .min(1.0);
+            let dw = (bm.width as f32 * s).round().max(1.0) as u32;
+            let dh = (bm.height as f32 * s).round().max(1.0) as u32;
+            let x = ((win_w as f32 - dw as f32) * 0.5).round() as i32;
+            let y = ((win_h as f32 - dh as f32) * 0.5).round() as i32;
+            frame.fill_rect(x - 3, y - 3, dw + 6, dh + 6, [0, 0, 0, 160]);
+            if dw == bm.width && dh == bm.height {
+                frame.blit(&bm.rgba, bm.width, bm.height, x, y);
+            } else {
+                frame.blit_scaled(&bm.rgba, bm.width, bm.height, dw, dh, x, y);
+            }
         }
-        (None, Some(err)) => {
+        (None, Some(err), _) => {
             let msg = crate::i18n::tf(crate::i18n::Key::MermaidPreviewError, &[&err]);
             if let Some(lab) = app.ui_state.chrome.labels.get_or_insert(
                 &mut app.engine,
@@ -628,7 +927,21 @@ pub(crate) fn paint_preview(app: &mut crate::app::App, frame: &mut Frame) {
                 frame.blit(&lab.pixels, lab.w, lab.h, x, y);
             }
         }
-        (None, None) => {}
+        // 渲染中占位（后台 worker 执行期间面板不空白）。
+        (None, None, true) => {
+            let msg = crate::i18n::t(crate::i18n::Key::MermaidPreviewLoading).to_string();
+            if let Some(lab) = app
+                .ui_state
+                .chrome
+                .labels
+                .get_or_insert(&mut app.engine, &msg, [170, 170, 170], scale)
+            {
+                let x = ((win_w as f32 - lab.w as f32) * 0.5).max(0.0) as i32;
+                let y = ((win_h as f32 - lab.h as f32) * 0.5).max(0.0) as i32;
+                frame.blit(&lab.pixels, lab.w, lab.h, x, y);
+            }
+        }
+        (None, None, false) => {}
     }
     if let Some(lab) = app
         .ui_state
@@ -642,12 +955,15 @@ pub(crate) fn paint_preview(app: &mut crate::app::App, frame: &mut Frame) {
     }
 }
 
-/// 预览面板状态：成功时持有矢量结果，失败时持有可见错误消息。
-#[derive(Clone, Debug, PartialEq)]
+/// 预览面板状态：成功时持有位图（后台渲染完成），失败时持有可见错误消息，
+/// 渲染中为 `loading`（占位文案）。
+#[derive(Clone, Debug)]
 pub(crate) struct MermaidPreview {
     pub(crate) title: String,
-    pub(crate) drawing: Option<MermaidDrawing>,
+    pub(crate) bitmap: Option<MermaidBitmap>,
     pub(crate) error: Option<String>,
+    /// true = 后台渲染尚未回包。
+    pub(crate) loading: bool,
 }
 
 #[cfg(test)]
@@ -697,6 +1013,20 @@ mod tests {
     #[test]
     fn registry_disabled_returns_none_and_enabled_returns_drawing() {
         struct Fake;
+        impl MermaidBitmapRenderer for Fake {
+            fn render_bitmap(
+                &self,
+                _source: &str,
+                _theme: &MermaidTheme,
+                _scale: f32,
+            ) -> Result<MermaidBitmap, MermaidError> {
+                Ok(MermaidBitmap {
+                    rgba: std::sync::Arc::new(vec![0; 120 * 60 * 4]),
+                    width: 120,
+                    height: 60,
+                })
+            }
+        }
         impl MermaidRenderer for Fake {
             fn render(
                 &self,
@@ -720,8 +1050,103 @@ mod tests {
             .expect("已安装应有结果")
             .expect("假渲染器应成功");
         assert_eq!(got.scene.width, 120);
+        // arc() 克隆给 worker 线程：独立计数，原注册表仍可用。
+        assert!(r.arc().is_some());
+        assert!(r.renderer().is_some());
         r.clear();
         assert!(!r.is_enabled());
+        assert!(r.arc().is_none());
+    }
+
+    #[test]
+    fn supported_source_covers_tiny_bundle_keep_set_only() {
+        assert!(mermaid_supported_source("flowchart TD\nA-->B"));
+        assert!(mermaid_supported_source("graph LR\nA-->B"));
+        assert!(mermaid_supported_source("%% 注释\nsequenceDiagram\nA->>B: 你好"));
+        assert!(mermaid_supported_source("pie title 销量\n\"A\": 40"));
+        // Tiny bundle 未打包的图型：不渲染（保持源码卡片）。
+        assert!(!mermaid_supported_source("classDiagram\nA <|-- B"));
+        assert!(!mermaid_supported_source("stateDiagram-v2\n[*] --> A"));
+        assert!(!mermaid_supported_source("gantt\n无"));
+        assert!(!mermaid_supported_source(""));
+    }
+
+    #[test]
+    fn engine_failure_whitelist_matches_infra_only_messages() {
+        assert!(is_engine_failure("渲染超时"));
+        assert!(is_engine_failure("渲染引擎不可用"));
+        assert!(is_engine_failure("渲染引擎初始化失败：boom"));
+        assert!(is_engine_failure("Mermaid 渲染输出无效"));
+        assert!(is_engine_failure("QuickJS 运行时错误：x"));
+        assert!(is_engine_failure("bundle 加载失败"));
+        // 用户源码问题（JS 解析异常原样字符串）不属于引擎失败。
+        assert!(!is_engine_failure("Parse error on line 2: ..."));
+        assert!(!is_engine_failure("Diagram 变量未定义"));
+    }
+
+    #[test]
+    fn jobs_debounce_merges_and_clear_bumps_epoch() {
+        let theme = MermaidTheme::from_export(&ExportStyle::default());
+        let mut jobs = MermaidJobs::new();
+        let req = |id: BlockId| MermaidJobRequest {
+            renderer: request_recorder_renderer(),
+            epoch: 0,
+            kind: MermaidJobKind::Block {
+                id,
+                source: std::sync::Arc::from("flowchart TD\nA-->B"),
+                theme: theme.clone(),
+                fit_w: 600.0,
+                fit_h: 400.0,
+                theme_rev: 0,
+                session_rev: 0,
+            },
+        };
+        let a_id = BlockId(1);
+        let b_id = BlockId(2);
+        assert!(jobs.idle());
+        jobs.submit_block(req(a_id));
+        assert!(jobs.is_pending(a_id));
+        assert!(!jobs.is_pending(b_id));
+        let first = jobs.wake_at().expect("提交后应有防抖期限");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        jobs.submit_block(req(a_id)); // 同块覆盖旧快照
+        jobs.submit_block(req(b_id));
+        assert!(
+            jobs.wake_at().expect("覆盖提交应刷新期限") > first,
+            "防抖窗口应被刷新"
+        );
+        assert_eq!(jobs.epoch(), 0);
+        jobs.clear();
+        assert!(!jobs.is_pending(a_id));
+        assert!(!jobs.is_pending(b_id));
+        assert_eq!(jobs.epoch(), 1, "换代应递增代次");
+        assert!(jobs.wake_at().is_none(), "换代后不应再有防抖期限");
+        assert!(jobs.idle());
+    }
+
+    /// 最小渲染器替身（调度器测试不真正执行渲染）。
+    fn request_recorder_renderer() -> std::sync::Arc<dyn MermaidRenderer> {
+        struct Fake;
+        impl MermaidBitmapRenderer for Fake {
+            fn render_bitmap(
+                &self,
+                _s: &str,
+                _t: &MermaidTheme,
+                _sc: f32,
+            ) -> Result<MermaidBitmap, MermaidError> {
+                Err(MermaidError::new("未执行"))
+            }
+        }
+        impl MermaidRenderer for Fake {
+            fn render(
+                &self,
+                _s: &str,
+                _t: &MermaidTheme,
+            ) -> Result<MermaidDrawing, MermaidError> {
+                Err(MermaidError::new("未执行"))
+            }
+        }
+        std::sync::Arc::new(Fake)
     }
 
     #[test]

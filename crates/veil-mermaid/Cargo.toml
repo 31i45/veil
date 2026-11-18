@@ -1,0 +1,16 @@
+[package]
+name = "veil-mermaid"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+veil-ui = { path = "../veil-ui" }
+# QuickJS-ng 嵌入（spike 3 验证路径）：所需 API（Runtime/Context/Module/Function）
+# 均在 core，默认 features 即够，不引入 classes/loader/bindgen。
+rquickjs = "0.9"
+# SVG → RGBA 栅格化（spike 实测体积 +2.3 MiB；fontdb 全局缓存后 parse ≈1ms）。
+resvg = "0.47"
+usvg = "0.47"
+# 文本度量注入（shim 的 __measureTextRaw 桥）：与 veil-ui 同版本，FontSystem
+# 在 worker 线程内持有、不跨线程。
+cosmic-text = "0.19"

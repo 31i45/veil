@@ -131,7 +131,7 @@ Measured on release build, probe-serialized; performance rows re-verified 2026-1
 | Keystroke→commit p95 on 100 K-word doc | ≤ 16 ms | 1.297 ms / 1.796 ms (`perf_keystroke_path` 5,005 blocks / `perf_keystroke_10k_blocks` 10,500 blocks; same machine, re-measured 2026-11-15; previous record 6.781 / 12.379) ✅ |
 | Resident memory, 100 K-word doc (private working set) | ≤ 150 MB | 40.76 MB (2026-11-05) |
 | Installed size — code + data (non-icon) | ≤ 6 MiB (Phase A baseline; superseded by the Wave 3/4 PDF export gate allowance) | 9,880,899 B (exe minus 89,277 B icons: `veil.ico` 46,688 + `veil-doc.ico` 42,589; 2026-11-17) |
-| Installed size — total single-file `veil.exe` | ≤ 10 MiB = 10,485,760 B (Wave 4 authorization; every increment must be recorded) | 9,970,176 B ≈ 9.51 MiB (local build, pinned toolchain; +2,208,768 B vs v1.7.0 7,761,408 B; margin 515,584 B). The published v1.8.0 asset built on CI is 9,973,248 B |
+| Installed size — total single-file `veil.exe` | ≤ 16 MiB = 16,777,216 B with `mermaid-render` (v1.9 authorization; feature off returns to ≤ 10 MiB; every increment must be recorded) | 14,683,136 B ≈ 14.00 MiB (local release build with `mermaid-render`, pinned toolchain; +4,712,960 B vs v1.8.0 9,970,176 B: QuickJS-ng + resvg + embedded Tiny mermaid bundle 1,720,018 B; 2026-11-18). Feature off: 10,016,256 B ≈ 9.55 MiB (+46,080 B vs v1.8.0, Mermaid job scheduler + settings plumbing) |
 | `veil-core` unit + property tests | ≥ 80 | 343 |
 | E2E assertions | ≥ 20 | 41 (3 e2e scenarios: open→save→reopen, table+image paste, find/replace→crash recovery→self-clean) ✅ |
 | Markdown roundtrip (no edits: output == input bytes; byte comparison) | 100% | 100% |
@@ -140,7 +140,7 @@ Measured on release build, probe-serialized; performance rows re-verified 2026-1
 | GFM extension conformance (Tables / TaskList / Strikethrough; by test cases; dimension A / C / D) | — | A 23/23 · C 23/23 · D 23/23 ✅; B_CANON 12/23 (11 autolink cases observed only) |
 | `veil-core` GUI/async runtime deps | 0 | 0 |
 | `veil-ui` + `veil` external direct deps (`cargo tree --depth 1`, distinct crate names) | ≤ 8 (pre-PDF baseline; superseded by the Wave 3 authorization for `pdf-writer` + `subsetter` + `ttf-parser`, and by v1.8's `regex`) | 17 (8 in `veil-ui` + 9 in `veil`) |
-| Workspace transitive deps (distinct crate names, normal edges incl. the three workspace members) | ≤ 200 | 125 |
+| Workspace transitive deps (distinct crate names, normal edges incl. the three workspace members) | ≤ 240 with `mermaid-render` (v1.9 authorization; feature off stays ≤ 200) | 153 with `mermaid-render` / 125 without (2026-11-17, `cargo tree -p veil --edges normal --prefix none`) |
 
 ## Same-machine Comparison (P2 public baseline, 2026-10-30)
 

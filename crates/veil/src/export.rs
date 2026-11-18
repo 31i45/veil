@@ -1906,6 +1906,16 @@ mod tests {
     /// Task 9：安装渲染器后 mermaid 块输出内嵌 SVG（后端 SVG 经清理）；
     /// 未安装时保持既有代码块输出。
     struct FakeMermaidSvg;
+    impl veil_ui::MermaidBitmapRenderer for FakeMermaidSvg {
+        fn render_bitmap(
+            &self,
+            _s: &str,
+            _t: &veil_ui::MermaidTheme,
+            _sc: f32,
+        ) -> Result<veil_ui::MermaidBitmap, veil_ui::MermaidError> {
+            Err(veil_ui::MermaidError::new("位图路径不在导出流程中使用"))
+        }
+    }
     impl veil_ui::MermaidRenderer for FakeMermaidSvg {
         fn render(
             &self,
@@ -1920,6 +1930,16 @@ mod tests {
     }
 
     struct FakeMermaidSceneOnly;
+    impl veil_ui::MermaidBitmapRenderer for FakeMermaidSceneOnly {
+        fn render_bitmap(
+            &self,
+            _s: &str,
+            _t: &veil_ui::MermaidTheme,
+            _sc: f32,
+        ) -> Result<veil_ui::MermaidBitmap, veil_ui::MermaidError> {
+            Err(veil_ui::MermaidError::new("位图路径不在导出流程中使用"))
+        }
+    }
     impl veil_ui::MermaidRenderer for FakeMermaidSceneOnly {
         fn render(
             &self,
@@ -1950,6 +1970,23 @@ mod tests {
         let derived = html_of_with_mermaid(&s, &style, &font(), Some(&FakeMermaidSceneOnly));
         assert!(derived.contains("<svg xmlns="), "{derived}");
         assert!(derived.contains("<rect x=\"1.0\""), "场景派生 SVG: {derived}");
+    }
+
+    /// Task 4.1：真实 QuickJS 后端（`mermaid-render` feature）端到端——flowchart
+    /// 导出件含 `<svg>`/`<text>`，且不含脚本/foreignObject（与屏幕同一清理口径）。
+    #[cfg(feature = "mermaid-render")]
+    #[test]
+    fn quickjs_backend_exports_sanitized_flowchart_svg() {
+        let s = Session::open("```mermaid\nflowchart TD\n    A[开始] --> B{有效?}\n```\n");
+        let renderer = veil_mermaid::QuickJSRenderer::new();
+        let html = html_of_with_mermaid(&s, &ExportStyle::default(), &font(), Some(&*renderer));
+        assert!(html.contains("<figure class=\"mermaid\">"), "{html}");
+        let lower = html.to_ascii_lowercase();
+        assert!(lower.contains("<svg"), "{html}");
+        assert!(lower.contains("<text"), "图内文本应内嵌: {html}");
+        assert!(!lower.contains("<script"), "不得含脚本: {html}");
+        assert!(!lower.contains("foreignobject"), "不得含外部对象: {html}");
+        assert!(!lower.contains("flowchart td"), "启用后不再输出源码块: {html}");
     }
 
     #[test]

@@ -402,14 +402,15 @@ fn build_print_layout(session: &mut PrintSession) -> Result<PrintLayout, String>
         page_numbers: cfg.page_numbers,
     };
     let mut media = PdfMedia::new(session.document_dir(), Some(crate::math_renderer()));
-    let scenes = session.mermaid_scenes();
+    // Mermaid：与屏幕共用渲染入口，300dpi 位图进版面（未启用时为空，走源码块）。
+    let mermaid_bitmaps = session.mermaid_bitmaps();
     let layout = layout_document(
         session.session(),
         &metrics,
         geom,
         opts,
         Some(&mut media),
-        &scenes,
+        &mermaid_bitmaps,
     );
     if layout.pages.is_empty() {
         return Err(t(Key::PrintErrNoPrintablePages).into());
@@ -1012,15 +1013,15 @@ fn try_native_pdf(target: &std::path::Path, session: &mut PrintSession) -> Resul
     let base_dir = session.document_dir();
     let mut media = PdfMedia::new(base_dir, Some(crate::math_renderer()));
 
-    // Mermaid：与屏幕共用渲染入口，矢量场景直接进版面（未启用时为空，走源码块）。
-    let scenes = session.mermaid_scenes();
+    // Mermaid：与屏幕共用渲染入口，300dpi 位图进版面（未启用时为空，走源码块）。
+    let mermaid_bitmaps = session.mermaid_bitmaps();
     let layout = layout_document(
         session.session(),
         &metrics,
         geom,
         opts,
         Some(&mut media),
-        &scenes,
+        &mermaid_bitmaps,
     );
 
     if layout.pages.is_empty() {

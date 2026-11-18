@@ -219,6 +219,7 @@ keys! {
     MermaidPreviewTitle => "mermaid.preview.title", "Mermaid 预览 — {}";
     MermaidPreviewHint => "mermaid.preview.hint", "Esc 或点击任意处关闭";
     MermaidPreviewError => "mermaid.preview.error", "Mermaid 渲染失败：{}";
+    MermaidPreviewLoading => "mermaid.preview.loading", "正在渲染 Mermaid 图…";
 
     // ---- 正文降级提示 ----
     BlockOversizeNotice => "doc.block_oversize", "该块约 {} MB，超出单块渲染上限，后续内容未渲染；源码完整保留";
@@ -528,6 +529,7 @@ keys! {
     SettingsFontMono => "settings.font_mono", "等宽";
     SettingsSmoothScroll => "settings.smooth_scroll", "平滑滚动";
     SettingsAllowRemoteImages => "settings.allow_remote_images", "允许远程图片";
+    SettingsMermaidRender => "settings.mermaid_render", "Mermaid 图渲染";
     SettingsBlockRemoteImages => "settings.block_remote_images", "阻止远程图片";
     SettingsWindowGeom => "settings.window_geom", "上次窗口几何";
     SettingsWindowGeomNone => "settings.window_geom_none", "（未记录）";

@@ -2180,38 +2180,39 @@ impl App {
                 };
                 match action {
                     CtxAction::MermaidPreview => {
-                        // 已启用渲染器：应用内预览面板展示同一矢量结果；
+                        // 已启用渲染器：后台渲染完成后应用内面板展示位图（渲染中显示占位）；
                         // 未启用：保持既有 mermaid.live 在线预览（降级不变）。
-                        let theme = crate::view::mermaid::MermaidTheme::from_theme(
-                            &self.input_state.theme,
-                            self.input_state.scale,
-                        );
-                        let title = veil_core::detect_type(&body).unwrap_or("mermaid");
-                        match self.mermaid.render(&body, &theme) {
-                            Some(Ok(drawing)) => {
-                                self.ui_state.mermaid_preview =
-                                    Some(crate::view::mermaid::MermaidPreview {
-                                        title: title.to_string(),
-                                        drawing: Some(drawing),
-                                        error: None,
-                                    });
-                                self.request_redraw();
-                            }
-                            Some(Err(e)) => {
-                                // 错误可见：面板内直接展示后端消息，不静默吞掉。
-                                self.ui_state.mermaid_preview =
-                                    Some(crate::view::mermaid::MermaidPreview {
-                                        title: title.to_string(),
-                                        drawing: None,
-                                        error: Some(e.message),
-                                    });
-                                self.request_redraw();
-                            }
-                            None => {
-                                let url = veil_core::mermaid_live_url(&body);
-                                let _ = self.ports.url_opener.open_url(&url);
-                            }
-                        }
+                        let Some(renderer) = self.mermaid.arc() else {
+                            let url = veil_core::mermaid_live_url(&body);
+                            let _ = self.ports.url_opener.open_url(&url);
+                            return;
+                        };
+                        let title = veil_core::detect_type(&body).unwrap_or("mermaid").to_string();
+                        let (win_w, win_h) = self.win_size();
+                        let pad = (40.0 * self.input_state.scale).max(8.0);
+                        // 先开面板（loading 占位），结果由 tick 收割回包后填充。
+                        self.ui_state.mermaid_preview =
+                            Some(crate::view::mermaid::MermaidPreview {
+                                title: title.clone(),
+                                bitmap: None,
+                                error: None,
+                                loading: true,
+                            });
+                        self.mermaid_jobs.submit_preview(crate::view::mermaid::MermaidJobRequest {
+                            renderer,
+                            epoch: self.mermaid_jobs.epoch(),
+                            kind: crate::view::mermaid::MermaidJobKind::Preview {
+                                title,
+                                source: std::sync::Arc::from(body.as_str()),
+                                theme: crate::view::mermaid::MermaidTheme::from_theme(
+                                    &self.input_state.theme,
+                                    1.0,
+                                ),
+                                fit_w: (win_w as f32 - 2.0 * pad).max(1.0),
+                                fit_h: (win_h as f32 - 3.0 * pad).max(1.0),
+                            },
+                        });
+                        self.request_redraw();
                     }
                     CtxAction::MermaidCopySource => {
                         self.ports.clipboard.set(&body);
@@ -3156,6 +3157,15 @@ impl App {
         // 4) 文档字体族/字号/行高/制表符 + 主题配色：统一由主题刷新入口
         //    递增代次、重排可见块并重算几何（base_key 同时含 typography/theme）。
         self.refresh_theme_visuals();
+        // 5) Mermaid 渲染开关（Task 3.2 设置项）：按配置装载/卸载后端。
+        //    install/clear 内部清位图缓存与待渲染请求并重排，无需重启。
+        if self.config.mermaid_render {
+            if !self.mermaid.is_enabled() {
+                self.install_mermaid_from_factory();
+            }
+        } else if self.mermaid.is_enabled() {
+            self.clear_mermaid_renderer();
+        }
         self.set_ime_area();
         // 成功/失败提示由 resolve_settings 按落盘结果决定，这里不写 notice。
     }

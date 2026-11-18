@@ -30,7 +30,7 @@ use crate::theme::{
     WindowGeom,
 };
 use crate::view::{
-    quick_open, search, Cache, Frame, History, LayoutEngine, Outline, QuickOpen, Revs, Search,
+    quick_open, search, Cache, Frame, History, LayoutEngine, Memo, Outline, QuickOpen, Revs, Search,
 };
 
 // 各域 impl App 的注册由 lib.rs 的模块声明承担（同 crate 内 impl 自动链接）。
@@ -52,6 +52,25 @@ const CURSOR_BLINK: Duration = Duration::from_millis(600);
 /// 状态栏提示存活时长：同一文本展示满该时长即自动消退（含错误提示，
 /// 避免释放后被永久占用）；新提示写入后重新计时。
 const NOTICE_TTL: Duration = Duration::from_secs(6);
+
+/// Mermaid 渲染后端工厂（进程级）：产品层在 `run` 前注册一次；App 按设置在
+/// 启动与设置变更时调用。返回 `None` = 本构建无后端（feature 关闭）或初始化失败。
+pub type MermaidBackendFactory = fn() -> Option<Arc<dyn crate::view::mermaid::MermaidRenderer>>;
+
+static MERMAID_BACKEND_FACTORY: std::sync::OnceLock<MermaidBackendFactory> =
+    std::sync::OnceLock::new();
+
+/// 注册 Mermaid 渲染后端工厂（Task 3.1）。重复注册以首次为准，返回是否注册成功。
+/// 为什么全局注册而非走 `Ports`：`Ports` 的字段集合被测试与既有嵌入方字面量构造
+/// 锁定，后端属于「可选能力」而非必需端口，进程级工厂不扩大 `Ports` 面。
+pub fn set_mermaid_backend_factory(factory: MermaidBackendFactory) -> bool {
+    MERMAID_BACKEND_FACTORY.set(factory).is_ok()
+}
+
+/// 当前注册的工厂（App 启动/设置变更时装载后端用；未注册返回 None）。
+pub(crate) fn mermaid_backend_factory() -> Option<MermaidBackendFactory> {
+    MERMAID_BACKEND_FACTORY.get().copied()
+}
 
 /// 系统剪贴板抽象：实现由产品层（veil）注入，本层不依赖具体剪贴板库（INSTANCE §6）。
 pub trait Clipboard {
@@ -720,6 +739,8 @@ pub(crate) struct App {
     pub(crate) cache: Cache,
     /// Mermaid 渲染后端注册表：默认为空（保持 v0 源码卡片降级）。
     pub(crate) mermaid: crate::view::mermaid::MermaidRenderers,
+    /// Mermaid 后台渲染调度器（防抖提交 + worker 收割；渲染不占 UI 帧）。
+    pub(crate) mermaid_jobs: crate::view::mermaid::MermaidJobs,
     pub(crate) input_state: InputState,
     /// 11 个外部注入的端口（Clipboard / FileStore / MathRenderer / ImageLoader /
     /// AssetStore / Exporter / FileDialog / FileWatcher / ConfigStore / SystemTheme /
@@ -944,6 +965,7 @@ impl App {
             index: BlockIndex::default(),
             cache,
             mermaid: crate::view::mermaid::MermaidRenderers::new(),
+            mermaid_jobs: crate::view::mermaid::MermaidJobs::new(),
             callouts,
             input_state: InputState {
                 revs: Revs::default(),
@@ -982,6 +1004,11 @@ impl App {
         app.engine.set_syntax_colors(app.input_state.theme.syntax);
         app.engine.set_link_color(app.input_state.theme.link);
         app.engine.set_muted_color(app.input_state.theme.muted);
+        // Mermaid 渲染后端（Task 3.1）：按配置从进程级工厂装载（默认开）。
+        // 工厂未注册（测试/无后端构建）或初始化失败时保持源码卡片降级。
+        if app.config.mermaid_render {
+            app.install_mermaid_from_factory();
+        }
         // 正文排版（字号/行高/字体族）：必须在首次排版前设置；缓存此时为空，无需失效。
         app.engine.set_doc_typography(
             app.config.doc_font_size,
@@ -1199,6 +1226,100 @@ impl App {
         self.request_redraw();
     }
 
+    /// 收割后台 Mermaid 渲染结果并按需刷新（tick 调用）：位图落地后重排可见块，
+    /// 防抖到期时统一投递待渲染请求（渲染不占 UI 帧，Task 3.2）。
+    pub(crate) fn poll_mermaid_jobs(&mut self, now: Instant) {
+        let mut dirty = false;
+        for outcome in self.mermaid_jobs.drain() {
+            dirty |= self.apply_mermaid_outcome(outcome);
+        }
+        if dirty {
+            // 位图到达/失败记忆变更 → 块高与可见性可能变化：走数学块同款刷新链。
+            self.refresh_index();
+            self.ensure_layouts_visible();
+            self.ensure_math_visible();
+            self.ensure_tables_visible();
+            self.recompute_geometry();
+            self.request_redraw();
+        }
+        if self.mermaid_jobs.debounce_due(now) {
+            self.mermaid_jobs.flush(now);
+        }
+    }
+
+    /// 应用一次渲染结果：块位图进缓存（键失配/换代/块已删的陈旧回包丢弃），
+    /// 预览回包填充面板。返回 true 表示块缓存变化（需要重排几何）。
+    fn apply_mermaid_outcome(&mut self, outcome: crate::view::mermaid::MermaidJobOutcome) -> bool {
+        match outcome {
+            crate::view::mermaid::MermaidJobOutcome::Block {
+                epoch,
+                id,
+                theme_rev,
+                session_rev,
+                result,
+            } => {
+                // 陈旧回包丢弃：后端已换代 / 主题或会话已切换 / 块已删除或重解析。
+                if epoch != self.mermaid_jobs.epoch()
+                    || theme_rev != self.input_state.revs.theme
+                    || session_rev != self.input_state.revs.session
+                    || !self.editor.session().contains_block(id)
+                {
+                    return false;
+                }
+                match result {
+                    Ok(b) => {
+                        self.cache.mermaid_bitmaps.insert(
+                            id,
+                            Memo {
+                                key: crate::view::cache::MermaidBitmapKey {
+                                    block: id,
+                                    theme_rev,
+                                    session_rev,
+                                },
+                                value: b,
+                            },
+                        );
+                    }
+                    Err(e) => {
+                        if crate::view::mermaid::is_engine_failure(&e.message) {
+                            eprintln!("Mermaid 渲染引擎失败（降级为源码卡片）: {}", e.message);
+                        } else {
+                            eprintln!("Mermaid 源码解析失败（降级为源码卡片）: {}", e.message);
+                        }
+                        self.cache.mermaid_bitmap_failed.insert(
+                            id,
+                            Memo {
+                                key: crate::view::cache::MermaidBitmapFailKey {
+                                    block: id,
+                                    theme_rev,
+                                    session_rev,
+                                },
+                                value: e.message,
+                            },
+                        );
+                    }
+                }
+                true
+            }
+            crate::view::mermaid::MermaidJobOutcome::Preview { title, result } => {
+                // 面板仍展示同一张图且尚未回包时才填充（用户可能已关闭或切换预览）。
+                let Some(pv) = self.ui_state.mermaid_preview.as_mut() else {
+                    return false;
+                };
+                if pv.title != title || !pv.loading {
+                    return false;
+                }
+                pv.loading = false;
+                match result {
+                    Ok(bm) => pv.bitmap = Some(bm),
+                    Err(e) => pv.error = Some(e.message),
+                }
+                self.request_redraw();
+                false
+            }
+        }
+    }
+
     pub(crate) fn win_size(&self) -> (u32, u32) {
         // 打印中：「窗口」即打印页帧（无菜单栏/状态栏），render() 产出整页帧
         if let Some(p) = &self.window_state.print {
@@ -1373,6 +1494,7 @@ impl App {
         self.poll_external();
         self.poll_system_theme(now);
         self.poll_remote_images();
+        self.poll_mermaid_jobs(now);
         // 只读浏览版本历史期间冻结所有持久化副作用：浏览不得改变文档字节，
         // 也不得在预览暂存实时编辑器时触发自动保存/恢复写盘。
         if self.ui_state.history.open {
@@ -1919,6 +2041,10 @@ impl App {
         if !self.cache.remote_pending.is_empty() {
             let remote_at = now + REMOTE_POLL;
             next = Some(next.map_or(remote_at, |t| t.min(remote_at)));
+        }
+        // Mermaid 后台渲染：防抖到期投递 / 在途结果收割（空闲时不产生周期唤醒）。
+        if let Some(at) = self.mermaid_jobs.wake_at() {
+            next = Some(next.map_or(at, |t| t.min(at)));
         }
         // 光标闪烁：以「最近一次翻转/活跃重置」时刻为基准算下一次到期点。
         // 若改用 now + CURSOR_BLINK，活跃信号（note_caret_activity）刚重置的周期

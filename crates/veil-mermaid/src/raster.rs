@@ -42,8 +42,8 @@ pub(crate) fn rasterize(svg: &str, scale: f32, bg: [u8; 3]) -> Result<MermaidBit
     let mut pixmap =
         resvg::tiny_skia::Pixmap::new(w, h).ok_or_else(|| MermaidError::new("Mermaid 位图分配失败"))?;
     // 预填不透明背景（逐像素写比 fill_rect 通用；背景色随主题）。
-    for px in pixmap.data_mut().chunks_exact_mut(4) {
-        px.copy_from_slice(&[bg[0], bg[1], bg[2], 255]);
+    for px in pixmap.data_mut().as_chunks_mut::<4>().0 {
+        *px = [bg[0], bg[1], bg[2], 255];
     }
     resvg::render(
         &tree,

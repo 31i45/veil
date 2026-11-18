@@ -2,7 +2,7 @@
 
 Veil 版本迭代记录。每个版本的详细修复清单见对应 git tag 的 commit log。
 
-## v1.9.0 — 2026-11-17
+## v1.9.0 — 2026-11-18
 
 Mermaid L1 内嵌渲染（QuickJS-ng 内嵌官方 Tiny mermaid + resvg 栅格化，路线 A）。
 
@@ -12,6 +12,7 @@ Mermaid L1 内嵌渲染（QuickJS-ng 内嵌官方 Tiny mermaid + resvg 栅格化
 - 红线更新（v1.9 授权）：exe ≤16 MiB（实测 14,683,136 B ≈ 14.00 MiB，`mermaid-render` 开）、workspace 依赖 ≤240（实测 153）；feature 关闭回落原口径（10,016,256 B ≈ 9.55 MiB / 125 包）
 
 ### Notes
+- 发布：workspace 版本 1.9.0，tag `v1.9.0`；GitHub Actions `release.yml` 以 `cargo build --release -p veil --features mermaid-render` 构建并上传 `veil.exe`
 - spike 实测与结论见 `spikes/quickjs-mermaid-spike/RESULTS.md`（断言三例 PASS、引擎冷启字节码路径 58ms、体积增量 4.93 MiB）
 - `mermaid-render` cargo feature 可整体裁掉渲染栈（依赖 125 包、exe 回 ≤10 MiB 口径）
 

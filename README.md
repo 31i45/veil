@@ -15,7 +15,7 @@
 
 Veil was born because **Typedown** — my favorite Markdown editor on Windows, bar none — takes **tens of seconds to minutes** to launch, every single time. A WinUI app that starts cold faster than you finish sipping your coffee should not exist, yet here we are.
 
-So I built my own. Pure Rust. No webview, no Chromium, no Electron, no external runtime. Single-file exe. In-app cold start ≈150 ms (the first open-and-edit adds ≈160 ms; measurements, commands and dates are in [Red Numbers](#red-numbers-targets-vs-measured)). **Single-user, single-document, zero background networking — no collaboration, ever.**
+So I built my own. Pure Rust. No webview, no Chromium, no Electron, no external runtime. Single-file exe. In-app cold start ≈190 ms (the first open-and-edit adds ≈220 ms; measurements, commands and dates are in [Red Numbers](#red-numbers-targets-vs-measured)). **Single-user, single-document, zero background networking — no collaboration, ever.**
 
 ## Download & Run
 
@@ -43,15 +43,18 @@ Both the app icon (white page + veiled V) and the `.md` document icon (folded pa
 
 ## Architecture
 
-Three crates, one-way dependency (`veil` → `veil-ui` → `veil-core`, no reverse edges permitted):
+Four crates, one-way dependency (`veil` → `veil-mermaid` → `veil-ui` → `veil-core`, no reverse edges permitted):
 
 | Crate | Responsibility |
 |---|---|
 | `veil-core` | Pure logic kernel: document model, incremental parsing, edit transactions. Zero GUI, zero async runtime deps |
 | `veil-ui` | View adapter: winit + softbuffer software rendering + cosmic-text layout. Chrome (menus/status/scrollbar) is drawn in-house — no egui, no GPU API (ADR-005) |
-| `veil` | Product binary: platform seams (Windows FFI, config, clipboard, file watcher) and feature wiring |
+| `veil-mermaid` | Mermaid L1 renderer behind the `MermaidRenderer` trait: QuickJS-ng runs a pinned official Tiny mermaid bundle (flowchart/graph, sequence, pie) and resvg rasterizes the `<text>`-only SVG. Engines live on one resident worker thread; nothing is fetched at runtime |
+| `veil` | Product binary: platform seams (Windows FFI, config, clipboard, file watcher) and feature wiring. `mermaid-render` is an opt-in cargo feature |
 
 > Before v1.0, `veil-egui` was renamed `veil-ui`. The crate had already been egui-free since ADR-005; the old name no longer matched the facts. Boundaries and responsibilities unchanged.
+>
+> `veil-mermaid` is optional at build time: without `--features mermaid-render` it is not linked at all, and Mermaid blocks keep the v0 source card + mermaid.live link.
 
 ## What It Does
 
@@ -89,6 +92,7 @@ Three crates, one-way dependency (`veil` → `veil-ui` → `veil-core`, no rever
 32. Outline panel (`Ctrl+Shift+O`): headings of the current document as a click-to-jump list, refreshed as you edit, with an explicit empty state when the document has no headings
 33. View controls: zoom 50%–300% in 10% steps via `Ctrl+=` / `Ctrl+-` / `Ctrl+0` or `Ctrl+wheel` (trackpad pinch included; session-only, not persisted), and `F11` full screen
 34. Windows: `Ctrl+Shift+N` opens an independent window; the current window keeps its document, caret and dirty state
+35. Mermaid diagrams (v1.9, `mermaid-render` feature, on by default; toggle: **Mermaid diagram rendering**): flowchart/graph, sequence and pie blocks render inline as embedded vector diagrams — QuickJS-ng executes a pinned mermaid 12.3.0 Tiny bundle (1,720,018 B, no network), text is measured through cosmic-text so CJK labels share the body font stack, and resvg rasterizes at the device scale (re-rasterized at 125%/200% DPI, so it stays crisp). Editing is debounced 280 ms; SVG and bitmap caches keep scrolling free of re-layout. HTML export embeds the sanitized SVG, PDF/print embed a 300 dpi bitmap. Unsupported diagram types and syntax errors keep the source card with a mermaid.live link instead of showing an error
 
 ## What It Won't Do (still out of scope)
 
@@ -98,7 +102,7 @@ Three crates, one-way dependency (`veil` → `veil-ui` → `veil-core`, no rever
 - Plugin system
 - Mobile / PWA (desktop exe only)
 - Table visual editing beyond the delivered subset (merge/split cells); content editing, row/column insert/delete, column alignment and column-width drag are supported
-- Mermaid rendering itself: Mermaid fenced blocks stay as code (a backend-neutral renderer interface is reserved; no rendering runtime is bundled)
+- Mermaid diagram types outside the embedded L1 subset (mindmap, class, state, architecture, gantt, …): they stay as code cards with a mermaid.live link. The subset is fixed at build time; adding a type means re-bundling, never fetching code at runtime
 - A separate rich-text document model: the text stays Markdown, and Ctrl+/ is a view toggle over the same document
 - Background networking: no sync, no update check, no telemetry; the only outbound requests are made on demand when rendering remote images in a document, and can be disabled globally via **View → Block Remote Images**. External links are handed to the system default program; Export and PDF never include remote resources.
 - Competitor-parity items deliberately declined: a separate whole-word toggle (the regex mode's `\b` covers it), `Ctrl+Shift+K` delete-line (`Alt+↑` / `Alt+↓` already covers line operations), and a separate H5/H6 type scale (indentation expresses level). Auto-pairing of brackets/quotes shipped in v1.5 and is no longer on this list
@@ -113,24 +117,27 @@ Interface text ships in Chinese (zh-CN) only: the i18n layer is a single-locale 
 cargo build --workspace
 cargo test --workspace
 cargo run -p veil -- <file.md>
+
+# release artifact that ships the embedded Mermaid renderer
+cargo build --release -p veil --features mermaid-render
 ```
 
-Baseline: 1797 passed / 0 failed / 14 ignored (2026-11-17, re-verified after this round); `cargo clippy --workspace --all-targets -- -D warnings` zero warnings.
+Baseline: 1821 passed / 0 failed / 15 ignored (2026-11-18, `cargo test --workspace`; the release-only viz check is one of the ignored ones); `cargo clippy --workspace --all-targets -- -D warnings` zero warnings.
 
 ## Red Numbers (targets vs measured)
 
-Measured on release build, probe-serialized; performance rows re-verified 2026-11-09, test and size rows 2026-11-17. Commands: `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo run --release -p veil --example bench_typing`, `cargo test -p veil-ui --release --lib -- --ignored --nocapture --test-threads=1 perf_keystroke_path` (and `perf_keystroke_10k_blocks`), `(Get-Item target\release\veil.exe).Length`, and `cargo tree -e normal --workspace --prefix none` for dependency counts. Keystroke attribution detail in `docs/review/keystroke-attribution.md`.
+Measured on release build, probe-serialized; performance rows re-verified 2026-11-18, test and size rows 2026-11-18. Commands: `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo run --release -p veil --example bench_typing`, `cargo test -p veil-ui --release --lib -- --ignored --nocapture --test-threads=1 perf_keystroke_path` (and `perf_keystroke_10k_blocks`), `cargo build --release -p veil --features mermaid-render` + `(Get-Item target\release\veil.exe).Length`, and `cargo tree -p veil --edges normal --prefix none` for dependency counts. Keystroke attribution detail in `docs/review/keystroke-attribution.md`.
 
 | Metric | Target | Measured |
 |---|---|---|
 | Cold start (release, `main` → first frame; acceptance definition; 5 runs) | ≤ 300 ms | 145–190 ms (min–max; 2026-11-05, `VEIL_BOOT_LOG` segmented probe) ✅ |
-| Cold start (in-process open + first full layout + first edit; p50 / max over 5 runs) | observation only | 290.0 ms (app 131.8 ms + first edit 158.2 ms; 130.1 ms after warm-up; 2026-11-09, `cargo test -p veil-ui --release --lib -- --ignored --nocapture --test-threads=1 perf_cold_first_edit`). Same machine only: repeats vary between 290 and 580 ms because of the OS file cache |
+| Cold start (in-process open + first full layout + first edit; p50 / max over 5 runs) | observation only | 405.7 ms (app 188.9 ms + first edit 216.8 ms; 2026-11-18, `cargo test -p veil-ui --release --lib -- --ignored --nocapture --test-threads=1 perf_cold_first_edit`). Same machine only: repeats vary between 290 and 580 ms because of the OS file cache |
 | Cold start (bench harness, process create → open → first layout; p50 / max) | observation only | 576.46 / 599.98 ms (2026-11-09, `cargo run --release -p veil --example bench_typing`; baseline 520.87 / 533.85 → +10.7% / +12.4%, regression gate ≤ 20%) |
 | Cold start (wall clock, process create → first frame; observation only) | ≤ 300 ms | 450–529 ms (440–470 ms before `main`, process-create overhead on this machine; 2026-10-31) |
 | Cold start (window handle; P2 comparison definition) | — | 30 ms (2026-10-30, `tools/bench/measure.ps1`) |
-| Keystroke→commit p95 on 100 K-word doc | ≤ 16 ms | 1.297 ms / 1.796 ms (`perf_keystroke_path` 5,005 blocks / `perf_keystroke_10k_blocks` 10,500 blocks; same machine, re-measured 2026-11-15; previous record 6.781 / 12.379) ✅ |
+| Keystroke→commit p95 on 100 K-word doc | ≤ 16 ms | 0.973 ms / 1.566 ms (`perf_keystroke_path` 5,005 blocks / `perf_keystroke_10k_blocks` 10,500 blocks; same machine, re-measured 2026-11-18; previous record 1.297 / 1.796) ✅ |
 | Resident memory, 100 K-word doc (private working set) | ≤ 150 MB | 40.76 MB (2026-11-05) |
-| Installed size — code + data (non-icon) | ≤ 6 MiB (Phase A baseline; superseded by the Wave 3/4 PDF export gate allowance) | 9,880,899 B (exe minus 89,277 B icons: `veil.ico` 46,688 + `veil-doc.ico` 42,589; 2026-11-17) |
+| Installed size — code + data (non-icon) | ≤ 6 MiB (Phase A baseline; superseded by the Wave 3/4 PDF export gate and the v1.9 Mermaid authorization) | 9,926,979 B feature off / 14,593,859 B with `mermaid-render` (exe minus 89,277 B icons: `veil.ico` 46,688 + `veil-doc.ico` 42,589; 2026-11-18) |
 | Installed size — total single-file `veil.exe` | ≤ 16 MiB = 16,777,216 B with `mermaid-render` (v1.9 authorization; feature off returns to ≤ 10 MiB; every increment must be recorded) | 14,683,136 B ≈ 14.00 MiB (local release build with `mermaid-render`, pinned toolchain; +4,712,960 B vs v1.8.0 9,970,176 B: QuickJS-ng + resvg + embedded Tiny mermaid bundle 1,720,018 B; 2026-11-18). Feature off: 10,016,256 B ≈ 9.55 MiB (+46,080 B vs v1.8.0, Mermaid job scheduler + settings plumbing) |
 | `veil-core` unit + property tests | ≥ 80 | 343 |
 | E2E assertions | ≥ 20 | 41 (3 e2e scenarios: open→save→reopen, table+image paste, find/replace→crash recovery→self-clean) ✅ |
@@ -140,7 +147,7 @@ Measured on release build, probe-serialized; performance rows re-verified 2026-1
 | GFM extension conformance (Tables / TaskList / Strikethrough; by test cases; dimension A / C / D) | — | A 23/23 · C 23/23 · D 23/23 ✅; B_CANON 12/23 (11 autolink cases observed only) |
 | `veil-core` GUI/async runtime deps | 0 | 0 |
 | `veil-ui` + `veil` external direct deps (`cargo tree --depth 1`, distinct crate names) | ≤ 8 (pre-PDF baseline; superseded by the Wave 3 authorization for `pdf-writer` + `subsetter` + `ttf-parser`, and by v1.8's `regex`) | 17 (8 in `veil-ui` + 9 in `veil`) |
-| Workspace transitive deps (distinct crate names, normal edges incl. the three workspace members) | ≤ 240 with `mermaid-render` (v1.9 authorization; feature off stays ≤ 200) | 153 with `mermaid-render` / 125 without (2026-11-17, `cargo tree -p veil --edges normal --prefix none`) |
+| Workspace transitive deps (distinct crate names, normal edges incl. the four workspace members) | ≤ 240 with `mermaid-render` (v1.9 authorization; feature off stays ≤ 200) | 153 with `mermaid-render` / 125 without (2026-11-18, `cargo tree -p veil --edges normal --prefix none`) |
 
 ## Same-machine Comparison (P2 public baseline, 2026-10-30)
 

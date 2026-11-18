@@ -1094,7 +1094,7 @@ mod tests {
             kind: MermaidJobKind::Block {
                 id,
                 source: std::sync::Arc::from("flowchart TD\nA-->B"),
-                theme: theme.clone(),
+                theme,
                 fit_w: 600.0,
                 fit_h: 400.0,
                 theme_rev: 0,

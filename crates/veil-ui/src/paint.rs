@@ -1014,7 +1014,7 @@ impl App {
                 kind: crate::view::mermaid::MermaidJobKind::Block {
                     id,
                     source: std::sync::Arc::from(body.as_str()),
-                    theme: theme.clone(),
+                    theme,
                     fit_w,
                     fit_h,
                     theme_rev,

@@ -2871,7 +2871,7 @@ dependencies = [
 
 [[package]]
 name = "veil"
-version = "1.8.0"
+version = "1.9.0"
 dependencies = [
  "arboard",
  "base64 0.23.1",
@@ -2889,7 +2889,7 @@ dependencies = [
 
 [[package]]
 name = "veil-core"
-version = "1.8.0"
+version = "1.9.0"
 dependencies = [
  "base64 0.23.1",
  "flate2",
@@ -2901,7 +2901,7 @@ dependencies = [
 
 [[package]]
 name = "veil-mermaid"
-version = "1.8.0"
+version = "1.9.0"
 dependencies = [
  "cosmic-text",
  "resvg",
@@ -2912,7 +2912,7 @@ dependencies = [
 
 [[package]]
 name = "veil-ui"
-version = "1.8.0"
+version = "1.9.0"
 dependencies = [
  "cosmic-text",
  "memchr",

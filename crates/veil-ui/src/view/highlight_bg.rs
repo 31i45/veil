@@ -207,7 +207,8 @@ mod tests {
 
     #[test]
     fn many_tasks_all_complete() {
-        // 20 个并行长块任务，全部必须在 10 秒内返回。
+        // 20 个排队长块任务必须全部返回。单 worker 串行 parse，慢速 CI runner
+        // 上单个长块可达 ~1s，故给 60s 上限（只防挂死，不测吞吐）。
         let (tx, rx) = spawn_background();
         let body = long_rust_body();
         for i in 0..20 {
@@ -220,7 +221,7 @@ mod tests {
             .unwrap();
         }
         let mut got = 0;
-        let deadline = Instant::now() + Duration::from_secs(10);
+        let deadline = Instant::now() + Duration::from_secs(60);
         while got < 20 && Instant::now() < deadline {
             if let Ok(r) = rx.try_recv() {
                 assert!(r.key < 20);

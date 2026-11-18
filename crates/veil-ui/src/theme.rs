@@ -479,9 +479,6 @@ pub struct Config {
     pub smooth_scroll: bool,
     /// 远程图片自动加载（默认开）；false = 全局阻止，只显示 alt 文本。
     pub allow_remote_images: bool,
-    /// Mermaid 图渲染（默认开）：安装后端时 flowchart/sequence/pie 渲染为位图，
-    /// 其余图型保持源码卡片；false = 全部 mermaid 块保持源码卡片。
-    pub mermaid_render: bool,
     /// 制表符宽度（2 或 4，默认 4）；其它值夹到 4。
     pub tab_width: u8,
     /// 图片缓存字节上限（MiB，默认 200）；0 = 不限制，超出按 LRU 逐出。
@@ -502,7 +499,6 @@ impl Default for Config {
             doc_line_height: DEFAULT_DOC_LINE_HEIGHT,
             smooth_scroll: false,
             allow_remote_images: true,
-            mermaid_render: true,
             tab_width: DEFAULT_TAB_WIDTH,
             image_cache_limit_mb: DEFAULT_IMAGE_CACHE_LIMIT_MB,
             window: None,
@@ -517,7 +513,7 @@ impl Config {
             "# Veil 配置（自动生成）\n# mode: system（跟随系统）| light | dark\nmode = \"{}\"\n\
              export_margin_mm = {}\nexport_page_numbers = {}\nexport_toc = {}\n\
              doc_font_family = \"{}\"\ndoc_font_size = {}\ndoc_line_height = {}\n\
-             smooth_scroll = {}\nallow_remote_images = {}\nmermaid_render = {}\ntab_width = {}\n\
+             smooth_scroll = {}\nallow_remote_images = {}\ntab_width = {}\n\
              image_cache_limit_mb = {}\n",
             self.mode.as_str(),
             self.export_margin_mm,
@@ -528,7 +524,6 @@ impl Config {
             self.doc_line_height,
             self.smooth_scroll,
             self.allow_remote_images,
-            self.mermaid_render,
             self.tab_width,
             self.image_cache_limit_mb,
         );
@@ -599,11 +594,6 @@ fn edit_existing_toml(text: &str, cfg: Config) -> Option<String> {
     );
     set_item(
         &mut doc,
-        "mermaid_render",
-        toml_edit::value(cfg.mermaid_render),
-    );
-    set_item(
-        &mut doc,
         "tab_width",
         toml_edit::value(i64::from(cfg.tab_width)),
     );
@@ -654,8 +644,7 @@ pub struct ConfigParse {
 }
 
 /// 极简配置解析：识别顶层 `mode`/`export_*`、正文排版键
-/// `doc_font_family`/`doc_font_size`/`doc_line_height`/`smooth_scroll`/`allow_remote_images`/
-/// `mermaid_render` 与成组的窗口键 `window_width`/`window_height`/`window_x`/`window_y`，
+/// `doc_font_family`/`doc_font_size`/`doc_line_height`/`smooth_scroll`/`allow_remote_images`
 /// 与成组的窗口键 `window_width`/`window_height`/`window_x`/`window_y`，其余条目计数忽略。
 /// 排版数值越界按夹取处理（不计数），类型/字面量非法才计入 ignored；
 /// 字号先夹 10..=32，行高再按「字号..=字号×3」夹取（与键出现顺序无关）。
@@ -727,10 +716,8 @@ pub fn parse_config(text: &str) -> ConfigParse {
                 Some(v) => out.config.allow_remote_images = v,
                 None => out.ignored += 1,
             },
-            "mermaid_render" => match value.as_bool() {
-                Some(v) => out.config.mermaid_render = v,
-                None => out.ignored += 1,
-            },
+            // 已移除的旧键（进程内 Mermaid 渲染开关）：静默忽略，不产生「无法识别」提示。
+            "mermaid_render" => {}
             "tab_width" => match value.as_integer() {
                 Some(v) if v == 2 || v == 4 => out.config.tab_width = v as u8,
                 _ => out.ignored += 1,

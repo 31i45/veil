@@ -220,14 +220,16 @@ mod tests {
             })
             .unwrap();
         }
+        // 阻塞等待每个结果：只验证「队列不丢任务」，不把机器负载当失败。
+        // 单 worker 串行 parse，排空队列时 debug 构建在并行测试下可能远超 60s。
         let mut got = 0;
-        let deadline = Instant::now() + Duration::from_secs(60);
-        while got < 20 && Instant::now() < deadline {
-            if let Ok(r) = rx.try_recv() {
-                assert!(r.key < 20);
-                got += 1;
-            } else {
-                std::thread::sleep(Duration::from_millis(20));
+        while got < 20 {
+            match rx.recv_timeout(Duration::from_secs(120)) {
+                Ok(r) => {
+                    assert!(r.key < 20);
+                    got += 1;
+                }
+                Err(e) => panic!("第 {} 个任务未在 120s 内完成：{e:?}", got + 1),
             }
         }
         assert_eq!(got, 20, "20 个任务必须全部完成");

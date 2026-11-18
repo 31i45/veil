@@ -34,6 +34,10 @@ pub(crate) enum CtxAction {
     TableAlignRight,
     /// Mermaid v0：在 mermaid.live 在线预览当前源码。
     MermaidPreview,
+    /// Mermaid：应用内预览在线渲染的 PNG（mermaid.ink，显式点击才联网）。
+    MermaidPreviewImage,
+    /// Mermaid：下载在线渲染的 PNG 到 `<doc>.assets/` 并插入图片引用。
+    MermaidInsertImage,
     /// Mermaid v0：复制当前 mermaid 块的源码（不含围栏行）到剪贴板。
     MermaidCopySource,
     /// Mermaid v0：复制 mermaid.live 预览 URL 到剪贴板。
@@ -123,6 +127,12 @@ pub(crate) fn items_for(kind: CtxKind) -> Vec<(Key, CtxAction)> {
         ],
         CtxKind::MermaidBlock => vec![
             (Key::CtxMermaidPreview, CtxAction::MermaidPreview),
+            (
+                Key::CtxMermaidPreviewImage,
+                CtxAction::MermaidPreviewImage,
+            ),
+            (Key::CtxMermaidInsertImage, CtxAction::MermaidInsertImage),
+            (Key::Empty, CtxAction::Separator),
             (Key::CtxMermaidCopySource, CtxAction::MermaidCopySource),
             (Key::CtxMermaidCopyLink, CtxAction::MermaidCopyLink),
             (Key::Empty, CtxAction::Separator),
@@ -214,7 +224,6 @@ pub(crate) fn items_for(kind: CtxKind) -> Vec<(Key, CtxAction)> {
 }
 
 /// 右键菜单状态：打开位置（视口坐标）、项集与悬停；`link` 为 CopyLink 的载荷。
-#[derive(Default)]
 pub(crate) struct CtxMenu {
     pub(crate) open: bool,
     pub(crate) x: f32,
@@ -225,6 +234,10 @@ pub(crate) struct CtxMenu {
     pub(crate) link: Option<String>,
     /// 表格上下文（打开时刻定；执行结构操作时读行列信息）。
     pub(crate) table: Option<TableCtx>,
+    /// 远程图片总开关：关闭时隐藏 Mermaid 在线渲染两项（打开前由 interaction 写入）。
+    pub(crate) remote_ok: bool,
+    /// 右键 mermaid 块的内容结束偏移（「下载并插入」的插入锚点）。
+    pub(crate) mermaid_end: Option<usize>,
     /// Mermaid v0：打开时刻捕获的块 body 源码（不含围栏行），供预览/复制链接动作读取。
     pub(crate) mermaid_body: Option<String>,
     /// Mermaid 空块：模板插入锚点（body 起点，绝对字节偏移）；非空块为 None，
@@ -237,6 +250,28 @@ pub(crate) struct CtxMenu {
     /// 代码块右键菜单携带的块 id（供复制代码块动作读取源码）。
     pub(crate) code_id: Option<BlockId>,
     items: Vec<(Key, CtxAction)>,
+}
+
+impl Default for CtxMenu {
+    fn default() -> Self {
+        Self {
+            open: false,
+            x: 0.0,
+            y: 0.0,
+            hover: None,
+            fade: crate::anim::Fade::default(),
+            link: None,
+            table: None,
+            remote_ok: true,
+            mermaid_end: None,
+            mermaid_body: None,
+            mermaid_insert_start: None,
+            details_id: None,
+            image_path: None,
+            code_id: None,
+            items: Vec::new(),
+        }
+    }
 }
 
 impl CtxMenu {
@@ -258,6 +293,7 @@ impl CtxMenu {
             _ => None,
         };
         self.mermaid_body = mermaid_body;
+        self.mermaid_end = None;
         self.mermaid_insert_start = None;
         self.details_id = match &kind {
             CtxKind::Details { id, .. } => Some(*id),
@@ -272,6 +308,14 @@ impl CtxMenu {
             _ => None,
         };
         self.items = items_for(kind);
+        if !self.remote_ok {
+            self.items.retain(|&(_, a)| {
+                !matches!(
+                    a,
+                    CtxAction::MermaidPreviewImage | CtxAction::MermaidInsertImage
+                )
+            });
+        }
     }
 
     pub(crate) fn close(&mut self) {
@@ -280,6 +324,7 @@ impl CtxMenu {
         self.link = None;
         self.table = None;
         self.mermaid_body = None;
+        self.mermaid_end = None;
         self.mermaid_insert_start = None;
         self.code_id = None;
     }

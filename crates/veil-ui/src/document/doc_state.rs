@@ -543,7 +543,6 @@ impl App {
             self.doc.export_style,
             self.doc.path.as_deref(),
             Some(&target),
-            self.mermaid.renderer(),
         ) {
             Ok(p) => {
                 self.ui_state.chrome.notice = tf(Key::NoticeExportedHtml, &[&path_label(Some(&p))]);

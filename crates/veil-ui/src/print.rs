@@ -401,43 +401,6 @@ impl PrintSession<'_> {
         self.app.request_redraw();
     }
 
-    /// PDF/打印导出用的 Mermaid 位图（键 = 块 id）：300dpi 栅格化（纸面走位图嵌入，
-    /// 屏幕场景对 QuickJS 后端是 stub，不含图元）。与屏幕共用同一渲染入口与导出主题；
-    /// 未安装渲染器时为空（产品层保持源码块）。空块、Tiny bundle 不支持的图型与
-    /// 渲染失败一律跳过（与屏幕降级同口径，不阻塞导出）。
-    pub fn mermaid_bitmaps(
-        &mut self,
-    ) -> std::collections::HashMap<veil_core::BlockId, crate::view::mermaid::MermaidBitmap> {
-        let mut out = std::collections::HashMap::new();
-        let Some(renderer) = self.app.mermaid.arc() else {
-            return out;
-        };
-        let theme = crate::view::mermaid::MermaidTheme::from_export(&self.app.doc.export_style);
-        // 300dpi 位图：CSS 逻辑像素（96dpi）× 3.125；PDF 侧按 72/300 pt/px 布局保物理尺寸。
-        const PRINT_SCALE: f32 = 300.0 / 96.0;
-        for (id, kind, _) in self.app.editor.session().blocks() {
-            let veil_core::BlockKind::FencedCode(Some(lang)) = kind else {
-                continue;
-            };
-            if !lang.eq_ignore_ascii_case("mermaid") {
-                continue;
-            }
-            let Some((_, src)) = self.app.editor.session().fenced_code_source(id) else {
-                continue;
-            };
-            if crate::view::mermaid::is_empty_source(&src) {
-                continue;
-            }
-            if !crate::view::mermaid::mermaid_supported_source(&src) {
-                continue;
-            }
-            if let Ok(bm) = renderer.render_bitmap(&src, &theme, PRINT_SCALE) {
-                out.insert(id, bm);
-            }
-        }
-        out
-    }
-
     /// 打印失败/中断：与其它失败态同一错误弹窗（重试重新打印 / 取消）。
     pub fn print_error(&mut self, reason: &str) {
         self.app.ui_state.chrome.notice = tf(Key::NoticePrintFailed, &[reason]);

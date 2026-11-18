@@ -22,7 +22,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Build release binary
-        run: cargo build --release -p veil --features mermaid-render
+        run: cargo build --release -p veil
 
       - name: Report artifact size
         run: |

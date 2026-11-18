@@ -89,10 +89,6 @@ fn main() {
         }
     };
 
-    // Mermaid 渲染后端工厂（Task 3.1）：进入事件循环前注册；App 按配置
-    // （mermaid_render，默认开）在启动与设置变更时装载，失败保持源码卡片降级。
-    veil_ui::set_mermaid_backend_factory(mermaid_backend);
-
     let doc = if let Some(path) = initial_path {
         match load_document(&path) {
             Ok((text, bom)) => Doc {
@@ -235,7 +231,6 @@ impl veil_ui::Exporter for NoExport {
         _style: veil_ui::ExportStyle,
         _p: Option<&Path>,
         _t: Option<&Path>,
-        _m: Option<&dyn veil_ui::MermaidRenderer>,
     ) -> Result<PathBuf, String> {
         Err(t(Key::ErrMathFontUnavailable).into())
     }
@@ -296,16 +291,6 @@ fn math_renderer() -> Box<dyn veil_ui::MathRenderer> {
             Box::new(NoMath)
         }
     }
-}
-
-/// Mermaid 渲染后端工厂（Task 3.1）：`mermaid-render` feature 下编译 QuickJS +
-/// mermaid Tiny bundle；未启用该 feature 的构建返回 None（全部 mermaid 块保持
-/// 源码卡片降级）。`QuickJSRenderer::new()` 立即返回、引擎后台冷启（一次性开销）。
-fn mermaid_backend() -> Option<std::sync::Arc<dyn veil_ui::MermaidRenderer>> {
-    #[cfg(feature = "mermaid-render")]
-    return Some(veil_mermaid::QuickJSRenderer::new());
-    #[cfg(not(feature = "mermaid-render"))]
-    return None;
 }
 
 /// 字体初始化失败的兜底：恒 Err → 全部数学块降级源码显示（ADR-002 降级策略）。

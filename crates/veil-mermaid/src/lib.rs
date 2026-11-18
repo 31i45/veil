@@ -321,12 +321,9 @@ fn attr_value(lower: &str, name: &str) -> Option<String> {
                 .is_some_and(|c| c.is_ascii_whitespace() || c == '<');
         if ok_boundary {
             let rest = lower[at + key.len()..].trim_start();
-            match rest.chars().next() {
-                Some(q @ ('"' | '\'')) => {
-                    let end = rest[1..].find(q)?;
-                    return Some(rest[1..1 + end].to_string());
-                }
-                _ => {}
+            if let Some(q @ ('"' | '\'')) = rest.chars().next() {
+                let end = rest[1..].find(q)?;
+                return Some(rest[1..1 + end].to_string());
             }
         }
         from = at + key.len();

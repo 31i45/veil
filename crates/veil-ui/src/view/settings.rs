@@ -127,13 +127,6 @@ impl SettingsForm {
                 read_only: false,
             },
             SettingsField {
-                label: Key::SettingsMermaidRender,
-                kind: FieldKind::Toggle,
-                value: FieldValue::Toggle(cfg.mermaid_render),
-                buffer: None,
-                read_only: false,
-            },
-            SettingsField {
                 label: Key::SettingsWindowGeom,
                 kind: FieldKind::WindowGeom,
                 value: FieldValue::Geom(cfg.window.map(|w| (w.width, w.height, w.x, w.y))),
@@ -214,11 +207,6 @@ impl SettingsForm {
                 Key::SettingsAllowRemoteImages => {
                     if let FieldValue::Toggle(v) = f.value {
                         out.allow_remote_images = v;
-                    }
-                }
-                Key::SettingsMermaidRender => {
-                    if let FieldValue::Toggle(v) = f.value {
-                        out.mermaid_render = v;
                     }
                 }
                 Key::SettingsExportPageNumbers => {

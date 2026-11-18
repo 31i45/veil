@@ -23,7 +23,6 @@ use std::ops::Deref;
 use veil_core::{BlockId, BlockKind, Range};
 
 use super::layout::{BlockLayout, FootnoteCtx};
-use super::mermaid::MermaidBlockBitmap;
 use super::table::TableLayout;
 use crate::app::App;
 use crate::image::ImageData;
@@ -183,23 +182,6 @@ pub(crate) struct MathFailKey {
     pub(crate) session_rev: u32,
 }
 
-/// Mermaid 位图缓存键：块 id 即内容修订，另含主题/会话代次。
-/// fit 倍率不入键（resize 时旧位图先拉伸显示、后台重栅格化；倍率存条目内比对）。
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) struct MermaidBitmapKey {
-    pub(crate) block: BlockId,
-    pub(crate) theme_rev: u32,
-    pub(crate) session_rev: u32,
-}
-
-/// Mermaid 位图失败记忆键：不含倍率——引擎/语法错误与显示尺寸无关，跨 resize 不重试。
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) struct MermaidBitmapFailKey {
-    pub(crate) block: BlockId,
-    pub(crate) theme_rev: u32,
-    pub(crate) session_rev: u32,
-}
-
 fn quantize(v: f32, factor: f32) -> u32 {
     (v * factor).round().clamp(0.0, u32::MAX as f32) as u32
 }
@@ -219,9 +201,6 @@ pub(crate) struct Cache {
     /// 数学块渲染图与失败记忆。
     pub(crate) math_imgs: HashMap<BlockId, Memo<MathKey, MathImage>>,
     pub(crate) math_failed: HashMap<BlockId, Memo<MathFailKey, ()>>,
-    /// Mermaid 块位图与失败记忆（未安装渲染器时为空）。
-    pub(crate) mermaid_bitmaps: HashMap<BlockId, Memo<MermaidBitmapKey, MermaidBlockBitmap>>,
-    pub(crate) mermaid_bitmap_failed: HashMap<BlockId, Memo<MermaidBitmapFailKey, String>>,
     /// 行内公式图与失败记忆：按 tex 内容寻址。
     pub(crate) inline_math: HashMap<String, Memo<InlineKey, MathImage>>,
     pub(crate) inline_failed: HashMap<String, Memo<u32, ()>>,
@@ -256,8 +235,6 @@ impl Default for Cache {
             rasters: HashMap::new(),
             math_imgs: HashMap::new(),
             math_failed: HashMap::new(),
-            mermaid_bitmaps: HashMap::new(),
-            mermaid_bitmap_failed: HashMap::new(),
             inline_math: HashMap::new(),
             inline_failed: HashMap::new(),
             inline_images: HashMap::new(),
@@ -431,32 +408,6 @@ impl Cache {
         self.math_failed.get(&id).is_some_and(|m| m.matches(&key))
     }
 
-    /// Mermaid 位图查询（键含主题/会话代次；倍率不入键——resize 后旧位图先拉伸显示）。
-    pub(crate) fn mermaid_bitmap(
-        &self,
-        id: BlockId,
-        theme_rev: u32,
-        session_rev: u32,
-    ) -> Option<&MermaidBlockBitmap> {
-        self.mermaid_bitmaps
-            .get(&id)
-            .filter(|m| m.key.theme_rev == theme_rev && m.key.session_rev == session_rev)
-            .map(|m| &m.value)
-    }
-
-    /// 失败记忆：返回错误消息（None = 未失败）。失败后不再提交渲染（跨 resize 有效）。
-    pub(crate) fn mermaid_bitmap_error(
-        &self,
-        id: BlockId,
-        theme_rev: u32,
-        session_rev: u32,
-    ) -> Option<&str> {
-        self.mermaid_bitmap_failed
-            .get(&id)
-            .filter(|m| m.key.theme_rev == theme_rev && m.key.session_rev == session_rev)
-            .map(|m| m.value.as_str())
-    }
-
     pub(crate) fn inline_math(&self, tex: &str, key: InlineKey) -> Option<&MathImage> {
         self.inline_math
             .get(tex)
@@ -553,18 +504,6 @@ impl Cache {
                 && m.key.scale_q == base.scale_q
                 && m.key.session_rev == revs.session
         });
-        self.mermaid_bitmaps.retain(|id, m| {
-            alive(*id)
-                && m.key.block == *id
-                && m.key.theme_rev == revs.theme
-                && m.key.session_rev == revs.session
-        });
-        self.mermaid_bitmap_failed.retain(|id, m| {
-            alive(*id)
-                && m.key.block == *id
-                && m.key.theme_rev == revs.theme
-                && m.key.session_rev == revs.session
-        });
         self.inline_math.retain(|_, m| m.matches(&inline_key));
         self.inline_failed.retain(|_, m| m.key == base.scale_q);
         self.inline_images.retain(|_, m| m.key == revs.image_base);
@@ -648,52 +587,6 @@ impl App {
             theme_rev: self.input_state.revs.theme,
             session_rev: self.input_state.revs.session,
         }
-    }
-
-    /// 从进程级工厂装载 Mermaid 渲染后端（Task 3.1）：产品层在 run 前注册工厂，
-    /// App 启动（配置开启）与设置变更时调用。未注册/工厂返回 None = 保持源码卡片降级。
-    pub(crate) fn install_mermaid_from_factory(&mut self) {
-        if let Some(factory) = crate::app::mermaid_backend_factory() {
-            if let Some(renderer) = factory() {
-                self.install_mermaid_shared(renderer);
-            }
-        }
-    }
-
-    /// 安装/替换 Mermaid 渲染后端（测试与既有嵌入方调用；产品层走工厂装载）。
-    /// 后端变化不是任何代次的函数，因此显式清空两类缓存并重算几何：
-    /// 后续帧按新后端重渲。
-    #[cfg(test)]
-    pub fn install_mermaid_renderer(
-        &mut self,
-        renderer: Box<dyn crate::view::mermaid::MermaidRenderer>,
-    ) {
-        self.mermaid.install(renderer);
-        self.reset_mermaid_caches();
-    }
-
-    /// 安装共享渲染后端（产品层已持有 `Arc`，如 `QuickJSRenderer::new()` 返回值）。
-    pub(crate) fn install_mermaid_shared(
-        &mut self,
-        renderer: std::sync::Arc<dyn crate::view::mermaid::MermaidRenderer>,
-    ) {
-        self.mermaid.install_shared(renderer);
-        self.reset_mermaid_caches();
-    }
-
-    /// 卸载 Mermaid 渲染后端：回到既有源码卡片降级（不改变文档字节）。
-    pub fn clear_mermaid_renderer(&mut self) {
-        self.mermaid.clear();
-        self.reset_mermaid_caches();
-    }
-
-    fn reset_mermaid_caches(&mut self) {
-        self.cache.mermaid_bitmaps.clear();
-        self.cache.mermaid_bitmap_failed.clear();
-        // 换后端：丢弃旧后端的待渲染/在途请求（在途回包由代次校验丢弃）。
-        self.mermaid_jobs.clear();
-        self.index.geometry_stale = true;
-        self.request_redraw();
     }
 
     pub(crate) fn math_fail_key(&self, block: BlockId) -> MathFailKey {

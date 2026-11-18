@@ -41,10 +41,9 @@ mod view;
 mod app_tests;
 
 pub use app::{
-    content_hash, format_unix_ms_utc, normalize_link_url, set_mermaid_backend_factory,
-    url_is_openable, Clipboard, Clock, Doc, Exporter, FileDialog, FileEvent, FileStore, FileWatcher,
-    MermaidBackendFactory, PersistEnv, Ports, RecoveryStore, SessionStore, SnapshotMeta,
-    SnapshotStore, StartupError, UrlOpener,
+    content_hash, format_unix_ms_utc, normalize_link_url, url_is_openable, Clipboard, Clock, Doc,
+    Exporter, FileDialog, FileEvent, FileStore, FileWatcher, PersistEnv, Ports, RecoveryStore,
+    SessionStore, SnapshotMeta, SnapshotStore, StartupError, UrlOpener,
 };
 pub use chrome::path_label;
 pub use docio::decode;
@@ -58,9 +57,3 @@ pub use theme::{
 };
 // bench_typing（产品层纯度量 example）需要 LayoutEngine / Frame 做纯排版与帧分配基准
 pub use view::{BlockLayout, Frame, LayoutEngine, BASE_FONT_SIZE, BASE_LINE_HEIGHT};
-// Mermaid 后端中立接口：产品层 HTML/PDF 导出与外部嵌入方安装渲染器时使用
-pub use view::mermaid::{
-    is_empty_source, sanitize_svg, scene_to_svg, svg_of, MermaidBitmap, MermaidBitmapRenderer,
-    MermaidDrawing, MermaidError, MermaidItem, MermaidRenderer, MermaidRenderers, MermaidScene,
-    MermaidTheme,
-};

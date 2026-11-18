@@ -43,18 +43,17 @@ veil.exe /unregister   # 只撤销 /register 创建、且当前值仍属于自�
 
 ## 架构
 
-四个 crate，依赖方向单向（`veil` → `veil-mermaid` → `veil-ui` → `veil-core`，禁止反向）：
+三个 crate，依赖方向单向（`veil` → `veil-ui` → `veil-core`，禁止反向）：
 
 | Crate | 职责 |
 |---|---|
 | `veil-core` | 纯逻辑内核：文档模型、增量解析、编辑事务。零 GUI、零异步运行时依赖 |
 | `veil-ui` | 视图适配器：winit + softbuffer 软件呈现 + cosmic-text 排版。chrome（菜单/状态栏/滚动条）自绘，不引入 egui/GL（ADR-005） |
-| `veil-mermaid` | `MermaidRenderer` 的 L1 实现（可选）：QuickJS-ng 常驻 worker 线程执行钉死的官方 Tiny mermaid 子集（flowchart/graph、sequence、pie），resvg 栅格化纯 `<text>` SVG；运行期零网络 |
-| `veil` | 产品层二进制：平台接缝（Windows FFI、配置、剪贴板、文件监听）与功能装配；`mermaid-render` 为可选 feature |
+| `veil` | 产品层二进制：平台接缝（Windows FFI、配置、剪贴板、文件监听）与功能装配 |
 
 > 2026-11-03 v1 发布前将 `veil-egui` 更名为 `veil-ui`：该 crate 自 ADR-005 起已零 egui 依赖，旧名与事实不符。crate 边界与职责未变。
 >
-> 不启用 `--features mermaid-render` 时 `veil-mermaid` 完全不参与链接，Mermaid 块保持 v0 源码卡 + mermaid.live 外链。
+> Mermaid 不内置渲染器：v1.9.0 曾内置进程内引擎（QuickJS-ng + resvg + 1.7 MB Tiny bundle），下一个版本即移除——低频功能不应让每个用户多背 4.7 MB。完整实现保留在 v1.9.0 tag。
 
 ## 已实现功能
 
@@ -92,7 +91,7 @@ veil.exe /unregister   # 只撤销 /register 创建、且当前值仍属于自�
 32. 大纲面板（`Ctrl+Shift+O`）：以标题列表呈现当前文档，点击即跳转，随编辑自动刷新；无标题时给出明确空态
 33. 视图控制：`Ctrl+=` / `Ctrl+-` / `Ctrl+0` 或 `Ctrl+wheel`（含触控板捏合）以 10% 步进在 50%–300% 缩放（仅会话内，不持久化）；`F11` 全屏
 34. 窗口：`Ctrl+Shift+N` 新建独立窗口，当前窗口保留自己的文档、光标与脏状态
-35. Mermaid 图（v1.9，`mermaid-render` feature，默认开；开关「Mermaid 图渲染」）：flowchart/graph、sequence、pie 围栏块在正文内直接显示为矢量图——QuickJS-ng 执行钉死的 mermaid 12.3.0 Tiny 子集（1,720,018 B 嵌入，零网络），文本经 cosmic-text 度量（CJK 与正文字体栈一致），resvg 按设备 scale 栅格化（125%/200% DPI 重栅格化，保持清晰）；编辑 280ms 防抖，SVG/位图双层缓存让滚动不重布局。HTML 导出内嵌清洗后的 SVG，PDF/打印内嵌 300dpi 位图。不支持的图型与语法错误保持源码卡 + mermaid.live 外链，不显示为错误
+35. Mermaid 图（外部创作流，不内置引擎）：`mermaid` 围栏块保持源码卡与模板。右键提供 **在 mermaid.live 预览**（复制该块源码并打开编辑器，URL 本地生成、不上传）、**预览图片（在线渲染）** 与 **下载并插入图片**：后两项仅在点击时请求 mermaid.ink 出 PNG（源码会发送给该第三方服务；首次点击给出一次性提示，「Block Remote Images」开启时两项隐藏）。预览进入现有图片浮层；插入把图写入 `<doc>.assets/mermaid-N.png`，并在块后追加 `![](相对路径)`，一条 undo 回退。导出 HTML/PDF 直接使用该 PNG。图不随编辑自动更新——重新执行动作覆盖
 
 ## 非目标（仍未纳入）
 
@@ -102,9 +101,9 @@ veil.exe /unregister   # 只撤销 /register 创建、且当前值仍属于自�
 - 插件系统
 - 移动端 / PWA（仅桌面 exe）
 - 表格结构可视化编辑的剩余部分（合并/拆分单元格）；内容编辑、行列增删、列对齐与列宽拖动已支持
-- Mermaid 内嵌子集之外的图型（mindmap、class、state、architecture、gantt 等）：仍以源码卡 + mermaid.live 外链呈现。子集在构建期固定，扩充图型需重新打包，运行期绝不下载代码
+- 内置图形渲染：不链接任何 Mermaid 引擎。应用内预览/插入只在显式点击时委托 mermaid.ink；编辑器链接使用本地生成的 mermaid.live URL
 - 独立富文本文档模型：正文始终是 Markdown，`Ctrl+/` 只是同一文档的视图切换
-- 任何后台网络：无同步、无更新检查、无遥测；唯一出站请求是在渲染文档中的远程图片时按需发出，可在「视图 → 阻止远程图片」一键阻止；外部链接交给系统默认程序打开，导出 / PDF 永不包含远程资源
+- 任何后台网络：无同步、无更新检查、无遥测；唯一出站请求是在渲染文档中的远程图片时按需发出，或在 Mermaid 块上显式点击「预览图片 / 下载并插入图片」时发送给 mermaid.ink，可在「视图 → 阻止远程图片」一键阻止；外部链接交给系统默认程序打开，导出 / PDF 永不包含远程资源
 - 竞品对齐项明确不做：独立的全词匹配开关（正则模式的 `\b` 已覆盖）、`Ctrl+Shift+K` 删除行（`Alt+↑` / `Alt+↓` 已覆盖行级操作）、独立 H5/H6 字阶（层级用缩进表达）。括号/引号自动配对已于 v1.5 交付，不再属于非目标
 
 ## 构建 / 运行 / 测试
@@ -115,16 +114,13 @@ veil.exe /unregister   # 只撤销 /register 创建、且当前值仍属于自�
 cargo build --workspace
 cargo test --workspace
 cargo run -p veil -- <file.md>
-
-# 带内嵌 Mermaid 渲染器的发布构建
-cargo build --release -p veil --features mermaid-render
 ```
 
-当前 1821 项测试全绿（`cargo test --workspace` 1821 passed / 0 failed / 15 ignored，2026-11-18；其中 1 项 ignored 是发布构建专用的目检），`cargo clippy --workspace --all-targets -- -D warnings` 零警告。
+当前 1791 项测试全绿（`cargo test --workspace` 1791 passed / 0 failed / 14 ignored，2026-11-18，移除 Mermaid 引擎后的基线），`cargo clippy --workspace --all-targets -- -D warnings` 零警告。
 
 ## 数字红线（目标值与实测）
 
-发布构建、探针串行；性能项 2026-11-18 复核，测试与体积项 2026-11-18 复核。命令：`cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo run --release -p veil --example bench_typing`、`cargo test -p veil-ui --release --lib -- --ignored --nocapture --test-threads=1 perf_keystroke_path`（10,500 块用 `perf_keystroke_10k_blocks`）、`cargo build --release -p veil --features mermaid-render` + `(Get-Item target\release\veil.exe).Length`，依赖计数用 `cargo tree -p veil --edges normal --prefix none`。方法与明细见 `docs/review/keystroke-attribution.md`。
+发布构建、探针串行；性能项 2026-11-18 复核，测试与体积项 2026-11-18 复核。命令：`cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo run --release -p veil --example bench_typing`、`cargo test -p veil-ui --release --lib -- --ignored --nocapture --test-threads=1 perf_keystroke_path`（10,500 块用 `perf_keystroke_10k_blocks`）、`cargo build --release -p veil` + `(Get-Item target\release\veil.exe).Length`，依赖计数用 `cargo tree -p veil --edges normal --prefix none`。方法与明细见 `docs/review/keystroke-attribution.md`。
 
 | 指标 | 目标值 | 实测 |
 |---|---|---|
@@ -135,8 +131,8 @@ cargo build --release -p veil --features mermaid-render
 | 冷启动（窗口句柄口径；P2 对比口径） | — | 30 ms（2026-10-30，`tools/bench/measure.ps1`） |
 | 10 万字文档击键→提交上屏延迟 p95 | ≤ 16 ms | 0.973 ms / 1.566 ms（`perf_keystroke_path` 5,005 块 / `perf_keystroke_10k_blocks` 10,500 块；同机 2026-11-18 复测；上一轮记录 1.297 / 1.796）✅ |
 | 10 万字文档常驻内存（私有工作集） | ≤ 150 MB | 40.76 MB（20 页深滚动后 WorkingSet，2026-11-05 实测） |
-| 安装产物体积 — 运行时代码（非图标） | ≤ 6 MiB（Phase A 基准；Wave 3/4 PDF 导出门槛与 v1.9 Mermaid 授权已覆盖） | 9,926,979 B（feature 关）/ 14,593,859 B（`mermaid-render` 开）；exe 减 89,277 B 图标资源：`veil.ico` 46,688 + `veil-doc.ico` 42,589，2026-11-18 |
-| 安装产物体积 — 合计单文件 `veil.exe` | ≤ 16 MiB = 16,777,216 B（v1.9 授权；feature 关闭回 ≤ 10 MiB；每次增量须记录） | 14,683,136 B ≈ 14.00 MiB（本机构建、钉死工具链；较 v1.8.0 的 9,970,176 B +4,712,960 B：QuickJS-ng + resvg + 1,720,018 B 内嵌 Tiny mermaid；2026-11-18）。feature 关闭：10,016,256 B ≈ 9.55 MiB。GitHub v1.9.0 发布资产由 CI 构建，为 14,689,280 B |
+| 安装产物体积 — 运行时代码（非图标） | ≤ 6 MiB（Phase A 基准；Wave 3/4 PDF 导出门槛已覆盖） | 9,844,035 B（exe 减 89,277 B 图标资源：`veil.ico` 46,688 + `veil-doc.ico` 42,589，2026-11-18） |
+| 安装产物体积 — 合计单文件 `veil.exe` | ≤ 10 MiB = 10,485,760 B（每次增量须记录） | 9,933,312 B ≈ 9.47 MiB（本机构建、钉死工具链；2026-11-18；移除 Mermaid 引擎后较 v1.8.0 的 9,970,176 B −36,864 B）。v1.9.0 是唯一内置渲染器的版本：本机 14,683,136 B / CI 14,689,280 B |
 | `veil-core` 单元+属性测试数 | ≥ 80 | 343 |
 | e2e 断言数 | ≥ 20 | 41（3 个 e2e_ 场景测试：写作闭环打开→保存→重开、表格+图片粘贴落盘、查找替换→崩溃恢复→自清）✅ |
 | Markdown 往返一致率（无编辑时输出 == 输入字节；按字节比较） | 100% | 100% |
@@ -145,7 +141,7 @@ cargo build --release -p veil --features mermaid-render
 | GFM 扩展一致性（Tables / TaskList / Strikethrough；按用例数；A / C / D 维） | — | A 23/23 · C 23/23 · D 23/23 ✅；B_CANON 12/23（11 例 autolinks 仅观测） |
 | `veil-core` 的 GUI/异步运行时依赖数 | 0 | 0 |
 | `veil-ui`+`veil` 外部直接依赖总数（`cargo tree --depth 1`，按 crate 名去重） | ≤ 8（PDF 前置基线；已被 Wave 3 授权引入的 `pdf-writer` + `subsetter` + `ttf-parser` 与 v1.8 的 `regex` 覆盖） | 17（`veil-ui` 8 + `veil` 9） |
-| workspace 传递依赖总数（按 crate 名去重，normal 边，含四个 workspace 成员） | ≤ 240（`mermaid-render` 开，v1.9 授权；feature 关仍 ≤ 200） | 153（`mermaid-render` 开）/ 125（关），2026-11-18，`cargo tree -p veil --edges normal --prefix none` |
+| workspace 传递依赖总数（按 crate 名去重，normal 边，含三个 workspace 成员） | ≤ 200 | 125（2026-11-18，`cargo tree -p veil --edges normal --prefix none`） |
 
 ## 同机对比（P2 公开基准，2026-10-30）
 

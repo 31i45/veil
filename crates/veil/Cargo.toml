@@ -23,9 +23,3 @@ notify = "8"
 pdf-writer = "0.15"
 ttf-parser = "0.25"
 subsetter = "0.2.6"
-# Mermaid L1 渲染（QuickJS + Tiny mermaid + resvg）：仅在 `mermaid-render` feature 下
-# 参与构建（Task 3 宿主接线使用）；关闭时 exe 回落原口径、行为与今天逐字节一致。
-veil-mermaid = { path = "../veil-mermaid", optional = true }
-
-[features]
-mermaid-render = ["dep:veil-mermaid"]

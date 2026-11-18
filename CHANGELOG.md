@@ -2,6 +2,24 @@
 
 Veil 版本迭代记录。每个版本的详细修复清单见对应 git tag 的 commit log。
 
+## Unreleased
+
+Mermaid 改为「外部创作流」：默认产物移除进程内渲染器（−4.7 MB / −28 依赖），改为右键在线预览与下载插入。
+
+### Removed
+- 移除 `crates/veil-mermaid`（QuickJS-ng + resvg + 内嵌 Tiny bundle）与 `mermaid-render` feature；exe 回落到约 9.5 MB、依赖 125。完整实现保留在 v1.9.0 tag，需要离线自动渲染时可从历史取回
+
+### Added
+- Mermaid 围栏块右键新增「预览图片（在线渲染）」与「下载并插入图片」：由 mermaid.ink 在线出图（PNG），预览进入现有图片浮层；插入写入 `<doc>.assets/mermaid-N.png` 并插入 `![](相对路径)`，一条 undo 回退
+- 仅在用户显式点击时联网；首次点击提示源码将发送给第三方；「Block Remote Images」开启时两项隐藏；「在 mermaid.live 预览」保持可用（本地编码 URL，不经第三方渲染）
+
+### Changed
+- Mermaid 不再随文档自动渲染：编辑源码后需重新点击下载覆盖；导出 HTML/PDF 直接使用已插入的 PNG
+
+### Notes
+- 实测：exe 9,933,312 B ≈ 9.47 MiB（较 v1.8.0 −36,864 B）；workspace 依赖 125；`cargo test --workspace` 1791 passed / 14 ignored；clippy 零警告
+- 决策：低频功能不进入默认产物。若未来需要离线自动渲染，从 `v1.9.0` 取回完整实现或单独发布 `veil-full`，而不是恢复内置
+
 ## v1.9.0 — 2026-11-18
 
 Mermaid L1 内嵌渲染（QuickJS-ng 内嵌官方 Tiny mermaid + resvg 栅格化，路线 A）。

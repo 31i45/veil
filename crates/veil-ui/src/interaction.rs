@@ -1,7 +1,7 @@
 //! 交互策略：按键到意图的翻译、编辑后的几何刷新编排、光标移动/命中/点选/
 //! 拖选、剪贴板、菜单动作。只发意图与调几何，不做像素绘制。
 
-use crate::app::{App, ConfigSave, ImagePreview};
+use crate::app::{App, ConfigSave, ImagePreview, PendingMermaidFetch};
 use crate::chrome::{self, MenuAction};
 use crate::document::block_index::{gap_after, gap_between, BlockGeom};
 use crate::editor::Intent;
@@ -108,14 +108,6 @@ impl App {
         // 打印预览覆盖层优先：打开时它是唯一输入接收者（翻页/缩放/Esc 关闭）。
         if self.ui_state.print_preview.is_some() {
             self.print_preview_key(&key);
-            return;
-        }
-        // Mermaid 预览覆盖层：Esc 关闭，其余按键吞掉（不与编辑器抢输入）。
-        if self.ui_state.mermaid_preview.is_some() {
-            if matches!(key, Key::Escape) {
-                self.ui_state.mermaid_preview = None;
-                self.request_redraw();
-            }
             return;
         }
         // 设置模态优先（优先级高于普通 modal）：打开时它是唯一输入接收者
@@ -448,6 +440,37 @@ impl App {
                 self.request_redraw();
             }
         }
+    }
+
+    /// mermaid.ink 回包：预览填图片浮层；插入则落盘 assets 并插到 mermaid 块后（一条 undo）。
+    pub(crate) fn finish_mermaid_fetch(
+        &mut self,
+        pending: PendingMermaidFetch,
+        result: Result<crate::image::ImageData, String>,
+    ) {
+        match result {
+            Ok(img) => {
+                if pending.insert {
+                    if let Some(end) = pending.block_end {
+                        self.editor.set_caret(end);
+                        self.window_state.goal_x = None;
+                    }
+                    self.insert_image_data(&img);
+                    return;
+                }
+                self.cache.insert_remote_image(pending.url.clone(), img);
+                self.ui_state.image_preview = Some(ImagePreview {
+                    key: pending.url,
+                    title: pending.title,
+                    zoom: 1.0,
+                    pan: (0.0, 0.0),
+                });
+            }
+            Err(e) => {
+                self.ui_state.chrome.notice = tf(I18nKey::NoticeMermaidInkFailed, &[&e]);
+            }
+        }
+        self.request_redraw();
     }
 
     /// 图片文件插入（剪贴板文件列表）：与拖入同一条路径——解码 → 落盘 assets → 独占段插入。
@@ -1308,6 +1331,7 @@ impl App {
             .editor
             .selection()
             .is_some_and(|s| s.start <= off && off < s.end);
+        let mut mermaid_end = None;
         let (kind, link, mermaid_body, insert_start) = if in_sel {
             (CtxKind::Selection, None, None, None)
         } else {
@@ -1340,7 +1364,7 @@ impl App {
                         None => match self.plain_code_block_at(off) {
                             Some(id) => (CtxKind::CodeBlock { id }, None, None, None),
                             None => match self.mermaid_block_info_at(off) {
-                                Some((body, body_start)) if mermaid_body_is_empty(&body) => {
+                                Some((body, body_start, _end)) if mermaid_body_is_empty(&body) => {
                                     // 空块右键也把光标落到 body 起点：模板项只在这里有意义，
                                     // 落在点击位置会破坏围栏结构。
                                     self.editor.set_caret(body_start);
@@ -1351,7 +1375,10 @@ impl App {
                                         Some(body_start),
                                     )
                                 }
-                                Some((body, _)) => (CtxKind::MermaidBlock, None, Some(body), None),
+                                Some((body, _start, end)) => {
+                                    mermaid_end = Some(end);
+                                    (CtxKind::MermaidBlock, None, Some(body), None)
+                                }
                                 None => {
                                     // Details 块优先于普通块：右键菜单给折叠/展开项。
                                     // B3：命中 details 子块时同样归到所属头块，菜单行为一致。
@@ -1383,8 +1410,10 @@ impl App {
                 },
             }
         };
+        self.ui_state.ctx.remote_ok = self.config.allow_remote_images;
         self.ui_state.ctx.open_at(mx, my, kind, link, mermaid_body);
         self.ui_state.ctx.mermaid_insert_start = insert_start;
+        self.ui_state.ctx.mermaid_end = mermaid_end;
         self.set_ime_area();
         self.request_redraw();
     }
@@ -1445,7 +1474,7 @@ impl App {
 
     /// 偏移是否命中 mermaid 围栏代码块：命中返回 (剥掉围栏的 body 源码, body 绝对起点)。
     /// body 起点 = 开围栏行换行之后；无换行（未闭合且无 body）时返回 None。
-    fn mermaid_block_info_at(&self, off: usize) -> Option<(String, usize)> {
+    fn mermaid_block_info_at(&self, off: usize) -> Option<(String, usize, usize)> {
         let g = self.index.blocks.iter().find(|g| {
             g.range.start <= off
                 && off <= g.range.end
@@ -1457,7 +1486,7 @@ impl App {
         let (_, body) = self.editor.session().fenced_code_source(g.id)?;
         let src = self.editor.session().text_slice(g.range)?;
         let first_nl = src.find('\n')?;
-        Some((body, g.range.start + first_nl + 1))
+        Some((body, g.range.start + first_nl + 1, g.range.end))
     }
 
     /// 左键命中空 mermaid 块：光标落到该块 body 起点，并在鼠标处打开仅含
@@ -1491,7 +1520,7 @@ impl App {
         if !inside {
             return false;
         }
-        let Some((body, body_start)) = self.mermaid_block_info_at(off) else {
+        let Some((body, body_start, _end)) = self.mermaid_block_info_at(off) else {
             return false;
         };
         if !mermaid_body_is_empty(&body) {
@@ -2180,39 +2209,9 @@ impl App {
                 };
                 match action {
                     CtxAction::MermaidPreview => {
-                        // 已启用渲染器：后台渲染完成后应用内面板展示位图（渲染中显示占位）；
-                        // 未启用：保持既有 mermaid.live 在线预览（降级不变）。
-                        let Some(renderer) = self.mermaid.arc() else {
-                            let url = veil_core::mermaid_live_url(&body);
-                            let _ = self.ports.url_opener.open_url(&url);
-                            return;
-                        };
-                        let title = veil_core::detect_type(&body).unwrap_or("mermaid").to_string();
-                        let (win_w, win_h) = self.win_size();
-                        let pad = (40.0 * self.input_state.scale).max(8.0);
-                        // 先开面板（loading 占位），结果由 tick 收割回包后填充。
-                        self.ui_state.mermaid_preview =
-                            Some(crate::view::mermaid::MermaidPreview {
-                                title: title.clone(),
-                                bitmap: None,
-                                error: None,
-                                loading: true,
-                            });
-                        self.mermaid_jobs.submit_preview(crate::view::mermaid::MermaidJobRequest {
-                            renderer,
-                            epoch: self.mermaid_jobs.epoch(),
-                            kind: crate::view::mermaid::MermaidJobKind::Preview {
-                                title,
-                                source: std::sync::Arc::from(body.as_str()),
-                                theme: crate::view::mermaid::MermaidTheme::from_theme(
-                                    &self.input_state.theme,
-                                    1.0,
-                                ),
-                                fit_w: (win_w as f32 - 2.0 * pad).max(1.0),
-                                fit_h: (win_h as f32 - 3.0 * pad).max(1.0),
-                            },
-                        });
-                        self.request_redraw();
+                        // v0 在线预览：始终打开 mermaid.live（源码离线压缩进 URL）。
+                        let url = veil_core::mermaid_live_url(&body);
+                        let _ = self.ports.url_opener.open_url(&url);
                     }
                     CtxAction::MermaidCopySource => {
                         self.ports.clipboard.set(&body);
@@ -2223,6 +2222,42 @@ impl App {
                     }
                     _ => unreachable!(),
                 }
+            }
+            // Mermaid：在线渲染（mermaid.ink）。仅在用户显式点击时联网，
+            // 关闭远程图片时拒绝；源码会发往第三方，首次点击给出一次性提示。
+            CtxAction::MermaidPreviewImage | CtxAction::MermaidInsertImage => {
+                let Some(body) = self.ui_state.ctx.mermaid_body.clone() else {
+                    return;
+                };
+                if !self.config.allow_remote_images {
+                    self.ui_state.chrome.notice = t(I18nKey::NoticeMermaidRemoteBlocked).into();
+                    self.request_redraw();
+                    return;
+                }
+                if !self.mermaid_ink_notice_shown {
+                    self.mermaid_ink_notice_shown = true;
+                    self.ui_state.chrome.notice = t(I18nKey::NoticeMermaidInkNotice).into();
+                }
+                let insert = matches!(action, CtxAction::MermaidInsertImage);
+                let width = if insert {
+                    veil_core::MERMAID_INK_INSERT_WIDTH
+                } else {
+                    veil_core::MERMAID_INK_PREVIEW_WIDTH
+                };
+                let url = veil_core::mermaid_ink_png_url(&body, self.input_state.theme.dark, width);
+                let title = veil_core::detect_type(&body)
+                    .unwrap_or("mermaid")
+                    .to_string();
+                self.pending_mermaid_fetch = Some(PendingMermaidFetch {
+                    url: url.clone(),
+                    insert,
+                    block_end: self.ui_state.ctx.mermaid_end,
+                    title,
+                });
+                if self.cache.remote_pending.insert(url.clone()) {
+                    self.ports.images.request_remote(&url);
+                }
+                self.request_redraw();
             }
             // Mermaid v0：插入预设模板到当前光标位置（空块时为 body 起点）
             CtxAction::MermaidInsertFlowchart => {
@@ -2484,12 +2519,6 @@ impl App {
             if !inside {
                 self.close_image_preview();
             }
-            return false;
-        }
-        // Mermaid 预览：点击任意处关闭（模态语义，透明遮罩不穿透）。
-        if self.ui_state.mermaid_preview.is_some() {
-            self.ui_state.mermaid_preview = None;
-            self.request_redraw();
             return false;
         }
         // 设置模态优先（优先级高于普通 modal）：只判定按钮/字段命中，遮罩/空白点击一律吞掉
@@ -3157,15 +3186,6 @@ impl App {
         // 4) 文档字体族/字号/行高/制表符 + 主题配色：统一由主题刷新入口
         //    递增代次、重排可见块并重算几何（base_key 同时含 typography/theme）。
         self.refresh_theme_visuals();
-        // 5) Mermaid 渲染开关（Task 3.2 设置项）：按配置装载/卸载后端。
-        //    install/clear 内部清位图缓存与待渲染请求并重排，无需重启。
-        if self.config.mermaid_render {
-            if !self.mermaid.is_enabled() {
-                self.install_mermaid_from_factory();
-            }
-        } else if self.mermaid.is_enabled() {
-            self.clear_mermaid_renderer();
-        }
         self.set_ime_area();
         // 成功/失败提示由 resolve_settings 按落盘结果决定，这里不写 notice。
     }
@@ -3917,7 +3937,10 @@ impl App {
 /// 空 mermaid 块判定：body trim 后为空，或所有非空行都以 `%%` 开头（纯注释块）。
 /// 与 `view/layout.rs::fenced_subs` 的提示行判定保持同口径。
 fn mermaid_body_is_empty(body: &str) -> bool {
-    crate::view::mermaid::is_empty_source(body)
+    !body
+        .lines()
+        .map(str::trim)
+        .any(|l| !l.is_empty() && !l.starts_with("%%"))
 }
 
 /// 解析脚注定义块首行 `[^id]: ` 的 id。
@@ -4288,14 +4311,6 @@ impl App {
                 .cache
                 .math(g.id, self.math_key(g.id))
                 .map_or(g.est_h, |m| m.height as f32);
-        }
-        // Mermaid 渲染态：高度取场景等比缩放后的像素高（与绘制同一 fit 口径）。
-        if let BlockKind::FencedCode(Some(lang)) = &g.kind {
-            if lang.eq_ignore_ascii_case("mermaid") && self.mermaid_shows_image(g.id, &g.range) {
-                if let Some((_, h)) = self.mermaid_display_size(g.id) {
-                    return h;
-                }
-            }
         }
         if g.kind == BlockKind::Table && self.table_shows_grid(g.id, &g.range) {
             return self

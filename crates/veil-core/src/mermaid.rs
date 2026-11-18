@@ -18,6 +18,14 @@ use std::io::Read;
 /// mermaid.live edit 页 base URL（pako fragment 由本地生成，完全离线）。
 pub const MERMAID_LIVE_BASE: &str = "https://mermaid.live/edit#pako:";
 
+/// mermaid.ink 图片渲染端点（用户显式触发才访问，非后台请求）。
+pub const MERMAID_INK_BASE: &str = "https://mermaid.ink/img/";
+
+/// mermaid.ink 预览图宽度（逻辑像素）。
+pub const MERMAID_INK_PREVIEW_WIDTH: u32 = 1200;
+/// mermaid.ink 插入图宽度：约等于 8 英寸 300 dpi。
+pub const MERMAID_INK_INSERT_WIDTH: u32 = 2400;
+
 /// 流程图模板（flowchart TD）。
 pub const FLOWCHART_TEMPLATE: &str = r#"graph TD
     A[Start] --> B{Decision}
@@ -117,6 +125,22 @@ pub fn mermaid_live_url(mermaid_source: &str) -> String {
     format!("{MERMAID_LIVE_BASE}{encoded}")
 }
 
+/// 生成 mermaid.ink 的 PNG 渲染 URL（用户点击时才由上层发起请求）。
+///
+/// payload 与 `mermaid_live_url` 完全相同（gzip + base64url），mermaid.ink 的
+/// pako 解码器可直接识别；`width` 决定出图像素宽，`theme`/`bgColor` 跟随编辑器主题。
+pub fn mermaid_ink_png_url(mermaid_source: &str, dark: bool, width: u32) -> String {
+    let theme = if dark { "dark" } else { "default" };
+    let bg = if dark { "1B1B1F" } else { "FFFFFF" };
+    let json = format!(
+        r#"{{"code":{}, "mermaid":{{"theme":"{theme}"}}, "autoSync":true, "updateDiagram":true}}"#,
+        json_escape(mermaid_source)
+    );
+    let compressed = gzip_bytes(&json);
+    let encoded = base64url_encode(&compressed);
+    format!("{MERMAID_INK_BASE}pako:{encoded}?type=png&width={width}&theme={theme}&bgColor={bg}")
+}
+
 /// 把任意字符串安全地嵌入 JSON 字符串字面量（无需 serde_json 依赖）。
 fn json_escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
@@ -165,6 +189,25 @@ mod tests {
             "URL 应以 mermaid.live 前缀开头: {url}"
         );
         assert!(url.len() > MERMAID_LIVE_BASE.len());
+    }
+
+    #[test]
+    fn mermaid_ink_url_encodes_theme_and_width() {
+        let url = mermaid_ink_png_url("graph TD\n  A-->B", true, 2400);
+        assert!(url.starts_with(MERMAID_INK_BASE), "{url}");
+        assert!(url.contains("pako:"), "{url}");
+        assert!(url.contains("type=png"), "{url}");
+        assert!(url.contains("width=2400"), "{url}");
+        assert!(url.contains("theme=dark"), "{url}");
+        assert!(url.contains("bgColor=1B1B1F"), "{url}");
+
+        let light = mermaid_ink_png_url("pie title t\n \"a\": 1", false, 1200);
+        assert!(light.contains("theme=default"), "{light}");
+        assert!(light.contains("bgColor=FFFFFF"), "{light}");
+        // 浅色主题下与 mermaid.live URL 共用同一段 pako 编码（同一 payload）
+        let live = mermaid_live_url("pie title t\n \"a\": 1");
+        let enc = live.trim_start_matches(MERMAID_LIVE_BASE);
+        assert!(light.contains(enc), "两个端点应共用同一段编码");
     }
 
     #[test]

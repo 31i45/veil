@@ -935,127 +935,12 @@ impl App {
                 }
             }
         }
-        // Mermaid 块与数学块同为「视口驱动的原子块渲染」：共用同一批调用点
-        // （单块 / 全量 / 视口），避免遗漏某条 ensured 路径。
-        if !self.source_mode() {
-            self.ensure_mermaid_range(indices);
-        }
     }
 
     /// 仅渲染视口内（含 overscan）的数学块。
     pub(crate) fn ensure_math_visible(&mut self) {
         let range = self.visible_index_range();
         self.ensure_math_range(range);
-    }
-
-    /// Mermaid 渲染调度（启用后端时）：把可视区内的 mermaid 块提交后台渲染
-    /// （防抖合并，tick 收割结果）。光标在块内或源码模式不渲染（显源码编辑）；
-    /// 空块与 Tiny bundle 不支持的图型不渲染（保持源码卡片）；失败按块记忆不重试。
-    pub(crate) fn ensure_mermaid_range(&mut self, indices: std::ops::Range<usize>) {
-        if self.source_mode() || !self.mermaid.is_enabled() {
-            return;
-        }
-        let Some(renderer) = self.mermaid.arc() else {
-            return;
-        };
-        let caret = self.effective_caret();
-        // 屏幕 1x 主题快照：字号不随 DPI，缩放全部由 fit 倍率承担（避免双重缩放）。
-        let theme = crate::view::mermaid::MermaidTheme::from_theme(&self.input_state.theme, 1.0);
-        let (fit_w, fit_h) = (self.content_width(), self.image_max_height());
-        let epoch = self.mermaid_jobs.epoch();
-        let (theme_rev, session_rev) =
-            (self.input_state.revs.theme, self.input_state.revs.session);
-        let Some(blocks) = self.index.blocks.get(indices) else {
-            return;
-        };
-        for g in blocks {
-            let BlockKind::FencedCode(Some(lang)) = &g.kind else {
-                continue;
-            };
-            if !lang.eq_ignore_ascii_case("mermaid") {
-                continue;
-            }
-            let (id, range) = (g.id, g.range);
-            if range.start <= caret && caret <= range.end {
-                continue;
-            }
-            if self.mermaid_jobs.is_pending(id) {
-                continue;
-            }
-            let Some((_, body)) = self.editor.session().fenced_code_source(id) else {
-                continue;
-            };
-            if crate::view::mermaid::is_empty_source(&body) {
-                continue;
-            }
-            if !crate::view::mermaid::mermaid_supported_source(&body) {
-                continue;
-            }
-            // 失败记忆（跨 resize 有效）：引擎/语法错误不重试，保持源码卡片。
-            if self
-                .cache
-                .mermaid_bitmap_error(id, theme_rev, session_rev)
-                .is_some()
-            {
-                continue;
-            }
-            // 已有位图：fit 倍率失配（resize/DPI 变化）时后台重栅格化；paint 先拉伸旧图。
-            if let Some(entry) = self.cache.mermaid_bitmap(id, theme_rev, session_rev) {
-                let target = entry.fit_scale(fit_w, fit_h);
-                if crate::view::mermaid::MermaidBlockBitmap::scale_bucket(target)
-                    == crate::view::mermaid::MermaidBlockBitmap::scale_bucket(entry.k)
-                {
-                    continue;
-                }
-            }
-            self.mermaid_jobs.submit_block(crate::view::mermaid::MermaidJobRequest {
-                renderer: std::sync::Arc::clone(&renderer),
-                epoch,
-                kind: crate::view::mermaid::MermaidJobKind::Block {
-                    id,
-                    source: std::sync::Arc::from(body.as_str()),
-                    theme,
-                    fit_w,
-                    fit_h,
-                    theme_rev,
-                    session_rev,
-                },
-            });
-        }
-    }
-
-    /// 仅渲染视口内（含 overscan）的 Mermaid 块。
-    #[allow(dead_code)] // 由 `ensure_math_range` 统一驱动；保留单入口便于后续按需拆分
-    pub(crate) fn ensure_mermaid_visible(&mut self) {
-        let range = self.visible_index_range();
-        self.ensure_mermaid_range(range);
-    }
-
-    /// Mermaid 块当前是否按渲染图显示：光标在块内（Reveal 同语义）或位图未就绪时显源码。
-    pub(crate) fn mermaid_shows_image(&self, id: BlockId, range: &veil_core::Range) -> bool {
-        if self.source_mode() {
-            return false;
-        }
-        let caret = self.effective_caret();
-        !(range.start <= caret && caret <= range.end)
-            && self
-                .cache
-                .mermaid_bitmap(
-                    id,
-                    self.input_state.revs.theme,
-                    self.input_state.revs.session,
-                )
-                .is_some()
-    }
-
-    /// Mermaid 位图的屏幕显示尺寸（内容宽 × 可视高度上限内等比缩放）。
-    pub(crate) fn mermaid_display_size(&self, id: BlockId) -> Option<(f32, f32)> {
-        let entry = self.cache.mermaid_bitmap(
-            id,
-            self.input_state.revs.theme,
-            self.input_state.revs.session,
-        )?;
-        Some(entry.display_size(self.content_width(), self.image_max_height()))
     }
 
     /// 测试专用：全量数学渲染。
@@ -1523,37 +1408,6 @@ impl App {
                 frame.blit(&img.pixels, img.width, img.height, x, sy);
                 continue;
             }
-            // Mermaid 渲染态：位图整体替换源码光栅（与数学块同构）。
-            // 键失配（resize 改变 fit 倍率）时旧图拉伸即时重绘，后台重栅格化随后换上。
-            if let BlockKind::FencedCode(Some(lang)) = &kind {
-                if lang.eq_ignore_ascii_case("mermaid") && self.mermaid_shows_image(id, &range) {
-                    if let Some(entry) = self.cache.mermaid_bitmap(
-                        id,
-                        self.input_state.revs.theme,
-                        self.input_state.revs.session,
-                    ) {
-                        let (dw, dh) =
-                            entry.display_size(self.content_width(), self.image_max_height());
-                        let dx = self.content_x() + ((self.content_width() - dw) / 2.0).max(0.0);
-                        let (bw, bh) = (entry.bitmap.width, entry.bitmap.height);
-                        let (dwi, dhi) = (dw.round() as u32, dh.round() as u32);
-                        if dwi == bw && dhi == bh {
-                            frame.blit(&entry.bitmap.rgba, bw, bh, dx.round() as i32, sy);
-                        } else {
-                            frame.blit_scaled(
-                                &entry.bitmap.rgba,
-                                bw,
-                                bh,
-                                dwi,
-                                dhi,
-                                dx.round() as i32,
-                                sy,
-                            );
-                        }
-                    }
-                    continue;
-                }
-            }
             // 仅网格态才走表格绘制；源码模式（或光标落在结构字符上）必须落到
             // 文本光栅路径，否则表格块只会画空白并跳过原始行。
             if kind == BlockKind::Table
@@ -1952,8 +1806,6 @@ impl App {
             crate::view::print_preview::paint(self, &mut frame);
         } else if self.ui_state.image_preview.is_some() && self.window_state.print.is_none() {
             crate::view::image_preview::paint(self, &mut frame);
-        } else if self.ui_state.mermaid_preview.is_some() && self.window_state.print.is_none() {
-            crate::view::mermaid::paint_preview(self, &mut frame);
         } else if self.ui_state.settings.is_some() && self.window_state.print.is_none() {
             self.paint_settings(&mut frame);
         } else if self.ui_state.modal.is_some() && self.window_state.print.is_none() {

@@ -622,67 +622,9 @@ impl Exporter for NoExport {
         _style: ExportStyle,
         _p: Option<&Path>,
         _t: Option<&Path>,
-        _m: Option<&dyn crate::view::mermaid::MermaidRenderer>,
     ) -> Result<PathBuf, String> {
         Err("未注入导出器".into())
     }
-}
-
-/// Mermaid 测试替身：固定 120×60 场景（1 矩形 + 1 线 + 1 文本）与可选失败注入。
-/// 记录收到的源码，用于断言三端共用同一渲染入口；位图恒 120×60（blit 路径测试）。
-/// 计数器用 `Arc<Mutex>`：渲染现在在后台 worker 线程执行，替身必须 Send + Sync。
-struct FakeMermaid {
-    calls: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
-    fail: bool,
-}
-
-impl crate::view::mermaid::MermaidBitmapRenderer for FakeMermaid {
-    fn render_bitmap(
-        &self,
-        _source: &str,
-        _theme: &crate::view::mermaid::MermaidTheme,
-        _scale: f32,
-    ) -> Result<crate::view::mermaid::MermaidBitmap, crate::view::mermaid::MermaidError> {
-        Ok(crate::view::mermaid::MermaidBitmap {
-            rgba: std::sync::Arc::new(vec![250; 120 * 60 * 4]),
-            width: 120,
-            height: 60,
-        })
-    }
-}
-
-impl crate::view::mermaid::MermaidRenderer for FakeMermaid {
-    fn render(
-        &self,
-        source: &str,
-        _theme: &crate::view::mermaid::MermaidTheme,
-    ) -> Result<crate::view::mermaid::MermaidDrawing, crate::view::mermaid::MermaidError> {
-        self.calls.lock().unwrap().push(source.to_string());
-        if self.fail {
-            return Err(crate::view::mermaid::MermaidError::new("引擎不可用"));
-        }
-        Ok(crate::view::mermaid::MermaidDrawing::with_svg(
-            crate::view::mermaid::MermaidScene::new(120, 60)
-                .rect(0.0, 0.0, 120.0, 60.0, [230, 240, 250, 255])
-                .line(10.0, 30.0, 110.0, 30.0, 2.0, [40, 90, 160, 255])
-                .text(12.0, 8.0, 10.0, "A", [20, 20, 20]),
-            "<svg xmlns=\"http://www.w3.org/2000/svg\"><rect width=\"1\" height=\"1\"/></svg>",
-        ))
-    }
-}
-
-/// 泵 Mermaid 后台任务：推进防抖窗口并等待 worker 结果落地（假渲染器即时完成，
-/// 轮询上限防挂死）。渲染走真线程，每次 tick 之间稍作让步。
-fn pump_mermaid(a: &mut App) {
-    let t0 = std::time::Instant::now();
-    for i in 0..100u32 {
-        a.tick(t0 + std::time::Duration::from_millis(u64::from(i) * 30));
-        if a.mermaid_jobs.idle() {
-            return;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(2));
-    }
-    panic!("Mermaid 后台任务未在限期内完成");
 }
 
 fn app_math(text: &str, fail: bool) -> (App, MathCalls) {
@@ -3367,7 +3309,6 @@ impl Exporter for FakeExport {
         style: ExportStyle,
         source_path: Option<&Path>,
         target: Option<&Path>,
-        _mermaid: Option<&dyn crate::view::mermaid::MermaidRenderer>,
     ) -> Result<PathBuf, String> {
         self.calls.borrow_mut().push((
             session.serialize(),
@@ -13613,10 +13554,175 @@ fn non_empty_mermaid_right_click_keeps_full_menu() {
         .iter()
         .filter(|&&(_, act)| act != ctx_menu::CtxAction::Separator)
         .count();
-    assert_eq!(actionable, 8, "非空块保持现状 8 项可执行项");
+    assert_eq!(actionable, 10, "新增在线预览/插入两项后为 10 项");
     assert!(
         a.ui_state.ctx.mermaid_insert_start.is_none(),
         "非空块不启用空块插入锚点"
+    );
+}
+
+/// 远程图片 + 资产双端口装配（Mermaid 在线预览/插入测试用）。
+fn app_remote_assets(
+    text: &str,
+    path: Option<&str>,
+    store: &MemStore,
+    images: RemoteImages,
+    assets: FakeAssets,
+) -> App {
+    let doc = Doc {
+        text: text.into(),
+        path: path.map(PathBuf::from),
+        bom: false,
+        resume: false,
+        open_error: None,
+    };
+    App::new(
+        doc,
+        Ports {
+            clipboard: Box::new(NoClip),
+            store: Box::new(store.clone()),
+            math: Box::new(FakeMath {
+                fail: false,
+                calls: Rc::new(RefCell::new(Vec::new())),
+            }),
+            images: Box::new(images),
+            assets: Box::new(assets),
+            exporter: Box::new(NoExport),
+            dialogs: Box::new(NoDialogs),
+            watcher: Box::new(NoWatcher),
+            theme_env: theme::test_support::env(),
+            persist_env: persist_env(),
+            print: Box::new(NoPrint),
+            url_opener: no_url(),
+            clock: fixed_clock(),
+        },
+    )
+}
+
+/// 在 mermaid 块上右键并执行指定菜单项。
+fn exec_mermaid_action(a: &mut App, action: ctx_menu::CtxAction) {
+    hover_mermaid_block(a);
+    a.on_right_click();
+    assert!(a.ui_state.ctx.open, "mermaid 块右键应打开菜单");
+    let i = a
+        .ui_state
+        .ctx
+        .items()
+        .iter()
+        .position(|&(_, act)| act == action)
+        .expect("菜单应含目标项");
+    a.ui_state.ctx.hover = Some(i);
+    a.route_key(Key::Enter);
+}
+
+/// 在线预览：显式点击才请求 mermaid.ink，回包后进入图片浮层，且不改文档。
+#[test]
+fn mermaid_online_preview_requests_ink_then_opens_overlay() {
+    let store = MemStore::default();
+    let images = RemoteImages::default();
+    let requests = images.requests.clone();
+    let doc = "p\n\n```mermaid\ngraph TD\nA-->B\n```\n";
+    let mut a = app_remote_assets(
+        doc,
+        None,
+        &store,
+        images.clone(),
+        FakeAssets {
+            result: Ok("d.assets/mermaid-1.png".into()),
+            calls: Rc::new(RefCell::new(Vec::new())),
+        },
+    );
+
+    exec_mermaid_action(&mut a, ctx_menu::CtxAction::MermaidPreviewImage);
+    assert_eq!(requests.borrow().len(), 1, "点击后应发起一次请求");
+    let url = requests.borrow()[0].clone();
+    assert!(url.starts_with("https://mermaid.ink/img/pako:"), "{url}");
+    assert!(url.contains("type=png"), "{url}");
+    assert!(url.contains("width=1200"), "{url}");
+    assert!(a.pending_mermaid_fetch.is_some(), "应记录待回包请求");
+    assert!(a.ui_state.image_preview.is_none(), "回包前不得先开浮层");
+
+    *images.results.borrow_mut() = vec![(url, Ok(solid(12, 8)))];
+    a.poll_remote_images();
+    assert!(a.ui_state.image_preview.is_some(), "回包后应打开图片浮层");
+    assert!(a.pending_mermaid_fetch.is_none(), "回包后清空待处理项");
+    let n = a.editor.session().text_len();
+    assert_eq!(
+        a.editor.session().text_slice(Range::new(0, n)).unwrap(),
+        doc,
+        "预览不得修改文档"
+    );
+}
+
+/// 下载插入：写入 assets 并在块后插入图片引用；一次事务（undo_depth 恰 +1）。
+#[test]
+fn mermaid_online_insert_writes_asset_as_one_undo_step() {
+    let store = MemStore::default();
+    let images = RemoteImages::default();
+    let requests = images.requests.clone();
+    let calls = Rc::new(RefCell::new(Vec::new()));
+    let doc = "p\n\n```mermaid\ngraph TD\nA-->B\n```\n";
+    let mut a = app_remote_assets(
+        doc,
+        Some("C:\\tmp\\d.md"),
+        &store,
+        images.clone(),
+        FakeAssets {
+            result: Ok("d.assets/mermaid-1.png".into()),
+            calls: calls.clone(),
+        },
+    );
+    let depth0 = a.editor.session().undo_depth();
+
+    exec_mermaid_action(&mut a, ctx_menu::CtxAction::MermaidInsertImage);
+    let url = requests.borrow()[0].clone();
+    assert!(url.contains("width=2400"), "插入用高分辨率：{url}");
+
+    *images.results.borrow_mut() = vec![(url, Ok(solid(20, 10)))];
+    a.poll_remote_images();
+
+    assert_eq!(calls.borrow().len(), 1, "应落盘一次资产");
+    assert_eq!(calls.borrow()[0].0, PathBuf::from("C:\\tmp\\d.md"));
+    let n = a.editor.session().text_len();
+    let text = a.editor.session().text_slice(Range::new(0, n)).unwrap();
+    assert!(
+        text.contains("![](d.assets/mermaid-1.png)"),
+        "应插入图片引用：{text}"
+    );
+    assert_eq!(
+        a.editor.session().undo_depth(),
+        depth0 + 1,
+        "插入必须是一条 undo 步骤"
+    );
+}
+
+/// 关闭远程图片时，两项在线渲染不出现在菜单里（仍保留 mermaid.live 预览）。
+#[test]
+fn mermaid_online_items_hidden_when_remote_images_blocked() {
+    let store = MemStore::default();
+    let doc = "p\n\n```mermaid\ngraph TD\nA-->B\n```\n";
+    let mut a = app(doc, None, false, &store);
+    a.config.allow_remote_images = false;
+    hover_mermaid_block(&mut a);
+    a.on_right_click();
+    let acts: Vec<_> = a
+        .ui_state
+        .ctx
+        .items()
+        .iter()
+        .map(|&(_, act)| act)
+        .collect();
+    assert!(
+        !acts.contains(&ctx_menu::CtxAction::MermaidPreviewImage),
+        "关闭远程图片后不应出现在线预览"
+    );
+    assert!(
+        !acts.contains(&ctx_menu::CtxAction::MermaidInsertImage),
+        "关闭远程图片后不应出现在线插入"
+    );
+    assert!(
+        acts.contains(&ctx_menu::CtxAction::MermaidPreview),
+        "mermaid.live 预览应始终可用"
     );
 }
 
@@ -13636,183 +13742,9 @@ fn exec_mermaid_preview(a: &mut App) {
     a.route_key(Key::Enter);
 }
 
-/// Task 3.2：测试替身渲染器贯通 L1 内嵌块与预览面板（同一入口 / 位图 blit 路径）；
-/// 光标进入块内仍显源码，卸载后回到源码卡片降级，文档字节始终不变。
+/// v0：右键「预览」始终打开 mermaid.live（源码离线压缩进 URL），不改文档字节。
 #[test]
-fn mermaid_renderer_draws_block_and_preview_uses_same_backend() {
-    let store = MemStore::default();
-    let doc = "p\n\n```mermaid\ngraph TD\nA-->B\n```\n";
-    let mut a = app(doc, None, false, &store);
-    let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-    a.install_mermaid_renderer(Box::new(FakeMermaid {
-        calls: calls.clone(),
-        fail: false,
-    }));
-    a.editor.set_caret(0);
-    a.refresh_index();
-    a.ensure_layouts_all();
-    a.ensure_math_visible();
-    pump_mermaid(&mut a);
-    a.recompute_geometry();
-    let id = block_id_of(&a, |k| {
-        matches!(k, BlockKind::FencedCode(Some(l)) if l.eq_ignore_ascii_case("mermaid"))
-    });
-    let range = geom(&a, id).range;
-    assert!(a.mermaid_shows_image(id, &range), "启用后块内应显示渲染位图");
-    assert_eq!(calls.lock().unwrap().len(), 1, "同一块只渲染一次（缓存）");
-    let (_, h) = a.mermaid_display_size(id).expect("应有显示尺寸");
-    assert!(
-        (geom(&a, id).height - h).abs() < 0.01,
-        "块高应取位图缩放高：{} vs {h}",
-        geom(&a, id).height
-    );
-
-    // 光标进入块内 → 显源码编辑（与原有 mermaid 块/数学块同语义）。
-    a.editor.set_caret(doc.find("graph TD").unwrap());
-    a.recompute_geometry();
-    assert!(!a.mermaid_shows_image(id, &range));
-
-    exec_mermaid_preview(&mut a);
-    pump_mermaid(&mut a);
-    let pv = a
-        .ui_state
-        .mermaid_preview
-        .as_ref()
-        .expect("应用内预览面板应打开");
-    assert_eq!(pv.error, None);
-    assert_eq!(pv.title, "flowchart");
-    let bm = pv.bitmap.as_ref().expect("预览应持有位图");
-    assert_eq!((bm.width, bm.height), (120, 60), "预览位图来自同一后端");
-    assert!(!pv.loading, "回包后 loading 应清除");
-    assert_eq!(calls.lock().unwrap().len(), 2, "预览走同一渲染入口");
-
-    a.route_key(Key::Escape);
-    assert!(a.ui_state.mermaid_preview.is_none(), "Esc 关闭预览");
-    assert_eq!(a.editor.session().serialize(), doc, "预览不改文档字节");
-
-    // 卸载 → 恢复源码卡片（高度回到文本布局）。
-    a.clear_mermaid_renderer();
-    a.editor.set_caret(0);
-    a.ensure_layouts_all();
-    a.ensure_math_visible();
-    pump_mermaid(&mut a);
-    a.recompute_geometry();
-    assert!(!a.mermaid_shows_image(id, &geom(&a, id).range));
-    assert_eq!(a.editor.session().serialize(), doc);
-}
-
-/// Task 3.2：渲染失败在预览面板可见（不静默吞错），块内回退源码卡片且按块记忆不重试。
-#[test]
-fn mermaid_render_error_is_visible_in_preview_panel() {
-    let store = MemStore::default();
-    let doc = "p\n\n```mermaid\ngraph TD\nA-->B\n```\n";
-    let mut a = app(doc, None, false, &store);
-    a.install_mermaid_renderer(Box::new(FakeMermaid {
-        calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
-        fail: true,
-    }));
-    a.editor.set_caret(0);
-    a.ensure_layouts_all();
-    a.ensure_math_visible();
-    pump_mermaid(&mut a);
-    a.recompute_geometry();
-    let id = block_id_of(&a, |k| {
-        matches!(k, BlockKind::FencedCode(Some(l)) if l.eq_ignore_ascii_case("mermaid"))
-    });
-    assert!(
-        !a.mermaid_shows_image(id, &geom(&a, id).range),
-        "失败时块内保持源码卡片"
-    );
-    let (theme_rev, session_rev) =
-        (a.input_state.revs.theme, a.input_state.revs.session);
-    assert!(
-        a.cache
-            .mermaid_bitmap_error(id, theme_rev, session_rev)
-            .is_some(),
-        "失败按块记忆，不每帧重试"
-    );
-
-    exec_mermaid_preview(&mut a);
-    pump_mermaid(&mut a);
-    let pv = a.ui_state.mermaid_preview.as_ref().expect("预览面板应打开");
-    assert!(pv.bitmap.is_none());
-    assert_eq!(pv.error.as_deref(), Some("引擎不可用"));
-    // 点击任意处关闭（模态语义）。
-    a.input_state.mouse = PhysicalPosition::new(4.0, 4.0);
-    a.on_left_click();
-    assert!(a.ui_state.mermaid_preview.is_none());
-    assert_eq!(a.editor.session().serialize(), doc);
-}
-
-/// Task 3.2：Tiny bundle 不支持的图型（class/state/…）不提交渲染，保持源码卡片。
-#[test]
-fn mermaid_unsupported_type_keeps_source_card() {
-    let store = MemStore::default();
-    let doc = "p\n\n```mermaid\nclassDiagram\nA <|-- B\n```\n";
-    let mut a = app(doc, None, false, &store);
-    let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-    a.install_mermaid_renderer(Box::new(FakeMermaid {
-        calls: calls.clone(),
-        fail: false,
-    }));
-    a.editor.set_caret(0);
-    a.refresh_index();
-    a.ensure_layouts_all();
-    a.ensure_math_visible();
-    pump_mermaid(&mut a);
-    let id = block_id_of(&a, |k| {
-        matches!(k, BlockKind::FencedCode(Some(l)) if l.eq_ignore_ascii_case("mermaid"))
-    });
-    assert!(
-        !a.mermaid_shows_image(id, &geom(&a, id).range),
-        "不支持的图型不渲染"
-    );
-    assert!(
-        calls.lock().unwrap().is_empty(),
-        "支持预检应在提交前拦截，不触发后端"
-    );
-}
-
-/// Task 3.2：resize 改变 fit 倍率 → 旧位图先拉伸显示，后台重栅格化换新图。
-#[test]
-fn mermaid_resize_requeues_rasterization() {
-    let store = MemStore::default();
-    let doc = "p\n\n```mermaid\ngraph TD\nA-->B\n```\n";
-    let mut a = app(doc, None, false, &store);
-    a.window_state.test_size = Some((1280, 800));
-    let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-    a.install_mermaid_renderer(Box::new(FakeMermaid {
-        calls: calls.clone(),
-        fail: false,
-    }));
-    a.editor.set_caret(0);
-    a.refresh_index();
-    a.ensure_layouts_all();
-    a.ensure_math_visible();
-    pump_mermaid(&mut a);
-    a.recompute_geometry();
-    let id = block_id_of(&a, |k| {
-        matches!(k, BlockKind::FencedCode(Some(l)) if l.eq_ignore_ascii_case("mermaid"))
-    });
-    assert!(a.mermaid_shows_image(id, &geom(&a, id).range));
-    let before = calls.lock().unwrap().len();
-
-    // 窗口变宽 → 版心宽变化 → fit 倍率变化 → 重投递栅格化。
-    a.window_state.test_size = Some((2560, 800));
-    a.refresh_index();
-    a.ensure_layouts_all();
-    a.ensure_math_visible();
-    pump_mermaid(&mut a);
-    a.recompute_geometry();
-    assert!(
-        calls.lock().unwrap().len() > before,
-        "resize 后应重新栅格化（键失配重投递）"
-    );
-}
-
-/// Task 9：未启用渲染器时预览保持既有 mermaid.live 外链降级。
-#[test]
-fn mermaid_preview_without_renderer_keeps_mermaid_live_fallback() {
+fn mermaid_preview_opens_mermaid_live() {
     let store = MemStore::default();
     let doc = "p\n\n```mermaid\ngraph TD\nA-->B\n```\n";
     let calls = Rc::new(RefCell::new(Vec::new()));
@@ -13827,10 +13759,6 @@ fn mermaid_preview_without_renderer_keeps_mermaid_live_fallback() {
         }),
     );
     exec_mermaid_preview(&mut a);
-    assert!(
-        a.ui_state.mermaid_preview.is_none(),
-        "未启用渲染器不开应用内面板"
-    );
     let urls = calls.borrow();
     assert_eq!(urls.len(), 1, "应走在线预览");
     assert!(urls[0].starts_with("https://mermaid.live/"), "{}", urls[0]);

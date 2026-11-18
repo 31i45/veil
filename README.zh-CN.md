@@ -136,7 +136,7 @@ cargo build --release -p veil --features mermaid-render
 | 10 万字文档击键→提交上屏延迟 p95 | ≤ 16 ms | 0.973 ms / 1.566 ms（`perf_keystroke_path` 5,005 块 / `perf_keystroke_10k_blocks` 10,500 块；同机 2026-11-18 复测；上一轮记录 1.297 / 1.796）✅ |
 | 10 万字文档常驻内存（私有工作集） | ≤ 150 MB | 40.76 MB（20 页深滚动后 WorkingSet，2026-11-05 实测） |
 | 安装产物体积 — 运行时代码（非图标） | ≤ 6 MiB（Phase A 基准；Wave 3/4 PDF 导出门槛与 v1.9 Mermaid 授权已覆盖） | 9,926,979 B（feature 关）/ 14,593,859 B（`mermaid-render` 开）；exe 减 89,277 B 图标资源：`veil.ico` 46,688 + `veil-doc.ico` 42,589，2026-11-18 |
-| 安装产物体积 — 合计单文件 `veil.exe` | ≤ 16 MiB = 16,777,216 B（v1.9 授权；feature 关闭回 ≤ 10 MiB；每次增量须记录） | 14,683,136 B ≈ 14.00 MiB（本机构建、钉死工具链；较 v1.8.0 的 9,970,176 B +4,712,960 B：QuickJS-ng + resvg + 1,720,018 B 内嵌 Tiny mermaid；2026-11-18）。feature 关闭：10,016,256 B ≈ 9.55 MiB |
+| 安装产物体积 — 合计单文件 `veil.exe` | ≤ 16 MiB = 16,777,216 B（v1.9 授权；feature 关闭回 ≤ 10 MiB；每次增量须记录） | 14,683,136 B ≈ 14.00 MiB（本机构建、钉死工具链；较 v1.8.0 的 9,970,176 B +4,712,960 B：QuickJS-ng + resvg + 1,720,018 B 内嵌 Tiny mermaid；2026-11-18）。feature 关闭：10,016,256 B ≈ 9.55 MiB。GitHub v1.9.0 发布资产由 CI 构建，为 14,689,280 B |
 | `veil-core` 单元+属性测试数 | ≥ 80 | 343 |
 | e2e 断言数 | ≥ 20 | 41（3 个 e2e_ 场景测试：写作闭环打开→保存→重开、表格+图片粘贴落盘、查找替换→崩溃恢复→自清）✅ |
 | Markdown 往返一致率（无编辑时输出 == 输入字节；按字节比较） | 100% | 100% |

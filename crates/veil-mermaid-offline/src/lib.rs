@@ -180,7 +180,8 @@ impl Session {
             "mermaid.initialize({{ startOnLoad: false, securityLevel: 'loose', \
              {theme_css}theme: '{theme}', htmlLabels: false, fontFamily: 'sans-serif', \
              flowchart: {{ htmlLabels: false }}, class: {{ htmlLabels: false }}, \
-             journey: {{ htmlLabels: false, textPlacement: 'tspan' }}, state: {{ htmlLabels: false }} }}); 'ok'"
+             journey: {{ htmlLabels: false, textPlacement: 'tspan' }}, state: {{ htmlLabels: false }}, \
+             gantt: {{ fontSize: 14, sectionFontSize: 14 }} }}); 'ok'"
         );
         let call = format!(
             "globalThis.__veil_out = null; \
@@ -482,6 +483,93 @@ mod tests {
             !svg.to_ascii_lowercase().contains("foreignobject"),
             "htmlLabels 必须关闭"
         );
+    }
+
+    /// Task 7.1：gantt 任务/分节文字默认 11px 偏小；通过 `gantt.fontSize` /
+    /// `sectionFontSize` 显式抬到 14px（Mermaid 公开配置项，不改布局算法）。
+    #[test]
+    fn gantt_task_and_section_text_have_min_font_size() {
+        let (_, source) = corpus::MERMAID_11_12_CORPUS
+            .iter()
+            .find(|(name, _)| *name == "gantt")
+            .expect("gantt corpus entry");
+        let svg = render_blocking(source, false).expect("gantt render");
+        let doc = roxmltree::Document::parse(&svg).expect("gantt SVG XML");
+        for class in ["taskText", "sectionTitle"] {
+            let nodes: Vec<_> = doc
+                .descendants()
+                .filter(|node| {
+                    node.tag_name().name() == "text"
+                        && node.attribute("class").is_some_and(|value| {
+                            value.split_whitespace().any(|token| token == class)
+                        })
+                })
+                .collect();
+            assert!(!nodes.is_empty(), "{class} missing in gantt SVG");
+            for node in nodes {
+                let size = node
+                    .attribute("font-size")
+                    .and_then(|value| value.parse::<f64>().ok())
+                    .unwrap_or_else(|| panic!("{class} missing numeric font-size"));
+                assert!(
+                    size >= 14.0,
+                    "{class} font-size must be >= 14px, got {size}"
+                );
+            }
+        }
+    }
+
+    /// Task 7.1 / 7.4：深色 gantt 的任务文字与任务条底色达到 WCAG AA。
+    /// 颜色取自 Mermaid 主题 CSS（`.taskText0` / `.task0`），非人工目检。
+    #[test]
+    fn dark_gantt_task_text_has_readable_contrast() {
+        let (_, source) = corpus::MERMAID_11_12_CORPUS
+            .iter()
+            .find(|(name, _)| *name == "gantt")
+            .expect("gantt corpus entry");
+        let mut session = Session::new().expect("initialize Mermaid");
+        let dark = session.render(source, true).expect("dark gantt render");
+        let text = css_property(last_css_rule(&dark, ".taskText0"), "fill");
+        let bar = css_property(last_css_rule(&dark, ".task0"), "fill");
+        let ratio = contrast_ratio_css(text, bar);
+        assert!(
+            ratio >= 4.5,
+            "dark gantt task text contrast {ratio:.2} ({text} on {bar})"
+        );
+    }
+
+    /// Task 7.1：c4context 的 stereotype 字号由 Mermaid c4 渲染器写死（12px），
+    /// 没有公开配置项；放大 CSS 会超出按 12px 测量出的固定方框，因此记为
+    /// **已知降级**，这里只锁定当前值并验证深色底色上的对比度。
+    #[test]
+    fn dark_c4_stereotype_contrast_and_fixed_font_size() {
+        let (_, source) = corpus::MERMAID_11_12_CORPUS
+            .iter()
+            .find(|(name, _)| *name == "c4context")
+            .expect("c4context corpus entry");
+        let mut session = Session::new().expect("initialize Mermaid");
+        let dark = session.render(source, true).expect("dark c4 render");
+        let doc = roxmltree::Document::parse(&dark).expect("c4 SVG XML");
+        // 已知降级：stereotype 固定 12px；深色主题沿用 c4 自带深蓝底 + 白字。
+        for (stereotype, background) in [("<<person>>", "#08427B"), ("<<system>>", "#1168BD")] {
+            let node = doc
+                .descendants()
+                .find(|node| {
+                    node.tag_name().name() == "text" && normalized_text(*node) == stereotype
+                })
+                .unwrap_or_else(|| panic!("c4 stereotype {stereotype} missing"));
+            assert_eq!(
+                node.attribute("font-size"),
+                Some("12"),
+                "c4 stereotype 字号由 Mermaid 固定（约 12px）；若上游变更需重新评估"
+            );
+            let fill = node.attribute("fill").expect("stereotype fill");
+            let ratio = contrast_ratio(fill, background);
+            assert!(
+                ratio >= 4.5,
+                "c4 stereotype {stereotype} contrast {ratio:.2} ({fill} on {background})"
+            );
+        }
     }
 
     /// pie 饼图：简单数值列表。
@@ -1281,6 +1369,48 @@ mod tests {
     fn contrast_ratio(foreground: &str, background: &str) -> f64 {
         let foreground = relative_luminance(foreground);
         let background = relative_luminance(background);
+        (foreground.max(background) + 0.05) / (foreground.min(background) + 0.05)
+    }
+
+    /// CSS 颜色（`#rgb` / `#rrggbb` / `hsl(h,s%,l%)`）→ RGB 0..255。
+    /// 只覆盖 Mermaid 主题样式实际使用的写法；其他格式直接失败，避免静默跳过断言。
+    fn css_color_rgb(value: &str) -> [f64; 3] {
+        let value = value.trim();
+        if let Some(hex) = value.strip_prefix('#') {
+            return match hex.len() {
+                6 => [0, 2, 4].map(|i| f64::from(u8::from_str_radix(&hex[i..i + 2], 16).unwrap())),
+                3 => [0, 1, 2]
+                    .map(|i| f64::from(u8::from_str_radix(&hex[i..i + 1], 16).unwrap() * 17)),
+                _ => panic!("unsupported hex color {value}"),
+            };
+        }
+        let inner = value
+            .strip_prefix("hsl(")
+            .and_then(|rest| rest.strip_suffix(')'))
+            .unwrap_or_else(|| panic!("unsupported CSS color {value}"));
+        let parts: Vec<&str> = inner.split(',').map(str::trim).collect();
+        assert_eq!(parts.len(), 3, "malformed hsl() {value}");
+        let hue = parts[0].trim_end_matches("deg").parse::<f64>().unwrap();
+        let sat = parts[1].trim_end_matches('%').parse::<f64>().unwrap() / 100.0;
+        let light = parts[2].trim_end_matches('%').parse::<f64>().unwrap() / 100.0;
+        let c = (1.0 - (2.0 * light - 1.0).abs()) * sat;
+        let h = (hue.rem_euclid(360.0)) / 60.0;
+        let x = c * (1.0 - (h.rem_euclid(2.0) - 1.0).abs());
+        let (r, g, b) = match h as u32 {
+            0 => (c, x, 0.0),
+            1 => (x, c, 0.0),
+            2 => (0.0, c, x),
+            3 => (0.0, x, c),
+            4 => (x, 0.0, c),
+            _ => (c, 0.0, x),
+        };
+        let m = light - c / 2.0;
+        [r + m, g + m, b + m].map(|channel| (channel * 255.0).round())
+    }
+
+    fn contrast_ratio_css(foreground: &str, background: &str) -> f64 {
+        let foreground = relative_luminance_rgb(css_color_rgb(foreground));
+        let background = relative_luminance_rgb(css_color_rgb(background));
         (foreground.max(background) + 0.05) / (foreground.min(background) + 0.05)
     }
 

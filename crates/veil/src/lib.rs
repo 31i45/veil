@@ -17,8 +17,35 @@ use std::path::{Path, PathBuf};
 use veil_ui::i18n::{t, tf, Key};
 use veil_ui::{decode, Doc, FileStore, ImageData, MathImage, StartupError};
 
-/// 无 CLI 参数时的示例文档，覆盖全部渲染路径：标题/粗体/斜体/代码/链接/行内公式/展示公式/代码块/中文。
-const SAMPLE: &str = "# Veil 切片 8\n\n支持 **粗体**、*斜体*、`行内代码`、[链接](https://example.com) 与行内公式 $x^2 + y^2 = z^2$（光标移出渲染为图、移入显示源码）。\n\n块级公式（同规则，渲染图居中）：\n\n$$\n\\frac{a + b}{\\sqrt{c^2 + 1}} = \\sum_{k=0}^{n} k^2\n$$\n\n```\npub fn run() { /* 代码块等宽 */ }\n```\n\n中文混排与 IME 输入：请用中文输入法在此段尾部打字验证候选框跟随。\n\n本页为无路径草稿：可拖入 .md 文件打开；关联文件后可直接拖入 PNG/JPEG 等图片插入正文（Ctrl+S 保存与 Ctrl+E 导出 HTML 仅对关联文件生效）。\n";
+/// 无 CLI 参数时的首跑欢迎文档：安静、可读、可直接改写。
+/// 只给三条可发现性提示（打开文件 / 直接开始写 / 导出），不出现内部术语或迭代编号。
+/// 图片只以源码写法示例出现，避免首跑自动联网加载远程图片。
+const SAMPLE: &str = r#"# 欢迎使用 Veil
+
+这是你的第一页。文字会边写边排版，Markdown 源码始终是唯一的内容。
+
+## 现在可以做的三件事
+
+- 打开文件：按 Ctrl+O，选择电脑里已有的 Markdown 文档。
+- 直接开始写：把这段文字替换掉，或者接着往下写。
+- 导出：按 Ctrl+E 导出 HTML，按 Ctrl+Shift+E 导出 PDF。
+
+## 正文里的样式
+
+**加粗**、*斜体* 和 `行内代码` 都可以直接输入，链接写成 [站点名称](https://example.com)，图片写成 `![说明](图片路径.png)`。
+
+公式也可以写在句子里，例如 $x^2 + y^2 = z^2$；需要独立成行时：
+
+$$
+\frac{a + b}{\sqrt{c^2 + 1}} = \sum_{k=0}^{n} k^2
+$$
+
+```rust
+fn main() {
+    println!("Hello, Veil");
+}
+```
+"#;
 
 /// 读取并解码文档：IO 失败按种类归因（不存在/无权限/其他），解码失败归因非 UTF-8。
 fn load_document(path: &Path) -> Result<(String, bool), platform::OpenFailure> {
@@ -689,6 +716,60 @@ fn clipboard() -> Box<dyn veil_ui::Clipboard> {
 mod tests {
     use super::*;
     use veil_ui::{AssetStore, ImageLoader};
+
+    /// 首跑欢迎文档是产品文案：不含内部/QA 术语，只保留三条可发现性提示。
+    /// 两个发行版共用同一 `SAMPLE`（差异只在 Mermaid 能力）。
+    #[test]
+    fn sample_is_product_copy_without_internal_terms() {
+        for banned in [
+            "切片",
+            "ADR",
+            "调试",
+            "无路径",
+            "验证",
+            "候选框",
+            "落盘",
+            "回退",
+            "管线",
+            "渲染为图",
+            "仅对关联文件生效",
+        ] {
+            assert!(
+                !SAMPLE.contains(banned),
+                "首跑示例不得出现内部术语：{banned}"
+            );
+        }
+        for hint in ["打开文件", "直接开始写", "导出"] {
+            assert!(SAMPLE.contains(hint), "缺少可发现性提示：{hint}");
+        }
+        assert!(SAMPLE.starts_with("# 欢迎使用 Veil"));
+        assert!(SAMPLE.len() > 200, "首跑示例应是一页可读内容");
+    }
+
+    /// 首跑示例不是静态展示页：能编辑、能一次撤销复原、能用与产品一致的导出函数产出 HTML。
+    #[test]
+    fn sample_is_editable_undoable_and_exportable() {
+        use veil_core::{Edit, Session};
+
+        let mut session = Session::open(SAMPLE);
+        let len = session.text_len();
+        let events = session
+            .apply(Edit::Insert {
+                at: len,
+                text: "\n补充一句。".into(),
+            })
+            .expect("首跑示例必须可编辑");
+        assert!(!events.dirty_blocks.is_empty());
+        assert!(session.serialize().ends_with("补充一句。"));
+        session.undo().expect("编辑后必须可撤销");
+        assert_eq!(session.serialize(), SAMPLE, "一次撤销应回到首跑原文");
+
+        let font = latex_rust::MathFont::stix_two_math().expect("STIX math font");
+        let html = export::html_of(&session, &veil_ui::ExportStyle::default(), &font, None);
+        assert!(html.contains("欢迎使用 Veil"), "导出 HTML 应包含首跑标题");
+        assert!(html.contains("打开文件"), "导出 HTML 应包含可发现性提示");
+        assert!(!html.trim().is_empty());
+    }
 
     /// 真 latex-rust 渲染链（切片 8）：基线公式 baseline = height(em) × em_px，
     /// 与 crate 内 raster.rs 的图内基线一致。数值为 latex-rust 2.1.1 实测校准，

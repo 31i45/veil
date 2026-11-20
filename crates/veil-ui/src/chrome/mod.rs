@@ -63,12 +63,10 @@ pub enum MenuAction {
     Save,
     SaveAs,
     Export,
-    /// 直接导出 PDF（Ctrl+Shift+E）：无打印对话框，写同目录 `<stem>.pdf`。
+    /// 直接导出 PDF（Ctrl+Shift+E）：原生矢量管线，写用户确认的 `.pdf`。
     ExportPdf,
-    /// 打印 / 导出 PDF（3b）：系统打印对话框，PDF 走「Microsoft Print to PDF」。
+    /// 打印（3b）：系统打印对话框 + GDI，复用 PDF 同一分页版面。
     Print,
-    /// 打印预览（6b）：与 PDF 导出同源分页的整页位图覆盖层，支持翻页/缩放。
-    PrintPreview,
     /// 版本历史（N1/B8a）：左侧快照列表 + 正文区只读预览。
     VersionHistory,
     Undo,
@@ -95,8 +93,6 @@ pub enum MenuAction {
     ThemeDark,
     /// 切换专注模式（阶段 1）。
     ToggleFocus,
-    /// 切换打字机模式（阶段 1）。
-    ToggleTypewriter,
     /// 切换源码模式（Ctrl+/）：全文按 Markdown 源码排版。
     ToggleSourceMode,
     /// 全局阻止/允许远程图片（默认自动加载）。
@@ -151,11 +147,6 @@ pub const MENUS: [MenuDef; 3] = [
                 MenuAction::ExportPdf,
             ),
             (Key::MenuFilePrint, Key::ShortcutPrint, MenuAction::Print),
-            (
-                Key::MenuFilePrintPreview,
-                Key::Empty,
-                MenuAction::PrintPreview,
-            ),
             (
                 Key::MenuFileVersionHistory,
                 Key::ShortcutVersionHistory,
@@ -243,14 +234,9 @@ pub const MENUS: [MenuDef; 3] = [
                 MenuAction::ToggleSourceMode,
             ),
             (Key::MenuViewFocusMode, Key::Empty, MenuAction::ToggleFocus),
-            (
-                Key::MenuViewTypewriterMode,
-                Key::Empty,
-                MenuAction::ToggleTypewriter,
-            ),
             (Key::Empty, Key::Empty, MenuAction::Separator),
             (
-                Key::MenuViewBlockRemoteImages,
+                Key::MenuViewAllowRemoteImages,
                 Key::Empty,
                 MenuAction::ToggleRemoteImages,
             ),
@@ -652,12 +638,13 @@ pub(super) fn theme_action_matches(action: MenuAction, mode: ThemeMode) -> bool 
 pub(crate) struct MenuFlags {
     pub(crate) fullscreen: bool,
     pub(crate) focus: bool,
-    pub(crate) typewriter: bool,
     pub(crate) source: bool,
-    /// 远程图片已被全局阻止（配置 allow_remote_images = false）。
-    pub(crate) block_remote_images: bool,
+    /// 允许加载远程图片（与设置同一极性：勾选 = 允许）。
+    pub(crate) allow_remote_images: bool,
     /// 有可保存内容（脏文档或未命名草稿）。
     pub(crate) can_save: bool,
+    /// 正文非空：导出/打印有可输出内容（空白但非空的文档仍然可导出）。
+    pub(crate) can_export: bool,
     pub(crate) can_undo: bool,
     pub(crate) can_redo: bool,
 }
@@ -667,9 +654,8 @@ pub(crate) fn action_checked(action: MenuAction, flags: MenuFlags) -> bool {
     match action {
         MenuAction::ToggleFullscreen => flags.fullscreen,
         MenuAction::ToggleFocus => flags.focus,
-        MenuAction::ToggleTypewriter => flags.typewriter,
         MenuAction::ToggleSourceMode => flags.source,
-        MenuAction::ToggleRemoteImages => flags.block_remote_images,
+        MenuAction::ToggleRemoteImages => flags.allow_remote_images,
         _ => false,
     }
 }
@@ -680,6 +666,7 @@ pub(crate) fn action_enabled(action: MenuAction, flags: MenuFlags) -> bool {
     match action {
         MenuAction::Separator => false,
         MenuAction::Save => flags.can_save,
+        MenuAction::Export | MenuAction::ExportPdf | MenuAction::Print => flags.can_export,
         MenuAction::Undo => flags.can_undo,
         MenuAction::Redo => flags.can_redo,
         _ => true,

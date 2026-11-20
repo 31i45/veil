@@ -14,6 +14,10 @@ pub(crate) enum CtxAction {
     Copy,
     Paste,
     SelectAll,
+    /// 行内格式（选区右键）：与编辑菜单共用同一 Intent，不另造实现。
+    ToggleBold,
+    ToggleItalic,
+    InsertLink,
     /// 复制命中链接的 URL（inline 链接才有；引用式无 url 区间不出现本项）。
     CopyLink,
     /// 复制命中的围栏代码块源码（不含围栏行）。
@@ -103,6 +107,9 @@ pub(crate) fn shortcut(action: CtxAction) -> Option<Key> {
         CtxAction::Copy => Some(Key::ShortcutCopy),
         CtxAction::Paste => Some(Key::ShortcutPaste),
         CtxAction::SelectAll => Some(Key::ShortcutSelectAll),
+        CtxAction::ToggleBold => Some(Key::ShortcutBold),
+        CtxAction::ToggleItalic => Some(Key::ShortcutItalic),
+        CtxAction::InsertLink => Some(Key::ShortcutLink),
         CtxAction::CopyCodeBlock => Some(Key::ShortcutCopyCode),
         CtxAction::InsertImage => Some(Key::ShortcutInsertImage),
         _ => None,
@@ -117,6 +124,10 @@ pub(crate) fn items_for(kind: CtxKind) -> Vec<(Key, CtxAction)> {
             (Key::CtxCut, CtxAction::Cut),
             (Key::CtxCopy, CtxAction::Copy),
             (Key::CtxPaste, CtxAction::Paste),
+            (Key::Empty, CtxAction::Separator),
+            (Key::MenuEditBold, CtxAction::ToggleBold),
+            (Key::MenuEditItalic, CtxAction::ToggleItalic),
+            (Key::MenuEditLink, CtxAction::InsertLink),
             (Key::Empty, CtxAction::Separator),
             (Key::CtxSelectAll, CtxAction::SelectAll),
         ],
@@ -251,10 +262,11 @@ pub(crate) struct CtxMenu {
     pub(crate) table: Option<TableCtx>,
     /// 远程图片总开关：关闭时隐藏 Mermaid 在线渲染两项（打开前由 interaction 写入）。
     pub(crate) remote_ok: bool,
-    /// 右键 mermaid 块的内容结束偏移（「下载并插入」的插入锚点）。
-    pub(crate) mermaid_end: Option<usize>,
     /// Mermaid v0：打开时刻捕获的块 body 源码（不含围栏行），供预览/复制链接动作读取。
     pub(crate) mermaid_body: Option<String>,
+    /// 同源码 Mermaid 块中的序号（0-based，按文档顺序）。回包时用于在多个
+    /// 相同源码块中稳定选中用户当初右键的那一个；非 Mermaid 块为 None。
+    pub(crate) mermaid_occurrence: Option<usize>,
     /// Mermaid 空块：模板插入锚点（body 起点，绝对字节偏移）；非空块为 None，
     /// 此时沿用既有的「在光标处插入」语义。
     pub(crate) mermaid_insert_start: Option<usize>,
@@ -278,8 +290,8 @@ impl Default for CtxMenu {
             link: None,
             table: None,
             remote_ok: true,
-            mermaid_end: None,
             mermaid_body: None,
+            mermaid_occurrence: None,
             mermaid_insert_start: None,
             details_id: None,
             image_path: None,
@@ -308,7 +320,7 @@ impl CtxMenu {
             _ => None,
         };
         self.mermaid_body = mermaid_body;
-        self.mermaid_end = None;
+        self.mermaid_occurrence = None;
         self.mermaid_insert_start = None;
         self.details_id = match &kind {
             CtxKind::Details { id, .. } => Some(*id),
@@ -339,7 +351,7 @@ impl CtxMenu {
         self.link = None;
         self.table = None;
         self.mermaid_body = None;
-        self.mermaid_end = None;
+        self.mermaid_occurrence = None;
         self.mermaid_insert_start = None;
         self.code_id = None;
     }
@@ -470,6 +482,33 @@ mod tests {
             !blk.iter().any(|&(_, a)| a == CtxAction::Cut),
             "无选区不出现剪切"
         );
+    }
+
+    /// 选区右键补齐高频行内格式（与编辑菜单同文案、同快捷键提示）。
+    #[test]
+    fn selection_menu_offers_inline_formatting_with_shortcuts() {
+        let sel = items_for(CtxKind::Selection);
+        for (action, label, shortcut_key) in [
+            (CtxAction::ToggleBold, Key::MenuEditBold, Key::ShortcutBold),
+            (
+                CtxAction::ToggleItalic,
+                Key::MenuEditItalic,
+                Key::ShortcutItalic,
+            ),
+            (CtxAction::InsertLink, Key::MenuEditLink, Key::ShortcutLink),
+        ] {
+            let entry = sel
+                .iter()
+                .find(|&&(_, a)| a == action)
+                .unwrap_or_else(|| panic!("选区右键缺少 {action:?}"));
+            assert_eq!(entry.0, label, "右键与主菜单必须复用同一词条");
+            assert_eq!(
+                shortcut(action),
+                Some(shortcut_key),
+                "快捷键提示必须与主菜单一致"
+            );
+            assert!(!t(label).is_empty());
+        }
     }
 
     /// DEF-T07-001：Details 菜单只出现与当前展开态匹配的一项。

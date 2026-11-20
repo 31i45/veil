@@ -52,7 +52,7 @@ pub use docio::decode;
 pub use image::{AssetMigration, AssetStore, ImageData, ImageLoader};
 pub use math::{MathImage, MathRenderer};
 pub use mermaid_renderer::{MermaidImage, MermaidRenderer};
-pub use print::{ExportOptions, NoPrint, PreviewPage, Print, PrintSession};
+pub use print::{ExportOptions, NoPrint, Print, PrintSession};
 pub use shell::run;
 pub use theme::{
     config_path, data_dir, ConfigStore, ExportStyle, NativeWindow, SystemTheme, ThemeEnv,

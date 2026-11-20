@@ -53,10 +53,9 @@ keys! {
     MenuFileQuickOpen => "menu.file.quick_open", "快速打开";
     MenuFileSave => "menu.file.save", "保存";
     MenuFileSaveAs => "menu.file.save_as", "另存为…";
-    MenuFileExportHtml => "menu.file.export_html", "导出 HTML";
-    MenuFileExportPdf => "menu.file.export_pdf", "导出 PDF";
+    MenuFileExportHtml => "menu.file.export_html", "导出 HTML…";
+    MenuFileExportPdf => "menu.file.export_pdf", "导出 PDF…";
     MenuFilePrint => "menu.file.print", "打印…";
-    MenuFilePrintPreview => "menu.file.print_preview", "打印预览";
     MenuFileVersionHistory => "menu.file.version_history", "版本历史";
     MenuFileQuit => "menu.file.quit", "关闭窗口";
 
@@ -83,8 +82,7 @@ keys! {
     MenuViewThemeDark => "menu.view.theme_dark", "深色";
     MenuViewSourceMode => "menu.view.source_mode", "源码模式";
     MenuViewFocusMode => "menu.view.focus_mode", "专注模式";
-    MenuViewTypewriterMode => "menu.view.typewriter_mode", "打字机模式";
-    MenuViewBlockRemoteImages => "menu.view.block_remote_images", "阻止远程图片";
+    MenuViewAllowRemoteImages => "menu.view.allow_remote_images", "允许远程图片";
     MenuViewSettings => "menu.view.settings", "设置…";
 
     // ---- 快捷键提示（菜单右侧列） ----
@@ -181,11 +179,11 @@ keys! {
     CtxCopyCode => "ctx.copy_code", "复制代码块";
     CtxReloadImage => "ctx.reload_image", "重新加载图片";
     CtxImageMissing => "ctx.image_missing", "图片文件缺失（当前显示替代文本）";
-    CtxMermaidPreview => "ctx.mermaid.preview", "在 mermaid.live 编辑（在线）";
+    CtxMermaidPreview => "ctx.mermaid.preview", "在 mermaid.live 编辑（需联网）";
     CtxMermaidPreviewImage => "ctx.mermaid.preview_image", "预览当前源码图";
-    CtxMermaidInsertImage => "ctx.mermaid.insert_image", "插入图片快照（独立，可能过期）";
+    CtxMermaidInsertImage => "ctx.mermaid.insert_image", "插入本地图片快照（保留源码）";
     CtxMermaidCopySource => "ctx.mermaid.copy_source", "复制源码";
-    CtxMermaidCopyLink => "ctx.mermaid.copy_link", "复制预览链接";
+    CtxMermaidCopyLink => "ctx.mermaid.copy_link", "复制预览链接（需联网）";
     CtxMermaidInsertFlowchart => "ctx.mermaid.insert_flowchart", "插入流程图模板";
     CtxMermaidInsertSequence => "ctx.mermaid.insert_sequence", "插入时序图模板";
     CtxMermaidInsertClass => "ctx.mermaid.insert_class", "插入类图模板";
@@ -263,8 +261,11 @@ keys! {
     NoticeExternalKept => "notice.external_kept", "已保留当前内容；保存时将先备份磁盘版本";
     NoticeExternalDismissed => "notice.external_dismissed", "已取消：外部修改仍待处理";
     NoticeExportCancelled => "notice.export_cancelled", "导出已取消";
+    NoticeOutputEmptyDocument => "notice.output_empty_document", "空文档没有可导出或打印的内容";
     NoticeExportedHtml => "notice.exported_html", "已导出 HTML：{}";
     NoticeExportFailed => "notice.export_failed", "导出失败：{}";
+    NoticeErrorWhileModalOpen => "notice.error_while_modal_open",
+        "{}：{}（请先关闭当前弹窗，再重试）";
     ModalExportFailedTitle => "modal.export_failed.title", "导出失败";
     ModalExportFailedBody => "modal.export_failed.body",
         "{}\n\n原因：{}\n\n下一步：可重试导出，或取消后检查目标目录是否可写。";
@@ -331,12 +332,15 @@ keys! {
     NoticeFullscreenOn => "notice.fullscreen_on", "全屏（F11 退出）";
     NoticeFullscreenOff => "notice.fullscreen_off", "已退出全屏";
     NoticeZoom => "notice.zoom", "缩放 {}%";
-    NoticeImagePasteNeedsFile => "notice.image_paste_needs_file", "图片粘贴需要关联文件（草稿无落盘目录）";
-    NoticeImageSaveFailed => "notice.image_save_failed", "图片落盘失败：{}";
+    NoticeImagePasteNeedsFile => "notice.image_paste_needs_file", "插入图片需要先保存文档";
+    NoticeImageSaveFailed => "notice.image_save_failed", "图片保存失败：{}";
     NoticeMermaidSnapshotNeedsFile => "notice.mermaid_snapshot_needs_file", "Mermaid 快照未插入：请先保存文档，再写入本地图片";
     NoticeMermaidSnapshotSaveFailed => "notice.mermaid_snapshot_save_failed", "Mermaid 快照保存失败，未修改原文：{}";
+    NoticeMermaidSnapshotStale => "notice.mermaid_snapshot_stale", "Mermaid 源码已变化或文档已切换，快照未插入（正文未修改）";
+    NoticeMermaidSnapshotPending => "notice.mermaid_snapshot_pending", "上一张 Mermaid 快照仍在生成，请稍候";
+    NoticeMermaidRenderPending => "notice.mermaid_render_pending", "Mermaid 图片正在生成，请稍候";
     NoticeImageReadFailed => "notice.image_read_failed", "图片读取失败：{}";
-    NoticeInsertImageNeedsFile => "notice.insert_image_needs_file", "插入图片需要关联文件（草稿无相对路径基准）";
+    NoticeInsertImageNeedsFile => "notice.insert_image_needs_file", "插入图片需要先保存文档";
     NoticeUnsupportedImage => "notice.unsupported_image", "所选文件不是支持的图片格式";
     NoticeFootnoteDefMissing => "notice.footnote_def_missing", "未找到脚注定义";
     NoticeFootnoteRefMissing => "notice.footnote_ref_missing", "未找到脚注引用";
@@ -350,12 +354,12 @@ keys! {
     CodeCopiedButton => "code.copied_button", "已复制";
     FrontMatterCollapsed => "doc.frontmatter_collapsed", "Front Matter";
     NoticeFocusMode => "notice.focus_mode", "专注模式：{}";
-    NoticeTypewriterMode => "notice.typewriter_mode", "打字机模式：{}";
     NoticeRemoteImageFailed => "notice.remote_image_failed", "部分远程图片加载失败，已显示替代文本";
     NoticeMermaidInkNotice => "notice.mermaid_ink_notice", "图片由 mermaid.ink 在线渲染：该图源码将发送给第三方服务";
     NoticeMermaidRemoteBlocked => "notice.mermaid_remote_blocked", "已关闭远程图片加载，无法在线渲染；可改用「在 mermaid.live 编辑」";
     NoticeMermaidInkFailed => "notice.mermaid_ink_failed", "Mermaid 渲染失败：{}；可改用「在 mermaid.live 编辑」";
-    NoticeMermaidImageInserted => "notice.mermaid_image_inserted", "已插入独立 Mermaid 图片快照（不会随源码更新）：{}";
+    NoticeMermaidImageInserted => "notice.mermaid_image_inserted",
+        "已插入本地图片快照；上方 Mermaid 源码块仍是活预览，快照不会随源码更新：{}";
     NoticeRemoteImagesBlocked => "notice.remote_images_blocked", "已阻止远程图片";
     NoticeRemoteImagesAllowed => "notice.remote_images_allowed", "已允许远程图片";
     NoticeMermaidSourceTooLarge => "notice.mermaid_source_too_large", "Mermaid 源码超过 128 KiB，跳过在线渲染";
@@ -363,23 +367,17 @@ keys! {
     ToggleOff => "toggle.off", "关";
 
     // ---- 拖放 ----
-    DropImageNeedsDir => "drop.image_needs_dir", "「{}」无法插入：草稿没有落盘目录";
+    DropImageNeedsDir => "drop.image_needs_dir", "「{}」无法插入：请先保存文档";
     DropInsertImage => "drop.insert_image", "松开以插入图片：{}";
     DropOpenDocument => "drop.open_document", "松开以打开文档：{}";
 
     // ---- 打印 / 导出 ----
     PrintUnsupportedPdf => "print.unsupported_pdf", "当前平台暂不支持导出 PDF";
     PrintUnsupportedPrint => "print.unsupported_print", "当前平台暂不支持打印";
-    PrintUnsupportedPreview => "print.unsupported_preview", "当前平台暂不支持打印预览";
-    PrintErrPreviewRaster => "print.preview_raster_failed", "打印预览渲染失败（内存位图不可用）";
-    PrintPreviewTitle => "print.preview_title", "打印预览 · 第 {} / {} 页 · {}";
-    PrintPreviewHint => "print.preview_hint",
-        "←/→ 翻页 · +/- 缩放 · 0 适宽 · Esc 关闭";
     ImagePreviewTitle => "image.preview_title", "图片预览 · {} · {}";
     ImagePreviewHint => "image.preview_hint",
         "滚轮/方向键平移 · Ctrl+滚轮或 +/- 缩放 · 0 适应窗口 · Esc 或点击遮罩关闭";
     PrintTocTitle => "print.toc_title", "目录";
-    PrintPageFooter => "print.page_footer", "{} / {}";
     ExportUntitledPdf => "export.untitled_pdf", "未命名.pdf";
     ExportUntitledHtml => "export.untitled_html", "未命名.html";
     ExportUntitledMarkdown => "export.untitled_markdown", "未命名.md";
@@ -390,7 +388,7 @@ keys! {
     NoticeExportPdfFailed => "notice.export_pdf_failed", "导出 PDF 失败：{}";
     ModalExportPdfFailedTitle => "modal.export_pdf_failed.title", "导出 PDF 失败";
     ModalExportPdfFailedBody => "modal.export_pdf_failed.body",
-        "原因：{}\n\n下一步：可重试导出，或取消后检查目标目录是否可写、PDF 驱动是否可用。";
+        "原因：{}\n\n下一步：可重试导出，或取消后检查系统是否安装可用的中文字体、目标目录是否可写、文件是否被占用；既有 PDF 不会被修改。";
 
     // ---- 平台层（打印 / PDF） ----
     PrintNoPrinterContext => "print.no_printer_context", "打印失败：无法获取打印机上下文";
@@ -398,10 +396,6 @@ keys! {
     PrintUnifiedFallback => "print.unified_fallback", "统一版面不可用，回退屏幕渲染打印：{}";
     PrintSentPagesScreen => "print.sent_pages_screen", "已发送 {} 页到打印机（屏幕渲染）";
     PrintExportCancelled => "print.export_cancelled", "导出已取消";
-    PrintNativePdfFallback => "print.native_pdf_fallback", "原生 PDF 导出失败，回退位图路径：{}";
-    PrintNoPdfPrinterContext => "print.no_pdf_printer_context", "导出失败：无法创建 PDF 打印机上下文";
-    PrintExportedPdfBitmap => "print.exported_pdf_bitmap", "已导出 PDF（位图）：{}";
-    PrintExportPdfFellBack => "print.export_pdf_fell_back", "导出 PDF 失败：已回退打印对话框";
     PrintErrStartJob => "print.err.start_job", "打印失败：无法开始打印作业";
     PrintErrInterruptedPartial => "print.err.interrupted_partial", "打印中断：部分页面未输出";
     PrintErrInterruptedNewPage => "print.err.interrupted_new_page", "打印中断：无法开始新页";
@@ -504,7 +498,7 @@ keys! {
     ErrSnapshotMigrate => "error.snapshot_migrate", "迁移快照失败: {}";
     ErrFontRead => "error.font_read", "字体读取失败 {}: {}";
     ErrFontParse => "error.font_parse", "字体解析失败: {}";
-    ErrExportDraftNoPath => "error.export_draft_no_path", "草稿无关联文件，导出被忽略";
+    ErrExportDraftNoPath => "error.export_draft_no_path", "文档还没有保存位置，无法导出";
     ErrFontSubset => "error.font_subset", "字体子集化失败: {}";
     ErrShellProtocol => "error.shell_protocol", "不支持的链接协议: {}";
     ErrShellExecute => "error.shell_execute", "ShellExecuteW 返回 {}";
@@ -589,9 +583,7 @@ keys! {
     SettingsFontSans => "settings.font_sans", "无衬线";
     SettingsFontSerif => "settings.font_serif", "衬线";
     SettingsFontMono => "settings.font_mono", "等宽";
-    SettingsSmoothScroll => "settings.smooth_scroll", "平滑滚动";
     SettingsAllowRemoteImages => "settings.allow_remote_images", "允许远程图片";
-    SettingsBlockRemoteImages => "settings.block_remote_images", "阻止远程图片";
     SettingsWindowGeom => "settings.window_geom", "上次窗口几何";
     SettingsWindowGeomNone => "settings.window_geom_none", "（未记录）";
     SettingsResetWindowGeom => "settings.reset_window_geom", "清除（下次启动重置）";

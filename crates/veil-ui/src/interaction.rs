@@ -105,11 +105,6 @@ impl App {
             self.image_preview_key(&key);
             return;
         }
-        // 打印预览覆盖层优先：打开时它是唯一输入接收者（翻页/缩放/Esc 关闭）。
-        if self.ui_state.print_preview.is_some() {
-            self.print_preview_key(&key);
-            return;
-        }
         // 设置模态优先（优先级高于普通 modal）：打开时它是唯一输入接收者
         if self.ui_state.settings.is_some() {
             let mods = self.input_state.mods;
@@ -372,9 +367,7 @@ impl App {
         // 文档高度随缩放变化：滚动位置可能越出新的最大滚动量，钳位
         let max = chrome::max_scroll(self.viewport(), self.doc_height());
         self.window_state.goal_y = self.window_state.goal_y.clamp(0.0, max);
-        if !self.window_state.smooth {
-            self.window_state.scroll_y = self.window_state.goal_y;
-        }
+        self.window_state.scroll_y = self.window_state.goal_y;
         self.set_ime_area();
         self.ui_state.chrome.notice = tf(
             I18nKey::NoticeZoom,
@@ -442,8 +435,8 @@ impl App {
         }
     }
 
-    /// mermaid.ink 回包：预览填图片浮层；插入时根据渲染能力与配置决定策略。
-    /// 联网 renderer 尊重显式 URL 配置；离线 renderer 永远落盘，不能回退成远程 URL。
+    /// mermaid.ink 回包：预览填图片浮层；插入是「文档身份 + 源码哈希」事务。
+    /// 文档已切换或源码已变化时丢弃回包并提示，不修改正文。
     pub(crate) fn finish_mermaid_fetch(
         &mut self,
         pending: PendingMermaidFetch,
@@ -452,20 +445,12 @@ impl App {
         match result {
             Ok(img) => {
                 if pending.insert {
-                    if self.config.mermaid_insert_url && self.ports.mermaid.requires_network() {
-                        if let Some(end) = pending.block_end {
-                            self.editor.set_caret(end);
-                            self.window_state.goal_x = None;
-                        }
-                        let alt = pending.title;
-                        let url = pending.url;
-                        let md = format!("\n![{alt}]({url})\n");
-                        self.editor.paste(&md);
-                        self.ui_state.chrome.notice =
-                            tf(I18nKey::NoticeMermaidImageInserted, &[&url]);
-                    } else {
-                        self.insert_mermaid_snapshot(&img, pending.block_end);
+                    if self.doc.path != pending.doc_path {
+                        self.ui_state.chrome.notice = t(I18nKey::NoticeMermaidSnapshotStale).into();
+                        self.request_redraw();
+                        return;
                     }
+                    self.insert_mermaid_snapshot(&img, pending.source_hash, pending.occurrence);
                     return;
                 }
                 self.cache.insert_remote_image(pending.url.clone(), img);
@@ -485,19 +470,34 @@ impl App {
     }
 
     /// 将已经渲染的 Mermaid 位图保存为独立 PNG 快照，再插入相对路径。
-    /// 先保存、后移动光标和改正文，草稿或落盘失败时原文与光标均不变，也不回退 URL。
-    fn insert_mermaid_snapshot(&mut self, img: &crate::image::ImageData, block_end: Option<usize>) {
+    /// 插入前按「源码哈希 + 同源码序号」重新定位当前块：0 个匹配或序号越界
+    /// （目标块已被删除/改写）都安全丢弃并提示。
+    /// 锚点 = 目标块的结束位置（闭围栏之后），`set_caret` 失败同样不插入。
+    /// 先落盘、后移动光标和改正文；草稿或落盘失败时原文与光标均不变，也不回退 URL。
+    fn insert_mermaid_snapshot(
+        &mut self,
+        img: &crate::image::ImageData,
+        source_hash: u64,
+        occurrence: Option<usize>,
+    ) {
         let Some(doc) = self.doc.path.clone() else {
             self.ui_state.chrome.notice = t(I18nKey::NoticeMermaidSnapshotNeedsFile).into();
             self.request_redraw();
             return;
         };
+        let Some(end) = self.mermaid_snapshot_anchor(source_hash, occurrence) else {
+            self.ui_state.chrome.notice = t(I18nKey::NoticeMermaidSnapshotStale).into();
+            self.request_redraw();
+            return;
+        };
         match self.ports.assets.save_pasted_image(&doc, img) {
             Ok(rel) => {
-                if let Some(end) = block_end {
-                    self.editor.set_caret(end);
-                    self.window_state.goal_x = None;
+                if !self.editor.set_caret(end) {
+                    self.ui_state.chrome.notice = t(I18nKey::NoticeMermaidSnapshotStale).into();
+                    self.request_redraw();
+                    return;
                 }
+                self.window_state.goal_x = None;
                 self.insert_paste(&self.image_paragraph_markup(&rel));
                 self.ui_state.chrome.notice = tf(I18nKey::NoticeMermaidImageInserted, &[&rel]);
             }
@@ -507,6 +507,84 @@ impl App {
                 self.request_redraw();
             }
         }
+    }
+
+    /// 在当前索引中按源码哈希定位 Mermaid 块，返回闭围栏之后的插入锚点。
+    /// `occurrence` 是请求发起时记录的「同源码块序号」：匹配数 >1 时按序号选目标；
+    /// 0 个匹配或序号越界（请求的块已被删除/改写）返回 None。
+    /// 没有序号（历史调用）时只在唯一匹配下插入，避免猜测用户意图。
+    fn mermaid_snapshot_anchor(
+        &self,
+        source_hash: u64,
+        occurrence: Option<usize>,
+    ) -> Option<usize> {
+        let mut ends = Vec::new();
+        for g in &self.index.blocks {
+            let is_mermaid = matches!(
+                &g.kind,
+                BlockKind::FencedCode(Some(l)) if l.eq_ignore_ascii_case("mermaid")
+            ) || g.kind == BlockKind::Mermaid;
+            if !is_mermaid {
+                continue;
+            }
+            let hash = self
+                .editor
+                .session()
+                .fenced_code_source(g.id)
+                .map(|(_, body)| crate::app::content_hash(body.as_bytes()));
+            if hash == Some(source_hash) {
+                ends.push(g.range.end);
+            }
+        }
+        match occurrence {
+            Some(i) => ends.get(i).copied(),
+            None if ends.len() == 1 => ends.first().copied(),
+            None => None,
+        }
+    }
+
+    /// 记录光标所在 Mermaid 块在同源码块中的序号（0-based，按文档顺序）。
+    fn mermaid_occurrence_at(&self, off: usize) -> Option<usize> {
+        let target = self.index.blocks.iter().find(|g| {
+            g.range.start <= off
+                && off <= g.range.end
+                && (matches!(
+                    &g.kind,
+                    BlockKind::FencedCode(Some(l)) if l.eq_ignore_ascii_case("mermaid")
+                ) || g.kind == BlockKind::Mermaid)
+        })?;
+        let target_hash = self
+            .editor
+            .session()
+            .fenced_code_source(target.id)
+            .map(|(_, body)| crate::app::content_hash(body.as_bytes()))?;
+        let mut n = 0;
+        for g in &self.index.blocks {
+            let is_mermaid = matches!(
+                &g.kind,
+                BlockKind::FencedCode(Some(l)) if l.eq_ignore_ascii_case("mermaid")
+            ) || g.kind == BlockKind::Mermaid;
+            if !is_mermaid {
+                continue;
+            }
+            let hash = self
+                .editor
+                .session()
+                .fenced_code_source(g.id)
+                .map(|(_, body)| crate::app::content_hash(body.as_bytes()));
+            if hash == Some(target_hash) {
+                if g.id == target.id {
+                    return Some(n);
+                }
+                n += 1;
+            }
+        }
+        None
+    }
+
+    /// 丢弃挂起中的 Mermaid 回包（打开/切换文档、历史预览等整篇替换时调用）。
+    pub(crate) fn clear_pending_mermaid_fetch(&mut self) {
+        self.pending_mermaid_fetch = None;
     }
 
     /// 图片文件插入（剪贴板文件列表）：与拖入同一条路径——解码 → 落盘 assets → 独占段插入。
@@ -726,9 +804,7 @@ impl App {
         let caret = self.editor.caret();
         let Some(bi) = self.caret_block_index() else {
             self.window_state.goal_y = new_scroll;
-            if !self.window_state.smooth {
-                self.window_state.scroll_y = self.window_state.goal_y;
-            }
+            self.window_state.scroll_y = self.window_state.goal_y;
             self.request_redraw();
             return;
         };
@@ -777,9 +853,7 @@ impl App {
                     .min(trange.len())
         };
         self.window_state.goal_y = new_scroll;
-        if !self.window_state.smooth {
-            self.window_state.scroll_y = self.window_state.goal_y;
-        }
+        self.window_state.scroll_y = self.window_state.goal_y;
         if !self.editor.set_caret(target) {
             return;
         }
@@ -925,13 +999,24 @@ impl App {
         chrome::MenuFlags {
             fullscreen: self.window_state.fullscreen,
             focus: self.ui_state.writing.focus,
-            typewriter: self.ui_state.writing.typewriter,
             source: self.source_mode(),
-            block_remote_images: !self.config.allow_remote_images,
+            allow_remote_images: self.config.allow_remote_images,
             can_save: self.editor.is_dirty() || self.doc.path.is_none(),
+            can_export: self.editor.session().text_len() > 0,
             can_undo: self.editor.session().undo_depth() > 0,
             can_redo: self.editor.session().redo_depth() > 0,
         }
+    }
+
+    /// 导出/打印的统一入口守卫：菜单、快捷键、模态重试与任何命令分发都必须
+    /// 先经过这里，空文档时与菜单禁用态一致地 no-op 并给出提示。
+    pub(crate) fn output_allowed(&mut self) -> bool {
+        if self.menu_flags().can_export {
+            return true;
+        }
+        self.ui_state.chrome.notice = t(I18nKey::NoticeOutputEmptyDocument).into();
+        self.request_redraw();
+        false
     }
 
     /// 打开最近文件（0b）：复用 open_path（脏文档拒绝；下标越界静默忽略）。
@@ -1068,7 +1153,6 @@ impl App {
             MenuAction::Export => self.export_now(),
             MenuAction::ExportPdf => self.export_pdf(),
             MenuAction::Print => self.print_document(),
-            MenuAction::PrintPreview => self.open_print_preview(),
             MenuAction::VersionHistory => self.toggle_history(),
             MenuAction::Undo => {
                 if let Some(dirty) = self.editor.apply(Intent::Undo) {
@@ -1090,7 +1174,6 @@ impl App {
             MenuAction::ThemeLight => self.set_theme_mode(ThemeMode::Light),
             MenuAction::ThemeDark => self.set_theme_mode(ThemeMode::Dark),
             MenuAction::ToggleFocus => self.toggle_focus(),
-            MenuAction::ToggleTypewriter => self.toggle_typewriter(),
             MenuAction::ToggleSourceMode => self.toggle_source_mode(),
             MenuAction::ToggleRemoteImages => self.toggle_remote_images(),
             MenuAction::ZoomIn => self.zoom_step(1),
@@ -1369,9 +1452,8 @@ impl App {
             .editor
             .selection()
             .is_some_and(|s| s.start <= off && off < s.end);
-        let mut mermaid_end = None;
-        let (kind, link, mermaid_body, insert_start) = if in_sel {
-            (CtxKind::Selection, None, None, None)
+        let (kind, link, mermaid_body, insert_start, mermaid_occurrence) = if in_sel {
+            (CtxKind::Selection, None, None, None, None)
         } else {
             self.editor.set_caret(off);
             self.window_state.goal_x = None;
@@ -1387,29 +1469,31 @@ impl App {
                             crate::i18n::t(crate::i18n::Key::NoticeImageMissing)
                                 .replace("{}", &path);
                     }
-                    (CtxKind::Image { path, missing }, None, None, None)
+                    (CtxKind::Image { path, missing }, None, None, None, None)
                 }
                 None => match nodes.as_deref().and_then(|n| self.link_at_in(n, off)) {
-                    Some(url) => (CtxKind::Link, Some(url), None, None),
+                    Some(url) => (CtxKind::Link, Some(url), None, None, None),
                     None => match self.table_ctx_at(off) {
-                        Some(tc) => (CtxKind::Table(tc), None, None, None),
+                        Some(tc) => (CtxKind::Table(tc), None, None, None, None),
                         None => match self.plain_code_block_at(off) {
-                            Some(id) => (CtxKind::CodeBlock { id }, None, None, None),
+                            Some(id) => (CtxKind::CodeBlock { id }, None, None, None, None),
                             None => match self.mermaid_block_info_at(off) {
                                 Some((body, body_start, _end)) if mermaid_body_is_empty(&body) => {
                                     // 空块右键也把光标落到 body 起点：模板项只在这里有意义，
                                     // 落在点击位置会破坏围栏结构。
                                     self.editor.set_caret(body_start);
+                                    let occurrence = self.mermaid_occurrence_at(off);
                                     (
                                         CtxKind::MermaidEmptyBlock,
                                         None,
                                         Some(body),
                                         Some(body_start),
+                                        Some(occurrence.unwrap_or(0)),
                                     )
                                 }
-                                Some((body, _start, end)) => {
-                                    mermaid_end = Some(end);
-                                    (CtxKind::MermaidBlock, None, Some(body), None)
+                                Some((body, _start, _end)) => {
+                                    let occurrence = self.mermaid_occurrence_at(off);
+                                    (CtxKind::MermaidBlock, None, Some(body), None, occurrence)
                                 }
                                 None => {
                                     // Details 块优先于普通块：右键菜单给折叠/展开项。
@@ -1434,7 +1518,13 @@ impl App {
                                                     .contains(&id),
                                             })
                                         });
-                                    (details_kind.unwrap_or(CtxKind::Block), None, None, None)
+                                    (
+                                        details_kind.unwrap_or(CtxKind::Block),
+                                        None,
+                                        None,
+                                        None,
+                                        None,
+                                    )
                                 }
                             },
                         },
@@ -1446,7 +1536,7 @@ impl App {
             self.config.allow_remote_images || !self.ports.mermaid.requires_network();
         self.ui_state.ctx.open_at(mx, my, kind, link, mermaid_body);
         self.ui_state.ctx.mermaid_insert_start = insert_start;
-        self.ui_state.ctx.mermaid_end = mermaid_end;
+        self.ui_state.ctx.mermaid_occurrence = mermaid_occurrence;
         self.set_ime_area();
         self.request_redraw();
     }
@@ -2202,6 +2292,10 @@ impl App {
             }
             CtxAction::Paste => self.paste_clipboard(),
             CtxAction::SelectAll => self.perform_action(Action::Doc(Intent::SelectAll)),
+            // 与主菜单「加粗/斜体/链接」同一 Intent，不重复实现格式化逻辑。
+            CtxAction::ToggleBold => self.perform_action(Action::Doc(Intent::ToggleWrap("**"))),
+            CtxAction::ToggleItalic => self.perform_action(Action::Doc(Intent::ToggleWrap("*"))),
+            CtxAction::InsertLink => self.perform_action(Action::Doc(Intent::InsertLink)),
             CtxAction::CopyLink => {
                 if let Some(u) = self.ui_state.ctx.link.clone() {
                     // 复制出去的是可直接使用的目标：`www.` 补全协议；
@@ -2265,7 +2359,24 @@ impl App {
                 let title = veil_core::detect_type(&body)
                     .unwrap_or("mermaid")
                     .to_string();
-                let block_end = self.ui_state.ctx.mermaid_end;
+                let source_hash = crate::app::content_hash(body.as_bytes());
+                let occurrence = self.ui_state.ctx.mermaid_occurrence;
+
+                // 单飞：插入请求挂起期间再次触发（同块或任意块）不覆盖挂起项；
+                // 挂起的是插入时，预览请求也同样拒绝，避免破坏快照事务。
+                // 提示按挂起类型区分：挂起的是自动预览时不能说「快照仍在生成」。
+                if let Some(pending) = self.pending_mermaid_fetch.as_ref() {
+                    if insert || pending.insert {
+                        self.ui_state.chrome.notice = if pending.insert {
+                            t(I18nKey::NoticeMermaidSnapshotPending)
+                        } else {
+                            t(I18nKey::NoticeMermaidRenderPending)
+                        }
+                        .into();
+                        self.request_redraw();
+                        return;
+                    }
+                }
 
                 if !self.ports.mermaid.requires_network() {
                     let label = format!(
@@ -2284,7 +2395,7 @@ impl App {
                                 height: rendered.height,
                             };
                             if insert {
-                                self.insert_mermaid_snapshot(&img, block_end);
+                                self.insert_mermaid_snapshot(&img, source_hash, occurrence);
                             } else {
                                 self.cache.remote_failed.remove(&label);
                                 self.cache.insert_remote_image(label.clone(), img);
@@ -2328,7 +2439,9 @@ impl App {
                 self.pending_mermaid_fetch = Some(PendingMermaidFetch {
                     url: url.clone(),
                     insert,
-                    block_end,
+                    doc_path: self.doc.path.clone(),
+                    source_hash,
+                    occurrence,
                     title,
                 });
                 if self.cache.remote_pending.insert(url.clone()) {
@@ -2768,9 +2881,7 @@ impl App {
                     let dir = if my < ty { -1 } else { 1 };
                     let new = chrome::page_scroll(vp, doc_h, self.window_state.scroll_y, dir);
                     self.window_state.goal_y = new;
-                    if !self.window_state.smooth {
-                        self.window_state.scroll_y = self.window_state.goal_y;
-                    }
+                    self.window_state.scroll_y = self.window_state.goal_y;
                     self.set_ime_area();
                     self.request_redraw();
                 }
@@ -3081,10 +3192,7 @@ impl App {
     /// 仅在形状变化时写窗口，避免每次鼠标移动都下发。
     pub(crate) fn apply_pointer(&mut self) {
         use winit::window::CursorIcon;
-        let icon = if self.ui_state.modal.is_some()
-            || self.ui_state.image_preview.is_some()
-            || self.ui_state.print_preview.is_some()
-        {
+        let icon = if self.ui_state.modal.is_some() || self.ui_state.image_preview.is_some() {
             CursorIcon::Default
         } else if self.ui_state.search.hover.is_some()
             || self.ui_state.quick.hover.is_some()
@@ -3221,7 +3329,7 @@ impl App {
                 // 持久化完整 Config；失败时 save_config 已写入可见错误，不得被
                 // 后续成功提示覆盖（DEF-T10-008）。
                 let saved = self.save_config(ConfigSave::All);
-                // 立即刷新所有受影响的 UI（主题模式、字体、平滑滚动等）
+                // 立即刷新所有受影响的 UI（主题模式、字体等）
                 self.refresh_settings_effects();
                 if saved {
                     self.ui_state.chrome.notice = t(I18nKey::NoticeSettingsSaved).into();
@@ -3244,7 +3352,7 @@ impl App {
         }
     }
 
-    /// 设置应用后立即生效：主题模式、字体缓存、平滑滚动。不要求重启。
+    /// 设置应用后立即生效：主题模式、字体缓存。不要求重启。
     ///
     /// 走 `refresh_theme_visuals` 而非只换 `Theme` 值：主题代次必须递增，否则
     /// Dark→System（系统为浅色）时布局/光栅缓存仍按旧深色主题命中，正文保持浅灰。
@@ -3257,9 +3365,7 @@ impl App {
             }
         }
         self.input_state.theme = Theme::of(self.config.mode, self.input_state.system_dark);
-        // 2) 平滑滚动：WindowState 独立存储，需要同步
-        self.window_state.smooth = self.config.smooth_scroll;
-        // 3) 正文排版：字号/行高/字体族先落到排版引擎；它们同时进入 `BaseKey`，
+        // 2) 正文排版：字号/行高/字体族先落到排版引擎；它们同时进入 `BaseKey`，
         //    随后的主题代次递增会按新排版输入整体重排（无需重启）。
         self.engine.set_doc_typography(
             self.config.doc_font_size,
@@ -3277,34 +3383,8 @@ impl App {
     pub(crate) fn toggle_focus(&mut self) {
         let on = !self.ui_state.writing.focus;
         self.ui_state.writing.focus = on;
-        if on {
-            // 专注 / 打字机互斥（同为「写作模式」，同开语义混乱）
-            self.ui_state.writing.typewriter = false;
-        }
         self.ui_state.chrome.notice = tf(
             I18nKey::NoticeFocusMode,
-            &[if on {
-                t(I18nKey::ToggleOn)
-            } else {
-                t(I18nKey::ToggleOff)
-            }],
-        );
-        self.request_redraw();
-    }
-
-    /// 切换打字机模式（阶段 1）：开启即刻把光标行移到视口锚点；之后每次
-    /// `scroll_to_caret`（编辑/垂直移动）都保持该锚点。
-    pub(crate) fn toggle_typewriter(&mut self) {
-        let on = !self.ui_state.writing.typewriter;
-        self.ui_state.writing.typewriter = on;
-        if on {
-            // 专注 / 打字机互斥
-            self.ui_state.writing.focus = false;
-            self.scroll_to_caret();
-            self.set_ime_area();
-        }
-        self.ui_state.chrome.notice = tf(
-            I18nKey::NoticeTypewriterMode,
             &[if on {
                 t(I18nKey::ToggleOn)
             } else {
@@ -3395,20 +3475,12 @@ impl App {
             return;
         }
         self.window_state.goal_x = None;
-        if self.ui_state.writing.typewriter {
-            // 打字机模式下大纲跳转也必须落到锚点（当前行而非视口顶部），
-            // 避免首帧停在顶部、要等下一次输入才被纠正（DEF-T11-E1-003）。
-            // 远处块高可能仍是估算值：先补排并收敛几何，再计算锚点滚动量，
-            // 否则绘制阶段补排会让首帧偏离锚点（本轮复发项）。
-            self.scroll_to_typewriter_anchor();
-        } else if let Some(top) = top {
+        if let Some(top) = top {
             let vp = self.viewport();
             let max = chrome::max_scroll(vp, self.doc_height());
             let target = (top - MARGIN * self.input_state.scale).clamp(0.0, max);
             self.window_state.goal_y = target;
-            if !self.window_state.smooth {
-                self.window_state.scroll_y = self.window_state.goal_y;
-            }
+            self.window_state.scroll_y = self.window_state.goal_y;
         }
         self.set_ime_area();
         self.request_redraw();
@@ -3489,11 +3561,9 @@ impl App {
         // 正文滚动：光标位置不变，但用户已开始操作文档，隐藏半周期应被打断。
         self.note_caret_activity();
         let max = chrome::max_scroll(vp, self.doc_height());
-        // B3：写入 goal_y；smooth=false 时 animate() 首帧 goal_y==scroll_y 零开销同步
+        // 瞬时滚动：写入目标后立即同步，无需动画插值。
         self.window_state.goal_y = (self.window_state.goal_y - d).clamp(0.0, max);
-        if !self.window_state.smooth {
-            self.window_state.scroll_y = self.window_state.goal_y;
-        }
+        self.window_state.scroll_y = self.window_state.goal_y;
         self.set_ime_area();
         self.request_redraw();
     }

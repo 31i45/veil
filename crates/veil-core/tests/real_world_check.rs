@@ -38,6 +38,10 @@ fn in_repo_md_files() -> Vec<PathBuf> {
         }
         walk_md(&p, &mut out);
     }
+    // `.trae/specs/` 是 Spec 流程的设计/证据文档，不是产品真实写作样本；
+    // 把它们计入会让「新增一个 spec 就多一篇差异」，污染真实文档回归。
+    let specs = root.join(".trae/specs");
+    out.retain(|p| !p.starts_with(&specs));
     out.sort();
     out
 }

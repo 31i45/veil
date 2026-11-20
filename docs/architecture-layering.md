@@ -26,7 +26,7 @@
 
 ### 机制层 — veil-ui + veil-mermaid-offline + veil/platform
 - `crates/veil-ui/` — 整个 crate 及所有子模块
-  - 顶层模块：`anim`、`app`、`autosave`、`chrome`、`docio`、`document`（doc_state / persist / block_index / recovery / session / snapshot / history）、`editor`、`geometry`、`html`、`i18n`、`image`、`input`、`interaction`、`math`、`mermaid_renderer`、`mode`、`paint`、`perf`、`print`、`search`（含 search_strategy / search_view）、`shell`、`stats`、`style`、`theme`、`tokens`、`view`（cache / ctx_menu / frame / highlight / layout / linebreak / modal / outline / print_preview / quick_open / settings / style / table / table_strategy / table_view）
+  - 顶层模块：`anim`、`app`、`autosave`、`chrome`、`docio`、`document`（doc_state / persist / block_index / recovery / session / snapshot / history）、`editor`、`geometry`、`html`、`i18n`、`image`、`input`、`interaction`、`math`、`mermaid_renderer`、`mode`、`paint`、`perf`、`print`、`search`（含 search_strategy / search_view）、`shell`、`stats`、`style`、`theme`、`tokens`、`view`（cache / ctx_menu / frame / highlight / layout / linebreak / modal / outline / quick_open / settings / style / table / table_strategy / table_view）
 - `crates/veil-mermaid-offline/` — 整个 crate（QuickJS + mermaid 引擎 = 渲染机制）
 - `crates/veil/src/platform/` — 远程 Mermaid / HTTP / PDF 光栅化 / 进程监视等平台桥接
   - 模块：`assoc`、`clock`、`error`、`http`、`ipc`、`mermaid`、`mermaid_offline`、`pdf`、`pdf_layout`、`pdf_media`、`print`、`shell`、`theme`、`watch`、`wic`、`windows`

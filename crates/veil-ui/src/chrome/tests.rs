@@ -38,10 +38,19 @@ fn action_enabled_only_gates_known_noop_items() {
         !action_enabled(MenuAction::Redo, none),
         "无重做步：重做禁用"
     );
+    // 空文档没有可导出内容：导出/打印禁用（产品语义变化，见 Task 6.4）。
+    assert!(
+        !action_enabled(MenuAction::Export, none),
+        "空文档禁用导出 HTML"
+    );
+    assert!(
+        !action_enabled(MenuAction::ExportPdf, none),
+        "空文档禁用导出 PDF"
+    );
+    assert!(!action_enabled(MenuAction::Print, none), "空文档禁用打印");
     // 其余项恒可用（含剪贴板等不可静态判断的项）
     assert!(action_enabled(MenuAction::Copy, none));
     assert!(action_enabled(MenuAction::Open, none));
-    assert!(action_enabled(MenuAction::Export, none));
 
     let all = MenuFlags {
         can_save: true,
@@ -52,6 +61,14 @@ fn action_enabled_only_gates_known_noop_items() {
     assert!(action_enabled(MenuAction::Save, all));
     assert!(action_enabled(MenuAction::Undo, all));
     assert!(action_enabled(MenuAction::Redo, all));
+    // 正文非空即可导出/打印，与是否有未保存修改无关。
+    let with_text = MenuFlags {
+        can_export: true,
+        ..none
+    };
+    assert!(action_enabled(MenuAction::Export, with_text));
+    assert!(action_enabled(MenuAction::ExportPdf, with_text));
+    assert!(action_enabled(MenuAction::Print, with_text));
 }
 
 #[test]
@@ -232,7 +249,6 @@ fn menu_definitions_cover_shortcuts() {
             MenuAction::Export,
             MenuAction::ExportPdf,
             MenuAction::Print,
-            MenuAction::PrintPreview,
             MenuAction::VersionHistory,
             MenuAction::Separator,
             MenuAction::Quit
@@ -278,7 +294,6 @@ fn menu_definitions_cover_shortcuts() {
             MenuAction::Separator,
             MenuAction::ToggleSourceMode,
             MenuAction::ToggleFocus,
-            MenuAction::ToggleTypewriter,
             MenuAction::Separator,
             MenuAction::ToggleRemoteImages,
             MenuAction::Separator,
@@ -372,13 +387,11 @@ fn menu_shortcuts_match_winit_mapping_and_real_dispatch() {
             if *shortcut == Key::Empty {
                 assert!(matches!(
                     action,
-                    MenuAction::PrintPreview
-                        | MenuAction::Quit
+                    MenuAction::Quit
                         | MenuAction::ThemeSystem
                         | MenuAction::ThemeLight
                         | MenuAction::ThemeDark
                         | MenuAction::ToggleFocus
-                        | MenuAction::ToggleTypewriter
                         | MenuAction::ToggleRemoteImages
                 ));
                 continue;
@@ -403,6 +416,8 @@ fn dialog_commands_use_ellipsis_consistently() {
                 action,
                 MenuAction::Open
                     | MenuAction::SaveAs
+                    | MenuAction::Export
+                    | MenuAction::ExportPdf
                     | MenuAction::Print
                     | MenuAction::InsertImage
                     | MenuAction::Settings
@@ -444,14 +459,29 @@ fn view_menu_exposes_source_mode_toggle() {
         .expect("视图菜单应含源码模式");
     assert_eq!(t(item.0), "源码模式");
     assert_eq!(t(item.1), "Ctrl+/");
-    // 与专注/打字机模式同类开关项相邻
+    // 紧随其后的是专注模式，再往后回到分隔线
     let idx = MENUS[2]
         .items
         .iter()
         .position(|(_, _, a)| *a == MenuAction::ToggleSourceMode)
         .unwrap();
     assert_eq!(MENUS[2].items[idx + 1].2, MenuAction::ToggleFocus);
-    assert_eq!(MENUS[2].items[idx + 2].2, MenuAction::ToggleTypewriter);
+    assert_eq!(MENUS[2].items[idx + 2].2, MenuAction::Separator);
+}
+
+#[test]
+fn remote_images_menu_uses_settings_wording() {
+    let item = MENUS[2]
+        .items
+        .iter()
+        .find(|(_, _, a)| *a == MenuAction::ToggleRemoteImages)
+        .expect("视图菜单应含远程图片开关");
+    assert_eq!(
+        t(item.0),
+        t(crate::i18n::Key::SettingsAllowRemoteImages),
+        "菜单与设置必须使用同一文案"
+    );
+    assert_eq!(t(item.0), "允许远程图片");
 }
 
 #[test]
@@ -782,7 +812,6 @@ fn toggle_rows_report_and_paint_checked_state() {
         ..Default::default()
     };
     assert!(action_checked(MenuAction::ToggleFocus, flags));
-    assert!(!action_checked(MenuAction::ToggleTypewriter, flags));
     assert!(
         !action_checked(MenuAction::Save, flags),
         "非开关项无「当前」"
@@ -797,6 +826,18 @@ fn toggle_rows_report_and_paint_checked_state() {
             fullscreen: true,
             ..Default::default()
         }
+    ));
+    // 远程图片与设置同极性：勾选 = 允许（不再是反相的「阻止」）。
+    assert!(action_checked(
+        MenuAction::ToggleRemoteImages,
+        MenuFlags {
+            allow_remote_images: true,
+            ..Default::default()
+        }
+    ));
+    assert!(!action_checked(
+        MenuAction::ToggleRemoteImages,
+        MenuFlags::default()
     ));
     // 源码模式只认自己的开关位，不与其它模式串扰
     assert!(action_checked(
@@ -821,13 +862,12 @@ fn toggle_rows_report_and_paint_checked_state() {
         MenuAction::ToggleSourceMode,
         MenuFlags {
             focus: true,
-            typewriter: true,
             ..Default::default()
         }
     ));
 
     // 像素级：视图菜单「专注模式」行开启后多出右侧「当前」像素
-    // 帧高需容纳新增源码模式项后的整张弹窗（11 行）
+    // 帧高需容纳源码模式项后的整张弹窗（10 行）
     let theme = Theme::light();
     let v = viewport(300, 400, 1.0);
     let p = popup_layout(2, 1.0, &[], 1000.0);
@@ -922,7 +962,6 @@ fn theme_menu_marks_current_mode() {
             MenuAction::ThemeDark,
             MenuAction::ToggleSourceMode,
             MenuAction::ToggleFocus,
-            MenuAction::ToggleTypewriter,
             MenuAction::ToggleRemoteImages,
             MenuAction::Settings,
         ]

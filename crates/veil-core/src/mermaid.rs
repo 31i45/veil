@@ -138,6 +138,24 @@ pub fn mermaid_live_url(mermaid_source: &str) -> String {
     format!("{MERMAID_LIVE_BASE}{encoded}")
 }
 
+/// gantt 字号统一提升到 14px（与离线渲染器的 `mermaid.initialize({gantt:{...}})` 对齐）。
+///
+/// 远程 mermaid.ink 只接受源码，无法单独下发 initialize 配置；用官方 init 指令
+/// 写在源码最前（注释行会被 `detect_type` 跳过，不影响图型识别）。
+pub const GANTT_FONT_INIT: &str = "%%{init: {'gantt': {'fontSize': 14, 'sectionFontSize': 14}}}%%";
+
+/// 远程渲染前的源码预处理：gantt 源码前注入字号 init 指令，其余图型原样返回。
+fn with_remote_defaults(source: &str) -> std::borrow::Cow<'_, str> {
+    if detect_type(source) == Some("gantt") {
+        let mut out = String::with_capacity(GANTT_FONT_INIT.len() + 1 + source.len());
+        out.push_str(GANTT_FONT_INIT);
+        out.push('\n');
+        out.push_str(source);
+        return std::borrow::Cow::Owned(out);
+    }
+    std::borrow::Cow::Borrowed(source)
+}
+
 /// 生成 mermaid.ink 的 PNG 渲染 URL（用户点击时才由上层发起请求）。
 ///
 /// payload 与 `mermaid_live_url` 完全相同（gzip + base64url），mermaid.ink 的
@@ -145,9 +163,10 @@ pub fn mermaid_live_url(mermaid_source: &str) -> String {
 pub fn mermaid_ink_png_url(mermaid_source: &str, dark: bool, width: u32) -> String {
     let theme = if dark { "dark" } else { "default" };
     let bg = if dark { "1B1B1F" } else { "FFFFFF" };
+    let source = with_remote_defaults(mermaid_source);
     let json = format!(
         r#"{{"code":{}, "mermaid":{{"theme":"{theme}"}}, "autoSync":true, "updateDiagram":true}}"#,
-        json_escape(mermaid_source)
+        json_escape(&source)
     );
     let compressed = gzip_bytes(&json);
     let encoded = base64url_encode(&compressed);
@@ -164,9 +183,10 @@ pub fn mermaid_ink_svg_url(mermaid_source: &str, dark: bool) -> String {
     let bg = if dark { "1B1B1F" } else { "FFFFFF" };
     // htmlLabels:false 必须显式下发：mermaid.ink 新版本默认输出 foreignObject，
     // resvg 无法光栅化其中的 HTML 标签（文字会整块丢失）。
+    let source = with_remote_defaults(mermaid_source);
     let json = format!(
         r#"{{"code":{}, "mermaid":{{"theme":"{theme}","htmlLabels":false,"flowchart":{{"htmlLabels":false}},"class":{{"htmlLabels":false}}}}, "autoSync":true, "updateDiagram":true}}"#,
-        json_escape(mermaid_source)
+        json_escape(&source)
     );
     let compressed = gzip_bytes(&json);
     let encoded = base64url_encode(&compressed);
@@ -253,6 +273,47 @@ mod tests {
         assert!(url.contains("theme=dark"), "{url}");
         assert!(url.contains("bgColor=1B1B1F"), "{url}");
         assert!(!url.contains("type=svg"), "{url}");
+    }
+
+    #[test]
+    fn gantt_remote_urls_inject_font_size_init() {
+        let source = "gantt\n  title T\n  section S\n  A :a1, 2020-01-01, 1d";
+        for url in [
+            mermaid_ink_png_url(source, false, 1200),
+            mermaid_ink_svg_url(source, false),
+        ] {
+            let payload = url
+                .split("pako:")
+                .nth(1)
+                .and_then(|s| s.split('?').next())
+                .expect("URL 应含 pako payload");
+            let json = String::from_utf8(inflate_bytes(&base64url_decode(payload))).unwrap();
+            assert!(
+                json.contains("%%{init:"),
+                "gantt 远程源码必须注入 init 指令：{json}"
+            );
+            assert!(
+                json.contains("'fontSize': 14") && json.contains("'sectionFontSize': 14"),
+                "gantt 字号配置缺失：{json}"
+            );
+        }
+    }
+
+    #[test]
+    fn non_gantt_remote_urls_do_not_inject_gantt_init() {
+        for source in ["graph TD\n  A-->B", "pie title t\n  \"a\": 1"] {
+            let url = mermaid_ink_svg_url(source, false);
+            let payload = url
+                .split("pako:")
+                .nth(1)
+                .and_then(|s| s.split('?').next())
+                .unwrap();
+            let json = String::from_utf8(inflate_bytes(&base64url_decode(payload))).unwrap();
+            assert!(
+                !json.contains("%%{init:") && !json.contains("sectionFontSize"),
+                "非 gantt 图型不得注入 gantt 字号配置：{json}"
+            );
+        }
     }
 
     #[test]

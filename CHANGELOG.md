@@ -2,6 +2,15 @@
 
 Veil 版本迭代记录。每个版本的详细修复清单见对应 git tag 的 commit log。
 
+## v2.0.1 — 2026-11-20
+
+首次双产物发布（v2.0.0）被 CI 测试非确定性阻断，本版只修门禁与测试，不改产品行为。
+
+### Fixed
+- `remote_svg_mock_succeeds_for_preview_and_export` 看门狗从 2s 提升到 30s：首次 resvg/fontdb 初始化在冷缓存、高并发 runner 上可能超过 2s；该测试验证正确性而非延迟
+- 深色 mindmap 标签对比度改为检查字芯（前 10% 最实心像素）而非中位数：抗锯齿边缘占比随平台字体/hinting 变化，CI 与本地中位数可差 2:1，导致同一主题假失败；字芯仍需 ≥ WCAG AA 4.5
+- 发布产物新鲜度：CI 与 release 在 rust-cache 恢复后清理工作区 crate（保留第三方依赖缓存），防止缓存指纹时间戳比 checkout 源码新时复用旧测试二进制（v2.0.0 发布日志已出现指向旧源码行号的 panic）
+
 ## v2.0.0 — 2026-11-20
 
 双发行产物：`veil.exe`（远程 Mermaid）+ `veil-full.exe`（完全离线 Mermaid）。

@@ -24,6 +24,20 @@ jobs:
       - name: Cache cargo builds
         uses: Swatinem/rust-cache@v2
 
+      # rust-cache 会恢复上次的 target-default/target-full。若恢复出的指纹时间戳
+      # 比本次 checkout 的源码更新，cargo 可能复用旧测试二进制（本次 CI 已出现
+      # 指向旧源码行号的 panic）。发布物必须由当前源码重建：只清工作区 crate，
+      # 保留第三方依赖缓存。
+      - name: Clean workspace artifacts (veil.exe target)
+        env:
+          CARGO_TARGET_DIR: target-default
+        run: cargo clean -p veil -p veil-ui -p veil-core -p veil-mermaid-offline
+
+      - name: Clean workspace artifacts (veil-full.exe target)
+        env:
+          CARGO_TARGET_DIR: target-full
+        run: cargo clean -p veil -p veil-ui -p veil-core -p veil-mermaid-offline
+
       - name: Build veil.exe
         env:
           CARGO_TARGET_DIR: target-default

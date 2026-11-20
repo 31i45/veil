@@ -286,7 +286,9 @@ mod tests {
         });
 
         fetcher.request("https://example.com/diagram.svg".into());
-        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        // 看门狗只用于避免测试永久挂起：首次 resvg/fontdb 初始化在 CI 冷缓存、
+        // 高并发 runner 上可能远超 2s。这里等的是正确性，不是延迟指标。
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
         let preview = loop {
             if let Some((label, result)) = fetcher.poll().into_iter().next() {
                 assert_eq!(label, "https://example.com/diagram.svg");

@@ -273,7 +273,7 @@ OffsetMap（doc↔layout 坐标换算）→ shape_until_scroll →
 
 - **平台接缝**：条件编译 `#[cfg(target_os = "windows")] mod imp`，上层零 `#[cfg]`，签名一致性由编译器强制。macOS/Linux 实现故意缺失 → 编译失败 → 强制显式决策。
 - **单实例 IPC**：WM_COPYDATA + 命名事件，主实例监听、次实例发送 `NewWindow` 请求。
-- **PDF 原生导出**：pdf-writer 0.15 + ttf-parser + subsetter 0.2.6。多级书签、CJK 字体子集化、heading/table/image/math 布局。兜底 Microsoft Print to PDF。
+- **PDF 原生导出**：pdf-writer 0.15 + ttf-parser + subsetter 0.2.6。多级书签、CJK 字体子集化、heading/table/image/math 布局。失败时保留原文件并显示可操作错误，不做位图或打印兜底。
 - **HTML 导出**：pulldown-cmark 解析 → 内嵌 CSS + 数学 SVG（latex-rust）→ 自包含单文件。
 - **图标/资源**：exe 内嵌图标，无 vendor 外部资产。
 
@@ -482,13 +482,13 @@ layout 阶段：content 区间 → 占位 InlineImg { width, height, baseline }
 |---|---|---|---|---|
 | HTML（自包含） | ✅ | ✅ | ✅ | ✅（Pandoc） |
 | PDF（原生） | ✅ 原生 pdf-writer + 字体子集化 + TOC | ✅ 打印管线 | ✅ 打印管线 | ✅ Pandoc |
-| PDF（Microsoft Print to PDF 兜底） | ✅ | ❌（Chromium 打印） | ❌（Chromium 打印） | ❌ |
+| PDF（位图/打印兜底） | ❌ 已删除（只保留矢量出口） | ❌（Chromium 打印） | ❌（Chromium 打印） | ❌ |
 | Word (.docx) | ❌ | ✅ | ✅ | ✅ Pandoc |
 | LaTeX | ❌ | ✅ | ✅ | ✅ Pandoc |
 | ePub | ❌ | ✅ | ❌ | ✅ Pandoc |
 | 图片 (.png) | ❌ | ✅ | ✅ | ❌ |
 
-**Veil 的导出定位**：只做 HTML 和 PDF，拒绝 Pandoc 管线（避免引入 100+ MB 外部依赖）。PDF 是自己手写的原生实现（pdf-writer + ttf-parser + subsetter），多级书签 + CJK 字体子集化 + heading/table/image/math 全布局。Microsoft Print to PDF 兜底保证任何情况下都能导出。
+**Veil 的导出定位**：只做 HTML 和 PDF，拒绝 Pandoc 管线（避免引入 100+ MB 外部依赖）。PDF 是自己手写的原生实现（pdf-writer + ttf-parser + subsetter），多级书签 + CJK 字体子集化 + heading/table/image/math 全布局。导出失败时保留原文件并给出可操作错误，不再提供位图或打印兜底；物理打印走系统打印对话框。
 
 ### 4.4 UX 层对比
 
@@ -555,7 +555,7 @@ Veil 有一个罕见的设计纪律——明确列出并公开解释了 10 类�
 | **纯 Rust 数学渲染** | latex-rust STIX Two Math，无 KaTeX/MathJax 依赖。竞品依赖 JS 引擎。 |
 | **自定义 Callout** | `> [!FIXME]` 自定义提示块，解析期分类、渲染期消费。竞品只有五种内置 GFM Alerts。 |
 | **PDF 原生导出 + CJK 字体子集化** | 完全手写（pdf-writer + ttf-parser + subsetter），不依赖 Chromium 打印或 Pandoc。 |
-| **Microsoft Print to PDF 兜底** | 任何情况下都能导出 PDF，竞品走 Chromium 打印管线（可能受驱动影响）。 |
+| **单一矢量 PDF 出口** | 导出失败明确报错并保留旧文件；物理打印走系统对话框，不做位图/打印兜底。 |
 | **单实例 IPC + 新窗口** | WM_COPYDATA 主/次进程通信，次进程发送 NewWindow 请求。 |
 | **崩溃恢复魔数校验** | `VEIL-RECOVERY-1`，启动时可验证快照完整性。 |
 | **中文排版禁则 + WJ 胶水 + UAX#14** | 行首 24 + 行尾 11 字符禁则表、悬挂标点、整体下沉——超过 Typora/iA Writer 公开能力描述。 |

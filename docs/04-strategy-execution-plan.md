@@ -412,7 +412,8 @@ B 用 `gfm_canonical` 抹平 cmark-gfm 与 pulldown 的序列化差异（align/s
   选区/查找高亮/浮层/chrome，末页可越过 max_scroll）+ Win32 GDI 粘合（PRINTDLGW
   系统对话框 → 按打印机 DPI 重排 → 逐页 SetDIBitsToDevice 贴帧，帧像素 XRGB
   little-endian 直接作 32bpp BI_RGB 顶向下 DIB 零转换）。PDF 导出走系统
-  「Microsoft Print to PDF」同一码路。手写 FFI 零新增依赖，预算维持 8/8；
+  「Microsoft Print to PDF」同一码路（双发行收敛后已改为原生矢量 PDF 唯一出口，
+  物理打印仍走系统对话框；此处保留当日记述）。手写 FFI 零新增依赖，预算维持 8/8；
   787 测试绿 + clippy 零警告（commit 5a516eb / b078e8c）。
   **真机走查项（人工）**：Microsoft Print to PDF 出 PDF 目检（多页文档分页不截字、
   数学图/表格跨页硬切、页码范围打印）；物理打印机抽验一份。

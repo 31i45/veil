@@ -1,15 +1,15 @@
 //! Win32 GDI 打印（3b，手写 FFI，零新增依赖）。
 //! PRINTDLGW 取打印机 DC → **与 PDF 导出同一 `pdf_layout` 版面**（分页/书签同源）→
 //! 逐页把 DrawOp 画到打印机 DC（文字走 GDI，图片走 StretchDIBits）。
-//! PDF 导出走原生 PDF 管线；GDI 位图 PDF 仅作原生失败兜底。
-//! 版面不可用时回退旧的屏幕渲染打印（保证仍能出纸，并在状态栏明示降级）。
+//! PDF 导出只走原生矢量管线（Type0/CIDFontType2），失败时报告可操作错误，不产生位图替代文件。
+//! 打印版面不可用时回退旧的屏幕渲染打印（保证仍能出纸，并在状态栏明示降级）。
 
 #![allow(non_snake_case)]
 
 use std::ffi::c_void;
 
 use veil_ui::i18n::{t, tf, Key};
-use veil_ui::{path_label, PreviewPage, Print, PrintSession};
+use veil_ui::{path_label, Print, PrintSession};
 
 use super::pdf::{
     find_cjk_font, DrawOp, FontMetrics, ImageData, TextMetrics, TextRun, A4_HEIGHT, A4_WIDTH,
@@ -25,7 +25,6 @@ type Hgdiobj = *mut c_void;
 type Hbrush = *mut c_void;
 type Hpen = *mut c_void;
 type Hfont = *mut c_void;
-type Hbitmap = *mut c_void;
 
 #[repr(C)]
 struct RectI32 {
@@ -150,12 +149,6 @@ extern "system" {
 
 #[link(name = "gdi32")]
 extern "system" {
-    fn CreateDCW(
-        pwsz_driver: *const u16,
-        pwsz_device: *const u16,
-        psz_port: *const u16,
-        pdm: *const c_void,
-    ) -> Hdc;
     fn GetDeviceCaps(hdc: Hdc, index: i32) -> i32;
     fn StartDocW(hdc: Hdc, lpdi: *const DocInfoW) -> i32;
     fn EndDoc(hdc: Hdc) -> i32;
@@ -164,15 +157,6 @@ extern "system" {
     fn EndPage(hdc: Hdc) -> i32;
     fn DeleteDC(hdc: Hdc) -> i32;
     fn ResetDCW(hdc: Hdc, lpdm: *const c_void) -> Hdc;
-    fn CreateCompatibleDC(hdc: Hdc) -> Hdc;
-    fn CreateDIBSection(
-        hdc: Hdc,
-        pbmi: *const BitmapInfoHeader,
-        usage: u32,
-        ppv_bits: *mut *mut c_void,
-        h_section: *mut c_void,
-        offset: u32,
-    ) -> Hbitmap;
     fn SetDIBitsToDevice(
         hdc: Hdc,
         x_dest: i32,
@@ -265,8 +249,7 @@ fn rgb(color: [u8; 3]) -> u32 {
 }
 
 /// 打印作业体（begin 之后必经路径）：StartDoc → 逐页贴帧 → EndDoc/AbortDoc。
-/// `margin`：页帧在物理页内的贴图偏移（像素）；`output`：DOCINFO 输出文件名
-/// （None = 由打印机/对话框决定，PDF 导出时指向目标路径）。
+/// `margin`：页帧在物理页内的贴图偏移（像素）。
 /// 返回 Ok(已输出页数) 或 Err(提示文案)。任何失败都不留半开作业。
 fn run_print_job(
     hdc: Hdc,
@@ -274,13 +257,12 @@ fn run_print_job(
     from: usize,
     to: usize,
     margin: i32,
-    output: Option<&[u16]>,
 ) -> Result<usize, &'static str> {
     let doc_name = wide(t(Key::PrintDocumentName));
     let di = DocInfoW {
         cb_size: std::mem::size_of::<DocInfoW>() as i32,
         lpsz_doc_name: doc_name.as_ptr(),
-        lpsz_output: output.map_or(std::ptr::null(), |o| o.as_ptr()),
+        lpsz_output: std::ptr::null(),
         lpsz_datatype: std::ptr::null(),
         fw_type: 0,
     };
@@ -333,15 +315,6 @@ fn run_print_job(
     }
     unsafe { EndDoc(hdc) };
     Ok(done)
-}
-
-/// 导出页帧几何：毫米边距 → 设备像素，扣除两侧边距得到页帧尺寸。
-/// 纯函数（不碰 DC），便于 headless 断言「页边距数值生效」。
-fn export_frame(page_w: i32, page_h: i32, margin_mm: f32, dpi: i32) -> (i32, u32, u32) {
-    let margin = (margin_mm / 25.4 * dpi.max(1) as f32).round() as i32;
-    let w = (page_w - 2 * margin).max(1) as u32;
-    let h = (page_h - 2 * margin).max(1) as u32;
-    (margin, w, h)
 }
 
 /// 同目录临时目标：驱动写到全新文件，成功后替换正式目标。
@@ -812,7 +785,7 @@ impl Print for WinPrint {
                 } else {
                     (1, pages)
                 };
-                let result = run_print_job(hdc, session, from, to, dpi, None);
+                let result = run_print_job(hdc, session, from, to, dpi);
                 unsafe { DeleteDC(hdc) };
                 session.end();
                 match result {
@@ -840,160 +813,11 @@ impl Print for WinPrint {
         // 位置已确认：补齐缺失的 Mermaid 渲染（同步、有预算），保证导出一致性。
         session.prepare_mermaid();
 
-        // —— 优先走原生 PDF（Wave 3A/4：Type0/CIDFontType2 + ToUnicode，可搜索/可复制/带书签）——
-        // 失败时 try_native_pdf 已保证目标文件未被改动（tmp + 原子替换），
-        // 因此这里绝不能再删 target，否则 GDI 也失败/取消时用户既有 PDF 会丢失。
+        // 唯一出口：原生矢量 PDF（Type0/CIDFontType2 + ToUnicode，可搜索/可复制/带书签）。
+        // 失败时 try_native_pdf 保证既有目标未被改动（tmp + 原子替换）；
+        // 不弹打印对话框、不生成位图 PDF，只给出可操作错误。
         if let Err(e) = try_native_pdf(&target, session) {
-            session.notice(&tf(Key::PrintNativePdfFallback, &[&e.to_string()]));
-            run_gdi_pdf_export(&target, session);
-        }
-    }
-
-    /// 打印预览：与 PDF 导出同一 `pdf_layout` 版面，离屏 GDI 渲染为整页位图。
-    /// 覆盖层只读展示，不产生打印作业、不改文档。
-    fn preview_pages(&mut self, session: &mut PrintSession) -> Result<Vec<PreviewPage>, String> {
-        // 预览无确认对话框：直接补齐缺失的 Mermaid 渲染，与 PDF 导出同源。
-        session.prepare_mermaid();
-        let layout = build_print_layout(session)?;
-        render_preview_pages(&layout)
-    }
-}
-
-/// 预览离屏 DPI：A4（pt）按 96dpi 光栅化，覆盖层再按窗口缩放（最近邻）。
-const PREVIEW_DPI: f32 = 96.0;
-
-/// 逐页把 DrawOp 画到 32bpp 内存位图，返回 RGBA（alpha 恒 255）。
-fn render_preview_pages(pl: &PrintLayout) -> Result<Vec<PreviewPage>, String> {
-    let s = PREVIEW_DPI / 72.0;
-    let w = (A4_WIDTH * s).round() as i32;
-    let h = (A4_HEIGHT * s).round() as i32;
-    let bmi = BitmapInfoHeader {
-        bi_size: 40,
-        bi_width: w,
-        bi_height: -h, // 顶向下，与帧行序一致
-        bi_planes: 1,
-        bi_bit_count: 32,
-        bi_compression: 0,
-        bi_size_image: 0,
-        bi_x_pels_per_meter: 0,
-        bi_y_pels_per_meter: 0,
-        bi_clr_used: 0,
-        bi_clr_important: 0,
-    };
-    let mut pages = Vec::with_capacity(pl.layout.pages.len());
-    for ops in &pl.layout.pages {
-        let mut bits: *mut c_void = std::ptr::null_mut();
-        let dc = unsafe { CreateCompatibleDC(std::ptr::null_mut()) };
-        let dib = if dc.is_null() {
-            std::ptr::null_mut()
-        } else {
-            unsafe { CreateDIBSection(dc, &bmi, 0, &mut bits, std::ptr::null_mut(), 0) }
-        };
-        if dc.is_null() || dib.is_null() || bits.is_null() {
-            if dib.is_null() {
-                unsafe { DeleteDC(dc) };
-            } else {
-                unsafe {
-                    DeleteObject(dib);
-                    DeleteDC(dc);
-                }
-            }
-            return Err(t(Key::PrintErrPreviewRaster).into());
-        }
-        let old = unsafe { SelectObject(dc, dib) };
-        let white = unsafe { CreateSolidBrush(rgb([255, 255, 255])) };
-        let all = RectI32 {
-            left: 0,
-            top: 0,
-            right: w,
-            bottom: h,
-        };
-        unsafe {
-            FillRect(dc, &all, white);
-            DeleteObject(white);
-        }
-        for op in ops {
-            draw_op(
-                dc,
-                op,
-                &pl.layout.images,
-                &pl.metrics,
-                pl.font_path,
-                s,
-                0.0,
-                0.0,
-            );
-        }
-        let mut pixels = vec![0u8; (w * h * 4) as usize];
-        unsafe {
-            std::ptr::copy_nonoverlapping(bits as *const u8, pixels.as_mut_ptr(), pixels.len());
-            SelectObject(dc, old);
-            DeleteObject(dib);
-            DeleteDC(dc);
-        }
-        // GDI 的 32bpp 位图是 BGRA 且 alpha 未定义：翻成 RGBA 并置不透明。
-        for p in pixels.chunks_exact_mut(4) {
-            p.swap(0, 2);
-            p[3] = 255;
-        }
-        pages.push(PreviewPage {
-            width: w as u32,
-            height: h as u32,
-            pixels,
-        });
-    }
-    Ok(pages)
-}
-
-// =============================================================================
-// GDI 位图 PDF 回退路径（Microsoft Print to PDF）
-// =============================================================================
-
-fn run_gdi_pdf_export(target: &std::path::Path, session: &mut PrintSession) {
-    let cfg = session.export_options();
-    let margin_mm = session.export_margin_mm();
-
-    let driver = wide("WINSPOOL");
-    let device = wide("Microsoft Print to PDF");
-    let hdc = unsafe {
-        CreateDCW(
-            driver.as_ptr(),
-            device.as_ptr(),
-            std::ptr::null(),
-            std::ptr::null(),
-        )
-    };
-    if hdc.is_null() {
-        session.notice(t(Key::PrintNoPdfPrinterContext));
-        WinPrint.print(session);
-        return;
-    }
-    let dpi = unsafe { GetDeviceCaps(hdc, LOGPIXELSX) }.max(1);
-    let page_w = unsafe { GetDeviceCaps(hdc, HORZRES) };
-    let page_h = unsafe { GetDeviceCaps(hdc, VERTRES) };
-    let (margin, frame_w, frame_h) = export_frame(page_w, page_h, margin_mm, dpi);
-    let total = session.begin_export(frame_w, frame_h, dpi as f32 / 96.0, cfg);
-    let tmp = temp_pdf_path(target);
-    let _ = std::fs::remove_file(&tmp);
-    let output = wide(&tmp.to_string_lossy());
-    let result = run_print_job(hdc, session, 1, total, margin, Some(&output));
-    unsafe { DeleteDC(hdc) };
-    session.end();
-    match result {
-        Ok(_) => match replace_file(&tmp, target) {
-            Ok(()) => session.notice(&tf(
-                Key::PrintExportedPdfBitmap,
-                &[&path_label(Some(target))],
-            )),
-            Err(e) => {
-                let _ = std::fs::remove_file(&tmp);
-                session.export_pdf_error(&e);
-            }
-        },
-        Err(_) => {
-            let _ = std::fs::remove_file(&tmp);
-            session.notice(t(Key::PrintExportPdfFellBack));
-            WinPrint.print(session);
+            session.export_pdf_error(&e);
         }
     }
 }
@@ -1002,7 +826,7 @@ fn run_gdi_pdf_export(target: &std::path::Path, session: &mut PrintSession) {
 // 原生 PDF 集成（Wave 3A）
 // =============================================================================
 
-/// 尝试原生 PDF 导出。成功写盘 Ok(())，失败 Err(原因) 让上层 fallback GDI。
+/// 尝试原生 PDF 导出。成功写盘 Ok(())，失败 Err(原因) 由调用方显示可操作错误。
 fn try_native_pdf(target: &std::path::Path, session: &mut PrintSession) -> Result<(), String> {
     use super::pdf::{find_cjk_font, render_pages, FontMetrics};
     use super::pdf_layout::{layout_document, LayoutOpts, PageGeom};
@@ -1057,8 +881,14 @@ fn try_native_pdf(target: &std::path::Path, session: &mut PrintSession) -> Resul
     }
 
     let tmp = temp_pdf_path(target);
-    std::fs::write(&tmp, &bytes).map_err(|e| tf(Key::PrintErrWriteTemp, &[&e.to_string()]))?;
-    replace_file(&tmp, target).map_err(|e| tf(Key::PrintErrReplaceTarget, &[&e.to_string()]))?;
+    if let Err(e) = std::fs::write(&tmp, &bytes) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(tf(Key::PrintErrWriteTemp, &[&e.to_string()]));
+    }
+    if let Err(e) = replace_file(&tmp, target) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(tf(Key::PrintErrReplaceTarget, &[&e.to_string()]));
+    }
 
     session.notice(&tf(
         Key::PrintExportedPdf,
@@ -1075,27 +905,9 @@ fn try_native_pdf(target: &std::path::Path, session: &mut PrintSession) -> Resul
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        export_frame, find_cjk_font, font_face_for, rect_i32, render_preview_pages, replace_file,
-        rgb, temp_pdf_path, DocLayout, DrawOp, FontMetrics, PrintLayout, TextRun, A4_HEIGHT,
-        A4_WIDTH, PREVIEW_DPI,
-    };
+    use super::{font_face_for, rect_i32, replace_file, rgb, temp_pdf_path};
     use std::fs;
     use std::path::PathBuf;
-
-    #[test]
-    fn export_frame_follows_margin_config() {
-        // A4 @600dpi = 4961x7016；20mm → 472px，10mm → 236px
-        let (m20, w20, h20) = export_frame(4961, 7016, 20.0, 600);
-        let (m10, w10, h10) = export_frame(4961, 7016, 10.0, 600);
-        assert_eq!((m20, m10), (472, 236));
-        assert!(w20 < w10 && h20 < h10, "边距越大页帧越小");
-        assert_eq!(w10 + 2 * (m10 as u32), 4961);
-        assert_eq!(h20 + 2 * (m20 as u32), 7016);
-        // 边距超过半页时钳到 1，不下溢
-        assert_eq!(export_frame(100, 100, 90.0, 600).1, 1);
-        assert_eq!(export_frame(100, 100, 90.0, 600).2, 1);
-    }
 
     fn temp_dir(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
@@ -1191,57 +1003,5 @@ mod tests {
         String::from_utf16_lossy(s)
             .trim_end_matches('\0')
             .to_string()
-    }
-
-    /// 6b：预览离屏渲染与 PDF 同源版面——每页产出 A4@96dpi 的整页位图，
-    /// 文字确实被画上（存在非白像素），alpha 固定不透明。
-    #[cfg(windows)]
-    #[test]
-    fn preview_pages_rasterize_same_layout() {
-        let Some(font_path) = find_cjk_font() else {
-            return;
-        };
-        let metrics = FontMetrics::load(std::path::Path::new(font_path), "预览".chars()).unwrap();
-        let page = vec![DrawOp::Text(TextRun {
-            x: 56.0,
-            y: 80.0,
-            size: 12.0,
-            text: "预览".into(),
-            bold: false,
-            italic: false,
-            underline: false,
-            strike: false,
-            highlight: None,
-            color: [0, 0, 0],
-        })];
-        let pl = PrintLayout {
-            layout: DocLayout {
-                pages: vec![page.clone(), page],
-                images: Vec::new(),
-                outline: Vec::new(),
-                links: Vec::new(),
-            },
-            metrics,
-            font_path,
-        };
-        let pages = render_preview_pages(&pl).expect("离屏位图应可用");
-        assert_eq!(pages.len(), 2, "与 PDF 同页数");
-        let p = &pages[0];
-        assert_eq!(
-            (p.width, p.height),
-            (
-                (A4_WIDTH * PREVIEW_DPI / 72.0).round() as u32,
-                (A4_HEIGHT * PREVIEW_DPI / 72.0).round() as u32
-            )
-        );
-        assert_eq!(p.pixels.len(), (p.width * p.height * 4) as usize);
-        assert!(
-            p.pixels.chunks_exact(4).all(|q| q[3] == 255),
-            "alpha 不透明"
-        );
-        assert!(
-            p.pixels.chunks_exact(4).any(|q| q[0] < 250),
-            "文字应被绘制到纸面"
-        );
     }
 }

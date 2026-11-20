@@ -148,13 +148,6 @@ impl Style {
             color: COL_TEXT,
         }
     }
-
-    fn with_size(size: f32) -> Self {
-        Self {
-            size,
-            ..Self::body()
-        }
-    }
 }
 
 #[derive(Clone)]
@@ -198,13 +191,25 @@ fn fill_lines(items: Vec<LItem>, max_w: f32, m: &dyn TextMetrics) -> Vec<Vec<LIt
         if w + iw > max_w && !cur.is_empty() {
             match last_space {
                 Some((bi, _bw)) if bi > 0 && bi < cur.len() => {
-                    let rest = cur.split_off(bi);
+                    let split = kinsoku_break(&cur, bi, None);
+                    let rest = cur.split_off(split);
                     lines.push(cur);
                     cur = rest;
                     last_space = None;
                 }
                 _ => {
-                    lines.push(std::mem::take(&mut cur));
+                    let next = match &it {
+                        LItem::Ch(c, _) => Some(*c),
+                        _ => None,
+                    };
+                    let split = kinsoku_break(&cur, cur.len(), next);
+                    if split < cur.len() {
+                        let rest = cur.split_off(split);
+                        lines.push(cur);
+                        cur = rest;
+                    } else {
+                        lines.push(std::mem::take(&mut cur));
+                    }
                     last_space = None;
                 }
             }
@@ -226,6 +231,108 @@ fn fill_lines(items: Vec<LItem>, max_w: f32, m: &dyn TextMetrics) -> Vec<Vec<LIt
         lines.push(cur);
     }
     lines
+}
+
+/// 中文断行禁则用的行首禁排字符（标点/闭符号不得出现在行首）。
+fn is_line_start_forbidden(c: char) -> bool {
+    matches!(
+        c,
+        '，' | '。'
+            | '、'
+            | '；'
+            | '：'
+            | '？'
+            | '！'
+            | '）'
+            | '〕'
+            | '］'
+            | '｝'
+            | '〉'
+            | '》'
+            | '」'
+            | '』'
+            | '】'
+            | '”'
+            | '’'
+            | '…'
+            | '‥'
+            | '·'
+            | '．'
+            | ','
+            | '.'
+            | ';'
+            | ':'
+            | '?'
+            | '!'
+            | ')'
+            | ']'
+            | '}'
+    )
+}
+
+/// 行尾禁排字符（开符号/开引号不得留在行尾）。
+fn is_line_end_forbidden(c: char) -> bool {
+    matches!(
+        c,
+        '（' | '〔'
+            | '［'
+            | '｛'
+            | '〈'
+            | '《'
+            | '「'
+            | '『'
+            | '【'
+            | '“'
+            | '‘'
+            | '('
+            | '['
+            | '{'
+    )
+}
+
+/// 直觉断点 `n`（[0,n) 留在本行）→ 禁则修正后的断点。
+///
+/// 只做最小避头尾：行首禁排字符随前一字符一起下移；行尾禁排字符下移。
+/// 修正后至少保留一个 item，避免产生空行；`next` 是尚未入行的下一个字符
+/// （硬断时断点正好在它之前）。
+fn kinsoku_break(cur: &[LItem], n: usize, next: Option<char>) -> usize {
+    if cur.is_empty() {
+        return n;
+    }
+    let mut n = n.clamp(1, cur.len());
+    let first_char = cur[n.min(cur.len())..]
+        .iter()
+        .find_map(|it| match it {
+            LItem::Ch(c, _) => Some(*c),
+            _ => None,
+        })
+        .or(next);
+    // 避头：下一行首字是闭符号 → 把本行末尾的普通字一起带到下一行。
+    // 连续闭符号（如 `。」`）最多再带一个字，避免把前一个闭符号留在行首。
+    if let Some(c) = first_char {
+        if is_line_start_forbidden(c) {
+            let mut moved = 0;
+            while n >= 2 && moved < 2 {
+                let LItem::Ch(prev, _) = &cur[n - 1] else {
+                    break;
+                };
+                n -= 1;
+                moved += 1;
+                if !is_line_start_forbidden(*prev) {
+                    break;
+                }
+            }
+        }
+    }
+    // 避尾：本行末字是开符号 → 把它推到下一行。
+    if n >= 2 {
+        if let LItem::Ch(prev, _) = &cur[n - 1] {
+            if is_line_end_forbidden(*prev) {
+                n -= 1;
+            }
+        }
+    }
+    n
 }
 
 // =============================================================================
@@ -1256,7 +1363,7 @@ impl<'a> Ctx<'a> {
         self.y += 2.0;
     }
 
-    fn table(&mut self, s: &Session, id: BlockId) {
+    fn table(&mut self, s: &Session, id: BlockId, media: &mut Option<&mut dyn MediaProvider>) {
         let Some(t) = s.table(id) else { return };
         // B2：容器内表格按容器缩进（引用层/列表内容列），可用宽同步扣减。
         let container = s.block_container(id);
@@ -1292,136 +1399,249 @@ impl<'a> Ctx<'a> {
         }
 
         for (ri, row) in rows.iter().enumerate() {
-            // 单元格换行（至多 6 行）
-            let mut cell_lines: Vec<Vec<String>> = Vec::new();
+            // 单元格按 inlines 排版（粗体/斜体/行内代码/链接与正文同源），
+            // 不再截断到 6 行：内容按页拆分完整输出（行可跨页，续页继续）。
+            let base_style = Style {
+                size: TABLE_SIZE,
+                bold: ri == 0,
+                ..Style::body()
+            };
+            let mut cell_lines: Vec<Vec<Vec<LItem>>> = Vec::new();
             let mut max_lines = 1usize;
             for (ci, &cw) in widths.iter().enumerate() {
-                let txt = row.get(ci).map(|c| c.text.as_str()).unwrap_or("");
                 let inner_w = (cw - 2.0 * pad).max(12.0);
-                let items: Vec<LItem> = txt
-                    .chars()
-                    .map(|c| LItem::Ch(c, Style::with_size(TABLE_SIZE)))
-                    .collect();
-                let mut lines: Vec<String> = fill_lines(items, inner_w, self.metrics)
-                    .into_iter()
-                    .map(|l| {
-                        l.into_iter()
-                            .map(|i| match i {
-                                LItem::Ch(c, _) => c,
-                                LItem::Box(_) => ' ',
-                                LItem::LinkOpen(_) | LItem::LinkClose => '\0',
-                            })
-                            .filter(|c| *c != '\0')
-                            .collect::<String>()
-                    })
-                    .collect();
-                if lines.is_empty() {
-                    lines.push(String::new());
+                let mut items: Vec<LItem> = Vec::new();
+                if let Some(cell) = row.get(ci) {
+                    let raw = s.text_slice(cell.range).unwrap_or_default();
+                    // 单元格源码是文档切片，base = cell.range.start：
+                    // `emit_inlines` 的节点区间是文档绝对偏移，两者口径一致。
+                    self.emit_inlines(
+                        &raw,
+                        cell.range.start,
+                        cell.range.start,
+                        cell.range.end,
+                        &cell.inlines,
+                        base_style,
+                        &mut items,
+                        media,
+                    );
                 }
-                if lines.len() > 6 {
-                    lines.truncate(6);
-                    if let Some(last) = lines.last_mut() {
-                        last.push('…');
-                    }
+                let mut lines = fill_lines(items, inner_w, self.metrics);
+                if lines.is_empty() {
+                    lines.push(Vec::new());
                 }
                 max_lines = max_lines.max(lines.len());
                 cell_lines.push(lines);
             }
 
-            let row_h = line_h * max_lines as f32 + pad * 1.4;
-            if self.y + row_h > self.geom.bottom() && self.y > self.geom.top() + 1.0 {
+            let full_h = line_h * max_lines as f32 + pad * 1.4;
+            // 整行能放进一页时，尽量不拆行（避免表格行孤悬）。
+            if full_h <= self.geom.content_h()
+                && self.y + full_h > self.geom.bottom()
+                && self.y > self.geom.top() + 1.0
+            {
                 self.new_page();
             }
-            let top = self.y;
-            if ri == 0 {
-                self.pages[self.page].push(DrawOp::Rect {
-                    x: x0,
-                    y: top,
-                    w: widths.iter().sum(),
-                    h: row_h,
-                    color: COL_HEAD_BG,
-                });
-            }
-
-            // 单元格文本
-            let mut x = x0;
-            for ci in 0..ncols {
-                let align = t.aligns.get(ci).copied().unwrap_or_default();
-                let mut cy = top + pad * 0.7;
-                for text in &cell_lines[ci] {
-                    if text.is_empty() {
-                        cy += line_h;
-                        continue;
-                    }
-                    let st = Style {
-                        size: TABLE_SIZE,
-                        bold: ri == 0,
-                        ..Style::body()
-                    };
-                    let mut items: Vec<LItem> = Vec::new();
-                    for c in text.chars() {
-                        items.push(LItem::Ch(c, st));
-                    }
-                    // 直接定位（避免 emit_line 推进全局 y）
-                    let wid: f32 = items.iter().map(|i| item_width(i, self.metrics)).sum();
-                    let inner = widths[ci] - 2.0 * pad;
-                    let off = match align {
-                        CellAlign::Center => (inner - wid).max(0.0) / 2.0,
-                        CellAlign::Right => (inner - wid).max(0.0),
-                        _ => 0.0,
-                    };
-                    let baseline = cy + self.metrics.ascent(TABLE_SIZE);
-                    let run = TextRun {
-                        x: x + pad + off,
-                        y: baseline,
-                        size: TABLE_SIZE,
-                        text: text.clone(),
-                        bold: ri == 0,
-                        italic: false,
-                        underline: false,
-                        strike: false,
-                        highlight: None,
-                        color: COL_TEXT,
-                    };
-                    self.pages[self.page].push(DrawOp::Text(run));
-                    cy += line_h;
+            // 跨页拆行：续页从下一行继续，表头边框在每页重画。
+            let mut drawn = 0usize;
+            let mut first_chunk = true;
+            let mut cell_links: Vec<Option<(u32, f32)>> = vec![None; ncols];
+            while drawn < max_lines {
+                // 行放不下就换页再画：避免页底只剩几 pt 时 fit 被强制为 1，
+                // 使基线越过正文底（文字被裁切或压到页脚）。每页重画边框。
+                if self.y + line_h + pad * 1.4 > self.geom.bottom()
+                    && self.y > self.geom.top() + 1.0
+                {
+                    self.new_page();
                 }
-                x += widths[ci];
-            }
+                let avail = (self.geom.bottom() - self.y - pad * 1.4).max(0.0);
+                let fit = ((avail / line_h).floor() as usize)
+                    .max(1)
+                    .min(max_lines - drawn);
+                let row_h = line_h * fit as f32 + pad * 1.4;
+                let top = self.y;
+                if ri == 0 && first_chunk {
+                    self.pages[self.page].push(DrawOp::Rect {
+                        x: x0,
+                        y: top,
+                        w: widths.iter().sum(),
+                        h: row_h,
+                        color: COL_HEAD_BG,
+                    });
+                }
 
-            // 横线
-            let total_w: f32 = widths.iter().sum();
-            for yy in [top, top + row_h] {
-                self.pages[self.page].push(DrawOp::Line {
-                    x1: x0,
-                    y1: yy,
-                    x2: x0 + total_w,
-                    y2: yy,
-                    width: 0.6,
-                    color: COL_RULE,
-                });
-            }
-            // 竖线
-            let mut xs = Vec::with_capacity(widths.len() + 1);
-            let mut vx = x0;
-            xs.push(vx);
-            for &cw in &widths {
-                vx += cw;
+                // 单元格文本（保留样式与链接矩形）
+                let mut x = x0;
+                for ci in 0..ncols {
+                    let align = t.aligns.get(ci).copied().unwrap_or_default();
+                    let inner = widths[ci] - 2.0 * pad;
+                    let mut cy = top + pad * 0.7;
+                    for k in 0..fit {
+                        let line: &[LItem] = cell_lines[ci]
+                            .get(drawn + k)
+                            .map(Vec::as_slice)
+                            .unwrap_or(&[]);
+                        self.emit_cell_line(
+                            line,
+                            x + pad,
+                            inner,
+                            cy,
+                            line_h,
+                            align,
+                            &mut cell_links[ci],
+                        );
+                        cy += line_h;
+                    }
+                    x += widths[ci];
+                }
+
+                // 横线
+                let total_w: f32 = widths.iter().sum();
+                for yy in [top, top + row_h] {
+                    self.pages[self.page].push(DrawOp::Line {
+                        x1: x0,
+                        y1: yy,
+                        x2: x0 + total_w,
+                        y2: yy,
+                        width: 0.6,
+                        color: COL_RULE,
+                    });
+                }
+                // 竖线
+                let mut xs = Vec::with_capacity(widths.len() + 1);
+                let mut vx = x0;
                 xs.push(vx);
+                for &cw in &widths {
+                    vx += cw;
+                    xs.push(vx);
+                }
+                for vx in xs {
+                    self.pages[self.page].push(DrawOp::Line {
+                        x1: vx,
+                        y1: top,
+                        x2: vx,
+                        y2: top + row_h,
+                        width: 0.6,
+                        color: COL_RULE,
+                    });
+                }
+                self.y += row_h;
+                drawn += fit;
+                first_chunk = false;
+                if drawn < max_lines {
+                    self.new_page();
+                }
             }
-            for vx in xs {
-                self.pages[self.page].push(DrawOp::Line {
-                    x1: vx,
-                    y1: top,
-                    x2: vx,
-                    y2: top + row_h,
-                    width: 0.6,
-                    color: COL_RULE,
-                });
-            }
-            self.y += row_h;
         }
         self.y += 8.0;
+    }
+
+    /// 在表格单元格内画一行（不推进全局 `y`）。
+    ///
+    /// 与 [`Ctx::emit_line`] 共用样式 run / 链接矩形语义，但位置由单元格几何
+    /// （`x` / `top`）给定；行内在 `LItem` 里携带的粗体、斜体、行内代码底色、
+    /// 链接颜色与下划线因此都能落到 PDF。
+    #[allow(clippy::too_many_arguments)]
+    fn emit_cell_line(
+        &mut self,
+        line: &[LItem],
+        x: f32,
+        avail_w: f32,
+        top: f32,
+        line_h: f32,
+        align: CellAlign,
+        open: &mut Option<(u32, f32)>,
+    ) {
+        let wid: f32 = line.iter().map(|i| item_width(i, self.metrics)).sum();
+        let slack = (avail_w - wid).max(0.0);
+        let mut cx = x + match align {
+            CellAlign::Center => slack / 2.0,
+            CellAlign::Right => slack,
+            _ => 0.0,
+        };
+        let baseline = top + self.metrics.ascent(TABLE_SIZE);
+        let mut buf = String::new();
+        let mut style: Option<Style> = None;
+        // 跨行链接：本行从行首重新起算，行尾再闭合（每行一个可点击矩形）。
+        if let Some((idx, _)) = *open {
+            *open = Some((idx, cx));
+        }
+        for it in line {
+            match it {
+                LItem::LinkOpen(idx) => {
+                    flush_run(
+                        &mut self.pages,
+                        self.page,
+                        &mut buf,
+                        &mut style,
+                        &mut cx,
+                        self.metrics,
+                        baseline,
+                    );
+                    *open = Some((*idx, cx));
+                }
+                LItem::LinkClose => {
+                    flush_run(
+                        &mut self.pages,
+                        self.page,
+                        &mut buf,
+                        &mut style,
+                        &mut cx,
+                        self.metrics,
+                        baseline,
+                    );
+                    if let Some((idx, sx)) = open.take() {
+                        self.push_link(idx, sx, cx, top, line_h);
+                    }
+                }
+                LItem::Ch(c, st) => {
+                    if style != Some(*st) {
+                        flush_run(
+                            &mut self.pages,
+                            self.page,
+                            &mut buf,
+                            &mut style,
+                            &mut cx,
+                            self.metrics,
+                            baseline,
+                        );
+                        style = Some(*st);
+                    }
+                    buf.push(*c);
+                }
+                LItem::Box(b) => {
+                    flush_run(
+                        &mut self.pages,
+                        self.page,
+                        &mut buf,
+                        &mut style,
+                        &mut cx,
+                        self.metrics,
+                        baseline,
+                    );
+                    self.pages[self.page].push(DrawOp::Image {
+                        x: cx,
+                        y: baseline - b.baseline,
+                        w: b.w,
+                        h: b.h,
+                        id: b.id,
+                    });
+                    cx += b.w;
+                }
+            }
+        }
+        flush_run(
+            &mut self.pages,
+            self.page,
+            &mut buf,
+            &mut style,
+            &mut cx,
+            self.metrics,
+            baseline,
+        );
+        if let Some((idx, sx)) = *open {
+            self.push_link(idx, sx, cx, top, line_h);
+        }
     }
 
     fn block_math(&mut self, s: &Session, id: BlockId, media: &mut Option<&mut dyn MediaProvider>) {
@@ -1977,7 +2197,7 @@ pub fn layout_document(
             BlockKind::Mermaid => ctx.mermaid_block(session, id, start, end),
             BlockKind::IndentedCode => ctx.code(session, id, start, end, false),
             BlockKind::Math => ctx.block_math(session, id, &mut media),
-            BlockKind::Table => ctx.table(session, id),
+            BlockKind::Table => ctx.table(session, id, &mut media),
             BlockKind::ListItem {
                 ordered,
                 depth,
@@ -2655,6 +2875,166 @@ mod tests {
                 .any(|op| matches!(op, DrawOp::Line { .. })),
             "嵌套表格应绘制网格线"
         );
+    }
+
+    #[test]
+    fn table_cell_inlines_preserve_bold_italic_code_and_link() {
+        // Task 7.2：表格单元格与正文同源消费 inlines，不再退化为纯文本。
+        let md = "| 列 | 值 |\n| --- | --- |\n| **粗体** | *斜体* `代码` [链接](https://example.com) |\n";
+        let doc = lay(md, false);
+        let runs: Vec<&TextRun> = doc
+            .pages
+            .iter()
+            .flatten()
+            .filter_map(|op| match op {
+                DrawOp::Text(t) => Some(t),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            runs.iter().any(|r| r.text.contains("粗体") && r.bold),
+            "粗体应保留为 bold TextRun: {:?}",
+            runs.iter().map(|r| &r.text).collect::<Vec<_>>()
+        );
+        assert!(
+            runs.iter().any(|r| r.text.contains("斜体") && r.italic),
+            "斜体应保留为 italic TextRun"
+        );
+        assert!(
+            runs.iter()
+                .any(|r| r.text.contains("代码") && r.highlight == Some(COL_CODE_BG)),
+            "行内代码应保留浅灰底色"
+        );
+        let link = runs
+            .iter()
+            .find(|r| r.text.contains("链接"))
+            .expect("链接文字应绘制");
+        assert!(
+            link.underline && link.color == COL_LINK,
+            "链接应保留下划线/链接色：underline={} color={:?}",
+            link.underline,
+            link.color
+        );
+        assert!(
+            doc.links.iter().any(|l| matches!(
+                &l.target,
+                LinkTarget::Uri(u) if u == "https://example.com"
+            )),
+            "表格内链接应生成 URI 注释"
+        );
+    }
+
+    #[test]
+    fn table_long_cell_is_not_truncated_and_paginates() {
+        // 旧实现把单元格截断到 6 行并追加 `…`；现在必须完整输出并跨页。
+        let body = "乙".repeat(5000);
+        let md = format!("| 长文 |\n| --- |\n| {body} |\n");
+        let doc = lay(&md, false);
+        let text = all_text(&doc);
+        assert!(!text.contains('…'), "单元格内容不得静默截断");
+        assert_eq!(
+            text.matches('乙').count(),
+            5000,
+            "单元格内容必须逐字完整进入 PDF"
+        );
+        assert!(doc.pages.len() > 1, "超长表格行必须跨页，而不是被截断");
+        // 每一页都要有网格线：拆行后每页重画边框。
+        for (i, page) in doc.pages.iter().enumerate() {
+            assert!(
+                page.iter().any(|op| matches!(op, DrawOp::Line { .. })),
+                "第 {i} 页缺少表格网格线"
+            );
+        }
+    }
+
+    #[test]
+    fn table_long_row_near_page_bottom_stays_inside_content_area() {
+        // 先填到接近页底，再放超长单元格：分页时每个 chunk 都必须整体落在
+        // [top, bottom] 内，不能再把首行硬塞进只剩几 pt 的页底（基线越界被裁切）。
+        let mut md = String::new();
+        for _ in 0..20 {
+            md.push_str("填充段落。\n\n");
+        }
+        md.push_str("| 长文 |\n| --- |\n| ");
+        md.push_str(&"乙".repeat(3000));
+        md.push_str(" |\n");
+        let doc = lay(&md, false);
+        let geom = PageGeom::a4(20.0);
+        let (top, bottom) = (geom.top(), geom.bottom());
+        let mut cells = 0usize;
+        let mut chars = 0usize;
+        for (pi, page) in doc.pages.iter().enumerate() {
+            for op in page {
+                if let DrawOp::Text(t) = op {
+                    if (t.size - TABLE_SIZE).abs() > 0.01 {
+                        continue; // 只检查表格单元格，页脚不在正文区
+                    }
+                    cells += 1;
+                    chars += t.text.matches('乙').count();
+                    assert!(
+                        t.y <= bottom + 0.01,
+                        "第 {pi} 页表格基线越过正文底：y={} bottom={bottom}",
+                        t.y
+                    );
+                    assert!(
+                        t.y - FakeMetrics.ascent(t.size) >= top - 0.01,
+                        "第 {pi} 页表格基线越过正文顶：y={} top={top}",
+                        t.y
+                    );
+                }
+            }
+        }
+        assert!(cells > 0, "应绘制表格单元格");
+        assert_eq!(chars, 3000, "跨页后单元格内容必须逐字完整");
+    }
+
+    #[test]
+    fn fill_lines_applies_chinese_kinsoku_rules() {
+        let st = Style::body();
+        let items = |text: &str| -> Vec<LItem> { text.chars().map(|c| LItem::Ch(c, st)).collect() };
+        // FakeMetrics：CJK 1em @ 11pt → 一行正好 43 个字。
+        let line_w = 43.0 * 11.0;
+        let rendered = |lines: Vec<Vec<LItem>>| -> Vec<String> {
+            lines
+                .iter()
+                .map(|line| {
+                    line.iter()
+                        .filter_map(|item| match item {
+                            LItem::Ch(c, _) => Some(*c),
+                            _ => None,
+                        })
+                        .collect::<String>()
+                })
+                .collect()
+        };
+
+        // 避头：断点正好落在句号前 → 句号不得出现在下一行行首。
+        let text = format!("{}。结尾", "甲".repeat(43));
+        let lines = rendered(fill_lines(items(&text), line_w, &FakeMetrics));
+        assert!(lines.len() >= 2, "{lines:?}");
+        for line in &lines {
+            assert!(!line.starts_with('。'), "句号不得出现在行首：{lines:?}");
+        }
+        assert!(lines[1].starts_with("甲。"), "{lines:?}");
+
+        // 避尾：开括号不得留在行尾。
+        let text = format!("{}（后", "乙".repeat(42));
+        let lines = rendered(fill_lines(items(&text), line_w, &FakeMetrics));
+        assert!(lines.len() >= 2, "{lines:?}");
+        for line in &lines {
+            assert!(!line.ends_with('（'), "开括号不得留在行尾：{lines:?}");
+        }
+        assert!(lines[1].starts_with('（'), "{lines:?}");
+
+        // 连续闭符号（`。」`）不得把后一个闭符号孤立到行首。
+        let text = format!("{}。」尾", "丙".repeat(43));
+        let lines = rendered(fill_lines(items(&text), line_w, &FakeMetrics));
+        for line in &lines {
+            assert!(
+                !line.starts_with(['。', '」']),
+                "连续闭符号不得出现在行首：{lines:?}"
+            );
+        }
     }
 
     #[test]

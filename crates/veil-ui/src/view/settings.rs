@@ -113,13 +113,6 @@ impl SettingsForm {
                 read_only: false,
             },
             SettingsField {
-                label: Key::SettingsSmoothScroll,
-                kind: FieldKind::Toggle,
-                value: FieldValue::Toggle(cfg.smooth_scroll),
-                buffer: None,
-                read_only: false,
-            },
-            SettingsField {
                 label: Key::SettingsAllowRemoteImages,
                 kind: FieldKind::Toggle,
                 value: FieldValue::Toggle(cfg.allow_remote_images),
@@ -197,11 +190,6 @@ impl SettingsForm {
                 Key::SettingsDocFontFamily => {
                     if let FieldValue::FontFamily(v) = f.value {
                         out.doc_font_family = v;
-                    }
-                }
-                Key::SettingsSmoothScroll => {
-                    if let FieldValue::Toggle(v) = f.value {
-                        out.smooth_scroll = v;
                     }
                 }
                 Key::SettingsAllowRemoteImages => {
@@ -1340,7 +1328,7 @@ mod tests {
     #[test]
     fn low_height_rows_do_not_overflow_card_or_overlap_buttons() {
         let form = default_form();
-        // 150% DPI 下 720px 高窗口：10 行放不下，必须截断/滚动。
+        // 150% DPI 下 720px 高窗口：9 行放不下，必须截断/滚动。
         let vp = viewport(720.0, 720.0);
         let layout = layout_scrolled(vp, &form, 1.5, 0);
         assert!(layout.shown_rows < form.fields.len(), "低高度应截断可见行");

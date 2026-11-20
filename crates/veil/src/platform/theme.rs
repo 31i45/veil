@@ -38,6 +38,17 @@ extern "system" {
     fn SystemParametersInfoW(action: u32, param: u32, value: *mut c_void, win_ini: u32) -> i32;
 }
 
+// 窗口类背景画刷：GDI 创建实色画刷，窗口类持有其句柄直到被替换。
+#[link(name = "gdi32")]
+extern "system" {
+    fn CreateSolidBrush(color: u32) -> *mut c_void;
+}
+
+#[link(name = "user32")]
+extern "system" {
+    fn SetClassLongPtrW(hwnd: *mut c_void, index: i32, new_long: isize) -> isize;
+}
+
 /// SPI_GETCLIENTAREAANIMATION：客户端区动画（「显示动画」开关）。
 const SPI_GETCLIENTAREAANIMATION: u32 = 0x1042;
 
@@ -95,8 +106,16 @@ impl SystemTheme for WinSystemTheme {
     }
 }
 
-/// 窗口外观：深色标题栏 + Mica 背景材质。HWND 无效或系统不支持时静默跳过。
-pub struct WinEffects;
+/// 窗口外观：深色标题栏 + Mica 背景材质 + 窗口类背景画刷。HWND 无效或系统不支持时静默跳过。
+#[derive(Default)]
+pub struct WinEffects {
+    /// 进程内画刷缓存：COLORREF → HBRUSH。窗口类会一直引用已设置的句柄，
+    /// 因此旧画刷不删除（宁可进程退出时由系统回收），避免窗口类持有悬空句柄。
+    brushes: std::collections::HashMap<u32, isize>,
+}
+
+/// SetClassLongPtrW 的索引：窗口类背景画刷（GCLP_HBRBACKGROUND）。
+const GCLP_HBRBACKGROUND: i32 = -10;
 
 impl WindowEffects for WinEffects {
     fn apply(&mut self, window: NativeWindow, dark: bool) {
@@ -110,6 +129,33 @@ impl WindowEffects for WinEffects {
         }
         // Mica 只在 Win11 22H2+ 生效；失败即退化为纯色（内容区不依赖该效果）
         let _ = set_dwm_attr(hwnd, DWMWA_SYSTEMBACKDROP_TYPE, DWMSBT_MAINWINDOW);
+    }
+
+    /// 未绘制区域改用主题底色擦除：winit 注册窗口类时 hbrBackground=0（黑色），
+    /// 首帧覆盖前右下会露出黑块。COLORREF 的字节序是 BGR（`r | g<<8 | b<<16`）。
+    fn set_background(&mut self, window: NativeWindow, color: [u8; 3]) {
+        let hwnd = window.hwnd as *mut c_void;
+        if hwnd.is_null() {
+            return;
+        }
+        let colorref =
+            u32::from(color[0]) | (u32::from(color[1]) << 8) | (u32::from(color[2]) << 16);
+        let brush = match self.brushes.get(&colorref).copied() {
+            Some(brush) => brush,
+            None => {
+                let handle = unsafe { CreateSolidBrush(colorref) };
+                if handle.is_null() {
+                    return;
+                }
+                let brush = handle as isize;
+                self.brushes.insert(colorref, brush);
+                brush
+            }
+        };
+        // 失败（窗口类已销毁等）静默：内容区仍绘制完整背景，只是失去擦除兜底
+        unsafe {
+            SetClassLongPtrW(hwnd, GCLP_HBRBACKGROUND, brush);
+        }
     }
 }
 

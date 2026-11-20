@@ -14,6 +14,7 @@ use crate::view::{
     InlineImg, LayoutEngine, LayoutKey, Memo, OverKind, TableKey, UnderKind,
 };
 use std::collections::{HashMap, HashSet};
+use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use veil_core::{BlockId, BlockKind, HtmlTag, InlineKind, InlineNode, Range};
 
@@ -28,9 +29,6 @@ struct PendingImage {
     explicit: (Option<u32>, Option<u32>),
     align: Option<veil_core::ImageAlign>,
 }
-
-/// 打字机模式锚点：视口高比例（0.42 ≈ 上四成处），光标行中心恒定位于此处。
-const TYPEWRITER_ANCHOR: f32 = 0.42;
 
 /// 拖放悬停压暗强度（阶段 1）：内容区背景覆盖，突出居中提示条。
 const DROP_DIM_ALPHA: u8 = 120;
@@ -804,14 +802,25 @@ impl App {
             }
             // Mermaid 块位图占位：cache 里有该 block_id 的 MermaidImage → 构造 InlineImg
             // 覆盖整个块（含围栏），LayoutEngine 用 NBSP 占位 + paint 按 key blit。
+            // 位图是「CSS 尺寸 × 光栅倍率」的副本（`px_to_pt` 记录倍率），不能直接把
+            // 像素当逻辑尺寸：宽图会越出版心并与相邻块重叠。这里还原 CSS 尺寸、乘以
+            // 界面 DPI，再复用图片的限宽/限高口径。
             if matches!(kind, BlockKind::Mermaid) {
                 if let Some(bm) = self.cache.mermaid_imgs.get(&id) {
+                    let (dw, dh) = mermaid_display_size(
+                        bm.width,
+                        bm.height,
+                        bm.px_to_pt,
+                        scale,
+                        img_max_w,
+                        self.image_max_height(),
+                    );
                     imgs.push(InlineImg {
                         range,
                         key: InlineAsset::Mermaid(id.0.to_string()),
-                        width: bm.width,
-                        height: bm.height,
-                        baseline: bm.height,
+                        width: dw,
+                        height: dh,
+                        baseline: dh,
                         align: None,
                     });
                 }
@@ -1842,9 +1851,7 @@ impl App {
             self.paint_search_ticks(&mut frame, vp);
         }
         // 应用内设置模态（优先级高于普通 modal）：覆盖菜单栏与状态栏的最后一层；打印帧不含遮罩
-        if self.ui_state.print_preview.is_some() && self.window_state.print.is_none() {
-            crate::view::print_preview::paint(self, &mut frame);
-        } else if self.ui_state.image_preview.is_some() && self.window_state.print.is_none() {
+        if self.ui_state.image_preview.is_some() && self.window_state.print.is_none() {
             crate::view::image_preview::paint(self, &mut frame);
         } else if self.ui_state.settings.is_some() && self.window_state.print.is_none() {
             self.paint_settings(&mut frame);
@@ -1869,29 +1876,56 @@ impl App {
     }
 
     /// 呈现分离（ADR-009 决策五）：唯一产生外部副作用的出口。
-    /// 从 self.window_state.frame 取缓冲，拷进 surface 并 present；失败属瞬时状态，丢帧不崩溃。
-    /// 无 surface（headless）时纯 no-op。
-    pub(crate) fn present(&mut self) {
+    /// 从 self.window_state.frame 取缓冲，拷进 surface 并 present；返回是否成功上屏。
+    /// 无 surface（headless）、打印页帧、尺寸仍未对齐时返回 false。
+    ///
+    /// surface 与客户区尺寸不一致时按当前帧尺寸重建后再拷：softbuffer 只对自身缓冲
+    /// 尺寸 BitBlt、不会拉伸，沿用旧尺寸会把右下留在未擦除状态（启动黑块）。
+    pub(crate) fn present(&mut self) -> bool {
         let Some(frame) = self.window_state.frame.as_ref() else {
-            return;
+            return false;
         };
-        let Some(surface) = self.window_state.surface.as_mut() else {
-            return;
-        };
-        if let Ok(mut target) = surface.buffer_mut() {
-            if !can_present(frame.pixels.len(), target.len()) {
-                return;
-            }
-            target.copy_from_slice(&frame.pixels);
-            let _ = target.present();
+        // 打印期间的帧是「页帧」语义（尺寸 ≠ 客户区），不得 present 到窗口
+        if self.window_state.print.is_some() {
+            return false;
         }
+        let Some(surface) = self.window_state.surface.as_mut() else {
+            return false;
+        };
+        let matches = match surface.buffer_mut() {
+            Ok(target) => can_present(frame.pixels.len(), target.len()),
+            Err(_) => false,
+        };
+        if !matches {
+            // 0×0 防护：帧尺寸恒 ≥1×1，surface.resize 也只接受非零尺寸
+            let (Some(w), Some(h)) = (NonZeroU32::new(frame.width), NonZeroU32::new(frame.height))
+            else {
+                return false;
+            };
+            // 帧尺寸与客户区不一致（渲染后窗口又变了）：不把旧尺寸帧呈现到新客户区
+            let stale = self.window_state.window.as_ref().is_some_and(|win| {
+                let s = win.inner_size();
+                s.width != frame.width || s.height != frame.height
+            });
+            if stale || surface.resize(w, h).is_err() {
+                return false;
+            }
+        }
+        let Ok(mut target) = surface.buffer_mut() else {
+            return false;
+        };
+        if !can_present(frame.pixels.len(), target.len()) {
+            return false;
+        }
+        target.copy_from_slice(&frame.pixels);
+        target.present().is_ok()
     }
 
     /// 帧合成完整路径：render → present。产品层事件循环 Redraw 分支唯一调用。
     pub(crate) fn paint(&mut self) {
         let started = std::time::Instant::now();
         let _ = self.render();
-        self.present();
+        let _ = self.present();
         crate::perf::frame(started.elapsed());
     }
 
@@ -3002,12 +3036,7 @@ impl App {
         let (_, cy, ch) = self.caret_screen();
         let max = chrome::max_scroll(vp, self.doc_height());
         let mut target = self.window_state.goal_y;
-        if self.ui_state.writing.typewriter {
-            // 打字机模式（阶段 1）：光标行固定在视口上部锚点，行中心对齐锚点；
-            // 文档首尾处仍由下方钳位兜底（无法再居中时贴边）
-            let anchor = vp.y + vp.h * TYPEWRITER_ANCHOR;
-            target += cy + ch / 2.0 - anchor;
-        } else if cy < vp.y {
+        if cy < vp.y {
             target += cy - vp.y - MARGIN * self.input_state.scale;
         } else if cy + ch > vp.y + vp.h {
             // B5：光标行下方至少保留 `BOTTOM_PAD_LINES` 行可点击空白，
@@ -3018,43 +3047,7 @@ impl App {
             target += cy + ch - (vp.y + vp.h) + pad;
         }
         self.window_state.goal_y = target.clamp(0.0, max);
-        if !self.window_state.smooth {
-            self.window_state.scroll_y = self.window_state.goal_y;
-        }
-    }
-
-    /// 打字机锚点定位（跳转路径）：先把候选滚动位置附近的块补排并重算几何，
-    /// 迭代收敛后再落位。
-    ///
-    /// 大纲/搜索等远距离跳转前，目标块高度可能仍是估算值；若按估算 `top` 直接
-    /// 算滚动量，首帧绘制补排后 `top` 会整体漂移，当前行就偏离锚点，要等下一次
-    /// 输入调用 `scroll_to_caret` 才纠正（DEF-T11-E1-003）。这里与 `render`
-    /// 使用同一套可见区间补排，先收敛几何再算滚动量，保证首帧即锚点。
-    pub(crate) fn scroll_to_typewriter_anchor(&mut self) {
-        let vp0 = self.viewport();
-        let anchor = vp0.y + vp0.h * TYPEWRITER_ANCHOR;
-        let mut target = self.window_state.scroll_y;
-        for _ in 0..4 {
-            self.window_state.scroll_y = target;
-            self.ensure_layouts_visible();
-            self.ensure_math_visible();
-            self.ensure_tables_visible();
-            if self.index.geometry_stale {
-                self.recompute_geometry();
-            }
-            let vp = self.viewport();
-            let max = chrome::max_scroll(vp, self.doc_height());
-            let (_, cy, ch) = self.caret_screen();
-            let next = (target + cy + ch / 2.0 - anchor).clamp(0.0, max);
-            let converged = (next - target).abs() < 0.5;
-            target = next;
-            if converged {
-                break;
-            }
-        }
-        // 首帧即锚点：直接落位，不依赖平滑滚动动画或后续输入纠正。
-        self.window_state.scroll_y = target;
-        self.window_state.goal_y = target;
+        self.window_state.scroll_y = self.window_state.goal_y;
     }
 
     /// Ctrl+Enter：在 caret 所在表格末尾追加一个空 body 行。返回 true 表示已处理。
@@ -3588,6 +3581,37 @@ pub(crate) fn fit_size(w: u32, h: u32, max_width: f32) -> (u32, u32) {
     crate::view::fit_size_box(w, h, max_width, f32::MAX)
 }
 
+/// Mermaid 位图的逻辑显示尺寸。
+///
+/// 位图是「SVG 的 CSS 尺寸 × 光栅倍率」的副本，`px_to_pt = 72 / (96 * scale)`
+/// 记录了倍率；直接把位图像素当逻辑尺寸会让宽图（≥2000px）越出版心。
+/// 这里先还原 CSS 像素，再乘界面 DPI 得到逻辑像素，最后复用图片的限宽/限高
+/// 口径（`image_display_size` → `fit_size_box`，只缩小不放大）。
+fn mermaid_display_size(
+    bmp_w: u32,
+    bmp_h: u32,
+    px_to_pt: f32,
+    ui_scale: f32,
+    max_w: f32,
+    max_h: f32,
+) -> (u32, u32) {
+    // px_to_pt = 72 / (96 * raster) → CSS px = 位图 px * px_to_pt * 96 / 72。
+    // 非法/缺失换算比时按默认光栅倍率 2.0 还原（与 `svg_to_bitmap` 的 clamp 下限一致）。
+    let css_per_bmp = if px_to_pt.is_finite() && px_to_pt > 0.0 {
+        px_to_pt * (96.0 / 72.0)
+    } else {
+        0.5
+    };
+    let ui = if ui_scale.is_finite() && ui_scale > 0.0 {
+        ui_scale
+    } else {
+        1.0
+    };
+    let nat_w = (bmp_w as f32 * css_per_bmp * ui).round().max(1.0) as u32;
+    let nat_h = (bmp_h as f32 * css_per_bmp * ui).round().max(1.0) as u32;
+    crate::view::image_display_size(nat_w, nat_h, (None, None), max_w, max_h)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3830,5 +3854,25 @@ mod tests {
         );
         // 第二列起点按转义口径计算，不被 `\|` 提前截断
         assert_eq!(table_cell_start(src, 0, 1), 11);
+    }
+
+    #[test]
+    fn mermaid_display_size_restores_css_size_and_clamps_to_content_width() {
+        // 2400×1200 位图 @2x → CSS 1200×600；界面 DPI 1.0、版心 640 → 限宽到 640。
+        let (w, h) = mermaid_display_size(2400, 1200, 0.375, 1.0, 640.0, 10000.0);
+        assert_eq!(w, 640, "宽图必须压到版心宽：{w}");
+        assert_eq!(h, 320, "等比缩放后高度：{h}");
+        // 小图不被放大：600×300 位图 @2x → CSS 300×150。
+        let (w, h) = mermaid_display_size(600, 300, 0.375, 1.0, 640.0, 10000.0);
+        assert_eq!((w, h), (300, 150), "小图保持 CSS 尺寸，不放大");
+        // 界面 DPI 2.0 时按逻辑像素放大一倍（仍不超版心）。
+        let (w, _) = mermaid_display_size(600, 300, 0.375, 2.0, 2000.0, 10000.0);
+        assert_eq!(w, 600, "高 DPI 下 CSS 尺寸按界面倍率换算");
+        // 非法换算比回退到默认 2x 光栅，不退化为 0。
+        let (w, h) = mermaid_display_size(400, 200, f32::NAN, 1.0, 640.0, 10000.0);
+        assert_eq!((w, h), (200, 100));
+        // 限高同样生效（视口 80%）。
+        let (_, h) = mermaid_display_size(800, 8000, 0.375, 1.0, 640.0, 400.0);
+        assert_eq!(h, 400);
     }
 }

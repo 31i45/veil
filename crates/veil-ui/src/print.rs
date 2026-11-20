@@ -9,7 +9,6 @@ use crate::app::App;
 use crate::i18n::{t, tf, Key};
 use crate::mermaid_renderer::MermaidImage;
 use crate::theme::NativeWindow;
-use crate::tokens::palette;
 use crate::view::Frame;
 use veil_core::{BlockKind, Range};
 
@@ -20,22 +19,7 @@ pub struct ExportOptions {
     pub toc: bool,
 }
 
-/// 打印预览页：与 PDF 导出同源的整页位图（RGBA 顶向下，straight alpha）。
-#[derive(Clone)]
-pub struct PreviewPage {
-    pub width: u32,
-    pub height: u32,
-    pub pixels: Vec<u8>,
-}
-
-/// 打印预览瞬态：整页位图 + 当前页 + 缩放（0 = 适宽，>0 = 适宽倍数）。
-pub(crate) struct PrintPreview {
-    pub(crate) pages: Vec<PreviewPage>,
-    pub(crate) index: usize,
-    pub(crate) zoom: f32,
-}
-
-/// 打印端口：实现由产品层注入（Win32 GDI；PDF 走系统「Microsoft Print to PDF」）。
+/// 打印端口：实现由产品层注入（Win32 GDI + 系统打印对话框；PDF 走原生矢量管线）。
 /// 一次打印 = `begin` → 逐页 `render_page` → `end`；实现方须保证 begin 之后
 /// 必调 end（含出错/中止路径），否则应用停留在打印态（尺寸/缩放未恢复）。
 pub trait Print {
@@ -44,12 +28,6 @@ pub trait Print {
     /// 直接导出 PDF（无打印对话框）。默认实现仅提示，不产生输出。
     fn export_pdf(&mut self, session: &mut PrintSession) {
         session.notice(t(Key::PrintUnsupportedPdf));
-    }
-
-    /// 打印预览页（与 PDF 导出同一分页/版面）。默认实现提示不支持。
-    fn preview_pages(&mut self, session: &mut PrintSession) -> Result<Vec<PreviewPage>, String> {
-        let _ = session;
-        Err(t(Key::PrintUnsupportedPreview).into())
     }
 }
 
@@ -73,26 +51,6 @@ pub(crate) struct PrintState {
     pub(crate) saved_scroll: f32,
     /// 页首 y 坐标序列（文档坐标，物理像素）：breaks[0] = 0.0，页数 = len。
     pub(crate) breaks: Vec<f32>,
-    /// 目录页数（物理页 0..toc_pages 为目录）。
-    pub(crate) toc_pages: usize,
-    /// 预渲染的目录页帧。
-    pub(crate) toc_frames: Vec<Frame>,
-    /// 页脚文本光栅，下标 = 物理页（0-based）；非页码模式或目录页为空。
-    pub(crate) footers: Vec<(Vec<u8>, u32, u32)>,
-    /// 物理总页数（目录页 + 正文页）。
-    pub(crate) total_pages: usize,
-    /// 本次会话的导出选项（`begin` 为全关）。
-    pub(crate) options: ExportOptions,
-    /// 目录条目快照（层级、文本、物理页码）。
-    pub(crate) toc_entries: Vec<TocEntry>,
-}
-
-/// 目录条目：层级（1-based）、渲染态文本、物理页码（1-based）。
-#[derive(Clone, PartialEq, Debug)]
-pub(crate) struct TocEntry {
-    pub(crate) level: u8,
-    pub(crate) text: String,
-    pub(crate) page: usize,
 }
 
 /// 打印会话：产品层 Print 实现与 App 之间的唯一通道。
@@ -108,44 +66,6 @@ impl PrintSession<'_> {
         self.begin_inner(w, h, scale)
     }
 
-    /// 进入 PDF 导出：在 `begin` 基础上预渲染目录页与页脚，返回物理总页数。
-    pub fn begin_export(&mut self, w: u32, h: u32, scale: f32, opt: ExportOptions) -> usize {
-        let body_pages = self.begin_inner(w, h, scale);
-        let mut toc_pages = 0usize;
-        let mut toc_frames = Vec::new();
-        let mut entries = Vec::new();
-        if opt.toc {
-            // 目录页数影响正文页码 → 迭代到稳定（最多 3 次，防不收敛）
-            for _ in 0..3 {
-                entries = self.collect_toc_entries(toc_pages);
-                if entries.is_empty() {
-                    toc_frames.clear();
-                    break;
-                }
-                toc_frames = self.render_toc_pages(&entries);
-                if toc_frames.len() == toc_pages {
-                    break;
-                }
-                toc_pages = toc_frames.len();
-            }
-            toc_pages = toc_frames.len();
-        }
-        let total = toc_pages + body_pages;
-        let footers = if opt.page_numbers {
-            self.render_footers(toc_pages, total)
-        } else {
-            Vec::new()
-        };
-        let state = self.app.window_state.print.as_mut().unwrap();
-        state.toc_pages = toc_pages;
-        state.toc_frames = toc_frames;
-        state.footers = footers;
-        state.total_pages = total;
-        state.options = opt;
-        state.toc_entries = entries;
-        total
-    }
-
     fn begin_inner(&mut self, w: u32, h: u32, scale: f32) -> usize {
         let app = &mut *self.app;
         app.window_state.print = Some(PrintState {
@@ -154,12 +74,6 @@ impl PrintSession<'_> {
             saved_scale: app.input_state.scale,
             saved_scroll: app.window_state.scroll_y,
             breaks: Vec::new(),
-            toc_pages: 0,
-            toc_frames: Vec::new(),
-            footers: Vec::new(),
-            total_pages: 0,
-            options: ExportOptions::default(),
-            toc_entries: Vec::new(),
         });
         app.input_state.scale = scale.max(0.1);
         app.window_state.scroll_y = 0.0;
@@ -172,78 +86,27 @@ impl PrintSession<'_> {
         app.recompute_geometry();
         let frame_h = app.window_state.print.as_ref().unwrap().h as f32;
         let breaks = app.compute_page_breaks(frame_h);
-        let state = app.window_state.print.as_mut().unwrap();
-        state.breaks = breaks;
-        state.total_pages = state.breaks.len();
-        state.breaks.len()
+        let pages = breaks.len();
+        app.window_state.print.as_mut().unwrap().breaks = breaks;
+        pages
     }
 
     /// 渲染第 i 页（0-based，i < begin 返回值）：返回整页帧。
-    /// 目录页直接返回预渲染帧；正文页滚动到页首，并在页码模式下叠加页脚。
+    /// 滚动到页首，逐页重建光栅（跨页累积会让长文档打印的内存随页数线性增长）。
     pub fn render_page(&mut self, i: usize) -> &Frame {
-        let toc_pages = self
-            .app
-            .window_state
-            .print
-            .as_ref()
-            .map(|p| p.toc_pages)
-            .unwrap_or(0);
-        if i < toc_pages {
-            return &self.app.window_state.print.as_ref().unwrap().toc_frames[i];
-        }
         let app = &mut *self.app;
-        let body = i.saturating_sub(toc_pages);
         let scroll = app
             .window_state
             .print
             .as_ref()
-            .and_then(|p| p.breaks.get(body).copied())
+            .and_then(|p| p.breaks.get(i).copied())
             .unwrap_or(0.0);
-        let footer = app
-            .window_state
-            .print
-            .as_ref()
-            .and_then(|p| p.footers.get(i).cloned())
-            .filter(|(_, w, h)| *w > 0 && *h > 0);
-        let pad = (8.0 * app.input_state.scale).round() as i32;
         app.window_state.scroll_y = scroll;
-        // 逐页重建光栅：跨页累积会让长文档打印的内存随页数线性增长（布局保留，光栅即弃）
         app.cache.rasters.clear();
-        let frame = app.render();
-        if let Some((px, w, h)) = footer {
-            let x = frame.width as i32 - w as i32 - pad;
-            let y = frame.height as i32 - h as i32 - pad;
-            frame.blit(&px, w, h, x, y);
-        }
-        frame
+        app.render()
     }
 
-    /// 目录条目快照（测试断言页码映射）。
-    #[cfg(test)]
-    pub(crate) fn toc_entries(&self) -> &[TocEntry] {
-        match &self.app.window_state.print {
-            Some(p) => &p.toc_entries,
-            None => &[],
-        }
-    }
-
-    /// 目录条目数（测试用）。
-    pub fn toc_entry_count(&self) -> usize {
-        match &self.app.window_state.print {
-            Some(p) => p.toc_entries.len(),
-            None => 0,
-        }
-    }
-
-    /// 物理总页数（目录页 + 正文页）；非导出会话 = 正文页数。
-    pub fn page_count(&self) -> usize {
-        match &self.app.window_state.print {
-            Some(p) => p.total_pages,
-            None => 0,
-        }
-    }
-
-    /// 当前配置的导出选项（产品层在 begin_export 之前读取）。
+    /// 当前配置的导出选项（原生 PDF 导出前读取）。
     pub fn export_options(&self) -> ExportOptions {
         ExportOptions {
             page_numbers: self.app.config.export_page_numbers,
@@ -272,115 +135,6 @@ impl PrintSession<'_> {
             .ports
             .dialogs
             .save_export(&suggested.to_string_lossy(), ext)
-    }
-
-    /// 排版并光栅化单行文本，返回 (straight-alpha RGBA8, 宽, 高)。
-    fn text_raster(&mut self, text: &str, width: f32) -> (Vec<u8>, u32, u32) {
-        let fg = self.app.input_state.theme.fg;
-        let layout = self.app.engine.layout_block(
-            BlockKind::Paragraph,
-            text,
-            Range::new(0, text.len()),
-            &[],
-            width,
-            usize::MAX,
-            &[],
-            false,
-        );
-        self.app.engine.rasterize(&layout, fg)
-    }
-
-    /// 标题条目（层级 / 渲染态文本 / 物理页码）。正文页序取 `breaks.partition_point`。
-    fn collect_toc_entries(&self, toc_pages: usize) -> Vec<TocEntry> {
-        let breaks = self.page_breaks();
-        let mut out = Vec::new();
-        for g in &self.app.index.blocks {
-            let level = match g.kind {
-                BlockKind::AtxHeading(l) | BlockKind::SetextHeading(l) => l,
-                _ => continue,
-            };
-            let Some(memo) = self.app.cache.layouts.get(&g.id) else {
-                continue;
-            };
-            let text = memo.value.layout_text().trim().to_string();
-            if text.is_empty() {
-                continue;
-            }
-            let page = breaks.partition_point(|&b| b <= g.top) + 1 + toc_pages;
-            out.push(TocEntry { level, text, page });
-        }
-        out
-    }
-
-    /// 预渲染目录页：每页首行「目录」标题，条目按层级缩进、页码右对齐，贪心分页。
-    fn render_toc_pages(&mut self, entries: &[TocEntry]) -> Vec<Frame> {
-        let (frame_w, frame_h) = {
-            let Some(p) = self.app.window_state.print.as_ref() else {
-                return Vec::new();
-            };
-            (p.w, p.h)
-        };
-        let bg = palette::surface_base(&self.app.input_state.theme);
-        let scale = self.app.input_state.scale;
-        let pad = (12.0 * scale).round() as i32;
-        let gap = (6.0 * scale).max(1.0);
-        let number_col = (48.0 * scale).max(24.0);
-        let w_avail = (frame_w as f32 - 2.0 * pad as f32 - number_col).max(16.0);
-        let bottom = frame_h as f32 - pad as f32;
-        let mut frames: Vec<Frame> = Vec::new();
-        let mut frame = Frame::new(frame_w, frame_h, bg);
-        let mut y = self.draw_toc_title(&mut frame, pad, w_avail, gap);
-        for e in entries {
-            let indent = (e.level.saturating_sub(1) as f32) * 16.0 * scale;
-            let (px, pw, ph) = self.text_raster(&e.text, (w_avail - indent).max(16.0));
-            let (nx, nw, nh) = self.text_raster(&e.page.to_string(), number_col);
-            let row_h = ph.max(nh) as f32;
-            // 至少保留标题后的第一行：避免页高过小导致空页死循环
-            if y + row_h > bottom && y > pad as f32 {
-                frames.push(frame);
-                frame = Frame::new(frame_w, frame_h, bg);
-                y = self.draw_toc_title(&mut frame, pad, w_avail, gap);
-            }
-            frame.blit(&px, pw, ph, pad + indent as i32, y as i32);
-            frame.blit(&nx, nw, nh, frame_w as i32 - pad - nw as i32, y as i32);
-            y += row_h + gap;
-        }
-        frames.push(frame);
-        frames
-    }
-
-    /// 目录页标题行（左对齐），返回正文条目起点 y。
-    fn draw_toc_title(&mut self, frame: &mut Frame, pad: i32, width: f32, gap: f32) -> f32 {
-        let (px, pw, ph) = self.text_raster(t(Key::PrintTocTitle), width);
-        frame.blit(&px, pw, ph, pad, pad);
-        pad as f32 + ph as f32 + gap
-    }
-
-    /// 预渲染页脚：目录页留空，正文页为 `n / total`（n = 物理页码）。
-    fn render_footers(&mut self, toc_pages: usize, total: usize) -> Vec<(Vec<u8>, u32, u32)> {
-        let w = self
-            .app
-            .window_state
-            .print
-            .as_ref()
-            .map(|p| p.w)
-            .unwrap_or(1);
-        let mut out = Vec::with_capacity(total);
-        for i in 0..total {
-            if i < toc_pages {
-                out.push((Vec::new(), 0, 0));
-                continue;
-            }
-            let (px, pw, ph) = self.text_raster(
-                &tf(
-                    Key::PrintPageFooter,
-                    &[&(i + 1).to_string(), &total.to_string()],
-                ),
-                w as f32,
-            );
-            out.push((px, pw, ph));
-        }
-        out
     }
 
     /// 结束打印：恢复屏幕态（DPI/滚动/窗口尺寸），触发按屏幕参数重排。
@@ -506,96 +260,27 @@ impl PrintSession<'_> {
     pub fn prepare_mermaid(&mut self) {
         self.app.ensure_mermaid_for_export();
     }
-
-    /// 当前打印的分页总数（含目录页）；非打印中返回 0。
-    pub fn total_pages(&self) -> usize {
-        self.app
-            .window_state
-            .print
-            .as_ref()
-            .map(|p| p.total_pages)
-            .unwrap_or(0)
-    }
 }
 
 impl App {
     /// 菜单「打印」入口（3b）：端口置换规避 app 与 ports.print 的同时借用。
     pub(crate) fn print_document(&mut self) {
+        if !self.output_allowed() {
+            return;
+        }
         let mut port = std::mem::replace(&mut self.ports.print, Box::new(NoPrint));
         port.print(&mut PrintSession { app: self });
         self.ports.print = port;
     }
 
-    /// 菜单「导出 PDF」入口：与打印同一端口置换，产品层决定直接导出或回退对话框。
+    /// 菜单「导出 PDF」入口：与打印同一端口置换，产品层只走原生矢量管线。
     pub(crate) fn export_pdf(&mut self) {
+        if !self.output_allowed() {
+            return;
+        }
         let mut port = std::mem::replace(&mut self.ports.print, Box::new(NoPrint));
         port.export_pdf(&mut PrintSession { app: self });
         self.ports.print = port;
-    }
-
-    /// 菜单「打印预览」入口：产品层按 PDF 同源版面离屏渲染整页位图，随后以覆盖层展示。
-    pub(crate) fn open_print_preview(&mut self) {
-        let mut port = std::mem::replace(&mut self.ports.print, Box::new(NoPrint));
-        let pages = port.preview_pages(&mut PrintSession { app: self });
-        self.ports.print = port;
-        match pages {
-            Ok(pages) if !pages.is_empty() => {
-                self.ui_state.print_preview = Some(PrintPreview {
-                    pages,
-                    index: 0,
-                    zoom: 0.0,
-                });
-                self.ui_state.chrome.notice.clear();
-                self.request_redraw();
-            }
-            Ok(_) => {
-                self.ui_state.chrome.notice = t(Key::PrintErrNoPrintablePages).into();
-                self.request_redraw();
-            }
-            Err(e) => {
-                self.ui_state.chrome.notice = e;
-                self.request_redraw();
-            }
-        }
-    }
-
-    /// 关闭打印预览（Esc/再点菜单）：不改文档、不写历史。
-    pub(crate) fn close_print_preview(&mut self) {
-        if self.ui_state.print_preview.take().is_some() {
-            self.request_redraw();
-        }
-    }
-
-    /// 预览态按键：翻页、缩放、关闭。打开时它是唯一输入接收者。
-    pub(crate) fn print_preview_key(&mut self, key: &crate::input::Key) {
-        use crate::input::Key as K;
-        let Some(pv) = self.ui_state.print_preview.as_mut() else {
-            return;
-        };
-        let last = pv.pages.len().saturating_sub(1);
-        match key {
-            K::Text(s) => match s.as_str() {
-                "+" | "=" => pv.zoom = next_zoom(pv.zoom, true),
-                "-" | "_" => pv.zoom = next_zoom(pv.zoom, false),
-                "0" => pv.zoom = 0.0,
-                _ => return,
-            },
-            K::Equal => pv.zoom = next_zoom(pv.zoom, true),
-            K::Minus => pv.zoom = next_zoom(pv.zoom, false),
-            K::Digit0 => pv.zoom = 0.0,
-            K::Left | K::Up => pv.index = pv.index.saturating_sub(1),
-            K::Right | K::Down => pv.index = (pv.index + 1).min(last),
-            K::PageUp => pv.index = pv.index.saturating_sub(1),
-            K::PageDown | K::Enter => pv.index = (pv.index + 1).min(last),
-            K::Home => pv.index = 0,
-            K::End => pv.index = last,
-            K::Escape => {
-                self.close_print_preview();
-                return;
-            }
-            _ => return,
-        }
-        self.request_redraw();
     }
 
     /// 布局/绘制的有效光标：打印中恒 usize::MAX —— 一切 Reveal 收拢（无激活节点、

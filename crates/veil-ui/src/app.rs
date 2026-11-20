@@ -453,8 +453,6 @@ pub(crate) struct UIState {
     pub(crate) hover_link_is_link: bool,
     /// 版本历史面板（N1/B8a）：左侧快照列表 + 正文区只读预览。
     pub(crate) history: History,
-    /// 打印预览覆盖层：与 PDF 导出同源的整页位图 + 当前页/缩放。
-    pub(crate) print_preview: Option<crate::print::PrintPreview>,
     /// 图片放大预览覆盖层：纯视图态，关闭后文档字节与光标不变。
     pub(crate) image_preview: Option<ImagePreview>,
 }
@@ -471,13 +469,20 @@ pub(crate) struct ImagePreview {
 }
 
 /// 用户点击「预览图片 / 下载并插入」后等待 mermaid.ink 回包的请求。
+///
+/// 事务身份：文档路径 + Mermaid 源码哈希。回包时不使用任何绝对字节偏移，
+/// 而是在当前索引中按源码哈希重新定位块，取该块结束位置作为插入锚点。
 #[derive(Clone, Debug)]
 pub(crate) struct PendingMermaidFetch {
     pub(crate) url: String,
     /// true = 落盘到 assets 并插入图片引用；false = 只在应用内预览。
     pub(crate) insert: bool,
-    /// 插入锚点（mermaid 块结束偏移）；None 时退回当前光标。
-    pub(crate) block_end: Option<usize>,
+    /// 发起请求时的文档路径（草稿为 None）；回包时与当前文档比对。
+    pub(crate) doc_path: Option<PathBuf>,
+    /// 发起请求时 Mermaid 源码的哈希（`content_hash`）；回包时用于重新定位块。
+    pub(crate) source_hash: u64,
+    /// 同源码块中的序号（0-based，文档顺序）；回包时优先用它区分多个相同源码块。
+    pub(crate) occurrence: Option<usize>,
     /// 预览浮层标题（图型名）。
     pub(crate) title: String,
 }
@@ -508,7 +513,6 @@ impl Default for UIState {
             hover_link: None,
             hover_link_is_link: false,
             history: History::default(),
-            print_preview: None,
             image_preview: None,
             expanded_details: std::collections::HashSet::new(),
             expanded_inline_details: std::collections::HashSet::new(),
@@ -551,8 +555,6 @@ impl TableView {
 pub(crate) struct WritingState {
     /// 专注模式：非光标所在块整体压暗，仅视觉，不改真值。
     pub(crate) focus: bool,
-    /// 打字机模式：光标行固定在视口上部锚点。
-    pub(crate) typewriter: bool,
     /// 全文字数（中文口径），随 `refresh_index` 重算。
     pub(crate) words: usize,
 }
@@ -631,6 +633,63 @@ pub(crate) struct DocState {
     pub(crate) export_style: ExportStyle,
 }
 
+/// 未绘制区域的擦除色：取当前主题底色的 RGB（丢弃 alpha），
+/// 由窗口类背景画刷在首帧覆盖前兜底，避免露出系统默认黑色。
+#[cfg(any(windows, test))]
+pub(crate) fn window_erase_rgb(bg: [u8; 4]) -> [u8; 3] {
+    [bg[0], bg[1], bg[2]]
+}
+
+/// 首帧显示保护时限：呈现失败/无事件唤醒时也必须显示窗口，杜绝永久不可见。
+const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// 首帧显示状态机（Task 5）：窗口以隐藏状态创建，首帧 `present` 成功后一次性显示；
+/// 失败时由保护时限兜底显示。纯状态（无 winit/GUI），可独立单测。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct StartupGate {
+    /// 隐藏起点：保护时限从此刻起算。
+    started: Instant,
+    revealed: bool,
+}
+
+impl StartupGate {
+    pub(crate) fn new(now: Instant) -> Self {
+        Self {
+            started: now,
+            revealed: false,
+        }
+    }
+
+    /// 保护时限到期点（`next_wake` 据此登记唯一一次唤醒）。
+    pub(crate) fn deadline(&self) -> Instant {
+        self.started + FIRST_FRAME_TIMEOUT
+    }
+
+    #[cfg(test)]
+    pub(crate) fn revealed(&self) -> bool {
+        self.revealed
+    }
+
+    /// 首帧呈现结果：成功且尚未显示时返回 true（调用方执行一次显示）。
+    /// 之后再次成功（尺寸变化触发的重复首帧）不再重复显示。
+    pub(crate) fn on_present(&mut self, ok: bool) -> bool {
+        if ok && !self.revealed {
+            self.revealed = true;
+            return true;
+        }
+        false
+    }
+
+    /// 保护时限到达：无论首帧是否成功都显示。已显示则返回 false。
+    pub(crate) fn on_timeout(&mut self, now: Instant) -> bool {
+        if !self.revealed && now >= self.deadline() {
+            self.revealed = true;
+            return true;
+        }
+        false
+    }
+}
+
 /// 瞬态窗口/呈现状态（ADR-009 S6 C1）：6 个字段无交叉借用风险，单独子结构。
 pub(crate) struct WindowState {
     pub(crate) window: Option<Arc<Window>>,
@@ -638,10 +697,9 @@ pub(crate) struct WindowState {
     /// 跨帧复用的像素缓冲（P2）：尺寸不变时零分配，绘制结束整块拷入 surface。
     pub(crate) frame: Option<Frame>,
     pub(crate) scroll_y: f32,
-    /// 平滑滚动目标（B3）：on_wheel/PageUp/PageDown/Home/End 写 goal_y，animate() 插值。
-    /// 默认 smooth=false 时 goal_y=scroll_y，无插值开销。
+    /// 滚动目标：on_wheel/PageUp/PageDown/Home/End/拖拽滚动条写 goal_y；
+    /// 产品定位为「瞬时」，写入后立即同步 scroll_y，无插值。
     pub(crate) goal_y: f32,
-    pub(crate) smooth: bool,
     /// 垂直移动的目标列（goal column），上下移动时保持。
     pub(crate) goal_x: Option<f32>,
     /// 左键按住中：CursorMoved 转化为拖选（扩选）。
@@ -657,6 +715,8 @@ pub(crate) struct WindowState {
     pub(crate) resize_pending: bool,
     /// 窗口可见性（3g）：最小化/失焦/Occluded 时置 false，阻止 RedrawRequested → render → paint 路径。
     pub(crate) visible: bool,
+    /// 首帧守卫：Some 期间窗口仍隐藏，首帧成功/兜底超时后置 None 并显示（Task 5）。
+    pub(crate) startup: Option<StartupGate>,
     /// 已获准退出：仅当「关闭意图」真正执行后置 true，由 Shell 只移除当前窗口。
     pub(crate) exit_requested: bool,
     /// 用户请求新建独立窗口；Shell 消费后在主事件循环中创建另一个 App。
@@ -693,7 +753,6 @@ impl Default for WindowState {
             frame: None,
             scroll_y: 0.0,
             goal_y: 0.0,
-            smooth: false,
             goal_x: None,
             dragging: false,
             last_click: None,
@@ -701,6 +760,7 @@ impl Default for WindowState {
             fullscreen: false,
             resize_pending: false,
             visible: true,
+            startup: None,
             exit_requested: false,
             new_window_requested: false,
             geom_dirty: false,
@@ -965,10 +1025,7 @@ impl App {
                 export_style,
             },
             config: app_config,
-            window_state: WindowState {
-                smooth: app_config.smooth_scroll,
-                ..WindowState::default()
-            },
+            window_state: WindowState::default(),
             editor,
             engine: LayoutEngine::new(),
             index: BlockIndex::default(),
@@ -1039,7 +1096,6 @@ impl App {
     fn apply_window_effects(&mut self) {
         #[cfg(windows)]
         {
-            use crate::theme::NativeWindow;
             use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
             let Some(win) = &self.window_state.window else {
                 return;
@@ -1048,14 +1104,24 @@ impl App {
                 return;
             };
             if let RawWindowHandle::Win32(p) = handle.as_raw() {
-                self.ports.effects.apply(
-                    NativeWindow { hwnd: p.hwnd.get() },
-                    self.input_state.theme.dark,
-                );
+                self.apply_window_effects_to(crate::theme::NativeWindow { hwnd: p.hwnd.get() });
             }
         }
         #[cfg(not(windows))]
         let _ = &self.ports.effects;
+    }
+
+    /// 把窗口外观效果下发给已解析的原生窗口：深色标题栏 + 擦除色 = 当前主题底色。
+    /// 与 HWND 获取解耦，使「主题切换后使用当前主题 bg」可在无窗口测试中验证。
+    #[cfg(any(windows, test))]
+    pub(crate) fn apply_window_effects_to(&mut self, native: crate::theme::NativeWindow) {
+        self.ports
+            .effects
+            .apply(native, self.input_state.theme.dark);
+        // 未绘制区域擦除色 = 主题底色：首帧覆盖前不会露出系统默认黑色
+        self.ports
+            .effects
+            .set_background(native, window_erase_rgb(self.input_state.theme.bg));
     }
 
     /// 记录窗口移动后的几何（尺寸沿用已存值）。`minimized` 为真时忽略事件：
@@ -1574,6 +1640,10 @@ impl App {
     /// 时间输入的唯一入口：外部轮询、系统外观、自动保存、恢复写盘都只读调用方注入的
     /// `now`（ADR-009 决策三「时间作为输入」）。顺序不可交换：外部修改须先挂起自动保存。
     pub(crate) fn tick(&mut self, now: Instant) {
+        // 首帧兜底（Task 5）：隐藏窗口的唤醒源只有这里，超时后无论如何都要显示。
+        if self.window_state.startup.is_some() {
+            self.settle_startup(false, now);
+        }
         self.poll_external();
         self.poll_system_theme(now);
         self.trigger_mermaid_auto();
@@ -1703,15 +1773,6 @@ impl App {
             let hovered = m.state.hovered;
             m.state.fade.tick(now, hovered);
         }
-        // B3 平滑滚动：默认关（smooth=false），goal_y 直接等于 scroll_y，零开销。
-        if self.window_state.smooth {
-            let diff = self.window_state.goal_y - self.window_state.scroll_y;
-            if diff.abs() > 0.5 {
-                self.window_state.scroll_y += diff * 0.25; // ease-out，~4 帧到位
-            } else {
-                self.window_state.scroll_y = self.window_state.goal_y;
-            }
-        }
     }
 
     /// 是否仍有悬停过渡在跑（事件循环据此按帧继续重绘）。
@@ -1723,8 +1784,6 @@ impl App {
             || ui.ctx.fade.running()
             || ui.chrome.anim_running()
             || ui.modal.as_ref().is_some_and(|m| m.state.fade.running())
-            || (self.window_state.smooth
-                && (self.window_state.goal_y - self.window_state.scroll_y).abs() > 0.5)
     }
 
     /// 动效总开关（S6）：系统「显示动画」关闭时全部立即到位（逐像素同无动效版本）。
@@ -1771,7 +1830,9 @@ impl App {
             // 3e 修 A1：exe 内嵌 ICO 只喂任务栏/文件管理器，标题栏图标须显式设置
             .with_window_icon(Some(
                 Icon::from_rgba(crate::icon::icon_rgba(), 32, 32).expect("32×32 RGBA 尺寸恒合法"),
-            ));
+            ))
+            // 首帧完整性（Task 5）：首帧准备好之前不显示，避免露出黑色未绘制区域
+            .with_visible(false);
         if let Some(g) = saved_geom {
             attrs = attrs.with_position(PhysicalPosition::new(g.x, g.y));
         }
@@ -1798,8 +1859,50 @@ impl App {
         // 动效开关（S6）：系统「显示动画」关闭时悬停高亮立即到位。
         let animations = self.ports.system.animations_enabled();
         self.set_animations(animations);
-        self.request_redraw();
+        // 首帧完整性（Task 5）：窗口以隐藏状态创建，先在当前客户区尺寸完成一次同步
+        // 渲染/呈现，成功即显示；失败或超时由 next_wake 兜底显示，不会永久不可见。
+        self.begin_startup();
         self.window_state.window.as_ref().map(|w| w.id())
+    }
+
+    /// 进入首帧隐藏阶段并立即尝试显示。
+    pub(crate) fn begin_startup(&mut self) {
+        self.window_state.startup = Some(StartupGate::new(Instant::now()));
+        self.try_show_first_frame();
+    }
+
+    /// 在当前客户区尺寸上完成一次同步首帧：先合并待处理尺寸变化，再 render + present。
+    /// 呈现成功即显示；`present` 失败时保持隐藏，等 Resized/DPI 事件重试，超时兜底。
+    /// surface 与客户区尺寸对齐由 `present` 内部完成（尺寸不符时按帧尺寸重建）。
+    pub(crate) fn try_show_first_frame(&mut self) {
+        if self.window_state.startup.is_none() {
+            return;
+        }
+        // 呈现面不可用（softbuffer 创建/取缓冲失败）：无从「准备好首帧」，
+        // 直接显示并由窗口类背景画刷（主题底色）兜底，避免白等 1 秒。
+        if self.window_state.surface.is_none() {
+            self.settle_startup(true, Instant::now());
+            return;
+        }
+        self.apply_pending_resize();
+        let _ = self.render();
+        let presented = self.present();
+        self.settle_startup(presented, Instant::now());
+    }
+
+    /// 首帧状态机推进：成功立即显示；超时（无论成败）兜底显示。显示只执行一次。
+    fn settle_startup(&mut self, presented: bool, now: Instant) {
+        let Some(gate) = self.window_state.startup.as_mut() else {
+            return;
+        };
+        if !(gate.on_present(presented) || gate.on_timeout(now)) {
+            return;
+        }
+        self.window_state.startup = None;
+        if let Some(window) = &self.window_state.window {
+            window.set_visible(true);
+            window.request_redraw();
+        }
     }
 
     pub(crate) fn handle_window_event(&mut self, event: WindowEvent) {
@@ -1852,7 +1955,12 @@ impl App {
                 if !self.window_state.visible {
                     self.window_state.visible = true;
                 }
-                self.request_redraw();
+                if self.window_state.startup.is_some() {
+                    // 隐藏阶段：立即在新客户区尺寸上重做首帧，避免旧尺寸帧进入新客户区
+                    self.try_show_first_frame();
+                } else {
+                    self.request_redraw();
+                }
             }
             // 窗口移动（3d）：只记录物理坐标，尺寸沿用已存值（无记录时取当前逻辑尺寸），
             // 置脏位待退出时统一落盘。最小化时 Windows 会报 -32000 哨兵坐标，
@@ -1878,7 +1986,12 @@ impl App {
                 self.ensure_math_visible();
                 self.ensure_tables_visible();
                 self.recompute_geometry();
-                self.request_redraw();
+                if self.window_state.startup.is_some() {
+                    // 启动期间 DPI 变化同样按新客户区重做首帧
+                    self.try_show_first_frame();
+                } else {
+                    self.request_redraw();
+                }
             }
             WindowEvent::Ime(Ime::Preedit(text, cursor)) => self.ime_preedit(text, cursor),
             WindowEvent::Ime(Ime::Commit(text)) => self.ime_commit(text),
@@ -1935,9 +2048,7 @@ impl App {
                         self.input_state.mouse.y as f32 - off,
                         self.input_state.scale,
                     );
-                    if !self.window_state.smooth {
-                        self.window_state.scroll_y = self.window_state.goal_y;
-                    }
+                    self.window_state.scroll_y = self.window_state.goal_y;
                     self.set_ime_area();
                     self.request_redraw();
                 } else if self.window_state.dragging {
@@ -2006,6 +2117,11 @@ impl App {
                 self.apply_pending_resize();
                 // 悬停过渡推进到当前时刻（S6）：绘制侧只读 alpha。
                 self.animate(Instant::now());
+                if self.window_state.startup.is_some() {
+                    // 隐藏阶段的首帧：成功即显示，失败保持隐藏等兜底
+                    self.try_show_first_frame();
+                    return;
+                }
                 self.paint();
             }
             // 窗口重新获得焦点：立即校验系统外观（限频轮询最多滞后 1s，此处消除等待）
@@ -2050,7 +2166,6 @@ impl App {
             || self.ui_state.quick.open
             || self.ui_state.search.open
             || self.ui_state.history.open
-            || self.ui_state.print_preview.is_some()
     }
 
     /// 保存当前窗口几何并报告是否应关闭。Shell 据此只移除一个 WindowId。
@@ -2079,8 +2194,9 @@ impl App {
     /// 「恢复/自动保存静默期终点」「监听轮询」「系统外观轮询」的较早者
     /// （干净草稿且显式主题下完全休眠）。
     pub(crate) fn next_wake(&mut self) -> Option<Instant> {
-        // 窗口不可见时跳过所有周期性工作——恢复路径由 Resized/Focused/Occluded 主动 request_redraw
-        if !self.window_state.visible {
+        // 窗口不可见时跳过所有周期性工作——恢复路径由 Resized/Focused/Occluded 主动 request_redraw。
+        // 唯一例外是首帧隐藏阶段：必须保留一次唤醒用于兜底显示，否则窗口可能永久不可见。
+        if !self.window_state.visible && self.window_state.startup.is_none() {
             return None;
         }
         let now = Instant::now();
@@ -2149,6 +2265,11 @@ impl App {
             } else {
                 next = Some(next.map_or(due, |t| t.min(due)));
             }
+        }
+        // 首帧隐藏阶段的保护时限：tick 已在此刻之前尝试过兜底显示，仍挂起则登记唤醒。
+        if let Some(gate) = &self.window_state.startup {
+            let at = gate.deadline();
+            next = Some(next.map_or(at, |t| t.min(at)));
         }
         next
     }

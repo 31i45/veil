@@ -13,7 +13,6 @@
 //! doc_font_family = "system"  # system | sans | serif | mono
 //! doc_font_size = 16     # 正文基准字号（物理像素），夹取 10..=32
 //! doc_line_height = 22   # 正文基准行高（物理像素），夹取 字号..=字号×3
-//! smooth_scroll = false  # 平滑滚动开关
 //! allow_remote_images = true  # 远程图片默认自动加载；false = 全局阻止
 //! tab_width = 4          # 制表符宽度（2 或 4），默认 4
 //! image_cache_limit_mb = 200  # 图片缓存字节上限（MiB），0 = 不限制
@@ -486,12 +485,8 @@ pub struct Config {
     pub doc_font_size: f32,
     /// 正文行高（物理像素基准，夹取 字号..=字号×3）。
     pub doc_line_height: f32,
-    /// 平滑滚动开关（默认关，保持既有行为）。
-    pub smooth_scroll: bool,
     /// 远程图片自动加载（默认开）；false = 全局阻止，只显示 alt 文本。
     pub allow_remote_images: bool,
-    /// Mermaid 下载插入策略（默认 false）；true = 直接写远程 URL；false = 落盘 assets 目录。
-    pub mermaid_insert_url: bool,
     /// 制表符宽度（2 或 4，默认 4）；其它值夹到 4。
     pub tab_width: u8,
     /// 图片缓存字节上限（MiB，默认 200）；0 = 不限制，超出按 LRU 逐出。
@@ -510,9 +505,7 @@ impl Default for Config {
             doc_font_family: DocFontFamily::System,
             doc_font_size: DEFAULT_DOC_FONT_SIZE,
             doc_line_height: DEFAULT_DOC_LINE_HEIGHT,
-            smooth_scroll: false,
             allow_remote_images: true,
-            mermaid_insert_url: false,
             tab_width: DEFAULT_TAB_WIDTH,
             image_cache_limit_mb: DEFAULT_IMAGE_CACHE_LIMIT_MB,
             window: None,
@@ -527,7 +520,7 @@ impl Config {
             "# Veil 配置（自动生成）\n# mode: system（跟随系统）| light | dark\nmode = \"{}\"\n\
              export_margin_mm = {}\nexport_page_numbers = {}\nexport_toc = {}\n\
              doc_font_family = \"{}\"\ndoc_font_size = {}\ndoc_line_height = {}\n\
-             smooth_scroll = {}\nallow_remote_images = {}\nmermaid_insert_url = {}\ntab_width = {}\n\
+             allow_remote_images = {}\ntab_width = {}\n\
              image_cache_limit_mb = {}\n",
             self.mode.as_str(),
             self.export_margin_mm,
@@ -536,9 +529,7 @@ impl Config {
             self.doc_font_family.as_str(),
             self.doc_font_size,
             self.doc_line_height,
-            self.smooth_scroll,
             self.allow_remote_images,
-            self.mermaid_insert_url,
             self.tab_width,
             self.image_cache_limit_mb,
         );
@@ -603,18 +594,8 @@ fn edit_existing_toml(text: &str, cfg: Config) -> Option<String> {
     );
     set_item(
         &mut doc,
-        "smooth_scroll",
-        toml_edit::value(cfg.smooth_scroll),
-    );
-    set_item(
-        &mut doc,
         "allow_remote_images",
         toml_edit::value(cfg.allow_remote_images),
-    );
-    set_item(
-        &mut doc,
-        "mermaid_insert_url",
-        toml_edit::value(cfg.mermaid_insert_url),
     );
     set_item(
         &mut doc,
@@ -672,7 +653,7 @@ pub struct ConfigParse {
 }
 
 /// 极简配置解析：识别顶层 `mode`/`export_*`、正文排版键
-/// `doc_font_family`/`doc_font_size`/`doc_line_height`/`smooth_scroll`/`allow_remote_images`
+/// `doc_font_family`/`doc_font_size`/`doc_line_height`/`allow_remote_images`
 /// 与成组的窗口键 `window_width`/`window_height`/`window_x`/`window_y`，其余条目计数忽略。
 /// 排版数值越界按夹取处理（不计数），类型/字面量非法才计入 ignored；
 /// 字号先夹 10..=32，行高再按「字号..=字号×3」夹取（与键出现顺序无关）。
@@ -742,18 +723,14 @@ pub fn parse_config(text: &str) -> ConfigParse {
                     _ => out.ignored += 1,
                 }
             }
-            "smooth_scroll" => match value.as_bool() {
-                Some(v) => out.config.smooth_scroll = v,
-                None => out.ignored += 1,
-            },
+            // 已移除的旧键（平滑滚动开关）：滚动固定为瞬时，静默忽略且不提示未知键。
+            "smooth_scroll" => {}
             "allow_remote_images" => match value.as_bool() {
                 Some(v) => out.config.allow_remote_images = v,
                 None => out.ignored += 1,
             },
-            "mermaid_insert_url" => match value.as_bool() {
-                Some(v) => out.config.mermaid_insert_url = v,
-                None => out.ignored += 1,
-            },
+            // 已移除的旧键（Mermaid 插入策略）：静默忽略，快照动作永远落盘本地资产。
+            "mermaid_insert_url" => {}
             // 已移除的旧键（进程内 Mermaid 渲染开关）：静默忽略，不产生「无法识别」提示。
             "mermaid_render" => {}
             "tab_width" => match value.as_integer() {
@@ -962,6 +939,10 @@ pub trait SystemTheme {
 /// 因此 Win10/无 Mica 环境下自动退化为纯色外观，无需调用方分支。
 pub trait WindowEffects {
     fn apply(&mut self, window: NativeWindow, dark: bool);
+
+    /// 把窗口类背景画刷设为指定 RGB：首帧呈现前任何未绘制区域显示主题底色，
+    /// 而不是系统默认的黑色。默认空实现，平台/测试无需改动。
+    fn set_background(&mut self, _window: NativeWindow, _color: [u8; 3]) {}
 }
 
 /// 主题相关平台能力集合（产品层一次性注入，避免 `run` 参数继续膨胀）。
@@ -1222,32 +1203,25 @@ mod tests {
 
     #[test]
     fn doc_typography_keys_round_trip_and_default_when_missing() {
-        // 四键齐全往返
+        // 三键齐全往返
         let cfg = Config {
             doc_font_family: DocFontFamily::Serif,
             doc_font_size: 18.0,
             doc_line_height: 27.0,
-            smooth_scroll: true,
             ..Config::default()
         };
         let text = cfg.to_toml();
-        for key in [
-            "doc_font_family",
-            "doc_font_size",
-            "doc_line_height",
-            "smooth_scroll",
-        ] {
+        for key in ["doc_font_family", "doc_font_size", "doc_line_height"] {
             assert!(text.contains(key), "序列化必须包含 {key}");
         }
         let p = parse(&text);
         assert_eq!(p.config, cfg);
         assert_eq!(p.ignored, 0);
-        // 旧配置缺四键 → 全部取默认值且不产生 ignored
+        // 旧配置缺三键 → 全部取默认值且不产生 ignored
         let p = parse("mode = \"dark\"\n");
         assert_eq!(p.config.doc_font_family, DocFontFamily::System);
         assert_eq!(p.config.doc_font_size, 16.0);
         assert_eq!(p.config.doc_line_height, 22.0);
-        assert!(!p.config.smooth_scroll);
         assert_eq!(p.ignored, 0);
         // 字体族四值严格互逆
         for f in [
@@ -1322,13 +1296,20 @@ mod tests {
         assert_eq!(p.ignored, 0);
     }
 
+    /// 旧配置 `smooth_scroll` 已删除：任何值都静默忽略（不改变行为、不产生「无法识别」提示）。
     #[test]
-    fn smooth_scroll_bool_invalid_falls_back_to_default() {
-        assert!(parse("smooth_scroll = true").config.smooth_scroll);
-        assert!(!parse("smooth_scroll = false").config.smooth_scroll);
-        let p = parse("smooth_scroll = \"true\"");
-        assert!(!p.config.smooth_scroll);
-        assert_eq!(p.ignored, 1);
+    fn legacy_smooth_scroll_key_is_silently_ignored() {
+        for text in [
+            "smooth_scroll = true\n",
+            "smooth_scroll = false\n",
+            "smooth_scroll = \"yes\"\n",
+        ] {
+            let p = parse(text);
+            assert_eq!(p.ignored, 0, "旧键不得产生无法识别提示：{text}");
+            assert_eq!(p.config, Config::default(), "旧键不得改变任何行为：{text}");
+        }
+        // 新序列化不再写出该键
+        assert!(!Config::default().to_toml().contains("smooth_scroll"));
     }
 
     #[test]
@@ -1423,31 +1404,22 @@ mod tests {
         }
     }
 
+    /// 旧配置 `mermaid_insert_url` 已删除：无论 true/false/非法类型都静默忽略，
+    /// 不计入 ignored（不打扰用户），也不再写回配置文件。
     #[test]
-    fn mermaid_insert_url_defaults_local_and_respects_explicit_values() {
-        let missing = parse("mode = \"light\"\n");
-        assert!(!missing.config.mermaid_insert_url);
-        assert_eq!(missing.ignored, 0);
-        assert!(
-            parse("mermaid_insert_url = true\n")
-                .config
-                .mermaid_insert_url
-        );
-        assert!(
-            !parse("mermaid_insert_url = false\n")
-                .config
-                .mermaid_insert_url
-        );
-
-        for insert_url in [false, true] {
-            let cfg = Config {
-                mermaid_insert_url: insert_url,
-                ..Config::default()
-            };
-            let text = cfg.to_toml();
-            assert!(text.contains(&format!("mermaid_insert_url = {insert_url}")));
-            assert_eq!(parse(&text).config, cfg);
+    fn legacy_mermaid_insert_url_key_is_silently_ignored() {
+        for text in [
+            "mermaid_insert_url = true\n",
+            "mermaid_insert_url = false\n",
+            "mermaid_insert_url = \"yes\"\n",
+        ] {
+            let p = parse(text);
+            assert_eq!(p.ignored, 0, "旧键不得产生无法识别提示：{text}");
+            assert_eq!(p.config, Config::default(), "旧键不得改变任何行为：{text}");
         }
+        let out = Config::default().to_toml();
+        assert!(!out.contains("mermaid_insert_url"), "{out}");
+        assert_eq!(parse(&out).ignored, 0);
     }
 
     #[test]

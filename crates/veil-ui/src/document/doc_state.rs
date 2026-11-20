@@ -12,7 +12,7 @@ use crate::app::{
 use crate::chrome::path_label;
 use crate::docio::{decode, encode};
 use crate::editor::Editor;
-use crate::i18n::{t, tf, Key};
+use crate::i18n::{clip_error, t, tf, Key};
 use crate::view::modal;
 
 use super::{recovery, session, ExternalState};
@@ -497,6 +497,7 @@ impl App {
             }
         };
         self.editor = Editor::new_with_callouts(&text, &self.callouts);
+        self.clear_pending_mermaid_fetch();
         self.doc.baseline = disk;
         self.doc.bom = bom;
         self.persist_state.persist.reset(); // 清 pending/hold/missing/backup/activity
@@ -582,6 +583,9 @@ impl App {
     /// 由平台层补「文档」目录）。取消即中止，不产生文件；失败走 notice 不崩溃。
     /// 导出不清脏标（源文件未变）。
     pub(crate) fn export_now(&mut self) {
+        if !self.output_allowed() {
+            return;
+        }
         let suggested = match self.doc.path.as_ref() {
             Some(p) => p.with_extension("html").to_string_lossy().into_owned(),
             None => t(Key::ExportUntitledHtml).to_string(),
@@ -799,8 +803,28 @@ impl App {
         );
     }
 
+    /// 已有模态未决时错误不叠加，但也绝不静默丢弃：把标题、原因与恢复提示写进状态栏，
+    /// 用户处理完当前弹窗后仍知道刚才的操作失败了。
+    fn note_error_while_modal_open(&mut self, title: &str, message: &str) {
+        let reason = message
+            .lines()
+            .find_map(|line| {
+                line.trim()
+                    .strip_prefix("原因：")
+                    .or_else(|| line.trim().strip_prefix("原因:"))
+            })
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| message.lines().next().unwrap_or("").trim());
+        self.ui_state.chrome.notice = tf(
+            Key::NoticeErrorWhileModalOpen,
+            &[title, &clip_error(reason)],
+        );
+        self.request_redraw();
+    }
+
     /// 错误弹窗的唯一装配点：与确认弹窗共用卡片/按钮/间距令牌，只在语义上标记危险。
-    /// 已有模态未决时不叠加（避免覆盖未保存确认而丢失用户意图），仅保留状态栏提示。
+    /// 已有模态未决时不叠加（避免覆盖未保存确认而丢失用户意图），改为写入状态栏提示。
     pub(crate) fn show_error_modal(
         &mut self,
         title: &str,
@@ -809,6 +833,7 @@ impl App {
         buttons: Vec<modal::ModalButton>,
     ) {
         if self.ui_state.modal.is_some() {
+            self.note_error_while_modal_open(title, &message);
             return;
         }
         self.close_lite_overlays();
@@ -828,6 +853,7 @@ impl App {
     /// 出口为「重试 / 打开其他文件 / 关闭」；关闭（含 Esc）即退出本窗口。
     pub(crate) fn show_startup_error(&mut self, err: StartupError) {
         if self.ui_state.modal.is_some() {
+            self.note_error_while_modal_open(&err.title, &err.message);
             return;
         }
         self.close_lite_overlays();
@@ -1070,6 +1096,8 @@ impl App {
             }
         };
         self.editor = Editor::new_with_callouts(&text, &self.callouts);
+        // 换文档：旧文档挂起的 Mermaid 回包立即作废，避免写入新文档。
+        self.clear_pending_mermaid_fetch();
         self.doc.path = Some(path.clone());
         self.doc.history_key = super::history::doc_key(&path);
         self.doc.bom = bom;
@@ -1122,6 +1150,7 @@ impl App {
     /// 文件监听解除、派生缓存按会话代次失效。
     fn new_draft_now(&mut self) {
         self.editor = Editor::new_with_callouts("", &self.callouts);
+        self.clear_pending_mermaid_fetch();
         self.doc.path = None;
         self.doc.history_key = super::history::session_key();
         self.doc.bom = false;

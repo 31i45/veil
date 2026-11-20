@@ -779,7 +779,7 @@ fn system_theme() -> Box<dyn SystemTheme> {
 
 #[cfg(windows)]
 fn window_effects() -> Box<dyn WindowEffects> {
-    Box::new(theme::WinEffects)
+    Box::new(theme::WinEffects::default())
 }
 #[cfg(not(windows))]
 fn window_effects() -> Box<dyn WindowEffects> {

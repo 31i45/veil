@@ -17,8 +17,10 @@ use crate::math::{MathImage, MathRenderer};
 use crate::mermaid_renderer::{MermaidImage, MermaidRenderer};
 use crate::mode::{Mode, TextSink};
 use crate::paint::{can_present, fit_size, local_image_path};
-use crate::print::{ExportOptions, NoPrint, PreviewPage, Print, PrintSession};
-use crate::theme::{self, ConfigStore, ExportStyle, SystemTheme, ThemeEnv, ThemeMode};
+use crate::print::{NoPrint, Print, PrintSession};
+use crate::theme::{
+    self, ConfigStore, ExportStyle, NativeWindow, SystemTheme, ThemeEnv, ThemeMode, WindowEffects,
+};
 use crate::view::ctx_menu;
 use crate::view::outline;
 use crate::view::search;
@@ -64,6 +66,19 @@ impl Clock for FixedClock {
 
 fn fixed_clock() -> Box<dyn Clock> {
     Box::new(FixedClock)
+}
+
+/// 记录窗口效果调用：断言主题切换后 `set_background` 收到当前主题底色。
+#[derive(Clone, Default)]
+struct RecordingEffects {
+    backgrounds: Rc<RefCell<Vec<[u8; 3]>>>,
+}
+
+impl WindowEffects for RecordingEffects {
+    fn apply(&mut self, _window: NativeWindow, _dark: bool) {}
+    fn set_background(&mut self, _window: NativeWindow, color: [u8; 3]) {
+        self.backgrounds.borrow_mut().push(color);
+    }
 }
 
 /// 可编排的 URL 打开端口：记录每次调用的 URL，结果由 `result` 决定（校验失败注入）。
@@ -2311,16 +2326,26 @@ fn remote_images_menu_flag_reflects_config_and_toggle_persists() {
     let cfg = MemConfig::default();
     let saves = cfg.saves.clone();
     let mut a = app_remote("abc", Box::new(cfg), RemoteImages::default());
+    // 菜单与设置同文案、同极性：勾选 = 允许。
+    assert_eq!(
+        t(I18nKey::MenuViewAllowRemoteImages),
+        t(I18nKey::SettingsAllowRemoteImages),
+        "菜单与设置必须使用同一「允许远程图片」文案"
+    );
     a.config.allow_remote_images = false;
     let flags = a.menu_flags();
-    assert!(flags.block_remote_images, "阻止态进入菜单标志");
-    assert!(chrome::action_checked(
+    assert!(!flags.allow_remote_images, "阻止态进入菜单标志");
+    assert!(!chrome::action_checked(
         MenuAction::ToggleRemoteImages,
         flags
     ));
     a.perform_menu(MenuAction::ToggleRemoteImages);
     assert!(a.config.allow_remote_images, "切换后恢复允许");
-    assert!(!a.menu_flags().block_remote_images);
+    assert!(a.menu_flags().allow_remote_images);
+    assert!(chrome::action_checked(
+        MenuAction::ToggleRemoteImages,
+        a.menu_flags()
+    ));
     assert!(a.ui_state.chrome.notice.contains("已允许远程图片"));
     let last = saves.borrow().last().cloned().unwrap_or_default();
     assert!(
@@ -2336,6 +2361,66 @@ fn remote_images_menu_flag_reflects_config_and_toggle_persists() {
         last.contains("allow_remote_images = false"),
         "应持久化为 false: {last}"
     );
+}
+
+/// Task 6.3 反向同步：设置里改主题/远程图片后，View 菜单的勾选状态必须立即跟随，
+/// 不能只有「菜单 → 设置」单向同步。
+#[test]
+fn settings_changes_update_view_menu_state_immediately() {
+    use crate::view::settings::{FieldValue, BTN_OK};
+    let cfg = MemConfig::default();
+    let mut a = app_remote("abc", Box::new(cfg), RemoteImages::default());
+    let mermaid = RecordingMermaid::new();
+    a.ports.mermaid = Box::new(mermaid.clone());
+    assert!(a.config.allow_remote_images);
+
+    a.open_settings();
+    {
+        let s = a.ui_state.settings.as_mut().expect("设置已打开");
+        for f in &mut s.form.fields {
+            match f.label {
+                I18nKey::SettingsThemeMode => f.value = FieldValue::ThemeMode(ThemeMode::Dark),
+                I18nKey::SettingsAllowRemoteImages => f.value = FieldValue::Toggle(false),
+                _ => {}
+            }
+        }
+    }
+    a.resolve_settings(BTN_OK);
+
+    assert!(!a.config.allow_remote_images, "设置必须落到 Config");
+    assert!(
+        !chrome::action_checked(MenuAction::ToggleRemoteImages, a.menu_flags()),
+        "取消允许后 View 菜单必须立即变为未勾选"
+    );
+    assert!(!mermaid.allowed.get(), "远程渲染端口必须同步禁用");
+    assert!(
+        chrome::theme_action_matches(MenuAction::ThemeDark, a.config.mode),
+        "切到深色后主题菜单「当前」标记必须立即跟随"
+    );
+
+    // 反向：允许远程 + 浅色，菜单同步回勾选态。
+    a.open_settings();
+    {
+        let s = a.ui_state.settings.as_mut().expect("设置已打开");
+        for f in &mut s.form.fields {
+            match f.label {
+                I18nKey::SettingsThemeMode => f.value = FieldValue::ThemeMode(ThemeMode::Light),
+                I18nKey::SettingsAllowRemoteImages => f.value = FieldValue::Toggle(true),
+                _ => {}
+            }
+        }
+    }
+    a.resolve_settings(BTN_OK);
+    assert!(a.config.allow_remote_images);
+    assert!(chrome::action_checked(
+        MenuAction::ToggleRemoteImages,
+        a.menu_flags()
+    ));
+    assert!(mermaid.allowed.get());
+    assert!(chrome::theme_action_matches(
+        MenuAction::ThemeLight,
+        a.config.mode
+    ));
 }
 
 // ---- 拖放（阶段 1）：图片插入落点；非图片按文档打开 ----
@@ -2438,7 +2523,10 @@ fn drop_image_requires_document_path() {
     assert_eq!(doc_text(&f.app), "ab");
     assert!(!f.app.editor.is_dirty());
     assert!(f.assets.borrow().is_empty(), "草稿不得落盘资产");
-    assert!(f.app.ui_state.chrome.notice.contains("草稿"));
+    assert!(
+        f.app.ui_state.chrome.notice.contains("先保存文档"),
+        "提示应给出可操作的下一步"
+    );
 }
 
 #[test]
@@ -2468,7 +2556,7 @@ fn drop_image_asset_failure_keeps_document() {
     assert_eq!(doc_text(&f.app), "ab");
     assert!(!f.app.editor.is_dirty());
     assert_eq!(f.assets.borrow().len(), 1, "已尝试落盘");
-    assert!(f.app.ui_state.chrome.notice.contains("落盘失败"));
+    assert!(f.app.ui_state.chrome.notice.contains("保存失败"));
 }
 
 #[test]
@@ -6965,14 +7053,14 @@ fn startup_applies_export_config_and_saves_all_keys() {
 }
 
 #[test]
-fn startup_applies_doc_typography_and_smooth_scroll() {
+fn startup_applies_doc_typography_and_ignores_legacy_smooth_scroll() {
     let cfg = MemConfig::default();
     *cfg.text.borrow_mut() = Some(
         "doc_font_family = \"serif\"\ndoc_font_size = 18\ndoc_line_height = 27\nsmooth_scroll = true\n"
             .into(),
     );
     let mut a = app_theme(Box::new(cfg), Rc::new(Cell::new(Some(false))));
-    assert!(a.window_state.smooth, "平滑滚动按配置开启");
+    // 旧配置的 smooth_scroll 静默忽略：滚动固定为瞬时。
     assert_eq!(a.config.doc_font_family, theme::DocFontFamily::Serif);
     assert_eq!(a.config.doc_font_size, 18.0);
     assert_eq!(a.config.doc_line_height, 27.0);
@@ -8183,7 +8271,10 @@ fn present_is_noop_without_surface_and_isolated_from_render() {
         .as_ref()
         .map(|f| f.pixels.clone())
         .expect("render 产出 frame");
-    a.present(); // headless 下 surface=None → no-op
+    assert!(
+        !a.present(),
+        "headless 无 surface 时 present 必须报告未上屏"
+    ); // surface=None → no-op
     let frame_pixels_after = a
         .window_state
         .frame
@@ -8203,6 +8294,153 @@ fn present_requires_matching_lengths() {
     assert!(can_present(100, 100), "长度相等应允许呈现");
     assert!(!can_present(4, 100), "帧短于 surface 应丢帧");
     assert!(!can_present(100, 4), "帧长于 surface 应丢帧");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Task 5 首帧显示状态机：窗口隐藏创建 → 首帧成功只显示一次；
+// 呈现失败由 1 秒保护时限兜底显示；隐藏阶段尺寸变化重做首帧但不重复显示。
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn startup_gate_reveals_once_after_first_present() {
+    let t0 = Instant::now();
+    let mut gate = StartupGate::new(t0);
+    assert!(!gate.revealed(), "创建时窗口必须保持隐藏");
+    assert!(gate.on_present(true), "首帧成功后应请求显示窗口");
+    assert!(gate.revealed());
+    assert!(
+        !gate.on_present(true),
+        "后续首帧（尺寸变化重做）不得重复显示"
+    );
+    assert!(
+        !gate.on_timeout(t0 + Duration::from_secs(5)),
+        "已显示后超时不得再次触发显示"
+    );
+}
+
+#[test]
+fn startup_gate_failed_present_waits_for_timeout() {
+    let t0 = Instant::now();
+    let mut gate = StartupGate::new(t0);
+    assert!(!gate.on_present(false), "呈现失败时不得显示窗口");
+    assert!(
+        !gate.on_timeout(t0 + Duration::from_millis(999)),
+        "未到 1 秒保护时限不得显示"
+    );
+    assert!(!gate.revealed());
+    assert!(
+        gate.on_timeout(t0 + Duration::from_secs(1)),
+        "保护时限到达必须兜底显示"
+    );
+    assert!(gate.revealed());
+    assert!(!gate.on_timeout(t0 + Duration::from_secs(2)));
+}
+
+#[test]
+fn startup_gate_deadline_is_one_second() {
+    let t0 = Instant::now();
+    let gate = StartupGate::new(t0);
+    assert_eq!(gate.deadline(), t0 + Duration::from_secs(1));
+}
+
+#[test]
+fn startup_gate_resize_retry_can_succeed_after_failure() {
+    // 首帧失败（如客户区尚为 0×0）后，尺寸事件带来的重试成功 → 只显示一次。
+    let t0 = Instant::now();
+    let mut gate = StartupGate::new(t0);
+    assert!(!gate.on_present(false));
+    assert!(gate.on_present(true), "尺寸就绪后的重试应显示窗口");
+    assert!(!gate.on_present(true), "之后的正常帧不得再次显示");
+    assert!(!gate.on_timeout(t0 + Duration::from_secs(3)));
+}
+
+#[test]
+fn headless_app_has_no_startup_gate_and_present_fails() {
+    // 无窗口（headless）路径不登记首帧守卫：tick/next_wake 不引入额外唤醒。
+    let store = MemStore::default();
+    let mut a = app("# t\n\np\n", None, false, &store);
+    assert!(a.window_state.startup.is_none());
+    let _ = a.render();
+    assert!(
+        !a.present(),
+        "无 surface 时 present 报告失败，由调用方决定兜底"
+    );
+}
+
+#[test]
+fn startup_gate_registers_deadline_in_next_wake() {
+    // 接线测试（Review A F2）：隐藏首帧阶段的唯一唤醒源是 next_wake 登记的
+    // 1 秒保护时限；若该接线回退，纯状态机测试仍会全绿而窗口可能永久不可见。
+    let store = MemStore::default();
+    let mut a = app("# t\n\np\n", None, false, &store);
+    a.window_state.visible = false;
+    let t0 = Instant::now();
+    a.window_state.startup = Some(StartupGate::new(t0));
+    let next = a
+        .next_wake()
+        .expect("首帧隐藏阶段必须登记兜底唤醒，否则窗口可能永久不可见");
+    assert_eq!(
+        next,
+        t0 + Duration::from_secs(1),
+        "startup 阶段 next_wake 必须包含 1s 保护时限"
+    );
+}
+
+#[test]
+fn startup_timeout_tick_settles_gate_once() {
+    // 接线测试（Review A F2）：tick 在保护时限到达后必须结束隐藏阶段。
+    // headless 无窗口，`set_visible` 安全跳过；真实 GUI 显示为 NOT RUN。
+    let store = MemStore::default();
+    let mut a = app("# t\n\np\n", None, false, &store);
+    a.window_state.visible = false;
+    let t0 = Instant::now();
+    a.window_state.startup = Some(StartupGate::new(t0));
+    a.tick(t0 + Duration::from_millis(999));
+    assert!(
+        a.window_state.startup.is_some(),
+        "未到 1 秒保护时限必须保持隐藏"
+    );
+    a.tick(t0 + Duration::from_secs(1));
+    assert!(
+        a.window_state.startup.is_none(),
+        "保护时限到达必须结束隐藏阶段（超时兜底显示）"
+    );
+    // 只显示一次：后续 tick 不得重新进入启动态或再次登记兜底唤醒。
+    a.tick(t0 + Duration::from_secs(5));
+    assert!(a.window_state.startup.is_none());
+    assert!(
+        a.next_wake().is_none(),
+        "首帧结束后（不可见且无其它唤醒源）不得残留周期唤醒"
+    );
+}
+
+#[test]
+fn theme_switch_applies_current_theme_bg_to_window_effects() {
+    // 接线测试（Review A F2）：apply_window_effects 必须以「当前主题」底色
+    // 调用 WindowEffects::set_background；HWND 获取层之外的部分在此验证。
+    let store = MemStore::default();
+    let mut a = app("# t\n\np\n", None, false, &store);
+    let rec = RecordingEffects::default();
+    a.ports.effects = Box::new(rec.clone());
+    let native = NativeWindow { hwnd: 1 };
+
+    a.apply_window_effects_to(native);
+    let light_rgb = window_erase_rgb(a.input_state.theme.bg);
+    assert_eq!(
+        rec.backgrounds.borrow().last(),
+        Some(&light_rgb),
+        "首次应用必须使用当前主题底色（RGB，无 alpha）"
+    );
+
+    a.set_theme_mode(ThemeMode::Dark);
+    a.apply_window_effects_to(native);
+    let dark_rgb = window_erase_rgb(a.input_state.theme.bg);
+    assert_ne!(dark_rgb, light_rgb, "深色主题底色应与浅色不同");
+    assert_eq!(
+        rec.backgrounds.borrow().last(),
+        Some(&dark_rgb),
+        "主题切换后必须使用新主题底色更新窗口擦除色"
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -10012,68 +10250,6 @@ fn outline_click_jumps_caret_and_scrolls_heading_to_top() {
     assert_eq!(a.ui_state.outline.hover, None, "点击不残留悬停");
 }
 
-/// DEF-T11-E1-003：打字机模式下大纲跳转首帧即落在锚点，而非视口顶部。
-#[test]
-fn typewriter_outline_jump_lands_on_anchor_without_typing() {
-    let mut text = String::from("# 开头\n");
-    for i in 0..40 {
-        text.push_str(&format!("\n段落 {i}\n"));
-    }
-    text.push_str("\n# 中部\n");
-    for i in 0..40 {
-        text.push_str(&format!("\n后文 {i}\n"));
-    }
-    text.push_str("\n# 结尾\n");
-    let store = MemStore::default();
-    let (mut a, _) = app_dialogs(&text, None, false, &store, None, None);
-    a.toggle_outline();
-    a.toggle_typewriter();
-    assert!(a.ui_state.writing.typewriter);
-    let want_start = text.find("# 中部").unwrap();
-    a.jump_outline(1);
-    assert_eq!(a.editor.caret(), want_start);
-    let vp = a.viewport();
-    let target = vp.y + vp.h * 0.42;
-    let (_, cy, ch) = a.caret_screen();
-    assert!(
-        (cy + ch / 2.0 - target).abs() <= ch,
-        "跳转首帧当前行应贴合打字机锚点：cy={cy} target={target}"
-    );
-}
-
-/// DEF-T11-E1-003（复发）：跳转前远处块高只是估算值，首帧绘制补排会让几何
-/// 漂移。要求「跳转后第一帧」就落在打字机锚点，而不是等下一次输入纠正。
-#[test]
-fn typewriter_outline_jump_first_frame_lands_on_anchor_after_real_layout() {
-    // 长中文段落放大估算高度与实际排版高度的差距（CJK 字宽约为 ASCII 两倍）。
-    let long = "这是一段用于放大行高估算误差的中文长段落，".repeat(12);
-    let mut text = String::from("# 开头\n");
-    for i in 0..30 {
-        text.push_str(&format!("\n{long}{i}\n"));
-    }
-    text.push_str("\n# 中部\n");
-    for i in 0..30 {
-        text.push_str(&format!("\n{long}{i}\n"));
-    }
-    text.push_str("\n# 结尾\n");
-    let store = MemStore::default();
-    let (mut a, _) = app_dialogs(&text, None, false, &store, None, None);
-    a.toggle_outline();
-    a.toggle_typewriter();
-    let want_start = text.find("# 中部").unwrap();
-    a.jump_outline(1);
-    assert_eq!(a.editor.caret(), want_start);
-    // 首帧：走真实渲染（补排可见块 + 重算几何），与真机第一次绘制同路径。
-    let _ = a.render();
-    let vp = a.viewport();
-    let target = vp.y + vp.h * 0.42;
-    let (_, cy, ch) = a.caret_screen();
-    assert!(
-        (cy + ch / 2.0 - target).abs() <= ch / 2.0,
-        "首帧标题行应贴合打字机锚点：cy={cy} ch={ch} target={target}"
-    );
-}
-
 #[test]
 fn outline_wheel_scrolls_panel_only_when_pointer_inside() {
     let mut text = String::from("# 目录\n");
@@ -11428,7 +11604,7 @@ fn perf_after_edit_breakdown() {
     println!("p95_recompute_geometry_ms={:.3}", p95(&recompute));
 }
 
-// ---- 阶段 1：中文口径字数 + 专注/打字机模式 ----
+// ---- 阶段 1：中文口径字数 + 专注模式 ----
 
 /// 在帧的 [y0, y1) 行内找首个非背景像素（文本/光标/装饰）。
 fn first_non_bg(f: &Frame, y0: i32, y1: i32, bg: [u8; 4]) -> Option<(u32, u32, [u8; 4])> {
@@ -11516,25 +11692,6 @@ fn focus_mode_dims_only_non_caret_blocks() {
     assert!(lum(dimmed) > lum(p1.2), "压暗即向背景色靠拢");
     // 纯视觉开关：源码一个字节都不变
     assert_eq!(doc_text(&a), "第一段\n\n第二段\n");
-}
-
-#[test]
-fn typewriter_mode_pins_caret_line_to_anchor() {
-    let store = MemStore::default();
-    let text = "line\n\n".repeat(100);
-    let mut a = app(&text, None, false, &store);
-    a.editor.set_caret(360); // 第 61 块起点（每块 6 字节）
-    a.toggle_typewriter();
-    assert!(a.ui_state.writing.typewriter);
-    let vp = a.viewport();
-    let target = vp.y + vp.h * 0.42;
-    let (_, cy, ch) = a.caret_screen();
-    assert!(a.window_state.scroll_y > 0.0, "开启即滚动到锚点");
-    assert!(
-        (cy + ch / 2.0 - target).abs() <= ch,
-        "光标行中心贴合锚点：cy={cy} target={target}"
-    );
-    assert_eq!(doc_text(&a), text, "只改视口，不动文本");
 }
 
 // ---- 2e 端到端场景：打开→编辑→表格→图片→查找→保存→重开→恢复（红线 e2e 断言 ≥20）----
@@ -11748,22 +11905,6 @@ fn e2e_search_replace_and_crash_recovery() {
 }
 
 // ---- 打印（3b）：分页引擎 + 干净帧 + 状态复原 ----
-
-/// 打印预览端口探针：只提供整页位图，触发打印即视为测试失败。
-#[derive(Clone)]
-struct PreviewProbe {
-    pages: Vec<PreviewPage>,
-    calls: Rc<Cell<usize>>,
-}
-impl Print for PreviewProbe {
-    fn print(&mut self, _s: &mut PrintSession) {
-        panic!("打印预览不应产生打印作业");
-    }
-    fn preview_pages(&mut self, _s: &mut PrintSession) -> Result<Vec<PreviewPage>, String> {
-        self.calls.set(self.calls.get() + 1);
-        Ok(self.pages.clone())
-    }
-}
 
 /// 打印几何采样：begin 后各块 (top, 行顶序列)，断点合法性（不劈行）的判定依据。
 type PrintGeoms = Rc<RefCell<Vec<(f32, Vec<f32>)>>>;
@@ -12098,232 +12239,12 @@ fn print_stub_notices_when_platform_missing() {
     assert!(a.window_state.print.is_none(), "NoPrint 不进入打印态");
 }
 
-// ---- 8：PDF 导出（目录 / 页码）headless 断言 ----
-
-/// 导出探针：跑 begin_export（或 begin）→ 逐页采样 → end。
-#[derive(Clone, Default)]
-struct ExportProbe {
-    w: u32,
-    h: u32,
-    opt: ExportOptions,
-    legacy: bool,
-    pages: Rc<Cell<usize>>,
-    breaks: Rc<RefCell<Vec<f32>>>,
-    toc_count: Rc<Cell<usize>>,
-    entries: Rc<RefCell<Vec<(u8, String, usize)>>>,
-    heading_tops: Rc<RefCell<Vec<f32>>>,
-    frames: Rc<RefCell<Vec<Vec<u32>>>>,
-    ended: Rc<Cell<bool>>,
-}
-
-impl Print for ExportProbe {
-    fn print(&mut self, _s: &mut PrintSession) {
-        unreachable!("导出探针只走 export_pdf")
-    }
-
-    fn export_pdf(&mut self, s: &mut PrintSession) {
-        let pages = if self.legacy {
-            s.begin(self.w.max(1), self.h.max(1), 1.0)
-        } else {
-            s.begin_export(self.w.max(1), self.h.max(1), 1.0, self.opt)
-        };
-        self.pages.set(pages);
-        *self.breaks.borrow_mut() = s.page_breaks().to_vec();
-        self.toc_count.set(s.toc_entry_count());
-        *self.entries.borrow_mut() = s
-            .toc_entries()
-            .iter()
-            .map(|e| (e.level, e.text.clone(), e.page))
-            .collect();
-        *self.heading_tops.borrow_mut() = s
-            .app
-            .index
-            .blocks
-            .iter()
-            .filter(|g| {
-                matches!(
-                    g.kind,
-                    BlockKind::AtxHeading(_) | BlockKind::SetextHeading(_)
-                )
-            })
-            .map(|g| g.top)
-            .collect();
-        let mut frames = Vec::new();
-        for i in 0..pages {
-            frames.push(s.render_page(i).pixels.clone());
-        }
-        *self.frames.borrow_mut() = frames;
-        s.end();
-        self.ended.set(true);
-    }
-}
-
-fn packed(c: [u8; 4]) -> u32 {
-    ((c[0] as u32) << 16) | ((c[1] as u32) << 8) | c[2] as u32
-}
-
-fn region_has_ink(frame: &[u32], width: u32, bg: u32, x0: u32, y0: u32, x1: u32, y1: u32) -> bool {
-    (y0..y1).any(|y| (x0..x1).any(|x| frame[(y as usize) * width as usize + x as usize] != bg))
-}
-
-fn export_doc() -> String {
-    let filler: String = (1..=12)
-        .map(|i| format!("正文段落 {i} 内容。\n\n"))
-        .collect();
-    format!("# 第一章\n\n{filler}## 第二节\n\n{filler}### 小节\n\n{filler}尾段\n")
-}
-
 #[test]
-fn export_toc_adds_pages_with_ink() {
-    let p = ExportProbe {
-        w: 300,
-        h: 120,
-        opt: ExportOptions {
-            page_numbers: false,
-            toc: true,
-        },
-        ..Default::default()
-    };
-    let (pages, breaks, count, frames, ended) = (
-        p.pages.clone(),
-        p.breaks.clone(),
-        p.toc_count.clone(),
-        p.frames.clone(),
-        p.ended.clone(),
-    );
-    let mut a = app_print(&export_doc(), Box::new(p));
-    assert!(!a.perform_menu(MenuAction::ExportPdf), "导出不退出应用");
-    assert!(ended.get(), "begin_export 之后必调 end");
-    let body_pages = breaks.borrow().len();
-    assert!(count.get() >= 3, "目录应含三个标题: {}", count.get());
-    assert!(
-        pages.get() > body_pages,
-        "目录页使总页数增加: {} vs {}",
-        pages.get(),
-        body_pages
-    );
-    let bg = packed(a.input_state.theme.bg);
-    let f0 = &frames.borrow()[0];
-    assert!(
-        f0.iter().any(|&px| px != bg),
-        "目录首页不应为空白（含标题/条目墨迹）"
-    );
-    assert!(a.window_state.print.is_none(), "导出态已退出");
-}
-
-#[test]
-fn export_without_toc_matches_plain_begin() {
-    let text = export_doc();
-    let toc_off = ExportProbe {
-        w: 300,
-        h: 120,
-        opt: ExportOptions {
-            page_numbers: false,
-            toc: false,
-        },
-        ..Default::default()
-    };
-    let (pages, breaks, frames) = (
-        toc_off.pages.clone(),
-        toc_off.breaks.clone(),
-        toc_off.frames.clone(),
-    );
-    let mut a = app_print(&text, Box::new(toc_off));
+fn export_pdf_stub_notices_when_platform_missing() {
+    let mut a = app_print("x\n", Box::new(NoPrint));
     a.perform_menu(MenuAction::ExportPdf);
-    assert_eq!(
-        pages.get(),
-        breaks.borrow().len(),
-        "无目录时总页数 = 正文页数"
-    );
-
-    let legacy = ExportProbe {
-        w: 300,
-        h: 120,
-        legacy: true,
-        ..Default::default()
-    };
-    let legacy_frames = legacy.frames.clone();
-    let mut b = app_print(&text, Box::new(legacy));
-    b.perform_menu(MenuAction::ExportPdf);
-    assert_eq!(
-        frames.borrow()[0],
-        legacy_frames.borrow()[0],
-        "关闭目录/页码时首页与 begin 完全一致"
-    );
-}
-
-#[test]
-fn export_page_numbers_draw_bottom_right_footer() {
-    let text = "a\n\nb\n";
-    let (w, h) = (300u32, 600u32);
-    let on = ExportProbe {
-        w,
-        h,
-        opt: ExportOptions {
-            page_numbers: true,
-            toc: false,
-        },
-        ..Default::default()
-    };
-    let on_frames = on.frames.clone();
-    let mut a = app_print(text, Box::new(on));
-    a.perform_menu(MenuAction::ExportPdf);
-    let bg = packed(a.input_state.theme.bg);
-    let on_ink = region_has_ink(&on_frames.borrow()[0], w, bg, w - 120, h - 48, w - 4, h - 4);
-
-    let off = ExportProbe {
-        w,
-        h,
-        opt: ExportOptions {
-            page_numbers: false,
-            toc: false,
-        },
-        ..Default::default()
-    };
-    let off_frames = off.frames.clone();
-    let mut b = app_print(text, Box::new(off));
-    b.perform_menu(MenuAction::ExportPdf);
-    let bg = packed(b.input_state.theme.bg);
-    let off_ink = region_has_ink(
-        &off_frames.borrow()[0],
-        w,
-        bg,
-        w - 120,
-        h - 48,
-        w - 4,
-        h - 4,
-    );
-
-    assert!(on_ink, "页码开启时页脚右下应有墨迹");
-    assert!(!off_ink, "页码关闭时页脚区域应为背景色");
-}
-
-#[test]
-fn export_toc_entry_pages_follow_breaks() {
-    let p = ExportProbe {
-        w: 300,
-        h: 120,
-        opt: ExportOptions {
-            page_numbers: false,
-            toc: true,
-        },
-        ..Default::default()
-    };
-    let (pages, breaks, entries, tops) = (
-        p.pages.clone(),
-        p.breaks.clone(),
-        p.entries.clone(),
-        p.heading_tops.clone(),
-    );
-    let mut a = app_print(&export_doc(), Box::new(p));
-    a.perform_menu(MenuAction::ExportPdf);
-    let toc_pages = pages.get() - breaks.borrow().len();
-    let entries = entries.borrow();
-    assert_eq!(entries.len(), tops.borrow().len());
-    for ((_, text, page), top) in entries.iter().zip(tops.borrow().iter()) {
-        let expected = breaks.borrow().partition_point(|&b| b <= *top) + 1 + toc_pages;
-        assert_eq!(*page, expected, "标题 {text:?} 的物理页码");
-    }
+    assert_eq!(a.ui_state.chrome.notice, "当前平台暂不支持导出 PDF");
+    assert!(a.window_state.print.is_none(), "无平台实现时不进入打印态");
 }
 
 // ── 3c-2：用户缩放（Ctrl+滚轮/捏合、Ctrl+=/-/0、视图菜单）────────────────────
@@ -12452,12 +12373,6 @@ fn zoom_ignored_during_print() {
         saved_scale: 1.0,
         saved_scroll: 0.0,
         breaks: vec![0.0],
-        toc_pages: 0,
-        toc_frames: Vec::new(),
-        footers: Vec::new(),
-        total_pages: 1,
-        options: ExportOptions::default(),
-        toc_entries: Vec::new(),
     });
     a.set_user_zoom(1.5);
     assert_eq!(a.input_state.user_zoom, 1.0, "打印页帧语义独占 scale");
@@ -12839,6 +12754,92 @@ fn menu_flags_track_save_undo_redo_availability() {
     assert!(d.menu_flags().can_save, "未命名草稿：保存可用");
 }
 
+/// D1/F2：空文档没有可输出内容，导出/打印在菜单层禁用；空白但合法的文档不受影响。
+#[test]
+fn menu_flags_disable_export_and_print_only_for_empty_document() {
+    let store = MemStore::default();
+    let mut empty = app("", None, false, &store);
+    assert!(!empty.menu_flags().can_export, "空文档不可导出");
+    for action in [MenuAction::Export, MenuAction::ExportPdf, MenuAction::Print] {
+        assert!(
+            !chrome::action_enabled(action, empty.menu_flags()),
+            "空文档必须禁用 {action:?}"
+        );
+    }
+    empty.editor.apply(Intent::InsertText("\n".into())).unwrap();
+    assert!(empty.menu_flags().can_export, "仅有空白也应视为有内容");
+    assert!(chrome::action_enabled(
+        MenuAction::ExportPdf,
+        empty.menu_flags()
+    ));
+}
+
+/// 空文档时快捷键与菜单同源：不得打开保存框、不得进入导出/打印错误路径。
+/// 有内容后同一快捷键恢复正常导出。
+#[test]
+fn empty_document_shortcuts_are_gated_like_menu() {
+    let (mut a, calls, dialog_calls) = app_export_with_dialog("", Some("out.html"));
+    a.input_state.mods = Mods {
+        ctrl: true,
+        ..Mods::default()
+    };
+    a.route_key(Key::E);
+    assert!(
+        dialog_calls.borrow().is_empty(),
+        "空文档 Ctrl+E 不得弹保存框"
+    );
+    assert!(calls.borrow().is_empty(), "空文档 Ctrl+E 不得调用导出器");
+    assert_eq!(
+        a.ui_state.chrome.notice,
+        t(I18nKey::NoticeOutputEmptyDocument)
+    );
+    assert!(a.ui_state.modal.is_none(), "不得进入错误弹窗路径");
+
+    a.input_state.mods.shift = true;
+    a.route_key(Key::E);
+    a.route_key(Key::P);
+    assert!(dialog_calls.borrow().is_empty(), "空文档导出/打印不得弹框");
+    assert!(calls.borrow().is_empty(), "空文档导出/打印不得产生输出");
+    assert_eq!(
+        a.ui_state.chrome.notice,
+        t(I18nKey::NoticeOutputEmptyDocument)
+    );
+
+    // 有内容后同一入口放行：Ctrl+E 先弹保存框，再调用导出器。
+    a.editor.apply(Intent::InsertText("x".into())).unwrap();
+    a.input_state.mods = Mods {
+        ctrl: true,
+        ..Mods::default()
+    };
+    a.route_key(Key::E);
+    assert_eq!(dialog_calls.borrow().len(), 1, "有内容时 Ctrl+E 应弹保存框");
+    assert_eq!(calls.borrow().len(), 1, "有内容时 Ctrl+E 应导出");
+}
+
+/// F1：已有模态时新错误不得静默丢弃——保留原模态，并把标题 + 恢复提示写入状态栏。
+#[test]
+fn error_while_modal_open_is_noted_not_dropped() {
+    let store = MemStore::default();
+    store
+        .files
+        .borrow_mut()
+        .insert(PathBuf::from("a.md"), b"ab".to_vec());
+    let mut a = app("ab", Some("a.md"), false, &store);
+    a.editor.apply(Intent::InsertText("x".into())).unwrap();
+    a.open_path(PathBuf::from("b.md"));
+    assert!(a.ui_state.modal.is_some(), "未保存确认占住模态");
+
+    store.fail_paths.borrow_mut().push(PathBuf::from("a.md"));
+    a.save_now();
+    assert!(a.ui_state.modal.is_some(), "既有模态不得被新错误覆盖");
+    let notice = a.ui_state.chrome.notice.clone();
+    assert!(notice.contains("保存失败"), "提示必须含错误标题: {notice}");
+    assert!(
+        notice.contains("请先关闭当前弹窗"),
+        "提示必须含可操作的恢复路径: {notice}"
+    );
+}
+
 #[test]
 fn menu_keyboard_skips_disabled_items_and_enter_is_noop() {
     let store = MemStore::default();
@@ -13042,6 +13043,46 @@ fn context_menu_keyboard_up_selects_last_and_enter_executes() {
     let sel = a.editor.selection().expect("全选应产生选区");
     assert_eq!((sel.start, sel.end), (0, 3));
     assert_eq!(a.editor.session().serialize(), "ab\n", "文档文本不得变化");
+}
+
+/// 选区右键的加粗/斜体/链接必须真实改写正文（与主菜单同一 Intent），
+/// 且一次撤销即可复原——只断言菜单项存在不足以防止映射写错。
+#[test]
+fn selection_ctx_actions_edit_text_and_undo_once() {
+    for (action, expected) in [
+        (ctx_menu::CtxAction::ToggleBold, "**hello**\n"),
+        (ctx_menu::CtxAction::ToggleItalic, "*hello*\n"),
+        (ctx_menu::CtxAction::InsertLink, "[hello]()\n"),
+    ] {
+        let store = MemStore::default();
+        let mut a = app("hello\n", None, false, &store);
+        assert!(a.editor.set_caret(0));
+        assert!(a.editor.set_caret_extend(5));
+        a.ui_state
+            .ctx
+            .open_at(10.0, 20.0, ctx_menu::CtxKind::Selection, None, None);
+        let i = a
+            .ui_state
+            .ctx
+            .items()
+            .iter()
+            .position(|&(_, act)| act == action)
+            .unwrap_or_else(|| panic!("选区菜单应含 {action:?}"));
+        a.ui_state.ctx.hover = Some(i);
+        a.route_key(Key::Enter);
+        assert_eq!(
+            a.editor.session().serialize(),
+            expected,
+            "{action:?} 必须真实改写正文"
+        );
+
+        a.perform_action(Action::Doc(Intent::Undo));
+        assert_eq!(
+            a.editor.session().serialize(),
+            "hello\n",
+            "{action:?} 必须一次撤销复原"
+        );
+    }
 }
 
 #[test]
@@ -13529,10 +13570,10 @@ fn non_toc_link_lists_keep_normal_list_rendering() {
     assert_eq!(texts, ["• A", "• B", "1. C", "2. 普通项"]);
 }
 
-/// `[TOC]` 视图目录在专注/打字机模式下继承同一渲染：同样无有序列表序号，
-/// 且两种模式切换不写回文档、不产生撤销步。
+/// `[TOC]` 视图目录在专注模式下继承同一渲染：同样无有序列表序号，
+/// 且模式切换不写回文档、不产生撤销步。
 #[test]
-fn toc_render_is_shared_in_focus_and_typewriter_modes() {
+fn toc_render_is_shared_in_focus_mode() {
     let store = MemStore::default();
     let src = "[TOC]\n\n# 一\n\n## 1.1 背景\n\n正文\n";
     let mut a = app(src, None, false, &store);
@@ -13562,13 +13603,6 @@ fn toc_render_is_shared_in_focus_and_typewriter_modes() {
         a.cache.layouts[&marker].layout_text(),
         plain,
         "专注模式同一渲染"
-    );
-    a.toggle_typewriter();
-    a.ensure_layouts_all();
-    assert_eq!(
-        a.cache.layouts[&marker].layout_text(),
-        plain,
-        "打字机模式同一渲染"
     );
     assert_eq!(a.editor.session().serialize(), src);
     assert!(!a.editor.is_dirty());
@@ -13883,6 +13917,42 @@ fn click_empty_mermaid_block(a: &mut App) {
     a.on_left_click();
 }
 
+/// 悬停第 n 个 Mermaid 块（0-based），用于同源码多块的目标选择测试。
+fn hover_nth_mermaid_block(a: &mut App, nth: usize) {
+    a.ensure_layouts_all();
+    let id = a
+        .index
+        .blocks
+        .iter()
+        .filter(|g| matches!(g.kind, BlockKind::Mermaid))
+        .nth(nth)
+        .map(|g| g.id)
+        .expect("文档应含第 n 个 Mermaid 块");
+    let top = geom(a, id).top;
+    let scale = a.input_state.scale;
+    let vp = a.viewport();
+    a.input_state.mouse = PhysicalPosition::new(
+        (MARGIN * scale + 8.0) as f64,
+        (vp.y + top - a.window_state.scroll_y + BASE_LINE_HEIGHT * scale / 2.0) as f64,
+    );
+}
+
+/// 在第 n 个 Mermaid 块上右键并执行指定菜单项。
+fn exec_nth_mermaid_action(a: &mut App, nth: usize, action: ctx_menu::CtxAction) {
+    hover_nth_mermaid_block(a, nth);
+    a.on_right_click();
+    assert!(a.ui_state.ctx.open, "mermaid 块右键应打开菜单");
+    let i = a
+        .ui_state
+        .ctx
+        .items()
+        .iter()
+        .position(|&(_, act)| act == action)
+        .expect("菜单应含目标项");
+    a.ui_state.ctx.hover = Some(i);
+    a.route_key(Key::Enter);
+}
+
 #[test]
 fn click_empty_mermaid_opens_template_only_menu() {
     let store = MemStore::default();
@@ -13981,6 +14051,24 @@ fn app_remote_assets(
     images: RemoteImages,
     assets: FakeAssets,
 ) -> App {
+    app_remote_assets_env(
+        text,
+        path,
+        store,
+        images,
+        assets,
+        theme::test_support::env(),
+    )
+}
+
+fn app_remote_assets_env(
+    text: &str,
+    path: Option<&str>,
+    store: &MemStore,
+    images: RemoteImages,
+    assets: FakeAssets,
+    theme_env: ThemeEnv,
+) -> App {
     let doc = Doc {
         text: text.into(),
         path: path.map(PathBuf::from),
@@ -14003,7 +14091,7 @@ fn app_remote_assets(
             exporter: Box::new(NoExport),
             dialogs: Box::new(NoDialogs),
             watcher: Box::new(NoWatcher),
-            theme_env: theme::test_support::env(),
+            theme_env,
             persist_env: persist_env(),
             print: Box::new(NoPrint),
             url_opener: no_url(),
@@ -14077,14 +14165,56 @@ fn mermaid_online_preview_requests_ink_then_opens_overlay() {
     );
 }
 
-/// 下载插入：写入 assets 并在块后插入图片引用；一次事务（undo_depth 恰 +1）。
+/// 预览请求挂起时再点「插入快照」：提示必须说图片正在生成，而不是「快照仍在生成」。
+#[test]
+fn preview_pending_uses_render_notice_for_snapshot_attempt() {
+    let store = MemStore::default();
+    let images = RemoteImages::default();
+    let requests = images.requests.clone();
+    let doc = "p\n\n```mermaid\ngraph TD\nA-->B\n```\n";
+    let mut a = app_remote_assets(
+        doc,
+        Some("C:\\tmp\\d.md"),
+        &store,
+        images.clone(),
+        FakeAssets {
+            result: Ok("d.assets/mermaid-1.png".into()),
+            calls: Rc::new(RefCell::new(Vec::new())),
+        },
+    );
+    exec_mermaid_action(&mut a, ctx_menu::CtxAction::MermaidPreviewImage);
+    assert_eq!(requests.borrow().len(), 1);
+    let pending = a.pending_mermaid_fetch.clone().expect("预览请求挂起");
+
+    exec_mermaid_action(&mut a, ctx_menu::CtxAction::MermaidInsertImage);
+    assert_eq!(
+        a.ui_state.chrome.notice,
+        t(I18nKey::NoticeMermaidRenderPending),
+        "预览挂起时不得说「快照仍在生成」"
+    );
+    assert_eq!(
+        a.pending_mermaid_fetch.as_ref().map(|p| p.insert),
+        Some(false),
+        "挂起项不得被插入请求覆盖"
+    );
+    assert_eq!(requests.borrow().len(), 1, "不得重复发起请求");
+
+    let url = pending.url.clone();
+    *images.results.borrow_mut() = vec![(url, Ok(solid(12, 8)))];
+    a.poll_remote_images();
+    assert!(a.ui_state.image_preview.is_some(), "原预览回包仍应打开浮层");
+    assert_eq!(a.editor.session().serialize(), doc);
+}
+
+/// 下载插入：写入 assets 并在闭合围栏之后自成段落；一次事务（undo_depth 恰 +1）。
+/// 断言完整文本，而不是 `contains`——图片进入围栏内部时必须失败。
 #[test]
 fn mermaid_online_insert_writes_asset_as_one_undo_step() {
     let store = MemStore::default();
     let images = RemoteImages::default();
     let requests = images.requests.clone();
     let calls = Rc::new(RefCell::new(Vec::new()));
-    let doc = "p\n\n```mermaid\ngraph TD\nA-->B\n```\n";
+    let doc = "p\n\n```mermaid\ngraph TD\nA-->B\n```\n尾段\n";
     let mut a = app_remote_assets(
         doc,
         Some("C:\\tmp\\d.md"),
@@ -14095,7 +14225,6 @@ fn mermaid_online_insert_writes_asset_as_one_undo_step() {
             calls: calls.clone(),
         },
     );
-    assert!(!a.config.mermaid_insert_url, "缺省配置必须走本地资产");
     let depth0 = a.editor.session().undo_depth();
 
     exec_mermaid_action(&mut a, ctx_menu::CtxAction::MermaidInsertImage);
@@ -14107,29 +14236,96 @@ fn mermaid_online_insert_writes_asset_as_one_undo_step() {
 
     assert_eq!(calls.borrow().len(), 1, "应落盘一次资产");
     assert_eq!(calls.borrow()[0].0, PathBuf::from("C:\\tmp\\d.md"));
-    let n = a.editor.session().text_len();
-    let text = a.editor.session().text_slice(Range::new(0, n)).unwrap();
-    assert!(
-        text.contains("![](d.assets/mermaid-1.png)"),
-        "应插入图片引用：{text}"
+    let text = a.editor.session().serialize();
+    assert_eq!(
+        text, "p\n\n```mermaid\ngraph TD\nA-->B\n```\n![](d.assets/mermaid-1.png)\n尾段\n",
+        "图片必须位于闭合围栏之后、自成段落"
     );
+    assert_eq!(
+        text.matches("![](").count(),
+        1,
+        "一次动作只新增一个图片引用"
+    );
+    assert!(!text.contains("mermaid.ink"), "快照动作不得写远程链接");
     assert_eq!(
         a.editor.session().undo_depth(),
         depth0 + 1,
         "插入必须是一条 undo 步骤"
     );
+    assert_eq!(
+        t(I18nKey::CtxMermaidInsertImage),
+        "插入本地图片快照（保留源码）"
+    );
+    assert!(
+        a.ui_state
+            .chrome
+            .notice
+            .contains("上方 Mermaid 源码块仍是活预览"),
+        "提示需说明活预览与快照的关系：{}",
+        a.ui_state.chrome.notice
+    );
+    assert!(a.ui_state.chrome.notice.contains("不会随源码更新"));
+    assert!(a.ui_state.chrome.notice.contains("d.assets/mermaid-1.png"));
 }
 
+/// 旧配置 `mermaid_insert_url = true` 仍只写本地资产：旧键在解析层静默忽略，
+/// 快照动作不再有 URL 分支。
 #[test]
-fn mermaid_online_explicit_url_config_writes_remote_reference() {
+fn mermaid_snapshot_ignores_legacy_insert_url_config() {
     let store = MemStore::default();
     let images = RemoteImages::default();
     let requests = images.requests.clone();
     let calls = Rc::new(RefCell::new(Vec::new()));
-    let doc = "p\n\n```mermaid\ngraph TD\nA-->B\n```\n";
+    let doc = "p\n\n```mermaid\ngraph TD\nA-->B\n```\n尾段\n";
+    let mut env = theme::test_support::env();
+    env.config = Box::new(MemConfig {
+        text: Rc::new(RefCell::new(Some(
+            "mermaid_insert_url = true\nallow_remote_images = true\n".into(),
+        ))),
+        saves: Rc::new(RefCell::new(Vec::new())),
+    });
+    let mut a = app_remote_assets_env(
+        doc,
+        Some("C:\\tmp\\d.md"),
+        &store,
+        images.clone(),
+        FakeAssets {
+            result: Ok("d.assets/mermaid-1.png".into()),
+            calls: calls.clone(),
+        },
+        env,
+    );
+    assert!(
+        a.ui_state.chrome.notice.is_empty(),
+        "旧键不得产生无法识别提示：{}",
+        a.ui_state.chrome.notice
+    );
+
+    exec_mermaid_action(&mut a, ctx_menu::CtxAction::MermaidInsertImage);
+    let url = requests.borrow()[0].clone();
+    *images.results.borrow_mut() = vec![(url, Ok(solid(20, 10)))];
+    a.poll_remote_images();
+
+    assert_eq!(calls.borrow().len(), 1, "旧配置 true 也必须本地落盘");
+    let text = a.editor.session().serialize();
+    assert_eq!(
+        text,
+        "p\n\n```mermaid\ngraph TD\nA-->B\n```\n![](d.assets/mermaid-1.png)\n尾段\n"
+    );
+    assert!(!text.contains("mermaid.ink"), "{text}");
+}
+
+/// 回包前在源码块内编辑：源码哈希失配 → 安全丢弃，绝不把图片写进围栏。
+#[test]
+fn mermaid_snapshot_response_dropped_when_source_changed() {
+    let store = MemStore::default();
+    let images = RemoteImages::default();
+    let requests = images.requests.clone();
+    let calls = Rc::new(RefCell::new(Vec::new()));
+    let doc = "p\n\n```mermaid\ngraph TD\nA-->B\n```\n尾段\n";
     let mut a = app_remote_assets(
         doc,
-        None,
+        Some("C:\\tmp\\d.md"),
         &store,
         images.clone(),
         FakeAssets {
@@ -14137,24 +14333,278 @@ fn mermaid_online_explicit_url_config_writes_remote_reference() {
             calls: calls.clone(),
         },
     );
-    a.config.mermaid_insert_url = true;
-
     exec_mermaid_action(&mut a, ctx_menu::CtxAction::MermaidInsertImage);
     let url = requests.borrow()[0].clone();
-    *images.results.borrow_mut() = vec![(url.clone(), Ok(solid(20, 10)))];
+
+    let body_end = a.editor.session().serialize().find("A-->B").unwrap() + "A-->B".len();
+    assert!(a.editor.set_caret(body_end));
+    a.insert_paste("\nA-->C");
+    let edited = a.editor.session().serialize();
+    assert_eq!(
+        edited,
+        "p\n\n```mermaid\ngraph TD\nA-->B\nA-->C\n```\n尾段\n"
+    );
+
+    *images.results.borrow_mut() = vec![(url, Ok(solid(20, 10)))];
     a.poll_remote_images();
 
-    let text = a.editor.session().serialize();
-    assert!(
-        text.contains(&format!("]({url})")),
-        "显式 true 应写远程 URL：{text}"
+    assert_eq!(
+        a.editor.session().serialize(),
+        edited,
+        "失配回包不得修改正文"
     );
-    assert!(calls.borrow().is_empty(), "URL 模式不得另写本地资产");
-    assert!(a.ui_state.chrome.notice.contains("不会随源码更新"));
+    assert_eq!(a.editor.session().serialize().matches("![](").count(), 0);
+    assert!(calls.borrow().is_empty(), "失配时不得落盘孤儿资产");
+    assert_eq!(
+        a.ui_state.chrome.notice,
+        t(I18nKey::NoticeMermaidSnapshotStale)
+    );
+}
+
+/// 同文两个完全相同的 Mermaid 块：右键第二个插入快照，必须落在第二个块之后，
+/// 第一个块保持不变（不能因源码哈希相同而丢弃回包）。
+#[test]
+fn mermaid_snapshot_targets_second_identical_block() {
+    let store = MemStore::default();
+    let images = RemoteImages::default();
+    let requests = images.requests.clone();
+    let calls = Rc::new(RefCell::new(Vec::new()));
+    let doc =
+        "前\n\n```mermaid\ngraph TD\nA-->B\n```\n中\n\n```mermaid\ngraph TD\nA-->B\n```\n尾\n";
+    let mut a = app_remote_assets(
+        doc,
+        Some("C:\\tmp\\d.md"),
+        &store,
+        images.clone(),
+        FakeAssets {
+            result: Ok("d.assets/mermaid-1.png".into()),
+            calls: calls.clone(),
+        },
+    );
+    exec_nth_mermaid_action(&mut a, 1, ctx_menu::CtxAction::MermaidInsertImage);
+    assert_eq!(
+        a.pending_mermaid_fetch.as_ref().and_then(|p| p.occurrence),
+        Some(1),
+        "请求必须记录第二个同源码块的序号"
+    );
+    let url = requests.borrow()[0].clone();
+    *images.results.borrow_mut() = vec![(url, Ok(solid(20, 10)))];
+    a.poll_remote_images();
+
+    assert_eq!(calls.borrow().len(), 1);
+    assert_eq!(
+        a.editor.session().serialize(),
+        "前\n\n```mermaid\ngraph TD\nA-->B\n```\n中\n\n```mermaid\ngraph TD\nA-->B\n```\n![](d.assets/mermaid-1.png)\n尾\n",
+        "快照必须落在第二个块之后，第一个块不得被改动"
+    );
+}
+
+/// 回包前删除第一个同源码块：原目标序号已越界，必须安全丢弃并提示，
+/// 不能把快照写到剩下的另一个块后面。
+#[test]
+fn mermaid_snapshot_occurrence_out_of_range_is_dropped() {
+    let store = MemStore::default();
+    let images = RemoteImages::default();
+    let requests = images.requests.clone();
+    let calls = Rc::new(RefCell::new(Vec::new()));
+    let doc =
+        "前\n\n```mermaid\ngraph TD\nA-->B\n```\n中\n\n```mermaid\ngraph TD\nA-->B\n```\n尾\n";
+    let mut a = app_remote_assets(
+        doc,
+        Some("C:\\tmp\\d.md"),
+        &store,
+        images.clone(),
+        FakeAssets {
+            result: Ok("d.assets/mermaid-1.png".into()),
+            calls: calls.clone(),
+        },
+    );
+    exec_nth_mermaid_action(&mut a, 1, ctx_menu::CtxAction::MermaidInsertImage);
+    assert_eq!(
+        a.pending_mermaid_fetch.as_ref().and_then(|p| p.occurrence),
+        Some(1)
+    );
+    let url = requests.borrow()[0].clone();
+
+    // 删除第一个 Mermaid 块（含围栏），文档里只剩一个同源码块。
+    let first = a
+        .index
+        .blocks
+        .iter()
+        .find(|g| matches!(g.kind, BlockKind::Mermaid))
+        .map(|g| g.range)
+        .expect("第一个 Mermaid 块");
+    assert!(a.editor.set_caret(first.start));
+    assert!(a.editor.set_caret_extend(first.end));
+    a.cut_selection();
+    let after_cut = a.editor.session().serialize();
+    assert_eq!(after_cut.matches("```mermaid").count(), 1, "{after_cut}");
+    assert!(a.pending_mermaid_fetch.is_some(), "编辑不得清空挂起项");
+
+    *images.results.borrow_mut() = vec![(url, Ok(solid(20, 10)))];
+    a.poll_remote_images();
+
+    assert_eq!(
+        a.editor.session().serialize(),
+        after_cut,
+        "序号越界不得改正文"
+    );
+    assert_eq!(a.editor.session().serialize().matches("![](").count(), 0);
+    assert!(calls.borrow().is_empty(), "越界时不得落盘孤儿资产");
+    assert_eq!(
+        a.ui_state.chrome.notice,
+        t(I18nKey::NoticeMermaidSnapshotStale)
+    );
+}
+
+/// 回包前在块前插入一行（源码未变）：锚点必须按当前索引重算，仍落在闭合围栏之后。
+#[test]
+fn mermaid_snapshot_anchor_follows_edits_before_block() {
+    let store = MemStore::default();
+    let images = RemoteImages::default();
+    let requests = images.requests.clone();
+    let doc = "p\n\n```mermaid\ngraph TD\nA-->B\n```\n尾段\n";
+    let mut a = app_remote_assets(
+        doc,
+        Some("C:\\tmp\\d.md"),
+        &store,
+        images.clone(),
+        FakeAssets {
+            result: Ok("d.assets/mermaid-1.png".into()),
+            calls: Rc::new(RefCell::new(Vec::new())),
+        },
+    );
+    exec_mermaid_action(&mut a, ctx_menu::CtxAction::MermaidInsertImage);
+    let url = requests.borrow()[0].clone();
+
+    assert!(a.editor.set_caret(0));
+    a.insert_paste("新增\n");
+    *images.results.borrow_mut() = vec![(url, Ok(solid(20, 10)))];
+    a.poll_remote_images();
+
+    assert_eq!(
+        a.editor.session().serialize(),
+        "新增\np\n\n```mermaid\ngraph TD\nA-->B\n```\n![](d.assets/mermaid-1.png)\n尾段\n",
+        "图片必须跟随块尾，不能使用打开菜单时的旧偏移"
+    );
+}
+
+/// 回包前切换文档：新文档一个字都不能改（挂起项在打开时已作废）。
+#[test]
+fn mermaid_snapshot_response_does_not_touch_other_document() {
+    let store = MemStore::default();
+    store
+        .files
+        .borrow_mut()
+        .insert(PathBuf::from("C:\\tmp\\b.md"), b"B document\n".to_vec());
+    let images = RemoteImages::default();
+    let requests = images.requests.clone();
+    let calls = Rc::new(RefCell::new(Vec::new()));
+    let doc = "p\n\n```mermaid\ngraph TD\nA-->B\n```\n尾段\n";
+    let mut a = app_remote_assets(
+        doc,
+        Some("C:\\tmp\\d.md"),
+        &store,
+        images.clone(),
+        FakeAssets {
+            result: Ok("d.assets/mermaid-1.png".into()),
+            calls: calls.clone(),
+        },
+    );
+    exec_mermaid_action(&mut a, ctx_menu::CtxAction::MermaidInsertImage);
+    let url = requests.borrow()[0].clone();
+
+    a.open_path(PathBuf::from("C:\\tmp\\b.md"));
+    assert!(a.pending_mermaid_fetch.is_none(), "换文档必须清空挂起项");
+    *images.results.borrow_mut() = vec![(url, Ok(solid(20, 10)))];
+    a.poll_remote_images();
+
+    assert_eq!(a.editor.session().serialize(), "B document\n");
+    assert!(calls.borrow().is_empty(), "不得为新文档落盘旧快照");
+}
+
+/// 回包时文档身份已变（路径被改写）：丢弃并提示，不修改正文。
+#[test]
+fn mermaid_snapshot_response_dropped_when_document_identity_changes() {
+    let store = MemStore::default();
+    let images = RemoteImages::default();
+    let requests = images.requests.clone();
+    let calls = Rc::new(RefCell::new(Vec::new()));
+    let doc = "p\n\n```mermaid\ngraph TD\nA-->B\n```\n尾段\n";
+    let mut a = app_remote_assets(
+        doc,
+        Some("C:\\tmp\\d.md"),
+        &store,
+        images.clone(),
+        FakeAssets {
+            result: Ok("d.assets/mermaid-1.png".into()),
+            calls: calls.clone(),
+        },
+    );
+    exec_mermaid_action(&mut a, ctx_menu::CtxAction::MermaidInsertImage);
+    let url = requests.borrow()[0].clone();
+
+    a.doc.path = Some(PathBuf::from("C:\\tmp\\other.md"));
+    *images.results.borrow_mut() = vec![(url, Ok(solid(20, 10)))];
+    a.poll_remote_images();
+
+    assert_eq!(a.editor.session().serialize(), doc);
+    assert!(calls.borrow().is_empty());
+    assert_eq!(
+        a.ui_state.chrome.notice,
+        t(I18nKey::NoticeMermaidSnapshotStale)
+    );
+}
+
+/// 挂起期间连续点击只落一个图片引用；重复回包走普通图片缓存，不再改正文。
+#[test]
+fn mermaid_snapshot_pending_blocks_repeated_clicks() {
+    let store = MemStore::default();
+    let images = RemoteImages::default();
+    let requests = images.requests.clone();
+    let calls = Rc::new(RefCell::new(Vec::new()));
+    let doc = "p\n\n```mermaid\ngraph TD\nA-->B\n```\n尾段\n";
+    let mut a = app_remote_assets(
+        doc,
+        Some("C:\\tmp\\d.md"),
+        &store,
+        images.clone(),
+        FakeAssets {
+            result: Ok("d.assets/mermaid-1.png".into()),
+            calls: calls.clone(),
+        },
+    );
+    exec_mermaid_action(&mut a, ctx_menu::CtxAction::MermaidInsertImage);
+    let url = requests.borrow()[0].clone();
+    let pending = a.pending_mermaid_fetch.clone();
+    exec_mermaid_action(&mut a, ctx_menu::CtxAction::MermaidInsertImage);
+    assert_eq!(
+        a.ui_state.chrome.notice,
+        t(I18nKey::NoticeMermaidSnapshotPending),
+        "挂起期间再次点击必须提示且不覆盖挂起项"
+    );
+    assert_eq!(a.pending_mermaid_fetch.as_ref().map(|p| &p.url), Some(&url));
+    assert_eq!(
+        a.pending_mermaid_fetch.as_ref().map(|p| p.source_hash),
+        pending.as_ref().map(|p| p.source_hash)
+    );
+
+    *images.results.borrow_mut() = vec![(url.clone(), Ok(solid(20, 10)))];
+    a.poll_remote_images();
+    *images.results.borrow_mut() = vec![(url, Ok(solid(20, 10)))];
+    a.poll_remote_images();
+
+    assert_eq!(calls.borrow().len(), 1, "只落盘一次");
+    let text = a.editor.session().serialize();
+    assert_eq!(
+        text.matches("![](").count(),
+        1,
+        "只新增一个图片引用：{text}"
+    );
 }
 
 #[test]
-fn mermaid_offline_insert_ignores_url_config_and_remote_switch() {
+fn mermaid_offline_insert_stays_local_when_remote_blocked() {
     let store = MemStore::default();
     let images = RemoteImages::default();
     let requests = images.requests.clone();
@@ -14174,13 +14624,12 @@ fn mermaid_offline_insert_ignores_url_config_and_remote_switch() {
     );
     a.ports.mermaid = Box::new(mermaid.clone());
     a.config.allow_remote_images = false;
-    a.config.mermaid_insert_url = true;
 
     exec_mermaid_action(&mut a, ctx_menu::CtxAction::MermaidInsertImage);
 
     assert!(requests.borrow().is_empty(), "完整版快照不得发起远程请求");
     assert_eq!(mermaid.blocking_count(), 1);
-    assert_eq!(calls.borrow().len(), 1, "即使配置 true 也必须本地落盘");
+    assert_eq!(calls.borrow().len(), 1, "离线版固定本地落盘");
     let inserted = a.editor.session().serialize();
     assert!(
         inserted.contains("![](d.assets/mermaid-1.png)"),
@@ -14248,7 +14697,6 @@ fn mermaid_local_snapshot_draft_failure_preserves_document() {
             calls: calls.clone(),
         },
     );
-    assert!(!a.config.mermaid_insert_url);
 
     exec_mermaid_action(&mut a, ctx_menu::CtxAction::MermaidInsertImage);
     let url = requests.borrow()[0].clone();
@@ -14285,7 +14733,6 @@ fn mermaid_offline_snapshot_save_failure_has_no_url_fallback() {
         },
     );
     a.ports.mermaid = Box::new(mermaid);
-    a.config.mermaid_insert_url = true;
 
     exec_mermaid_action(&mut a, ctx_menu::CtxAction::MermaidInsertImage);
 
@@ -14318,7 +14765,6 @@ fn mermaid_offline_render_failure_preserves_source_without_url_fallback() {
         },
     );
     a.ports.mermaid = Box::new(mermaid);
-    a.config.mermaid_insert_url = true;
 
     exec_mermaid_action(&mut a, ctx_menu::CtxAction::MermaidInsertImage);
 
@@ -14606,6 +15052,72 @@ fn mermaid_async_bitmap_stays_inside_own_block_before_and_after_scroll() {
             "滚动 {scroll} 后位图应绘制在自己的块内"
         );
     }
+}
+
+#[test]
+fn mermaid_async_wide_bitmap_is_clamped_to_content_width() {
+    // 回归：位图是 CSS 尺寸 ×2 光栅副本，≥2000px 宽图曾按原始像素当逻辑尺寸，
+    // 越出版心并与相邻块重叠。修复后按 DPI 还原 CSS 尺寸并限制在版心内。
+    let mermaid = RecordingMermaid::new();
+    let doc = "# 宽图\n\n```mermaid\nflowchart LR\n    A[开始] --> B[结束]\n```\n\n尾部正文。\n";
+    let mut a = app_with_mermaid(doc, mermaid.clone());
+    a.trigger_mermaid_auto();
+    let url = mermaid.last_request_url().expect("应请求自动预览");
+    mermaid
+        .poll_queue
+        .borrow_mut()
+        .push((url, Ok(test_mermaid_image(2400, 1200))));
+    a.poll_remote_images();
+    a.ensure_layouts_all();
+    a.recompute_geometry();
+
+    let source_at = doc.find("flowchart LR").unwrap();
+    let image_id = a
+        .index
+        .blocks
+        .iter()
+        .find(|g| {
+            g.kind == BlockKind::Mermaid && g.range.start <= source_at && source_at <= g.range.end
+        })
+        .unwrap()
+        .id;
+    let (px, pw, ph, layout_h) = {
+        let layout = &a.cache.layouts[&image_id].value;
+        let p = layout
+            .imgs
+            .iter()
+            .find(|p| matches!(p.key, InlineAsset::Mermaid(_)))
+            .expect("回包后应排出版图");
+        (p.x, p.width, p.height, layout.height)
+    };
+    let content_w = a.content_width();
+    assert!(
+        px >= -0.01 && px + pw as f32 <= content_w + 0.5,
+        "宽位图不得越出版心：x={px}, w={pw}, content_w={content_w}"
+    );
+    assert!(
+        pw as f32 <= content_w + 0.5,
+        "宽位图宽度必须压到版心内：w={pw}, content_w={content_w}"
+    );
+    assert!(
+        ph as f32 <= layout_h + 0.01,
+        "块高必须包含完整位图：h={ph}, layout_h={layout_h}"
+    );
+
+    let image = a.index.blocks.iter().find(|g| g.id == image_id).unwrap();
+    let next = a
+        .index
+        .blocks
+        .iter()
+        .find(|g| g.range.start >= image.range.end && g.id != image_id)
+        .expect("应有后续块");
+    assert!(
+        image.top + image.height <= next.top,
+        "图块底缘不得越过后续块起点：{} + {} > {}",
+        image.top,
+        image.height,
+        next.top
+    );
 }
 
 #[test]
@@ -16063,7 +16575,6 @@ fn caret_at_doc_end_keeps_two_lines_of_visible_space() {
         .collect::<String>();
     let mut a = app(&doc, None, false, &store);
     a.paint();
-    a.window_state.smooth = false;
     a.perform_action(Action::Doc(Intent::MoveDocEnd));
     a.scroll_to_caret();
     let scale = a.input_state.scale;
@@ -16520,71 +17031,6 @@ fn startup_error_mnemonic_o() {
     assert!(!a.window_state.exit_requested, "助记符出口不退出窗口");
 }
 
-// ---- 打印预览（6b）：翻页/缩放/关闭，纯视图态 ----
-
-#[test]
-fn print_preview_overlay_navigates_and_closes_without_doc_change() {
-    let store = MemStore::default();
-    let mut a = app("第一页\n\n第二页\n", Some("a.md"), false, &store);
-    let text = doc_text(&a);
-    let calls = Rc::new(Cell::new(0));
-    let page = |c: u8| PreviewPage {
-        width: 80,
-        height: 120,
-        pixels: vec![c; 80 * 120 * 4],
-    };
-    a.ports.print = Box::new(PreviewProbe {
-        pages: vec![page(200), page(100), page(50)],
-        calls: calls.clone(),
-    });
-    a.perform_menu(MenuAction::PrintPreview);
-    assert_eq!(calls.get(), 1, "打开预览应只取一次整页位图");
-    let pv = a.ui_state.print_preview.as_ref().expect("预览覆盖层已打开");
-    assert_eq!((pv.index, pv.zoom), (0, 0.0), "默认首页 + 适宽");
-    a.route_key(Key::Right);
-    assert_eq!(a.ui_state.print_preview.as_ref().unwrap().index, 1);
-    a.route_key(Key::PageDown);
-    assert_eq!(a.ui_state.print_preview.as_ref().unwrap().index, 2);
-    a.route_key(Key::Right);
-    assert_eq!(
-        a.ui_state.print_preview.as_ref().unwrap().index,
-        2,
-        "末页不越界"
-    );
-    a.route_key(Key::Home);
-    assert_eq!(a.ui_state.print_preview.as_ref().unwrap().index, 0);
-    // 缩放在适宽基础上放大/缩小，0 恢复适宽。
-    a.route_key(Key::Equal);
-    let z = a.ui_state.print_preview.as_ref().unwrap().zoom;
-    assert!(z > 1.0, "放大后 zoom > 1: {z}");
-    a.route_key(Key::Minus);
-    a.route_key(Key::Text("0".into()));
-    assert_eq!(a.ui_state.print_preview.as_ref().unwrap().zoom, 0.0);
-    assert_eq!(doc_text(&a), text, "预览期间文档字节不变");
-    a.route_key(Key::Escape);
-    assert!(a.ui_state.print_preview.is_none(), "Esc 关闭预览");
-    assert_eq!(doc_text(&a), text, "关闭后文档仍不变");
-}
-
-#[test]
-fn print_preview_renders_overlay_frame() {
-    let store = MemStore::default();
-    let mut a = app("正文\n", Some("a.md"), false, &store);
-    let before = a.render().pixels[0];
-    let calls = Rc::new(Cell::new(0));
-    a.ports.print = Box::new(PreviewProbe {
-        pages: vec![PreviewPage {
-            width: 40,
-            height: 60,
-            pixels: vec![255; 40 * 60 * 4],
-        }],
-        calls,
-    });
-    a.perform_menu(MenuAction::PrintPreview);
-    let after = a.render().pixels[0];
-    let sum = |p: u32| (p & 0xff) + ((p >> 8) & 0xff) + ((p >> 16) & 0xff);
-    assert!(sum(after) < sum(before), "预览覆盖层应压暗背景");
-}
 #[test]
 fn image_preview_renders_overlay_frame() {
     let (mut a, _calls, _files) = app_with_images(

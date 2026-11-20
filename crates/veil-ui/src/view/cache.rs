@@ -215,6 +215,12 @@ pub(crate) struct Cache {
     pub(crate) remote_failed: HashSet<String>,
     /// 已发起、尚未返回的远程请求：去重与轮询唤醒的依据。
     pub(crate) remote_pending: HashSet<String>,
+    /// Mermaid 块渲染位图：键 = BlockId，值 = resvg 光栅化的 RGBA 位图。
+    pub(crate) mermaid_imgs: HashMap<BlockId, crate::mermaid_renderer::MermaidImage>,
+    /// Mermaid 块失败记忆：键 = (source_hash, dark)，值 = 连续失败次数。
+    /// ≥ MAX_MERMAID_FAIL_COUNT（3）则永久禁用该块自动预览，直到源码变化（key 自然变）
+    /// 或主题切换（refresh_theme_visuals 主动 clear）。
+    pub(crate) mermaid_failed: HashMap<(u64, bool), u8>,
     /// 脚注渲染上下文缓存：(编号代次, 前缀色, 表)。代次与颜色均不变时复用同一份。
     pub(crate) footnote_ctx: Option<(u64, [u8; 3], std::rc::Rc<FootnoteCtx>)>,
     /// 图片缓存 LRU 追踪：key（inline 路径或 remote URL）→ 最近一次使用（插入或命中）
@@ -243,6 +249,8 @@ impl Default for Cache {
             remote_images: HashMap::new(),
             remote_failed: HashSet::new(),
             remote_pending: HashSet::new(),
+            mermaid_imgs: HashMap::new(),
+            mermaid_failed: HashMap::new(),
             footnote_ctx: None,
             image_last_used: HashMap::new(),
             image_limit_bytes: 200 * 1024 * 1024,
@@ -254,7 +262,11 @@ impl Default for Cache {
 impl Cache {
     /// 设置图片缓存字节上限（单位 MiB）。0 表示不限制。
     pub(crate) fn set_image_limit_mb(&mut self, mb: u32) {
-        self.image_limit_bytes = if mb == 0 { 0 } else { (mb as usize) * 1024 * 1024 };
+        self.image_limit_bytes = if mb == 0 {
+            0
+        } else {
+            (mb as usize) * 1024 * 1024
+        };
     }
 
     /// 当前相对纳秒时间戳（自 Cache 创建起算）。单调递增，可直接比较先后。
@@ -361,7 +373,7 @@ impl Cache {
         (m.key.base == base
             && m.key.toc == toc
             && m.key.reveal == m.value.reveal_state(kind, range, caret))
-            .then_some(m.key)
+        .then_some(m.key)
     }
 
     pub(crate) fn layout(
@@ -629,10 +641,22 @@ mod tests {
             width: 512,
             height: 384,
         };
-        c.insert_inline_image("a.png".into(), Memo { key: 1, value: img() });
+        c.insert_inline_image(
+            "a.png".into(),
+            Memo {
+                key: 1,
+                value: img(),
+            },
+        );
         // 时间戳来自 anchor.elapsed()，间隔 2ms 确保 a 严格早于 b
         std::thread::sleep(std::time::Duration::from_millis(2));
-        c.insert_inline_image("b.png".into(), Memo { key: 1, value: img() });
+        c.insert_inline_image(
+            "b.png".into(),
+            Memo {
+                key: 1,
+                value: img(),
+            },
+        );
         // 两张共 1.5 MiB > 1 MiB：最旧的 a 被逐出，b 保留
         assert!(c.inline_images.contains_key("b.png"), "最新条目应保留");
         assert!(!c.inline_images.contains_key("a.png"), "最旧条目应被逐出");
@@ -652,18 +676,39 @@ mod tests {
             width: 512,
             height: 384,
         };
-        c.insert_inline_image("a.png".into(), Memo { key: 1, value: img() });
+        c.insert_inline_image(
+            "a.png".into(),
+            Memo {
+                key: 1,
+                value: img(),
+            },
+        );
         // 间隔 2ms 保证插入时间戳严格递增
         std::thread::sleep(std::time::Duration::from_millis(2));
-        c.insert_inline_image("b.png".into(), Memo { key: 1, value: img() });
+        c.insert_inline_image(
+            "b.png".into(),
+            Memo {
+                key: 1,
+                value: img(),
+            },
+        );
         // 命中 a：a 的最近使用时间被刷新，b 反而成为最久未用
         assert!(c.image("a.png", 1).is_some());
         std::thread::sleep(std::time::Duration::from_millis(2));
         // 第三张使总量 2.25 MiB 超上限：须逐出 b（最久未用），而不是仍在使用中的 a
-        c.insert_inline_image("c.png".into(), Memo { key: 1, value: img() });
+        c.insert_inline_image(
+            "c.png".into(),
+            Memo {
+                key: 1,
+                value: img(),
+            },
+        );
         assert!(c.inline_images.contains_key("a.png"), "刚命中的 a 应保留");
         assert!(c.inline_images.contains_key("c.png"), "新插入的 c 应保留");
-        assert!(!c.inline_images.contains_key("b.png"), "最久未用的 b 应被逐出");
+        assert!(
+            !c.inline_images.contains_key("b.png"),
+            "最久未用的 b 应被逐出"
+        );
     }
 
     /// clear_remote 同步清空远程条目与 LRU 追踪（TR-3.2）。
@@ -861,8 +906,18 @@ mod tests {
         let mut c = Cache::default();
         let revs = Revs::default();
         let base = revs.base(800.0, 1.0, 600.0, false, 0);
-        let lk0 = LayoutKey { base, reveal: 0, toc: 0, highlight_epoch: 0 };
-        let lk1 = LayoutKey { base, reveal: 0, toc: 0, highlight_epoch: 0 };
+        let lk0 = LayoutKey {
+            base,
+            reveal: 0,
+            toc: 0,
+            highlight_epoch: 0,
+        };
+        let lk1 = LayoutKey {
+            base,
+            reveal: 0,
+            toc: 0,
+            highlight_epoch: 0,
+        };
 
         // 为 ids[0] 和 ids[1] 填充 rasters（值 = (像素, 宽, 高) 易构造）
         c.rasters.insert(

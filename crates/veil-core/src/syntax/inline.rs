@@ -2213,7 +2213,10 @@ mod tests {
         let src = "看 https://a.example/x，后再看";
         let ns = parse(src);
         let link = find_link(&ns).expect("裸 URL 应成链");
-        assert_eq!(&src[link.url.unwrap().start..link.url.unwrap().end], "https://a.example/x");
+        assert_eq!(
+            &src[link.url.unwrap().start..link.url.unwrap().end],
+            "https://a.example/x"
+        );
         // 对照：URL 内的非 ASCII 字母（中文路径）仍被保留。
         let src = "https://例子.example/路径";
         let ns = parse(src);
@@ -2226,12 +2229,17 @@ mod tests {
         // TASK04-D010：闭合的 `<...>` 不能再把后续裸 URL 判为“尖括号内”而抑制。
         let src = "<https://a.example> https://b.example www.example.com";
         let ns = parse(src);
-        let links: Vec<&InlineNode> =
-            ns.iter().filter(|n| n.kind == InlineKind::Link).collect();
+        let links: Vec<&InlineNode> = ns.iter().filter(|n| n.kind == InlineKind::Link).collect();
         assert_eq!(links.len(), 3, "自动链接 + 两个裸链接: {ns:?}");
         assert_eq!(links[0].range.end, 19);
-        assert_eq!(&src[links[1].range.start..links[1].range.end], "https://b.example");
-        assert_eq!(&src[links[2].range.start..links[2].range.end], "www.example.com");
+        assert_eq!(
+            &src[links[1].range.start..links[1].range.end],
+            "https://b.example"
+        );
+        assert_eq!(
+            &src[links[2].range.start..links[2].range.end],
+            "www.example.com"
+        );
         // 对照：普通文本中的 `>` 不影响其后裸 URL。
         let ns = parse("x > y https://b.example");
         assert_eq!(ns.iter().filter(|n| n.kind == InlineKind::Link).count(), 1);
@@ -2890,9 +2898,18 @@ mod tests {
     fn html_img_align_collected_only_for_whitelisted_values() {
         for (input, want) in [
             (r#"<img src="a.png" align="left">"#, Some(ImageAlign::Left)),
-            (r#"<img src="a.png" align="CENTER">"#, Some(ImageAlign::Center)),
-            (r#"<img src="a.png" align="centre">"#, Some(ImageAlign::Center)),
-            (r#"<img src="a.png" align=" right ">"#, Some(ImageAlign::Right)),
+            (
+                r#"<img src="a.png" align="CENTER">"#,
+                Some(ImageAlign::Center),
+            ),
+            (
+                r#"<img src="a.png" align="centre">"#,
+                Some(ImageAlign::Center),
+            ),
+            (
+                r#"<img src="a.png" align=" right ">"#,
+                Some(ImageAlign::Right),
+            ),
         ] {
             match &parse(input)[0].kind {
                 InlineKind::HtmlSelfClosed { attrs, .. } => {
@@ -2908,7 +2925,9 @@ mod tests {
             r#"<img src="a.png" align="">"#,
         ] {
             match &parse(input)[0].kind {
-                InlineKind::HtmlSelfClosed { attrs, .. } => assert_eq!(attrs.align, None, "{input}"),
+                InlineKind::HtmlSelfClosed { attrs, .. } => {
+                    assert_eq!(attrs.align, None, "{input}")
+                }
                 _ => panic!("expected HtmlSelfClosed Img for {input}"),
             }
         }

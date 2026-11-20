@@ -7,7 +7,7 @@ use crate::document::block_index::{gap_after, gap_between, BlockGeom};
 use crate::editor::Intent;
 use crate::geometry::{Rect, BASE_FONT_SIZE, BASE_LINE_HEIGHT, MARGIN, READABLE_COLS, WIDE_WINDOW};
 use crate::html::html_to_markdown;
-use crate::i18n::{t, tf, Key as I18nKey};
+use crate::i18n::{clip_error, t, tf, Key as I18nKey};
 use crate::input::{Action, Key, Mods};
 use crate::mode::{route, Cmd, Mode, TextSink};
 use crate::paint::{
@@ -442,7 +442,8 @@ impl App {
         }
     }
 
-    /// mermaid.ink 回包：预览填图片浮层；插入则落盘 assets 并插到 mermaid 块后（一条 undo）。
+    /// mermaid.ink 回包：预览填图片浮层；插入时根据渲染能力与配置决定策略。
+    /// 联网 renderer 尊重显式 URL 配置；离线 renderer 永远落盘，不能回退成远程 URL。
     pub(crate) fn finish_mermaid_fetch(
         &mut self,
         pending: PendingMermaidFetch,
@@ -451,11 +452,20 @@ impl App {
         match result {
             Ok(img) => {
                 if pending.insert {
-                    if let Some(end) = pending.block_end {
-                        self.editor.set_caret(end);
-                        self.window_state.goal_x = None;
+                    if self.config.mermaid_insert_url && self.ports.mermaid.requires_network() {
+                        if let Some(end) = pending.block_end {
+                            self.editor.set_caret(end);
+                            self.window_state.goal_x = None;
+                        }
+                        let alt = pending.title;
+                        let url = pending.url;
+                        let md = format!("\n![{alt}]({url})\n");
+                        self.editor.paste(&md);
+                        self.ui_state.chrome.notice =
+                            tf(I18nKey::NoticeMermaidImageInserted, &[&url]);
+                    } else {
+                        self.insert_mermaid_snapshot(&img, pending.block_end);
                     }
-                    self.insert_image_data(&img);
                     return;
                 }
                 self.cache.insert_remote_image(pending.url.clone(), img);
@@ -467,10 +477,36 @@ impl App {
                 });
             }
             Err(e) => {
-                self.ui_state.chrome.notice = tf(I18nKey::NoticeMermaidInkFailed, &[&e]);
+                self.ui_state.chrome.notice =
+                    tf(I18nKey::NoticeMermaidInkFailed, &[&clip_error(&e)]);
             }
         }
         self.request_redraw();
+    }
+
+    /// 将已经渲染的 Mermaid 位图保存为独立 PNG 快照，再插入相对路径。
+    /// 先保存、后移动光标和改正文，草稿或落盘失败时原文与光标均不变，也不回退 URL。
+    fn insert_mermaid_snapshot(&mut self, img: &crate::image::ImageData, block_end: Option<usize>) {
+        let Some(doc) = self.doc.path.clone() else {
+            self.ui_state.chrome.notice = t(I18nKey::NoticeMermaidSnapshotNeedsFile).into();
+            self.request_redraw();
+            return;
+        };
+        match self.ports.assets.save_pasted_image(&doc, img) {
+            Ok(rel) => {
+                if let Some(end) = block_end {
+                    self.editor.set_caret(end);
+                    self.window_state.goal_x = None;
+                }
+                self.insert_paste(&self.image_paragraph_markup(&rel));
+                self.ui_state.chrome.notice = tf(I18nKey::NoticeMermaidImageInserted, &[&rel]);
+            }
+            Err(e) => {
+                self.ui_state.chrome.notice =
+                    tf(I18nKey::NoticeMermaidSnapshotSaveFailed, &[&e.to_string()]);
+                self.request_redraw();
+            }
+        }
     }
 
     /// 图片文件插入（剪贴板文件列表）：与拖入同一条路径——解码 → 落盘 assets → 独占段插入。
@@ -910,14 +946,14 @@ impl App {
     /// 有选中时钳位在 `[0, n-1]`。高亮复用绘制既有的 `ctx.hover` / `chrome.hover_item`。
     pub(crate) fn menu_move(&mut self, d: i32) {
         if self.ui_state.ctx.open {
-            // 可停靠项：跳过分隔线
+            // 可停靠项：跳过分隔线与只读提示
             let nav: Vec<usize> = self
                 .ui_state
                 .ctx
                 .items()
                 .iter()
                 .enumerate()
-                .filter(|(_, (_, a))| *a != CtxAction::Separator)
+                .filter(|(_, (_, a))| ctx_menu::action_enabled(*a))
                 .map(|(i, _)| i)
                 .collect();
             if nav.is_empty() {
@@ -992,7 +1028,9 @@ impl App {
                 return;
             };
             if let Some(action) = self.ui_state.ctx.action(i) {
-                self.ctx_exec(action);
+                if ctx_menu::action_enabled(action) {
+                    self.ctx_exec(action);
+                }
             }
             self.ui_state.ctx.close();
             self.request_redraw();
@@ -1341,10 +1379,7 @@ impl App {
             // mermaid 围栏块（带专用菜单）→ 块级 link → 普通块
             // 图片与链接共用同一份 inline 解析（原实现各解析一次整块）。
             let nodes = self.inlines_at_offset(off);
-            match nodes
-                .as_deref()
-                .and_then(|n| self.image_at_in(n, off))
-            {
+            match nodes.as_deref().and_then(|n| self.image_at_in(n, off)) {
                 Some((path, missing)) => {
                     if missing {
                         // 缺失图片：菜单打开时给出可见提示（DEF-T67-E1-005）。
@@ -1354,10 +1389,7 @@ impl App {
                     }
                     (CtxKind::Image { path, missing }, None, None, None)
                 }
-                None => match nodes
-                    .as_deref()
-                    .and_then(|n| self.link_at_in(n, off))
-                {
+                None => match nodes.as_deref().and_then(|n| self.link_at_in(n, off)) {
                     Some(url) => (CtxKind::Link, Some(url), None, None),
                     None => match self.table_ctx_at(off) {
                         Some(tc) => (CtxKind::Table(tc), None, None, None),
@@ -1410,7 +1442,8 @@ impl App {
                 },
             }
         };
-        self.ui_state.ctx.remote_ok = self.config.allow_remote_images;
+        self.ui_state.ctx.remote_ok =
+            self.config.allow_remote_images || !self.ports.mermaid.requires_network();
         self.ui_state.ctx.open_at(mx, my, kind, link, mermaid_body);
         self.ui_state.ctx.mermaid_insert_start = insert_start;
         self.ui_state.ctx.mermaid_end = mermaid_end;
@@ -1478,10 +1511,10 @@ impl App {
         let g = self.index.blocks.iter().find(|g| {
             g.range.start <= off
                 && off <= g.range.end
-                && matches!(
+                && (matches!(
                     &g.kind,
                     BlockKind::FencedCode(Some(l)) if l.eq_ignore_ascii_case("mermaid")
-                )
+                ) || g.kind == BlockKind::Mermaid)
         })?;
         let (_, body) = self.editor.session().fenced_code_source(g.id)?;
         let src = self.editor.session().text_slice(g.range)?;
@@ -1511,10 +1544,10 @@ impl App {
             .find(|g| {
                 g.range.start <= off
                     && off <= g.range.end
-                    && matches!(
+                    && (matches!(
                         &g.kind,
                         BlockKind::FencedCode(Some(l)) if l.eq_ignore_ascii_case("mermaid")
-                    )
+                    ) || g.kind == BlockKind::Mermaid)
             })
             .is_some_and(|g| y >= g.top && y < g.top + self.block_height(g));
         if !inside {
@@ -1711,11 +1744,9 @@ impl App {
     /// 之间切换（块字节与解析结果不变）。
     pub(crate) fn sync_frontmatter_at_caret(&mut self) {
         let caret = self.effective_caret();
-        let revealed = self
-            .index
-            .blocks
-            .iter()
-            .any(|g| self.block_is_frontmatter(g) && g.range.start <= caret && caret <= g.range.end);
+        let revealed = self.index.blocks.iter().any(|g| {
+            self.block_is_frontmatter(g) && g.range.start <= caret && caret <= g.range.end
+        });
         if revealed != self.ui_state.frontmatter_revealed {
             self.ui_state.frontmatter_revealed = revealed;
             self.index.geometry_stale = true;
@@ -2223,12 +2254,62 @@ impl App {
                     _ => unreachable!(),
                 }
             }
-            // Mermaid：在线渲染（mermaid.ink）。仅在用户显式点击时联网，
-            // 关闭远程图片时拒绝；源码会发往第三方，首次点击给出一次性提示。
+            // Mermaid 手动预览/快照复用当前注入的 renderer：离线版本地同步渲染，
+            // 联网版仅在显式点击时请求 mermaid.ink。两条路径都不改写活源码。
             CtxAction::MermaidPreviewImage | CtxAction::MermaidInsertImage => {
                 let Some(body) = self.ui_state.ctx.mermaid_body.clone() else {
                     return;
                 };
+                let insert = matches!(action, CtxAction::MermaidInsertImage);
+                let dark = self.input_state.theme.dark;
+                let title = veil_core::detect_type(&body)
+                    .unwrap_or("mermaid")
+                    .to_string();
+                let block_end = self.ui_state.ctx.mermaid_end;
+
+                if !self.ports.mermaid.requires_network() {
+                    let label = format!(
+                        "mermaid-manual:{:016x}",
+                        crate::app::content_hash(format!("{body}\0{dark}").as_bytes())
+                    );
+                    match self
+                        .ports
+                        .mermaid
+                        .render_blocking(label.clone(), body, dark)
+                    {
+                        Ok(rendered) => {
+                            let img = crate::image::ImageData {
+                                pixels: rendered.data,
+                                width: rendered.width,
+                                height: rendered.height,
+                            };
+                            if insert {
+                                self.insert_mermaid_snapshot(&img, block_end);
+                            } else {
+                                self.cache.remote_failed.remove(&label);
+                                self.cache.insert_remote_image(label.clone(), img);
+                                self.input_state.revs.remote_images += 1;
+                                self.ui_state.image_preview = Some(ImagePreview {
+                                    key: label,
+                                    title,
+                                    zoom: 1.0,
+                                    pan: (0.0, 0.0),
+                                });
+                                self.request_redraw();
+                            }
+                        }
+                        Err(e) => {
+                            if !insert {
+                                self.cache.remote_failed.insert(label);
+                            }
+                            self.ui_state.chrome.notice =
+                                tf(I18nKey::NoticeMermaidInkFailed, &[&clip_error(&e)]);
+                            self.request_redraw();
+                        }
+                    }
+                    return;
+                }
+
                 if !self.config.allow_remote_images {
                     self.ui_state.chrome.notice = t(I18nKey::NoticeMermaidRemoteBlocked).into();
                     self.request_redraw();
@@ -2238,20 +2319,16 @@ impl App {
                     self.mermaid_ink_notice_shown = true;
                     self.ui_state.chrome.notice = t(I18nKey::NoticeMermaidInkNotice).into();
                 }
-                let insert = matches!(action, CtxAction::MermaidInsertImage);
                 let width = if insert {
                     veil_core::MERMAID_INK_INSERT_WIDTH
                 } else {
                     veil_core::MERMAID_INK_PREVIEW_WIDTH
                 };
-                let url = veil_core::mermaid_ink_png_url(&body, self.input_state.theme.dark, width);
-                let title = veil_core::detect_type(&body)
-                    .unwrap_or("mermaid")
-                    .to_string();
+                let url = veil_core::mermaid_ink_png_url(&body, dark, width);
                 self.pending_mermaid_fetch = Some(PendingMermaidFetch {
                     url: url.clone(),
                     insert,
-                    block_end: self.ui_state.ctx.mermaid_end,
+                    block_end,
                     title,
                 });
                 if self.cache.remote_pending.insert(url.clone()) {
@@ -2986,10 +3063,7 @@ impl App {
                             if let Some(u) = self.link_at_in(&nodes, off) {
                                 (Some(crate::normalize_link_url(&u)), true)
                             } else {
-                                (
-                                    Self::abbr_title_in(&nodes, off).map(str::to_owned),
-                                    false,
-                                )
+                                (Self::abbr_title_in(&nodes, off).map(str::to_owned), false)
                             }
                         }
                         None => (None, false),
@@ -3125,6 +3199,15 @@ impl App {
                 // 应用表单值到 Config
                 let previous_window = self.config.window;
                 self.config = s.form.apply(&self.config);
+                // 设置模态也能改「允许远程图片」：与视图菜单开关一致地同步后台开关，
+                // 阻止时清空待投递队列，避免旧开关状态下的排队请求继续出网。
+                self.ports
+                    .mermaid
+                    .set_allowed(self.config.allow_remote_images);
+                if !self.config.allow_remote_images {
+                    self.pending_mermaid_auto.clear();
+                    self.mermaid_auto_requested.clear();
+                }
                 // 清除/恢复默认几何（DEF-T07-002）：本次 apply 明确移除了窗口几何时，
                 // 必须一并丢弃本会话的几何脏位，否则关闭时 finish_close 会把此前
                 // resize 得到的当前几何写回，覆盖刚清除的结果。用户之后再次移动/缩放
@@ -4295,12 +4378,10 @@ impl App {
         }
         // Details 头块折叠态：只显示 summary 单行 + ▼/▶ 箭头。折叠态是纯 UI 状态，
         // 不参与 layout 缓存 key；直接在 block_height 层面钳高度，避免缓存污染。
+        // 光标进入 summary 或右键菜单落光标时也保持同一折叠几何。
         // 打印态恒展开（用户想看完整内容），跳过折叠钳制。
         if let BlockKind::Details { .. } = &g.kind {
-            if self.window_state.print.is_none()
-                && !self.ui_state.expanded_details.contains(&g.id)
-                // 光标进入头块时按 WYSIWYM 显示源码（多行），不做单行裁剪。
-                && !crate::view::node_active(g.range, caret)
+            if self.window_state.print.is_none() && !self.ui_state.expanded_details.contains(&g.id)
             {
                 // 物理像素：doc_line_height 是逻辑像素基准，几何与文本光栅都乘 scale
                 return (self.engine.doc_line_height() * self.input_state.scale).round();
@@ -4319,7 +4400,14 @@ impl App {
                 .map_or(g.est_h, |t| t.height);
         }
         self.cache
-            .layout(g.id, &g.kind, g.range, base, caret, self.toc_layout_epoch(g))
+            .layout(
+                g.id,
+                &g.kind,
+                g.range,
+                base,
+                caret,
+                self.toc_layout_epoch(g),
+            )
             .map_or(g.est_h, |l| l.height)
     }
 

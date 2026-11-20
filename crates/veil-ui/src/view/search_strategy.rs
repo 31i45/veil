@@ -303,11 +303,17 @@ pub(crate) fn find_all(hay: &str, needle: &str, case_sensitive: bool) -> Vec<Ran
     // 直接用原文 bytes 的借用（零分配）。折叠失败时回退原文大小写敏感扫描，
     // 与旧实现逐字节等价。
     let (hay_bytes, needle_bytes): (Cow<[u8]>, Cow<[u8]>) = if case_sensitive {
-        (Cow::Borrowed(hay.as_bytes()), Cow::Borrowed(needle.as_bytes()))
+        (
+            Cow::Borrowed(hay.as_bytes()),
+            Cow::Borrowed(needle.as_bytes()),
+        )
     } else if let (Some(h), Some(n)) = (fold_case(hay), fold_case(needle)) {
         (Cow::Owned(h.into_bytes()), Cow::Owned(n.into_bytes()))
     } else {
-        (Cow::Borrowed(hay.as_bytes()), Cow::Borrowed(needle.as_bytes()))
+        (
+            Cow::Borrowed(hay.as_bytes()),
+            Cow::Borrowed(needle.as_bytes()),
+        )
     };
     find_iter(&hay_bytes, &needle_bytes)
         .map(|i| Range::new(i, i + needle_bytes.len()))

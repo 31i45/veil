@@ -22,7 +22,7 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::Path;
 
 use common::{
-    actual_blocks, actual_inline, actual_inline_structure, canonical, export_body, expected_blocks,
+    actual_blocks, actual_inline, actual_inline_structure, canonical, expected_blocks, export_body,
     reference_inline, short, sig_short,
 };
 use veil_core::Session;
@@ -162,7 +162,9 @@ fn commonmark_0_31_2_conformance() {
                     c_pass += 1;
                     entry.4 += 1;
                 } else if c_fail.len() < 60 {
-                    c_fail.push(format!("#{id} {section}: expected={ec:?} actual={counts:?}"));
+                    c_fail.push(format!(
+                        "#{id} {section}: expected={ec:?} actual={counts:?}"
+                    ));
                 }
                 let d_ok = esig == asig;
                 if d_ok {

@@ -228,9 +228,7 @@ impl App {
         } else {
             estimate_h(session, new_range, chars_per_line, scale, line_h)
         };
-        let words = session
-            .text_slice(new_range)
-            .map_or(0, |t| count_words(&t));
+        let words = session.text_slice(new_range).map_or(0, |t| count_words(&t));
         let toc_marker = matches!(new_kind, BlockKind::Paragraph)
             && new_range.end - new_range.start <= 16
             && session
@@ -517,8 +515,7 @@ impl App {
                     .text_slice(range)
                     .is_some_and(|t| veil_core::is_toc_marker(&t));
             let toc_list = self.index.toc_lists.contains(&id);
-            let frontmatter_like =
-                frontmatter_like_of(self.editor.session(), &kind, range);
+            let frontmatter_like = frontmatter_like_of(self.editor.session(), &kind, range);
             toc_epoch ^= toc_entry_epoch(id, &kind);
             next.push(BlockGeom {
                 id,
@@ -572,20 +569,34 @@ impl App {
         // 前块只保留间距判定所需的轻量信息（不克隆 BlockKind，也不重扫块间文本）。
         #[allow(clippy::type_complexity)]
         let mut prev: Option<(f32, bool, bool, Range, BlockContainer, usize, bool)> = None;
+        let mut hidden_since_prev = false;
         for g in &mut blocks {
             g.height = self.block_height_with(g, base, caret);
             g.top = y;
             if g.details_hidden {
                 // 隐藏子块不占高度，也不参与后续块间距计算（上一个可见块保持不变）。
+                hidden_since_prev = true;
                 continue;
             }
             // REN-SWEEP-001：隐藏的 Front Matter 高 0，且不留前后段距。
             let hidden_fm = self.frontmatter_hidden(g, caret);
-            if let Some((prev_gap, prev_quote, prev_details, pr, pc, prev_end_line, prev_hidden_fm)) =
-                prev
+            if let Some((
+                prev_gap,
+                prev_quote,
+                prev_details,
+                pr,
+                pc,
+                prev_end_line,
+                prev_hidden_fm,
+            )) = prev
             {
-                // 块间空行数 = 下一块首行 - 上一块尾行（块边界均为行首，gap 全为换行）。
-                let blank = g.start_line.saturating_sub(prev_end_line) as u32;
+                // 普通块间只含空行，直接以行号差计算。跳过折叠 Details 子块后，
+                // 原始行号差还含隐藏正文与闭标签，必须只数当前块之前连续的空行。
+                let blank = if hidden_since_prev {
+                    self.blank_lines_directly_before(g.start_line)
+                } else {
+                    g.start_line.saturating_sub(prev_end_line) as u32
+                };
                 if !prev_hidden_fm {
                     y += gap_between_parts(
                         prev_gap,
@@ -612,6 +623,7 @@ impl App {
                 g.end_line,
                 hidden_fm,
             ));
+            hidden_since_prev = false;
         }
         // 文末留白（B5）：末行下方至少 `BOTTOM_PAD_LINES` 行可点击空白。
         // 另预留「下一个空段落」自身 1 行 + 尾空行行高：Enter 后在文末产生的新行
@@ -654,16 +666,16 @@ impl App {
         let end = (pos + 2).min(n);
         // details 的隐藏/折叠会改变「是否占高度」与后续块归属：退全量。
         // Front Matter 的隐藏/显示会改变块高与前后段距（REN-SWEEP-001）：同样退全量。
-        if self.index.blocks[start..end]
+        if self.index.blocks[start..end].iter().any(|g| {
+            g.details_hidden
+                || matches!(
+                    g.kind,
+                    BlockKind::Details { .. } | BlockKind::FrontMatter(_)
+                )
+                || g.container.details_depth > 0
+        }) || self.index.blocks[start..end]
             .iter()
-            .any(|g| {
-                g.details_hidden
-                    || matches!(g.kind, BlockKind::Details { .. } | BlockKind::FrontMatter(_))
-                    || g.container.details_depth > 0
-            })
-            || self.index.blocks[start..end]
-                .iter()
-                .any(|g| self.block_is_frontmatter(g))
+            .any(|g| self.block_is_frontmatter(g))
         {
             self.recompute_geometry();
             return;
@@ -683,7 +695,8 @@ impl App {
                 let p = i - 1;
                 let blank = self.index.blocks[i]
                     .start_line
-                    .saturating_sub(self.index.blocks[p].end_line) as u32;
+                    .saturating_sub(self.index.blocks[p].end_line)
+                    as u32;
                 let gap = gap_between(
                     &self.index.blocks[p].kind,
                     self.index.blocks[p].range,
@@ -724,16 +737,36 @@ impl App {
         }
         let text_len = self.editor.session().text_len();
         if let Some(last) = self.index.blocks.last() {
-            let tail_blank = self.blank_lines_in_gap(
-                last.range,
-                Range::new(text_len, text_len),
-            );
+            let tail_blank = self.blank_lines_in_gap(last.range, Range::new(text_len, text_len));
             let pad = gap_after(&last.kind)
                 + (tail_blank as f32 + doc::BLANK_LINE_LINES + doc::BOTTOM_PAD_LINES) * line_h;
             self.index.total_h = last.top + last.height + pad * scale;
         }
         self.index.incremental_pos = None;
         self.index.geometry_stale = false;
+    }
+
+    /// 当前块之前连续空白行的数量。折叠 Details 后跨过的源码含正文与闭标签，
+    /// 不能用首尾块行号差；逐行回扫会在最近的非空行（通常是 `</details>`）停止，
+    /// 因而只保留组外真实间距，且扫描量与组内正文长度无关。
+    fn blank_lines_directly_before(&self, line: usize) -> u32 {
+        let session = self.editor.session();
+        let mut count = 0;
+        for previous in (0..line).rev() {
+            let range = Range::new(
+                session.offset_of_line(previous),
+                session.offset_of_line(previous + 1),
+            );
+            if session
+                .text_slice(range)
+                .is_some_and(|text| text.trim().is_empty())
+            {
+                count += 1;
+            } else {
+                break;
+            }
+        }
+        count
     }
 
     /// 两块之间的空行数（块间空隙里的 `\n` 个数）。块区间含行尾换行，故
@@ -896,9 +929,9 @@ fn frontmatter_like_of(session: &Session, kind: &BlockKind, range: Range) -> boo
             if range.end.saturating_sub(range.start) < 7 {
                 return false;
             }
-            session.text_slice(range).is_some_and(|t| {
-                t.trim_start().starts_with("+++") && toml_frontmatter_like(&t)
-            })
+            session
+                .text_slice(range)
+                .is_some_and(|t| t.trim_start().starts_with("+++") && toml_frontmatter_like(&t))
         }
         _ => false,
     }

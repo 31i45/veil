@@ -402,12 +402,14 @@ fn build_print_layout(session: &mut PrintSession) -> Result<PrintLayout, String>
         page_numbers: cfg.page_numbers,
     };
     let mut media = PdfMedia::new(session.document_dir(), Some(crate::math_renderer()));
+    let mermaids = session.mermaid_images();
     let layout = layout_document(
         session.session(),
         &metrics,
         geom,
         opts,
         Some(&mut media),
+        &mermaids,
     );
     if layout.pages.is_empty() {
         return Err(t(Key::PrintErrNoPrintablePages).into());
@@ -772,6 +774,9 @@ impl Print for WinPrint {
             session.notice(t(Key::PrintNoPrinterContext));
             return;
         }
+        // 用户已确认打印：补齐缺失的 Mermaid 渲染（同步、有预算），
+        // 让 PDF/打印与预览同源；失败静默降级为源码围栏。
+        session.prepare_mermaid();
         // 页帧 = 打印机可打印区（不再额外扣 1 英寸：A4 版面自带配置页边距）；
         // 版面与 PDF 导出共用 pdf_layout，打印只负责把同一页画到设备上。
         let dpi = unsafe { GetDeviceCaps(hdc, LOGPIXELSX) }.max(1);
@@ -832,6 +837,9 @@ impl Print for WinPrint {
         // DEF-T09-004：重名导出递增命名（`name (2).pdf`），不替换既有文件。
         let target = crate::export::unique_file_path(&target);
 
+        // 位置已确认：补齐缺失的 Mermaid 渲染（同步、有预算），保证导出一致性。
+        session.prepare_mermaid();
+
         // —— 优先走原生 PDF（Wave 3A/4：Type0/CIDFontType2 + ToUnicode，可搜索/可复制/带书签）——
         // 失败时 try_native_pdf 已保证目标文件未被改动（tmp + 原子替换），
         // 因此这里绝不能再删 target，否则 GDI 也失败/取消时用户既有 PDF 会丢失。
@@ -844,6 +852,8 @@ impl Print for WinPrint {
     /// 打印预览：与 PDF 导出同一 `pdf_layout` 版面，离屏 GDI 渲染为整页位图。
     /// 覆盖层只读展示，不产生打印作业、不改文档。
     fn preview_pages(&mut self, session: &mut PrintSession) -> Result<Vec<PreviewPage>, String> {
+        // 预览无确认对话框：直接补齐缺失的 Mermaid 渲染，与 PDF 导出同源。
+        session.prepare_mermaid();
         let layout = build_print_layout(session)?;
         render_preview_pages(&layout)
     }
@@ -877,9 +887,7 @@ fn render_preview_pages(pl: &PrintLayout) -> Result<Vec<PreviewPage>, String> {
         let dib = if dc.is_null() {
             std::ptr::null_mut()
         } else {
-            unsafe {
-                CreateDIBSection(dc, &bmi, 0, &mut bits, std::ptr::null_mut(), 0)
-            }
+            unsafe { CreateDIBSection(dc, &bmi, 0, &mut bits, std::ptr::null_mut(), 0) }
         };
         if dc.is_null() || dib.is_null() || bits.is_null() {
             if dib.is_null() {
@@ -905,7 +913,16 @@ fn render_preview_pages(pl: &PrintLayout) -> Result<Vec<PreviewPage>, String> {
             DeleteObject(white);
         }
         for op in ops {
-            draw_op(dc, op, &pl.layout.images, &pl.metrics, pl.font_path, s, 0.0, 0.0);
+            draw_op(
+                dc,
+                op,
+                &pl.layout.images,
+                &pl.metrics,
+                pl.font_path,
+                s,
+                0.0,
+                0.0,
+            );
         }
         let mut pixels = vec![0u8; (w * h * 4) as usize];
         unsafe {
@@ -1009,6 +1026,7 @@ fn try_native_pdf(target: &std::path::Path, session: &mut PrintSession) -> Resul
     };
     let base_dir = session.document_dir();
     let mut media = PdfMedia::new(base_dir, Some(crate::math_renderer()));
+    let mermaids = session.mermaid_images();
 
     let layout = layout_document(
         session.session(),
@@ -1016,6 +1034,7 @@ fn try_native_pdf(target: &std::path::Path, session: &mut PrintSession) -> Resul
         geom,
         opts,
         Some(&mut media),
+        &mermaids,
     );
 
     if layout.pages.is_empty() {
@@ -1182,8 +1201,7 @@ mod tests {
         let Some(font_path) = find_cjk_font() else {
             return;
         };
-        let metrics =
-            FontMetrics::load(std::path::Path::new(font_path), "预览".chars()).unwrap();
+        let metrics = FontMetrics::load(std::path::Path::new(font_path), "预览".chars()).unwrap();
         let page = vec![DrawOp::Text(TextRun {
             x: 56.0,
             y: 80.0,
@@ -1217,7 +1235,10 @@ mod tests {
             )
         );
         assert_eq!(p.pixels.len(), (p.width * p.height * 4) as usize);
-        assert!(p.pixels.chunks_exact(4).all(|q| q[3] == 255), "alpha 不透明");
+        assert!(
+            p.pixels.chunks_exact(4).all(|q| q[3] == 255),
+            "alpha 不透明"
+        );
         assert!(
             p.pixels.chunks_exact(4).any(|q| q[0] < 250),
             "文字应被绘制到纸面"

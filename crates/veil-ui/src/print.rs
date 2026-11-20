@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 
 use crate::app::App;
 use crate::i18n::{t, tf, Key};
+use crate::mermaid_renderer::MermaidImage;
 use crate::theme::NativeWindow;
 use crate::tokens::palette;
 use crate::view::Frame;
@@ -490,6 +491,20 @@ impl PrintSession<'_> {
             .as_ref()
             .and_then(|p| p.parent())
             .map(|p| p.to_path_buf())
+    }
+
+    /// 当前缓存中已光栅化的 Mermaid 图表（BlockId → MermaidImage）。
+    /// 导出/打印时用于把 Mermaid 块绘制成位图。空 HashMap 表示无数据。
+    pub fn mermaid_images(&self) -> std::collections::HashMap<veil_core::BlockId, MermaidImage> {
+        self.app.cache.mermaid_imgs.clone()
+    }
+
+    /// 导出/打印前补齐缺失的 Mermaid 渲染（同步、有超时预算）。
+    ///
+    /// 由平台实现方在「用户已确认输出位置之后」调用：放在对话框之前会让取消操作
+    /// 也白等网络超时。重复调用幂等（命中缓存即跳过）。
+    pub fn prepare_mermaid(&mut self) {
+        self.app.ensure_mermaid_for_export();
     }
 
     /// 当前打印的分页总数（含目录页）；非打印中返回 0。

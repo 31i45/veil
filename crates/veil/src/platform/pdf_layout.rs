@@ -9,7 +9,9 @@ use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use veil_core::{BlockId, BlockKind, CellAlign, ImageAlign, InlineKind, InlineNode, Range, Session};
+use veil_core::{
+    BlockId, BlockKind, CellAlign, ImageAlign, InlineKind, InlineNode, Range, Session,
+};
 use veil_ui::i18n::{t, Key};
 
 use crate::platform::pdf::{
@@ -243,10 +245,7 @@ struct Head {
 fn link_target(url: &str) -> Option<LinkTarget> {
     const MAX_URI: usize = 2048;
     let u = url.trim();
-    if u.is_empty()
-        || u.len() > MAX_URI
-        || u.chars().any(|c| c.is_control() || c.is_whitespace())
-    {
+    if u.is_empty() || u.len() > MAX_URI || u.chars().any(|c| c.is_control() || c.is_whitespace()) {
         return None;
     }
     if let Some(anchor) = u.strip_prefix('#') {
@@ -285,10 +284,16 @@ struct Ctx<'a> {
     link_targets: Vec<LinkTarget>,
     /// 正在跨越的链接：(目标下标, 本行起点 x)。行尾闭合本行矩形并保留跨行状态。
     open_link: Option<(u32, f32)>,
+    /// Mermaid 渲染结果：BlockId → MermaidImage（SVG + 位图）。
+    mermaids: &'a std::collections::HashMap<veil_core::BlockId, veil_ui::MermaidImage>,
 }
 
 impl<'a> Ctx<'a> {
-    fn new(metrics: &'a dyn TextMetrics, geom: PageGeom) -> Self {
+    fn new(
+        metrics: &'a dyn TextMetrics,
+        geom: PageGeom,
+        mermaids: &'a std::collections::HashMap<veil_core::BlockId, veil_ui::MermaidImage>,
+    ) -> Self {
         Self {
             metrics,
             geom,
@@ -304,6 +309,7 @@ impl<'a> Ctx<'a> {
             anchors: HashMap::new(),
             link_targets: Vec::new(),
             open_link: None,
+            mermaids,
         }
     }
 
@@ -790,8 +796,7 @@ impl<'a> Ctx<'a> {
                             self.anchors
                                 .entry(format!("fnref:{id_txt}"))
                                 .or_insert((self.page, self.y));
-                            let idx =
-                                self.link_mark(LinkTarget::Anchor(format!("fn:{id_txt}")));
+                            let idx = self.link_mark(LinkTarget::Anchor(format!("fn:{id_txt}")));
                             out.push(LItem::LinkOpen(idx));
                             for c in format!("[{num}]").chars() {
                                 out.push(LItem::Ch(
@@ -1174,7 +1179,16 @@ impl<'a> Ctx<'a> {
                 }
             }
             if from < to {
-                self.rich(text.as_ref(), start, from, to, &nodes, Style::body(), indent, media);
+                self.rich(
+                    text.as_ref(),
+                    start,
+                    from,
+                    to,
+                    &nodes,
+                    Style::body(),
+                    indent,
+                    media,
+                );
             }
         }
         let h = self.y - start_y;
@@ -1443,6 +1457,66 @@ impl<'a> Ctx<'a> {
         self.y += 8.0;
     }
 
+    /// Mermaid 图表块：优先用缓存位图（若 SVG 可用则重新高 DPI 光栅化），
+    /// 嵌入 DrawOp::Image；无数据时降级为源码代码块。
+    fn mermaid_block(&mut self, s: &Session, id: BlockId, start: usize, end: usize) {
+        self.y += 4.0;
+        // 优先用 SVG 重新按 300dpi 光栅化（PDF 高 DPI 清晰）；否则用缓存位图。
+        let bitmap = if let Some(m) = self.mermaids.get(&id) {
+            if let Some(svg) = &m.svg_text {
+                crate::platform::mermaid::svg_to_bitmap(svg, 300.0 / 96.0 * 2.0).ok()
+            } else {
+                None
+            }
+            .or_else(|| {
+                Some(crate::platform::mermaid::MermaidBitmap {
+                    data: m.data.clone(),
+                    width: m.width,
+                    height: m.height,
+                    svg_text: None,
+                    px_to_pt: m.px_to_pt,
+                })
+            })
+        } else {
+            None
+        };
+        if let Some(bm) = bitmap {
+            // RGBA → RGB8（ImageData 格式）
+            let mut rgb = Vec::with_capacity((bm.width as usize) * (bm.height as usize) * 3);
+            for px in bm.data.chunks_exact(4) {
+                rgb.push(px[0]);
+                rgb.push(px[1]);
+                rgb.push(px[2]);
+            }
+            // px_to_pt：从 MermaidBitmap 字段取（resvg 光栅化时已按实际 scale 算好）
+            let px_to_pt = bm.px_to_pt;
+            let data = ImageData {
+                w: bm.width,
+                h: bm.height,
+                rgb,
+                baseline_px: 0.0,
+                px_to_pt,
+            };
+            let idx = self.push_image(data);
+            let im = &self.images[idx];
+            let (w, h) = (im.pt_w(), im.pt_h());
+            self.ensure(h + 8.0);
+            let x = self.geom.margin_x + (self.max_w() - w).max(0.0) / 2.0;
+            let top = self.y;
+            self.pages[self.page].push(DrawOp::Image {
+                x,
+                y: top,
+                w,
+                h,
+                id: idx,
+            });
+            self.y += h + 8.0;
+        } else {
+            // 无 Mermaid 数据：降级为源码代码块
+            self.code(s, id, start, end, true);
+        }
+    }
+
     /// details 头块的 summary 行（B3）：PDF 恒展开，只画标题行，正文由子块排版。
     /// 箭头用 ▼（U+25BC）而非 ▾（U+25BE），保证微软雅黑等系统字体能渲染。
     fn details_summary(&mut self, summary: &str) {
@@ -1534,8 +1608,7 @@ impl<'a> Ctx<'a> {
         for (num, id, body) in items {
             // 定义项锚点：正文引用 `[n]` → 此处；本项编号 → 首次引用位置。
             self.ensure(self.metrics.line_height(9.0));
-            self.anchors
-                .insert(format!("fn:{id}"), (self.page, self.y));
+            self.anchors.insert(format!("fn:{id}"), (self.page, self.y));
             let idx = self.link_mark(LinkTarget::Anchor(format!("fnref:{id}")));
             let mut items: Vec<LItem> = Vec::new();
             items.push(LItem::LinkOpen(idx));
@@ -1808,9 +1881,7 @@ fn split_footnote_def(text: &str) -> Option<(String, String)> {
 /// 脚注定义正文 → 可读纯文本：保留文字/代码/任务标记，丢弃强调/反引号等标记。
 fn footnote_plain_text(md: &str) -> String {
     use pulldown_cmark::{Event, Options, Parser};
-    let opts = Options::ENABLE_TABLES
-        | Options::ENABLE_STRIKETHROUGH
-        | Options::ENABLE_TASKLISTS;
+    let opts = Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
     let mut out = String::new();
     for ev in Parser::new_ext(md, opts) {
         match ev {
@@ -1888,8 +1959,9 @@ pub fn layout_document(
     geom: PageGeom,
     opts: LayoutOpts,
     mut media: Option<&mut dyn MediaProvider>,
+    mermaids: &std::collections::HashMap<veil_core::BlockId, veil_ui::MermaidImage>,
 ) -> DocLayout {
-    let mut ctx = Ctx::new(metrics, geom);
+    let mut ctx = Ctx::new(metrics, geom, mermaids);
     ctx.footnotes = collect_footnote_numbers(session);
     ctx.new_page();
 
@@ -1901,6 +1973,8 @@ pub fn layout_document(
             BlockKind::FencedCode(_) => {
                 ctx.code(session, id, start, end, true);
             }
+            // Mermaid：优先用缓存位图（若有 SVG 可重新高 DPI 光栅化），无数据降级为源码。
+            BlockKind::Mermaid => ctx.mermaid_block(session, id, start, end),
             BlockKind::IndentedCode => ctx.code(session, id, start, end, false),
             BlockKind::Math => ctx.block_math(session, id, &mut media),
             BlockKind::Table => ctx.table(session, id),
@@ -1965,9 +2039,15 @@ pub fn layout_document(
     // 标题锚点：slug（按标题顺序去重）→（最终页, 标题顶）。登记两份键：
     // 原 slug 与归一化后 slug（作者手写 `#Heading` 也能命中）。
     let titles: Vec<&str> = ctx.heads.iter().map(|h| h.text.as_str()).collect();
-    for (h, slug) in ctx.heads.iter().zip(veil_core::heading_slugs(titles.into_iter())) {
+    for (h, slug) in ctx
+        .heads
+        .iter()
+        .zip(veil_core::heading_slugs(titles.into_iter()))
+    {
         let at = (h.page + toc_pages, h.top_y);
-        ctx.anchors.entry(veil_core::heading_slug(&slug)).or_insert(at);
+        ctx.anchors
+            .entry(veil_core::heading_slug(&slug))
+            .or_insert(at);
         ctx.anchors.entry(slug).or_insert(at);
     }
     // 解析文档内锚点：命中则改为 Internal；未命中的锚点丢弃（不输出可执行动作）。
@@ -2025,6 +2105,7 @@ mod tests {
         let session = Session::open(md);
         let metrics = FakeMetrics;
         let geom = PageGeom::a4(20.0);
+        let mermaids = std::collections::HashMap::new();
         layout_document(
             &session,
             &metrics,
@@ -2034,12 +2115,14 @@ mod tests {
                 page_numbers: true,
             },
             None,
+            &mermaids,
         )
     }
 
     fn lay_with(session: &Session, toc: bool) -> DocLayout {
         let metrics = FakeMetrics;
         let geom = PageGeom::a4(20.0);
+        let mermaids = std::collections::HashMap::new();
         layout_document(
             session,
             &metrics,
@@ -2049,7 +2132,70 @@ mod tests {
                 page_numbers: true,
             },
             None,
+            &mermaids,
         )
+    }
+
+    /// 完整版 corpus 逐图走「本地 SVG → 高 DPI 位图 → 原生 PDF」；逐图释放位图以限制峰值内存。
+    #[cfg(feature = "mermaid-offline")]
+    #[test]
+    fn offline_mermaid_corpus_pdf_uses_local_images() {
+        use crate::platform::pdf::{find_cjk_font, render_pages};
+        use veil_ui::MermaidRenderer;
+
+        let font_path = find_cjk_font().expect("Windows CJK font");
+        let mut renderer = crate::platform::mermaid_offline::OfflineMermaid::new();
+        assert!(!renderer.requires_network());
+        renderer.set_allowed(false);
+
+        for &(name, source) in veil_mermaid_offline::corpus::MERMAID_11_12_CORPUS {
+            let markdown = format!("# {name}\n\n```mermaid\n{source}\n```\n");
+            let session = Session::open(&markdown);
+            let id = session
+                .blocks()
+                .into_iter()
+                .find_map(|(id, kind, _)| (kind == BlockKind::Mermaid).then_some(id))
+                .expect("Mermaid block");
+            let image = renderer
+                .render_blocking(name.into(), source.into(), false)
+                .unwrap_or_else(|error| panic!("{name}: {error}"));
+            let mut mermaids = HashMap::new();
+            mermaids.insert(id, image);
+
+            let doc = layout_document(
+                &session,
+                &FakeMetrics,
+                PageGeom::a4(20.0),
+                LayoutOpts::default(),
+                None,
+                &mermaids,
+            );
+            assert_eq!(doc.images.len(), 1, "{name}: PDF 必须重新光栅化本地 SVG");
+            assert!(!doc.images[0].rgb.is_empty(), "{name}: empty RGB image");
+            assert_eq!(
+                doc.pages
+                    .iter()
+                    .flatten()
+                    .filter(|op| matches!(op, DrawOp::Image { .. }))
+                    .count(),
+                1,
+                "{name}: Mermaid 必须生成图片绘制指令"
+            );
+            let bytes = render_pages(
+                &doc.pages,
+                &doc.images,
+                &doc.outline,
+                &doc.links,
+                Path::new(font_path),
+            )
+            .unwrap_or_else(|error| panic!("{name}: PDF render: {error}"));
+            assert!(bytes.starts_with(b"%PDF-"), "{name}: PDF header");
+            assert!(bytes.ends_with(b"%%EOF"), "{name}: PDF trailer");
+            assert!(
+                String::from_utf8_lossy(&bytes).contains("/Subtype /Image"),
+                "{name}: PDF image XObject missing"
+            );
+        }
     }
 
     // ===== Task 5：链接注释 =====
@@ -2128,13 +2274,8 @@ mod tests {
         // 跨页链接：同一 URL 的文字跨过分页，每页各自一个矩形（页下标正确）。
         let label = "跨页链接".repeat(1500);
         let doc = lay(&format!("[{label}](https://example.com/paged)\n"), false);
-        let pages: std::collections::HashSet<usize> =
-            doc.links.iter().map(|l| l.page).collect();
-        assert!(
-            pages.len() >= 2,
-            "跨页链接应在多页生成矩形: {:?}",
-            pages
-        );
+        let pages: std::collections::HashSet<usize> = doc.links.iter().map(|l| l.page).collect();
+        assert!(pages.len() >= 2, "跨页链接应在多页生成矩形: {:?}", pages);
         assert!(doc.links.iter().all(|l| l.page < doc.pages.len()));
     }
 
@@ -2144,10 +2285,18 @@ mod tests {
             "[a](javascript:alert(1)) [b](file:///C:/secret.txt) [c](data:text/html,hi)\n",
             false,
         );
-        assert!(doc.links.is_empty(), "危险 scheme 不得生成动作: {:?}", doc.links);
+        assert!(
+            doc.links.is_empty(),
+            "危险 scheme 不得生成动作: {:?}",
+            doc.links
+        );
         let long = format!("[x](https://example.com/{})\n", "x".repeat(2100));
         let doc = lay(&long, false);
-        assert!(doc.links.is_empty(), "超长 URL 不得生成动作: {:?}", doc.links);
+        assert!(
+            doc.links.is_empty(),
+            "超长 URL 不得生成动作: {:?}",
+            doc.links
+        );
     }
 
     // ===== N3c / N3b：高亮与 Callout 的 PDF 通道 =====
@@ -2539,12 +2688,14 @@ mod tests {
 
     fn lay_media(md: &str, media: &mut dyn MediaProvider) -> DocLayout {
         let session = Session::open(md);
+        let mermaids = std::collections::HashMap::new();
         layout_document(
             &session,
             &FakeMetrics,
             PageGeom::a4(20.0),
             LayoutOpts::default(),
             Some(media),
+            &mermaids,
         )
     }
 
@@ -2625,12 +2776,12 @@ mod tests {
         // 无 align / 行内图片：保持版心左缘续排。
         let (x, _) = image_x("<img src=\"fake.png\">\n", &mut media);
         assert!((x - geom.margin_x).abs() < 0.5, "left x={x}");
-        let (x, _) = image_x("前文 <img src=\"fake.png\" align=\"center\"> 后文\n", &mut media);
-        assert!(x > geom.margin_x, "行内图片不得跳位：x={x}");
-        assert!(
-            x < geom.margin_x + w + 30.0,
-            "行内图片应紧随前文：x={x}"
+        let (x, _) = image_x(
+            "前文 <img src=\"fake.png\" align=\"center\"> 后文\n",
+            &mut media,
         );
+        assert!(x > geom.margin_x, "行内图片不得跳位：x={x}");
+        assert!(x < geom.margin_x + w + 30.0, "行内图片应紧随前文：x={x}");
     }
 
     #[test]
@@ -2699,9 +2850,7 @@ mod tests {
             .iter()
             .flatten()
             .filter_map(|op| match op {
-                DrawOp::Text(t) if (t.size - 9.5).abs() < 0.01 && t.color == COL_MUTED => {
-                    Some(t.y)
-                }
+                DrawOp::Text(t) if (t.size - 9.5).abs() < 0.01 && t.color == COL_MUTED => Some(t.y),
                 _ => None,
             })
             .fold(f32::MIN, f32::max);
@@ -2752,12 +2901,14 @@ mod tests {
         let session = Session::open(md);
         let metrics = FakeMetrics;
         let mut media = FakeImageMedia;
+        let mermaids = std::collections::HashMap::new();
         let doc = layout_document(
             &session,
             &metrics,
             PageGeom::a4(20.0),
             LayoutOpts::default(),
             Some(&mut media),
+            &mermaids,
         );
         let ops: Vec<&DrawOp> = doc.pages.iter().flat_map(|p| p.iter()).collect();
         let img_idx = ops
@@ -2817,9 +2968,18 @@ mod tests {
         let session = Session::open(md);
         let doc = lay_with(&session, false);
         let text = all_text(&doc);
-        assert!(text.contains("para inside"), "details 内段落必须进 PDF: {text}");
-        assert!(text.contains("quote inside"), "details 内引用必须进 PDF: {text}");
-        assert!(text.contains("tail"), "details 后的尾部段落必须进 PDF: {text}");
+        assert!(
+            text.contains("para inside"),
+            "details 内段落必须进 PDF: {text}"
+        );
+        assert!(
+            text.contains("quote inside"),
+            "details 内引用必须进 PDF: {text}"
+        );
+        assert!(
+            text.contains("tail"),
+            "details 后的尾部段落必须进 PDF: {text}"
+        );
     }
 
     /// 真机 b7-outline.md 复刻：details 内正文段落 + 前后空行。
@@ -2834,7 +2994,10 @@ mod tests {
         let session = Session::open(md);
         let doc = lay_with(&session, false);
         let text = all_text(&doc);
-        assert!(text.contains("展开查看中文摘要"), "summary 必须进 PDF: {text}");
+        assert!(
+            text.contains("展开查看中文摘要"),
+            "summary 必须进 PDF: {text}"
+        );
         assert!(
             text.contains("折叠块内部的中文正文也应出现在 PDF 中。"),
             "details 内正文必须进 PDF: {text}"
@@ -2863,11 +3026,16 @@ mod tests {
         assert!(text.contains("引用摘要"), "summary 必须进 PDF: {text}");
         assert!(text.contains("引用正文"), "容器内正文必须进 PDF: {text}");
         assert!(text.contains("列表摘要"), "列表 summary 必须进 PDF: {text}");
-        assert!(text.contains("列表正文"), "列表容器内正文必须进 PDF: {text}");
+        assert!(
+            text.contains("列表正文"),
+            "列表容器内正文必须进 PDF: {text}"
+        );
         assert!(text.contains("尾"), "后续段落必须进 PDF: {text}");
         let lower = text.to_lowercase();
         assert!(
-            !lower.contains("<details") && !lower.contains("</details") && !lower.contains("<summary"),
+            !lower.contains("<details")
+                && !lower.contains("</details")
+                && !lower.contains("<summary"),
             "容器内 details 标签不得进 PDF: {text}"
         );
     }
@@ -2893,6 +3061,7 @@ mod tests {
             FontMetrics::load(std::path::Path::new(font_path), md.chars()).expect("字体度量");
         let session = Session::open(&md);
         let mut media = PdfMedia::new(Some(evidence.clone()), Some(crate::math_renderer()));
+        let mermaids = std::collections::HashMap::new();
         let doc = layout_document(
             &session,
             &metrics,
@@ -2902,6 +3071,7 @@ mod tests {
                 page_numbers: true,
             },
             Some(&mut media),
+            &mermaids,
         );
         let bytes = render_pages(
             &doc.pages,
@@ -3028,10 +3198,7 @@ mod tests {
                     }
                 }
             }
-            assert_eq!(
-                label_page, body_page,
-                "n={n}：代码标题与代码体被分页拆开"
-            );
+            assert_eq!(label_page, body_page, "n={n}：代码标题与代码体被分页拆开");
         }
     }
 }

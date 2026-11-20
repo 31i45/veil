@@ -412,7 +412,7 @@ mod win {
             set_sz(&prog, None, &description)?;
             set_state("ProgIdDesc", &description)?;
         } else {
-            kept.push("ProgID 描述");
+            kept.push(t(I18nKey::AssocProgIdDescription));
         }
         if is_vacant(&icon_key, None)? {
             let (key, _) = create_key(&icon_key)?;
@@ -426,7 +426,7 @@ mod win {
             set_sz(&key, None, &command)?;
             set_state("ProgIdCmd", &command)?;
         } else {
-            kept.push("打开命令");
+            kept.push(t(I18nKey::AssocOpenCommand));
         }
         if !kept.is_empty() {
             notes.push(tf(I18nKey::AssocRegisterKept, &[&kept.join("、")]));
@@ -490,7 +490,7 @@ mod win {
             delete_value(APP_ICON_KEY, None)?;
             delete_key_if_empty(APP_ICON_KEY);
         } else if current_icon.is_some() {
-            kept.push("veil.exe 图标");
+            kept.push(t(I18nKey::AssocAppIcon));
         }
 
         // 2) 「打开方式」列表：只删本程序新建的那一项
@@ -498,7 +498,7 @@ mod win {
         if recorded_open_with.as_deref() == Some("1") {
             delete_value(MD_OPEN_WITH_KEY, Some(PROG_ID))?;
         } else if read_raw(MD_OPEN_WITH_KEY, Some(PROG_ID))?.is_some() {
-            kept.push("「打开方式」项");
+            kept.push(t(I18nKey::AssocOpenWithEntry));
         }
 
         // 3) `.md` 默认值：只删本程序写入且仍指向本程序的值
@@ -507,7 +507,7 @@ mod win {
         if recorded_md.as_deref() == Some(PROG_ID) && current_md.as_deref() == Some(PROG_ID) {
             delete_value(MD_KEY, None)?;
         } else if current_md.as_deref() == Some(PROG_ID) {
-            kept.push(".md 默认值");
+            kept.push(t(I18nKey::AssocMarkdownDefault));
         }
 
         // 4) 本程序命名空间：逐值核对所有权，只删自己写入且未被改写的值；
@@ -515,9 +515,13 @@ mod win {
         let icon_key = format!("{PROG_ID_KEY}\\DefaultIcon");
         let cmd_key = format!("{PROG_ID_KEY}\\shell\\open\\command");
         for (sub, state, label) in [
-            (PROG_ID_KEY, "ProgIdDesc", "ProgID 描述"),
+            (
+                PROG_ID_KEY,
+                "ProgIdDesc",
+                t(I18nKey::AssocProgIdDescription),
+            ),
             (icon_key.as_str(), "ProgIdIcon", "DefaultIcon"),
-            (cmd_key.as_str(), "ProgIdCmd", "打开命令"),
+            (cmd_key.as_str(), "ProgIdCmd", t(I18nKey::AssocOpenCommand)),
         ] {
             let current = read_sz(sub, None)?;
             let recorded = read_sz(STATE_KEY, Some(state))?;

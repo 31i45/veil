@@ -395,10 +395,7 @@ mod tests {
         // pop_front 裁掉最旧的 20MB → 栈只剩小步
         let only = h.pop_undo().expect("小步应保留");
         assert_eq!(only.prim.inserted, "a");
-        assert!(
-            h.pop_undo().is_none(),
-            "旧的 20MB 步应被字节裁剪淘汰"
-        );
+        assert!(h.pop_undo().is_none(), "旧的 20MB 步应被字节裁剪淘汰");
     }
 
     // ---- 对抗性审查 Step 1：undo_bytes merge 同步 bug 最小复现 ----
@@ -407,9 +404,9 @@ mod tests {
     fn undo_bytes_sync_after_merge() {
         // 连续单字符插入触发 try_merge（连续性合并）
         let mut h = History::default();
-        h.record(ins(3, "a"));           // push_back, undo_bytes 应 = 1
+        h.record(ins(3, "a")); // push_back, undo_bytes 应 = 1
         assert_eq!(h.undo_bytes, 1, "第一次 record（不合并）undo_bytes 应为 1");
-        h.record(ins(4, "b"));           // try_merge 成功 → return，undo_bytes 应 = 2（被合并了新字节）
+        h.record(ins(4, "b")); // try_merge 成功 → return，undo_bytes 应 = 2（被合并了新字节）
 
         // 计算栈顶 Transaction 的真实字节数（merged inserted="ab", 字节=2）
         let top_tx = h.undo.back().unwrap();

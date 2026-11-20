@@ -20,6 +20,8 @@ pub const MERMAID_LIVE_BASE: &str = "https://mermaid.live/edit#pako:";
 
 /// mermaid.ink 图片渲染端点（用户显式触发才访问，非后台请求）。
 pub const MERMAID_INK_BASE: &str = "https://mermaid.ink/img/";
+/// mermaid.ink 的矢量端点（路径式，返回 `image/svg+xml`）。
+pub const MERMAID_INK_SVG_BASE: &str = "https://mermaid.ink/svg/";
 
 /// mermaid.ink 预览图宽度（逻辑像素）。
 pub const MERMAID_INK_PREVIEW_WIDTH: u32 = 1200;
@@ -95,6 +97,17 @@ pub fn detect_type(source: &str) -> Option<&'static str> {
         s if s.starts_with("erDiagram") => Some("er"),
         s if s.starts_with("gantt") => Some("gantt"),
         s if s.starts_with("pie") => Some("pie"),
+        s if s.starts_with("journey") => Some("journey"),
+        s if s.starts_with("mindmap") => Some("mindmap"),
+        s if s.starts_with("gitGraph") => Some("gitGraph"),
+        s if s.starts_with("block-beta") => Some("block"),
+        s if s.starts_with("requirementDiagram") => Some("requirement"),
+        s if s.starts_with("packet-beta") => Some("packet"),
+        s if s.starts_with("timeline") => Some("timeline"),
+        s if s.starts_with("c4Architecture") => Some("c4"),
+        s if s.starts_with("architecture-beta") => Some("architecture"),
+        s if s.starts_with("zenuml") => Some("zenuml"),
+        s if s.starts_with("wireviz") => Some("wireviz"),
         _ => None,
     }
 }
@@ -139,6 +152,27 @@ pub fn mermaid_ink_png_url(mermaid_source: &str, dark: bool, width: u32) -> Stri
     let compressed = gzip_bytes(&json);
     let encoded = base64url_encode(&compressed);
     format!("{MERMAID_INK_BASE}pako:{encoded}?type=png&width={width}&theme={theme}&bgColor={bg}")
+}
+
+/// 生成 mermaid.ink 的 SVG 渲染 URL（Veil 主预览管线使用）。
+///
+/// 返回的 SVG 文本字符串交由上层 resvg 光栅化为位图，与 Math 渲染管线
+/// （latex-rust → SVG → resvg → 位图）共享终点。`theme`/`bgColor` 参数已
+/// 内嵌在 URL 中，跟随编辑器主题切换自动重请求。
+pub fn mermaid_ink_svg_url(mermaid_source: &str, dark: bool) -> String {
+    let theme = if dark { "dark" } else { "default" };
+    let bg = if dark { "1B1B1F" } else { "FFFFFF" };
+    // htmlLabels:false 必须显式下发：mermaid.ink 新版本默认输出 foreignObject，
+    // resvg 无法光栅化其中的 HTML 标签（文字会整块丢失）。
+    let json = format!(
+        r#"{{"code":{}, "mermaid":{{"theme":"{theme}","htmlLabels":false,"flowchart":{{"htmlLabels":false}},"class":{{"htmlLabels":false}}}}, "autoSync":true, "updateDiagram":true}}"#,
+        json_escape(mermaid_source)
+    );
+    let compressed = gzip_bytes(&json);
+    let encoded = base64url_encode(&compressed);
+    // 注意：只能用路径式 `/svg/`。旧写法 `/img/...?type=svg` 已被上游忽略，
+    // 返回 image/jpeg（二进制 JPEG），上层按 UTF-8 解析会直接失败。
+    format!("{MERMAID_INK_SVG_BASE}pako:{encoded}?theme={theme}&bgColor={bg}")
 }
 
 /// 把任意字符串安全地嵌入 JSON 字符串字面量（无需 serde_json 依赖）。
@@ -211,6 +245,17 @@ mod tests {
     }
 
     #[test]
+    fn mermaid_ink_svg_url_uses_svg_endpoint() {
+        let url = mermaid_ink_svg_url("graph TD\n  A-->B", true);
+        // 回归：`/img/...?type=svg` 已被上游忽略并返回 JPEG，必须走 `/svg/`
+        assert!(url.starts_with(MERMAID_INK_SVG_BASE), "{url}");
+        assert!(url.contains("pako:"), "{url}");
+        assert!(url.contains("theme=dark"), "{url}");
+        assert!(url.contains("bgColor=1B1B1F"), "{url}");
+        assert!(!url.contains("type=svg"), "{url}");
+    }
+
+    #[test]
     fn template_constants_are_nonempty() {
         assert!(!FLOWCHART_TEMPLATE.is_empty());
         assert!(!SEQUENCE_TEMPLATE.is_empty());
@@ -255,9 +300,20 @@ mod tests {
         // pie
         assert_eq!(detect_type("pie\n  title Pie"), Some("pie"));
         assert_eq!(detect_type("pie title Test\n  A : 1"), Some("pie"));
-        // fallback — unknown keyword returns None
-        assert_eq!(detect_type("journey\n  title Test"), None);
-        assert_eq!(detect_type("mindmap\n  root((Test))"), None);
+        // journey / mindmap — 远程方案下这些图型由 mermaid.ink 渲染，detect_type 全部识别
+        assert_eq!(detect_type("journey\n  title Test"), Some("journey"));
+        assert_eq!(detect_type("mindmap\n  root((Test))"), Some("mindmap"));
+        // gitGraph / block-beta / requirement 等扩展图型
+        assert_eq!(detect_type("gitGraph\n  commit id:\"a\""), Some("gitGraph"));
+        assert_eq!(detect_type("block-beta\n  A 1"), Some("block"));
+        assert_eq!(
+            detect_type("requirementDiagram\n  element A"),
+            Some("requirement")
+        );
+        assert_eq!(detect_type("timeline\n  title Test"), Some("timeline"));
+        assert_eq!(detect_type("c4Architecture\n  actor A"), Some("c4"));
+        // fallback — 真 unknown keyword 仍返回 None
+        assert_eq!(detect_type("not_a_real_diagram\n  foo"), None);
     }
 
     #[test]
@@ -305,7 +361,9 @@ mod tests {
     }
 
     fn base64url_decode(s: &str) -> Vec<u8> {
-        URL_SAFE_NO_PAD.decode(s).expect("测试 payload 应为合法 base64url")
+        URL_SAFE_NO_PAD
+            .decode(s)
+            .expect("测试 payload 应为合法 base64url")
     }
 
     fn inflate_bytes(bytes: &[u8]) -> Vec<u8> {

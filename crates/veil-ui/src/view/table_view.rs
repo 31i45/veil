@@ -501,7 +501,8 @@ fn measure_clusters(
         .collect()
 }
 
-fn boundary_allowed(text: &str, left: &(usize, usize, f32), right: &(usize, usize, f32)) -> bool {    let prev = text.get(left.0..left.1).and_then(|s| s.chars().next_back());
+fn boundary_allowed(text: &str, left: &(usize, usize, f32), right: &(usize, usize, f32)) -> bool {
+    let prev = text.get(left.0..left.1).and_then(|s| s.chars().next_back());
     let next = text.get(right.0..right.1).and_then(|s| s.chars().next());
     match (prev, next) {
         // 占位内部（NBSP 连续段）不可断开，否则一张公式图会跨视觉行；

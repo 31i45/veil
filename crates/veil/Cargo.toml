@@ -3,9 +3,26 @@ name = "veil"
 edition.workspace = true
 version.workspace = true
 
+[features]
+default = []
+# veil-full.exe 专用：QuickJS + 完整 mermaid.js 离线渲染（体积 +约 5 MiB）
+mermaid-offline = ["dep:veil-mermaid-offline"]
+
+# 两个发行产物共用同一套 lib::run()；veil-full 需要显式开 feature 才可构建。
+[[bin]]
+name = "veil"
+path = "src/main.rs"
+
+[[bin]]
+name = "veil-full"
+path = "src/bin/veil-full.rs"
+required-features = ["mermaid-offline"]
+
 [dependencies]
 veil-core = { path = "../veil-core" }
 veil-ui = { path = "../veil-ui" }
+# 离线 Mermaid 引擎（仅 mermaid-offline feature 编译进产物）
+veil-mermaid-offline = { path = "../veil-mermaid-offline", optional = true }
 arboard = "3"
 # 公式渲染（ADR-002）：纯 Rust 排版+光栅化，字体内嵌；3.x 需 Rust 1.99（已满足）
 latex-rust = { version = "3.0", features = ["png"] }
@@ -23,3 +40,9 @@ notify = "8"
 pdf-writer = "0.15"
 ttf-parser = "0.25"
 subsetter = "0.2.6"
+# Mermaid 图表渲染（Task 2-5）：远程 mermaid.ink SVG + resvg 光栅化
+# default feature 集包含 text / system-fonts / raster-images / svgz / memmap-fonts
+# text 必需——mermaid.js 产出的 SVG 用 <text> 标签而非 foreignObject
+resvg = { version = "0.50", default-features = true }
+# resvg re-export 了 tiny_skia 但未 re-export tiny_skia_path——Transform::from_scale 在这里
+tiny-skia-path = "0.12"

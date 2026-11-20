@@ -180,12 +180,12 @@ impl App {
             } else {
                 theme.text
             };
-            if let Some(lab) = self.ui_state.chrome.labels.get_or_insert(
-                &mut self.engine,
-                &shown,
-                color,
-                scale,
-            ) {
+            if let Some(lab) =
+                self.ui_state
+                    .chrome
+                    .labels
+                    .get_or_insert(&mut self.engine, &shown, color, scale)
+            {
                 qw = lab.w as f32;
                 frame.blit(
                     &lab.pixels,

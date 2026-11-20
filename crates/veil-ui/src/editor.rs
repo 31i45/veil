@@ -1343,12 +1343,9 @@ impl Editor {
     /// 光标/选区是否触及表格块。Enter 在表格内必须保持结构（DEF-T67-E1-001）。
     fn touches_table(&self) -> bool {
         let start = self.selection().map_or(self.caret(), |sel| sel.start);
-        self.session
-            .blocks()
-            .iter()
-            .any(|(_, kind, range)| {
-                matches!(kind, BlockKind::Table) && range.start <= start && start < range.end
-            })
+        self.session.blocks().iter().any(|(_, kind, range)| {
+            matches!(kind, BlockKind::Table) && range.start <= start && start < range.end
+        })
     }
 
     fn newline(&mut self, caret: usize) -> Vec<BlockId> {
@@ -2079,7 +2076,11 @@ mod tests {
         // 表头单元格、分隔行、正文单元格都属表格块。
         for caret in [2, 12, 25] {
             let mut e = ed(src, caret);
-            assert_eq!(e.apply(Intent::Newline), None, "caret={caret} 应为安全 no-op");
+            assert_eq!(
+                e.apply(Intent::Newline),
+                None,
+                "caret={caret} 应为安全 no-op"
+            );
             assert_eq!(e.session().serialize(), src, "表格源码不得改变");
             assert_eq!(e.session().undo_depth(), 0, "不得产生撤销步");
         }

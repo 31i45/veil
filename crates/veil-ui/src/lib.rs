@@ -1,3 +1,4 @@
+//! 机制层 (Mechanism)：渲染管线 + 平台桥接，依赖策略层。
 //! veil-ui：视图适配器（阶段二）。
 //! 切片 1 栈：winit 直收事件（IME 走 spike 验证路径）+ softbuffer 软件呈现 + cosmic-text 排版。
 //! egui/GL 栈引入前提已由切片 15 推翻：自绘 chrome 与自绘模态，保持零 GUI 框架依赖。
@@ -27,6 +28,7 @@ mod image;
 mod input;
 mod interaction;
 mod math;
+mod mermaid_renderer;
 mod mode;
 mod paint;
 mod perf;
@@ -49,6 +51,7 @@ pub use chrome::path_label;
 pub use docio::decode;
 pub use image::{AssetMigration, AssetStore, ImageData, ImageLoader};
 pub use math::{MathImage, MathRenderer};
+pub use mermaid_renderer::{MermaidImage, MermaidRenderer};
 pub use print::{ExportOptions, NoPrint, PreviewPage, Print, PrintSession};
 pub use shell::run;
 pub use theme::{

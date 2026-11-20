@@ -48,3 +48,29 @@ fn veil_core_manifest_mentions_no_gui_or_async_crate() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// 三层架构守卫：机制层不得反向依赖编排层（详见 docs/architecture-layering.md）
+// ---------------------------------------------------------------------------
+
+/// veil-ui（机制层）不得引用 veil crate（编排层）的顶层类型。
+/// cargo tree -p veil-ui -e no-dev 不应出现 veil crate；此处 cargo test 的
+/// 编译阶段已足够保证依赖方向正确，额外 grep Cargo.toml 作为早期硬门禁。
+#[test]
+fn veil_ui_does_not_depend_on_veil_crate() {
+    let veil_ui_toml = include_str!("../../veil-ui/Cargo.toml");
+    assert!(
+        !veil_ui_toml.contains("veil = ") || !veil_ui_toml.contains("path = \"../veil\""),
+        "veil-ui must not depend on veil crate (策略层: veil-core, 编排层: veil bin)"
+    );
+}
+
+/// veil-mermaid-offline（机制层）同样不得引用 veil crate（编排层）。
+#[test]
+fn veil_mermaid_offline_does_not_depend_on_veil_crate() {
+    let offline_toml = include_str!("../../veil-mermaid-offline/Cargo.toml");
+    assert!(
+        !offline_toml.contains("veil = ") || !offline_toml.contains("path = \"../veil\""),
+        "veil-mermaid-offline must not depend on veil crate (策略层: veil-core, 编排层: veil bin)"
+    );
+}

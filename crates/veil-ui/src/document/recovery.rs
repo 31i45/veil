@@ -99,7 +99,11 @@ mod tests {
 
     #[test]
     fn roundtrip_with_path_and_bom() {
-        let data = encode_recovery(Some(Path::new("D:\\docs\\中文 a.md")), true, "中\n文\r\n内容");
+        let data = encode_recovery(
+            Some(Path::new("D:\\docs\\中文 a.md")),
+            true,
+            "中\n文\r\n内容",
+        );
         let r = decode_recovery(&data).expect("自编码应可解码");
         assert_eq!(r.path, Some(PathBuf::from("D:\\docs\\中文 a.md")));
         assert!(r.bom);

@@ -117,6 +117,7 @@ namespace VeilWalkthrough {
         [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr hWnd);
         [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetWindowText(IntPtr hWnd, System.Text.StringBuilder text, int count);
         [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
+        [DllImport("user32.dll")] public static extern uint GetDpiForWindow(IntPtr hWnd);
     }
 
     public static class Const {
@@ -253,6 +254,8 @@ function Save-WindowScreenshot {
         Write-Log 'WARN' "截图失败：窗口尺寸无效 ${w}x${h}"
         return $false
     }
+    $dpi = [VeilWalkthrough.Win32]::GetDpiForWindow($Hwnd)
+    Write-Log 'INFO' "真实窗口 DPI=$dpi（比例=$([Math]::Round($dpi / 96.0, 3))，物理像素=${w}x${h}，句柄=$Hwnd）"
     $bmp = New-Object System.Drawing.Bitmap($w, $h)
     $g = [System.Drawing.Graphics]::FromImage($bmp)
     $hdc = $g.GetHdc()
@@ -308,6 +311,10 @@ function Enter-Foreground {
     $prev = [VeilWalkthrough.Win32]::GetForegroundWindow()
     if ($prev -eq $Hwnd) { return $prev }
     [VeilWalkthrough.Win32]::ShowWindow($Hwnd, [VeilWalkthrough.Const]::SW_RESTORE) | Out-Null
+    # 前台锁下先做一次 topmost 往返并允许激活；真实点击/ SendKeys 才不会落到遮挡窗口。
+    $activateFlags = ([VeilWalkthrough.Const]::SWP_NOMOVE -bor [VeilWalkthrough.Const]::SWP_NOSIZE)
+    [VeilWalkthrough.Win32]::SetWindowPos($Hwnd, [VeilWalkthrough.Const]::HWND_TOPMOST, 0, 0, 0, 0, $activateFlags) | Out-Null
+    [VeilWalkthrough.Win32]::SetWindowPos($Hwnd, [VeilWalkthrough.Const]::HWND_NOTOPMOST, 0, 0, 0, 0, $activateFlags) | Out-Null
     [VeilWalkthrough.Win32]::SetForegroundWindow($Hwnd) | Out-Null
     Start-Sleep -Milliseconds 350
     if ([VeilWalkthrough.Win32]::GetForegroundWindow() -ne $Hwnd) {
@@ -333,6 +340,51 @@ function Send-RealClick {
     [VeilWalkthrough.Win32]::mouse_event($down, 0, 0, 0, [UIntPtr]::Zero)
     Start-Sleep -Milliseconds 80
     [VeilWalkthrough.Win32]::mouse_event($up, 0, 0, 0, [UIntPtr]::Zero)
+    Start-Sleep -Milliseconds 300
+}
+
+# 显式 postclick/postrclick/postkey 步骤：锁屏或无法前台化时，仍由真实目标窗口处理输入。
+# 不改变全局光标/前台，不伪造应用画面；日志与最终证据必须保留所用的窗口消息方式。
+function Send-WindowMessageClick {
+    param([IntPtr]$Hwnd, [int]$X, [int]$Y, [switch]$Right)
+    $lParam = [IntPtr](($Y -band 0xFFFF) * 65536 + ($X -band 0xFFFF))
+    $move = 0x0200
+    $down = if ($Right) { 0x0204 } else { 0x0201 }
+    $up = if ($Right) { 0x0205 } else { 0x0202 }
+    $button = if ($Right) { [IntPtr]2 } else { [IntPtr]1 }
+    [VeilWalkthrough.Win32]::PostMessage($Hwnd, $move, [IntPtr]::Zero, $lParam) | Out-Null
+    Start-Sleep -Milliseconds 80
+    [VeilWalkthrough.Win32]::PostMessage($Hwnd, $down, $button, $lParam) | Out-Null
+    Start-Sleep -Milliseconds 80
+    [VeilWalkthrough.Win32]::PostMessage($Hwnd, $up, [IntPtr]::Zero, $lParam) | Out-Null
+    Start-Sleep -Milliseconds 300
+}
+
+function Send-WindowMessageDrag {
+    param([IntPtr]$Hwnd, [int]$X1, [int]$Y1, [int]$X2, [int]$Y2)
+    $start = [IntPtr](($Y1 -band 0xFFFF) * 65536 + ($X1 -band 0xFFFF))
+    [VeilWalkthrough.Win32]::PostMessage($Hwnd, 0x0200, [IntPtr]::Zero, $start) | Out-Null
+    [VeilWalkthrough.Win32]::PostMessage($Hwnd, 0x0201, [IntPtr]1, $start) | Out-Null
+    for ($i = 1; $i -le 16; $i++) {
+        $x = $X1 + [int](($X2 - $X1) * $i / 16)
+        $y = $Y1 + [int](($Y2 - $Y1) * $i / 16)
+        $point = [IntPtr](($y -band 0xFFFF) * 65536 + ($x -band 0xFFFF))
+        [VeilWalkthrough.Win32]::PostMessage($Hwnd, 0x0200, [IntPtr]1, $point) | Out-Null
+        Start-Sleep -Milliseconds 25
+    }
+    $end = [IntPtr](($Y2 -band 0xFFFF) * 65536 + ($X2 -band 0xFFFF))
+    [VeilWalkthrough.Win32]::PostMessage($Hwnd, 0x0202, [IntPtr]::Zero, $end) | Out-Null
+    Start-Sleep -Milliseconds 400
+}
+
+function Send-WindowMessageKey {
+    param([IntPtr]$Hwnd, [string]$Chord)
+    $keys = @{ ESC = 0x1B; ENTER = 0x0D; HOME = 0x24; END = 0x23; PGUP = 0x21; PGDN = 0x22; DOWN = 0x28 }
+    $key = $Chord.ToUpperInvariant()
+    if (-not $keys.ContainsKey($key)) { throw "postkey 不支持的键：$Chord" }
+    [VeilWalkthrough.Win32]::PostMessage($Hwnd, [VeilWalkthrough.Const]::WM_KEYDOWN, [IntPtr]$keys[$key], [IntPtr]0) | Out-Null
+    Start-Sleep -Milliseconds 60
+    [VeilWalkthrough.Win32]::PostMessage($Hwnd, [VeilWalkthrough.Const]::WM_KEYUP, [IntPtr]$keys[$key], [IntPtr]0) | Out-Null
     Start-Sleep -Milliseconds 300
 }
 
@@ -429,6 +481,7 @@ function Invoke-Secondary {
 }
 
 # 步骤串：click:x,y / rclick:x,y / key:发送键串（SendKeys 语法，如 {TAB} ^p；{SPACE} 走 VK_SPACE） / type:文本 / wait:毫秒
+#   postclick/postrclick:x,y / postdrag:x1,y1,x2,y2 / postkey:ESC|ENTER|HOME|END|PGUP|PGDN|DOWN：显式向目标窗口投递输入（锁屏走查用）。
 #   shot:名字 / shot-screen:名字 / wait-windows:最小数量 / expect-windows:精确数量 / window:从0开始的编号
 #   window-title:唯一标题子串 / expect-title:当前窗口完整标题 / close / wait-exit / shot-windows:名字
 #   tile-windows：同 PID 文档窗口横向平铺，避免 PrintWindow 降级截图时相互遮挡。
@@ -452,6 +505,25 @@ function Invoke-Steps {
                 $xy = $arg.Split(',')
                 Send-RealClick -Hwnd $targetHwnd -X ([int]$xy[0]) -Y ([int]$xy[1]) -Right
                 Write-Log 'INFO' "右键 $arg"
+            }
+            'postclick' {
+                $xy = $arg.Split(',')
+                Send-WindowMessageClick -Hwnd $targetHwnd -X ([int]$xy[0]) -Y ([int]$xy[1])
+                Write-Log 'INFO' "窗口消息左键 $arg"
+            }
+            'postrclick' {
+                $xy = $arg.Split(',')
+                Send-WindowMessageClick -Hwnd $targetHwnd -X ([int]$xy[0]) -Y ([int]$xy[1]) -Right
+                Write-Log 'INFO' "窗口消息右键 $arg"
+            }
+            'postdrag' {
+                $xy = $arg.Split(',')
+                Send-WindowMessageDrag -Hwnd $targetHwnd -X1 ([int]$xy[0]) -Y1 ([int]$xy[1]) -X2 ([int]$xy[2]) -Y2 ([int]$xy[3])
+                Write-Log 'INFO' "窗口消息拖动 $arg"
+            }
+            'postkey' {
+                Send-WindowMessageKey -Hwnd $targetHwnd -Chord $arg
+                Write-Log 'INFO' "窗口消息按键 $arg"
             }
             'hover' {
                 # 仅移动鼠标（不按键）：客户端坐标转屏幕后 SetCursorPos，

@@ -374,6 +374,7 @@ impl Syntax {
         let b = self.get_block(block)?;
         let lang = match &b.kind {
             BlockKind::FencedCode(l) => l.clone(),
+            BlockKind::Mermaid => Some("mermaid".to_string()),
             _ => return None,
         };
         let start = buf.offset_of_line(b.start_line);
@@ -924,9 +925,9 @@ pub fn standalone_image_caption(
         return None;
     }
     let alt = match &node.kind {
-        InlineKind::Image => text.get(
-            node.content.start.checked_sub(base)?..node.content.end.checked_sub(base)?,
-        )?,
+        InlineKind::Image => {
+            text.get(node.content.start.checked_sub(base)?..node.content.end.checked_sub(base)?)?
+        }
         InlineKind::HtmlSelfClosed { attrs, .. } => attrs.alt.as_deref()?,
         _ => return None,
     };

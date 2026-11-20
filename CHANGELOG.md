@@ -4,21 +4,34 @@ Veil 版本迭代记录。每个版本的详细修复清单见对应 git tag 的
 
 ## Unreleased
 
-Mermaid 改为「外部创作流」：默认产物移除进程内渲染器（−4.7 MB / −28 依赖），改为右键在线预览与下载插入。
-
-### Removed
-- 移除 `crates/veil-mermaid`（QuickJS-ng + resvg + 内嵌 Tiny bundle）与 `mermaid-render` feature；exe 回落到约 9.5 MB、依赖 125。完整实现保留在 v1.9.0 tag，需要离线自动渲染时可从历史取回
+双发行产物：`veil.exe`（远程 Mermaid）+ `veil-full.exe`（完全离线 Mermaid）。
 
 ### Added
-- Mermaid 围栏块右键新增「预览图片（在线渲染）」与「下载并插入图片」：由 mermaid.ink 在线出图（PNG），预览进入现有图片浮层；插入写入 `<doc>.assets/mermaid-N.png` 并插入 `![](相对路径)`，一条 undo 回退
-- 仅在用户显式点击时联网；首次点击提示源码将发送给第三方；「Block Remote Images」开启时两项隐藏；「在 mermaid.live 预览」保持可用（本地编码 URL，不经第三方渲染）
+- `veil-full.exe`：新增 `crates/veil-mermaid-offline`（rquickjs 0.9 + 完整 `mermaid.js` 11.12.0 + linkedom headless DOM），Mermaid 图表全程本地渲染、零网络；与 `veil.exe` 共用同一 `lib::run()`，只有渲染器实现不同
+- 构建：`mermaid-offline` cargo feature + `src/bin/veil-full.rs`（`required-features`）；`release.yml` 以隔离的 `target-default` / `target-full` 同时构建/上传两个 exe 与 SHA-256，并加体积硬门禁（`veil.exe` ≤10 MiB、`veil-full.exe` ≤14 MiB）
+- 发布门禁：默认版按 ASCII 内容特征负向检查 QuickJS/linkedom/cytoscape/fcose，完整版正向检查同样的引擎特征（不再检查 `include_str!` 不保留的 `mermaid.min.js` 文件名）；Cargo test/clippy 的非零退出码不再被管道吞掉，Clippy 覆盖 `--all-targets`
+- Mermaid 快照：`mermaid_insert_url` 缺省改为本地 `assets` 相对路径；`veil.exe` 仅在显式 `true` 时写远程 URL，`veil-full.exe` 强制本地快照。源码始终是唯一真值，光标进入显示代码底色/等宽字体的围栏，快照被明确表达为独立且可能过期
+- 在线预览提示：`veil.exe` 自动渲染可见 Mermaid 块同样会把源码发给 mermaid.ink，首次自动请求显示一次性第三方提示，不再静默上传；离线实现不提示
 
 ### Changed
-- Mermaid 不再随文档自动渲染：编辑源码后需重新点击下载覆盖；导出 HTML/PDF 直接使用已插入的 PNG
+- 字体：文本光栅化把行基线（含上下标偏移）吸附到整数物理像素，消除行基线小数带来的垂直亚像素模糊；布局、光标、选区与命中几何不变。拉丁优先字体栈经实际解析与 A/B 目检后否决，维持 `Microsoft YaHei UI` 优先并记录原因
+- Mermaid 渲染：`MermaidRenderer::request` / `render_blocking` 改为携带 `(label, source, dark)`：远程实现用 label（mermaid.ink URL），离线实现直接用源码；上层缓存、去重与 pending 匹配逻辑不变
+- 结构：`crates/veil/src/main.rs` 拆为 `lib.rs`（`pub fn run()`）+ 两个薄入口，默认产物行为不变
+
+### Removed
+- 明确不采用 v1.9.0 的 `veil-mermaid` 实现（Tiny 子集 / 手写 DOM shim / 自有 worker 与缓存），也不提供「从 v1.9.0 取回」的路径
+
+### Fixed
+- Mermaid 自动预览/导出取源错误：`block range` 含 ``` 围栏行，源码被整段（含 fence）投递，mermaid 报 “No diagram type detected”、mermaid.ink 返回 400；改用 `fenced_code_source` 只取围栏内容，并补回归测试
+- mermaid.ink 端点失效：`/img/…?type=svg` 被上游忽略并返回 `image/jpeg`（按 UTF-8 解析必然失败）；改用路径式 `/svg/`，并在 payload 显式下发 `htmlLabels:false`（否则输出 foreignObject，resvg 无法光栅化标签）
+- kanban 浅色主题列标题不可读：Mermaid 11.12 默认给 `section-2` 白字 + 浅紫底（对比度不足 2:1）；浅色主题注入深色列标题并加 WCAG AA 回归测试，深色主题保留原浅色标签
+- 测试稳定性：默认版远程 SVG mock 使用 20ms 墙钟截止，CPU 争用时会出现假超时；文档记录必须串行执行测试，不改超时或断言口径
 
 ### Notes
-- 实测：exe 9,933,312 B ≈ 9.47 MiB（较 v1.8.0 −36,864 B）；workspace 依赖 125；`cargo test --workspace` 1791 passed / 14 ignored；clippy 零警告
-- 决策：低频功能不进入默认产物。若未来需要离线自动渲染，从 `v1.9.0` 取回完整实现或单独发布 `veil-full`，而不是恢复内置
+- 体积（2026-11-20 本机构建，隔离 target）：`veil.exe` 10,068,992 B ≈ 9.60 MiB（较 v1.8.0 的 9,970,176 B +98,816 B，门禁 ≤10 MiB）；`veil-full.exe` 13,998,080 B ≈ 13.35 MiB（离线渲染栈 +3.75 MiB，门禁 ≤14 MiB）
+- 测试：`cargo test --workspace --all-features` 1863 passed / 0 failed / 15 ignored；默认特性 release 1859 passed / 15 ignored（差额为 4 项特性门控测试）；`cargo clippy --workspace --all-features --all-targets -- -D warnings` 零警告
+- 离线覆盖：flowchart、sequence、class、state、er、journey、gantt、pie、quadrant、requirement、gitgraph、c4context、mindmap、timeline、sankey、xychart、block、packet、kanban、architecture、radar、treemap 共 22 类按内嵌 Mermaid 11.12.0 实际支持逐类验证（含 mindmap canvas2svg 全层级对比度、kanban 列标题与 journey 标签的浅色对比度修复），mindmap/kanban 提供浅深双主题 SVG+PNG 并排证据
+- 界面：固定简体中文单语表，不探测系统语言、无运行时切换；正文/导出/图内文字不随 UI 翻译。菜单与快捷键经 195 条命令矩阵走查，缺失项已按证据修复
 
 ## v1.9.0 — 2026-11-18
 

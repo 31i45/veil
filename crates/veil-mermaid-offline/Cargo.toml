@@ -1,0 +1,17 @@
+[package]
+name = "veil-mermaid-offline"
+edition.workspace = true
+version.workspace = true
+description = "veil 离线 Mermaid 渲染：QuickJS + 完整 mermaid.js + linkedom headless DOM"
+
+[dependencies]
+# QuickJS 引擎（bundled：编译期自带 QuickJS C 源码，无系统依赖）
+rquickjs = { version = "0.9", features = ["array-buffer"] }
+# 文本度量：与编辑器同一套字体栈，保证标签宽度/换行与实际排版一致
+cosmic-text = "0.19"
+
+[dev-dependencies]
+# corpus 必须验证浏览器布局结果确实能被产品所用的 resvg 光栅化。
+resvg = { version = "0.50", default-features = true }
+tiny-skia-path = "0.12"
+roxmltree = "0.21"

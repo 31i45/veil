@@ -254,10 +254,7 @@ impl TableLayout {
             }
             acc += w;
         }
-        let Some(cell) = self
-            .cells
-            .get(row * self.cols.len() + col)
-        else {
+        let Some(cell) = self.cells.get(row * self.cols.len() + col) else {
             return 0;
         };
         if let Some(map) = cell.caret_map.as_ref() {

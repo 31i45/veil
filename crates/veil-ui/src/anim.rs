@@ -105,9 +105,9 @@ impl Fade {
             self.prev = None;
         }
         self.cur_alpha = self.cur.map_or(0, |s| to_u8(alpha_in(&s, now)));
-        self.prev_alpha = self
-            .prev
-            .map_or(0, |s| to_u8(s.from * (1.0 - motion::ease_out_cubic(progress(&s, now)))));
+        self.prev_alpha = self.prev.map_or(0, |s| {
+            to_u8(s.from * (1.0 - motion::ease_out_cubic(progress(&s, now))))
+        });
         self.running = (self.cur.is_some() && self.cur_alpha < 255)
             || (self.prev.is_some() && self.prev_alpha > 0);
     }

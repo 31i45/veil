@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use veil_ui::i18n::{t, tf, Key};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Launch {
@@ -7,7 +8,9 @@ pub enum Launch {
     NewWindow(Option<PathBuf>),
 }
 
-const USAGE: &str = "用法: veil [--new-window] [路径]";
+fn usage() -> &'static str {
+    t(Key::CliUsage)
+}
 
 /// 以 `-` 开头且不是终止符的参数：未知选项，不得回退为路径
 /// （文件名以 `-` 开头时须用 `--` 显式终止选项解析）。
@@ -16,7 +19,7 @@ fn is_option(arg: &std::ffi::OsStr) -> bool {
 }
 
 fn unknown_option(arg: &std::ffi::OsStr) -> String {
-    format!("未知参数：{}；{USAGE}", arg.to_string_lossy())
+    tf(Key::CliUnknownOption, &[&arg.to_string_lossy(), usage()])
 }
 
 pub fn parse<I, S>(args: I) -> Result<Launch, String>
@@ -31,7 +34,7 @@ where
         return match args.as_slice() {
             [] => Ok(Launch::Default),
             [path] => Ok(Launch::Open(PathBuf::from(path))),
-            _ => Err(USAGE.into()),
+            _ => Err(usage().into()),
         };
     }
     match args.as_slice() {
@@ -39,7 +42,7 @@ where
         [flag] if flag == "--new-window" => Ok(Launch::NewWindow(None)),
         [flag, path] if flag == "--new-window" => {
             if path == "--" {
-                Err(USAGE.into())
+                Err(usage().into())
             } else if is_option(path) {
                 Err(unknown_option(path))
             } else {
@@ -48,7 +51,7 @@ where
         }
         [path] if is_option(path) => Err(unknown_option(path)),
         [path] => Ok(Launch::Open(PathBuf::from(path))),
-        _ => Err(USAGE.into()),
+        _ => Err(usage().into()),
     }
 }
 
@@ -56,23 +59,23 @@ pub fn absolute_path(path: &Path) -> Result<PathBuf, String> {
     // 空参数必须在 join 之前拒绝：否则 `join("")` 会退化成当前目录
     // （DEF-T10-DEEP-001）。
     if path.as_os_str().is_empty() {
-        return Err("文档路径无效".into());
+        return Err(t(Key::CliInvalidPath).into());
     }
     if path.to_string_lossy().contains('\0') {
-        return Err("文档路径无效".into());
+        return Err(t(Key::CliInvalidPath).into());
     }
     let absolute = if path.is_absolute() {
         path.to_path_buf()
     } else {
         std::env::current_dir()
-            .map_err(|e| format!("无法确定当前目录: {e}"))?
+            .map_err(|e| tf(Key::CliCurrentDir, &[&e.to_string()]))?
             .join(path)
     };
     // 规范化 `.`/`..`：避免把 `D:\docs\..\notes.md` 原样交给 IPC/文件层；
     // 越过根目录（`..` 无法再回退）视为无效路径（DEF-T10-003）。
     let normalized = normalize_lexically(&absolute)?;
     if normalized.as_os_str().is_empty() {
-        return Err("文档路径无效".into());
+        return Err(t(Key::CliInvalidPath).into());
     }
     Ok(normalized)
 }
@@ -86,7 +89,7 @@ fn normalize_lexically(path: &Path) -> Result<PathBuf, String> {
             Component::CurDir => {}
             Component::ParentDir => {
                 if !out.pop() {
-                    return Err("文档路径越界".into());
+                    return Err(t(Key::CliPathOutOfBounds).into());
                 }
             }
             other => out.push(other.as_os_str()),

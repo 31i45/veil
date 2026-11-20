@@ -12,16 +12,15 @@
 /// 行首禁则标点表（GB/T 15834 通行集）。
 /// 这些字符不允许出现在视觉行行首。
 pub(crate) const LINE_START_FORBIDDEN: &[char] = &[
-    '\u{3002}', '\u{3001}', '\u{FF0C}', '\u{FF0E}', '\u{FF1B}', '\u{FF1A}', '\u{FF1F}',
-    '\u{FF01}', '\u{2026}', '\u{2025}', '\u{2014}', '\u{00B7}', '\u{FF5E}', '\u{FF09}',
-    '\u{3011}', '\u{300B}', '\u{300D}', '\u{300F}', '\u{3015}', '\u{3009}', '\u{FF3D}',
-    '\u{FF5D}', '\u{201D}', '\u{2019}',
+    '\u{3002}', '\u{3001}', '\u{FF0C}', '\u{FF0E}', '\u{FF1B}', '\u{FF1A}', '\u{FF1F}', '\u{FF01}',
+    '\u{2026}', '\u{2025}', '\u{2014}', '\u{00B7}', '\u{FF5E}', '\u{FF09}', '\u{3011}', '\u{300B}',
+    '\u{300D}', '\u{300F}', '\u{3015}', '\u{3009}', '\u{FF3D}', '\u{FF5D}', '\u{201D}', '\u{2019}',
 ];
 
 /// 行尾禁则标点表（开括号/开引号）：不允许出现在视觉行行尾。
 pub(crate) const LINE_END_FORBIDDEN: &[char] = &[
-    '\u{FF08}', '\u{3010}', '\u{300A}', '\u{300C}', '\u{300E}', '\u{3014}', '\u{3008}',
-    '\u{FF3B}', '\u{FF5B}', '\u{201C}', '\u{2018}',
+    '\u{FF08}', '\u{3010}', '\u{300A}', '\u{300C}', '\u{300E}', '\u{3014}', '\u{3008}', '\u{FF3B}',
+    '\u{FF5B}', '\u{201C}', '\u{2018}',
 ];
 
 /// 文内零宽粘连符（Word Joiner）：UAX #14 的 WJ 类，前后都不允许断行。
@@ -81,8 +80,7 @@ pub(crate) fn glue_spans(body: &str) -> Vec<GlueSpan> {
                 fill.push(WJ);
             }
             fill.push(c);
-            let next_is_newline =
-                matches!(chars.get(idx + 1).map(|&(_, c)| c), Some('\n' | '\r'));
+            let next_is_newline = matches!(chars.get(idx + 1).map(|&(_, c)| c), Some('\n' | '\r'));
             if glue_after(c) && !next_is_newline {
                 fill.push(WJ);
             }
@@ -99,7 +97,9 @@ mod tests {
 
     #[test]
     fn forbidden_tables_cover_gb_set() {
-        for ch in ['。', '，', '、', '；', '：', '？', '！', '）', '】', '」', '』'] {
+        for ch in [
+            '。', '，', '、', '；', '：', '？', '！', '）', '】', '」', '』',
+        ] {
             assert!(forbidden_line_start(ch), "行首禁则表缺 {ch:?}");
         }
         for ch in ['（', '【', '《', '「', '『', '〔', '〈', '［', '｛'] {

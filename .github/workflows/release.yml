@@ -34,18 +34,20 @@ jobs:
           CARGO_TARGET_DIR: target-full
         run: cargo build --release --bin veil-full --features mermaid-offline
 
+      # 远程 SVG mock 使用 20 ms 墙钟截止，并行执行在忙 runner 上会假超时
+      # （CHANGELOG「测试稳定性」）；发布门禁必须按文档口径串行。
       - name: cargo test default features
         env:
           CARGO_TARGET_DIR: target-default
         run: |
-          cargo test --workspace --release
+          cargo test --workspace --release -- --test-threads=1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: cargo test mermaid-offline
         env:
           CARGO_TARGET_DIR: target-full
         run: |
-          cargo test --workspace --release --features mermaid-offline
+          cargo test --workspace --release --features mermaid-offline -- --test-threads=1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: cargo clippy

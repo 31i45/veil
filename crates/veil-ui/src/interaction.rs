@@ -1,7 +1,7 @@
 //! 交互策略：按键到意图的翻译、编辑后的几何刷新编排、光标移动/命中/点选/
 //! 拖选、剪贴板、菜单动作。只发意图与调几何，不做像素绘制。
 
-use crate::app::{App, ConfigSave, ImagePreview, PendingMermaidFetch};
+use crate::app::{App, ConfigSave, ImagePreview};
 use crate::chrome::{self, MenuAction};
 use crate::document::block_index::{gap_after, gap_between, BlockGeom};
 use crate::editor::Intent;
@@ -435,40 +435,6 @@ impl App {
         }
     }
 
-    /// mermaid.ink 回包：预览填图片浮层；插入是「文档身份 + 源码哈希」事务。
-    /// 文档已切换或源码已变化时丢弃回包并提示，不修改正文。
-    pub(crate) fn finish_mermaid_fetch(
-        &mut self,
-        pending: PendingMermaidFetch,
-        result: Result<crate::image::ImageData, String>,
-    ) {
-        match result {
-            Ok(img) => {
-                if pending.insert {
-                    if self.doc.path != pending.doc_path {
-                        self.ui_state.chrome.notice = t(I18nKey::NoticeMermaidSnapshotStale).into();
-                        self.request_redraw();
-                        return;
-                    }
-                    self.insert_mermaid_snapshot(&img, pending.source_hash, pending.occurrence);
-                    return;
-                }
-                self.cache.insert_remote_image(pending.url.clone(), img);
-                self.ui_state.image_preview = Some(ImagePreview {
-                    key: pending.url,
-                    title: pending.title,
-                    zoom: 1.0,
-                    pan: (0.0, 0.0),
-                });
-            }
-            Err(e) => {
-                self.ui_state.chrome.notice =
-                    tf(I18nKey::NoticeMermaidInkFailed, &[&clip_error(&e)]);
-            }
-        }
-        self.request_redraw();
-    }
-
     /// 将已经渲染的 Mermaid 位图保存为独立 PNG 快照，再插入相对路径。
     /// 插入前按「源码哈希 + 同源码序号」重新定位当前块：0 个匹配或序号越界
     /// （目标块已被删除/改写）都安全丢弃并提示。
@@ -580,11 +546,6 @@ impl App {
             }
         }
         None
-    }
-
-    /// 丢弃挂起中的 Mermaid 回包（打开/切换文档、历史预览等整篇替换时调用）。
-    pub(crate) fn clear_pending_mermaid_fetch(&mut self) {
-        self.pending_mermaid_fetch = None;
     }
 
     /// 图片文件插入（剪贴板文件列表）：与拖入同一条路径——解码 → 落盘 assets → 独占段插入。
@@ -1532,8 +1493,6 @@ impl App {
                 },
             }
         };
-        self.ui_state.ctx.remote_ok =
-            self.config.allow_remote_images || !self.ports.mermaid.requires_network();
         self.ui_state.ctx.open_at(mx, my, kind, link, mermaid_body);
         self.ui_state.ctx.mermaid_insert_start = insert_start;
         self.ui_state.ctx.mermaid_occurrence = mermaid_occurrence;
@@ -2325,31 +2284,19 @@ impl App {
             | CtxAction::TableAlignLeft
             | CtxAction::TableAlignCenter
             | CtxAction::TableAlignRight => self.apply_table_action(action),
-            // Mermaid v0：预览 / 复制源码 / 复制链接（读 ctx.mermaid_body）
-            CtxAction::MermaidPreview
-            | CtxAction::MermaidCopySource
-            | CtxAction::MermaidCopyLink => {
+            // Mermaid：预览 / 复制源码（读 ctx.mermaid_body）
+            CtxAction::MermaidPreview | CtxAction::MermaidCopySource => {
                 let Some(body) = self.ui_state.ctx.mermaid_body.clone() else {
                     return;
                 };
-                match action {
-                    CtxAction::MermaidPreview => {
-                        // v0 在线预览：始终打开 mermaid.live（源码离线压缩进 URL）。
-                        let url = veil_core::mermaid_live_url(&body);
-                        let _ = self.ports.url_opener.open_url(&url);
-                    }
-                    CtxAction::MermaidCopySource => {
-                        self.ports.clipboard.set(&body);
-                    }
-                    CtxAction::MermaidCopyLink => {
-                        let url = veil_core::mermaid_live_url(&body);
-                        self.ports.clipboard.set(&url);
-                    }
-                    _ => unreachable!(),
+                // 「在 mermaid.live 打开」是显式外部动作：只复制源码并交系统浏览器
+                // 打开站点首页，URL 不携带源码；产品自身不上传、不抓取。
+                self.ports.clipboard.set(&body);
+                if action == CtxAction::MermaidPreview {
+                    let _ = self.ports.url_opener.open_url("https://mermaid.live/");
                 }
             }
-            // Mermaid 手动预览/快照复用当前注入的 renderer：离线版本地同步渲染，
-            // 联网版仅在显式点击时请求 mermaid.ink。两条路径都不改写活源码。
+            // Mermaid 手动预览/快照只走进程内本地渲染，不改写活源码。
             CtxAction::MermaidPreviewImage | CtxAction::MermaidInsertImage => {
                 let Some(body) = self.ui_state.ctx.mermaid_body.clone() else {
                     return;
@@ -2362,92 +2309,45 @@ impl App {
                 let source_hash = crate::app::content_hash(body.as_bytes());
                 let occurrence = self.ui_state.ctx.mermaid_occurrence;
 
-                // 单飞：插入请求挂起期间再次触发（同块或任意块）不覆盖挂起项；
-                // 挂起的是插入时，预览请求也同样拒绝，避免破坏快照事务。
-                // 提示按挂起类型区分：挂起的是自动预览时不能说「快照仍在生成」。
-                if let Some(pending) = self.pending_mermaid_fetch.as_ref() {
-                    if insert || pending.insert {
-                        self.ui_state.chrome.notice = if pending.insert {
-                            t(I18nKey::NoticeMermaidSnapshotPending)
+                let label = format!(
+                    "mermaid-manual:{:016x}",
+                    crate::app::content_hash(format!("{body}\0{dark}").as_bytes())
+                );
+                match self
+                    .ports
+                    .mermaid
+                    .render_blocking(label.clone(), body, dark)
+                {
+                    Ok(rendered) => {
+                        let img = crate::image::ImageData {
+                            pixels: rendered.data,
+                            width: rendered.width,
+                            height: rendered.height,
+                        };
+                        if insert {
+                            self.insert_mermaid_snapshot(&img, source_hash, occurrence);
                         } else {
-                            t(I18nKey::NoticeMermaidRenderPending)
-                        }
-                        .into();
-                        self.request_redraw();
-                        return;
-                    }
-                }
-
-                if !self.ports.mermaid.requires_network() {
-                    let label = format!(
-                        "mermaid-manual:{:016x}",
-                        crate::app::content_hash(format!("{body}\0{dark}").as_bytes())
-                    );
-                    match self
-                        .ports
-                        .mermaid
-                        .render_blocking(label.clone(), body, dark)
-                    {
-                        Ok(rendered) => {
-                            let img = crate::image::ImageData {
-                                pixels: rendered.data,
-                                width: rendered.width,
-                                height: rendered.height,
-                            };
-                            if insert {
-                                self.insert_mermaid_snapshot(&img, source_hash, occurrence);
-                            } else {
-                                self.cache.remote_failed.remove(&label);
-                                self.cache.insert_remote_image(label.clone(), img);
-                                self.input_state.revs.remote_images += 1;
-                                self.ui_state.image_preview = Some(ImagePreview {
-                                    key: label,
-                                    title,
-                                    zoom: 1.0,
-                                    pan: (0.0, 0.0),
-                                });
-                                self.request_redraw();
-                            }
-                        }
-                        Err(e) => {
-                            if !insert {
-                                self.cache.remote_failed.insert(label);
-                            }
-                            self.ui_state.chrome.notice =
-                                tf(I18nKey::NoticeMermaidInkFailed, &[&clip_error(&e)]);
+                            self.cache.remote_failed.remove(&label);
+                            self.cache.insert_remote_image(label.clone(), img);
+                            self.input_state.revs.remote_images += 1;
+                            self.ui_state.image_preview = Some(ImagePreview {
+                                key: label,
+                                title,
+                                zoom: 1.0,
+                                pan: (0.0, 0.0),
+                            });
                             self.request_redraw();
                         }
                     }
-                    return;
+                    Err(e) => {
+                        if !insert {
+                            self.cache.remote_failed.insert(label);
+                        }
+                        self.ui_state.chrome.notice =
+                            tf(I18nKey::NoticeMermaidRenderFailed, &[&clip_error(&e)]);
+                        self.request_redraw();
+                    }
                 }
-
-                if !self.config.allow_remote_images {
-                    self.ui_state.chrome.notice = t(I18nKey::NoticeMermaidRemoteBlocked).into();
-                    self.request_redraw();
-                    return;
-                }
-                if !self.mermaid_ink_notice_shown {
-                    self.mermaid_ink_notice_shown = true;
-                    self.ui_state.chrome.notice = t(I18nKey::NoticeMermaidInkNotice).into();
-                }
-                let width = if insert {
-                    veil_core::MERMAID_INK_INSERT_WIDTH
-                } else {
-                    veil_core::MERMAID_INK_PREVIEW_WIDTH
-                };
-                let url = veil_core::mermaid_ink_png_url(&body, dark, width);
-                self.pending_mermaid_fetch = Some(PendingMermaidFetch {
-                    url: url.clone(),
-                    insert,
-                    doc_path: self.doc.path.clone(),
-                    source_hash,
-                    occurrence,
-                    title,
-                });
-                if self.cache.remote_pending.insert(url.clone()) {
-                    self.ports.images.request_remote(&url);
-                }
-                self.request_redraw();
             }
             // Mermaid v0：插入预设模板到当前光标位置（空块时为 body 起点）
             CtxAction::MermaidInsertFlowchart => {
@@ -3307,15 +3207,6 @@ impl App {
                 // 应用表单值到 Config
                 let previous_window = self.config.window;
                 self.config = s.form.apply(&self.config);
-                // 设置模态也能改「允许远程图片」：与视图菜单开关一致地同步后台开关，
-                // 阻止时清空待投递队列，避免旧开关状态下的排队请求继续出网。
-                self.ports
-                    .mermaid
-                    .set_allowed(self.config.allow_remote_images);
-                if !self.config.allow_remote_images {
-                    self.pending_mermaid_auto.clear();
-                    self.mermaid_auto_requested.clear();
-                }
                 // 清除/恢复默认几何（DEF-T07-002）：本次 apply 明确移除了窗口几何时，
                 // 必须一并丢弃本会话的几何脏位，否则关闭时 finish_close 会把此前
                 // resize 得到的当前几何写回，覆盖刚清除的结果。用户之后再次移动/缩放

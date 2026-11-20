@@ -1,32 +1,7 @@
-//! Mermaid v0 工具：pako URL 生成 + 预设模板。
+//! Mermaid 工具：图型识别与预设模板。
 //!
-//! mermaid.live 支持 `https://mermaid.live/edit#pako:<compressed>` 格式，
-//! 其中 `<compressed>` 是用 deflate 压缩再 base64url 编码的 JSON payload。
-//! pako deflate 是 mermaid.live 官方支持的本地解码方式，不经过任何服务器。
-//!
-//! 约束：本模块不执行任何网络 IO，只生成 URL 字符串供上层消费。
-//!
-//! 依赖：flate2 v1 已在 crate 依赖树中（miniz_oxide 传递依赖），零体积增量；
-//! base64url 编码由 `base64` 0.23 的 `URL_SAFE_NO_PAD` 引擎提供。
-
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use base64::Engine as _;
-use flate2::read::GzEncoder;
-use flate2::Compression;
-use std::io::Read;
-
-/// mermaid.live edit 页 base URL（pako fragment 由本地生成，完全离线）。
-pub const MERMAID_LIVE_BASE: &str = "https://mermaid.live/edit#pako:";
-
-/// mermaid.ink 图片渲染端点（用户显式触发才访问，非后台请求）。
-pub const MERMAID_INK_BASE: &str = "https://mermaid.ink/img/";
-/// mermaid.ink 的矢量端点（路径式，返回 `image/svg+xml`）。
-pub const MERMAID_INK_SVG_BASE: &str = "https://mermaid.ink/svg/";
-
-/// mermaid.ink 预览图宽度（逻辑像素）。
-pub const MERMAID_INK_PREVIEW_WIDTH: u32 = 1200;
-/// mermaid.ink 插入图宽度：约等于 8 英寸 300 dpi。
-pub const MERMAID_INK_INSERT_WIDTH: u32 = 2400;
+//! 约束：本模块不生成任何外部 URL、不执行网络 IO；图表渲染由
+//! `veil-mermaid-offline` 在进程内完成，源码永不离开本机。
 
 /// 流程图模板（flowchart TD）。
 pub const FLOWCHART_TEMPLATE: &str = r#"graph TD
@@ -112,209 +87,9 @@ pub fn detect_type(source: &str) -> Option<&'static str> {
     }
 }
 
-/// 生成 mermaid.live 预览 URL。
-///
-/// mermaid.live 的 pako payload 是一个压缩后的 JSON，结构如下：
-/// ```json
-/// {
-///   "code": "graph TD\n  A-->B",
-///   "mermaid": { "theme": "default" },
-///   "autoSync": true,
-///   "updateDiagram": true
-/// }
-/// ```
-///
-/// 整个 JSON 用 gzip deflate 压缩后 base64url（RFC 4648 §5，无 padding）编码，
-/// 拼接到 `https://mermaid.live/edit#pako:` 之后。
-///
-/// 压缩使用 `flate2::GzEncoder`（gzip 头），mermaid.live 的 pako 解码器可直接识别。
-pub fn mermaid_live_url(mermaid_source: &str) -> String {
-    let json = format!(
-        r#"{{"code":{}, "mermaid":{{"theme":"default"}}, "autoSync":true, "updateDiagram":true}}"#,
-        json_escape(mermaid_source)
-    );
-    let compressed = gzip_bytes(&json);
-    let encoded = base64url_encode(&compressed);
-    format!("{MERMAID_LIVE_BASE}{encoded}")
-}
-
-/// gantt 字号统一提升到 14px（与离线渲染器的 `mermaid.initialize({gantt:{...}})` 对齐）。
-///
-/// 远程 mermaid.ink 只接受源码，无法单独下发 initialize 配置；用官方 init 指令
-/// 写在源码最前（注释行会被 `detect_type` 跳过，不影响图型识别）。
-pub const GANTT_FONT_INIT: &str = "%%{init: {'gantt': {'fontSize': 14, 'sectionFontSize': 14}}}%%";
-
-/// 远程渲染前的源码预处理：gantt 源码前注入字号 init 指令，其余图型原样返回。
-fn with_remote_defaults(source: &str) -> std::borrow::Cow<'_, str> {
-    if detect_type(source) == Some("gantt") {
-        let mut out = String::with_capacity(GANTT_FONT_INIT.len() + 1 + source.len());
-        out.push_str(GANTT_FONT_INIT);
-        out.push('\n');
-        out.push_str(source);
-        return std::borrow::Cow::Owned(out);
-    }
-    std::borrow::Cow::Borrowed(source)
-}
-
-/// 生成 mermaid.ink 的 PNG 渲染 URL（用户点击时才由上层发起请求）。
-///
-/// payload 与 `mermaid_live_url` 完全相同（gzip + base64url），mermaid.ink 的
-/// pako 解码器可直接识别；`width` 决定出图像素宽，`theme`/`bgColor` 跟随编辑器主题。
-pub fn mermaid_ink_png_url(mermaid_source: &str, dark: bool, width: u32) -> String {
-    let theme = if dark { "dark" } else { "default" };
-    let bg = if dark { "1B1B1F" } else { "FFFFFF" };
-    let source = with_remote_defaults(mermaid_source);
-    let json = format!(
-        r#"{{"code":{}, "mermaid":{{"theme":"{theme}"}}, "autoSync":true, "updateDiagram":true}}"#,
-        json_escape(&source)
-    );
-    let compressed = gzip_bytes(&json);
-    let encoded = base64url_encode(&compressed);
-    format!("{MERMAID_INK_BASE}pako:{encoded}?type=png&width={width}&theme={theme}&bgColor={bg}")
-}
-
-/// 生成 mermaid.ink 的 SVG 渲染 URL（Veil 主预览管线使用）。
-///
-/// 返回的 SVG 文本字符串交由上层 resvg 光栅化为位图，与 Math 渲染管线
-/// （latex-rust → SVG → resvg → 位图）共享终点。`theme`/`bgColor` 参数已
-/// 内嵌在 URL 中，跟随编辑器主题切换自动重请求。
-pub fn mermaid_ink_svg_url(mermaid_source: &str, dark: bool) -> String {
-    let theme = if dark { "dark" } else { "default" };
-    let bg = if dark { "1B1B1F" } else { "FFFFFF" };
-    // htmlLabels:false 必须显式下发：mermaid.ink 新版本默认输出 foreignObject，
-    // resvg 无法光栅化其中的 HTML 标签（文字会整块丢失）。
-    let source = with_remote_defaults(mermaid_source);
-    let json = format!(
-        r#"{{"code":{}, "mermaid":{{"theme":"{theme}","htmlLabels":false,"flowchart":{{"htmlLabels":false}},"class":{{"htmlLabels":false}}}}, "autoSync":true, "updateDiagram":true}}"#,
-        json_escape(&source)
-    );
-    let compressed = gzip_bytes(&json);
-    let encoded = base64url_encode(&compressed);
-    // 注意：只能用路径式 `/svg/`。旧写法 `/img/...?type=svg` 已被上游忽略，
-    // 返回 image/jpeg（二进制 JPEG），上层按 UTF-8 解析会直接失败。
-    format!("{MERMAID_INK_SVG_BASE}pako:{encoded}?theme={theme}&bgColor={bg}")
-}
-
-/// 把任意字符串安全地嵌入 JSON 字符串字面量（无需 serde_json 依赖）。
-fn json_escape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('"');
-    for c in s.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            '\u{08}' => out.push_str("\\b"),
-            '\u{0C}' => out.push_str("\\f"),
-            c if (c as u32) < 0x20 => {
-                out.push_str(&format!("\\u{:04x}", c as u32));
-            }
-            c => out.push(c),
-        }
-    }
-    out.push('"');
-    out
-}
-
-/// Gzip 压缩：flate2 的 GzEncoder 输出标准 gzip 格式。
-fn gzip_bytes(input: &str) -> Vec<u8> {
-    let mut enc = GzEncoder::new(input.as_bytes(), Compression::default());
-    let mut out = Vec::with_capacity(input.len());
-    enc.read_to_end(&mut out).expect("flate2 读取不会失败");
-    out
-}
-
-/// base64url 编码（RFC 4648 §5，无 padding）：`base64` crate 的 URL_SAFE_NO_PAD 引擎。
-fn base64url_encode(bytes: &[u8]) -> String {
-    URL_SAFE_NO_PAD.encode(bytes)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn mermaid_live_url_starts_with_base() {
-        let url = mermaid_live_url("graph TD\n  A-->B");
-        assert!(
-            url.starts_with(MERMAID_LIVE_BASE),
-            "URL 应以 mermaid.live 前缀开头: {url}"
-        );
-        assert!(url.len() > MERMAID_LIVE_BASE.len());
-    }
-
-    #[test]
-    fn mermaid_ink_url_encodes_theme_and_width() {
-        let url = mermaid_ink_png_url("graph TD\n  A-->B", true, 2400);
-        assert!(url.starts_with(MERMAID_INK_BASE), "{url}");
-        assert!(url.contains("pako:"), "{url}");
-        assert!(url.contains("type=png"), "{url}");
-        assert!(url.contains("width=2400"), "{url}");
-        assert!(url.contains("theme=dark"), "{url}");
-        assert!(url.contains("bgColor=1B1B1F"), "{url}");
-
-        let light = mermaid_ink_png_url("pie title t\n \"a\": 1", false, 1200);
-        assert!(light.contains("theme=default"), "{light}");
-        assert!(light.contains("bgColor=FFFFFF"), "{light}");
-        // 浅色主题下与 mermaid.live URL 共用同一段 pako 编码（同一 payload）
-        let live = mermaid_live_url("pie title t\n \"a\": 1");
-        let enc = live.trim_start_matches(MERMAID_LIVE_BASE);
-        assert!(light.contains(enc), "两个端点应共用同一段编码");
-    }
-
-    #[test]
-    fn mermaid_ink_svg_url_uses_svg_endpoint() {
-        let url = mermaid_ink_svg_url("graph TD\n  A-->B", true);
-        // 回归：`/img/...?type=svg` 已被上游忽略并返回 JPEG，必须走 `/svg/`
-        assert!(url.starts_with(MERMAID_INK_SVG_BASE), "{url}");
-        assert!(url.contains("pako:"), "{url}");
-        assert!(url.contains("theme=dark"), "{url}");
-        assert!(url.contains("bgColor=1B1B1F"), "{url}");
-        assert!(!url.contains("type=svg"), "{url}");
-    }
-
-    #[test]
-    fn gantt_remote_urls_inject_font_size_init() {
-        let source = "gantt\n  title T\n  section S\n  A :a1, 2020-01-01, 1d";
-        for url in [
-            mermaid_ink_png_url(source, false, 1200),
-            mermaid_ink_svg_url(source, false),
-        ] {
-            let payload = url
-                .split("pako:")
-                .nth(1)
-                .and_then(|s| s.split('?').next())
-                .expect("URL 应含 pako payload");
-            let json = String::from_utf8(inflate_bytes(&base64url_decode(payload))).unwrap();
-            assert!(
-                json.contains("%%{init:"),
-                "gantt 远程源码必须注入 init 指令：{json}"
-            );
-            assert!(
-                json.contains("'fontSize': 14") && json.contains("'sectionFontSize': 14"),
-                "gantt 字号配置缺失：{json}"
-            );
-        }
-    }
-
-    #[test]
-    fn non_gantt_remote_urls_do_not_inject_gantt_init() {
-        for source in ["graph TD\n  A-->B", "pie title t\n  \"a\": 1"] {
-            let url = mermaid_ink_svg_url(source, false);
-            let payload = url
-                .split("pako:")
-                .nth(1)
-                .and_then(|s| s.split('?').next())
-                .unwrap();
-            let json = String::from_utf8(inflate_bytes(&base64url_decode(payload))).unwrap();
-            assert!(
-                !json.contains("%%{init:") && !json.contains("sectionFontSize"),
-                "非 gantt 图型不得注入 gantt 字号配置：{json}"
-            );
-        }
-    }
 
     #[test]
     fn template_constants_are_nonempty() {
@@ -361,7 +136,7 @@ mod tests {
         // pie
         assert_eq!(detect_type("pie\n  title Pie"), Some("pie"));
         assert_eq!(detect_type("pie title Test\n  A : 1"), Some("pie"));
-        // journey / mindmap — 远程方案下这些图型由 mermaid.ink 渲染，detect_type 全部识别
+        // journey / mindmap — 本地引擎同样按首行识别这些图型
         assert_eq!(detect_type("journey\n  title Test"), Some("journey"));
         assert_eq!(detect_type("mindmap\n  root((Test))"), Some("mindmap"));
         // gitGraph / block-beta / requirement 等扩展图型
@@ -390,48 +165,5 @@ mod tests {
             detect_type("%% this is a comment\ngraph TD\n  A-->B"),
             Some("flowchart")
         );
-    }
-
-    #[test]
-    fn pako_payload_roundtrip() {
-        let src = "graph TD\n  A[Hello]-->B[World]";
-        let url = mermaid_live_url(src);
-        let payload_b64 = url.strip_prefix(MERMAID_LIVE_BASE).unwrap();
-        let decoded = base64url_decode(payload_b64);
-        let decompressed = inflate_bytes(&decoded);
-        let json = String::from_utf8(decompressed).unwrap();
-        assert!(
-            json.contains("Hello"),
-            "解压后的 JSON 应包含原始源码: {json}"
-        );
-    }
-
-    #[test]
-    fn base64url_known_vectors() {
-        // RFC 4648 test vectors
-        assert_eq!(base64url_encode(b""), "");
-        assert_eq!(base64url_encode(b"f"), "Zg");
-        assert_eq!(base64url_encode(b"fo"), "Zm8");
-        assert_eq!(base64url_encode(b"foo"), "Zm9v");
-        assert_eq!(base64url_encode(b"foob"), "Zm9vYg");
-        assert_eq!(base64url_encode(b"fooba"), "Zm9vYmE");
-        assert_eq!(base64url_encode(b"foobar"), "Zm9vYmFy");
-        // URL-safe: '+' 和 '/' 应分别变成 '-' 和 '_'
-        // 0xFB 0xFF 0xFE → 111110 111111 111111 111110 → '-' '_' '_' '-'
-        assert_eq!(base64url_encode(&[0xFB, 0xFF, 0xFE]), "-__-");
-    }
-
-    fn base64url_decode(s: &str) -> Vec<u8> {
-        URL_SAFE_NO_PAD
-            .decode(s)
-            .expect("测试 payload 应为合法 base64url")
-    }
-
-    fn inflate_bytes(bytes: &[u8]) -> Vec<u8> {
-        use flate2::read::GzDecoder;
-        let mut dec = GzDecoder::new(bytes);
-        let mut out = Vec::new();
-        dec.read_to_end(&mut out).unwrap();
-        out
     }
 }

@@ -38,8 +38,7 @@
 > 现行硬门禁见 `boundary_guard.rs` 中新增的 `veil_ui_does_not_depend_on_veil_crate` 测试。
 
 ### 编排层 — veil bin + 顶层协调
-- `crates/veil/src/main.rs` — 启动 + wiring（轻量版：远程 Mermaid + resvg 光栅化）
-- `crates/veil/src/bin/veil-full.rs` — 完整版启动（QuickJS + mermaid.min.js）
+- `crates/veil/src/main.rs` — 唯一发行产物 veil.exe 的启动 + wiring（默认含离线 Mermaid）
 - `crates/veil/src/lib.rs` — 顶层 `run()` 函数 + 多能力协调（编辑循环、预览触发、缓存刷新）
   - 模块：`cli`、`export`、`platform`
 - `crates/veil/src/platform/` 虽在 veil crate 内，但其职责属于机制层（平台桥接），因此 **同时** 被机制层与编排层引用是允许的。

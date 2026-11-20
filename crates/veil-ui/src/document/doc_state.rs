@@ -497,7 +497,6 @@ impl App {
             }
         };
         self.editor = Editor::new_with_callouts(&text, &self.callouts);
-        self.clear_pending_mermaid_fetch();
         self.doc.baseline = disk;
         self.doc.bom = bom;
         self.persist_state.persist.reset(); // 清 pending/hold/missing/backup/activity
@@ -530,10 +529,6 @@ impl App {
     /// 会退化成源码围栏，与「三端同源」不符，故在入口处补一次阻塞渲染。
     /// 失败静默：导出继续走已有的源码围栏降级（不打断用户）。
     pub(crate) fn ensure_mermaid_for_export(&mut self) {
-        // 尊重远程图片总开关（AC-5）：关闭时不得发起任何网络请求（离线渲染不受限）
-        if self.ports.mermaid.requires_network() && !self.config.allow_remote_images {
-            return;
-        }
         // 先收集缺失块，避免持有 session 借用时改 cache
         let missing: Vec<(veil_core::BlockId, String)> = {
             let session = self.editor.session();
@@ -566,13 +561,16 @@ impl App {
             if rendered >= 16 || started.elapsed() > std::time::Duration::from_secs(10) {
                 break;
             }
-            // 与 trigger_mermaid_auto 相同上限：> 128 KiB 跳过（不发网络请求）
+            // 与 trigger_mermaid_auto 相同上限：> 128 KiB 跳过
             if source.len() > 128 * 1024 {
                 continue;
             }
             rendered += 1;
-            let url = veil_core::mermaid_ink_svg_url(&source, dark);
-            if let Ok(img) = self.ports.mermaid.render_blocking(url, source, dark) {
+            let label = format!(
+                "mermaid-export:{:016x}",
+                crate::app::content_hash(format!("{source}\0{dark}").as_bytes())
+            );
+            if let Ok(img) = self.ports.mermaid.render_blocking(label, source, dark) {
                 self.cache.mermaid_imgs.insert(id, img);
             }
         }
@@ -1096,8 +1094,6 @@ impl App {
             }
         };
         self.editor = Editor::new_with_callouts(&text, &self.callouts);
-        // 换文档：旧文档挂起的 Mermaid 回包立即作废，避免写入新文档。
-        self.clear_pending_mermaid_fetch();
         self.doc.path = Some(path.clone());
         self.doc.history_key = super::history::doc_key(&path);
         self.doc.bom = bom;
@@ -1150,7 +1146,6 @@ impl App {
     /// 文件监听解除、派生缓存按会话代次失效。
     fn new_draft_now(&mut self) {
         self.editor = Editor::new_with_callouts("", &self.callouts);
-        self.clear_pending_mermaid_fetch();
         self.doc.path = None;
         self.doc.history_key = super::history::session_key();
         self.doc.bom = false;

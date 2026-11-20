@@ -857,8 +857,11 @@ pub fn decode_config(bytes: &[u8]) -> Result<ConfigParse, String> {
 
 /// 配置文件路径：Windows `%APPDATA%\Veil\config.toml`；其余平台
 /// `$XDG_CONFIG_HOME/veil/config.toml` 或 `$HOME/.config/veil/config.toml`。
+/// 内部环境变量 `VEIL_HOME` 非空时优先：配置改到 `<VEIL_HOME>/config.toml`
+/// （仅供测试/自动化取证隔离，不进入设置界面与用户文档）。
 pub fn config_path() -> Option<PathBuf> {
-    config_path_of(
+    config_path_with(
+        std::env::var_os("VEIL_HOME").filter(|s| !s.is_empty()),
         std::env::var_os("APPDATA").filter(|s| !s.is_empty()),
         std::env::var_os("XDG_CONFIG_HOME").filter(|s| !s.is_empty()),
         std::env::var_os("HOME").filter(|s| !s.is_empty()),
@@ -867,12 +870,40 @@ pub fn config_path() -> Option<PathBuf> {
 
 /// 应用数据目录（0b 恢复/会话文件的公共父目录）：与配置同根。
 /// Windows `%APPDATA%\Veil`；其余 `$XDG_CONFIG_HOME/veil` 或 `$HOME/.config/veil`。
+/// `VEIL_HOME` 非空时即为该目录本身（同 `config_path` 的隔离用途）。
 pub fn data_dir() -> Option<PathBuf> {
-    data_dir_of(
+    data_dir_with(
+        std::env::var_os("VEIL_HOME").filter(|s| !s.is_empty()),
         std::env::var_os("APPDATA").filter(|s| !s.is_empty()),
         std::env::var_os("XDG_CONFIG_HOME").filter(|s| !s.is_empty()),
         std::env::var_os("HOME").filter(|s| !s.is_empty()),
     )
+}
+
+/// 配置路径推导（含 `VEIL_HOME` 覆盖）的纯函数形态：空串视为未设置，回落旧行为。
+pub fn config_path_with(
+    veil_home: Option<OsString>,
+    appdata: Option<OsString>,
+    xdg: Option<OsString>,
+    home: Option<OsString>,
+) -> Option<PathBuf> {
+    if let Some(dir) = veil_home.filter(|s| !s.is_empty()) {
+        return Some(PathBuf::from(dir).join("config.toml"));
+    }
+    config_path_of(appdata, xdg, home)
+}
+
+/// 数据目录推导（含 `VEIL_HOME` 覆盖）的纯函数形态：空串视为未设置，回落旧行为。
+pub fn data_dir_with(
+    veil_home: Option<OsString>,
+    appdata: Option<OsString>,
+    xdg: Option<OsString>,
+    home: Option<OsString>,
+) -> Option<PathBuf> {
+    if let Some(dir) = veil_home.filter(|s| !s.is_empty()) {
+        return Some(PathBuf::from(dir));
+    }
+    data_dir_of(appdata, xdg, home)
 }
 
 /// 数据目录推导的纯函数形态（测试注入环境变量，不触碰真实用户目录）。
@@ -1724,5 +1755,82 @@ mod tests {
             )
         );
         assert_eq!(config_path_of(None, None, None), None);
+    }
+
+    /// 取证隔离：`VEIL_HOME` 非空时配置与数据目录都落到该根下，压过 APPDATA/XDG/HOME。
+    #[test]
+    fn veil_home_overrides_config_and_data_paths() {
+        let veil_home = OsString::from(r"D:\tmp\veil-home");
+        let appdata = OsString::from(r"C:\Users\u\AppData\Roaming");
+        let xdg = OsString::from("/home/u/.config");
+        let home = OsString::from("/home/u");
+        assert_eq!(
+            config_path_with(
+                Some(veil_home.clone()),
+                Some(appdata.clone()),
+                Some(xdg.clone()),
+                Some(home.clone())
+            ),
+            Some(PathBuf::from(&veil_home).join("config.toml"))
+        );
+        assert_eq!(
+            data_dir_with(
+                Some(veil_home.clone()),
+                Some(appdata.clone()),
+                Some(xdg.clone()),
+                Some(home.clone())
+            ),
+            Some(PathBuf::from(&veil_home))
+        );
+    }
+
+    /// 空字符串等同未设置：不得生成相对路径，必须回落到旧行为。
+    #[test]
+    fn empty_veil_home_falls_back_to_legacy_paths() {
+        let empty = OsString::from("");
+        let appdata = OsString::from(r"C:\Users\u\AppData\Roaming");
+        let xdg = OsString::from("/home/u/.config");
+        let home = OsString::from("/home/u");
+        assert_eq!(
+            config_path_with(
+                Some(empty.clone()),
+                Some(appdata.clone()),
+                Some(xdg.clone()),
+                Some(home.clone())
+            ),
+            config_path_of(Some(appdata.clone()), Some(xdg.clone()), Some(home.clone()))
+        );
+        assert_eq!(
+            data_dir_with(
+                Some(empty.clone()),
+                Some(appdata.clone()),
+                Some(xdg.clone()),
+                Some(home.clone())
+            ),
+            data_dir_of(Some(appdata.clone()), Some(xdg.clone()), Some(home.clone()))
+        );
+    }
+
+    /// 未设置 `VEIL_HOME` 时与旧推导逐字节一致。
+    #[test]
+    fn unset_veil_home_matches_legacy_paths() {
+        let appdata = OsString::from(r"C:\Users\u\AppData\Roaming");
+        let xdg = OsString::from("/home/u/.config");
+        let home = OsString::from("/home/u");
+        for (a, x, h) in [
+            (Some(appdata.clone()), Some(xdg.clone()), Some(home.clone())),
+            (None, Some(xdg.clone()), Some(home.clone())),
+            (None, None, Some(home.clone())),
+            (None, None, None),
+        ] {
+            assert_eq!(
+                config_path_with(None, a.clone(), x.clone(), h.clone()),
+                config_path_of(a.clone(), x.clone(), h.clone())
+            );
+            assert_eq!(
+                data_dir_with(None, a.clone(), x.clone(), h.clone()),
+                data_dir_of(a.clone(), x.clone(), h.clone())
+            );
+        }
     }
 }

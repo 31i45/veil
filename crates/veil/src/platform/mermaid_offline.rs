@@ -1,8 +1,11 @@
-//! 离线 Mermaid 渲染适配层（veil-full 专用）。
+//! 离线 Mermaid 渲染适配层（唯一发行产物 veil.exe 的渲染器）。
 //!
-//! 与远程路线（`mermaid.rs`）的差别只在「SVG 从哪来」：
-//! 远程 = mermaid.ink HTTP；离线 = QuickJS + mermaid.js（`veil-mermaid-offline`）。
-//! 光栅化与导出用的 SVG 文本走同一条 resvg 管线，保证两个发行版渲染一致。
+//! SVG 来自 QuickJS + mermaid.js（`veil-mermaid-offline`），全程在进程内完成，
+//! 不发起任何网络请求。光栅化与导出用的 SVG 文本走同一条 resvg 管线。
+//!
+//! 惰性初始化：`OfflineMermaid::new()` 只构造空句柄，不 spawn 线程、不加载 QuickJS；
+//! 首次 `request` / `render_blocking` 才创建 `MermaidEngine`。这样没有 Mermaid 块的
+//! 文档不为未使用的引擎付空闲内存成本（见 evidence/decision/baseline.md §10）。
 
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
@@ -13,25 +16,34 @@ use veil_mermaid_offline::MermaidEngine;
 const BLOCKING_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub struct OfflineMermaid {
+    /// 首次渲染请求时才创建；`None` 表示尚未初始化。
     engine: Option<MermaidEngine>,
-    /// 引擎初始化失败原因（失败后所有请求立即返回该错误，UI 降级为源码块）。
-    init_error: Option<String>,
     /// render_blocking 期间收到的其它块结果：暂存给下一次 poll，避免丢失。
     backlog: VecDeque<(String, Result<veil_ui::MermaidImage, String>)>,
     scale: f32,
 }
 
 impl OfflineMermaid {
+    /// 惰性句柄：不 spawn、不加载 QuickJS，空闲进程零引擎成本。
     pub fn new() -> Self {
-        let (engine, init_error) = match MermaidEngine::new() {
-            Ok(engine) => (Some(engine), None),
-            Err(e) => (None, Some(e)),
-        };
         Self {
-            engine,
-            init_error,
+            engine: None,
             backlog: VecDeque::new(),
             scale: 2.0,
+        }
+    }
+
+    /// 首次使用时创建离线引擎；创建失败返回可读错误，下次请求重试（可恢复）。
+    fn ensure_engine(&mut self) -> Result<(), String> {
+        if self.engine.is_some() {
+            return Ok(());
+        }
+        match MermaidEngine::new() {
+            Ok(engine) => {
+                self.engine = Some(engine);
+                Ok(())
+            }
+            Err(e) => Err(e),
         }
     }
 
@@ -47,24 +59,33 @@ impl OfflineMermaid {
         })
     }
 
-    fn init_failure(&self) -> String {
-        self.init_error
-            .clone()
-            .unwrap_or_else(|| "offline mermaid unavailable".into())
+    #[cfg(test)]
+    fn engine_started(&self) -> bool {
+        self.engine.is_some()
+    }
+}
+
+impl Default for OfflineMermaid {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
 impl veil_ui::MermaidRenderer for OfflineMermaid {
     fn request(&mut self, label: String, source: String, dark: bool) {
-        match &self.engine {
-            Some(engine) => engine.submit(label, source, dark),
-            None => self.backlog.push_back((label, Err(self.init_failure()))),
+        if let Err(e) = self.ensure_engine() {
+            self.backlog.push_back((label, Err(e)));
+            return;
+        }
+        if let Some(engine) = &self.engine {
+            engine.submit(label, source, dark);
         }
     }
 
     fn poll(&mut self) -> Vec<(String, Result<veil_ui::MermaidImage, String>)> {
         let raw = match &self.engine {
             Some(engine) => engine.try_recv(),
+            // 未初始化：没有在途渲染，只返回 backlog（含初始化失败的可读错误）。
             None => Vec::new(),
         };
         let mut out: Vec<_> = self.backlog.drain(..).collect();
@@ -79,23 +100,16 @@ impl veil_ui::MermaidRenderer for OfflineMermaid {
         self.scale = scale;
     }
 
-    /// 完全本地渲染：忽略「阻止远程图片」开关，避免离线产物被网络开关误关。
-    fn set_allowed(&mut self, _allowed: bool) {}
-
-    fn requires_network(&self) -> bool {
-        false
-    }
-
     fn render_blocking(
         &mut self,
         label: String,
         source: String,
         dark: bool,
     ) -> Result<veil_ui::MermaidImage, String> {
-        let Some(engine) = &self.engine else {
-            return Err(self.init_failure());
-        };
-        engine.submit(label.clone(), source, dark);
+        self.ensure_engine()?;
+        if let Some(engine) = &self.engine {
+            engine.submit(label.clone(), source, dark);
+        }
 
         let deadline = Instant::now() + BLOCKING_TIMEOUT;
         loop {
@@ -138,12 +152,48 @@ mod tests {
         assert!(svg.contains("<text"), "labels must be <text> for resvg");
     }
 
-    /// 完整版请求矩阵：关闭普通远程图片后，Mermaid 的异步预览与同步导出仍走本地引擎。
+    /// D1 前置条件：`new()` 不创建引擎；首次渲染请求才初始化，之后立即可用。
     #[test]
-    fn offline_mermaid_ignores_remote_image_switch_for_preview_and_export() {
+    fn new_is_lazy_and_first_render_initializes_engine() {
+        let mut renderer = OfflineMermaid::new();
+        assert!(!renderer.engine_started(), "new() 不得创建离线引擎");
+        assert!(renderer.poll().is_empty(), "未初始化时 poll 只返回 backlog");
+
+        let img = renderer
+            .render_blocking("lazy".into(), "graph TD\n A-->B".into(), false)
+            .expect("首次 render_blocking 应触发惰性初始化并成功");
+        assert!(img.width > 0 && img.height > 0);
+        assert!(
+            renderer.engine_started(),
+            "首次渲染后引擎应已初始化，后续请求复用同一实例"
+        );
+
+        // 同一个实例继续服务异步预览请求。
+        renderer.request(
+            "lazy-preview".into(),
+            "pie title x\n \"a\" : 1".into(),
+            false,
+        );
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Some((label, result)) = renderer
+                .poll()
+                .into_iter()
+                .find(|(label, _)| label == "lazy-preview")
+            {
+                assert_eq!(label, "lazy-preview");
+                assert!(result.expect("惰性初始化后异步预览可用").width > 0);
+                break;
+            }
+            assert!(Instant::now() < deadline, "offline preview timed out");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// 完整版请求矩阵：异步预览与同步导出都走本地引擎，互不干扰。
+    #[test]
+    fn offline_mermaid_preview_and_export_are_always_local() {
         let mut renderer = super::super::mermaid::mermaid_renderer();
-        assert!(!renderer.requires_network());
-        renderer.set_allowed(false);
 
         let exported = renderer
             .render_blocking("offline-export".into(), "graph TD\n A-->B".into(), false)
@@ -176,10 +226,6 @@ mod tests {
             assert!(Instant::now() < deadline, "offline preview timed out");
             std::thread::sleep(Duration::from_millis(5));
         }
-
-        let live = veil_core::mermaid_live_url("graph TD\n A-->B");
-        assert!(live.starts_with("https://mermaid.live/edit#pako:"));
-        assert!(!live.contains("mermaid.ink"));
     }
 
     /// 语法错误：返回可读错误而不是 panic，且引擎可继续服务后续请求。

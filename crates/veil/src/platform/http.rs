@@ -496,9 +496,7 @@ const WINHTTP_DISABLE_REDIRECTS: u32 = 4;
 /// WINHTTP_FLAG_SECURE：https 请求必须置位。
 #[cfg(windows)]
 const WINHTTP_FLAG_SECURE: u32 = 0x0080_0000;
-/// WINHTTP_QUERY_CONTENT_TYPE / CONTENT_LENGTH / STATUS_CODE / LOCATION。
-#[cfg(windows)]
-const WINHTTP_QUERY_CONTENT_TYPE: u32 = 1;
+/// WINHTTP_QUERY_CONTENT_LENGTH / STATUS_CODE / LOCATION。
 #[cfg(windows)]
 const WINHTTP_QUERY_CONTENT_LENGTH: u32 = 5;
 #[cfg(windows)]
@@ -509,19 +507,11 @@ const WINHTTP_QUERY_LOCATION: u32 = 33;
 #[cfg(windows)]
 const WINHTTP_QUERY_FLAG_NUMBER: u32 = 0x2000_0000;
 
-/// 原始 HTTP 200 响应：Mermaid 需要同时校验 Content-Type 与 body。
-#[derive(Debug)]
-pub(crate) struct RawResponse {
-    pub(crate) body: Vec<u8>,
-    pub(crate) content_type: Option<String>,
-}
-
 /// 一次请求的结果：200 带响应体，重定向带 Location，其余只有状态码。
 struct Hop {
     status: u32,
     location: Option<String>,
     body: Option<Vec<u8>>,
-    content_type: Option<String>,
 }
 
 /// WinHTTP 句柄的 RAII 包装：离开作用域即关闭（含全部失败路径）。
@@ -564,48 +554,6 @@ fn last_error() -> u32 {
 #[cfg(windows)]
 fn code_error(what: Key) -> String {
     tf(Key::HttpErrWithCode, &[t(what), &last_error().to_string()])
-}
-
-/// 抓取远程资源并返回原始响应（跳过图片解码）。
-/// 与 `fetch` 共享重定向/超时/降级策略；供 Mermaid SVG 下载复用。
-#[cfg(windows)]
-pub(crate) fn fetch_raw_response(url: &str) -> Result<RawResponse, String> {
-    fetch_raw_with(url, fetch_once)
-}
-
-/// 原始响应的逐跳驱动。测试注入内存 hop，可真实覆盖重定向与降级且零网络。
-fn fetch_raw_with(
-    url: &str,
-    mut once: impl FnMut(&HttpUrl) -> Result<Hop, String>,
-) -> Result<RawResponse, String> {
-    let mut current = validate_url(url)?;
-    let mut hops = 0usize;
-    loop {
-        let hop = once(&current)?;
-        match hop.status {
-            200 => {
-                return Ok(RawResponse {
-                    body: hop.body.unwrap_or_default(),
-                    content_type: hop.content_type,
-                });
-            }
-            301 | 302 | 303 | 307 | 308 => {
-                if hops >= MAX_REDIRECTS {
-                    return Err(tf(Key::HttpRedirectTooMany, &[&MAX_REDIRECTS.to_string()]));
-                }
-                let location = hop
-                    .location
-                    .ok_or_else(|| t(Key::HttpRedirectMissingLocation).to_string())?;
-                let next = resolve_redirect(&current, &location)?;
-                if is_downgrade(&current, &next) {
-                    return Err(t(Key::HttpRedirectDowngrade).to_string());
-                }
-                current = next;
-                hops += 1;
-            }
-            status => return Err(format!("HTTP {status}")),
-        }
-    }
 }
 
 /// 抓取并按 WIC 解码远程图片：只接受 200，手动跟跳（最多 3 次），响应体上限 20 MiB。
@@ -667,13 +615,11 @@ fn fetch_once(url: &HttpUrl) -> Result<Hop, String> {
     let status = query_status(&request)?;
     if status == 200 {
         check_content_length(&request)?;
-        let content_type = query_header_string(&request, WINHTTP_QUERY_CONTENT_TYPE)?;
         let body = read_body(&request)?;
         return Ok(Hop {
             status,
             location: None,
             body: Some(body),
-            content_type,
         });
     }
     let location = if matches!(status, 301 | 302 | 303 | 307 | 308) {
@@ -685,7 +631,6 @@ fn fetch_once(url: &HttpUrl) -> Result<Hop, String> {
         status,
         location,
         body: None,
-        content_type: None,
     })
 }
 
@@ -1072,56 +1017,6 @@ mod tests {
         // 每跳都走同一校验：降级目标或内网目标在 resolve 阶段即被拒绝
         assert!(resolve_redirect(&https, "http://127.0.0.1/x.png").is_err());
         assert!(resolve_redirect(&https, "http://example.com/x.png").is_ok());
-    }
-
-    #[test]
-    fn raw_response_mock_follows_redirect_and_preserves_content_type() {
-        let mut calls = 0usize;
-        let response = fetch_raw_with("https://example.com/start.svg", |url| {
-            calls += 1;
-            if calls == 1 {
-                assert_eq!(url.target, "/start.svg");
-                Ok(Hop {
-                    status: 302,
-                    location: Some("/final.svg".into()),
-                    body: None,
-                    content_type: None,
-                })
-            } else {
-                assert_eq!(url.origin(), "https://example.com");
-                assert_eq!(url.target, "/final.svg");
-                Ok(Hop {
-                    status: 200,
-                    location: None,
-                    body: Some(b"<svg/>".to_vec()),
-                    content_type: Some("image/svg+xml; charset=utf-8".into()),
-                })
-            }
-        })
-        .expect("mock redirect should succeed");
-        assert_eq!(calls, 2);
-        assert_eq!(response.body, b"<svg/>");
-        assert_eq!(
-            response.content_type.as_deref(),
-            Some("image/svg+xml; charset=utf-8")
-        );
-    }
-
-    #[test]
-    fn raw_response_mock_rejects_https_downgrade_before_second_request() {
-        let mut calls = 0usize;
-        let error = fetch_raw_with("https://example.com/start.svg", |_| {
-            calls += 1;
-            Ok(Hop {
-                status: 301,
-                location: Some("http://example.com/final.svg".into()),
-                body: None,
-                content_type: None,
-            })
-        })
-        .expect_err("HTTPS downgrade must fail");
-        assert!(error.contains("https") && error.contains("http"), "{error}");
-        assert_eq!(calls, 1, "downgraded URL must never be fetched");
     }
 
     #[cfg(windows)]

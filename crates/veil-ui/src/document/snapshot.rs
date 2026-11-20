@@ -158,8 +158,6 @@ impl App {
 
     /// 预览换入/换出：`self.editor` 只承载只读展示，实时编辑器完整暂存（含撤销栈）。
     fn history_begin_preview(&mut self, text: &str) {
-        // 预览换入另一份正文：旧文档挂起的 Mermaid 回包立即作废。
-        self.clear_pending_mermaid_fetch();
         if self.ui_state.history.saved_editor.is_none() {
             let saved = std::mem::replace(
                 &mut self.editor,
@@ -184,7 +182,6 @@ impl App {
         let Some(saved) = self.ui_state.history.saved_editor.take() else {
             return;
         };
-        self.clear_pending_mermaid_fetch();
         self.editor = saved;
         self.window_state.scroll_y = self.ui_state.history.saved_scroll;
         self.window_state.goal_y = self.ui_state.history.saved_goal;
@@ -224,7 +221,6 @@ impl App {
     /// 恢复落地：整篇替换进缓冲区（单撤销事务 + 标脏），关闭面板并提示可撤销。
     pub(crate) fn history_apply_restore(&mut self, text: String) {
         self.history_end_preview();
-        self.clear_pending_mermaid_fetch();
         if let Some(dirty) = self.editor.replace_all_text(&text) {
             self.after_edit(dirty);
         }

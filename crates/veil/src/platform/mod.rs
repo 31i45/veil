@@ -7,9 +7,9 @@ mod clock;
 mod error;
 pub mod http; // 远程图片抓取（v1.4）：WinHTTP 手写 FFI
 pub mod ipc;
-pub mod mermaid; // mermaid.ink SVG 下载 + resvg 光栅化（Task 2-5）
+pub mod mermaid; // SVG → resvg 光栅化（离线引擎出 SVG 后共用）
 #[cfg(feature = "mermaid-offline")]
-pub mod mermaid_offline; // veil-full：QuickJS + mermaid.js 离线出 SVG
+pub mod mermaid_offline; // 唯一发行产物的 Mermaid 渲染器：QuickJS + mermaid.js 进程内出 SVG（惰性初始化）
 mod pdf; // 原生 PDF 导出（Wave 3A，跨平台 crate 但字体链 Windows 优先）
 #[cfg(windows)]
 mod pdf_layout; // Wave 4：Markdown → PDF 版面（纯逻辑，可单测）

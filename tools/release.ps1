@@ -51,8 +51,8 @@ if (-not $SkipClippy) {
 
 # Step 4: clean + release build
 Write-Step 4 'clean + release build'
-cargo clean -p veil -p veil-ui -p veil-core --release 2>$null
-Write-Host '  Cleaned veil/veil-ui/veil-core release artifacts'
+cargo clean -p veil -p veil-ui -p veil-core -p veil-mermaid-offline --release 2>$null
+Write-Host '  Cleaned veil/veil-ui/veil-core/veil-mermaid-offline release artifacts'
 cargo build --release -p veil 2>&1 | Select-Object -Last 3
 if ($LASTEXITCODE -ne 0) { Write-Fail 'cargo build --release failed' }
 $Exe = Get-Item target\release\veil.exe
@@ -63,16 +63,16 @@ Write-Step 5 'verify artifact'
 $vi = $Exe.VersionInfo
 $SizeMiB = [math]::Round($Exe.Length / 1MB, 2)
 $SizeBytes = $Exe.Length
-$SizeLimitBytes = 6MB
+$SizeLimitBytes = 14MB
 $SizeMarginBytes = $SizeLimitBytes - $SizeBytes
 $Checks = @(
-  @{ n='FileVersion';   ok = $vi.FileVersion -match '^1\.'; val=$vi.FileVersion },
-  @{ n='ProductVersion';ok = $vi.ProductVersion -match '^1\.'; val=$vi.ProductVersion },
+  @{ n='FileVersion';   ok = $vi.FileVersion -match '^\d+\.'; val=$vi.FileVersion },
+  @{ n='ProductVersion';ok = $vi.ProductVersion -match '^\d+\.'; val=$vi.ProductVersion },
   @{ n='FileDescription'; ok = $vi.FileDescription -eq 'Veil Markdown 编辑器'; val=$vi.FileDescription },
-  @{ n='Size 4-6 MiB';  ok = ($Exe.Length -ge 4MB) -and ($Exe.Length -le $SizeLimitBytes); val="$SizeMiB MiB" },
+  @{ n='Size <= 14 MiB';  ok = ($Exe.Length -ge 4MB) -and ($Exe.Length -le $SizeLimitBytes); val="$SizeMiB MiB" },
   @{ n='icons/veil.ico'; ok = (Test-Path 'icons/veil.ico'); val="$(if(Test-Path 'icons/veil.ico'){(Get-Item 'icons/veil.ico').Length}else{'missing'})" },
   @{ n='LICENSE';       ok = (Test-Path 'LICENSE'); val="$(if(Test-Path 'LICENSE'){(Get-Content 'LICENSE' -TotalCount 1)}else{'missing'})" },
-  @{ n='CHANGELOG.md';  ok = (Test-Path 'CHANGELOG.md'); val='v1.0.0 present' }
+  @{ n='CHANGELOG.md';  ok = (Test-Path 'CHANGELOG.md'); val='v3.0.0 present' }
 )
 foreach ($c in $Checks) {
   if ($c.ok) { Write-OK "$($c.n) = $($c.val)" } else { Write-Warn "$($c.n) = $($c.val) FAILED" }
@@ -105,7 +105,7 @@ Write-Host "  Veil v$Version Release Summary" -ForegroundColor Magenta
 Write-Host '=====================================================' -ForegroundColor Magenta
 Write-Host "  Version     : $($vi.ProductVersion)"
 Write-Host "  Size        : $SizeMiB MiB ($SizeBytes bytes)"
-Write-Host "  Size Margin : $SizeMarginBytes bytes to 6 MiB"
+Write-Host "  Size Margin : $SizeMarginBytes bytes to 14 MiB"
 Write-Host "  FileDescr   : $($vi.FileDescription)"
 Write-Host "  Build Time  : $($Exe.LastWriteTime)"
 Write-Host "  Elapsed     : $([math]::Round($Stopwatch.Elapsed.TotalSeconds, 1)) s"

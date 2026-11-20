@@ -1886,8 +1886,6 @@ mod tests {
         );
 
         let mut renderer = crate::platform::mermaid_offline::OfflineMermaid::new();
-        assert!(!renderer.requires_network());
-        renderer.set_allowed(false);
         let mut images = HashMap::new();
         let mut svg_roots = Vec::new();
         for (&(name, source), id) in veil_mermaid_offline::corpus::MERMAID_11_12_CORPUS

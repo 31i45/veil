@@ -179,11 +179,10 @@ keys! {
     CtxCopyCode => "ctx.copy_code", "复制代码块";
     CtxReloadImage => "ctx.reload_image", "重新加载图片";
     CtxImageMissing => "ctx.image_missing", "图片文件缺失（当前显示替代文本）";
-    CtxMermaidPreview => "ctx.mermaid.preview", "在 mermaid.live 编辑（需联网）";
+    CtxMermaidPreview => "ctx.mermaid.preview", "在 mermaid.live 编辑（复制源码）";
     CtxMermaidPreviewImage => "ctx.mermaid.preview_image", "预览当前源码图";
     CtxMermaidInsertImage => "ctx.mermaid.insert_image", "插入本地图片快照（保留源码）";
     CtxMermaidCopySource => "ctx.mermaid.copy_source", "复制源码";
-    CtxMermaidCopyLink => "ctx.mermaid.copy_link", "复制预览链接（需联网）";
     CtxMermaidInsertFlowchart => "ctx.mermaid.insert_flowchart", "插入流程图模板";
     CtxMermaidInsertSequence => "ctx.mermaid.insert_sequence", "插入时序图模板";
     CtxMermaidInsertClass => "ctx.mermaid.insert_class", "插入类图模板";
@@ -338,8 +337,6 @@ keys! {
     NoticeMermaidSnapshotNeedsFile => "notice.mermaid_snapshot_needs_file", "Mermaid 快照未插入：请先保存文档，再写入本地图片";
     NoticeMermaidSnapshotSaveFailed => "notice.mermaid_snapshot_save_failed", "Mermaid 快照保存失败，未修改原文：{}";
     NoticeMermaidSnapshotStale => "notice.mermaid_snapshot_stale", "Mermaid 源码已变化或文档已切换，快照未插入（正文未修改）";
-    NoticeMermaidSnapshotPending => "notice.mermaid_snapshot_pending", "上一张 Mermaid 快照仍在生成，请稍候";
-    NoticeMermaidRenderPending => "notice.mermaid_render_pending", "Mermaid 图片正在生成，请稍候";
     NoticeImageReadFailed => "notice.image_read_failed", "图片读取失败：{}";
     NoticeInsertImageNeedsFile => "notice.insert_image_needs_file", "插入图片需要先保存文档";
     NoticeUnsupportedImage => "notice.unsupported_image", "所选文件不是支持的图片格式";
@@ -356,14 +353,12 @@ keys! {
     FrontMatterCollapsed => "doc.frontmatter_collapsed", "Front Matter";
     NoticeFocusMode => "notice.focus_mode", "专注模式：{}";
     NoticeRemoteImageFailed => "notice.remote_image_failed", "部分远程图片加载失败，已显示替代文本";
-    NoticeMermaidInkNotice => "notice.mermaid_ink_notice", "图片由 mermaid.ink 在线渲染：该图源码将发送给第三方服务";
-    NoticeMermaidRemoteBlocked => "notice.mermaid_remote_blocked", "已关闭远程图片加载，无法在线渲染；可改用「在 mermaid.live 编辑」";
-    NoticeMermaidInkFailed => "notice.mermaid_ink_failed", "Mermaid 渲染失败：{}；可改用「在 mermaid.live 编辑」";
+    NoticeMermaidRenderFailed => "notice.mermaid_render_failed", "图表渲染失败：{}。请检查 Mermaid 语法";
     NoticeMermaidImageInserted => "notice.mermaid_image_inserted",
         "已插入本地图片快照；上方 Mermaid 源码块仍是活预览，快照不会随源码更新：{}";
     NoticeRemoteImagesBlocked => "notice.remote_images_blocked", "已阻止远程图片";
     NoticeRemoteImagesAllowed => "notice.remote_images_allowed", "已允许远程图片";
-    NoticeMermaidSourceTooLarge => "notice.mermaid_source_too_large", "Mermaid 源码超过 128 KiB，跳过在线渲染";
+    NoticeMermaidSourceTooLarge => "notice.mermaid_source_too_large", "Mermaid 源码超过 128 KiB，已跳过渲染";
     ToggleOn => "toggle.on", "开";
     ToggleOff => "toggle.off", "关";
 
@@ -534,7 +529,6 @@ keys! {
     IpcConnectPrimary => "ipc.connect_primary", "无法连接 Veil 主进程: {}";
     IpcUnknown => "ipc.unknown", "未知错误";
     IpcUnsupported => "ipc.unsupported", "当前平台不支持单实例 IPC；将使用独立进程";
-    ErrMermaidHttpUnsupported => "error.mermaid_http_unsupported", "当前平台不支持 Mermaid HTTP 传输";
     HttpUrlEmpty => "http.url_empty", "URL 为空";
     HttpUrlTooLong => "http.url_too_long", "URL 过长（上限 {} 字符）";
     HttpUrlControl => "http.url_control", "URL 含控制字符";

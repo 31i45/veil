@@ -600,7 +600,7 @@ pub enum BlockKind {
     /// 展示数学块（`$$...$$`）。块内不解析 inline，TeX 源码经 `math_source` 提取。
     Math,
     /// Mermaid 图表块（` ```mermaid ... ``` `）。块内不解析 inline，源码经
-    /// `mermaid_source` 提取；渲染走远程 mermaid.ink SVG API + resvg 光栅化。
+    /// `mermaid_source` 提取；渲染由进程内离线引擎出 SVG，再经 resvg 光栅化。
     Mermaid,
     /// GFM 表格（表头行 + 分隔行 + 至多若干表体行）。块级 inline 恒为空；
     /// 单元格文本/对齐/inline 节点经 `table` 提取（视图只读渲染，切片 9）。

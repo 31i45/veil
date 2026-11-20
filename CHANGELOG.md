@@ -2,7 +2,7 @@
 
 Veil 版本迭代记录。每个版本的详细修复清单见对应 git tag 的 commit log。
 
-## Unreleased
+## v2.0.0 — 2026-11-20
 
 双发行产物：`veil.exe`（远程 Mermaid）+ `veil-full.exe`（完全离线 Mermaid）。
 

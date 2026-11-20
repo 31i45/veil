@@ -123,6 +123,8 @@ Veil 不宣称所有 Markdown / Mermaid 语法在编辑态、源码态、HTML、
 
 前置：Rust stable（edition 2021）。验收环境：Windows 11 23H2+；Mica 亚克力在不可用时自动降级为纯色；Windows 10 未做真机记录，不宣称已验证。
 
+**平台边界：Veil 是 Windows-only 桌面应用。** 不宣称 `veil.exe` 的界面、Windows 集成与发布产物可在 Linux 或 macOS 构建、运行。只有平台无关的 `veil-core` 纳入 Linux CI：release workflow 的 `core-linux` job 在 Ubuntu 执行 `cargo check -p veil-core` 与 `cargo test -p veil-core`。Linux job 变绿只证明 core 的跨平台编译与测试，不代表提供或支持 Linux 应用。
+
 界面文案仅简体中文（zh-CN）：i18n 是单语词条表，没有英文条目，README 中引用的英文标签是对实际中文文案的翻译。Veil 不探测系统显示语言，也没有运行时语言切换。正文、导出内容与图内文字不随界面翻译。
 
 ```powershell
@@ -137,6 +139,8 @@ cargo test -p veil-mermaid-offline
 
 当前 1911 项测试全绿（串行 `cargo test --workspace --release -- --test-threads=1`：1911 passed / 0 failed / 15 ignored，2026-11-20；远程 SVG mock 使用 20 ms 墙钟截止，并行执行可能假超时）；默认特性下 `cargo test -p veil --lib` 为 221 passed / 1 ignored（默认特性现已包含离线引擎）。`cargo clippy --workspace --all-targets -- -D warnings` 零警告。
 
+Release CI 在 `v*` tag push 与 `workflow_dispatch` 时运行。手动触发默认 `dry_run=true`，执行 Linux core check/test 以及 Windows 构建、测试、clippy、产物边界、冒烟与 SHA-256 校验，但不创建、不上传 GitHub Release；只有 `v*` tag push 可以发布。任何冒烟失败都不得用 `continue-on-error` 掩盖。
+
 ## 零级门禁：真实启动冒烟
 
 测试全绿不等于用户双击的 exe 能打开。发布前必须对 release 产物运行真实启动冒烟：
@@ -145,9 +149,9 @@ cargo test -p veil-mermaid-offline
 pwsh -File tools/smoke_launch.ps1 -ExePath target/release/veil.exe -ExpectedTitlePattern '^veil' -MaxLaunchMs 1000
 ```
 
-出窗预算是 **1 秒**：`-MaxLaunchMs`（默认 1000）测量「进程启动 → `MainWindowHandle` 非零」，超限即 `stage=launch-too-slow` 判 FAIL——即使窗口最终出现、标题正确、退出码为 0 也不例外。`-TimeoutSeconds`（默认 5 秒）只决定探测时长，用于区分「慢启动」与「压根没出窗」，绝不放宽 1 秒预算。脚本还会校验标题非空（给出 `-ExpectedTitlePattern` 时还需匹配），即使窗口已出现，只要 stderr 含 `panicked at` / `buffer_mut` / `Must set size of surface` 也判失败；随后请求正常关闭并检查退出码。失败时非零退出，并打印结构化 `SMOKE FAIL ... stage=process-exited|window-timeout|launch-too-slow|stderr-panic|...` 行，PASS 行同时包含 `launch_ms` 与 `max_ms`。启动前若已有同名 `veil` 进程，脚本会明确失败并要求先手动关闭，绝不杀它未启动的进程。
+出窗预算是 **1 秒**：`-MaxLaunchMs`（默认 1000）测量「进程启动 → 通过 Win32 `EnumWindows` / `GetWindowText` 找到带标题的顶层窗口」，超限即 `stage=launch-too-slow` 判 FAIL——即使窗口最终出现、标题正确、退出码为 0 也不例外。脚本不使用 `Process.MainWindowHandle` 推断窗口或桌面是否可用。`-TimeoutSeconds`（默认 5 秒）只决定探测时长，用于区分「慢启动」与「压根没出窗」，绝不放宽 1 秒预算。脚本还会校验标题非空（给出 `-ExpectedTitlePattern` 时还需匹配），即使窗口已出现，只要 stderr 含 `panicked at` / `buffer_mut` / `Must set size of surface` 也判失败；随后发送 `WM_CLOSE` 并检查退出码。失败时非零退出，并打印结构化 `SMOKE FAIL ... stage=process-exited|window-timeout|launch-too-slow|stderr-panic|...` 行；每个结果都记录 `launch_ms`、`max_ms`、`session`、`target_session`、`user_interactive`、`desktop` 与窗口探测来源。子进程始终使用新建临时 `VEIL_HOME`，且不传文档参数，因此不会恢复真实用户文档。启动前若已有同名 `veil` 进程，脚本会明确失败并要求先手动关闭，绝不杀它未启动的进程。
 
-**冒烟失败一律不得发布**，单元测试、clippy、体积门禁、截图都不能替代，且发布前必须在本地对最终产物运行。发布阻断优先级：冒烟第一；CI 因必须验证最终要上传的产物，在测试/边界门禁之后、上传之前执行同一脚本，且不得使用 `continue-on-error`。GitHub 托管 Windows runner 可能没有交互桌面（拿不到 `MainWindowHandle`），因此权威口径是本地运行；若本地 PASS 而 CI 出现纯环境性失败，应在 release notes 记录并附本地日志，而不是削弱门禁。
+**冒烟失败一律不得发布**，单元测试、clippy、体积门禁、截图都不能替代，且发布前必须在本地对最终产物完成交互桌面全量冒烟。CI 在测试/边界门禁之后、上传之前执行同一脚本，且不得使用 `continue-on-error`。在 Session 0 或 `UserInteractive=false` 时，唯一可接受的降级结果是显式 `stage=pass-degraded`：进程在稳定观察期内存活、stderr 无 panic 特征、本进程顶层窗口接受 `WM_CLOSE` 且退出码为 0。该结果明确**不断言**窗口可见性、标题或 1 秒预算，权威视觉启动证据仍来自本机。找不到可关闭窗口、关闭超时、非零退出或 panic 仍使 job 失败；失败后的强制清理绝不算正常退出。
 
 ## 数字红线（目标值与实测）
 

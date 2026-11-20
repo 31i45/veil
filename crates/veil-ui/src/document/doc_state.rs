@@ -1,6 +1,7 @@
 //! 文档生命周期：打开/另存/保存（含冲突备份与原子落盘）、自动保存调度、
 //! 外部变更轮询与标题派生。纯策略与 IO 编排，绘制与交互不在此文件。
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -13,6 +14,7 @@ use crate::chrome::path_label;
 use crate::docio::{decode, encode};
 use crate::editor::Editor;
 use crate::i18n::{clip_error, t, tf, Key};
+use crate::mermaid_renderer::{MermaidImage, MermaidRenderer};
 use crate::view::modal;
 
 use super::{recovery, session, ExternalState};
@@ -574,6 +576,39 @@ impl App {
                 self.cache.mermaid_imgs.insert(id, img);
             }
         }
+    }
+
+    /// PDF/统一打印前置：填充本次会话独立的 light Mermaid map。
+    /// 屏幕为 dark 时忽略 dark 屏幕缓存并强制离线 light 重渲；屏幕为 light 时复用已有图。
+    /// 无论哪种主题都不写屏幕/HTML cache，失败保持缺失以沿用源码围栏降级。
+    pub(crate) fn ensure_mermaid_for_print(
+        &mut self,
+        print_imgs: &mut HashMap<veil_core::BlockId, MermaidImage>,
+    ) {
+        let blocks: Vec<(veil_core::BlockId, String)> = {
+            let session = self.editor.session();
+            session
+                .blocks()
+                .into_iter()
+                .filter_map(|(id, kind, _range)| {
+                    if kind != veil_core::BlockKind::Mermaid {
+                        return None;
+                    }
+                    let body = session
+                        .fenced_code_source(id)
+                        .map(|(_, body)| body)
+                        .unwrap_or_default();
+                    Some((id, body))
+                })
+                .collect()
+        };
+        ensure_mermaid_for_print_blocks(
+            blocks,
+            self.input_state.theme.dark,
+            &self.cache.mermaid_imgs,
+            print_imgs,
+            &mut *self.ports.mermaid,
+        );
     }
 
     /// Ctrl+E：经注入的 Exporter 导出 HTML。导出是显式副作用：无论文档是否有关联路径，
@@ -1186,6 +1221,48 @@ impl App {
     }
 }
 
+/// 同步填充打印专用 light map；屏幕缓存只读，渲染失败静默留给上层降级。
+fn ensure_mermaid_for_print_blocks(
+    blocks: Vec<(veil_core::BlockId, String)>,
+    screen_dark: bool,
+    screen_imgs: &HashMap<veil_core::BlockId, MermaidImage>,
+    print_imgs: &mut HashMap<veil_core::BlockId, MermaidImage>,
+    renderer: &mut dyn MermaidRenderer,
+) {
+    // 主题切换会清空屏幕 Mermaid cache，故 light 主题下按 BlockId 命中即为 light 图。
+    if !screen_dark {
+        for (id, _) in &blocks {
+            if let Some(img) = screen_imgs.get(id) {
+                print_imgs.entry(*id).or_insert_with(|| img.clone());
+            }
+        }
+    }
+
+    let started = Instant::now();
+    let mut rendered = 0usize;
+    for (id, source) in blocks {
+        // dark 屏幕缓存存在也不复用；但本会话已生成的 light 图可直接命中。
+        if print_imgs.contains_key(&id) {
+            continue;
+        }
+        // 与 HTML 导出同一预算及源码上限，保持同步导出语义。
+        if rendered >= 16 || started.elapsed() > Duration::from_secs(10) {
+            break;
+        }
+        if source.len() > 128 * 1024 {
+            continue;
+        }
+        rendered += 1;
+        let label = format!(
+            "mermaid-print:{:016x}",
+            crate::app::content_hash(format!("{source}\0false").as_bytes())
+        );
+        if let Ok(img) = renderer.render_blocking(label, source, false) {
+            print_imgs.insert(id, img);
+        }
+    }
+}
+
 /// 保存失败的标准出口：重试（主）/ 另存为（次）/ 取消（次）。
 fn save_error_buttons() -> Vec<modal::ModalButton> {
     vec![
@@ -1247,4 +1324,145 @@ fn conflict_copy_path(store: &mut dyn FileStore, path: &Path) -> Option<PathBuf>
         let cand = path.with_file_name(name);
         store.load(&cand).is_err().then_some(cand)
     })
+}
+
+#[cfg(test)]
+mod print_mermaid_tests {
+    use super::ensure_mermaid_for_print_blocks;
+    use crate::mermaid_renderer::{MermaidImage, MermaidRenderer};
+    use std::collections::{HashMap, VecDeque};
+    use veil_core::BlockId;
+
+    struct RecordingMermaid {
+        calls: Vec<(String, String, bool)>,
+        results: VecDeque<Result<MermaidImage, String>>,
+    }
+
+    impl RecordingMermaid {
+        fn new(results: Vec<Result<MermaidImage, String>>) -> Self {
+            Self {
+                calls: Vec::new(),
+                results: results.into(),
+            }
+        }
+    }
+
+    impl MermaidRenderer for RecordingMermaid {
+        fn request(&mut self, _label: String, _source: String, _dark: bool) {}
+
+        fn poll(&mut self) -> Vec<(String, Result<MermaidImage, String>)> {
+            Vec::new()
+        }
+
+        fn set_dpi_scale(&mut self, _scale: f32) {}
+
+        fn render_blocking(
+            &mut self,
+            label: String,
+            source: String,
+            dark: bool,
+        ) -> Result<MermaidImage, String> {
+            self.calls.push((label, source, dark));
+            self.results
+                .pop_front()
+                .unwrap_or_else(|| Err("unexpected blocking render".into()))
+        }
+    }
+
+    fn image(marker: &str) -> MermaidImage {
+        MermaidImage {
+            data: marker.as_bytes().to_vec(),
+            width: 1,
+            height: 1,
+            svg_text: Some(format!("<svg>{marker}</svg>")),
+            px_to_pt: 0.375,
+        }
+    }
+
+    fn block(id: BlockId) -> Vec<(BlockId, String)> {
+        vec![(id, "graph TD\nA-->B".into())]
+    }
+
+    fn assert_image(img: &MermaidImage, marker: &str) {
+        assert_eq!(img.data, marker.as_bytes());
+        assert_eq!(
+            img.svg_text.as_deref(),
+            Some(format!("<svg>{marker}</svg>").as_str())
+        );
+    }
+
+    #[test]
+    fn pdf_dark_ui_renders_light_even_with_dark_screen_cache() {
+        let id = BlockId(7);
+        let screen = HashMap::from([(id, image("dark-screen"))]);
+        let mut print = HashMap::new();
+        let mut renderer = RecordingMermaid::new(vec![Ok(image("light-pdf"))]);
+
+        ensure_mermaid_for_print_blocks(block(id), true, &screen, &mut print, &mut renderer);
+
+        assert_eq!(renderer.calls.len(), 1);
+        let (label, source, dark) = &renderer.calls[0];
+        assert!(label.starts_with("mermaid-print:"));
+        assert_eq!(source, "graph TD\nA-->B");
+        assert!(!dark, "PDF 在 dark UI 下也必须请求 light 渲染");
+        assert_image(print.get(&id).expect("PDF light 图"), "light-pdf");
+
+        ensure_mermaid_for_print_blocks(block(id), true, &screen, &mut print, &mut renderer);
+        assert_eq!(renderer.calls.len(), 1, "打印会话 light map 命中后不重渲");
+    }
+
+    #[test]
+    fn pdf_dark_ui_preserves_screen_bitmap_and_svg() {
+        let id = BlockId(11);
+        let dark = image("dark-original");
+        let expected_data = dark.data.clone();
+        let expected_svg = dark.svg_text.clone();
+        let screen = HashMap::from([(id, dark)]);
+        let mut print = HashMap::new();
+        let mut renderer = RecordingMermaid::new(vec![Ok(image("light-pdf"))]);
+
+        ensure_mermaid_for_print_blocks(block(id), true, &screen, &mut print, &mut renderer);
+
+        let cached = screen.get(&id).expect("dark 屏幕缓存仍应存在");
+        assert_eq!(cached.data, expected_data, "屏幕位图字节不得改变");
+        assert_eq!(cached.svg_text, expected_svg, "屏幕 SVG 不得改变");
+        assert_image(print.get(&id).expect("独立 PDF 图"), "light-pdf");
+    }
+
+    #[test]
+    fn pdf_light_ui_reuses_light_screen_cache_without_rendering() {
+        let id = BlockId(13);
+        let screen = HashMap::from([(id, image("light-screen"))]);
+        let mut print = HashMap::new();
+        let mut renderer = RecordingMermaid::new(Vec::new());
+
+        ensure_mermaid_for_print_blocks(block(id), false, &screen, &mut print, &mut renderer);
+
+        assert!(renderer.calls.is_empty(), "已有 light 图不应重复渲染");
+        assert_image(print.get(&id).expect("复用的 light 图"), "light-screen");
+    }
+
+    #[test]
+    fn pdf_mermaid_failure_keeps_source_fallback_and_can_retry() {
+        let id = BlockId(17);
+        let screen = HashMap::from([(id, image("dark-screen"))]);
+        let mut print = HashMap::new();
+        let mut renderer = RecordingMermaid::new(vec![
+            Err("injected offline render failure".into()),
+            Ok(image("light-retry")),
+        ]);
+
+        ensure_mermaid_for_print_blocks(block(id), true, &screen, &mut print, &mut renderer);
+
+        assert!(!print.contains_key(&id), "失败时应留空以走源码围栏降级");
+        assert_eq!(renderer.calls.len(), 1);
+        assert!(!renderer.calls[0].2);
+
+        ensure_mermaid_for_print_blocks(block(id), true, &screen, &mut print, &mut renderer);
+
+        assert_eq!(renderer.calls.len(), 2, "失败不应让后续重试失效");
+        assert!(!renderer.calls[1].2);
+        assert_image(print.get(&id).expect("重试成功的 light 图"), "light-retry");
+        assert_image(screen.get(&id).expect("屏幕缓存"), "dark-screen");
+    }
 }

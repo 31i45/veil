@@ -32,6 +32,54 @@ const CELL_PAD_Y: f32 = crate::tokens::doc::TABLE_PAD_Y;
 /// 列宽收缩下限（基准字号下）：再窄会把文本挤成逐字折行。
 pub(crate) const MIN_COL_WIDTH: f32 = 40.0;
 
+/// 整个单元格是否为 ASCII 单词或带匹配反引号的 code span。
+fn is_atomic_cell_text(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    if !bytes.is_empty() && bytes.iter().all(u8::is_ascii_alphanumeric) {
+        return true;
+    }
+    let open = bytes.iter().take_while(|&&b| b == b'`').count();
+    let close = bytes.iter().rev().take_while(|&&b| b == b'`').count();
+    open > 0 && open == close && open + close < bytes.len()
+}
+
+/// 用其他列在硬下限以上的空间补偿短原子 token，保护后总表宽不增加。
+fn protect_short_atomic_columns(cols: &mut [f32], hard_min: f32, preferred: &[f32]) {
+    let need: f32 = cols
+        .iter()
+        .zip(preferred)
+        .map(|(w, p)| (p - w).max(0.0))
+        .sum();
+    if need <= 0.0 {
+        return;
+    }
+    let room: f32 = cols
+        .iter()
+        .zip(preferred)
+        .map(|(w, p)| (w - hard_min.max(*p)).max(0.0))
+        .sum();
+    if room <= 0.0 {
+        return;
+    }
+    let factor = (room / need).min(1.0);
+    let mut boosted = 0.0f32;
+    for (w, p) in cols.iter_mut().zip(preferred) {
+        let delta = (*p - *w).max(0.0) * factor;
+        *w += delta;
+        boosted += delta;
+    }
+    let mut remaining = boosted;
+    for (w, p) in cols.iter_mut().zip(preferred) {
+        let available = (*w - hard_min.max(*p)).max(0.0);
+        let taken = available.min(remaining);
+        *w -= taken;
+        remaining -= taken;
+        if remaining <= 0.001 {
+            break;
+        }
+    }
+}
+
 /// 单元格内联公式（输入）：`range` 为剥标记后可见文本的字节区间（`$x^2$` → `x^2`），
 /// `w/h` 为渲染图尺寸（占位宽与行高据此计算）。
 #[derive(Clone)]
@@ -653,6 +701,7 @@ impl LayoutEngine {
         // 第一遍：内在宽度（不折行），列宽 = 该列最宽单元格 + 两侧内边距。
         // 可定位图片已计入文本占位；仅无法定位的降级图片沿用尾部宽度。
         let mut cols = vec![0.0f32; ncols];
+        let mut atomic_min = vec![0.0f32; ncols];
         let mut flat = 0usize;
         for (row, bold) in &inputs {
             for (c, cell) in row.iter().enumerate() {
@@ -682,6 +731,10 @@ impl LayoutEngine {
                         }
                     })
                     .unwrap_or(0.0);
+                // 只保护常规短 token；长英文仍按超宽 token 使用字形级兜底。
+                if cell_w <= MIN_COL_WIDTH * scale && is_atomic_cell_text(cell.text.as_ref()) {
+                    atomic_min[c] = atomic_min[c].max(cell_w + 2.0 * pad_x);
+                }
                 cols[c] = cols[c].max(cell_w.max(img_w));
                 flat += 1;
             }
@@ -707,6 +760,7 @@ impl LayoutEngine {
                 *w = (*w * k).max(hard_min);
             }
         }
+        protect_short_atomic_columns(&mut cols, hard_min, &atomic_min);
         // 用户拖动列宽（B2，纯视图态）：长度匹配即覆盖内在宽；
         // 总宽超出可用宽时按比例压回（无横向滚动，避免裁切）。
         if let Some(ov) = widths {
@@ -1017,6 +1071,24 @@ mod tests {
             "窄版心须折行增高: {} vs {}",
             narrow.height,
             wide.height
+        );
+    }
+
+    #[test]
+    fn shrink_preserves_short_inline_code_without_widening_table() {
+        let doc = "| 名称 | 格式 | 说明 |\n| --- | --- | --- |\n| Gamma | `code` | 较长的中文单元格用于检查换行 |\n";
+        let wide = layout(doc, 800.0);
+        let narrow = layout(doc, 360.0);
+        assert!(
+            narrow.cells[4].h <= wide.cells[4].h + 0.01,
+            "缩列后 code 必须保持单行完整: wide={}, narrow={}",
+            wide.cells[4].h,
+            narrow.cells[4].h
+        );
+        assert!(
+            narrow.width <= 360.0 + 0.01,
+            "保护短 token 不得让表格横向溢出: {}",
+            narrow.width
         );
     }
 

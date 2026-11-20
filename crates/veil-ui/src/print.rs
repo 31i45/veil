@@ -3,6 +3,7 @@
 //! 策略（打印对话框、设备上下文、逐页 blit）由产品层（veil）经 `Print` 端口注入。
 //! 本文件零 Win32 依赖，headless 全测（同 Clipboard/FileStore 模式，INSTANCE §6）。
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::app::App;
@@ -57,6 +58,8 @@ pub(crate) struct PrintState {
 /// 字段 pub(crate) 供 in-crate 测试直达；产品层只用下列 pub 方法。
 pub struct PrintSession<'a> {
     pub(crate) app: &'a mut App,
+    /// 本次打印/PDF 会话专用的 light Mermaid 图；与屏幕/HTML 主题缓存隔离。
+    mermaid_imgs: HashMap<veil_core::BlockId, MermaidImage>,
 }
 
 impl PrintSession<'_> {
@@ -247,18 +250,18 @@ impl PrintSession<'_> {
             .map(|p| p.to_path_buf())
     }
 
-    /// 当前缓存中已光栅化的 Mermaid 图表（BlockId → MermaidImage）。
-    /// 导出/打印时用于把 Mermaid 块绘制成位图。空 HashMap 表示无数据。
-    pub fn mermaid_images(&self) -> std::collections::HashMap<veil_core::BlockId, MermaidImage> {
-        self.app.cache.mermaid_imgs.clone()
+    /// 当前打印会话已准备好的 light Mermaid 图表（BlockId → MermaidImage）。
+    /// 不读取屏幕主题缓存，避免 dark 位图/SVG 混入固定浅色纸面。
+    pub fn mermaid_images(&self) -> HashMap<veil_core::BlockId, MermaidImage> {
+        self.mermaid_imgs.clone()
     }
 
-    /// 导出/打印前补齐缺失的 Mermaid 渲染（同步、有超时预算）。
+    /// 导出/打印前补齐缺失的 light Mermaid 渲染（同步、有超时预算）。
     ///
     /// 由平台实现方在「用户已确认输出位置之后」调用：放在对话框之前会让取消操作
-    /// 也白等网络超时。重复调用幂等（命中缓存即跳过）。
+    /// 也白等渲染超时。重复调用幂等（命中本次会话的 light map 即跳过）。
     pub fn prepare_mermaid(&mut self) {
-        self.app.ensure_mermaid_for_export();
+        self.app.ensure_mermaid_for_print(&mut self.mermaid_imgs);
     }
 }
 
@@ -269,7 +272,10 @@ impl App {
             return;
         }
         let mut port = std::mem::replace(&mut self.ports.print, Box::new(NoPrint));
-        port.print(&mut PrintSession { app: self });
+        port.print(&mut PrintSession {
+            app: self,
+            mermaid_imgs: HashMap::new(),
+        });
         self.ports.print = port;
     }
 
@@ -279,7 +285,10 @@ impl App {
             return;
         }
         let mut port = std::mem::replace(&mut self.ports.print, Box::new(NoPrint));
-        port.export_pdf(&mut PrintSession { app: self });
+        port.export_pdf(&mut PrintSession {
+            app: self,
+            mermaid_imgs: HashMap::new(),
+        });
         self.ports.print = port;
     }
 

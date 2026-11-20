@@ -4,12 +4,40 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Build, test, gate, smoke and validate artifacts without publishing'
+        required: true
+        default: true
+        type: boolean
 
 permissions:
   contents: write
 
 jobs:
+  core-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.99.1
+
+      - name: Cache cargo builds
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check veil-core
+        run: cargo check -p veil-core
+
+      - name: Test veil-core
+        run: cargo test -p veil-core
+
   release:
+    needs: core-linux
     runs-on: windows-latest
     steps:
       - name: Checkout
@@ -71,11 +99,9 @@ jobs:
           }
           Write-Host "PASS: veil.exe boundary correct (offline engine strings present, size OK)"
 
-      # 零级门禁：真实启动冒烟。测试全绿不代表用户双击的 exe 能打开。
-      # 1 秒出窗是硬预算（-MaxLaunchMs 1000）：本地 1000ms 是权威口径，CI 也
-      # 必须显式传入、不得放宽。GitHub 托管 runner 是 Session 0 非交互桌面，
-      # 极少数情况下冷启动更慢；即便如此也只能在 release notes 记录环境性失败，
-      # 不得用 continue-on-error 掩盖。
+      # 零级门禁：真实启动冒烟。交互桌面断言标题、出窗与 1 秒预算；Session 0 /
+      # 非交互桌面只断言存活、无 panic、WM_CLOSE 正常退出且退出码为 0，并以
+      # stage=pass-degraded 记录断言子集。两种结果都不使用 continue-on-error。
       - name: Smoke launch veil.exe (tier-0 gate)
         shell: pwsh
         run: pwsh -NoProfile -File tools/smoke_launch.ps1 -ExePath target/release/veil.exe -ExpectedTitlePattern '^veil' -MaxLaunchMs 1000
@@ -95,6 +121,20 @@ jobs:
           Set-Content -LiteralPath "$($exe.FullName).sha256" -Value $checksum -Encoding ascii
           Write-Host "$($exe.Name).sha256: $checksum"
 
+      - name: Validate release artifacts
+        shell: pwsh
+        run: |
+          $exe = Get-Item target\release\veil.exe
+          $checksumPath = "$($exe.FullName).sha256"
+          $line = (Get-Content -LiteralPath $checksumPath -Raw).Trim()
+          $expected = ($line -split '\s+')[0]
+          $actual = (Get-FileHash -LiteralPath $exe.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($expected -ne $actual) {
+            Write-Host "FAIL: SHA-256 mismatch for $($exe.Name)"
+            exit 1
+          }
+          Write-Host "PASS: release artifacts validated ($($exe.Name), $($exe.Name).sha256, SHA-256 match)"
+
       - name: Extract release notes from CHANGELOG
         run: |
           $tag = "${{ github.ref_name }}"
@@ -111,7 +151,9 @@ jobs:
           $out -join "`n" | Set-Content -Path release-notes.md -Encoding utf8
           Write-Host "release-notes.md written: $($out.Count) lines"
 
+      # workflow_dispatch 默认 dry_run=true；即使手动设为 false，也只有 v* tag push 能发布。
       - name: Create GitHub Release
+        if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && !inputs.dry_run }}
         uses: softprops/action-gh-release@v2
         with:
           name: Veil ${{ github.ref_name }}

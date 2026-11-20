@@ -34,6 +34,23 @@ pub(crate) struct CellDecor {
     pub scripts: Vec<(usize, usize, f32)>,
 }
 
+/// 整格是否由同一种富文本样式连续覆盖；是则折行测量可复用最终 shaping 的 attrs。
+fn uniform_cell_style(text_len: usize, styles: Option<&[(usize, usize, Style)]>) -> Option<Style> {
+    if text_len == 0 {
+        return None;
+    }
+    let styles = styles?;
+    let &(_, _, uniform) = styles.first()?;
+    let mut cursor = 0usize;
+    for &(s, e, st) in styles {
+        if s != cursor || e <= s || st != uniform {
+            return None;
+        }
+        cursor = e;
+    }
+    (cursor == text_len).then_some(uniform)
+}
+
 impl LayoutEngine {
     /// 排版单个单元格文本，返回 (buffer, 文本宽, 文本高)。
     /// `wrap_w` 为 None 时求内在宽（用于列宽计算，保留原文）；Some 时由本地显式换行
@@ -85,8 +102,24 @@ impl LayoutEngine {
         };
         let doc_font = self.doc_font();
         let mono_family = self.mono_family();
+        // 与 rich_spans 相同叠加表头粗体；整格 mono 尤其不能用正文字体测量，
+        // 否则列宽按 mono 求出后，折行却会按另一套宽度把 code 拆成 cod/e。
+        let wrap_attrs = uniform_cell_style(text.len(), styles).map_or_else(
+            || attrs.clone(),
+            |mut st| {
+                st.bold |= bold;
+                attrs_of(
+                    BlockKind::Table,
+                    st,
+                    link_color,
+                    doc_font,
+                    mono_family,
+                    metrics.font_size,
+                )
+            },
+        );
         let wrapped = match wrap_w {
-            Some(width) => wrap_cell_text(self.font_system(), metrics, &attrs, text, width),
+            Some(width) => wrap_cell_text(self.font_system(), metrics, &wrap_attrs, text, width),
             None => WrappedCell::identity(text),
         };
         let fs = self.font_system();
@@ -436,6 +469,7 @@ fn wrap_one_line(
     if clusters.is_empty() {
         return (text.to_owned(), Vec::new());
     }
+    let atomic = short_atomic_tokens(text, &clusters, width);
     let mut out = String::with_capacity(text.len() + 8);
     let mut breaks = Vec::new();
     let mut last_byte = 0usize;
@@ -448,11 +482,13 @@ fn wrap_one_line(
             continue;
         }
         // 从当前溢出点向前找最近的允许断点；找不到就允许悬挂，
-        // 绝不在「行首禁则 / 行尾禁则」边界断开。
+        // 绝不在「行首禁则 / 行尾禁则」边界或短原子 token 内断开。
         let mut j = i;
         let mut found = false;
         while j > line_start {
-            if boundary_allowed(text, &clusters[j - 1], &clusters[j]) {
+            let brk = clusters[j].0;
+            let inside_atomic = atomic.iter().any(|&(s, e)| s < brk && brk < e);
+            if !inside_atomic && boundary_allowed(text, &clusters[j - 1], &clusters[j]) {
                 found = true;
                 break;
             }
@@ -474,6 +510,67 @@ fn wrap_one_line(
     }
     out.push_str(&text[last_byte..]);
     (out, breaks)
+}
+
+/// 可容纳的 ASCII 单词与反引号 code span 整体折行；超宽 token 不列入，保留字形级兜底。
+fn short_atomic_tokens(
+    text: &str,
+    clusters: &[(usize, usize, f32)],
+    width: f32,
+) -> Vec<(usize, usize)> {
+    let bytes = text.as_bytes();
+    let mut tokens = Vec::new();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] == b'`' {
+            let open = i;
+            while i < bytes.len() && bytes[i] == b'`' {
+                i += 1;
+            }
+            let run = i - open;
+            let mut search = i;
+            let mut close = None;
+            while search < bytes.len() {
+                if bytes[search] != b'`' {
+                    search += 1;
+                    continue;
+                }
+                let close_start = search;
+                while search < bytes.len() && bytes[search] == b'`' {
+                    search += 1;
+                }
+                if search - close_start == run {
+                    close = Some(search);
+                    break;
+                }
+            }
+            if let Some(end) = close {
+                tokens.push((open, end));
+                i = end;
+                continue;
+            }
+            i = open;
+        }
+        if bytes[i].is_ascii_alphanumeric() {
+            let start = i;
+            i += 1;
+            while i < bytes.len() && bytes[i].is_ascii_alphanumeric() {
+                i += 1;
+            }
+            tokens.push((start, i));
+        } else {
+            i += text[i..].chars().next().map(char::len_utf8).unwrap_or(1);
+        }
+    }
+    tokens.retain(|&(start, end)| {
+        let token_w: f32 = clusters
+            .iter()
+            .filter(|c| c.0 < end && c.1 > start)
+            .map(|c| c.2)
+            .sum();
+        token_w <= width
+    });
+    tokens
 }
 
 /// 按字形簇测量：(起始字节, 结束字节, 宽度)，按起始字节排序。
@@ -782,6 +879,70 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    fn measured_width(engine: &mut LayoutEngine, metrics: Metrics, text: &str) -> f32 {
+        measure_clusters(engine.font_system(), metrics, &Attrs::new(), text)
+            .iter()
+            .map(|c| c.2)
+            .sum()
+    }
+
+    #[test]
+    fn short_ascii_word_and_inline_code_wrap_atomically() {
+        let mut engine = LayoutEngine::new();
+        let metrics = Metrics::new(BASE_FONT_SIZE, BASE_LINE_HEIGHT);
+        let attrs = Attrs::new();
+        for token in ["code", "`code`"] {
+            let text = format!("a {token}");
+            let token_w: f32 = measure_clusters(engine.font_system(), metrics, &attrs, &text)
+                .iter()
+                .filter(|c| c.0 >= 2)
+                .map(|c| c.2)
+                .sum();
+            let width = token_w + 1.0;
+            let w = wrap_cell_text(engine.font_system(), metrics, &attrs, &text, width);
+            assert_eq!(w.display, format!("a \n{token}"), "短 token 不得内部断行");
+
+            let alone = wrap_cell_text(engine.font_system(), metrics, &attrs, token, token_w);
+            assert_eq!(alone.display, token, "短 token 独占单元格时必须完整");
+        }
+    }
+
+    #[test]
+    fn overwide_ascii_word_keeps_glyph_fallback_without_overflow() {
+        let mut engine = LayoutEngine::new();
+        let metrics = Metrics::new(BASE_FONT_SIZE, BASE_LINE_HEIGHT);
+        let attrs = Attrs::new();
+        let text = "supercalifragilistic";
+        let width = measured_width(&mut engine, metrics, text) / 3.0;
+        let w = wrap_cell_text(engine.font_system(), metrics, &attrs, text, width);
+        assert!(w.display.lines().count() > 1, "超宽英文词仍须逐字兜底");
+        assert_eq!(w.display.replace('\n', ""), text);
+        for line in w.display.lines() {
+            assert!(
+                measured_width(&mut engine, metrics, line) <= width + 0.01,
+                "兜底折行不得横向溢出: {line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn cjk_cell_wraps_without_horizontal_overflow() {
+        let mut engine = LayoutEngine::new();
+        let metrics = Metrics::new(BASE_FONT_SIZE, BASE_LINE_HEIGHT);
+        let attrs = Attrs::new();
+        let text = "中文中文中文中文中文";
+        let width = measured_width(&mut engine, metrics, "中") * 2.5;
+        let w = wrap_cell_text(engine.font_system(), metrics, &attrs, text, width);
+        assert!(w.display.lines().count() > 1, "中文仍须正常折行");
+        assert_eq!(w.display.replace('\n', ""), text);
+        for line in w.display.lines() {
+            assert!(
+                measured_width(&mut engine, metrics, line) <= width + 0.01,
+                "中文折行不得横向溢出: {line:?}"
+            );
         }
     }
 

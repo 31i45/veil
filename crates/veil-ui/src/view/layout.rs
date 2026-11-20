@@ -1049,11 +1049,19 @@ impl LayoutEngine {
         // 标题/代码块字号按既有比例从正文字号派生。
         let scale = kind_scale(&kind) * block_scale(kind.clone()) * self.scale;
         let metrics = Metrics::new(self.doc_font_size * scale, self.doc_line_height * scale);
-        // NBSP 占位段：NBSP 为 2 字节，个数 = 图宽 / NBSP 宽四舍五入（误差 ≤ 半个 NBSP）。
+        let default_attrs = attrs_of(
+            kind.clone(),
+            Style::default(),
+            self.link_color,
+            self.doc_font,
+            self.mono_family,
+            metrics.font_size,
+        );
+        // NBSP 占位段：测量字体必须与实际占位 span 一致，尤其 Mermaid 使用等宽族。
         let nbsp_w = if imgs.is_empty() {
             1.0
         } else {
-            self.measure_nbsp(metrics)
+            self.measure_nbsp_with_attrs(metrics, &default_attrs)
         };
         let mut kept: Vec<&InlineImg> = Vec::new();
         // 缺失/远程 `<img>` 的占位文本区间（块相对 doc 坐标），供 paint 画占位框。
@@ -1209,14 +1217,6 @@ impl LayoutEngine {
             .collect();
         img_ranges.sort_by_key(|r| (r.start, r.end));
         let mut buffer = Buffer::new(&mut self.font_system, metrics);
-        let default_attrs = attrs_of(
-            kind.clone(),
-            Style::default(),
-            self.link_color,
-            self.doc_font,
-            self.mono_family,
-            metrics.font_size,
-        );
         // style_spans 产出文档坐标，经映射转 layout 坐标；整体落入消隐/占位区的 span 零宽丢弃。
         // 占位 NBSP 区无样式来源，显式补默认样式 span（cosmic 排版文本 = 各 span 顺次拼接，
         // 覆盖必须完备且有序）；指针序即 layout 偏移序。
@@ -1640,12 +1640,16 @@ impl LayoutEngine {
         }
     }
 
-    /// NBSP 占位宽度：同 metrics 下排 8 个 NBSP 求均值。字体缺字形时退化 1px 防除零。
-    /// 表格公式占位复用同一口径，保证两处视觉一致。
+    /// 表格公式占位沿用默认字体口径。
     pub(crate) fn measure_nbsp(&mut self, metrics: Metrics) -> f32 {
+        self.measure_nbsp_with_attrs(metrics, &Attrs::new())
+    }
+
+    /// NBSP 占位宽度：同 metrics/attrs 下排 8 个 NBSP 求均值，缺字形时退化 1px 防除零。
+    fn measure_nbsp_with_attrs(&mut self, metrics: Metrics, attrs: &Attrs) -> f32 {
         let probe = "\u{A0}\u{A0}\u{A0}\u{A0}\u{A0}\u{A0}\u{A0}\u{A0}";
         let mut b = Buffer::new(&mut self.font_system, metrics);
-        b.set_text(probe, &Attrs::new(), Shaping::Advanced, None);
+        b.set_text(probe, attrs, Shaping::Advanced, None);
         b.set_size(None, None);
         b.shape_until_scroll(&mut self.font_system, false);
         let w: f32 = b
@@ -4841,6 +4845,74 @@ mod tests {
             glyphs, nbsp,
             "占位文本不得被重复排版（字形数应等于 NBSP 数）"
         );
+    }
+
+    #[test]
+    fn mermaid_placeholder_uses_mono_attrs_without_inflating_block_height() {
+        let src = "```mermaid\nmindmap\n  root((Veil))\n```\n\n## 后续标题";
+        let session = Session::open(src);
+        let (id, kind, range) = session.blocks()[0].clone();
+        assert!(matches!(kind, BlockKind::Mermaid));
+        let mermaid_key = id.0.to_string();
+        let inlines = session.block_inlines(id).unwrap();
+        let mut eng = LayoutEngine::new();
+        let scale = kind_scale(&kind) * block_scale(kind.clone()) * eng.scale;
+        let metrics = Metrics::new(eng.doc_font_size * scale, eng.doc_line_height * scale);
+        let mermaid_attrs = attrs_of(
+            kind.clone(),
+            Style::default(),
+            eng.link_color,
+            eng.doc_font,
+            eng.mono_family,
+            metrics.font_size,
+        );
+        let default_w = eng.measure_nbsp_with_attrs(metrics, &Attrs::new());
+        let mono_w = eng.measure_nbsp_with_attrs(metrics, &mermaid_attrs);
+        assert!(
+            mono_w > default_w * 1.25,
+            "测试需暴露默认字体与等宽 NBSP 的宽度差: default={default_w}, mono={mono_w}"
+        );
+
+        // 旧算法会得到 default_count 个 NBSP：默认字体下单行可容纳，等宽成形后必折行。
+        let width = 400.0f32;
+        let default_count = (width / mono_w).floor() as usize + 1;
+        let image_w = ((default_count - 1) as f32 * default_w + default_w * 0.5).ceil() as u32;
+        assert!(image_w > 0 && (image_w as f32) <= width);
+        assert_eq!((image_w as f32 / default_w).ceil() as usize, default_count);
+        assert!(default_count as f32 * mono_w > width);
+        assert!(default_count <= (width / default_w).floor() as usize);
+
+        let image_h = 120u32;
+        let imgs = [InlineImg {
+            range,
+            key: InlineAsset::Mermaid(mermaid_key),
+            width: image_w,
+            height: image_h,
+            baseline: image_h,
+            align: None,
+        }];
+        let block_text = &src[range.start..range.end];
+        let l = eng.layout_block(
+            kind,
+            block_text,
+            range,
+            &inlines,
+            width,
+            usize::MAX,
+            &imgs,
+            false,
+        );
+        let runs: Vec<_> = l.buffer.layout_runs().collect();
+        assert_eq!(runs.len(), 1, "Mermaid NBSP 占位不得折成多个视觉行");
+        assert_eq!(l.imgs.len(), 1);
+        assert!(
+            (l.height - image_h as f32).abs() <= 1.0,
+            "块高只能占位图显示高: layout={}, image={image_h}",
+            l.height
+        );
+        // 后续块的 y 由前一块 height 累加；标题起点不得再包含第二条图高视觉行。
+        let following_heading_top = l.height;
+        assert!(following_heading_top <= image_h as f32 + 1.0);
     }
 
     #[test]

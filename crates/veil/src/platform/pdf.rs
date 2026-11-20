@@ -36,6 +36,18 @@ const FONT_CANDIDATES: &[&str] = &[
 #[cfg(not(windows))]
 const FONT_CANDIDATES: &[&str] = &[];
 
+/// inline code 的真实等宽字体；找不到时保留主字体，不用比例字体伪装等宽。
+#[cfg(windows)]
+const MONOSPACE_FONT_CANDIDATES: &[&str] = &[
+    r"C:\Windows\Fonts\consola.ttf",      // Consolas
+    r"C:\Windows\Fonts\CascadiaMono.ttf", // Cascadia Mono
+    r"C:\Windows\Fonts\CascadiaCode.ttf", // Cascadia Code
+    r"C:\Windows\Fonts\cour.ttf",         // Courier New
+];
+
+#[cfg(not(windows))]
+const MONOSPACE_FONT_CANDIDATES: &[&str] = &[];
+
 /// 页面顶部起算的 Y → PDF 坐标系 Y（原点在左下角）。
 pub fn y_from_top(top_pt: f32) -> f32 {
     A4_HEIGHT - top_pt
@@ -69,6 +81,13 @@ pub fn find_cjk_font() -> Option<&'static str> {
 #[cfg(not(windows))]
 pub fn find_cjk_font() -> Option<&'static str> {
     None
+}
+
+fn find_monospace_font() -> Option<&'static str> {
+    MONOSPACE_FONT_CANDIDATES
+        .iter()
+        .copied()
+        .find(|p| Path::new(p).exists())
 }
 
 /// 字符回退字体候选：CJK 主字体缺字（emoji / 非 BMP 符号 / CJK 扩展 B 等）时按序尝试。
@@ -126,8 +145,29 @@ pub trait TextMetrics {
     /// 单字宽度（pt）。
     fn width_of(&self, c: char, size: f32) -> f32;
 
+    /// 等宽字体实际覆盖该字符时返回其宽度；缺字由调用方走普通字体回退。
+    fn width_of_monospace(&self, c: char, size: f32) -> Option<f32> {
+        let _ = (c, size);
+        None
+    }
+
+    fn width_of_style(&self, c: char, size: f32, monospace: bool) -> f32 {
+        if monospace {
+            if let Some(w) = self.width_of_monospace(c, size) {
+                return w;
+            }
+        }
+        self.width_of(c, size)
+    }
+
     fn text_width(&self, s: &str, size: f32) -> f32 {
         s.chars().map(|c| self.width_of(c, size)).sum()
+    }
+
+    fn text_width_styled(&self, s: &str, size: f32, monospace: bool) -> f32 {
+        s.chars()
+            .map(|c| self.width_of_style(c, size, monospace))
+            .sum()
     }
 
     /// 单行行高（含行距）。
@@ -144,6 +184,7 @@ pub trait TextMetrics {
 /// 只读字体度量（不子集化）：版面阶段用，避免为测宽而子集化整篇字符。
 pub struct FontMetrics {
     widths: HashMap<char, f32>,
+    monospace_widths: Option<HashMap<char, f32>>,
     /// 缺字回退宽度（em 比例）。
     fallback: f32,
     pub ascent_ratio: f32,
@@ -163,9 +204,10 @@ impl FontMetrics {
         let upem = face.units_per_em().max(1) as f32;
         let scale = 1000.0 / upem;
 
+        let chars: BTreeSet<char> = chars.into_iter().collect();
         let mut widths = HashMap::new();
         let mut missing: Vec<char> = Vec::new();
-        for c in chars {
+        for c in chars.iter().copied() {
             if widths.contains_key(&c) {
                 continue;
             }
@@ -206,8 +248,26 @@ impl FontMetrics {
             }
         }
 
+        let monospace_widths = find_monospace_font().and_then(|path| {
+            let bytes = std::fs::read(path).ok()?;
+            let mono = ttf_parser::Face::parse(&bytes, 0).ok()?;
+            let mono_scale = 1000.0 / mono.units_per_em().max(1) as f32;
+            let mut widths = HashMap::new();
+            let mono_chars: BTreeSet<char> = chars.iter().copied().chain(' '..='~').collect();
+            for c in mono_chars {
+                if let Some(a) = mono
+                    .glyph_index(c)
+                    .and_then(|gid| mono.glyph_hor_advance(gid))
+                {
+                    widths.insert(c, a as f32 * mono_scale);
+                }
+            }
+            Some(widths)
+        });
+
         Ok(Self {
             widths,
+            monospace_widths,
             fallback: 600.0,
             // YaHei 的 ascender 含大量上行留白（2167/2048≈1.06），直接使用会把基线压低；
             // 钳到 0.72–0.92 与常见排版基线一致。
@@ -220,6 +280,13 @@ impl TextMetrics for FontMetrics {
     fn width_of(&self, c: char, size: f32) -> f32 {
         let units = self.widths.get(&c).copied().unwrap_or(self.fallback);
         units * size / 1000.0
+    }
+
+    fn width_of_monospace(&self, c: char, size: f32) -> Option<f32> {
+        self.monospace_widths
+            .as_ref()?
+            .get(&c)
+            .map(|units| units * size / 1000.0)
     }
 
     fn ascent(&self, size: f32) -> f32 {
@@ -265,6 +332,7 @@ pub struct TextRun {
     pub text: String,
     pub bold: bool,
     pub italic: bool,
+    pub monospace: bool,
     pub underline: bool,
     pub strike: bool,
     pub highlight: Option<[u8; 3]>,
@@ -584,19 +652,17 @@ fn content_stream(
     fallback: Option<&FontResource>,
 ) -> Vec<u8> {
     let fallbacks: Vec<&FontResource> = fallback.into_iter().collect();
-    content_stream_with_fonts(page, font, &fallbacks)
+    content_stream_with_fonts_and_mono(page, font, &fallbacks, None)
 }
 
 /// 内容流：文本按字体覆盖能力切 run，逐段切换 `/F1`、`/F2`…
 /// 保证 emoji、CJK 扩展 B 等主字体缺字仍以真实字形与 ToUnicode 输出。
-fn content_stream_with_fonts(
+fn content_stream_with_fonts_and_mono(
     page: &[DrawOp],
     font: &FontResource,
     fallbacks: &[&FontResource],
+    monospace: Option<&FontResource>,
 ) -> Vec<u8> {
-    let fonts: Vec<&FontResource> = std::iter::once(font)
-        .chain(fallbacks.iter().copied())
-        .collect();
     let mut out = String::new();
     for op in page {
         match op {
@@ -630,8 +696,21 @@ fn content_stream_with_fonts(
                 ));
             }
             DrawOp::Text(t) => {
-                // 字符按字体覆盖能力切 run：emoji/CJK 扩展 B 等用真正覆盖的回退字体，
-                // 其余仍用主字体（/F1），保证可显示且 ToUnicode 可复制。
+                // inline code 优先尝试真实等宽字体；其缺字仍按主字体、Unicode 回退链处理。
+                let mut fonts: Vec<&FontResource> = Vec::new();
+                let mut names: Vec<String> = Vec::new();
+                if t.monospace {
+                    if let Some(mono) = monospace {
+                        fonts.push(mono);
+                        names.push("FM".into());
+                    }
+                }
+                fonts.push(font);
+                names.push("F1".into());
+                for (i, f) in fallbacks.iter().enumerate() {
+                    fonts.push(*f);
+                    names.push(format!("F{}", i + 2));
+                }
                 let runs = split_font_runs_multi(&t.text, &fonts);
                 let tw: f32 = runs
                     .iter()
@@ -662,11 +741,7 @@ fn content_stream_with_fonts(
                     } else {
                         format!("1 0 0 1 {x:.2} {tm_y:.2} Tm")
                     };
-                    let name = if fi == 0 {
-                        "F1".to_string()
-                    } else {
-                        format!("F{}", fi + 1)
-                    };
+                    let name = &names[fi];
                     out.push_str(&format!("/{name} {:.2} Tf\n", t.size));
                     out.push_str(&format!("{}\n", color_cmd(t.color, false)));
                     out.push_str(&format!("{tm}\n"));
@@ -840,6 +915,23 @@ pub fn render_pages(
         .filter(|c| *c != '\0' && !font.covers(*c))
         .collect();
     let fallback_fonts = load_fallback_fonts(&missing);
+    let monospace_chars: BTreeSet<char> = pages
+        .iter()
+        .flatten()
+        .filter_map(|op| match op {
+            DrawOp::Text(t) if t.monospace => Some(t.text.chars()),
+            _ => None,
+        })
+        .flatten()
+        .collect();
+    let monospace_font = if monospace_chars.is_empty() {
+        None
+    } else {
+        find_monospace_font().and_then(|path| {
+            FontResource::load_and_subset(Path::new(path), monospace_chars.iter().copied(), false)
+                .ok()
+        })
+    };
 
     let mut pdf = Pdf::new();
 
@@ -882,6 +974,15 @@ pub fn render_pages(
             (next(), next(), next(), next(), next())
         })
         .collect();
+
+    let monospace_refs = monospace_font.as_ref().map(|_| {
+        let mut next = || {
+            let r = Ref::new(next_ref);
+            next_ref += 1;
+            r
+        };
+        (next(), next(), next(), next(), next())
+    });
 
     let fb_refs: Vec<&FontResource> = fallback_fonts.iter().collect();
 
@@ -927,6 +1028,9 @@ pub fn render_pages(
                 let name = format!("F{}", k + 2);
                 fonts.pair(Name(name.as_bytes()), r.2);
             }
+            if let Some(r) = monospace_refs.as_ref() {
+                fonts.pair(Name(b"FM"), r.2);
+            }
         }
         if !used.is_empty() && !image_refs.is_empty() {
             let mut xobj = res.insert(Name(b"XObject")).dict();
@@ -943,7 +1047,8 @@ pub fn render_pages(
         }
         drop(page_obj);
 
-        let content = content_stream_with_fonts(page, &font, &fb_refs);
+        let content =
+            content_stream_with_fonts_and_mono(page, &font, &fb_refs, monospace_font.as_ref());
         pdf.stream(content_refs[i], content.as_ref());
     }
 
@@ -1007,6 +1112,11 @@ pub fn render_pages(
     );
     for (fb, (fd, cid_r, type0_r, tu, stream)) in fallback_fonts.iter().zip(fallback_refs) {
         write_type0_font(&mut pdf, fb, fd, cid_r, type0_r, tu, stream);
+    }
+    if let (Some(mono), Some((fd, cid_r, type0_r, tu, stream))) =
+        (monospace_font.as_ref(), monospace_refs)
+    {
+        write_type0_font(&mut pdf, mono, fd, cid_r, type0_r, tu, stream);
     }
 
     // —— 书签（多级）——
@@ -1205,6 +1315,7 @@ mod tests {
                 text: "A".into(),
                 bold: true,
                 italic: false,
+                monospace: false,
                 underline: true,
                 strike: false,
                 highlight: Some([240, 240, 240]),
@@ -1254,6 +1365,7 @@ mod tests {
             text: "A😀A".into(),
             bold: false,
             italic: false,
+            monospace: false,
             underline: false,
             strike: false,
             highlight: None,
@@ -1274,6 +1386,96 @@ mod tests {
         // 同一文本在主字体下只写 /F1（回归：不要无条件引用 /F2）。
         let s = String::from_utf8_lossy(&content_stream(&page[..1], &primary, None)).to_string();
         assert!(!s.contains("/F2"), "{s}");
+    }
+
+    #[test]
+    fn monospace_content_uses_fm_real_widths_and_unicode_fallbacks() {
+        let primary = FontResource {
+            char_to_cid: HashMap::from([('\0', 0u16), ('i', 1), ('m', 2), ('中', 3), ('?', 4)]),
+            cid_to_char: vec!['\0', 'i', 'm', '中', '?'],
+            subset_bytes: Vec::new(),
+            font_bbox: [0.0; 4],
+            ascent: 800.0,
+            descent: -200.0,
+            base_name: "primary".into(),
+            widths: HashMap::from([('i', 300.0f32), ('m', 700.0), ('中', 1000.0), ('?', 500.0)]),
+        };
+        let mono = FontResource {
+            char_to_cid: HashMap::from([('\0', 0u16), ('i', 1), ('m', 2)]),
+            cid_to_char: vec!['\0', 'i', 'm'],
+            subset_bytes: Vec::new(),
+            font_bbox: [0.0; 4],
+            ascent: 800.0,
+            descent: -200.0,
+            base_name: "mono".into(),
+            widths: HashMap::from([('i', 600.0f32), ('m', 600.0)]),
+        };
+        let fallback = FontResource {
+            char_to_cid: HashMap::from([('\0', 0u16), ('😀', 1)]),
+            cid_to_char: vec!['\0', '😀'],
+            subset_bytes: Vec::new(),
+            font_bbox: [0.0; 4],
+            ascent: 800.0,
+            descent: -200.0,
+            base_name: "emoji".into(),
+            widths: HashMap::from([('😀', 1000.0f32)]),
+        };
+        let run = TextRun {
+            x: 50.0,
+            y: 100.0,
+            size: 10.0,
+            text: "im中😀".into(),
+            bold: false,
+            italic: false,
+            monospace: true,
+            underline: false,
+            strike: false,
+            highlight: Some([240, 240, 240]),
+            color: [0, 0, 0],
+        };
+        let fallbacks = [&fallback];
+        let page = vec![DrawOp::Text(run.clone())];
+        let s = String::from_utf8_lossy(&content_stream_with_fonts_and_mono(
+            &page,
+            &primary,
+            &fallbacks,
+            Some(&mono),
+        ))
+        .to_string();
+        let fm = s.find("/FM 10.00 Tf").expect("ASCII 应用等宽字体");
+        let f1 = s.find("/F1 10.00 Tf").expect("中文应回退主字体");
+        let f2 = s.find("/F2 10.00 Tf").expect("emoji 应回退 Unicode 字体");
+        assert!(fm < f1 && f1 < f2, "字体链顺序错误：{s}");
+        assert!(s.contains("1 0 0 1 62.00 741.89 Tm"), "等宽步进错误：{s}");
+        assert!(s.contains("1 0 0 1 72.00 741.89 Tm"), "回退步进错误：{s}");
+        assert!(
+            s.contains("32.00 12.80 re f"),
+            "浅底宽度须匹配真实字宽：{s}"
+        );
+        assert!(
+            s.contains("<0003> Tj") && s.contains("<0001> Tj"),
+            "缺字不得变成 ?：{s}"
+        );
+
+        let normal_page = vec![DrawOp::Text(TextRun {
+            monospace: false,
+            ..run
+        })];
+        let normal = String::from_utf8_lossy(&content_stream_with_fonts_and_mono(
+            &normal_page,
+            &primary,
+            &fallbacks,
+            Some(&mono),
+        ))
+        .to_string();
+        assert!(
+            !normal.contains("/FM"),
+            "普通正文不得使用等宽资源：{normal}"
+        );
+        assert!(
+            normal.contains("30.00 12.80 re f"),
+            "普通正文仍用比例字宽：{normal}"
+        );
     }
 
     #[test]
@@ -1324,6 +1526,7 @@ mod tests {
             text: "表情 😀 结束".into(),
             bold: false,
             italic: false,
+            monospace: false,
             underline: false,
             strike: false,
             highlight: None,
@@ -1334,6 +1537,68 @@ mod tests {
         let s = String::from_utf8_lossy(&bytes);
         assert!(s.contains("/F2"), "应嵌入并使用回退字体");
         assert!(s.contains("<D83DDE00>"), "ToUnicode 应映射 emoji 代理对");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn inline_code_uses_real_monospace_metrics_and_embedded_font() {
+        let Some(mono_path) = find_monospace_font() else {
+            return; // 无等宽字体的环境明确回退，不用比例字体冒充
+        };
+        let font_path = find_cjk_font().unwrap();
+        let metrics = FontMetrics::load(Path::new(font_path), ['i', 'm', '中']).expect("字体度量");
+        let mono_bytes = std::fs::read(mono_path).expect("读取等宽字体");
+        let mono_face = ttf_parser::Face::parse(&mono_bytes, 0).expect("解析等宽字体");
+        let mono_scale = 1000.0 / mono_face.units_per_em().max(1) as f32;
+        let advance = |c| {
+            mono_face
+                .glyph_index(c)
+                .and_then(|gid| mono_face.glyph_hor_advance(gid))
+                .expect("等宽字体应覆盖 ASCII") as f32
+                * mono_scale
+        };
+        let size = 10.0;
+        let i = metrics.width_of_monospace('i', size).expect("等宽 i 度量");
+        let m = metrics.width_of_monospace('m', size).expect("等宽 m 度量");
+        assert!((i - advance('i') * size / 1000.0).abs() < 0.001);
+        assert!((m - advance('m') * size / 1000.0).abs() < 0.001);
+        assert!((i - m).abs() < 0.001, "真实等宽字体的 i/m advance 必须一致");
+        if mono_face.glyph_index('中').is_none() {
+            assert!(metrics.width_of_monospace('中', size).is_none());
+            assert!(
+                (metrics.width_of_style('中', size, true) - metrics.width_of('中', size)).abs()
+                    < 0.001,
+                "等宽字体缺字必须复用主字体/Unicode 回退宽度"
+            );
+        }
+
+        let pages = vec![vec![DrawOp::Text(TextRun {
+            x: 56.0,
+            y: 80.0,
+            size: 11.0,
+            text: "im中".into(),
+            bold: false,
+            italic: false,
+            monospace: true,
+            underline: false,
+            strike: false,
+            highlight: Some([243, 244, 246]),
+            color: [0, 0, 0],
+        })]];
+        let bytes = render_pages(&pages, &[], &[], &[], Path::new(font_path)).expect("渲染 PDF");
+        let s = String::from_utf8_lossy(&bytes);
+        assert!(
+            s.matches("/FM").count() >= 2,
+            "页面资源与内容流均应使用 /FM"
+        );
+        let base_name = Path::new(mono_path)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .expect("等宽字体名");
+        assert!(
+            s.contains(&format!("/BaseFont /{base_name}")),
+            "应嵌入真实等宽字体 {base_name}"
+        );
     }
 
     /// DEF-T09-E1-003 残留：`𠮷`（U+20BB7，CJK 扩展 B）主字体缺字，
@@ -1366,14 +1631,17 @@ mod tests {
             text: "𠮷".into(),
             bold: false,
             italic: false,
+            monospace: false,
             underline: false,
             strike: false,
             highlight: None,
             color: [0, 0, 0],
         })];
         let refs: Vec<&FontResource> = fallbacks.iter().collect();
-        let content =
-            String::from_utf8_lossy(&content_stream_with_fonts(&page, &primary, &refs)).to_string();
+        let content = String::from_utf8_lossy(&content_stream_with_fonts_and_mono(
+            &page, &primary, &refs, None,
+        ))
+        .to_string();
         let cid = fb.char_to_cid[&'𠮷'];
         assert!(
             content.contains(&format!("<{cid:04X}> Tj")),
@@ -1405,6 +1673,7 @@ mod tests {
                 text: "第一章 引言".into(),
                 bold: true,
                 italic: false,
+                monospace: false,
                 underline: false,
                 strike: false,
                 highlight: None,
@@ -1417,6 +1686,7 @@ mod tests {
                 text: "第二章 实现".into(),
                 bold: true,
                 italic: false,
+                monospace: false,
                 underline: false,
                 strike: false,
                 highlight: None,
@@ -1464,6 +1734,7 @@ mod tests {
                 text: t.into(),
                 bold: true,
                 italic: false,
+                monospace: false,
                 underline: false,
                 strike: false,
                 highlight: None,
@@ -1540,6 +1811,7 @@ mod tests {
             text: "链接".into(),
             bold: false,
             italic: false,
+            monospace: false,
             underline: true,
             strike: false,
             highlight: None,

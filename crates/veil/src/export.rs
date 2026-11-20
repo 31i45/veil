@@ -26,7 +26,7 @@ fn head(style: &ExportStyle) -> String {
     let border = hex(style.border);
     // 深色页面须声明 color-scheme：否则浏览器默认的滚动条/表单控件仍是浅色，观感割裂
     let scheme = if style.dark {
-        "color-scheme: dark;\n"
+        ":root{color-scheme:dark}\n"
     } else {
         ""
     };
@@ -67,6 +67,8 @@ fn head(style: &ExportStyle) -> String {
          th,td{{border:1px solid {border};padding:.4em .6em}}\n\
          hr{{border:none;border-top:1px solid {border}}}\n\
          div.math{{text-align:center;margin:1em 0}}\n\
+         span.math-inline{{display:inline-block;vertical-align:middle;line-height:0;max-width:100%}}\n\
+         span.math-inline svg{{display:block;max-width:100%;height:auto}}\n\
          pre.math-source{{color:#a00;background:#fdf5f5}}\n\
          .fnref a{{text-decoration:none}}\n\
          .footnotes{{border-top:1px solid {border};margin-top:2em;\
@@ -101,6 +103,8 @@ pub fn html_of_doc(
     mermaids: Option<&std::collections::HashMap<veil_core::BlockId, veil_ui::MermaidImage>>,
 ) -> String {
     let mut body = String::new();
+    let mut mermaid_styles = Vec::new();
+    let mermaid_style_prefix = mermaid_style_prefix(session);
     let blocks = session.blocks();
     // 表格依赖 GFM 扩展，须显式开启（Parser::new 默认关闭 tables）
     let opts = pulldown_cmark::Options::ENABLE_TABLES
@@ -165,6 +169,8 @@ pub fn html_of_doc(
         if kind == BlockKind::Mermaid {
             if let Some(mermaid) = mermaids.and_then(|m| m.get(&id)) {
                 if let Some(svg) = &mermaid.svg_text {
+                    let svg =
+                        protect_mermaid_styles(svg, &mut mermaid_styles, &mermaid_style_prefix);
                     body.push_str(&format!(
                         "<div class=\"veil-mermaid\" style=\"text-align:center;\">{}</div>\n",
                         svg
@@ -196,9 +202,8 @@ pub fn html_of_doc(
             body.push_str(&callout_html(
                 session,
                 &mut fn_occurrences,
-                id,
-                range,
-                &kind,
+                font,
+                &blocks[i],
                 &defs,
                 opts,
             ));
@@ -236,6 +241,7 @@ pub fn html_of_doc(
             let rendered = render_block_inlines(
                 session,
                 &mut fn_occurrences,
+                font,
                 content,
                 range.start + offset,
                 &nodes,
@@ -270,7 +276,7 @@ pub fn html_of_doc(
                     }
                 }
                 let rendered =
-                    render_block_inlines(session, &mut fn_occurrences, &text, start, &nodes);
+                    render_block_inlines(session, &mut fn_occurrences, font, &text, start, &nodes);
                 pulldown_cmark::html::push_html(
                     &mut body,
                     pulldown_cmark::Parser::new_ext(&format!("{defs}{rendered}"), opts),
@@ -324,8 +330,14 @@ pub fn html_of_doc(
         } else {
             session.block_inlines(id).unwrap_or_default()
         };
-        let rendered =
-            render_block_inlines(session, &mut fn_occurrences, &text, span.start, &nodes);
+        let rendered = render_block_inlines(
+            session,
+            &mut fn_occurrences,
+            font,
+            &text,
+            span.start,
+            &nodes,
+        );
         // 独立图片题注与屏幕/PDF 共用内核判定，避免三端语义漂移。
         let caption = (kind == BlockKind::Paragraph)
             .then(|| veil_core::standalone_image_caption(&nodes, &text, span.start))
@@ -391,7 +403,8 @@ pub fn html_of_doc(
     let localized = localize_images(&format!("{body}{notes}"), base_dir);
     // 最后一道 scheme 白名单：Markdown 链接（含引用式定义的 dest）由 pulldown 直接写
     // `href`，只能在成品标签上复核；非白名单目标整条属性删除，文字保留。
-    let content = sanitize_html_urls(&localized);
+    let sanitized = sanitize_html_urls(&localized);
+    let content = restore_mermaid_styles(&sanitized, &mermaid_styles, &mermaid_style_prefix);
     format!("{}{content}</body>\n</html>\n", head(style))
 }
 
@@ -435,12 +448,12 @@ fn blank_callout_marker(text: &str) -> std::borrow::Cow<'_, str> {
 fn callout_html(
     session: &Session,
     occurrences: &mut HashMap<String, usize>,
-    id: veil_core::BlockId,
-    range: Range,
-    kind: &BlockKind,
+    font: &latex_rust::MathFont,
+    block: &(veil_core::BlockId, BlockKind, Range),
     defs: &str,
     opts: pulldown_cmark::Options,
 ) -> String {
+    let (id, kind, range) = (block.0, &block.1, block.2);
     let (name, label, icon, color) = match kind {
         BlockKind::Admonition(ty) => (
             ty.name().to_string(),
@@ -456,7 +469,7 @@ fn callout_html(
     };
     let blanked = blank_callout_marker(&text);
     let nodes = session.block_inlines(id).unwrap_or_default();
-    let rendered = render_block_inlines(session, occurrences, &blanked, range.start, &nodes);
+    let rendered = render_block_inlines(session, occurrences, font, &blanked, range.start, &nodes);
     let mut html = String::new();
     pulldown_cmark::html::push_html(
         &mut html,
@@ -477,6 +490,15 @@ fn callout_html(
          margin:0 0 .3em;font-size:.92em\">{title}</p>\n{inner}</div>\n",
         color[0], color[1], color[2]
     )
+}
+
+fn collect_math(nodes: &[InlineNode], out: &mut Vec<InlineNode>) {
+    for n in nodes {
+        if n.kind == InlineKind::Math {
+            out.push(n.clone());
+        }
+        collect_math(&n.children, out);
+    }
 }
 
 /// 收集高亮节点（`==x==`）：导出为 `<mark>`。内容源文本按 HTML 转义后再交
@@ -758,6 +780,103 @@ fn render_html_children(
         p = *e;
     }
     out.push_str(&text[p..end]);
+    out
+}
+
+const MERMAID_STYLE_PREFIX: &str = "<veil-mermaid-style-";
+const MERMAID_STYLE_CLOSE_PREFIX: &str = "</veil-mermaid-style-";
+
+/// 为本次导出选择源文中不存在的占位前缀，避免用户伪造标签被当成可信 SVG 样式。
+fn mermaid_style_prefix(session: &Session) -> String {
+    let source = session.serialize();
+    let mut prefix = MERMAID_STYLE_PREFIX.to_string();
+    let mut nonce = 0u64;
+    while source.contains(&prefix) {
+        nonce += 1;
+        prefix = format!("{MERMAID_STYLE_PREFIX}x{nonce:x}-");
+    }
+    prefix
+}
+
+fn mermaid_style_placeholder(prefix: &str, index: usize) -> String {
+    format!("{prefix}{index}></{}{index}>", &prefix[1..])
+}
+
+/// 只保护离线渲染器提供的 Mermaid SVG 样式：其余 SVG 标签与属性仍走原有净化。
+/// 占位前缀按文档避开源文；最终恢复只接受本次前缀，其余保留占位会转义。
+fn protect_mermaid_styles(svg: &str, styles: &mut Vec<String>, prefix: &str) -> String {
+    let lower = svg.to_ascii_lowercase();
+    let mut out = String::with_capacity(svg.len());
+    let mut pos = 0;
+    while let Some(rel) = lower[pos..].find("<style") {
+        let start = pos + rel;
+        if !tag_boundary(lower.as_bytes().get(start + "<style".len())) {
+            out.push_str(&svg[pos..start + 1]);
+            pos = start + 1;
+            continue;
+        }
+        let Some(open_end) = tag_end(svg.as_bytes(), start + 1) else {
+            break;
+        };
+        let inner = &svg[start + 1..open_end - 1];
+        let end = if inner.trim_end().ends_with('/') {
+            open_end
+        } else {
+            let after = skip_element(svg, open_end, "style");
+            let has_close = lower[open_end..after].rfind("</style").is_some_and(|rel| {
+                let close = open_end + rel;
+                tag_end(lower.as_bytes(), close + 1) == Some(after)
+            });
+            if !has_close {
+                out.push_str(&svg[pos..start + 1]);
+                pos = start + 1;
+                continue;
+            }
+            after
+        };
+        out.push_str(&svg[pos..start]);
+        let index = styles.len();
+        styles.push(svg[start..end].to_string());
+        out.push_str(&mermaid_style_placeholder(prefix, index));
+        pos = end;
+    }
+    out.push_str(&svg[pos..]);
+    out
+}
+
+/// 最终 URL/危险标签净化完成后，按本次文档的完整自定义元素恢复内部 Mermaid 样式。
+/// 其他保留占位（含闭标签）一律转义，普通标签与普通文本不受影响。
+fn restore_mermaid_styles(html: &str, styles: &[String], prefix: &str) -> String {
+    let mut out = String::with_capacity(html.len());
+    let mut rest = html;
+    while let Some(start) = rest.find('<') {
+        out.push_str(&rest[..start]);
+        let candidate = &rest[start..];
+        if let Some(suffix) = candidate.strip_prefix(prefix) {
+            let digits = suffix.bytes().take_while(u8::is_ascii_digit).count();
+            if digits > 0 {
+                if let Ok(index) = suffix[..digits].parse::<usize>() {
+                    let placeholder = mermaid_style_placeholder(prefix, index);
+                    if candidate.starts_with(&placeholder) {
+                        if let Some(style) = styles.get(index) {
+                            out.push_str(style);
+                            rest = &candidate[placeholder.len()..];
+                            continue;
+                        }
+                    }
+                }
+            }
+        }
+        if candidate.starts_with(MERMAID_STYLE_PREFIX)
+            || candidate.starts_with(MERMAID_STYLE_CLOSE_PREFIX)
+        {
+            out.push_str("&lt;");
+        } else {
+            out.push('<');
+        }
+        rest = &candidate[1..];
+    }
+    out.push_str(rest);
     out
 }
 
@@ -1179,6 +1298,7 @@ fn strip_unsafe_url_attrs(attr_src: &str, tag: &str) -> Option<String> {
 fn render_block_inlines(
     session: &Session,
     occurrences: &mut HashMap<String, usize>,
+    font: &latex_rust::MathFont,
     text: &str,
     base: usize,
     nodes: &[InlineNode],
@@ -1282,6 +1402,33 @@ fn render_block_inlines(
             continue;
         }
         reps.push((s, e, format!("<mark>{}</mark>", escape_html(&text[cs..ce]))));
+    }
+    let mut maths = Vec::new();
+    collect_math(nodes, &mut maths);
+    for node in maths {
+        let (Some(s), Some(e), Some(cs), Some(ce)) = (
+            node.range.start.checked_sub(base),
+            node.range.end.checked_sub(base),
+            node.content.start.checked_sub(base),
+            node.content.end.checked_sub(base),
+        ) else {
+            continue;
+        };
+        if s >= e
+            || e > text.len()
+            || cs >= ce
+            || ce > text.len()
+            || !text.is_char_boundary(s)
+            || !text.is_char_boundary(e)
+            || !text.is_char_boundary(cs)
+            || !text.is_char_boundary(ce)
+        {
+            continue;
+        }
+        // 失败时不登记替换，保留原始 `$...$`；成功时由受控 SVG 替换完整节点区间。
+        if let Some(svg) = math_svg(&text[cs..ce], font, false).map(|svg| svg.replace('\n', "")) {
+            reps.push((s, e, format!("<span class=\"math-inline\">{svg}</span>")));
+        }
     }
     reps.sort_by_key(|(s, _, _)| *s);
     let mut out = String::with_capacity(text.len() + 32);
@@ -1469,17 +1616,25 @@ fn footnotes_html(
     format!("<section class=\"footnotes\">\n<hr>\n<ol>\n{items}</ol>\n</section>\n")
 }
 
+/// latex-rust 的默认黑色改为继承页面前景色；显式 TeX 颜色仍保留。
+fn math_svg(tex: &str, font: &latex_rust::MathFont, display: bool) -> Option<String> {
+    let mut opt = latex_rust::SvgOptions::new();
+    opt.display = display;
+    let svg = latex_rust::latex_to_svg(tex, font, &opt).ok()?;
+    // 内嵌进 HTML 须剥 XML 声明（<?xml ?> 仅允许在独立文档开头），并去掉首尾空白。
+    let inline = svg.split_once("?>").map(|(_, rest)| rest).unwrap_or(&svg);
+    Some(
+        inline
+            .trim()
+            .replacen("fill=\"#000000\"", "fill=\"currentColor\"", 1),
+    )
+}
+
 /// 单个数学块 → 内嵌 SVG；渲染失败降级为转义源码（导出绝不中断）。
 fn math_html(tex: &str, font: &latex_rust::MathFont) -> String {
-    let mut opt = latex_rust::SvgOptions::new();
-    opt.display = true; // 块级 $$ 恒为 display（与编辑器渲染一致）
-    match latex_rust::latex_to_svg(tex, font, &opt) {
-        Ok(svg) => {
-            // 内嵌进 HTML 须剥 XML 声明（<?xml ?> 仅允许在独立文档开头），并去掉首尾空白
-            let inline = svg.split_once("?>").map(|(_, rest)| rest).unwrap_or(&svg);
-            format!("<div class=\"math\">{}</div>\n", inline.trim())
-        }
-        Err(_) => format!("<pre class=\"math-source\">{}</pre>\n", escape_html(tex)),
+    match math_svg(tex, font, true) {
+        Some(svg) => format!("<div class=\"math\">{svg}</div>\n"),
+        None => format!("<pre class=\"math-source\">{}</pre>\n", escape_html(tex)),
     }
 }
 
@@ -1888,6 +2043,7 @@ mod tests {
         let mut renderer = crate::platform::mermaid_offline::OfflineMermaid::new();
         let mut images = HashMap::new();
         let mut svg_roots = Vec::new();
+        let mut mermaid_style_count = 0;
         for (&(name, source), id) in veil_mermaid_offline::corpus::MERMAID_11_12_CORPUS
             .iter()
             .zip(ids)
@@ -1903,6 +2059,7 @@ mod tests {
                 !svg.to_ascii_lowercase().contains("foreignobject"),
                 "{name}"
             );
+            mermaid_style_count += svg.matches("<style").count();
             let root_end = svg
                 .find('>')
                 .unwrap_or_else(|| panic!("{name}: no SVG root"));
@@ -1921,6 +2078,27 @@ mod tests {
             assert!(
                 html.contains(root.as_str()),
                 "{name}: 本地 SVG 根节点未内嵌"
+            );
+        }
+        assert!(
+            mermaid_style_count > 0,
+            "真实 Mermaid corpus 应产出主题 CSS"
+        );
+        assert_eq!(
+            html.matches("<style").count(),
+            mermaid_style_count + 1,
+            "文档 head 之外的 style 必须全部来自并保留于内部 Mermaid SVG"
+        );
+        assert!(!html.contains(MERMAID_STYLE_PREFIX), "占位元素须全部恢复");
+        let mermaid_css = html
+            .split("<style")
+            .skip(1)
+            .filter_map(|tail| tail.split_once("</style>").map(|(css, _)| css))
+            .collect::<String>();
+        for selector in [".section-0 text", "text.task", ".node-bkg"] {
+            assert!(
+                mermaid_css.contains(selector),
+                "真实 Mermaid 主题规则 {selector} 在最终净化后丢失"
             );
         }
         let lower = html.to_ascii_lowercase();
@@ -2221,6 +2399,37 @@ mod tests {
     }
 
     #[test]
+    fn inline_math_becomes_text_style_svg_without_literal_delimiters() {
+        let body = body_of("before $\\frac{1}{2}$ after\n");
+        assert!(
+            body.starts_with("<p>before <span class=\"math-inline\"><svg"),
+            "实际输出: {body}"
+        );
+        assert!(body.ends_with("</span> after</p>\n"), "实际输出: {body}");
+        assert!(!body.contains('$'), "不得残留 $...$ 源码: {body}");
+        assert!(!body.contains("math-source"));
+        let font = font();
+        let text_style = math_svg(r"\frac{1}{2}", &font, false)
+            .expect("inline math")
+            .replace('\n', "");
+        let display_style = math_svg(r"\frac{1}{2}", &font, true)
+            .expect("display math")
+            .replace('\n', "");
+        assert_ne!(text_style, display_style, "测试公式须区分文本/显示样式");
+        assert!(
+            body.contains(text_style.as_str()),
+            "行内公式必须使用 display=false"
+        );
+    }
+
+    #[test]
+    fn inline_math_failure_keeps_original_source() {
+        let body = body_of("bad $a < b \\notacmd$\n");
+        assert!(body.contains("$a &lt; b \\notacmd$"), "实际输出: {body}");
+        assert!(!body.contains("math-inline"), "实际输出: {body}");
+    }
+
+    #[test]
     fn gfm_table_renders_as_html_table() {
         // pulldown-cmark 0.13.5 表格输出逐字节核算：对齐写 style，thead/tbody 分行位置固定
         assert_eq!(
@@ -2438,19 +2647,40 @@ mod tests {
         assert!(light.contains("background:#f5f5f5"), "实际输出: {light}");
         assert!(light.contains("a{color:#2b6cb0}"), "实际输出: {light}");
         assert!(
-            !light.contains("color-scheme: dark"),
+            !light.contains("color-scheme:dark"),
             "浅色不得声明深色 color-scheme"
         );
         let dark = html_of(&s, &dark_style(), &font(), None);
-        assert!(dark.contains("background:#1e1e1e"), "实际输出: {dark}");
-        assert!(dark.contains("color:#dcdcdc"), "实际输出: {dark}");
-        assert!(dark.contains("a{color:#7fb4f5}"), "实际输出: {dark}");
-        assert!(dark.contains("background:#282828"), "实际输出: {dark}");
+        let scheme_and_body = ":root{color-scheme:dark}\n\
+             body{max-width:44em;margin:2em auto;padding:0 1em;\
+             font:16px/1.6 system-ui,sans-serif;background:#1e1e1e;color:#dcdcdc;\
+             overflow-wrap:anywhere;word-break:break-word}";
         assert!(
-            dark.contains("border:1px solid #3c4046"),
-            "实际输出: {dark}"
+            dark.contains(scheme_and_body),
+            "scheme 必须是完整规则，且 body 背景/前景规则紧随其后: {dark}"
         );
-        assert!(dark.contains("color-scheme: dark"), "实际输出: {dark}");
+        assert!(dark.contains("a{color:#7fb4f5}"), "实际输出: {dark}");
+        assert!(
+            dark.contains(
+                "code,pre{background:#282828;border:1px solid #3c4046;\
+                 font-family:Consolas,Menlo,monospace}"
+            ),
+            "深色代码背景与边框必须有效: {dark}"
+        );
+        assert!(!dark.contains("<style>\ncolor-scheme"));
+    }
+
+    #[test]
+    fn dark_math_inherits_page_foreground_for_inline_and_block() {
+        let session = Session::open("inline $x$\n\n$$\ny\n$$\n");
+        let dark = html_of(&session, &dark_style(), &font(), None);
+        assert!(dark.contains("<span class=\"math-inline\"><svg"));
+        assert!(dark.contains("<div class=\"math\"><svg"));
+        assert_eq!(dark.matches("fill=\"currentColor\"").count(), 2);
+        assert!(
+            !dark.contains("fill=\"#000000\""),
+            "深色页面不得保留默认黑色公式字形: {dark}"
+        );
     }
 
     #[test]
@@ -2633,6 +2863,58 @@ mod tests {
         );
         for bad in ["javascript:", "position", "url(", "expression"] {
             assert!(!body.contains(bad), "输出不应含 {bad}: {body}");
+        }
+    }
+
+    #[test]
+    fn mermaid_style_restore_keeps_user_html_sanitization() {
+        let session = Session::open(
+            "<style>body{display:none}</style>\n\n<script>alert(1)</script>\n\n\
+             <veil-mermaid-style-0></veil-mermaid-style-0>\n\n\
+             ```mermaid\nflowchart TD\n  A --> B\n```\n\n[bad](javascript:alert(1))\n",
+        );
+        let id = session
+            .blocks()
+            .into_iter()
+            .find_map(|(id, kind, _)| (kind == BlockKind::Mermaid).then_some(id))
+            .expect("Mermaid block");
+        let mut images = HashMap::new();
+        images.insert(
+            id,
+            veil_ui::MermaidImage {
+                data: Vec::new(),
+                width: 1,
+                height: 1,
+                svg_text: Some(
+                    "<svg xmlns=\"http://www.w3.org/2000/svg\"><style>.node-bkg{fill:#eeeeee}</style><path class=\"node-bkg\" d=\"M0 0L1 1\"/></svg>"
+                        .to_string(),
+                ),
+                px_to_pt: 0.75,
+            },
+        );
+        let html = html_of(&session, &ExportStyle::default(), &font(), Some(&images));
+        assert!(html.contains("<style>.node-bkg{fill:#eeeeee}</style>"));
+        assert!(
+            html.contains(
+                "<svg xmlns=\"http://www.w3.org/2000/svg\"><style>.node-bkg{fill:#eeeeee}</style>"
+            ),
+            "内部 style 必须位于 Mermaid SVG；实际输出: {html}"
+        );
+        assert!(
+            !html.contains("<p><style"),
+            "用户段落不得恢复 style: {html}"
+        );
+        assert_eq!(
+            html.matches("<style").count(),
+            2,
+            "head + 内部 SVG；实际输出: {html}"
+        );
+        assert!(!html.contains(MERMAID_STYLE_PREFIX));
+        for forbidden in ["display:none", "<script", "alert(1)", "javascript:"] {
+            assert!(
+                !html.contains(forbidden),
+                "用户 HTML/URL 仍须剥除 {forbidden}"
+            );
         }
     }
 

@@ -10,7 +10,7 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::WindowId;
 
 use crate::app::{App, Doc, Ports};
-use crate::i18n::{tf, Key};
+use crate::i18n::{t, tf, Key};
 
 /// 单窗口事件产生的进程级结果。
 #[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
@@ -24,6 +24,8 @@ pub(crate) struct Shell {
     windows: HashMap<WindowId, App>,
     make_ports: Box<dyn FnMut() -> Ports>,
     pending: VecDeque<App>,
+    /// 首窗创建失败的致命错误详情：`run` 据此返回 Err，让产品层弹可见错误框而非静默退出。
+    startup_error: Option<String>,
 }
 
 impl Shell {
@@ -33,6 +35,7 @@ impl Shell {
             windows: HashMap::new(),
             make_ports,
             pending: VecDeque::from([initial]),
+            startup_error: None,
         }
     }
 
@@ -46,8 +49,32 @@ impl Shell {
     fn create_window(&mut self, event_loop: &ActiveEventLoop, mut app: App) {
         if let Some(id) = app.create_window(event_loop) {
             self.windows.insert(id, app);
-        } else if self.windows.is_empty() && self.pending.is_empty() {
+        } else if self.fail_initial_window(app.window_state.take_startup_error()) {
             event_loop.exit();
+        }
+    }
+
+    /// 首窗（且无其他窗口/待建窗口）创建失败：记录可读错误并请求退出事件循环。
+    /// 返回 true 表示错误已记录为致命启动失败，调用方应退出事件循环。
+    fn fail_initial_window(&mut self, app_error: Option<String>) -> bool {
+        if !self.windows.is_empty() || !self.pending.is_empty() {
+            return false;
+        }
+        if self.startup_error.is_none() {
+            self.startup_error =
+                Some(app_error.unwrap_or_else(|| t(Key::FatalWindowCreate).to_string()));
+        }
+        true
+    }
+
+    /// 汇总事件循环结果：正常结束后若记录过致命启动错误，返回该错误（不吞掉）。
+    fn finish(&mut self, result: Result<(), String>) -> Result<(), String> {
+        match result {
+            Ok(()) => match self.startup_error.take() {
+                Some(error) => Err(error),
+                None => Ok(()),
+            },
+            Err(e) => Err(e),
         }
     }
 
@@ -75,6 +102,7 @@ impl Shell {
             windows: HashMap::new(),
             make_ports: Box::new(|| unreachable!("测试不创建额外窗口")),
             pending: VecDeque::new(),
+            startup_error: None,
         }
     }
 
@@ -159,7 +187,58 @@ where
             .map_err(|e| tf(Key::ErrEventLoopCreate, &[&e.to_string()]))?;
     }
     let mut shell = Shell::new(doc, Box::new(make_ports));
-    event_loop
+    let result = event_loop
         .run_app(&mut shell)
-        .map_err(|e| tf(Key::ErrEventLoopRun, &[&e.to_string()]))
+        .map_err(|e| tf(Key::ErrEventLoopRun, &[&e.to_string()]));
+    shell.finish(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 首窗创建失败：错误被记录，收尾据此返回 Err（不再静默退出）。
+    #[test]
+    fn initial_window_failure_becomes_visible_error() {
+        let mut shell = Shell::empty_for_test();
+        assert!(shell.fail_initial_window(Some("创建窗口失败: 无显示设备".into())));
+        assert_eq!(
+            shell.startup_error.as_deref(),
+            Some("创建窗口失败: 无显示设备")
+        );
+        assert_eq!(
+            shell.finish(Ok(())),
+            Err("创建窗口失败: 无显示设备".to_string())
+        );
+        assert_eq!(shell.finish(Ok(())), Ok(()), "错误只上报一次");
+    }
+
+    /// 应用未留下详情时给兜底文案，仍是可读错误而不是空字符串。
+    #[test]
+    fn initial_window_failure_without_detail_uses_fallback() {
+        let mut shell = Shell::empty_for_test();
+        assert!(shell.fail_initial_window(None));
+        assert_eq!(
+            shell.startup_error.as_deref(),
+            Some(t(Key::FatalWindowCreate))
+        );
+    }
+
+    /// 正常关闭（无致命启动错误）仍返回 Ok。
+    #[test]
+    fn normal_exit_stays_ok() {
+        let mut shell = Shell::empty_for_test();
+        assert_eq!(shell.finish(Ok(())), Ok(()));
+    }
+
+    /// 事件循环自身的错误不被启动错误覆盖。
+    #[test]
+    fn event_loop_error_is_preserved() {
+        let mut shell = Shell::empty_for_test();
+        shell.startup_error = Some("窗口错误".into());
+        assert_eq!(
+            shell.finish(Err("事件循环错误".into())),
+            Err("事件循环错误".to_string())
+        );
+    }
 }

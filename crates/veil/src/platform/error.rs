@@ -76,6 +76,24 @@ pub fn show_error(title: &str, text: &str) {
     eprintln!("{title}: {text}");
 }
 
+/// 致命启动错误正文：原始诊断 + 可执行下一步（纯函数，便于不弹框地测试）。
+pub fn fatal_error_text(message: &str) -> String {
+    format!("{message}\n\n请检查图形环境后重试；文档内容未被修改。")
+}
+
+/// 致命启动错误（窗口/事件循环创建失败）：release 构建无控制台，
+/// 必须弹出可见错误框，否则双击启动表现为「无反应」（Spec：启动必须可见）。
+#[cfg(windows)]
+pub fn fatal_error(message: &str) {
+    show_error("Veil", &fatal_error_text(message));
+}
+
+/// 非 Windows 兜底：同 `show_error`，保留 stderr 诊断。
+#[cfg(not(windows))]
+pub fn fatal_error(message: &str) {
+    eprintln!("Veil: {}", fatal_error_text(message));
+}
+
 /// 弹出模态提示框（`/register`、`/unregister` 的结果反馈）。
 #[cfg(windows)]
 pub fn show_info(title: &str, text: &str) {
@@ -171,5 +189,16 @@ mod tests {
         let p = Path::new("D:/我的 文档/草稿 (1).md");
         let t = open_failure_text(p, &OpenFailure::NotFound("系统找不到指定的文件。".into()));
         assert!(t.contains("我的 文档/草稿 (1).md"), "路径须原样: {t}");
+    }
+
+    /// 致命启动错误：原始诊断与可执行下一步都要出现（对话框文案的可测部分）。
+    #[test]
+    fn fatal_error_text_keeps_diagnostic_and_next_step() {
+        let text = fatal_error_text("创建窗口失败: 无法初始化图形设备");
+        assert!(text.contains("创建窗口失败: 无法初始化图形设备"), "{text}");
+        assert!(
+            text.contains("请检查图形环境后重试；文档内容未被修改。"),
+            "{text}"
+        );
     }
 }

@@ -9,8 +9,12 @@
 
   失败时以非零码退出，并打印结构化 SMOKE 行（FAIL 阶段 + stderr 尾部），便于 CI
   日志检索：
-    SMOKE PASS exe=... stage=pass launch_ms=... hwnd=0x... ...
+    SMOKE PASS exe=... stage=pass launch_ms=... max_ms=1000 hwnd=0x... ...
     SMOKE FAIL exe=... stage=process-exited launch_ms=... exit_code=-1073740791 ...
+
+  1 秒预算：spec 要求双击后 1 秒内显示主窗口。MaxLaunchMs（默认 1000）是硬
+  上限，launch_ms 超限即判 FAIL（stage=launch-too-slow），与 TimeoutSeconds
+  无关；TimeoutSeconds 只决定愿意等多久来区分「慢启动」与「压根没出窗」。
 
   安全约束：不 kill 任何非本脚本启动的进程。若启动前已有同名 veil/veil-full
   进程，直接失败并要求用户先手动关闭。
@@ -19,7 +23,11 @@
   被测可执行文件路径（必填）。
 
 .PARAMETER TimeoutSeconds
-  等待主窗口出现的超时秒数，默认 5。
+  等待主窗口出现的超时秒数，默认 5。只控制探测时长，不放宽启动预算。
+
+.PARAMETER MaxLaunchMs
+  主窗口出现耗时上限（毫秒），默认 1000。launch_ms 超过该值即判 FAIL
+  （stage=launch-too-slow），即使窗口最终出现、标题正确、退出码正常。
 
 .PARAMETER ExpectedTitlePattern
   可选：主窗口标题必须匹配的正则表达式。
@@ -37,6 +45,9 @@ param(
 
     [ValidateRange(1, 600)]
     [int]$TimeoutSeconds = 5,
+
+    [ValidateRange(1, 600000)]
+    [int]$MaxLaunchMs = 1000,
 
     [string]$ExpectedTitlePattern
 )
@@ -195,7 +206,14 @@ try {
                 if ($exitCode -ne 0) {
                     $stage = 'exit-code'
                     $detail = "graceful close returned exit code $exitCode"
-                } else {
+                }
+                elseif ($launchMs -gt $MaxLaunchMs) {
+                    # 窗口最终出现且可正常关闭，但已超出 1 秒预算：按 FAIL 处理，
+                    # 不能因为 TimeoutSeconds（默认 5s）没等到超时就算 PASS。
+                    $stage = 'launch-too-slow'
+                    $detail = "main window appeared after ${launchMs} ms, exceeding the ${MaxLaunchMs} ms budget"
+                }
+                else {
                     $stage = 'pass'
                 }
             }
@@ -241,8 +259,8 @@ $exitText = if ($null -ne $exitCode) {
 $titleText = if ($windowTitle) { '"' + $windowTitle.Replace('"', "'") + '"' } else { 'none' }
 $panicText = if ($panicHits.Count -gt 0) { 'true' } else { 'false' }
 
-Write-Host ("SMOKE {0} exe={1} stage={2} launch_ms={3} hwnd={4} title={5} exit_code={6} panic={7} timeout_s={8}" -f `
-    $status, $exeFull, $stage, $launchMs, $hwndText, $titleText, $exitText, $panicText, $TimeoutSeconds)
+Write-Host ("SMOKE {0} exe={1} stage={2} launch_ms={3} max_ms={4} hwnd={5} title={6} exit_code={7} panic={8} timeout_s={9}" -f `
+    $status, $exeFull, $stage, $launchMs, $MaxLaunchMs, $hwndText, $titleText, $exitText, $panicText, $TimeoutSeconds)
 
 if ($status -eq 'FAIL') {
     if ($detail) { Write-Host "  detail=$detail" }

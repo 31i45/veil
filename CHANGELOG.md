@@ -35,8 +35,8 @@ Veil 版本迭代记录。每个版本的详细修复清单见对应 git tag 的
 - 测试稳定性：默认版远程 SVG mock 使用 20ms 墙钟截止，CPU 争用时会出现假超时；文档记录必须串行执行测试，不改超时或断言口径
 
 ### Notes
-- 体积（2026-11-20 本机构建，隔离 target）：`veil.exe` 10,062,848 B ≈ 9.60 MiB（较 v1.8.0 的 9,970,176 B +92,672 B，门禁 ≤10 MiB）；`veil-full.exe` 13,992,448 B ≈ 13.34 MiB（离线渲染栈 +3.75 MiB，门禁 ≤14 MiB）
-- 测试：串行 `cargo test --workspace --all-features -- --test-threads=1` 1897 passed / 0 failed / 15 ignored（远程 SVG mock 为 20 ms 墙钟截止，并行执行可能假超时）；默认特性 `cargo test -p veil` 215 passed / 1 ignored（差额为 4 项特性门控测试）；`cargo clippy --workspace --all-features --all-targets -- -D warnings` 零警告
+- 体积（2026-11-20 本机构建，隔离 target）：`veil.exe` 10,064,384 B ≈ 9.60 MiB（较 v1.8.0 的 9,970,176 B +94,208 B，门禁 ≤10 MiB）；`veil-full.exe` 13,993,984 B ≈ 13.34 MiB（离线渲染栈 +3.75 MiB，门禁 ≤14 MiB）
+- 测试：串行 `cargo test --workspace --all-features -- --test-threads=1` 1904 passed / 0 failed / 14 ignored（远程 SVG mock 为 20 ms 墙钟截止，并行执行可能假超时）；默认特性 `cargo test -p veil` 215 passed / 1 ignored（差额为 4 项特性门控测试）；`cargo clippy --workspace --all-features --all-targets -- -D warnings` 零警告
 - 离线覆盖：flowchart、sequence、class、state、er、journey、gantt、pie、quadrant、requirement、gitgraph、c4context、mindmap、timeline、sankey、xychart、block、packet、kanban、architecture、radar、treemap 共 22 类按内嵌 Mermaid 11.12.0 实际支持逐类验证（含 mindmap canvas2svg 全层级对比度、kanban 列标题与 journey 标签的浅色对比度修复），mindmap/kanban 提供浅深双主题 SVG+PNG 并排证据
 - 界面：固定简体中文单语表，不探测系统语言、无运行时切换；正文/导出/图内文字不随 UI 翻译。菜单与快捷键经 195 条命令矩阵走查，缺失项已按证据修复
 

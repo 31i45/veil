@@ -99,15 +99,17 @@ jobs:
           Write-Host "PASS: veil-full.exe boundary correct (offline engine strings present, size OK)"
 
       # 零级门禁：真实启动冒烟。测试全绿不代表用户双击的 exe 能打开。
-      # GitHub 托管 runner 是 Session 0 非交互桌面，可能拿不到 MainWindowHandle；
-      # 因此本地发布前必须再跑同一脚本（见 README）。不得用 continue-on-error 掩盖。
+      # 1 秒出窗是硬预算（-MaxLaunchMs 1000）：本地 1000ms 是权威口径，CI 也
+      # 必须显式传入、不得放宽。GitHub 托管 runner 是 Session 0 非交互桌面，
+      # 极少数情况下冷启动更慢；即便如此也只能在 release notes 记录环境性失败，
+      # 不得用 continue-on-error 掩盖。
       - name: Smoke launch veil.exe (tier-0 gate)
         shell: pwsh
-        run: pwsh -NoProfile -File tools/smoke_launch.ps1 -ExePath target-default/release/veil.exe
+        run: pwsh -NoProfile -File tools/smoke_launch.ps1 -ExePath target-default/release/veil.exe -ExpectedTitlePattern '^veil' -MaxLaunchMs 1000
 
       - name: Smoke launch veil-full.exe (tier-0 gate)
         shell: pwsh
-        run: pwsh -NoProfile -File tools/smoke_launch.ps1 -ExePath target-full/release/veil-full.exe
+        run: pwsh -NoProfile -File tools/smoke_launch.ps1 -ExePath target-full/release/veil-full.exe -ExpectedTitlePattern '^veil' -MaxLaunchMs 1000
 
       - name: Report artifact sizes
         run: |

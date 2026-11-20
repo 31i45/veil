@@ -236,6 +236,8 @@ pub fn run() {
     drop(primary);
     if let Err(e) = result {
         eprintln!("{e}");
+        // 发布构建无控制台：必须弹可见错误框，不能只写 stderr 后静默退出。
+        platform::fatal_error(&e);
         std::process::exit(1);
     }
 }

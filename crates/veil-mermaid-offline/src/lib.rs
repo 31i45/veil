@@ -159,17 +159,35 @@ impl Session {
         self.counter += 1;
         let id = format!("veil-mm-{}", self.counter);
         let theme = if dark { "dark" } else { "default" };
+        // mindmap 根文字实际位于 .section-root>.label text，旧 .mindmap-node-label 选择器不会命中；
+        // 只对根节点文字居中，避免改变其他节点、边标签或图型的锚点。
         // Mermaid 11.12 dark 的 mindmap cScaleLabel 为 lightgrey，细字抗锯齿后在近黑节点上偏暗；
         // 全部层级统一使用白色标签并加深根节点底色，选择器不命中浅主题或其他图型。
         // 浅色主题的分段底色均为浅色 pastel，而 Mermaid 部分 section 的 cScaleLabel 为白色：
         // kanban 列标题与 journey 任务标签因此不可读。这里统一把 section-0..11 的文字改深色；
         // 不覆盖 section-root（浅色 mindmap 根节点保持 Mermaid 默认白字）。
+        // `&[aria-roledescription]` 限定图根，避免影响 light、其他图型及 active/done/crit 语义色。
         let theme_css = if dark {
-            "themeCSS: '.mindmap-node text{fill:#ffffff !important;} \
+            "themeCSS: '&[aria-roledescription=\"mindmap\"] .section-root>.label text{text-anchor:middle !important;} \
+             .mindmap-node text{fill:#ffffff !important;} \
              .mindmap-node span{color:#ffffff !important;fill:#ffffff !important;} \
-             .section-root rect,.section-root path,.section-root circle,.section-root polygon{fill:#242448 !important;}', "
+             .section-root rect,.section-root path,.section-root circle,.section-root polygon{fill:#242448 !important;} \
+             &[aria-roledescription=\"mindmap\"] .section-edge-0{stroke:#b8c0cc !important;} \
+             &[aria-roledescription=\"flowchart-v2\"] .edgeLabel rect{fill:#4b5563 !important;opacity:1 !important;} \
+             &[aria-roledescription=\"flowchart-v2\"] .edgeLabel .label text{fill:#ffffff !important;} \
+             &[aria-roledescription=\"gantt\"] .titleText{fill:#ffffff !important;} \
+             &[aria-roledescription=\"gantt\"] .sectionTitle{fill:#ffffff !important;} \
+             &[aria-roledescription=\"gantt\"] .task0,&[aria-roledescription=\"gantt\"] .task1, \
+             &[aria-roledescription=\"gantt\"] .task2,&[aria-roledescription=\"gantt\"] .task3{fill:#8b949e !important;} \
+             &[aria-roledescription=\"gantt\"] .taskText0,&[aria-roledescription=\"gantt\"] .taskText1, \
+             &[aria-roledescription=\"gantt\"] .taskText2,&[aria-roledescription=\"gantt\"] .taskText3{fill:#111418 !important;} \
+             &[aria-roledescription=\"gantt\"] .taskTextOutside0,&[aria-roledescription=\"gantt\"] .taskTextOutside1, \
+             &[aria-roledescription=\"gantt\"] .taskTextOutside2,&[aria-roledescription=\"gantt\"] .taskTextOutside3{fill:#ffffff !important;} \
+             &[aria-roledescription=\"gantt\"] .grid .tick{stroke:#8c8c8c !important;opacity:0.8 !important;} \
+             &[aria-roledescription=\"gantt\"] .grid .tick text{fill:#ffffff !important;}', "
         } else {
-            "themeCSS: '.sections .cluster-label text,.sections .cluster-label tspan{fill:#333333 !important;} \
+            "themeCSS: '&[aria-roledescription=\"mindmap\"] .section-root>.label text{text-anchor:middle !important;} \
+             .sections .cluster-label text,.sections .cluster-label tspan{fill:#333333 !important;} \
              .section-0 text,.section-1 text,.section-2 text,.section-3 text,.section-4 text, \
              .section-5 text,.section-6 text,.section-7 text,.section-8 text,.section-9 text, \
              .section-10 text,.section-11 text{fill:#333333 !important;} \
@@ -388,6 +406,59 @@ mod tests {
         assert_ne!(light, dark);
     }
 
+    /// Task 8B.2：边标签颜色必须来自最终 SVG 的生效规则，并覆盖真实“是/否”元素。
+    #[test]
+    fn dark_flowchart_edge_label_contrast_uses_final_svg_css() {
+        let source = "flowchart LR\n  A[开始] --> B{判断}\n  B -->|是| C[完成]\n  B -->|否| A";
+        let mut session = Session::new().expect("initialize Mermaid");
+        let dark = session.render(source, true).expect("dark flowchart");
+        let light = session.render(source, false).expect("light flowchart");
+        let doc = roxmltree::Document::parse(&dark).expect("dark flowchart SVG XML");
+        let labels: Vec<_> = doc
+            .descendants()
+            .filter(|node| {
+                node.tag_name().name() == "g"
+                    && has_class(*node, "edgeLabel")
+                    && !normalized_text(*node).is_empty()
+            })
+            .collect();
+        assert_eq!(labels.len(), 2, "expected visible 是/否 edge labels");
+        for label in labels {
+            assert!(matches!(normalized_text(label).as_str(), "是" | "否"));
+            assert!(
+                label
+                    .descendants()
+                    .any(|node| node.tag_name().name() == "rect"),
+                "edge label background rect missing"
+            );
+            assert!(
+                label
+                    .descendants()
+                    .any(|node| node.tag_name().name() == "text"),
+                "edge label text missing"
+            );
+        }
+
+        let text = css_property(last_css_rule(&dark, ".edgeLabel .label text{"), "fill");
+        let rect_rule = last_css_rule(&dark, ".edgeLabel rect{");
+        let background = css_property(rect_rule, "fill");
+        let opacity = css_property(rect_rule, "opacity")
+            .parse::<f64>()
+            .expect("numeric edge label opacity");
+        assert_eq!(text, "#ffffff");
+        assert_eq!(background, "#4b5563");
+        assert_eq!(opacity, 1.0);
+        let ratio = contrast_ratio_css(text, background);
+        assert!(
+            ratio >= 4.5,
+            "dark flowchart edge label contrast {ratio:.2} ({text} on {background})"
+        );
+        assert!(
+            !light.contains("[aria-roledescription=\"flowchart-v2\"] .edgeLabel"),
+            "light flowchart must not receive dark edge label overrides"
+        );
+    }
+
     /// 语法错误必须返回可读错误（上层降级为源码块），且引擎仍可继续使用。
     #[test]
     fn invalid_source_is_recoverable() {
@@ -535,6 +606,92 @@ mod tests {
         assert!(
             ratio >= 4.5,
             "dark gantt task text contrast {ratio:.2} ({text} on {bar})"
+        );
+    }
+
+    /// Task 8A.3 / 8B.2：dark gantt 的普通任务、标题、分节、网格和轴文字满足对比度要求；
+    /// 所有颜色均从最终 SVG CSS 提取，tick 还需按其实际 opacity 合成后再计算。
+    #[test]
+    fn dark_gantt_bars_grid_and_axis_have_readable_contrast() {
+        let (_, source) = corpus::MERMAID_11_12_CORPUS
+            .iter()
+            .find(|(name, _)| *name == "gantt")
+            .expect("gantt corpus entry");
+        let mut session = Session::new().expect("initialize Mermaid");
+        let dark = session.render(source, true).expect("dark gantt render");
+        let light = session.render(source, false).expect("light gantt render");
+
+        for index in 0..4 {
+            let bar_selector = format!(".task{index}");
+            let text_selector = format!(".taskText{index}");
+            let outside_selector = format!(".taskTextOutside{index}");
+            let bar = css_property(last_css_rule(&dark, &bar_selector), "fill");
+            let text = css_property(last_css_rule(&dark, &text_selector), "fill");
+            let outside = css_property(last_css_rule(&dark, &outside_selector), "fill");
+            assert_eq!(bar, "#8b949e");
+            assert_eq!(text, "#111418");
+            assert_eq!(outside, "#ffffff");
+
+            let text_bar_ratio = contrast_ratio_css(text, bar);
+            assert!(
+                text_bar_ratio >= 4.5,
+                "dark gantt taskText{index} contrast {text_bar_ratio:.2} ({text} on {bar})"
+            );
+            for page in ["#282828", "#1e1e1e"] {
+                let bar_page_ratio = contrast_ratio_css(bar, page);
+                assert!(
+                    bar_page_ratio >= 3.0,
+                    "dark gantt task{index} contrast {bar_page_ratio:.2} ({bar} on {page})"
+                );
+                let outside_page_ratio = contrast_ratio_css(outside, page);
+                assert!(
+                    outside_page_ratio >= 4.5,
+                    "dark gantt taskTextOutside{index} contrast {outside_page_ratio:.2} ({outside} on {page})"
+                );
+            }
+        }
+
+        let doc = roxmltree::Document::parse(&dark).expect("dark gantt SVG XML");
+        for (selector, class) in [
+            (".titleText{", "titleText"),
+            (".sectionTitle{", "sectionTitle"),
+        ] {
+            let color = css_property(last_css_rule(&dark, selector), "fill");
+            assert_eq!(color, "#ffffff");
+            assert!(
+                doc.descendants().any(|node| has_class(node, class)),
+                "dark gantt must contain an actual {class} element"
+            );
+            for page in ["#282828", "#1e1e1e"] {
+                let ratio = contrast_ratio_css(color, page);
+                assert!(
+                    ratio >= 4.5,
+                    "dark gantt {class} contrast {ratio:.2} ({color} on {page})"
+                );
+            }
+        }
+
+        let grid_rule = last_css_rule(&dark, ".grid .tick{");
+        let grid = css_property(grid_rule, "stroke");
+        let axis = css_property(last_css_rule(&dark, ".grid .tick text{"), "fill");
+        assert_eq!(grid, "#8c8c8c");
+        assert_eq!(axis, "#ffffff");
+        let tick_opacity = css_property(grid_rule, "opacity")
+            .parse::<f64>()
+            .expect("numeric dark gantt tick opacity");
+        let grid_ratio = contrast_ratio_css_composited(grid, "#282828", tick_opacity);
+        assert!(
+            grid_ratio >= 3.0,
+            "dark gantt grid contrast {grid_ratio:.2} ({grid} at opacity {tick_opacity} on #282828)"
+        );
+        let axis_ratio = contrast_ratio_css_composited(axis, "#282828", tick_opacity);
+        assert!(
+            axis_ratio >= 4.5,
+            "dark gantt axis contrast {axis_ratio:.2} ({axis} at opacity {tick_opacity} on #282828)"
+        );
+        assert!(
+            !light.contains("[aria-roledescription=\"gantt\"]"),
+            "light gantt must not receive dark overrides"
         );
     }
 
@@ -1414,6 +1571,106 @@ mod tests {
         (foreground.max(background) + 0.05) / (foreground.min(background) + 0.05)
     }
 
+    fn contrast_ratio_css_composited(foreground: &str, background: &str, opacity: f64) -> f64 {
+        assert!((0.0..=1.0).contains(&opacity));
+        let foreground = css_color_rgb(foreground);
+        let background_rgb = css_color_rgb(background);
+        let composited: [f64; 3] = std::array::from_fn(|index| {
+            foreground[index] * opacity + background_rgb[index] * (1.0 - opacity)
+        });
+        let foreground = relative_luminance_rgb(composited);
+        let background = relative_luminance_rgb(background_rgb);
+        (foreground.max(background) + 0.05) / (foreground.min(background) + 0.05)
+    }
+
+    fn assert_mindmap_root_label_centered_inside(svg: &str) {
+        let doc = roxmltree::Document::parse(svg).expect("mindmap SVG XML");
+        let svg_root = doc.root_element();
+        let svg_id = svg_root.attribute("id").expect("mindmap SVG id");
+        assert_eq!(svg_root.attribute("aria-roledescription"), Some("mindmap"));
+        let root = doc
+            .descendants()
+            .find(|node| has_class(*node, "section-root"))
+            .expect("mindmap section-root");
+        assert_eq!(normalized_text(root), "Veil");
+        let label = root
+            .children()
+            .find(|node| has_class(*node, "label"))
+            .expect("root .label container");
+        let text = label
+            .descendants()
+            .find(|node| node.tag_name().name() == "text")
+            .expect("root text");
+        assert_eq!(normalized_text(text), "Veil");
+
+        // SVG style 属于 XML 文本，Mermaid 序列化会把子选择器的 `>` 转义为 `&gt;`。
+        let selector =
+            format!("#{svg_id}[aria-roledescription=\"mindmap\"] .section-root&gt;.label text{{");
+        let anchor = css_property(last_css_rule(svg, &selector), "text-anchor");
+        assert_eq!(anchor, "middle");
+
+        // 文字与圆心处于同一 section-root 局部坐标系；居中后左右边界都必须落在圆内。
+        let circle = root
+            .children()
+            .find(|node| node.tag_name().name() == "circle")
+            .expect("root circle");
+        let center_x = attr_f64(circle, "cx");
+        let radius = attr_f64(circle, "r");
+        let text_x = text
+            .descendants()
+            .find(|node| node.tag_name().name() == "tspan" && node.attribute("x").is_some())
+            .and_then(|node| node.attribute("x"))
+            .unwrap_or("0")
+            .parse::<f64>()
+            .expect("numeric root text x");
+        let anchor_x = translation(text).0 - translation(root).0 + text_x;
+        let root_style = last_css_rule(svg, &format!("#{svg_id}{{"));
+        let font_size = css_property(root_style, "font-size")
+            .trim_end_matches("px")
+            .parse::<f32>()
+            .expect("mindmap root font size in px");
+        let text_width = f64::from(measure_text(&mut FontSystem::new(), "Veil", font_size));
+        assert!(
+            anchor_x - text_width / 2.0 >= center_x - radius
+                && anchor_x + text_width / 2.0 <= center_x + radius,
+            "centered Veil bounds [{}, {}] exceed circle [{}, {}]",
+            anchor_x - text_width / 2.0,
+            anchor_x + text_width / 2.0,
+            center_x - radius,
+            center_x + radius
+        );
+
+        // 光栅差分直接防止白字越出圆形后落到透明页面；只隐藏根文字，不改布局尺寸。
+        let node_id = root.attribute("id").expect("root node id");
+        let node_marker = format!("id=\"{node_id}\"");
+        let node_start = svg.find(&node_marker).expect("root node in SVG");
+        let text_start = node_start + svg[node_start..].find("<text ").expect("root text in SVG");
+        let mut without_label = svg.to_string();
+        without_label.insert_str(text_start + "<text".len(), " style=\"display:none\"");
+        let (actual, _) = rasterize_svg(svg).expect("rasterize mindmap");
+        let (background, _) = rasterize_svg(&without_label).expect("rasterize root background");
+        let mut inside = 0usize;
+        let mut escaped = 0usize;
+        for (actual, background) in actual
+            .pixmap
+            .data()
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .zip(background.pixmap.data().as_chunks::<4>().0)
+        {
+            if actual != background {
+                if background[3] == u8::MAX {
+                    inside += 1;
+                } else {
+                    escaped += 1;
+                }
+            }
+        }
+        assert!(inside >= 16, "root Veil has too few visible text pixels");
+        assert_eq!(escaped, 0, "root Veil pixels escaped the opaque circle");
+    }
+
     fn validate_mindmap_css_theme(light: &str, dark: &str) {
         let dark_text = css_property(last_css_rule(dark, ".mindmap-node text"), "fill");
         let dark_span = css_property(last_css_rule(dark, ".mindmap-node span"), "color");
@@ -1526,6 +1783,38 @@ mod tests {
             failures.is_empty(),
             "dark mindmap labels must meet WCAG AA: {}",
             failures.join(", ")
+        );
+    }
+
+    /// Task 8B.2：完整 Veil 必须在两种主题下居中并留在根圆内；dark 连接线按实际 path 验收。
+    #[test]
+    fn mindmap_root_alignment_and_dark_connector_contrast() {
+        let source = "mindmap\n  root((Veil))\n    编辑\n      中文排版\n    导出\n      HTML\n      PDF\n    信任\n      本地 Mermaid";
+        let mut session = Session::new().expect("initialize Mermaid");
+        let light = session.render(source, false).expect("light mindmap");
+        let dark = session.render(source, true).expect("dark mindmap");
+        assert_mindmap_root_label_centered_inside(&light);
+        assert_mindmap_root_label_centered_inside(&dark);
+
+        let doc = roxmltree::Document::parse(&dark).expect("dark mindmap SVG XML");
+        assert!(
+            doc.descendants().any(|node| {
+                node.tag_name().name() == "path" && has_class(node, "section-edge-0")
+            }),
+            "actual section-edge-0 connector missing"
+        );
+        let stroke = css_property(last_css_rule(&dark, ".section-edge-0{"), "stroke");
+        assert_eq!(stroke, "#b8c0cc");
+        for page in ["#282828", "#1e1e1e"] {
+            let ratio = contrast_ratio_css(stroke, page);
+            assert!(
+                ratio >= 3.0,
+                "dark mindmap connector contrast {ratio:.2} ({stroke} on {page})"
+            );
+        }
+        assert!(
+            !light.contains("[aria-roledescription=\"mindmap\"] .section-edge-0"),
+            "light mindmap must not receive dark connector overrides"
         );
     }
 

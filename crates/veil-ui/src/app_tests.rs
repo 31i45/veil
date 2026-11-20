@@ -2790,6 +2790,41 @@ fn table_active_cell_shows_source_then_restores_rich_text() {
 }
 
 #[test]
+fn table_active_path_150_dpi_keeps_nonactive_inline_code_single_line() {
+    let doc = "| 名称 | 格式 | 对齐与换行 |\n| :--- | :---: | ---: |\n| Alpha | **粗体** | 左中右三列必须完整 |\n| Beta | *斜体* | 较长的中文单元格用于检查换行、边框与裁切是否清晰 |\n| Gamma | `code` | 1234567890 |\n";
+    let (mut a, _) = app_math(doc, false);
+    a.window_state.test_size = Some((1422, 1106));
+    a.input_state.set_dpi(1.5);
+    let (id, _, _) = a.editor.session().blocks()[0].clone();
+    let beta = a.editor.session().table(id).unwrap().rows[1][0].range.start;
+    assert!(a.editor.set_caret(beta));
+    a.ensure_layouts_all();
+    a.ensure_tables();
+
+    let rich_code_w = {
+        let grid = &a.cache.tables[&id];
+        assert_eq!(grid.active, Some(6), "Beta 首格应为 flat 6 活动格");
+        assert_eq!(
+            grid.cells[10].h,
+            BASE_LINE_HEIGHT * 1.5,
+            "Beta 活动时，非活动 Gamma code 必须保持绝对单行 33px"
+        );
+        grid.cells[10].pixel_w
+    };
+
+    let code = a.editor.session().table(id).unwrap().rows[2][1].range.start;
+    assert!(a.editor.set_caret(code));
+    a.ensure_tables();
+    let grid = &a.cache.tables[&id];
+    assert_eq!(grid.active, Some(10), "Gamma code 应为 flat 10 活动格");
+    let source_w = grid.cells[10].pixel_w;
+    assert!(
+        source_w > rich_code_w + 8,
+        "活动格应显示含两个反引号的 `code` 源码：source={source_w} rich={rich_code_w}"
+    );
+}
+
+#[test]
 fn table_cache_key_tracks_active_cell() {
     let (mut a, _) = app_math(TABLE_DOC, false);
     a.ensure_layouts_all();

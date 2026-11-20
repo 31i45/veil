@@ -130,6 +130,7 @@ struct Style {
     size: f32,
     bold: bool,
     italic: bool,
+    monospace: bool,
     underline: bool,
     strike: bool,
     highlight: Option<[u8; 3]>,
@@ -142,6 +143,7 @@ impl Style {
             size: BODY_SIZE,
             bold: false,
             italic: false,
+            monospace: false,
             underline: false,
             strike: false,
             highlight: None,
@@ -172,7 +174,7 @@ enum LItem {
 
 fn item_width(it: &LItem, m: &dyn TextMetrics) -> f32 {
     match it {
-        LItem::Ch(c, s) => m.width_of(*c, s.size),
+        LItem::Ch(c, s) => m.width_of_style(*c, s.size, s.monospace),
         LItem::Box(b) => b.w,
         LItem::LinkOpen(_) | LItem::LinkClose => 0.0,
     }
@@ -780,6 +782,7 @@ impl<'a> Ctx<'a> {
                 ),
                 InlineKind::Code => {
                     let st = Style {
+                        monospace: true,
                         highlight: Some(COL_CODE_BG),
                         ..style
                     };
@@ -1119,6 +1122,22 @@ impl<'a> Ctx<'a> {
         // B4：限高与编辑视图一致（行高倍数），同时保留整页安全上限。
         let max_h = (self.img_max_lines * self.metrics.line_height(BODY_SIZE))
             .min(self.geom.content_h() * 0.8);
+        if h > max_h && h > 0.0 {
+            data.px_to_pt *= max_h / h;
+        }
+        self.images.push(data);
+        self.images.len() - 1
+    }
+
+    fn push_mermaid_image(&mut self, mut data: ImageData) -> usize {
+        let max_w = self.max_w();
+        let w = data.pt_w();
+        if w > max_w && w > 0.0 {
+            data.px_to_pt *= max_w / w;
+        }
+        let h = data.pt_h();
+        // 块前 4pt、块后 8pt 也必须留在同一页内；不套用行内图片的两行限高。
+        let max_h = (self.geom.content_h() - 12.0).max(1.0);
         if h > max_h && h > 0.0 {
             data.px_to_pt *= max_h / h;
         }
@@ -1701,13 +1720,7 @@ impl<'a> Ctx<'a> {
             None
         };
         if let Some(bm) = bitmap {
-            // RGBA → RGB8（ImageData 格式）
-            let mut rgb = Vec::with_capacity((bm.width as usize) * (bm.height as usize) * 3);
-            for px in bm.data.chunks_exact(4) {
-                rgb.push(px[0]);
-                rgb.push(px[1]);
-                rgb.push(px[2]);
-            }
+            let rgb = premultiplied_rgba_to_rgb_on_white(&bm.data);
             // px_to_pt：从 MermaidBitmap 字段取（resvg 光栅化时已按实际 scale 算好）
             let px_to_pt = bm.px_to_pt;
             let data = ImageData {
@@ -1717,7 +1730,7 @@ impl<'a> Ctx<'a> {
                 baseline_px: 0.0,
                 px_to_pt,
             };
-            let idx = self.push_image(data);
+            let idx = self.push_mermaid_image(data);
             let im = &self.images[idx];
             let (w, h) = (im.pt_w(), im.pt_h());
             self.ensure(h + 8.0);
@@ -1878,6 +1891,7 @@ impl<'a> Ctx<'a> {
                 text: t(Key::PrintTocTitle).into(),
                 bold: true,
                 italic: false,
+                monospace: false,
                 underline: false,
                 strike: false,
                 highlight: None,
@@ -1915,6 +1929,7 @@ impl<'a> Ctx<'a> {
                     text: title,
                     bold: h.level <= 1,
                     italic: false,
+                    monospace: false,
                     underline: false,
                     strike: false,
                     highlight: None,
@@ -1927,6 +1942,7 @@ impl<'a> Ctx<'a> {
                     text: num,
                     bold: false,
                     italic: false,
+                    monospace: false,
                     underline: false,
                     strike: false,
                     highlight: None,
@@ -1970,6 +1986,7 @@ impl<'a> Ctx<'a> {
                 text,
                 bold: false,
                 italic: false,
+                monospace: false,
                 underline: false,
                 strike: false,
                 highlight: None,
@@ -1977,6 +1994,18 @@ impl<'a> Ctx<'a> {
             }));
         }
     }
+}
+
+/// tiny-skia 输出预乘 RGBA；DeviceRGB 没有 alpha，写入 PDF 前先合成到白底。
+fn premultiplied_rgba_to_rgb_on_white(rgba: &[u8]) -> Vec<u8> {
+    let mut rgb = Vec::with_capacity(rgba.len() / 4 * 3);
+    for px in rgba.chunks_exact(4) {
+        let white = 255 - px[3];
+        rgb.push(px[0].saturating_add(white));
+        rgb.push(px[1].saturating_add(white));
+        rgb.push(px[2].saturating_add(white));
+    }
+    rgb
 }
 
 fn flush_run(
@@ -1993,7 +2022,7 @@ fn flush_run(
         return;
     }
     if let Some(s) = *style {
-        let w = m.text_width(buf, s.size);
+        let w = m.text_width_styled(buf, s.size, s.monospace);
         pages[page].push(DrawOp::Text(TextRun {
             x: *x,
             y: baseline,
@@ -2001,6 +2030,7 @@ fn flush_run(
             text: std::mem::take(buf),
             bold: s.bold,
             italic: s.italic,
+            monospace: s.monospace,
             underline: s.underline,
             strike: s.strike,
             highlight: s.highlight,
@@ -2319,6 +2349,10 @@ mod tests {
             };
             em * size
         }
+
+        fn width_of_monospace(&self, c: char, size: f32) -> Option<f32> {
+            c.is_ascii().then_some(0.60 * size)
+        }
     }
 
     fn lay(md: &str, toc: bool) -> DocLayout {
@@ -2354,6 +2388,104 @@ mod tests {
             None,
             &mermaids,
         )
+    }
+
+    #[test]
+    fn mermaid_alpha_compositing_handles_transparent_semitransparent_and_opaque_pixels() {
+        let rgba = [
+            0, 0, 0, 0, // 全透明：白底
+            128, 64, 32, 128, // 预乘半透明色
+            12, 34, 56, 255, // 不透明：原色不变
+        ];
+        assert_eq!(
+            premultiplied_rgba_to_rgb_on_white(&rgba),
+            vec![255, 255, 255, 255, 191, 159, 12, 34, 56]
+        );
+    }
+
+    fn lay_mermaid(source: &str, width: u32, height: u32) -> DocLayout {
+        let session = Session::open(&format!("```mermaid\n{source}\n```\n"));
+        let id = session
+            .blocks()
+            .into_iter()
+            .find_map(|(id, kind, _)| (kind == BlockKind::Mermaid).then_some(id))
+            .expect("Mermaid block");
+        let mut mermaids = HashMap::new();
+        mermaids.insert(
+            id,
+            veil_ui::MermaidImage {
+                data: vec![0; (width * height * 4) as usize],
+                width,
+                height,
+                svg_text: None,
+                px_to_pt: 0.75,
+            },
+        );
+        layout_document(
+            &session,
+            &FakeMetrics,
+            PageGeom::a4(20.0),
+            LayoutOpts::default(),
+            None,
+            &mermaids,
+        )
+    }
+
+    #[test]
+    fn mermaid_flowchart_mindmap_and_sequence_keep_aspect_and_readable_height() {
+        let geom = PageGeom::a4(20.0);
+        let old_inline_cap = 2.0 * FakeMetrics.line_height(BODY_SIZE);
+        for (name, source, width, height) in [
+            ("flowchart", "flowchart LR\n  A --> B", 800, 400),
+            ("mindmap", "mindmap\n  root((主题))\n    分支", 592, 439),
+            (
+                "sequence",
+                "sequenceDiagram\n  A->>B: 请求\n  B-->>A: 响应",
+                500,
+                300,
+            ),
+        ] {
+            let doc = lay_mermaid(source, width, height);
+            let (x, y, w, h) = doc
+                .pages
+                .iter()
+                .flatten()
+                .find_map(|op| match op {
+                    DrawOp::Image { x, y, w, h, .. } => Some((*x, *y, *w, *h)),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("{name}: 应绘制 Mermaid 图片"));
+            assert!(h > old_inline_cap + 1.0, "{name}: 仍被两行限高压扁: {h}");
+            assert!(
+                (w / h - width as f32 / height as f32).abs() < 0.001,
+                "{name}: 宽高比改变: {w}×{h}"
+            );
+            assert!(w <= geom.content_w() + 0.01, "{name}: 越过版心宽");
+            assert!(x >= geom.margin_x - 0.01, "{name}: 越过左页边距");
+            assert!(y >= geom.top() - 0.01, "{name}: 越过上页边距");
+            assert!(
+                y + h + 8.0 <= geom.bottom() + 0.01,
+                "{name}: 图片及块后间距越过下单页边界"
+            );
+        }
+    }
+
+    #[test]
+    fn tall_mermaid_diagram_is_limited_only_by_single_page_safe_height() {
+        let geom = PageGeom::a4(20.0);
+        let doc = lay_mermaid("sequenceDiagram\n  A->>B: 长图", 400, 1400);
+        let (y, w, h) = doc
+            .pages
+            .iter()
+            .flatten()
+            .find_map(|op| match op {
+                DrawOp::Image { y, w, h, .. } => Some((*y, *w, *h)),
+                _ => None,
+            })
+            .expect("应绘制 Mermaid 图片");
+        assert!((h - (geom.content_h() - 12.0)).abs() < 0.01, "高度 {h}");
+        assert!((w / h - 400.0 / 1400.0).abs() < 0.001, "限高仍须等比");
+        assert!(y + h + 8.0 <= geom.bottom() + 0.01, "不得越出单页");
     }
 
     /// 完整版 corpus 逐图走「本地 SVG → 高 DPI 位图 → 原生 PDF」；逐图释放位图以限制峰值内存。
@@ -2657,6 +2789,37 @@ mod tests {
     }
 
     #[test]
+    fn inline_code_uses_monospace_metrics_and_unicode_fallback_width() {
+        let doc = lay("A `im中` B\n", false);
+        let runs: Vec<&TextRun> = doc
+            .pages
+            .iter()
+            .flatten()
+            .filter_map(|op| match op {
+                DrawOp::Text(t) => Some(t),
+                _ => None,
+            })
+            .collect();
+        let code = runs
+            .iter()
+            .find(|r| r.text == "im中")
+            .expect("inline code 应独立成 TextRun");
+        assert!(code.monospace, "inline code 必须携带 monospace 样式");
+        let after = runs
+            .iter()
+            .find(|r| r.text.contains('B'))
+            .expect("代码后的正文应绘制");
+        assert!(!after.monospace, "普通正文不得变成 monospace");
+        let expected_code_w = 2.0 * 0.60 * BODY_SIZE + BODY_SIZE;
+        assert!(
+            (after.x - code.x - expected_code_w).abs() < 0.001,
+            "ASCII 走 0.60em 等宽，中文字符回退为 1.0em：code.x={} after.x={}",
+            code.x,
+            after.x
+        );
+    }
+
+    #[test]
     fn semantic_inline_html_and_style_render() {
         let md = "<strong style=\"color:red\">VISUAL</strong> 与 <q>引用</q> 与 <u>下划</u> \
                   与 <s>删除</s> 与 <small>小字</small> 与 \
@@ -2902,6 +3065,10 @@ mod tests {
             runs.iter()
                 .any(|r| r.text.contains("代码") && r.highlight == Some(COL_CODE_BG)),
             "行内代码应保留浅灰底色"
+        );
+        assert!(
+            runs.iter().any(|r| r.text.contains("代码") && r.monospace),
+            "行内代码应使用真实 monospace 字体资源"
         );
         let link = runs
             .iter()

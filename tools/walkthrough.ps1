@@ -20,6 +20,7 @@
 param(
     [string]$Exe = "",
     [string]$Doc = "",
+    [string[]]$ExeArgs = @(),
     [string]$Widths = "240,320,480,800",
     [int]$ScrollPages = 0,
     [string]$Steps = "",
@@ -32,7 +33,10 @@ param(
     [switch]$KeepAlive,
     [int]$SettleMs = 700,
     [int]$WindowWaitMs = 15000,
-    [string[]]$AuditFiles = @()
+    [string[]]$AuditFiles = @(),
+    [ValidateSet('', 'startup', 'input', 'd1')]
+    [string]$EvidenceMode = '',
+    [int]$ColdRuns = 10
 )
 
 $ErrorActionPreference = 'Stop'
@@ -120,6 +124,142 @@ namespace VeilWalkthrough {
         [DllImport("user32.dll")] public static extern uint GetDpiForWindow(IntPtr hWnd);
     }
 
+    public static class PixelAudit {
+        public static bool IsBlank(System.Drawing.Bitmap bmp) {
+            var rect = new System.Drawing.Rectangle(0, 0, bmp.Width, bmp.Height);
+            var data = bmp.LockBits(rect, System.Drawing.Imaging.ImageLockMode.ReadOnly,
+                System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+            try {
+                var bytes = new byte[data.Stride * data.Height];
+                Marshal.Copy(data.Scan0, bytes, 0, bytes.Length);
+                int first = 0, second = 0, count = 0;
+                int stepX = Math.Max(1, bmp.Width / 16), stepY = Math.Max(1, bmp.Height / 10);
+                for (int y = 2; y < bmp.Height; y += stepY) {
+                    for (int x = 2; x < bmp.Width; x += stepX) {
+                        int p = y * data.Stride + x * 4;
+                        int color = bytes[p] | (bytes[p + 1] << 8) | (bytes[p + 2] << 16) | (bytes[p + 3] << 24);
+                        if (count == 0) { first = color; count = 1; }
+                        else if (color != first) {
+                            if (count == 1) { second = color; count = 2; }
+                            else if (color != second) return false;
+                        }
+                    }
+                }
+                return true;
+            } finally {
+                bmp.UnlockBits(data);
+            }
+        }
+
+        public static long[] CountExactBlack(System.Drawing.Bitmap bmp) {
+            var rect = new System.Drawing.Rectangle(0, 0, bmp.Width, bmp.Height);
+            var data = bmp.LockBits(rect, System.Drawing.Imaging.ImageLockMode.ReadOnly,
+                System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+            try {
+                var bytes = new byte[data.Stride * data.Height];
+                Marshal.Copy(data.Scan0, bytes, 0, bytes.Length);
+                long black = 0;
+                for (int y = 0; y < data.Height; y++) {
+                    int row = y * data.Stride;
+                    for (int x = 0; x < data.Width; x++) {
+                        int p = row + x * 4;
+                        if (bytes[p] == 0 && bytes[p + 1] == 0 && bytes[p + 2] == 0) black++;
+                    }
+                }
+                return new long[] { black, (long)bmp.Width * bmp.Height };
+            } finally {
+                bmp.UnlockBits(data);
+            }
+        }
+    }
+
+    public sealed class FrameResult {
+        public int RequestedMs;
+        public double CaptureStartMs;
+        public double CaptureEndMs;
+        public System.Drawing.Bitmap Bitmap;
+        public string Method;
+        public bool PrintWindow;
+        public int Dpi;
+        public int Width;
+        public int Height;
+        public int ClientX;
+        public int ClientY;
+        public int ClientWidth;
+        public int ClientHeight;
+        public Exception Error;
+    }
+
+    public static class FrameCapture {
+        private static double ElapsedMs(long origin) {
+            return (System.Diagnostics.Stopwatch.GetTimestamp() - origin) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+        }
+
+        private static FrameResult CaptureOne(IntPtr hwnd, long origin, int requestedMs) {
+            double remaining = requestedMs - ElapsedMs(origin);
+            if (remaining > 12) System.Threading.Tasks.Task.Delay((int)(remaining - 8)).Wait();
+            while (ElapsedMs(origin) < requestedMs) System.Threading.Tasks.Task.Delay(1).Wait();
+            var result = new FrameResult();
+            result.RequestedMs = requestedMs;
+            result.CaptureStartMs = ElapsedMs(origin);
+            var wr = new RECT();
+            Win32.GetWindowRect(hwnd, out wr);
+            int w = wr.Right - wr.Left, h = wr.Bottom - wr.Top;
+            if (w <= 0 || h <= 0) throw new Exception("invalid window rectangle " + w + "x" + h);
+            var bmp = new System.Drawing.Bitmap(w, h);
+            result.Bitmap = bmp;
+            var g = System.Drawing.Graphics.FromImage(bmp);
+            var hdc = g.GetHdc();
+            bool printed;
+            try { printed = Win32.PrintWindow(hwnd, hdc, Const.PW_RENDERFULLCONTENT); }
+            finally { g.ReleaseHdc(hdc); g.Dispose(); }
+            result.PrintWindow = printed;
+            bool blank = printed ? PixelAudit.IsBlank(bmp) : true;
+            result.Method = "PrintWindow";
+            if (!printed || blank) {
+                uint flags = Const.SWP_NOMOVE | Const.SWP_NOSIZE | Const.SWP_NOACTIVATE;
+                Win32.SetWindowPos(hwnd, Const.HWND_TOPMOST, 0, 0, 0, 0, flags);
+                try {
+                    var g2 = System.Drawing.Graphics.FromImage(bmp);
+                    try { g2.CopyFromScreen(wr.Left, wr.Top, 0, 0, new System.Drawing.Size(w, h)); }
+                    finally { g2.Dispose(); }
+                } finally {
+                    Win32.SetWindowPos(hwnd, Const.HWND_NOTOPMOST, 0, 0, 0, 0, flags);
+                }
+                result.Method = "CopyFromScreen";
+            }
+            var clientRect = new RECT();
+            Win32.GetClientRect(hwnd, out clientRect);
+            var clientOrigin = new Win32.POINT();
+            Win32.ClientToScreen(hwnd, ref clientOrigin);
+            result.Dpi = (int)Win32.GetDpiForWindow(hwnd);
+            result.Width = w; result.Height = h;
+            result.ClientX = clientOrigin.X - wr.Left; result.ClientY = clientOrigin.Y - wr.Top;
+            result.ClientWidth = clientRect.Right - clientRect.Left;
+            result.ClientHeight = clientRect.Bottom - clientRect.Top;
+            result.CaptureEndMs = ElapsedMs(origin);
+            return result;
+        }
+
+        public static FrameResult[] CaptureAll(IntPtr hwnd, long origin, int[] offsets) {
+            var results = new FrameResult[offsets.Length];
+            var tasks = new System.Threading.Tasks.Task[offsets.Length];
+            for (int i = 0; i < offsets.Length; i++) {
+                int captured = i;
+                tasks[i] = System.Threading.Tasks.Task.Run(() => {
+                    try { results[captured] = CaptureOne(hwnd, origin, offsets[captured]); }
+                    catch (Exception ex) {
+                        results[captured] = new FrameResult();
+                        results[captured].RequestedMs = offsets[captured];
+                        results[captured].Error = ex;
+                    }
+                });
+            }
+            System.Threading.Tasks.Task.WaitAll(tasks);
+            return results;
+        }
+    }
+
     public static class Const {
         public const uint WM_KEYDOWN = 0x0100;
         public const uint WM_KEYUP = 0x0101;
@@ -137,7 +277,7 @@ namespace VeilWalkthrough {
         public static readonly IntPtr HWND_NOTOPMOST = new IntPtr(-2);
     }
 }
-'@
+'@ -ReferencedAssemblies @([System.Drawing.Bitmap].Assembly.Location, [System.Drawing.Rectangle].Assembly.Location)
 }
 
 # 高 DPI 屏（如 150%）下 DPI 不感知的 pwsh 会拿到虚拟坐标：
@@ -491,6 +631,7 @@ function Invoke-Secondary {
 function Invoke-Steps {
     param([IntPtr]$Hwnd, [int]$ProcessId, [string]$Spec, [string]$Dir, [string]$Stamp, [ref]$Index)
     $targetHwnd = $Hwnd
+    $dialogHwnd = [IntPtr]::Zero
     foreach ($raw in @($Spec -split ';')) {
         $step = $raw.Trim()
         if (-not $step) { continue }
@@ -567,7 +708,11 @@ function Invoke-Steps {
             }
             'key' {
                 $foreground = [VeilWalkthrough.Win32]::GetForegroundWindow()
-                if ($foreground -ne $targetHwnd) {
+                $foregroundPid = [uint32]0
+                if ($foreground -ne [IntPtr]::Zero) {
+                    [VeilWalkthrough.Win32]::GetWindowThreadProcessId($foreground, [ref]$foregroundPid) | Out-Null
+                }
+                if ($foreground -ne $targetHwnd -and $foregroundPid -ne $ProcessId) {
                     Write-Log 'WARN' "按键前目标窗口不在前台：目标=$targetHwnd 前台=$foreground，重新前台化"
                     Enter-Foreground -Hwnd $targetHwnd | Out-Null
                 }
@@ -582,6 +727,16 @@ function Invoke-Steps {
                 Start-Sleep -Milliseconds 400
                 $foreground = [VeilWalkthrough.Win32]::GetForegroundWindow()
                 Write-Log 'INFO' "按键 $arg（前台=$foreground，目标=$targetHwnd）"
+            }
+            'wait-dialog' {
+                $timeout = if ($arg) { [int]$arg } else { 8000 }
+                $dialogHwnd = Wait-Task6NativeDialog -ProcessId $ProcessId -MainHwnd $targetHwnd -TimeoutMs $timeout
+                Write-Log 'INFO' "原生对话框就绪：HWND=$dialogHwnd"
+            }
+            'dialog-key' {
+                if ($dialogHwnd -eq [IntPtr]::Zero) { throw 'dialog-key 前必须先执行 wait-dialog' }
+                Send-Task6Keys -Hwnd $dialogHwnd -Keys $arg
+                $dialogHwnd = [IntPtr]::Zero
             }
             'type' {
                 # 走剪贴板粘贴：SendKeys 逐字符会被输入法截获成分解候选，ESC 还会吞掉文本。
@@ -826,7 +981,526 @@ function Invoke-PerfScenario {
     Write-Log 'METRIC' "perf rescan_lines avg=$avgRescan ratio=$ratioText"
 }
 
+# ---------- Task 6 隔离取证（首帧 / 真实输入 / D1 复测） ----------
+
+function Assert-Task6NoVeil {
+    $existing = @(Get-Process -Name 'veil' -ErrorAction SilentlyContinue)
+    if ($existing.Count -ne 0) {
+        $detail = @($existing | ForEach-Object { "PID=$($_.Id) Path=$($_.Path)" }) -join '；'
+        throw "Task 6 中止：启动前已有 veil 进程，不结束任何既有进程：$detail"
+    }
+}
+
+function New-Task6Document {
+    param([string]$Root, [switch]$Typing)
+    $path = Join-Path $Root $(if ($Typing) { 'typing.md' } else { 'startup.md' })
+    if ($Typing) {
+        $text = "# Task 6 typing`n`nExport base.`n"
+    } else {
+        # 与基线默认启动使用同一份 SAMPLE；仅改为 CLI 显式临时文档，杜绝会话恢复碰用户文档。
+        $source = [IO.File]::ReadAllText((Join-Path $repoRoot 'crates\veil\src\lib.rs'))
+        $match = [regex]::Match($source, '(?ms)const SAMPLE: &str = r#"(.*?)"#;')
+        if (-not $match.Success) { throw 'Task 6 脚本失败：无法从产品源码提取 SAMPLE' }
+        $text = $match.Groups[1].Value.Replace("`r`n", "`n")
+    }
+    [IO.File]::WriteAllBytes($path, [Text.UTF8Encoding]::new($false).GetBytes($text))
+    return $path
+}
+
+function Start-Task6Process {
+    param([string]$Root, [string]$Name, [string]$DocPath, [string]$OutputDir)
+    Assert-Task6NoVeil
+    $veilHome = Join-Path $Root $Name
+    $appData = Join-Path $veilHome 'AppData\Roaming'
+    $localAppData = Join-Path $veilHome 'AppData\Local'
+    $temp = Join-Path $veilHome 'Temp'
+    New-Item -ItemType Directory -Path $appData, $localAppData, $temp -Force | Out-Null
+    $stdout = Join-Path $OutputDir "$Name.stdout.log"
+    $stderr = Join-Path $OutputDir "$Name.stderr.log"
+    $clock = [Diagnostics.Stopwatch]::StartNew()
+    $startedUtc = [DateTime]::UtcNow
+    $proc = Start-Process -FilePath $Exe -ArgumentList @($DocPath) -PassThru `
+        -RedirectStandardOutput $stdout -RedirectStandardError $stderr `
+        -Environment @{ VEIL_HOME = $veilHome; APPDATA = $appData; LOCALAPPDATA = $localAppData; TEMP = $temp; TMP = $temp }
+    $script:task6Process = $proc
+    Write-Log 'INFO' "Task 6 启动：PID=$($proc.Id) VEIL_HOME=$veilHome APPDATA=$appData 临时文档=$DocPath"
+    return [pscustomobject]@{
+        Process = $proc; Home = $veilHome; Stdout = $stdout; Stderr = $stderr
+        Clock = $clock; StartedUtc = $startedUtc
+    }
+}
+
+function Get-Task6WindowStates {
+    param([int]$ProcessId)
+    $script:task6EnumPid = [uint32]$ProcessId
+    $script:task6EnumWindows = New-Object System.Collections.Generic.List[object]
+    $collect = {
+        param([IntPtr]$h, [IntPtr]$p)
+        $wp = [uint32]0
+        [VeilWalkthrough.Win32]::GetWindowThreadProcessId($h, [ref]$wp) | Out-Null
+        if ($wp -ne $script:task6EnumPid) { return $true }
+        $wr = New-Object VeilWalkthrough.RECT
+        [VeilWalkthrough.Win32]::GetWindowRect($h, [ref]$wr) | Out-Null
+        if (($wr.Right - $wr.Left) -lt 200 -or ($wr.Bottom - $wr.Top) -lt 300) { return $true }
+        $title = New-Object System.Text.StringBuilder 1024
+        [VeilWalkthrough.Win32]::GetWindowText($h, $title, $title.Capacity) | Out-Null
+        $script:task6EnumWindows.Add([pscustomobject]@{
+            Hwnd = $h; Title = $title.ToString(); Rect = $wr
+            Visible = [VeilWalkthrough.Win32]::IsWindowVisible($h)
+            Iconic = [VeilWalkthrough.Win32]::IsIconic($h)
+        })
+        return $true
+    }
+    [VeilWalkthrough.Win32]::EnumWindows($collect, [IntPtr]::Zero) | Out-Null
+    return @($script:task6EnumWindows | Sort-Object { $_.Hwnd.ToInt64() })
+}
+
+function Wait-Task6VisibleWindow {
+    param($Launch, [int]$TimeoutMs, [switch]$CaptureStartupFrames)
+    $sawHidden = $false
+    do {
+        if ($Launch.Process.HasExited) {
+            throw "Task 6 产品 FAIL：进程在首窗前退出，ExitCode=$($Launch.Process.ExitCode)，stderr=$($Launch.Stderr)"
+        }
+        $states = @(Get-Task6WindowStates -ProcessId $Launch.Process.Id)
+        if (@($states | Where-Object { -not $_.Visible }).Count -gt 0) { $sawHidden = $true }
+        $visible = @($states | Where-Object { $_.Visible -and -not $_.Iconic })
+        if ($visible.Count -gt 0) {
+            $launchMs = [Math]::Round($Launch.Clock.Elapsed.TotalMilliseconds, 2)
+            $firstVisibleUtc = [DateTime]::UtcNow
+            $frames = $null
+            if ($CaptureStartupFrames) {
+                $origin = [Diagnostics.Stopwatch]::GetTimestamp()
+                $frames = [VeilWalkthrough.FrameCapture]::CaptureAll($visible[0].Hwnd, $origin, [int[]]@(0, 30, 100, 300, 800))
+            }
+            return [pscustomobject]@{
+                Hwnd = $visible[0].Hwnd; Title = $visible[0].Title
+                LaunchMs = $launchMs
+                FirstVisibleUtc = $firstVisibleUtc; SawHiddenBeforeVisible = $sawHidden
+                Frames = $frames
+            }
+        }
+        Start-Sleep -Milliseconds 2
+    } while ($Launch.Clock.ElapsedMilliseconds -lt $TimeoutMs)
+    throw "Task 6 产品 FAIL：${TimeoutMs}ms 内没有可见文档窗口，stderr=$($Launch.Stderr)"
+}
+
+function Close-Task6Process {
+    param($Process, [DateTime]$ReadySince)
+    if ($null -eq $Process -or $Process.HasExited) {
+        $script:task6Process = $null
+        return 0
+    }
+    $remaining = [Math]::Ceiling(5000 - ([DateTime]::UtcNow - $ReadySince).TotalMilliseconds)
+    if ($remaining -gt 0) { Start-Sleep -Milliseconds $remaining }
+    $Process.Refresh()
+    if (-not $Process.Responding) { throw "Task 6 关闭失败：PID=$($Process.Id) 消息循环未响应；不强制结束进程" }
+    if (-not $Process.CloseMainWindow()) { throw "Task 6 关闭失败：CloseMainWindow 未接受 PID=$($Process.Id)；不强制结束进程" }
+    if (-not $Process.WaitForExit(10000)) { throw "Task 6 关闭失败：PID=$($Process.Id) 10s 内未正常退出；不强制结束进程" }
+    $code = $Process.ExitCode
+    $script:task6Process = $null
+    if ($code -ne 0) { throw "Task 6 产品 FAIL：正常关窗 ExitCode=$code" }
+    Write-Log 'PASS' "正常关窗：PID=$($Process.Id) ExitCode=0 forced=False"
+    return $code
+}
+
+function Wait-Task6FileBytes {
+    param([string]$Path, [byte[]]$Expected, [int]$TimeoutMs = 5000)
+    $expectedHash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($Expected))
+    $clock = [Diagnostics.Stopwatch]::StartNew()
+    do {
+        if (Test-Path -LiteralPath $Path -PathType Leaf) {
+            $actual = [IO.File]::ReadAllBytes($Path)
+            $actualHash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($actual))
+            if ([Convert]::ToBase64String($actual) -eq [Convert]::ToBase64String($Expected)) {
+                return [pscustomobject]@{ Bytes = $actual.Length; SHA256 = $actualHash; ExpectedSHA256 = $expectedHash }
+            }
+        }
+        Start-Sleep -Milliseconds 50
+    } while ($clock.ElapsedMilliseconds -lt $TimeoutMs)
+    $actualText = if (Test-Path -LiteralPath $Path) { [Convert]::ToBase64String([IO.File]::ReadAllBytes($Path)) } else { '<missing>' }
+    throw "Task 6 产品 FAIL：文档字节未达预期：$Path 期望SHA256=$expectedHash 实际Base64=$actualText"
+}
+
+function Write-Task6Artifact {
+    param([string]$Root)
+    $item = Get-Item -LiteralPath $Exe
+    $record = [ordered]@{
+        path = $item.FullName; bytes = $item.Length
+        sha256 = (Get-FileHash -LiteralPath $Exe -Algorithm SHA256).Hash
+        file_version = $item.VersionInfo.FileVersion; product_version = $item.VersionInfo.ProductVersion
+        last_write_time_utc = $item.LastWriteTimeUtc.ToString('o')
+    }
+    $record | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $Root 'artifact.json') -Encoding utf8
+    Write-Log 'INFO' "被测产物：bytes=$($item.Length) SHA256=$($record.sha256) path=$Exe"
+}
+
+function Write-Task6DpiProtocol {
+    param([string]$Path, [int]$AvailableDpi)
+    $missing = @(100, 125, 150, 200 | Where-Object { $_ -ne $AvailableDpi })
+    $lines = @(
+        '# 其余 DPI 首帧复测协议（needs-user）', '',
+        "当前仅自动执行 **$AvailableDpi%**；脚本未修改系统缩放。下列档位均为 **needs-user**，不是 PASS：$($missing -join '% / ')%。", '',
+        '每档约 1 分钟，合计不超过 5 分钟。启动前关闭所有 Veil 窗口；只用脚本创建的隔离目录和临时文档。', '',
+        '1. 在 Windows 设置中人工选择目标缩放，确认交互桌面已解锁。'
+        '2. 在仓库根目录执行：`pwsh -NoProfile -File tools/walkthrough.ps1 -EvidenceMode startup -ShotDir evidence/startup/final`。'
+        '3. 核对 `dpi-<档位>/frames.csv` 的实际 `dpi` 与五个整窗截图；客户区 0/30/100/300ms 黑像素必须 `<0.1%`，800ms 稳定帧必须为 `0`（原生标题栏黑色字形单列，不计黑块）。'
+        '4. 核对 `summary.json` 的窗口先于首帧隐藏观察记录、正常关窗与临时目录清理结果；失败必须写 FAIL，不得跳过。'
+        '5. 完成后恢复原缩放；不要覆盖其它档位的原始证据。', '',
+        '| DPI | 执行人签字 | 日期时间 | frames.csv / 截图复核 | 结果（PASS / FAIL） |',
+        '|---|---|---|---|---|'
+    )
+    foreach ($dpi in $missing) { $lines += "| $dpi% | __________ | __________ | __________ | __________ |" }
+    $lines += @('', '总复核人签字：__________  日期：__________  备注：_______________________________')
+    $lines | Set-Content -LiteralPath $Path -Encoding utf8
+}
+
+function Invoke-Task6Startup {
+    param([string]$Root, [string]$OutputDir, [string]$DocPath)
+    $launch = Start-Task6Process -Root $Root -Name 'startup-home' -DocPath $DocPath -OutputDir $OutputDir
+    $visible = Wait-Task6VisibleWindow -Launch $launch -TimeoutMs $WindowWaitMs -CaptureStartupFrames
+    $frames = @($visible.Frames)
+    try {
+        foreach ($frame in $frames) {
+            if ($null -ne $frame.Error) { throw "Task 6 截图失败：requested=$($frame.RequestedMs)ms $($frame.Error)" }
+        }
+        $dpi = $frames[0].Dpi
+        $dpiPercent = [int][Math]::Round($dpi * 100 / 96)
+        $dir = Join-Path $OutputDir "dpi-$dpiPercent"
+        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+        $rows = @()
+        foreach ($frame in $frames) {
+            $name = '{0:D4}ms.png' -f $frame.RequestedMs
+            $path = Join-Path $dir $name
+            $frame.Bitmap.Save($path, [Drawing.Imaging.ImageFormat]::Png)
+            $windowCounts = [VeilWalkthrough.PixelAudit]::CountExactBlack($frame.Bitmap)
+            $auditRect = New-Object Drawing.Rectangle($frame.ClientX, $frame.ClientY, $frame.ClientWidth, $frame.ClientHeight)
+            $clientBitmap = $frame.Bitmap.Clone($auditRect, [Drawing.Imaging.PixelFormat]::Format32bppArgb)
+            $counts = [VeilWalkthrough.PixelAudit]::CountExactBlack($clientBitmap)
+            $clientBitmap.Dispose()
+            $blackPercent = 100.0 * $counts[0] / $counts[1]
+            $pass = if ($frame.RequestedMs -eq 800) { $counts[0] -eq 0 } else { $blackPercent -lt 0.1 }
+            $rows += [pscustomobject]@{
+                requested_ms = $frame.RequestedMs
+                capture_start_ms = [Math]::Round($frame.CaptureStartMs, 2)
+                capture_end_ms = [Math]::Round($frame.CaptureEndMs, 2)
+                dpi = $frame.Dpi; dpi_percent = $dpiPercent
+                window_width = $frame.Width; window_height = $frame.Height
+                width = $frame.ClientWidth; height = $frame.ClientHeight
+                audit_region = "client-area offset=$($frame.ClientX),$($frame.ClientY)"
+                black_pixels = $counts[0]; total_pixels = $counts[1]
+                black_percent = [Math]::Round($blackPercent, 6)
+                whole_window_black_pixels = $windowCounts[0]; whole_window_pixels = $windowCounts[1]
+                exact_rgb_black = 'R=G=B=0'; method = $frame.Method
+                print_window = $frame.PrintWindow; screenshot = $path
+                sha256 = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
+                pass = $pass
+            }
+        }
+        $rows | Export-Csv -LiteralPath (Join-Path $dir 'frames.csv') -NoTypeInformation -Encoding utf8
+        $overall = @($rows | Where-Object { -not $_.pass }).Count -eq 0
+        $summary = [ordered]@{
+            status = $(if ($overall) { 'PASS' } else { 'FAIL' })
+            dpi = $dpi; dpi_percent = $dpiPercent; launch_to_visible_ms = $visible.LaunchMs
+            first_visible_utc = $visible.FirstVisibleUtc.ToString('o')
+            hidden_window_observed_before_visible = $visible.SawHiddenBeforeVisible
+            first_frame_rule = 'client area: 0/30/100/300ms exact RGB black <0.1%'
+            stable_frame_rule = 'client area: 800ms exact RGB black = 0'
+            temp_doc_sha256 = (Get-FileHash -LiteralPath $DocPath -Algorithm SHA256).Hash
+            frames_csv = (Join-Path $dir 'frames.csv')
+            stdout = $launch.Stdout; stderr = $launch.Stderr
+            normal_close = $false; temp_root_removed = $false
+        }
+        $script:task6SummaryPaths += Join-Path $dir 'summary.json'
+        $summary | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $dir 'summary.json') -Encoding utf8
+        Write-Task6DpiProtocol -Path (Join-Path $OutputDir 'needs-user-dpi.md') -AvailableDpi $dpiPercent
+        foreach ($row in $rows) { Write-Log $(if ($row.pass) { 'PASS' } else { 'FAIL' }) "DPI=$dpiPercent requested=$($row.requested_ms)ms actual_start=$($row.capture_start_ms)ms black=$($row.black_pixels)/$($row.total_pixels) ($($row.black_percent)%) shot=$($row.screenshot)" }
+        if (-not $overall) { throw 'Task 6 产品 FAIL：首帧或稳定帧黑像素超阈值，详见 frames.csv' }
+        $script:task6StartupSummary = Join-Path $dir 'summary.json'
+        $script:task6ReadySince = $visible.FirstVisibleUtc
+        return $visible.FirstVisibleUtc
+    } finally {
+        foreach ($frame in $frames) { if ($null -ne $frame -and $null -ne $frame.Bitmap) { $frame.Bitmap.Dispose() } }
+    }
+}
+
+function Send-Task6Keys {
+    param([IntPtr]$Hwnd, [string]$Keys)
+    Enter-Foreground -Hwnd $Hwnd | Out-Null
+    if ([VeilWalkthrough.Win32]::GetForegroundWindow() -ne $Hwnd) {
+        throw "Task 6 脚本失败：SendKeys 前无法前台化窗口 $Hwnd"
+    }
+    [Windows.Forms.SendKeys]::SendWait($Keys)
+    Start-Sleep -Milliseconds 400
+    Write-Log 'INFO' "SendKeys=$Keys 前台窗口=$Hwnd"
+}
+
+function Send-Task6Text {
+    param([IntPtr]$Hwnd, [string]$Text)
+    Enter-Foreground -Hwnd $Hwnd | Out-Null
+    if ([VeilWalkthrough.Win32]::GetForegroundWindow() -ne $Hwnd) {
+        throw "Task 6 脚本失败：逐字符键入前无法前台化窗口 $Hwnd"
+    }
+    foreach ($char in $Text.ToCharArray()) {
+        [Windows.Forms.SendKeys]::SendWait([string]$char)
+        Start-Sleep -Milliseconds 80
+    }
+    Start-Sleep -Milliseconds 600
+    Write-Log 'INFO' "逐字符 SendKeys=$Text 前台窗口=$Hwnd"
+}
+
+function Wait-Task6NativeDialog {
+    param([int]$ProcessId, [IntPtr]$MainHwnd, [int]$TimeoutMs = 8000)
+    $clock = [Diagnostics.Stopwatch]::StartNew()
+    do {
+        $dialogs = @(Get-Task6WindowStates -ProcessId $ProcessId | Where-Object { $_.Visible -and $_.Hwnd -ne $MainHwnd })
+        if ($dialogs.Count -gt 0) { return $dialogs[0].Hwnd }
+        Start-Sleep -Milliseconds 100
+    } while ($clock.ElapsedMilliseconds -lt $TimeoutMs)
+    throw 'Task 6 产品 FAIL：Ctrl+E 后未出现原生 HTML 导出对话框'
+}
+
+function Invoke-Task6Input {
+    param([string]$Root, [string]$OutputDir, [string]$DocPath)
+    $dir = Join-Path $OutputDir 'input'
+    New-Item -ItemType Directory -Path $dir -Force | Out-Null
+    $launch = Start-Task6Process -Root $Root -Name 'input-home' -DocPath $DocPath -OutputDir $dir
+    $visible = Wait-Task6VisibleWindow -Launch $launch -TimeoutMs $WindowWaitMs
+    Start-Sleep -Milliseconds 800
+    $hwnd = $visible.Hwnd
+    Send-RealClick -Hwnd $hwnd -X 320 -Y 260
+    $utf8 = [Text.UTF8Encoding]::new($false)
+    $originalBytes = [IO.File]::ReadAllBytes($DocPath)
+    $originalText = $utf8.GetString($originalBytes)
+    $assertions = @()
+
+    Send-Task6Keys -Hwnd $hwnd -Keys '^{END}'
+    Send-Task6Text -Hwnd $hwnd -Text 'VEILTYPE'
+    Send-Task6Keys -Hwnd $hwnd -Keys '{ENTER}'
+    Save-WindowScreenshot -Hwnd $hwnd -Path (Join-Path $dir 'typed-before-save.png') | Out-Null
+    Send-Task6Keys -Hwnd $hwnd -Keys '^s'
+    Save-WindowScreenshot -Hwnd $hwnd -Path (Join-Path $dir 'typed.png') | Out-Null
+    $typedExpected = $utf8.GetBytes($originalText + 'VEILTYPE')
+    $typed = Wait-Task6FileBytes -Path $DocPath -Expected $typedExpected
+    $assertions += [pscustomobject]@{ phase = 'typed'; bytes = $typed.Bytes; expected_sha256 = $typed.ExpectedSHA256; actual_sha256 = $typed.SHA256; pass = $true }
+    Write-Log 'PASS' "真实窗口键入并保存：bytes=$($typed.Bytes) SHA256=$($typed.SHA256)"
+
+    Send-Task6Keys -Hwnd $hwnd -Keys '^z'
+    Send-Task6Keys -Hwnd $hwnd -Keys '^s'
+    $undone = Wait-Task6FileBytes -Path $DocPath -Expected $originalBytes
+    $assertions += [pscustomobject]@{ phase = 'undone'; bytes = $undone.Bytes; expected_sha256 = $undone.ExpectedSHA256; actual_sha256 = $undone.SHA256; pass = $true }
+    Save-WindowScreenshot -Hwnd $hwnd -Path (Join-Path $dir 'undone.png') | Out-Null
+    Write-Log 'PASS' "Ctrl+Z 撤销并保存后恢复原始字节：SHA256=$($undone.SHA256)"
+
+    Send-Task6Text -Hwnd $hwnd -Text 'VEILEXPORT'
+    Send-Task6Keys -Hwnd $hwnd -Keys '{ENTER}'
+    Send-Task6Keys -Hwnd $hwnd -Keys '^s'
+    $exportExpected = $utf8.GetBytes($originalText + 'VEILEXPORT')
+    $beforeExport = Wait-Task6FileBytes -Path $DocPath -Expected $exportExpected
+    $assertions += [pscustomobject]@{ phase = 'before-export'; bytes = $beforeExport.Bytes; expected_sha256 = $beforeExport.ExpectedSHA256; actual_sha256 = $beforeExport.SHA256; pass = $true }
+
+    Send-Task6Keys -Hwnd $hwnd -Keys '^e'
+    $dialog = Wait-Task6NativeDialog -ProcessId $launch.Process.Id -MainHwnd $hwnd
+    Write-Log 'INFO' "原生导出对话框：HWND=$dialog；接受建议路径=$([IO.Path]::ChangeExtension($DocPath, 'html'))"
+    Send-Task6Keys -Hwnd $dialog -Keys '{ENTER}'
+    $exportPath = [IO.Path]::ChangeExtension($DocPath, 'html')
+    $clock = [Diagnostics.Stopwatch]::StartNew()
+    while (-not (Test-Path -LiteralPath $exportPath -PathType Leaf) -and $clock.ElapsedMilliseconds -lt 10000) {
+        Start-Sleep -Milliseconds 100
+    }
+    if (-not (Test-Path -LiteralPath $exportPath -PathType Leaf)) { throw "Task 6 产品 FAIL：导出产物不存在 $exportPath" }
+    $html = [IO.File]::ReadAllText($exportPath)
+    $exportPass = $html.Contains('VEILEXPORT') -and $html.Contains('Export base.') -and $html -match '(?i)<!doctype html>'
+    if (-not $exportPass) { throw "Task 6 产品 FAIL：HTML 内容断言失败：$exportPath" }
+    Enter-Foreground -Hwnd $hwnd | Out-Null
+    Save-WindowScreenshot -Hwnd $hwnd -Path (Join-Path $dir 'exported.png') | Out-Null
+    Copy-Item -LiteralPath $DocPath -Destination (Join-Path $dir 'document-final.md') -Force
+    Copy-Item -LiteralPath $exportPath -Destination (Join-Path $dir 'export-final.html') -Force
+    $exportHash = (Get-FileHash -LiteralPath $exportPath -Algorithm SHA256).Hash
+    $exportBytes = (Get-Item -LiteralPath $exportPath).Length
+    $assertions += [pscustomobject]@{ phase = 'html-export'; bytes = $exportBytes; expected_sha256 = 'content:doctype+base+VEILEXPORT'; actual_sha256 = $exportHash; pass = $exportPass }
+    $assertions | Export-Csv -LiteralPath (Join-Path $dir 'assertions.csv') -NoTypeInformation -Encoding utf8
+    $summary = [ordered]@{
+        status = 'PASS'; input_method = 'System.Windows.Forms.SendKeys.SendWait'
+        typed_save = $true; undo_restored_original_bytes = $true; export_html_content = $true
+        document_bytes = $beforeExport.Bytes; document_sha256 = $beforeExport.SHA256
+        export_bytes = $exportBytes; export_sha256 = $exportHash
+        original_sha256 = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($originalBytes))
+        stdout = $launch.Stdout; stderr = $launch.Stderr
+        normal_close = $false; temp_root_removed = $false
+    }
+    $summaryPath = Join-Path $dir 'summary.json'
+    $script:task6SummaryPaths += $summaryPath
+    $summary | ConvertTo-Json | Set-Content -LiteralPath $summaryPath -Encoding utf8
+    Write-Log 'PASS' "HTML 导出内容断言：bytes=$exportBytes SHA256=$exportHash copied=$(Join-Path $dir 'export-final.html')"
+    return $visible.FirstVisibleUtc
+}
+
+function Get-Task6PercentileInc {
+    param([double[]]$Values, [double]$Percent)
+    $sorted = @($Values | Sort-Object)
+    if ($sorted.Count -eq 0) { throw 'Task 6 统计失败：空样本' }
+    $position = ($sorted.Count - 1) * $Percent / 100.0
+    $lower = [int][Math]::Floor($position); $upper = [int][Math]::Ceiling($position)
+    return $sorted[$lower] + ($sorted[$upper] - $sorted[$lower]) * ($position - $lower)
+}
+
+function Get-Task6Median {
+    param([double[]]$Values)
+    return Get-Task6PercentileInc -Values $Values -Percent 50
+}
+
+function Wait-Task6MainHandle {
+    param($Launch, [int]$TimeoutMs)
+    do {
+        $Launch.Process.Refresh()
+        if ($Launch.Process.MainWindowHandle -ne [IntPtr]::Zero) {
+            return [pscustomobject]@{ LaunchMs = [Math]::Round($Launch.Clock.Elapsed.TotalMilliseconds, 2); ReadySince = [DateTime]::UtcNow }
+        }
+        if ($Launch.Process.HasExited) { throw "Task 6 产品 FAIL：冷启动进程提前退出 ExitCode=$($Launch.Process.ExitCode)" }
+        Start-Sleep -Milliseconds 5
+    } while ($Launch.Clock.ElapsedMilliseconds -lt $TimeoutMs)
+    throw "Task 6 产品 FAIL：${TimeoutMs}ms 内 MainWindowHandle 仍为 0"
+}
+
+function Invoke-Task6D1 {
+    param([string]$Root, [string]$OutputDir, [string]$DocPath, [int]$Runs)
+    if ($Runs -lt 10) { throw 'Task 6 D1 至少需要 10 次计入冷启动样本' }
+    $dir = Join-Path $OutputDir 'd1'
+    New-Item -ItemType Directory -Path $dir -Force | Out-Null
+    $coldRows = @()
+    foreach ($phase in @('warmup', 'measure')) {
+        $count = if ($phase -eq 'warmup') { 1 } else { $Runs }
+        for ($run = 1; $run -le $count; $run++) {
+            $name = '{0}-{1:D2}' -f $phase, $run
+            $launch = Start-Task6Process -Root $Root -Name "$name-home" -DocPath $DocPath -OutputDir $dir
+            $window = Wait-Task6MainHandle -Launch $launch -TimeoutMs $WindowWaitMs
+            Close-Task6Process -Process $launch.Process -ReadySince $window.ReadySince | Out-Null
+            $row = [pscustomobject]@{
+                exe = 'veil-final'; phase = $phase; run = $run; launch_ms = $window.LaunchMs
+                exit_code = 0; forced = $false; status = 'ok'; utc = $window.ReadySince.ToString('o')
+                stdout = $launch.Stdout; stderr = $launch.Stderr
+            }
+            $coldRows += $row
+            Write-Log 'INFO' "D1 cold phase=$phase run=$run launch_ms=$($window.LaunchMs) forced=False"
+        }
+    }
+    $coldRows | Export-Csv -LiteralPath (Join-Path $dir 'coldstart-final.csv') -NoTypeInformation -Encoding utf8
+    $values = @($coldRows | Where-Object { $_.phase -eq 'measure' } | ForEach-Object { [double]$_.launch_ms })
+    $p50 = [Math]::Round((Get-Task6PercentileInc -Values $values -Percent 50), 2)
+    $p95 = [Math]::Round((Get-Task6PercentileInc -Values $values -Percent 95), 2)
+
+    $idleLaunch = Start-Task6Process -Root $Root -Name 'idle-home' -DocPath $DocPath -OutputDir $dir
+    $idleWindow = Wait-Task6MainHandle -Launch $idleLaunch -TimeoutMs $WindowWaitMs
+    Start-Sleep -Seconds 2
+    $idleRows = @()
+    for ($sample = 1; $sample -le 5; $sample++) {
+        $idleLaunch.Process.Refresh()
+        $idleRows += [pscustomobject]@{
+            exe = 'veil-final'; sample = $sample
+            working_set_bytes = $idleLaunch.Process.WorkingSet64
+            private_bytes = $idleLaunch.Process.PrivateMemorySize64
+            utc = [DateTime]::UtcNow.ToString('o')
+        }
+        if ($sample -lt 5) { Start-Sleep -Milliseconds 250 }
+    }
+    Close-Task6Process -Process $idleLaunch.Process -ReadySince $idleWindow.ReadySince | Out-Null
+    $idleRows | Export-Csv -LiteralPath (Join-Path $dir 'idle-final.csv') -NoTypeInformation -Encoding utf8
+    $workingSet = [int64][Math]::Round((Get-Task6Median -Values @($idleRows | ForEach-Object { [double]$_.working_set_bytes })))
+    $private = [int64][Math]::Round((Get-Task6Median -Values @($idleRows | ForEach-Object { [double]$_.private_bytes })))
+    $wsMiB = $workingSet / 1MB
+    $p50Delta = $p50 - 86.98
+    $wsDelta = $wsMiB - 43.59
+    $p95Pass = $p95 -le 1000; $p50Pass = $p50Delta -le 150; $wsPass = $wsDelta -le 40
+    $d1Pass = $p95Pass -and $p50Pass -and $wsPass
+    $summary = [ordered]@{
+        status = $(if ($d1Pass) { 'PASS' } else { 'FAIL' }); d1_precondition_met = $d1Pass
+        protocol = 'Task 0: MainWindowHandle/5ms poll; 1 warmup + measured runs; 5s message-loop warmup; normal CloseMainWindow; PERCENTILE.INC'
+        document = 'temporary UTF-8 copy of current product SAMPLE; isolated VEIL_HOME/APPDATA per run'
+        measured_runs = $Runs; samples_ms = $values
+        min_ms = [Math]::Round(($values | Measure-Object -Minimum).Minimum, 2)
+        p50_ms = $p50; p95_ms = $p95; max_ms = [Math]::Round(($values | Measure-Object -Maximum).Maximum, 2)
+        baseline_light_p50_ms = 86.98; baseline_light_p95_ms = 90.97; p50_delta_ms = [Math]::Round($p50Delta, 2)
+        idle_working_set_bytes = $workingSet; idle_working_set_mib = [Math]::Round($wsMiB, 2)
+        idle_private_bytes = $private; idle_private_mib = [Math]::Round($private / 1MB, 2)
+        baseline_light_working_set_mib = 43.59; working_set_delta_mib = [Math]::Round($wsDelta, 2)
+        thresholds = [ordered]@{ p95_ms_max = 1000; p50_delta_ms_max = 150; working_set_delta_mib_max = 40 }
+        p95_pass = $p95Pass; p50_delta_pass = $p50Pass; working_set_delta_pass = $wsPass
+        all_runs_normal_close = $true; forced_termination = $false; temp_root_removed = $false
+    }
+    $summaryPath = Join-Path $dir 'summary.json'
+    $script:task6SummaryPaths += $summaryPath
+    $summary | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $summaryPath -Encoding utf8
+    Write-Log $(if ($d1Pass) { 'PASS' } else { 'FAIL' }) "D1 n=$Runs p50=$p50 ms (delta=$([Math]::Round($p50Delta,2))) p95=$p95 ms idleWS=$([Math]::Round($wsMiB,2)) MiB (delta=$([Math]::Round($wsDelta,2)))"
+}
+
 # ---------- 主流程 ----------
+if ($EvidenceMode) {
+    $script:task6Process = $null
+    $script:task6SummaryPaths = @()
+    $script:task6Root = Join-Path ([IO.Path]::GetTempPath()) ("veil-task6-" + [Guid]::NewGuid().ToString('N'))
+    $evidenceExit = 0
+    $normalClose = $false
+    try {
+        Assert-Task6NoVeil
+        New-Item -ItemType Directory -Path $script:task6Root -Force | Out-Null
+        Write-Log 'INFO' "Task 6 mode=$EvidenceMode 临时根=$script:task6Root；真实用户配置和文档不作为输入"
+        Write-Task6Artifact -Root $ShotDir
+        $task6Doc = New-Task6Document -Root $script:task6Root -Typing:($EvidenceMode -eq 'input')
+        Write-FileDigest -Path $task6Doc -Phase 'Task 6 临时文档启动前'
+        $readySince = $null
+        switch ($EvidenceMode) {
+            'startup' { $readySince = Invoke-Task6Startup -Root $script:task6Root -OutputDir $ShotDir -DocPath $task6Doc }
+            'input' { $readySince = Invoke-Task6Input -Root $script:task6Root -OutputDir $ShotDir -DocPath $task6Doc }
+            'd1' { Invoke-Task6D1 -Root $script:task6Root -OutputDir $ShotDir -DocPath $task6Doc -Runs $ColdRuns }
+        }
+        if ($null -ne $readySince) {
+            Close-Task6Process -Process $script:task6Process -ReadySince $readySince | Out-Null
+        }
+        $normalClose = $true
+    } catch {
+        $evidenceExit = 1
+        Write-Log 'FAIL' "Task 6：$($_.Exception.Message)"
+    } finally {
+        if ($null -ne $script:task6Process -and -not $script:task6Process.HasExited) {
+            try {
+                Close-Task6Process -Process $script:task6Process -ReadySince ([DateTime]::UtcNow.AddSeconds(-5)) | Out-Null
+            } catch {
+                Write-Log 'FAIL' "Task 6 清理时仍未能正常关窗；保留临时根供排查且未杀进程：$($_.Exception.Message)"
+                $evidenceExit = 1
+            }
+        }
+        $tempRemoved = $false
+        if ($null -eq $script:task6Process) {
+            try {
+                Remove-Item -LiteralPath $script:task6Root -Recurse -Force
+            } catch {
+                Write-Log 'WARN' "Remove-Item 临时目录清理未完成，尝试 .NET 后备：$($_.Exception.Message)"
+            }
+            if (Test-Path -LiteralPath $script:task6Root) {
+                try {
+                    [IO.Directory]::Delete($script:task6Root, $true)
+                } catch {
+                    Write-Log 'FAIL' "Task 6 临时目录清理失败（Remove-Item 与 .NET 后备均失败）：$($_.Exception.Message)"
+                }
+            }
+            $tempRemoved = -not (Test-Path -LiteralPath $script:task6Root)
+            if (-not $tempRemoved) { $evidenceExit = 1 }
+        }
+        foreach ($summaryPath in $script:task6SummaryPaths) {
+            if (Test-Path -LiteralPath $summaryPath) {
+                $saved = Get-Content -LiteralPath $summaryPath -Raw | ConvertFrom-Json
+                $saved | Add-Member -NotePropertyName normal_close -NotePropertyValue $normalClose -Force
+                $saved | Add-Member -NotePropertyName temp_root_removed -NotePropertyValue $tempRemoved -Force
+                $saved | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $summaryPath -Encoding utf8
+            }
+        }
+        Write-Log $(if ($tempRemoved) { 'PASS' } else { 'FAIL' }) "Task 6 临时目录清理=$tempRemoved root=$script:task6Root"
+        Write-Log 'INFO' "证据目录：$ShotDir"
+    }
+    exit $evidenceExit
+}
+
 $oldProbe = $env:VEIL_BREAK_PROBE
 if ($Probe) { $env:VEIL_BREAK_PROBE = '1' }
 $oldPerf = $env:VEIL_PERF_PROBE
@@ -845,7 +1519,9 @@ try {
         RedirectStandardOutput = $stdoutPath
         RedirectStandardError = $stderrPath
     }
-    if ($Doc) { $startArgs.ArgumentList = @($Doc) }
+    $argumentList = @($ExeArgs)
+    if ($Doc) { $argumentList += $Doc }
+    if ($argumentList.Count -gt 0) { $startArgs.ArgumentList = $argumentList }
 
     $openStart = Get-Date
     $proc = Start-Process @startArgs

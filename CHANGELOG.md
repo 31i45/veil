@@ -12,6 +12,7 @@ Veil 版本迭代记录。每个版本的详细修复清单见对应 git tag 的
 - 发布门禁：默认版按 ASCII 内容特征负向检查 QuickJS/linkedom/cytoscape/fcose，完整版正向检查同样的引擎特征（不再检查 `include_str!` 不保留的 `mermaid.min.js` 文件名）；Cargo test/clippy 的非零退出码不再被管道吞掉，Clippy 覆盖 `--all-targets`
 - Mermaid 快照：`mermaid_insert_url` 旧键静默忽略，两个发行版都始终写本地 `assets` 相对路径，绝不插入 mermaid.ink URL。源码始终是唯一真值，光标进入显示代码底色/等宽字体的围栏，快照被明确表达为独立且可能过期
 - 在线预览提示：`veil.exe` 自动渲染可见 Mermaid 块同样会把源码发给 mermaid.ink，首次自动请求显示一次性第三方提示，不再静默上传；离线实现不提示
+- 零级发布门禁：新增 `tools/smoke_launch.ps1`，对两个 release exe 验证「主窗口可见 + 标题正确 + 进程存活 + 无 stderr panic + 正常关闭」；`release.yml` 在两个 exe 构建后执行冒烟，失败即阻断发布
 
 ### Changed
 - 字体：文本光栅化把行基线（含上下标偏移）吸附到整数物理像素，消除行基线小数带来的垂直亚像素模糊；布局、光标、选区与命中几何不变。拉丁优先字体栈经实际解析与 A/B 目检后否决，维持 `Microsoft YaHei UI` 优先并记录原因
@@ -27,6 +28,7 @@ Veil 版本迭代记录。每个版本的详细修复清单见对应 git tag 的
 - 打字机模式：删除视图菜单开关及相关状态/文案（专注模式保留）；模式切换不再作为可发现设置项
 
 ### Fixed
+- 启动即崩（0xC0000409）：隐藏首帧路径在 surface 尺寸未设置时调用 `buffer_mut()`，两个 exe 双击无窗口、进程退出。现在任何 `buffer_mut()` 前都先同步 surface 尺寸，隐藏窗口首帧不再依赖首次 `Resized`；补 `PresentSink` 顺序回归测试与真实启动冒烟
 - Mermaid 自动预览/导出取源错误：`block range` 含 ``` 围栏行，源码被整段（含 fence）投递，mermaid 报 “No diagram type detected”、mermaid.ink 返回 400；改用 `fenced_code_source` 只取围栏内容，并补回归测试
 - mermaid.ink 端点失效：`/img/…?type=svg` 被上游忽略并返回 `image/jpeg`（按 UTF-8 解析必然失败）；改用路径式 `/svg/`，并在 payload 显式下发 `htmlLabels:false`（否则输出 foreignObject，resvg 无法光栅化标签）
 - kanban 浅色主题列标题不可读：Mermaid 11.12 默认给 `section-2` 白字 + 浅紫底（对比度不足 2:1）；浅色主题注入深色列标题并加 WCAG AA 回归测试，深色主题保留原浅色标签
@@ -34,7 +36,7 @@ Veil 版本迭代记录。每个版本的详细修复清单见对应 git tag 的
 
 ### Notes
 - 体积（2026-11-20 本机构建，隔离 target）：`veil.exe` 10,062,848 B ≈ 9.60 MiB（较 v1.8.0 的 9,970,176 B +92,672 B，门禁 ≤10 MiB）；`veil-full.exe` 13,992,448 B ≈ 13.34 MiB（离线渲染栈 +3.75 MiB，门禁 ≤14 MiB）
-- 测试：串行 `cargo test --workspace --all-features -- --test-threads=1` 1889 passed / 0 failed / 15 ignored（远程 SVG mock 为 20 ms 墙钟截止，并行执行可能假超时）；默认特性 `cargo test -p veil` 215 passed / 1 ignored（差额为 4 项特性门控测试）；`cargo clippy --workspace --all-features --all-targets -- -D warnings` 零警告
+- 测试：串行 `cargo test --workspace --all-features -- --test-threads=1` 1897 passed / 0 failed / 15 ignored（远程 SVG mock 为 20 ms 墙钟截止，并行执行可能假超时）；默认特性 `cargo test -p veil` 215 passed / 1 ignored（差额为 4 项特性门控测试）；`cargo clippy --workspace --all-features --all-targets -- -D warnings` 零警告
 - 离线覆盖：flowchart、sequence、class、state、er、journey、gantt、pie、quadrant、requirement、gitgraph、c4context、mindmap、timeline、sankey、xychart、block、packet、kanban、architecture、radar、treemap 共 22 类按内嵌 Mermaid 11.12.0 实际支持逐类验证（含 mindmap canvas2svg 全层级对比度、kanban 列标题与 journey 标签的浅色对比度修复），mindmap/kanban 提供浅深双主题 SVG+PNG 并排证据
 - 界面：固定简体中文单语表，不探测系统语言、无运行时切换；正文/导出/图内文字不随 UI 翻译。菜单与快捷键经 195 条命令矩阵走查，缺失项已按证据修复
 

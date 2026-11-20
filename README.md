@@ -134,7 +134,20 @@ cargo build --release --bin veil-full --features mermaid-offline
 cargo test -p veil --features mermaid-offline
 ```
 
-Baseline: 1889 passed / 0 failed / 15 ignored (2026-11-20, serial `cargo test --workspace --all-features -- --test-threads=1`; the remote-SVG mock uses a 20 ms wall-clock deadline, so parallel runs can produce false timeouts). With default features, `cargo test -p veil` is 215 passed / 1 ignored, the 4-test difference being feature-gated Mermaid tests. `cargo clippy --workspace --all-features --all-targets -- -D warnings` zero warnings.
+Baseline: 1897 passed / 0 failed / 15 ignored (2026-11-20, serial `cargo test --workspace --all-features -- --test-threads=1`; the remote-SVG mock uses a 20 ms wall-clock deadline, so parallel runs can produce false timeouts). With default features, `cargo test -p veil` is 215 passed / 1 ignored, the 4-test difference being feature-gated Mermaid tests. `cargo clippy --workspace --all-features --all-targets -- -D warnings` zero warnings.
+
+## Tier-0 Gate: Real Launch Smoke
+
+Green tests do not prove that the exe users double-click actually opens. Before publishing, run the real launch smoke against both release binaries:
+
+```powershell
+pwsh -File tools/smoke_launch.ps1 -ExePath target-default/release/veil.exe
+pwsh -File tools/smoke_launch.ps1 -ExePath target-full/release/veil-full.exe
+```
+
+The script starts the exe, waits up to `-TimeoutSeconds` (default 5) for a visible main window, verifies the title is non-empty (and matches `-ExpectedTitlePattern` if given), treats `panicked at` / `buffer_mut` / `Must set size of surface` in stderr as a failure even if a window appeared, then requests a normal close and checks the exit code. Failures exit non-zero with a structured `SMOKE FAIL ... stage=process-exited|window-timeout|stderr-panic|...` line. It refuses to run when another `veil`/`veil-full` process is already running and never kills processes it did not start.
+
+**A smoke failure blocks the release**, regardless of unit tests, clippy, size gates, or screenshots. The release workflow runs the same script after building both exes; because GitHub-hosted Windows runners may lack an interactive desktop (no `MainWindowHandle`), the authoritative run is local, before publishing.
 
 ## Red Numbers (targets vs measured)
 

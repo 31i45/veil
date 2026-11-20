@@ -130,7 +130,20 @@ cargo test --workspace
 cargo run -p veil -- <file.md>
 ```
 
-当前 1889 项测试全绿（串行 `cargo test --workspace --all-features -- --test-threads=1`：1889 passed / 0 failed / 15 ignored，2026-11-20；远程 SVG mock 使用 20 ms 墙钟截止，并行执行可能假超时）；默认特性下 `cargo test -p veil` 为 215 passed / 1 ignored，差额 4 项为特性门控的 Mermaid 测试。`cargo clippy --workspace --all-features --all-targets -- -D warnings` 零警告。
+当前 1897 项测试全绿（串行 `cargo test --workspace --all-features -- --test-threads=1`：1897 passed / 0 failed / 15 ignored，2026-11-20；远程 SVG mock 使用 20 ms 墙钟截止，并行执行可能假超时）；默认特性下 `cargo test -p veil` 为 215 passed / 1 ignored，差额 4 项为特性门控的 Mermaid 测试。`cargo clippy --workspace --all-features --all-targets -- -D warnings` 零警告。
+
+## 零级门禁：真实启动冒烟
+
+测试全绿不等于用户双击的 exe 能打开。发布前必须对两个 release 产物运行真实启动冒烟：
+
+```powershell
+pwsh -File tools/smoke_launch.ps1 -ExePath target-default/release/veil.exe
+pwsh -File tools/smoke_launch.ps1 -ExePath target-full/release/veil-full.exe
+```
+
+脚本会启动 exe，在 `-TimeoutSeconds`（默认 5 秒）内等待主窗口出现，校验标题非空（给出 `-ExpectedTitlePattern` 时还需匹配），即使窗口已出现，只要 stderr 含 `panicked at` / `buffer_mut` / `Must set size of surface` 也判失败；随后请求正常关闭并检查退出码。失败时非零退出，并打印结构化 `SMOKE FAIL ... stage=process-exited|window-timeout|stderr-panic|...` 行。启动前若已有同名 `veil`/`veil-full` 进程，脚本会明确失败并要求先手动关闭，绝不杀它未启动的进程。
+
+**冒烟失败一律不得发布**，单元测试、clippy、体积门禁、截图都不能替代。发布工作流在构建两个 exe 后会运行同一脚本；GitHub 托管 Windows runner 可能没有交互桌面（拿不到 `MainWindowHandle`），因此发布前以本地运行为准。
 
 ## 数字红线（目标值与实测）
 

@@ -2,7 +2,7 @@
 //! 已排版的几何与缓存，本文件不触发重新排版（除 paint 开头的两遍收敛）。
 //! 查找栏与表格网格的绘制片段在 `view::search_view` / `view::table_view`。
 
-use crate::app::App;
+use crate::app::{App, WindowState};
 use crate::chrome;
 use crate::document::block_index::BlockGeom;
 use crate::geometry::{Rect, MARGIN};
@@ -13,10 +13,13 @@ use crate::view::{
     oversize_notice, quick_open, search, BlockLayout, Frame, ImageCaption, InlineAsset, InlineFold,
     InlineImg, LayoutEngine, LayoutKey, Memo, OverKind, TableKey, UnderKind,
 };
+use softbuffer::Surface;
 use std::collections::{HashMap, HashSet};
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use veil_core::{BlockId, BlockKind, HtmlTag, InlineKind, InlineNode, Range};
+use winit::window::Window;
 
 /// 专注模式压暗强度：背景色以该 alpha 覆盖非光标块（越大越暗，255 = 全遮）。
 const FOCUS_DIM_ALPHA: u8 = 160;
@@ -135,6 +138,112 @@ impl crate::view::modal::Text for ModalText<'_> {
 /// 最小化时 Resized 宽/高为 0，surface 不 resize 而帧被钳成 1×1，长度失配即丢帧。
 pub(crate) fn can_present(frame_len: usize, target_len: usize) -> bool {
     frame_len == target_len
+}
+
+/// 呈现面写入端口：把 softbuffer 的 `resize` / `buffer_mut` 两步显式建模，
+/// 使「先 resize 再 buffer_mut」的顺序可在无真实窗口时用假实现验证。
+/// 实现方必须保证 `present_pixels` 只会在成功 `resize` 之后被调用。
+pub(crate) trait PresentSink {
+    /// 设置 surface 缓冲尺寸；失败返回 false（调用方放弃本帧，不得再取 buffer）。
+    fn resize(&mut self, width: NonZeroU32, height: NonZeroU32) -> bool;
+    /// 取 buffer、校验长度、拷贝并 present。softbuffer 未 resize 时取 buffer 会 panic，
+    /// 因此调用方必须先通过 `resize` 完成尺寸同步。
+    fn present_pixels(&mut self, pixels: &[u32]) -> bool;
+}
+
+/// 真实 softbuffer 呈现面适配器。
+pub(crate) struct SoftSurface<'a>(pub(crate) &'a mut Surface<Arc<Window>, Arc<Window>>);
+
+impl PresentSink for SoftSurface<'_> {
+    fn resize(&mut self, width: NonZeroU32, height: NonZeroU32) -> bool {
+        self.0.resize(width, height).is_ok()
+    }
+
+    fn present_pixels(&mut self, pixels: &[u32]) -> bool {
+        let Ok(mut target) = self.0.buffer_mut() else {
+            return false;
+        };
+        if !can_present(pixels.len(), target.len()) {
+            return false;
+        }
+        target.copy_from_slice(pixels);
+        target.present().is_ok()
+    }
+}
+
+/// 一帧的呈现前置决策（纯函数）：只在帧尺寸与客户区一致时允许触碰 surface。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SurfaceStep {
+    /// 帧尺寸为 0，或帧尺寸与当前客户区不一致（窗口已变化）：本帧不呈现。
+    Skip,
+    /// surface 尚未设置尺寸或尺寸与帧不一致：必须先 resize 再取 buffer。
+    Resize { width: u32, height: u32 },
+    /// surface 尺寸已与帧一致：可直接取 buffer 呈现。
+    Draw,
+}
+
+/// 决定 present 如何触碰 surface。顺序不可交换：
+/// 0×0 防护 → 帧/客户区一致性（stale 检查）→ surface 尺寸同步。
+/// 客户区为 None（headless）时不阻止；真实窗口的 0×0 客户区视为不可呈现。
+pub(crate) fn surface_step(
+    frame: (u32, u32),
+    client: Option<(u32, u32)>,
+    surface_size: Option<(u32, u32)>,
+) -> SurfaceStep {
+    if frame.0 == 0 || frame.1 == 0 {
+        return SurfaceStep::Skip;
+    }
+    if let Some(client) = client {
+        if client.0 == 0 || client.1 == 0 || client != frame {
+            return SurfaceStep::Skip;
+        }
+    }
+    match surface_size {
+        Some(size) if size == frame => SurfaceStep::Draw,
+        _ => SurfaceStep::Resize {
+            width: frame.0,
+            height: frame.1,
+        },
+    }
+}
+
+/// 呈现一帧：任何 `buffer_mut()` 之前必定先完成 surface 尺寸同步。
+///
+/// 调用顺序（回归重点）：取帧尺寸并做 0×0 防护 → stale 检查（不碰 surface）
+/// → resize（失败即返回）→ 取 buffer/校验/拷贝/present。
+/// `surface_size` 由调用方跨帧跟踪（softbuffer 0.4 未暴露 `size()`）。
+pub(crate) fn present_frame<S: PresentSink + ?Sized>(
+    frame: Option<&Frame>,
+    printing: bool,
+    client: Option<(u32, u32)>,
+    surface: Option<&mut S>,
+    surface_size: &mut Option<(u32, u32)>,
+) -> bool {
+    let Some(frame) = frame else {
+        return false;
+    };
+    // 打印期间的帧是「页帧」语义（尺寸 ≠ 客户区），不得 present 到窗口
+    if printing {
+        return false;
+    }
+    let step = surface_step((frame.width, frame.height), client, *surface_size);
+    if step == SurfaceStep::Skip {
+        return false;
+    }
+    let Some(surface) = surface else {
+        return false;
+    };
+    if let SurfaceStep::Resize { width, height } = step {
+        let (Some(width), Some(height)) = (NonZeroU32::new(width), NonZeroU32::new(height)) else {
+            return false;
+        };
+        if !surface.resize(width, height) {
+            // resize 失败：surface 尺寸仍未知/不符，绝不能继续取 buffer。
+            return false;
+        }
+        *surface_size = Some((width.get(), height.get()));
+    }
+    surface.present_pixels(&frame.pixels)
 }
 
 /// 插入点的焦点表达：聚焦实心；失焦空心框（不依赖 alpha 合成，语义最直接）。
@@ -1882,43 +1991,26 @@ impl App {
     /// surface 与客户区尺寸不一致时按当前帧尺寸重建后再拷：softbuffer 只对自身缓冲
     /// 尺寸 BitBlt、不会拉伸，沿用旧尺寸会把右下留在未擦除状态（启动黑块）。
     pub(crate) fn present(&mut self) -> bool {
-        let Some(frame) = self.window_state.frame.as_ref() else {
-            return false;
-        };
-        // 打印期间的帧是「页帧」语义（尺寸 ≠ 客户区），不得 present 到窗口
-        if self.window_state.print.is_some() {
-            return false;
-        }
-        let Some(surface) = self.window_state.surface.as_mut() else {
-            return false;
-        };
-        let matches = match surface.buffer_mut() {
-            Ok(target) => can_present(frame.pixels.len(), target.len()),
-            Err(_) => false,
-        };
-        if !matches {
-            // 0×0 防护：帧尺寸恒 ≥1×1，surface.resize 也只接受非零尺寸
-            let (Some(w), Some(h)) = (NonZeroU32::new(frame.width), NonZeroU32::new(frame.height))
-            else {
-                return false;
-            };
-            // 帧尺寸与客户区不一致（渲染后窗口又变了）：不把旧尺寸帧呈现到新客户区
-            let stale = self.window_state.window.as_ref().is_some_and(|win| {
-                let s = win.inner_size();
-                s.width != frame.width || s.height != frame.height
-            });
-            if stale || surface.resize(w, h).is_err() {
-                return false;
-            }
-        }
-        let Ok(mut target) = surface.buffer_mut() else {
-            return false;
-        };
-        if !can_present(frame.pixels.len(), target.len()) {
-            return false;
-        }
-        target.copy_from_slice(&frame.pixels);
-        target.present().is_ok()
+        let WindowState {
+            frame,
+            print,
+            window,
+            surface,
+            surface_size,
+            ..
+        } = &mut self.window_state;
+        let client = window.as_ref().map(|win| {
+            let size = win.inner_size();
+            (size.width, size.height)
+        });
+        let mut sink = surface.as_mut().map(SoftSurface);
+        present_frame(
+            frame.as_ref(),
+            print.is_some(),
+            client,
+            sink.as_mut().map(|s| s as &mut dyn PresentSink),
+            surface_size,
+        )
     }
 
     /// 帧合成完整路径：render → present。产品层事件循环 Redraw 分支唯一调用。

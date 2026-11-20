@@ -16,7 +16,9 @@ use crate::interaction::map_key_parts;
 use crate::math::{MathImage, MathRenderer};
 use crate::mermaid_renderer::{MermaidImage, MermaidRenderer};
 use crate::mode::{Mode, TextSink};
-use crate::paint::{can_present, fit_size, local_image_path};
+use crate::paint::{
+    can_present, fit_size, local_image_path, present_frame, surface_step, PresentSink, SurfaceStep,
+};
 use crate::print::{NoPrint, Print, PrintSession};
 use crate::theme::{
     self, ConfigStore, ExportStyle, NativeWindow, SystemTheme, ThemeEnv, ThemeMode, WindowEffects,
@@ -28,6 +30,7 @@ use crate::view::{Frame, InlineAsset, Memo, MAX_BLOCK_BYTES};
 use crate::Ports;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
+use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
@@ -8294,6 +8297,264 @@ fn present_requires_matching_lengths() {
     assert!(can_present(100, 100), "长度相等应允许呈现");
     assert!(!can_present(4, 100), "帧短于 surface 应丢帧");
     assert!(!can_present(100, 4), "帧长于 surface 应丢帧");
+}
+
+/// 假呈现面：复刻 softbuffer win32 的契约——未 resize 就取 buffer 直接 panic。
+/// 用它跑真实 `present_frame` 调用链，顺序写错会在断言处失败，而不是只验证纯函数。
+struct FakeSink {
+    size: Option<(u32, u32)>,
+    resizes: Vec<(u32, u32)>,
+    presents: usize,
+    resize_ok: bool,
+    present_ok: bool,
+}
+
+impl FakeSink {
+    fn new() -> Self {
+        Self {
+            size: None,
+            resizes: Vec::new(),
+            presents: 0,
+            resize_ok: true,
+            present_ok: true,
+        }
+    }
+}
+
+impl PresentSink for FakeSink {
+    fn resize(&mut self, width: NonZeroU32, height: NonZeroU32) -> bool {
+        if !self.resize_ok {
+            return false;
+        }
+        let size = (width.get(), height.get());
+        self.size = Some(size);
+        self.resizes.push(size);
+        true
+    }
+
+    fn present_pixels(&mut self, pixels: &[u32]) -> bool {
+        let (w, h) = self
+            .size
+            .expect("Must set size of surface before calling buffer_mut()");
+        assert_eq!(
+            pixels.len(),
+            (w as usize) * (h as usize),
+            "帧长度必须与已设置的 surface 尺寸一致"
+        );
+        self.presents += 1;
+        self.present_ok
+    }
+}
+
+fn test_frame(w: u32, h: u32) -> Frame {
+    Frame::new(w, h, [0, 0, 0, 255])
+}
+
+#[test]
+fn present_hidden_first_frame_resizes_surface_before_buffer_mut() {
+    // 隐藏窗口首帧：surface 从未收到 Resized（surface_size=None），但帧/客户区已就绪。
+    // 顺序必须是 resize → buffer_mut；FakeSink 在未 resize 取 buffer 时会 panic。
+    let frame = test_frame(900, 700);
+    let mut surface = FakeSink::new();
+    let mut surface_size = None;
+    assert!(present_frame(
+        Some(&frame),
+        false,
+        Some((900, 700)),
+        Some(&mut surface),
+        &mut surface_size
+    ));
+    assert_eq!(
+        surface.resizes,
+        vec![(900, 700)],
+        "首帧必须先 resize surface"
+    );
+    assert_eq!(surface.presents, 1, "resize 成功后只取一次 buffer");
+    assert_eq!(
+        surface_size,
+        Some((900, 700)),
+        "resize 成功后必须记录新尺寸，供下一次呈现判断"
+    );
+}
+
+#[test]
+fn present_skips_stale_frame_without_touching_surface() {
+    // 渲染后窗口尺寸又变了：旧尺寸帧不得 present 到新客户区，
+    // 且 stale 检查必须在 resize/buffer_mut 之前返回。
+    let frame = test_frame(800, 600);
+    let mut surface = FakeSink::new();
+    let mut surface_size = None;
+    assert!(!present_frame(
+        Some(&frame),
+        false,
+        Some((1024, 768)),
+        Some(&mut surface),
+        &mut surface_size
+    ));
+    assert!(surface.resizes.is_empty(), "stale 帧不得 resize surface");
+    assert_eq!(surface.presents, 0, "stale 帧不得取 buffer");
+    assert_eq!(surface_size, None);
+}
+
+#[test]
+fn present_resizes_again_after_client_size_changes() {
+    // 首帧后 DPI/最大化改变客户区：旧尺寸帧会被 stale 防护丢弃；
+    // 新尺寸帧到来时必须再次 resize 才能 buffer_mut。
+    let frame = test_frame(1024, 768);
+    let mut surface = FakeSink {
+        size: Some((800, 600)),
+        ..FakeSink::new()
+    };
+    let mut surface_size = Some((800, 600));
+    assert!(present_frame(
+        Some(&frame),
+        false,
+        Some((1024, 768)),
+        Some(&mut surface),
+        &mut surface_size
+    ));
+    assert_eq!(
+        surface.resizes,
+        vec![(1024, 768)],
+        "尺寸变化后必须先 resize 到新帧尺寸"
+    );
+    assert_eq!(surface.presents, 1);
+    assert_eq!(surface_size, Some((1024, 768)));
+}
+
+#[test]
+fn present_resize_failure_abandons_frame_without_buffer_mut() {
+    // resize 失败（如 size 超范围）时必须放弃本帧，绝不能继续 buffer_mut。
+    let frame = test_frame(900, 700);
+    let mut surface = FakeSink {
+        resize_ok: false,
+        ..FakeSink::new()
+    };
+    let mut surface_size = None;
+    assert!(!present_frame(
+        Some(&frame),
+        false,
+        Some((900, 700)),
+        Some(&mut surface),
+        &mut surface_size
+    ));
+    assert_eq!(surface.presents, 0, "resize 失败后不得取 buffer");
+    assert_eq!(surface_size, None, "resize 失败不得记录尺寸");
+}
+
+#[test]
+fn present_failure_is_reported_and_keeps_surface_size() {
+    // present 本身失败（平台错误）应返回未呈现，但不改变已同步的尺寸记录。
+    let frame = test_frame(900, 700);
+    let mut surface = FakeSink {
+        size: Some((900, 700)),
+        present_ok: false,
+        ..FakeSink::new()
+    };
+    let mut surface_size = Some((900, 700));
+    assert!(!present_frame(
+        Some(&frame),
+        false,
+        Some((900, 700)),
+        Some(&mut surface),
+        &mut surface_size
+    ));
+    assert_eq!(surface.presents, 1, "尺寸一致时应尝试一次 present");
+    assert_eq!(surface_size, Some((900, 700)));
+}
+
+#[test]
+fn present_skips_zero_sized_and_print_frames() {
+    // 0×0 帧：surface.resize 只接受非零，必须在触碰 surface 前跳过。
+    let zero = test_frame(0, 0);
+    let mut surface = FakeSink::new();
+    let mut surface_size = None;
+    assert!(!present_frame(
+        Some(&zero),
+        false,
+        Some((0, 0)),
+        Some(&mut surface),
+        &mut surface_size
+    ));
+    assert!(surface.resizes.is_empty());
+    assert_eq!(surface.presents, 0);
+
+    // 打印页帧尺寸 ≠ 客户区：不 present 到窗口。
+    let page = test_frame(794, 1123);
+    let mut page_surface = FakeSink::new();
+    let mut page_size = None;
+    assert!(!present_frame(
+        Some(&page),
+        true,
+        Some((900, 700)),
+        Some(&mut page_surface),
+        &mut page_size
+    ));
+    assert!(page_surface.resizes.is_empty());
+    assert_eq!(page_surface.presents, 0);
+}
+
+#[test]
+fn surface_step_orders_zero_guard_before_stale_and_resize() {
+    assert_eq!(
+        surface_step((0, 600), Some((0, 600)), None),
+        SurfaceStep::Skip,
+        "0×0 帧必须先被防护，不得进入 resize"
+    );
+    assert_eq!(
+        surface_step((800, 600), Some((0, 0)), None),
+        SurfaceStep::Skip,
+        "客户区 0×0（最小化）不可呈现"
+    );
+    assert_eq!(
+        surface_step((800, 600), Some((1024, 768)), None),
+        SurfaceStep::Skip,
+        "帧/客户区不一致时不得触碰 surface"
+    );
+    assert_eq!(
+        surface_step((800, 600), Some((800, 600)), None),
+        SurfaceStep::Resize {
+            width: 800,
+            height: 600
+        },
+        "surface 未设尺寸时必须先 resize"
+    );
+    assert_eq!(
+        surface_step((800, 600), Some((800, 600)), Some((1024, 768))),
+        SurfaceStep::Resize {
+            width: 800,
+            height: 600
+        },
+        "surface 记录尺寸与帧不一致时必须先 resize"
+    );
+    assert_eq!(
+        surface_step((800, 600), Some((800, 600)), Some((800, 600))),
+        SurfaceStep::Draw,
+        "尺寸一致才允许直接取 buffer"
+    );
+    assert_eq!(
+        surface_step((800, 600), None, None),
+        SurfaceStep::Resize {
+            width: 800,
+            height: 600
+        },
+        "无窗口（headless）不做 stale 检查，但仍需先设尺寸"
+    );
+}
+
+#[test]
+fn startup_without_surface_reveals_instead_of_staying_hidden() {
+    // 首帧兜底（Task 2.3）：呈现面不可用时也必须结束隐藏阶段，
+    // 由主题底色窗口兜底，不能永久隐藏或静默退出。
+    let store = MemStore::default();
+    let mut a = app("# t\n\np\n", None, false, &store);
+    a.window_state.visible = false;
+    a.window_state.startup = Some(StartupGate::new(Instant::now()));
+    a.try_show_first_frame();
+    assert!(
+        a.window_state.startup.is_none(),
+        "surface 不可用时必须结束隐藏阶段并显示窗口"
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

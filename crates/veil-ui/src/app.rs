@@ -694,6 +694,9 @@ impl StartupGate {
 pub(crate) struct WindowState {
     pub(crate) window: Option<Arc<Window>>,
     pub(crate) surface: Option<Surface<Arc<Window>, Arc<Window>>>,
+    /// softbuffer 已设置的 surface 尺寸。softbuffer 0.4 不暴露 `size()`，
+    /// 因此由本状态跟踪；`present` 必须在 `buffer_mut()` 之前用它判断是否先 resize。
+    pub(crate) surface_size: Option<(u32, u32)>,
     /// 跨帧复用的像素缓冲（P2）：尺寸不变时零分配，绘制结束整块拷入 surface。
     pub(crate) frame: Option<Frame>,
     pub(crate) scroll_y: f32,
@@ -750,6 +753,7 @@ impl Default for WindowState {
         Self {
             window: None,
             surface: None,
+            surface_size: None,
             frame: None,
             scroll_y: 0.0,
             goal_y: 0.0,
@@ -1852,6 +1856,7 @@ impl App {
                 return None;
             }
         };
+        self.window_state.surface_size = None;
         self.window_state.surface = Surface::new(&context, window.clone()).ok();
         self.set_ime_area();
         self.window_state.window = Some(window);
@@ -1859,10 +1864,30 @@ impl App {
         // 动效开关（S6）：系统「显示动画」关闭时悬停高亮立即到位。
         let animations = self.ports.system.animations_enabled();
         self.set_animations(animations);
+        // 隐藏窗口不会收到首次 Resized：必须在首次 paint 前显式设置 surface 尺寸，
+        // 否则 softbuffer 的 buffer_mut() 会 panic（Must set size of surface...）。
+        self.sync_surface_to_client();
         // 首帧完整性（Task 5）：窗口以隐藏状态创建，先在当前客户区尺寸完成一次同步
         // 渲染/呈现，成功即显示；失败或超时由 next_wake 兜底显示，不会永久不可见。
         self.begin_startup();
         self.window_state.window.as_ref().map(|w| w.id())
+    }
+
+    /// 把 surface 尺寸显式同步到当前客户区（隐藏窗口收不到首次 Resized）。
+    /// 尺寸取 `win_size()`：恒非零且与 `render` 产出的帧一致，避免「未 resize 就
+    /// buffer_mut()」的启动 panic。resize 失败时保持未知尺寸，交由 present 的
+    /// 尺寸检查与 1s 兜底处理，不在这里 panic。
+    fn sync_surface_to_client(&mut self) {
+        let (w, h) = self.win_size();
+        let (Some(w), Some(h)) = (NonZeroU32::new(w), NonZeroU32::new(h)) else {
+            return;
+        };
+        let Some(surface) = self.window_state.surface.as_mut() else {
+            return;
+        };
+        if surface.resize(w, h).is_ok() {
+            self.window_state.surface_size = Some((w.get(), h.get()));
+        }
     }
 
     /// 进入首帧隐藏阶段并立即尝试显示。
@@ -1873,7 +1898,8 @@ impl App {
 
     /// 在当前客户区尺寸上完成一次同步首帧：先合并待处理尺寸变化，再 render + present。
     /// 呈现成功即显示；`present` 失败时保持隐藏，等 Resized/DPI 事件重试，超时兜底。
-    /// surface 与客户区尺寸对齐由 `present` 内部完成（尺寸不符时按帧尺寸重建）。
+    /// surface 尺寸已在 `create_window` 中显式同步；`present` 仍会在 buffer_mut 前
+    /// 复核尺寸（隐藏窗口/DPI 变化后不依赖 Resized 一定到达）。
     pub(crate) fn try_show_first_frame(&mut self) {
         if self.window_state.startup.is_none() {
             return;
@@ -1950,7 +1976,11 @@ impl App {
                     NonZeroU32::new(size.width),
                     NonZeroU32::new(size.height),
                 ) {
-                    let _ = s.resize(w, h);
+                    // 只有 resize 成功才记录尺寸：present 以该记录判断能否直接
+                    // buffer_mut，失败时保持旧记录，由 present 再做一次 resize。
+                    if s.resize(w, h).is_ok() {
+                        self.window_state.surface_size = Some((size.width, size.height));
+                    }
                 }
                 if !self.window_state.visible {
                     self.window_state.visible = true;

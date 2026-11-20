@@ -2,6 +2,28 @@
 
 Veil 版本迭代记录。每个版本的详细修复清单见对应 git tag 的 commit log。
 
+## v3.0.0 — 2026-11-20
+
+**BREAKING**：只发布一个 `veil.exe`；Mermaid 改为进程内本地渲染。
+
+### BREAKING
+- 停止发布 `veil-full.exe`：删除 `veil-full` bin、`required-features` 分支与 `target-full` 发布路径。**迁移：此前使用较大离线发行包的用户直接改用新的 `veil.exe`，能力不减**；文件关联与 `/register` 行为不变
+- Mermaid 改为本地渲染：`mermaid-offline` 成为默认 feature，唯一产物内置 QuickJS + 完整 `mermaid.js`，图表源码永不离开本机
+- 移除在线预览与在线图片链接：不再提供把图表源码发给第三方服务的渲染路径，也不再有「复制预览链接」动作；需要外部编辑时使用显式的「复制源码 / 在 mermaid.live 打开」（URL 不携带源码，产品自身不上传）
+
+### Added
+- 离线引擎惰性初始化：`OfflineMermaid::new()` 不再在进程启动时创建 QuickJS runtime 或加载 `linkedom` + `mermaid.min.js`；首次图表请求才初始化，没有 Mermaid 块的文档不再为空闲引擎付出约 41 MiB WorkingSet（D1 前置条件）
+- 发布门禁改为单产物：`veil.exe ≤14 MiB`，且二进制必须包含离线引擎特征串（`QuickJS` / `linkedom`）
+
+### Changed
+- 发布管线只剩一条：一次干净构建（默认 feature）、一次串行测试、一次 clippy、一次门禁、一次冒烟、一份 SHA-256；`CARGO_TARGET_DIR` 统一为默认 `target`
+- workspace 版本号升至 3.0.0
+
+### Notes
+- 体积（2026-11-20 本机构建）：13,995,008 B ≈ 13.35 MiB（门禁 ≤14 MiB）；SHA-256 `3f7e164bc6e6b7eba67b950a004d6ed84e6b15db2283959c09824d96a63e596b`
+- 测试：串行 `cargo test --workspace --release -- --test-threads=1` 1911 passed / 0 failed / 15 ignored；`cargo test -p veil --lib` 221 passed / 1 ignored；`cargo test -p veil-mermaid-offline` 22 passed / 1 ignored；`cargo clippy --workspace --all-targets -- -D warnings` 零警告
+- 构建与门禁原始记录见 `evidence/release/v3-build.md`
+
 ## v2.0.1 — 2026-11-20
 
 首次双产物发布（v2.0.0）被 CI 测试非确定性阻断，本版只修门禁与测试，不改产品行为。

@@ -36,16 +36,14 @@ pub(crate) enum CtxAction {
     TableAlignLeft,
     TableAlignCenter,
     TableAlignRight,
-    /// Mermaid v0：在 mermaid.live 在线预览当前源码。
+    /// Mermaid：复制源码并在 mermaid.live 打开（显式外部动作，不携带源码 URL）。
     MermaidPreview,
-    /// Mermaid：应用内预览在线渲染的 PNG（mermaid.ink，显式点击才联网）。
+    /// Mermaid：应用内本地渲染预览（进程内出图，不联网）。
     MermaidPreviewImage,
-    /// Mermaid：下载在线渲染的 PNG 到 `<doc>.assets/` 并插入图片引用。
+    /// Mermaid：本地渲染后写入 `<doc>.assets/` 并插入图片引用。
     MermaidInsertImage,
     /// Mermaid v0：复制当前 mermaid 块的源码（不含围栏行）到剪贴板。
     MermaidCopySource,
-    /// Mermaid v0：复制 mermaid.live 预览 URL 到剪贴板。
-    MermaidCopyLink,
     /// Mermaid v0：插入预设模板（三种 diagram 类型）。
     MermaidInsertFlowchart,
     MermaidInsertSequence,
@@ -160,7 +158,6 @@ pub(crate) fn items_for(kind: CtxKind) -> Vec<(Key, CtxAction)> {
             (Key::CtxMermaidInsertImage, CtxAction::MermaidInsertImage),
             (Key::Empty, CtxAction::Separator),
             (Key::CtxMermaidCopySource, CtxAction::MermaidCopySource),
-            (Key::CtxMermaidCopyLink, CtxAction::MermaidCopyLink),
             (Key::Empty, CtxAction::Separator),
             (
                 Key::CtxMermaidInsertFlowchart,
@@ -260,9 +257,7 @@ pub(crate) struct CtxMenu {
     pub(crate) link: Option<String>,
     /// 表格上下文（打开时刻定；执行结构操作时读行列信息）。
     pub(crate) table: Option<TableCtx>,
-    /// 远程图片总开关：关闭时隐藏 Mermaid 在线渲染两项（打开前由 interaction 写入）。
-    pub(crate) remote_ok: bool,
-    /// Mermaid v0：打开时刻捕获的块 body 源码（不含围栏行），供预览/复制链接动作读取。
+    /// Mermaid v0：打开时刻捕获的块 body 源码（不含围栏行），供预览/复制动作读取。
     pub(crate) mermaid_body: Option<String>,
     /// 同源码 Mermaid 块中的序号（0-based，按文档顺序）。回包时用于在多个
     /// 相同源码块中稳定选中用户当初右键的那一个；非 Mermaid 块为 None。
@@ -289,7 +284,6 @@ impl Default for CtxMenu {
             fade: crate::anim::Fade::default(),
             link: None,
             table: None,
-            remote_ok: true,
             mermaid_body: None,
             mermaid_occurrence: None,
             mermaid_insert_start: None,
@@ -335,14 +329,6 @@ impl CtxMenu {
             _ => None,
         };
         self.items = items_for(kind);
-        if !self.remote_ok {
-            self.items.retain(|&(_, a)| {
-                !matches!(
-                    a,
-                    CtxAction::MermaidPreviewImage | CtxAction::MermaidInsertImage
-                )
-            });
-        }
     }
 
     pub(crate) fn close(&mut self) {

@@ -644,8 +644,8 @@ impl MermaidRenderer for NoopMermaid {
     fn set_dpi_scale(&mut self, _scale: f32) {}
 }
 
-/// 可观测的 MermaidRenderer stub：记录所有 request 调用；allowed=false 时 Renderer
-/// 自身丢弃 request；poll 从预设队列返回结果（用于失败计数/超限跳过驱动）。
+/// 可观测的 MermaidRenderer stub：记录所有 request 调用；poll 从预设队列返回
+/// 结果（用于失败计数/超限跳过驱动）。
 ///
 /// 所有内部状态都用 Rc/Cell 包起来，derive Clone 后与 Box<dyn MermaidRenderer> 共享
 /// poll() 结果队列（key + 位图/错误）。
@@ -658,36 +658,26 @@ type MermaidSourceLog = Rc<RefCell<Vec<String>>>;
 /// 同一份底层数据——测试可在外层通过 clone 句柄断言 Box 里 Renderer 的真实状态。
 #[derive(Clone)]
 struct RecordingMermaid {
-    /// request() 收到的所有 URL（allowed=false 时不会被 push）
+    /// request() 收到的所有 label（本地渲染的稳定键）
     requests: Rc<RefCell<Vec<String>>>,
     /// request() 收到的源码（校验围栏是否已被剥离）
     sources: MermaidSourceLog,
-    /// allowed 开关；Renderer 内部 self.request() 读取，false 时跳过
-    allowed: Rc<Cell<bool>>,
     /// poll() 返回队列；每次 poll 调 `take` 全部取走
     poll_queue: MermaidPollQueue,
     /// render_blocking() 调用次数（导出/打印前置补齐路径）
     blocking_calls: Rc<Cell<usize>>,
     /// render_blocking() 预设返回值；None 时按 trait 默认语义失败
     blocking_result: MermaidBlockingSlot,
-    /// false 模拟 veil-full 的本地 renderer，手动预览/快照不得访问网络。
-    network: bool,
 }
 impl RecordingMermaid {
     fn new() -> Self {
         Self {
             requests: Rc::new(RefCell::new(Vec::new())),
             sources: Rc::new(RefCell::new(Vec::new())),
-            allowed: Rc::new(Cell::new(true)),
             poll_queue: Rc::new(RefCell::new(Vec::new())),
             blocking_calls: Rc::new(Cell::new(0)),
             blocking_result: Rc::new(RefCell::new(None)),
-            network: true,
         }
-    }
-    fn offline(mut self) -> Self {
-        self.network = false;
-        self
     }
     fn push_err(&self, url: String, msg: &str) {
         self.poll_queue
@@ -703,10 +693,6 @@ impl RecordingMermaid {
     fn last_request_source(&self) -> Option<String> {
         self.sources.borrow().last().cloned()
     }
-    /// 直接改 Renderer 内部 allowed 状态（用 Rc<Cell> 共享，不需要 &mut self）。
-    fn set_allowed_state(&self, allowed: bool) {
-        self.allowed.set(allowed);
-    }
     /// 设置 render_blocking() 的返回结果（导出前置补齐测试用）。
     fn set_blocking_ok(&self, img: MermaidImage) {
         *self.blocking_result.borrow_mut() = Some(Ok(img));
@@ -718,9 +704,6 @@ impl RecordingMermaid {
 }
 impl MermaidRenderer for RecordingMermaid {
     fn request(&mut self, label: String, source: String, _dark: bool) {
-        if !self.allowed.get() {
-            return;
-        }
         self.requests.borrow_mut().push(label);
         self.sources.borrow_mut().push(source);
     }
@@ -728,12 +711,6 @@ impl MermaidRenderer for RecordingMermaid {
         std::mem::take(&mut *self.poll_queue.borrow_mut())
     }
     fn set_dpi_scale(&mut self, _scale: f32) {}
-    fn set_allowed(&mut self, allowed: bool) {
-        self.allowed.set(allowed);
-    }
-    fn requires_network(&self) -> bool {
-        self.network
-    }
     fn render_blocking(
         &mut self,
         _label: String,
@@ -782,43 +759,35 @@ fn app_with_mermaid(text: &str, mermaid: RecordingMermaid) -> App {
     )
 }
 
-// ---- Mermaid 稳定性加固测试（set_allowed / 失败计数 / 超限 notice） ----
+// ---- Mermaid 本地渲染测试（不联网 / 失败计数 / 超限 notice） ----
 
-/// set_allowed(false) 时 Renderer 自身拒绝新 request：URL 不进入 requests 记录，
-/// poll 仍返回空——App 层 trigger_mermaid_auto 虽然仍被调用（config.allow_remote_images 未改），
-/// 但 Renderer 内部 early-return 阻止了实际投递。
+/// 自动预览只向本地渲染器投递 request：label 是 `mermaid-auto` 稳定键，
+/// 不含任何 URL；空块被跳过；不出现第三方提示。
 #[test]
-fn mermaid_set_allowed_false_blocks_new_requests() {
+fn mermaid_auto_preview_requests_only_local_renderer() {
     let mermaid = RecordingMermaid::new();
-    let doc = "前文\n\n```mermaid\ngraph TD\nA-->B\n```\n";
+    let doc =
+        "前文\n\n```mermaid\n```\n\n```mermaid\n \n\t\n```\n\n```mermaid\ngraph TD\nA-->B\n```\n";
     let mut a = app_with_mermaid(doc, mermaid.clone());
+    assert!(a.ui_state.chrome.notice.is_empty(), "启动时不应有提示");
 
-    // 第 1 轮：allowed=true（默认）→ request 正常记录
     a.trigger_mermaid_auto();
-    assert_eq!(mermaid.request_count(), 1, "allowed=true 时应投递 request");
 
-    // 清 App 层去重守卫（mermaid_auto_requested / pending），让第二次 trigger 能走到 Renderer
-    a.mermaid_auto_requested.clear();
-    a.pending_mermaid_auto.clear();
-
-    // Renderer 层禁止：request 被内部 early-return 丢弃，requests 不增加
-    mermaid.set_allowed_state(false);
-    a.trigger_mermaid_auto();
+    assert_eq!(mermaid.request_count(), 1, "只有非空块应投递 request");
+    let label = mermaid.last_request_url().expect("request 未投递");
+    assert!(label.starts_with("mermaid-auto:"), "{label}");
+    assert!(!label.contains("http"), "label 不得包含网络地址：{label}");
     assert_eq!(
-        mermaid.request_count(),
-        1,
-        "allowed=false 时 Renderer 应丢弃新 request"
+        mermaid.last_request_source().as_deref(),
+        Some("graph TD\nA-->B")
     );
-
-    // 恢复 allowed=true 后应能正常投递
-    mermaid.set_allowed_state(true);
-    a.mermaid_auto_requested.clear();
-    a.trigger_mermaid_auto();
-    assert_eq!(mermaid.request_count(), 2, "恢复 allowed=true 后应正常投递");
+    assert!(
+        a.ui_state.chrome.notice.is_empty(),
+        "本地渲染不得出现第三方提示"
+    );
 }
 
 /// 回归：投递的源码必须是围栏**内容**，不能带 ```mermaid 围栏行。
-/// 带围栏会让 mermaid 报 "No diagram type detected"，mermaid.ink 直接 400。
 #[test]
 fn mermaid_request_source_strips_fence() {
     let mermaid = RecordingMermaid::new();
@@ -830,78 +799,6 @@ fn mermaid_request_source_strips_fence() {
     assert!(source.contains("graph TD"), "围栏内容丢失: {source:?}");
 }
 
-/// 空块与纯空白块没有可渲染图形，不得向 mermaid.ink 投递必然 HTTP 400 的请求；
-/// 同一文档中的非空块仍须正常渲染。
-#[test]
-fn mermaid_empty_remote_sources_skip_requests() {
-    let mermaid = RecordingMermaid::new();
-    let doc =
-        "前文\n\n```mermaid\n```\n\n```mermaid\n \n\t\n```\n\n```mermaid\ngraph TD\nA-->B\n```\n";
-    let mut a = app_with_mermaid(doc, mermaid.clone());
-
-    a.trigger_mermaid_auto();
-
-    assert_eq!(mermaid.request_count(), 1, "只有非空块应投递 request");
-    assert_eq!(
-        mermaid.last_request_source().as_deref(),
-        Some("graph TD\nA-->B")
-    );
-}
-
-/// 自动预览会向 mermaid.ink 发送源码：首次投递必须给出一次性第三方提示，
-/// 后续请求不再重复打扰；离线实现完全不提示。
-#[test]
-fn mermaid_auto_remote_third_party_notice_shown_once() {
-    let mermaid = RecordingMermaid::new();
-    let doc = "前文\n\n```mermaid\ngraph TD\nA-->B\n```\n";
-    let mut a = app_with_mermaid(doc, mermaid.clone());
-    assert!(a.ui_state.chrome.notice.is_empty(), "启动时不应有提示");
-
-    a.trigger_mermaid_auto();
-    assert_eq!(mermaid.request_count(), 1);
-    assert!(a.mermaid_ink_notice_shown, "首次自动远程渲染必须标记已提示");
-    assert_eq!(
-        a.ui_state.chrome.notice,
-        t(I18nKey::NoticeMermaidInkNotice),
-        "首次自动远程渲染必须显示明确的第三方上传提示"
-    );
-
-    // 清掉 App 层去重，模拟第二个块再次投递：不得重复提示
-    a.ui_state.chrome.notice.clear();
-    a.mermaid_auto_requested.clear();
-    a.pending_mermaid_auto.clear();
-    a.trigger_mermaid_auto();
-    assert_eq!(mermaid.request_count(), 2);
-    assert!(
-        a.ui_state.chrome.notice.is_empty(),
-        "同一会话不得重复提示第三方上传"
-    );
-}
-
-/// 空白拦截只针对联网实现；veil-full 本地渲染即使关闭远程图片仍走原路径。
-#[test]
-fn mermaid_offline_auto_render_ignores_remote_switch() {
-    let mermaid = RecordingMermaid::new().offline();
-    let doc = "前文\n\n```mermaid\ngraph TD\nA-->B\n```\n";
-    let mut a = app_with_mermaid(doc, mermaid.clone());
-    a.config.allow_remote_images = false;
-
-    a.trigger_mermaid_auto();
-
-    assert_eq!(
-        mermaid.request_count(),
-        1,
-        "本地非空块不得被远程开关或空白拦截影响"
-    );
-    assert_eq!(
-        mermaid.last_request_source().as_deref(),
-        Some("graph TD\nA-->B")
-    );
-    assert!(
-        !a.mermaid_ink_notice_shown,
-        "离线实现不得出现第三方上传提示"
-    );
-}
 /// 同一 (source_hash, dark) 连续失败 ≥ 3 次后，trigger_mermaid_auto 跳过第 4 次 request。
 /// 失败次数由 poll_remote_images 的 Err 分支累加，trigger_mermaid_auto 开头检查 ≥ 3 就 continue。
 #[test]
@@ -987,9 +884,9 @@ fn export_ensure_renders_missing_mermaid_blocks() {
     assert_eq!(mermaid.blocking_count(), 1, "缓存命中不应重复渲染");
 }
 
-/// allow_remote_images = false 时导出前置补齐不得发起任何渲染/网络请求。
+/// 「允许远程图片」开关只作用于普通远程 `<img>`；Mermaid 导出补齐恒走本地渲染。
 #[test]
-fn export_ensure_respects_remote_images_off() {
+fn export_ensure_renders_mermaid_locally_when_remote_images_off() {
     let mermaid = RecordingMermaid::new();
     mermaid.set_blocking_ok(MermaidImage {
         data: vec![0; 4],
@@ -1003,8 +900,12 @@ fn export_ensure_respects_remote_images_off() {
     a.config.allow_remote_images = false;
 
     a.ensure_mermaid_for_export();
-    assert_eq!(mermaid.blocking_count(), 0, "远程图片关闭时不得发起渲染");
-    assert!(a.cache.mermaid_imgs.is_empty(), "缓存不应被写入");
+    assert_eq!(
+        mermaid.blocking_count(),
+        1,
+        "本地导出补齐不受远程图片开关影响"
+    );
+    assert_eq!(a.cache.mermaid_imgs.len(), 1, "本地渲染结果应写入缓存");
 }
 
 /// 默认导出器：不记录、恒失败（不关心导出的既有测试用）。
@@ -2373,8 +2274,6 @@ fn settings_changes_update_view_menu_state_immediately() {
     use crate::view::settings::{FieldValue, BTN_OK};
     let cfg = MemConfig::default();
     let mut a = app_remote("abc", Box::new(cfg), RemoteImages::default());
-    let mermaid = RecordingMermaid::new();
-    a.ports.mermaid = Box::new(mermaid.clone());
     assert!(a.config.allow_remote_images);
 
     a.open_settings();
@@ -2395,7 +2294,6 @@ fn settings_changes_update_view_menu_state_immediately() {
         !chrome::action_checked(MenuAction::ToggleRemoteImages, a.menu_flags()),
         "取消允许后 View 菜单必须立即变为未勾选"
     );
-    assert!(!mermaid.allowed.get(), "远程渲染端口必须同步禁用");
     assert!(
         chrome::theme_action_matches(MenuAction::ThemeDark, a.config.mode),
         "切到深色后主题菜单「当前」标记必须立即跟随"
@@ -2419,7 +2317,6 @@ fn settings_changes_update_view_menu_state_immediately() {
         MenuAction::ToggleRemoteImages,
         a.menu_flags()
     ));
-    assert!(mermaid.allowed.get());
     assert!(chrome::theme_action_matches(
         MenuAction::ThemeLight,
         a.config.mode
@@ -14297,14 +14194,14 @@ fn non_empty_mermaid_right_click_keeps_full_menu() {
         .iter()
         .filter(|&&(_, act)| act != ctx_menu::CtxAction::Separator)
         .count();
-    assert_eq!(actionable, 10, "新增在线预览/插入两项后为 10 项");
+    assert_eq!(actionable, 9, "本地预览/插入与复制源码共 9 个可执行项");
     assert!(
         a.ui_state.ctx.mermaid_insert_start.is_none(),
         "非空块不启用空块插入锚点"
     );
 }
 
-/// 远程图片 + 资产双端口装配（Mermaid 在线预览/插入测试用）。
+/// 远程图片 + 资产双端口装配（Mermaid 本地预览/插入测试用）。
 fn app_remote_assets(
     text: &str,
     path: Option<&str>,
@@ -14387,37 +14284,35 @@ fn exec_mermaid_action(a: &mut App, action: ctx_menu::CtxAction) {
     a.route_key(Key::Enter);
 }
 
-/// 在线预览：显式点击才请求 mermaid.ink，回包后进入图片浮层，且不改文档。
+/// 预览/插入共用本地渲染：点击「预览」直接同步渲染并打开浮层，且不改文档。
 #[test]
-fn mermaid_online_preview_requests_ink_then_opens_overlay() {
+fn mermaid_preview_renders_locally_without_network() {
     let store = MemStore::default();
     let images = RemoteImages::default();
     let requests = images.requests.clone();
+    let mermaid = RecordingMermaid::new();
+    mermaid.set_blocking_ok(test_mermaid_image(12, 8));
     let doc = "p\n\n```mermaid\ngraph TD\nA-->B\n```\n";
     let mut a = app_remote_assets(
         doc,
         None,
         &store,
-        images.clone(),
+        images,
         FakeAssets {
             result: Ok("d.assets/mermaid-1.png".into()),
             calls: Rc::new(RefCell::new(Vec::new())),
         },
     );
+    a.ports.mermaid = Box::new(mermaid.clone());
 
     exec_mermaid_action(&mut a, ctx_menu::CtxAction::MermaidPreviewImage);
-    assert_eq!(requests.borrow().len(), 1, "点击后应发起一次请求");
-    let url = requests.borrow()[0].clone();
-    assert!(url.starts_with("https://mermaid.ink/img/pako:"), "{url}");
-    assert!(url.contains("type=png"), "{url}");
-    assert!(url.contains("width=1200"), "{url}");
-    assert!(a.pending_mermaid_fetch.is_some(), "应记录待回包请求");
-    assert!(a.ui_state.image_preview.is_none(), "回包前不得先开浮层");
 
-    *images.results.borrow_mut() = vec![(url, Ok(solid(12, 8)))];
-    a.poll_remote_images();
-    assert!(a.ui_state.image_preview.is_some(), "回包后应打开图片浮层");
-    assert!(a.pending_mermaid_fetch.is_none(), "回包后清空待处理项");
+    assert!(requests.borrow().is_empty(), "本地预览不得发起远程请求");
+    assert_eq!(mermaid.blocking_count(), 1, "本地预览应同步渲染一次");
+    assert!(
+        a.ui_state.image_preview.is_some(),
+        "本地渲染后应打开图片浮层"
+    );
     let n = a.editor.session().text_len();
     assert_eq!(
         a.editor.session().text_slice(Range::new(0, n)).unwrap(),
@@ -14426,75 +14321,34 @@ fn mermaid_online_preview_requests_ink_then_opens_overlay() {
     );
 }
 
-/// 预览请求挂起时再点「插入快照」：提示必须说图片正在生成，而不是「快照仍在生成」。
-#[test]
-fn preview_pending_uses_render_notice_for_snapshot_attempt() {
-    let store = MemStore::default();
-    let images = RemoteImages::default();
-    let requests = images.requests.clone();
-    let doc = "p\n\n```mermaid\ngraph TD\nA-->B\n```\n";
-    let mut a = app_remote_assets(
-        doc,
-        Some("C:\\tmp\\d.md"),
-        &store,
-        images.clone(),
-        FakeAssets {
-            result: Ok("d.assets/mermaid-1.png".into()),
-            calls: Rc::new(RefCell::new(Vec::new())),
-        },
-    );
-    exec_mermaid_action(&mut a, ctx_menu::CtxAction::MermaidPreviewImage);
-    assert_eq!(requests.borrow().len(), 1);
-    let pending = a.pending_mermaid_fetch.clone().expect("预览请求挂起");
-
-    exec_mermaid_action(&mut a, ctx_menu::CtxAction::MermaidInsertImage);
-    assert_eq!(
-        a.ui_state.chrome.notice,
-        t(I18nKey::NoticeMermaidRenderPending),
-        "预览挂起时不得说「快照仍在生成」"
-    );
-    assert_eq!(
-        a.pending_mermaid_fetch.as_ref().map(|p| p.insert),
-        Some(false),
-        "挂起项不得被插入请求覆盖"
-    );
-    assert_eq!(requests.borrow().len(), 1, "不得重复发起请求");
-
-    let url = pending.url.clone();
-    *images.results.borrow_mut() = vec![(url, Ok(solid(12, 8)))];
-    a.poll_remote_images();
-    assert!(a.ui_state.image_preview.is_some(), "原预览回包仍应打开浮层");
-    assert_eq!(a.editor.session().serialize(), doc);
-}
-
 /// 下载插入：写入 assets 并在闭合围栏之后自成段落；一次事务（undo_depth 恰 +1）。
 /// 断言完整文本，而不是 `contains`——图片进入围栏内部时必须失败。
 #[test]
-fn mermaid_online_insert_writes_asset_as_one_undo_step() {
+fn mermaid_local_insert_writes_asset_as_one_undo_step() {
     let store = MemStore::default();
     let images = RemoteImages::default();
     let requests = images.requests.clone();
     let calls = Rc::new(RefCell::new(Vec::new()));
+    let mermaid = RecordingMermaid::new();
+    mermaid.set_blocking_ok(test_mermaid_image(20, 10));
     let doc = "p\n\n```mermaid\ngraph TD\nA-->B\n```\n尾段\n";
     let mut a = app_remote_assets(
         doc,
         Some("C:\\tmp\\d.md"),
         &store,
-        images.clone(),
+        images,
         FakeAssets {
             result: Ok("d.assets/mermaid-1.png".into()),
             calls: calls.clone(),
         },
     );
+    a.ports.mermaid = Box::new(mermaid.clone());
     let depth0 = a.editor.session().undo_depth();
 
     exec_mermaid_action(&mut a, ctx_menu::CtxAction::MermaidInsertImage);
-    let url = requests.borrow()[0].clone();
-    assert!(url.contains("width=2400"), "插入用高分辨率：{url}");
 
-    *images.results.borrow_mut() = vec![(url, Ok(solid(20, 10)))];
-    a.poll_remote_images();
-
+    assert!(requests.borrow().is_empty(), "本地插入不得发起远程请求");
+    assert_eq!(mermaid.blocking_count(), 1);
     assert_eq!(calls.borrow().len(), 1, "应落盘一次资产");
     assert_eq!(calls.borrow()[0].0, PathBuf::from("C:\\tmp\\d.md"));
     let text = a.editor.session().serialize();
@@ -14507,7 +14361,6 @@ fn mermaid_online_insert_writes_asset_as_one_undo_step() {
         1,
         "一次动作只新增一个图片引用"
     );
-    assert!(!text.contains("mermaid.ink"), "快照动作不得写远程链接");
     assert_eq!(
         a.editor.session().undo_depth(),
         depth0 + 1,
@@ -14535,8 +14388,9 @@ fn mermaid_online_insert_writes_asset_as_one_undo_step() {
 fn mermaid_snapshot_ignores_legacy_insert_url_config() {
     let store = MemStore::default();
     let images = RemoteImages::default();
-    let requests = images.requests.clone();
     let calls = Rc::new(RefCell::new(Vec::new()));
+    let mermaid = RecordingMermaid::new();
+    mermaid.set_blocking_ok(test_mermaid_image(20, 10));
     let doc = "p\n\n```mermaid\ngraph TD\nA-->B\n```\n尾段\n";
     let mut env = theme::test_support::env();
     env.config = Box::new(MemConfig {
@@ -14549,13 +14403,14 @@ fn mermaid_snapshot_ignores_legacy_insert_url_config() {
         doc,
         Some("C:\\tmp\\d.md"),
         &store,
-        images.clone(),
+        images,
         FakeAssets {
             result: Ok("d.assets/mermaid-1.png".into()),
             calls: calls.clone(),
         },
         env,
     );
+    a.ports.mermaid = Box::new(mermaid);
     assert!(
         a.ui_state.chrome.notice.is_empty(),
         "旧键不得产生无法识别提示：{}",
@@ -14563,9 +14418,6 @@ fn mermaid_snapshot_ignores_legacy_insert_url_config() {
     );
 
     exec_mermaid_action(&mut a, ctx_menu::CtxAction::MermaidInsertImage);
-    let url = requests.borrow()[0].clone();
-    *images.results.borrow_mut() = vec![(url, Ok(solid(20, 10)))];
-    a.poll_remote_images();
 
     assert_eq!(calls.borrow().len(), 1, "旧配置 true 也必须本地落盘");
     let text = a.editor.session().serialize();
@@ -14573,84 +14425,32 @@ fn mermaid_snapshot_ignores_legacy_insert_url_config() {
         text,
         "p\n\n```mermaid\ngraph TD\nA-->B\n```\n![](d.assets/mermaid-1.png)\n尾段\n"
     );
-    assert!(!text.contains("mermaid.ink"), "{text}");
-}
-
-/// 回包前在源码块内编辑：源码哈希失配 → 安全丢弃，绝不把图片写进围栏。
-#[test]
-fn mermaid_snapshot_response_dropped_when_source_changed() {
-    let store = MemStore::default();
-    let images = RemoteImages::default();
-    let requests = images.requests.clone();
-    let calls = Rc::new(RefCell::new(Vec::new()));
-    let doc = "p\n\n```mermaid\ngraph TD\nA-->B\n```\n尾段\n";
-    let mut a = app_remote_assets(
-        doc,
-        Some("C:\\tmp\\d.md"),
-        &store,
-        images.clone(),
-        FakeAssets {
-            result: Ok("d.assets/mermaid-1.png".into()),
-            calls: calls.clone(),
-        },
-    );
-    exec_mermaid_action(&mut a, ctx_menu::CtxAction::MermaidInsertImage);
-    let url = requests.borrow()[0].clone();
-
-    let body_end = a.editor.session().serialize().find("A-->B").unwrap() + "A-->B".len();
-    assert!(a.editor.set_caret(body_end));
-    a.insert_paste("\nA-->C");
-    let edited = a.editor.session().serialize();
-    assert_eq!(
-        edited,
-        "p\n\n```mermaid\ngraph TD\nA-->B\nA-->C\n```\n尾段\n"
-    );
-
-    *images.results.borrow_mut() = vec![(url, Ok(solid(20, 10)))];
-    a.poll_remote_images();
-
-    assert_eq!(
-        a.editor.session().serialize(),
-        edited,
-        "失配回包不得修改正文"
-    );
-    assert_eq!(a.editor.session().serialize().matches("![](").count(), 0);
-    assert!(calls.borrow().is_empty(), "失配时不得落盘孤儿资产");
-    assert_eq!(
-        a.ui_state.chrome.notice,
-        t(I18nKey::NoticeMermaidSnapshotStale)
-    );
 }
 
 /// 同文两个完全相同的 Mermaid 块：右键第二个插入快照，必须落在第二个块之后，
-/// 第一个块保持不变（不能因源码哈希相同而丢弃回包）。
+/// 第一个块保持不变。
 #[test]
 fn mermaid_snapshot_targets_second_identical_block() {
     let store = MemStore::default();
     let images = RemoteImages::default();
-    let requests = images.requests.clone();
     let calls = Rc::new(RefCell::new(Vec::new()));
+    let mermaid = RecordingMermaid::new();
+    mermaid.set_blocking_ok(test_mermaid_image(20, 10));
     let doc =
         "前\n\n```mermaid\ngraph TD\nA-->B\n```\n中\n\n```mermaid\ngraph TD\nA-->B\n```\n尾\n";
     let mut a = app_remote_assets(
         doc,
         Some("C:\\tmp\\d.md"),
         &store,
-        images.clone(),
+        images,
         FakeAssets {
             result: Ok("d.assets/mermaid-1.png".into()),
             calls: calls.clone(),
         },
     );
+    a.ports.mermaid = Box::new(mermaid);
+
     exec_nth_mermaid_action(&mut a, 1, ctx_menu::CtxAction::MermaidInsertImage);
-    assert_eq!(
-        a.pending_mermaid_fetch.as_ref().and_then(|p| p.occurrence),
-        Some(1),
-        "请求必须记录第二个同源码块的序号"
-    );
-    let url = requests.borrow()[0].clone();
-    *images.results.borrow_mut() = vec![(url, Ok(solid(20, 10)))];
-    a.poll_remote_images();
 
     assert_eq!(calls.borrow().len(), 1);
     assert_eq!(
@@ -14660,217 +14460,13 @@ fn mermaid_snapshot_targets_second_identical_block() {
     );
 }
 
-/// 回包前删除第一个同源码块：原目标序号已越界，必须安全丢弃并提示，
-/// 不能把快照写到剩下的另一个块后面。
-#[test]
-fn mermaid_snapshot_occurrence_out_of_range_is_dropped() {
-    let store = MemStore::default();
-    let images = RemoteImages::default();
-    let requests = images.requests.clone();
-    let calls = Rc::new(RefCell::new(Vec::new()));
-    let doc =
-        "前\n\n```mermaid\ngraph TD\nA-->B\n```\n中\n\n```mermaid\ngraph TD\nA-->B\n```\n尾\n";
-    let mut a = app_remote_assets(
-        doc,
-        Some("C:\\tmp\\d.md"),
-        &store,
-        images.clone(),
-        FakeAssets {
-            result: Ok("d.assets/mermaid-1.png".into()),
-            calls: calls.clone(),
-        },
-    );
-    exec_nth_mermaid_action(&mut a, 1, ctx_menu::CtxAction::MermaidInsertImage);
-    assert_eq!(
-        a.pending_mermaid_fetch.as_ref().and_then(|p| p.occurrence),
-        Some(1)
-    );
-    let url = requests.borrow()[0].clone();
-
-    // 删除第一个 Mermaid 块（含围栏），文档里只剩一个同源码块。
-    let first = a
-        .index
-        .blocks
-        .iter()
-        .find(|g| matches!(g.kind, BlockKind::Mermaid))
-        .map(|g| g.range)
-        .expect("第一个 Mermaid 块");
-    assert!(a.editor.set_caret(first.start));
-    assert!(a.editor.set_caret_extend(first.end));
-    a.cut_selection();
-    let after_cut = a.editor.session().serialize();
-    assert_eq!(after_cut.matches("```mermaid").count(), 1, "{after_cut}");
-    assert!(a.pending_mermaid_fetch.is_some(), "编辑不得清空挂起项");
-
-    *images.results.borrow_mut() = vec![(url, Ok(solid(20, 10)))];
-    a.poll_remote_images();
-
-    assert_eq!(
-        a.editor.session().serialize(),
-        after_cut,
-        "序号越界不得改正文"
-    );
-    assert_eq!(a.editor.session().serialize().matches("![](").count(), 0);
-    assert!(calls.borrow().is_empty(), "越界时不得落盘孤儿资产");
-    assert_eq!(
-        a.ui_state.chrome.notice,
-        t(I18nKey::NoticeMermaidSnapshotStale)
-    );
-}
-
-/// 回包前在块前插入一行（源码未变）：锚点必须按当前索引重算，仍落在闭合围栏之后。
-#[test]
-fn mermaid_snapshot_anchor_follows_edits_before_block() {
-    let store = MemStore::default();
-    let images = RemoteImages::default();
-    let requests = images.requests.clone();
-    let doc = "p\n\n```mermaid\ngraph TD\nA-->B\n```\n尾段\n";
-    let mut a = app_remote_assets(
-        doc,
-        Some("C:\\tmp\\d.md"),
-        &store,
-        images.clone(),
-        FakeAssets {
-            result: Ok("d.assets/mermaid-1.png".into()),
-            calls: Rc::new(RefCell::new(Vec::new())),
-        },
-    );
-    exec_mermaid_action(&mut a, ctx_menu::CtxAction::MermaidInsertImage);
-    let url = requests.borrow()[0].clone();
-
-    assert!(a.editor.set_caret(0));
-    a.insert_paste("新增\n");
-    *images.results.borrow_mut() = vec![(url, Ok(solid(20, 10)))];
-    a.poll_remote_images();
-
-    assert_eq!(
-        a.editor.session().serialize(),
-        "新增\np\n\n```mermaid\ngraph TD\nA-->B\n```\n![](d.assets/mermaid-1.png)\n尾段\n",
-        "图片必须跟随块尾，不能使用打开菜单时的旧偏移"
-    );
-}
-
-/// 回包前切换文档：新文档一个字都不能改（挂起项在打开时已作废）。
-#[test]
-fn mermaid_snapshot_response_does_not_touch_other_document() {
-    let store = MemStore::default();
-    store
-        .files
-        .borrow_mut()
-        .insert(PathBuf::from("C:\\tmp\\b.md"), b"B document\n".to_vec());
-    let images = RemoteImages::default();
-    let requests = images.requests.clone();
-    let calls = Rc::new(RefCell::new(Vec::new()));
-    let doc = "p\n\n```mermaid\ngraph TD\nA-->B\n```\n尾段\n";
-    let mut a = app_remote_assets(
-        doc,
-        Some("C:\\tmp\\d.md"),
-        &store,
-        images.clone(),
-        FakeAssets {
-            result: Ok("d.assets/mermaid-1.png".into()),
-            calls: calls.clone(),
-        },
-    );
-    exec_mermaid_action(&mut a, ctx_menu::CtxAction::MermaidInsertImage);
-    let url = requests.borrow()[0].clone();
-
-    a.open_path(PathBuf::from("C:\\tmp\\b.md"));
-    assert!(a.pending_mermaid_fetch.is_none(), "换文档必须清空挂起项");
-    *images.results.borrow_mut() = vec![(url, Ok(solid(20, 10)))];
-    a.poll_remote_images();
-
-    assert_eq!(a.editor.session().serialize(), "B document\n");
-    assert!(calls.borrow().is_empty(), "不得为新文档落盘旧快照");
-}
-
-/// 回包时文档身份已变（路径被改写）：丢弃并提示，不修改正文。
-#[test]
-fn mermaid_snapshot_response_dropped_when_document_identity_changes() {
-    let store = MemStore::default();
-    let images = RemoteImages::default();
-    let requests = images.requests.clone();
-    let calls = Rc::new(RefCell::new(Vec::new()));
-    let doc = "p\n\n```mermaid\ngraph TD\nA-->B\n```\n尾段\n";
-    let mut a = app_remote_assets(
-        doc,
-        Some("C:\\tmp\\d.md"),
-        &store,
-        images.clone(),
-        FakeAssets {
-            result: Ok("d.assets/mermaid-1.png".into()),
-            calls: calls.clone(),
-        },
-    );
-    exec_mermaid_action(&mut a, ctx_menu::CtxAction::MermaidInsertImage);
-    let url = requests.borrow()[0].clone();
-
-    a.doc.path = Some(PathBuf::from("C:\\tmp\\other.md"));
-    *images.results.borrow_mut() = vec![(url, Ok(solid(20, 10)))];
-    a.poll_remote_images();
-
-    assert_eq!(a.editor.session().serialize(), doc);
-    assert!(calls.borrow().is_empty());
-    assert_eq!(
-        a.ui_state.chrome.notice,
-        t(I18nKey::NoticeMermaidSnapshotStale)
-    );
-}
-
-/// 挂起期间连续点击只落一个图片引用；重复回包走普通图片缓存，不再改正文。
-#[test]
-fn mermaid_snapshot_pending_blocks_repeated_clicks() {
-    let store = MemStore::default();
-    let images = RemoteImages::default();
-    let requests = images.requests.clone();
-    let calls = Rc::new(RefCell::new(Vec::new()));
-    let doc = "p\n\n```mermaid\ngraph TD\nA-->B\n```\n尾段\n";
-    let mut a = app_remote_assets(
-        doc,
-        Some("C:\\tmp\\d.md"),
-        &store,
-        images.clone(),
-        FakeAssets {
-            result: Ok("d.assets/mermaid-1.png".into()),
-            calls: calls.clone(),
-        },
-    );
-    exec_mermaid_action(&mut a, ctx_menu::CtxAction::MermaidInsertImage);
-    let url = requests.borrow()[0].clone();
-    let pending = a.pending_mermaid_fetch.clone();
-    exec_mermaid_action(&mut a, ctx_menu::CtxAction::MermaidInsertImage);
-    assert_eq!(
-        a.ui_state.chrome.notice,
-        t(I18nKey::NoticeMermaidSnapshotPending),
-        "挂起期间再次点击必须提示且不覆盖挂起项"
-    );
-    assert_eq!(a.pending_mermaid_fetch.as_ref().map(|p| &p.url), Some(&url));
-    assert_eq!(
-        a.pending_mermaid_fetch.as_ref().map(|p| p.source_hash),
-        pending.as_ref().map(|p| p.source_hash)
-    );
-
-    *images.results.borrow_mut() = vec![(url.clone(), Ok(solid(20, 10)))];
-    a.poll_remote_images();
-    *images.results.borrow_mut() = vec![(url, Ok(solid(20, 10)))];
-    a.poll_remote_images();
-
-    assert_eq!(calls.borrow().len(), 1, "只落盘一次");
-    let text = a.editor.session().serialize();
-    assert_eq!(
-        text.matches("![](").count(),
-        1,
-        "只新增一个图片引用：{text}"
-    );
-}
-
 #[test]
 fn mermaid_offline_insert_stays_local_when_remote_blocked() {
     let store = MemStore::default();
     let images = RemoteImages::default();
     let requests = images.requests.clone();
     let calls = Rc::new(RefCell::new(Vec::new()));
-    let mermaid = RecordingMermaid::new().offline();
+    let mermaid = RecordingMermaid::new();
     mermaid.set_blocking_ok(test_mermaid_image(20, 10));
     let doc = "p\n\n```mermaid\ngraph TD\nA-->B\n```\n";
     let mut a = app_remote_assets(
@@ -14888,7 +14484,7 @@ fn mermaid_offline_insert_stays_local_when_remote_blocked() {
 
     exec_mermaid_action(&mut a, ctx_menu::CtxAction::MermaidInsertImage);
 
-    assert!(requests.borrow().is_empty(), "完整版快照不得发起远程请求");
+    assert!(requests.borrow().is_empty(), "Mermaid 快照不得发起远程请求");
     assert_eq!(mermaid.blocking_count(), 1);
     assert_eq!(calls.borrow().len(), 1, "离线版固定本地落盘");
     let inserted = a.editor.session().serialize();
@@ -14915,7 +14511,7 @@ fn mermaid_offline_preview_works_when_remote_images_blocked() {
     let store = MemStore::default();
     let images = RemoteImages::default();
     let requests = images.requests.clone();
-    let mermaid = RecordingMermaid::new().offline();
+    let mermaid = RecordingMermaid::new();
     mermaid.set_blocking_ok(test_mermaid_image(12, 8));
     let doc = "p\n\n```mermaid\ngraph TD\nA-->B\n```\n";
     let mut a = app_remote_assets(
@@ -14945,24 +14541,23 @@ fn mermaid_offline_preview_works_when_remote_images_blocked() {
 fn mermaid_local_snapshot_draft_failure_preserves_document() {
     let store = MemStore::default();
     let images = RemoteImages::default();
-    let requests = images.requests.clone();
     let calls = Rc::new(RefCell::new(Vec::new()));
+    let mermaid = RecordingMermaid::new();
+    mermaid.set_blocking_ok(test_mermaid_image(20, 10));
     let doc = "p\n\n```mermaid\ngraph TD\nA-->B\n```\n";
     let mut a = app_remote_assets(
         doc,
         None,
         &store,
-        images.clone(),
+        images,
         FakeAssets {
             result: Ok("d.assets/mermaid-1.png".into()),
             calls: calls.clone(),
         },
     );
+    a.ports.mermaid = Box::new(mermaid);
 
     exec_mermaid_action(&mut a, ctx_menu::CtxAction::MermaidInsertImage);
-    let url = requests.borrow()[0].clone();
-    *images.results.borrow_mut() = vec![(url, Ok(solid(20, 10)))];
-    a.poll_remote_images();
 
     assert_eq!(a.editor.session().serialize(), doc);
     assert!(!a.editor.is_dirty());
@@ -14971,7 +14566,6 @@ fn mermaid_local_snapshot_draft_failure_preserves_document() {
         a.ui_state.chrome.notice,
         t(I18nKey::NoticeMermaidSnapshotNeedsFile)
     );
-    assert!(!a.editor.session().serialize().contains("mermaid.ink"));
 }
 
 #[test]
@@ -14980,7 +14574,7 @@ fn mermaid_offline_snapshot_save_failure_has_no_url_fallback() {
     let images = RemoteImages::default();
     let requests = images.requests.clone();
     let calls = Rc::new(RefCell::new(Vec::new()));
-    let mermaid = RecordingMermaid::new().offline();
+    let mermaid = RecordingMermaid::new();
     mermaid.set_blocking_ok(test_mermaid_image(20, 10));
     let doc = "p\n\n```mermaid\ngraph TD\nA-->B\n```\n";
     let mut a = app_remote_assets(
@@ -15012,7 +14606,7 @@ fn mermaid_offline_render_failure_preserves_source_without_url_fallback() {
     let images = RemoteImages::default();
     let requests = images.requests.clone();
     let calls = Rc::new(RefCell::new(Vec::new()));
-    let mermaid = RecordingMermaid::new().offline();
+    let mermaid = RecordingMermaid::new();
     *mermaid.blocking_result.borrow_mut() = Some(Err("本地渲染失败".into()));
     let doc = "p\n\n```mermaid\ngraph TD\nA-->B\n```\n";
     let mut a = app_remote_assets(
@@ -15034,6 +14628,16 @@ fn mermaid_offline_render_failure_preserves_source_without_url_fallback() {
     assert_eq!(a.editor.session().serialize(), doc);
     assert!(!a.editor.is_dirty());
     assert!(a.ui_state.chrome.notice.contains("本地渲染失败"));
+    assert!(
+        !a.ui_state.chrome.notice.contains("mermaid.ink"),
+        "渲染失败提示不得指向第三方服务：{}",
+        a.ui_state.chrome.notice
+    );
+    assert!(
+        a.ui_state.chrome.notice.contains("请检查 Mermaid 语法"),
+        "失败提示应给出本地可操作建议：{}",
+        a.ui_state.chrome.notice
+    );
     assert!(!a.editor.session().serialize().contains("mermaid.ink"));
 }
 
@@ -15041,22 +14645,21 @@ fn mermaid_offline_render_failure_preserves_source_without_url_fallback() {
 fn mermaid_snapshot_relative_path_survives_document_move() {
     let store = MemStore::default();
     let images = RemoteImages::default();
-    let requests = images.requests.clone();
+    let mermaid = RecordingMermaid::new();
+    mermaid.set_blocking_ok(test_mermaid_image(20, 10));
     let doc = "p\n\n```mermaid\ngraph TD\nA-->B\n```\n";
     let mut a = app_remote_assets(
         doc,
         Some("C:\\old\\d.md"),
         &store,
-        images.clone(),
+        images,
         FakeAssets {
             result: Ok("d.assets/mermaid-1.png".into()),
             calls: Rc::new(RefCell::new(Vec::new())),
         },
     );
+    a.ports.mermaid = Box::new(mermaid);
     exec_mermaid_action(&mut a, ctx_menu::CtxAction::MermaidInsertImage);
-    let url = requests.borrow()[0].clone();
-    *images.results.borrow_mut() = vec![(url, Ok(solid(20, 10)))];
-    a.poll_remote_images();
     let inserted = a.editor.session().serialize();
     assert!(inserted.contains("![](d.assets/mermaid-1.png)"));
 
@@ -15085,30 +14688,6 @@ fn mermaid_snapshot_relative_path_survives_document_move() {
     );
 }
 
-/// 关闭远程图片时，两项在线渲染不出现在菜单里（仍保留 mermaid.live 预览）。
-#[test]
-fn mermaid_online_items_hidden_when_remote_images_blocked() {
-    let store = MemStore::default();
-    let doc = "p\n\n```mermaid\ngraph TD\nA-->B\n```\n";
-    let mut a = app(doc, None, false, &store);
-    a.config.allow_remote_images = false;
-    hover_mermaid_block(&mut a);
-    a.on_right_click();
-    let acts: Vec<_> = a.ui_state.ctx.items().iter().map(|&(_, act)| act).collect();
-    assert!(
-        !acts.contains(&ctx_menu::CtxAction::MermaidPreviewImage),
-        "关闭远程图片后不应出现在线预览"
-    );
-    assert!(
-        !acts.contains(&ctx_menu::CtxAction::MermaidInsertImage),
-        "关闭远程图片后不应出现在线插入"
-    );
-    assert!(
-        acts.contains(&ctx_menu::CtxAction::MermaidPreview),
-        "mermaid.live 预览应始终可用"
-    );
-}
-
 /// 通过右键菜单执行「预览」项（菜单动作与键盘路径共用 `ctx_exec`）。
 fn exec_mermaid_preview(a: &mut App) {
     hover_mermaid_block(a);
@@ -15125,9 +14704,10 @@ fn exec_mermaid_preview(a: &mut App) {
     a.route_key(Key::Enter);
 }
 
-/// v0：右键「预览」始终打开 mermaid.live（源码离线压缩进 URL），不改文档字节。
+/// 右键「预览」是显式外部动作：只复制源码并打开 mermaid.live 首页，
+/// URL 不携带源码；不改文档字节。
 #[test]
-fn mermaid_preview_opens_mermaid_live() {
+fn mermaid_preview_copies_source_and_opens_site_without_source_url() {
     let store = MemStore::default();
     let doc = "p\n\n```mermaid\ngraph TD\nA-->B\n```\n";
     let calls = Rc::new(RefCell::new(Vec::new()));
@@ -15141,11 +14721,22 @@ fn mermaid_preview_opens_mermaid_live() {
             result: Ok(()),
         }),
     );
+    let log = Rc::new(RefCell::new(Vec::new()));
+    a.ports.clipboard = Box::new(ClipLog(log.clone()));
+
     exec_mermaid_preview(&mut a);
-    let urls = calls.borrow();
-    assert_eq!(urls.len(), 1, "应走在线预览");
-    assert!(urls[0].starts_with("https://mermaid.live/"), "{}", urls[0]);
-    assert_eq!(a.editor.session().serialize(), doc);
+
+    assert_eq!(
+        calls.borrow().as_slice(),
+        &["https://mermaid.live/".to_string()],
+        "URL 必须是站点首页，不携带源码"
+    );
+    assert_eq!(
+        log.borrow().as_slice(),
+        &["graph TD\nA-->B".to_string()],
+        "源码必须复制到剪贴板"
+    );
+    assert_eq!(a.editor.session().serialize(), doc, "外部动作不得修改文档");
 }
 
 #[test]

@@ -8,9 +8,9 @@ mod export;
 mod platform;
 
 // —— 机制层公开入口：供集成测试直接访问 ——
-// MermaidFetcher 在两种二进制里都可用（veil.exe 走远程 mermaid.ink，
-// veil-full.exe 也可在离线引擎失败或特定场景下回退到远程），故始终公开。
-pub use platform::mermaid::{svg_to_bitmap, MermaidFetcher};
+// svg_to_bitmap 是离线渲染与导出的共同光栅化接缝，保持公开以便集成测试验证
+// SVG → 位图。
+pub use platform::mermaid::svg_to_bitmap;
 
 use std::path::{Path, PathBuf};
 
@@ -231,6 +231,8 @@ pub fn run() {
             print: platform::print(),
             url_opener: platform::url_opener(),
         },
+        // 非首窗创建失败（如第二窗口）：发布构建无控制台，必须弹可见错误框。
+        |message| platform::show_error(t(Key::FatalWindowCreate), message),
         doc_requests,
     );
     drop(primary);

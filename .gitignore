@@ -17,7 +17,6 @@ Desktop.ini
 # ─── Rust / Cargo ───
 target/
 target-default/
-target-full/
 **/*.rs.bk
 Cargo.lock.bak
 

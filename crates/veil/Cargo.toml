@@ -4,19 +4,9 @@ edition.workspace = true
 version.workspace = true
 
 [features]
-default = []
-# veil-full.exe 专用：QuickJS + 完整 mermaid.js 离线渲染（体积 +约 5 MiB）
+# 唯一发行产物 veil.exe 默认包含离线 Mermaid（QuickJS + 完整 mermaid.js，体积 +约 5 MiB）。
+default = ["mermaid-offline"]
 mermaid-offline = ["dep:veil-mermaid-offline"]
-
-# 两个发行产物共用同一套 lib::run()；veil-full 需要显式开 feature 才可构建。
-[[bin]]
-name = "veil"
-path = "src/main.rs"
-
-[[bin]]
-name = "veil-full"
-path = "src/bin/veil-full.rs"
-required-features = ["mermaid-offline"]
 
 [dependencies]
 veil-core = { path = "../veil-core" }
@@ -40,7 +30,7 @@ notify = "8"
 pdf-writer = "0.15"
 ttf-parser = "0.25"
 subsetter = "0.2.6"
-# Mermaid 图表渲染（Task 2-5）：远程 mermaid.ink SVG + resvg 光栅化
+# Mermaid 图表渲染（Task 2-5）：进程内离线引擎出 SVG + resvg 光栅化
 # default feature 集包含 text / system-fonts / raster-images / svgz / memmap-fonts
 # text 必需——mermaid.js 产出的 SVG 用 <text> 标签而非 foreignObject
 resvg = { version = "0.50", default-features = true }

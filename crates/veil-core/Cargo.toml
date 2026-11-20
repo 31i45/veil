@@ -7,12 +7,6 @@ version.workspace = true
 # ADR-001：rope 实现，mark 语义在本 crate 内自封装，不向外暴露 rope 类型。
 # grapheme 导航由 rope 内置（prev/next_grapheme_offset），无需 unicode-segmentation。
 lapce-xi-rope = "0.4"
-# Mermaid v0：flate2 生成 mermaid.live 预览 URL（pako gzip deflate 格式）。
-# flate2 已被 miniz_oxide 传递依赖覆盖，体积增量为 0。
-flate2 = "1"
-# Mermaid 预览 URL 的 base64url（RFC 4648 §5，无 padding）编码。
-# 整个二进制中 plist 已传递引入本 crate 的解码路径；spike 实测补编码路径 +4 KB。
-base64 = "0.23"
 # 替换手写 callouts.json parser（~172 行 Parser struct）。
 # serde_json 经 syntect 传递依赖已在树，直接声明消除代理对缺失、转义不全、错误不可定位三个缺陷。
 serde = { version = "1", features = ["derive"] }

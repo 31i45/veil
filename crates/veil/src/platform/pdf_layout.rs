@@ -2365,8 +2365,6 @@ mod tests {
 
         let font_path = find_cjk_font().expect("Windows CJK font");
         let mut renderer = crate::platform::mermaid_offline::OfflineMermaid::new();
-        assert!(!renderer.requires_network());
-        renderer.set_allowed(false);
 
         for &(name, source) in veil_mermaid_offline::corpus::MERMAID_11_12_CORPUS {
             let markdown = format!("# {name}\n\n```mermaid\n{source}\n```\n");

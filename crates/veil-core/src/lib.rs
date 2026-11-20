@@ -18,9 +18,8 @@ pub mod toc;
 pub use callouts::CalloutRegistry;
 pub use link_safety::{link_scheme, link_url_is_safe, percent_decode_path};
 pub use mermaid::{
-    detect_type, mermaid_ink_png_url, mermaid_ink_svg_url, mermaid_live_url, MermaidTemplate,
-    CLASS_TEMPLATE, ER_TEMPLATE, FLOWCHART_TEMPLATE, MERMAID_INK_BASE, MERMAID_INK_INSERT_WIDTH,
-    MERMAID_INK_PREVIEW_WIDTH, MERMAID_LIVE_BASE, SEQUENCE_TEMPLATE, STATE_TEMPLATE,
+    detect_type, MermaidTemplate, CLASS_TEMPLATE, ER_TEMPLATE, FLOWCHART_TEMPLATE,
+    SEQUENCE_TEMPLATE, STATE_TEMPLATE,
 };
 pub use range::{Bias, MarkId, Range};
 pub use session::{Edit, EditError, Events, Session};

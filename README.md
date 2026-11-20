@@ -43,17 +43,18 @@ Both the app icon (white page + veiled V) and the `.md` document icon (folded pa
 
 ## Architecture
 
-Three crates, one-way dependency (`veil` → `veil-ui` → `veil-core`, no reverse edges permitted):
+Four crates, one-way dependency (`veil` → `veil-ui` → `veil-core`; `veil-mermaid-offline` depends only on `veil-core`; no reverse edges permitted):
 
 | Crate | Responsibility |
 |---|---|
 | `veil-core` | Pure logic kernel: document model, incremental parsing, edit transactions. Zero GUI, zero async runtime deps |
 | `veil-ui` | View adapter: winit + softbuffer software rendering + cosmic-text layout. Chrome (menus/status/scrollbar) is drawn in-house — no egui, no GPU API (ADR-005) |
+| `veil-mermaid-offline` | Mermaid engine: QuickJS + the pinned full `mermaid.js` + linkedom headless DOM; turns diagram source into SVG in-process, never touches the network |
 | `veil` | Product binary: platform seams (Windows FFI, config, clipboard, file watcher) and feature wiring |
 
 > Before v1.0, `veil-egui` was renamed `veil-ui`. The crate had already been egui-free since ADR-005; the old name no longer matched the facts. Boundaries and responsibilities unchanged.
 >
-> Two release binaries share one codebase. `veil.exe` keeps the lean v1.8 baseline plus mermaid.ink SVG fetching and a local resvg rasteriser; `veil-full.exe` additionally links QuickJS and the full `mermaid.js`, so every Mermaid type renders without any network. The v1.9.0 Tiny-subset engine (QuickJS-ng + resvg + a 1.7 MB hand-assembled bundle) is not coming back: the full engine supersedes it.
+> One release product: `veil.exe`. Mermaid renders in-process through `veil-mermaid-offline` (QuickJS + the full `mermaid.js`), so diagram source never leaves the machine. There is no second binary and no `veil-full.exe`: the engine is a default feature and is initialised lazily on the first diagram request, so a document without diagrams pays nothing for it.
 
 ## What It Does
 
@@ -91,7 +92,7 @@ Three crates, one-way dependency (`veil` → `veil-ui` → `veil-core`, no rever
 32. Outline panel (`Ctrl+Shift+O`): headings of the current document as a click-to-jump list, refreshed as you edit, with an explicit empty state when the document has no headings
 33. View controls: zoom 50%–300% in 10% steps via `Ctrl+=` / `Ctrl+-` / `Ctrl+0` or `Ctrl+wheel` (trackpad pinch included; session-only, not persisted), and `F11` full screen
 34. Windows: `Ctrl+Shift+N` opens an independent window; the current window keeps its document, caret and dirty state
-35. Mermaid diagrams: a `mermaid` fenced block stays a source card with its code and templates. In `veil-full.exe` the block renders locally (QuickJS + full `mermaid.js`, all diagram types including mindmap) with no network access; editing the source re-renders after a debounce. In `veil.exe` a visible block previews automatically while **View → Allow Remote Images** is enabled: the block source is sent to mermaid.ink and the returned SVG is rasterised locally, and the first automatic request shows a one-time notice naming that third party. Right-click additionally offers **Open in mermaid.live** (copies the block and opens the editor; the URL is built locally, nothing is sent), **Preview image** and **Download & insert image**; the render-and-insert items disappear when remote images are blocked. Both binaries keep the source as the single truth: the caret shows the fence with code background, monospace font and a copy button. **Download & insert image** writes `<doc>.assets/mermaid-N.png` and appends `![](relative-path)` after the block as one undo step, in both binaries. The legacy `mermaid_insert_url` key is silently ignored: a snapshot is always written to local assets, and no `mermaid.ink` URL is ever inserted by this action. A snapshot is an independent, possibly stale image — never a live bidirectional diagram, and the source is never deleted or hidden permanently
+35. Mermaid diagrams: a `mermaid` fenced block stays a source card with its code and templates. Visible blocks render locally in-process (QuickJS + the full `mermaid.js`, every diagram type including mindmap) and re-render after a debounce when the source changes; the engine is created on the first diagram request, so a document without diagrams never pays for it. Rendering never touches the network — the source stays on your machine, and failures give a local, actionable error instead of falling back to a remote service. The source stays the single truth: the caret shows the fence with code background, monospace font and a copy button. The block's context menu offers **Copy source**, **Open in mermaid.live** (copies the source and opens the site; the URL carries no source and Veil uploads nothing) and **Insert image snapshot**, which writes `<doc>.assets/mermaid-N.png` and appends `![](relative-path)` after the block as one undo step. The legacy `mermaid_insert_url` key is silently ignored: a snapshot is always written to local assets, and no external image URL is ever inserted. A snapshot is an independent, possibly stale image — never a live bidirectional diagram, and the source is never deleted or hidden permanently
 
 ## What It Won't Do (still out of scope)
 
@@ -101,16 +102,16 @@ Three crates, one-way dependency (`veil` → `veil-ui` → `veil-core`, no rever
 - Plugin system
 - Mobile / PWA (desktop exe only)
 - Table visual editing beyond the delivered subset (merge/split cells); content editing, row/column insert/delete, column alignment and column-width drag are supported
-- A browser engine or WebView for diagrams: `veil.exe` fetches Mermaid SVG from mermaid.ink on demand — automatic preview while remote images are allowed, or an explicit preview/insert action — and rasterises it locally with resvg; `veil-full.exe` bundles QuickJS + the full `mermaid.js` and renders entirely offline. Neither product ships Chromium; `foreignObject` output is disabled so resvg can rasterise labels
+- A browser engine or WebView for diagrams: Mermaid is rendered in-process by `veil-mermaid-offline` (QuickJS + the full `mermaid.js`); no Chromium ships, and `foreignObject` output is disabled so resvg can rasterise labels
 - A separate rich-text document model: the text stays Markdown, and Ctrl+/ is a view toggle over the same document
-- Background networking: no sync, no update check, no telemetry. In `veil-full.exe` Mermaid never touches the network. In `veil.exe`, while **View → Allow Remote Images** is enabled, visible Mermaid blocks and ordinary remote images are fetched on demand — Mermaid block source goes to mermaid.ink (first automatic request shows a one-time notice), and blocking remote images stops both pipelines. `mermaid.live` is only opened by an explicit user action and is never used as an image API. External links are handed to the system default program; Export and PDF never include remote resources.
+- Background networking: no sync, no update check, no telemetry, and Mermaid never touches the network. Ordinary remote images remain an independent, opt-in capability under **View → Allow Remote Images**; blocking them never affects Mermaid. External links and `mermaid.live` are only reached through an explicit user action. Export and PDF never include remote resources.
 - Competitor-parity items deliberately declined: a separate whole-word toggle (the regex mode's `\b` covers it), `Ctrl+Shift+K` delete-line (`Alt+↑` / `Alt+↓` already covers line operations), and a separate H5/H6 type scale (indentation expresses level). Auto-pairing of brackets/quotes shipped in v1.5 and is no longer on this list
 
 ## Known Limitations (rendering & export)
 
 Veil does not claim that every Markdown or Mermaid construct renders identically on all five surfaces (editing, source, HTML, PDF, print). The following are known limits, not "coming soon" promises:
 
-- **Mermaid readability**: `gantt` task and section labels are raised from Mermaid's 11 px default to 14 px through the public `gantt.fontSize` / `sectionFontSize` options. `veil-full.exe` sets them in its offline renderer; `veil.exe` prepends a `%%{init: {'gantt': {'fontSize': 14, 'sectionFontSize': 14}}}%%` directive to the source sent to mermaid.ink. Axis tick labels and internal layout metrics stay as Mermaid produces them. **Limit:** the online (`veil.exe`) 14 px result has not been verified against a live mermaid.ink render, so it is recorded here as unverified rather than as a measured result. `c4context` stereotype text is fixed at about 12 px by the upstream c4 renderer; there is no safe knob to enlarge it without overflowing boxes measured at that size, so it is recorded as a **known degradation**, not silently restyled.
+- **Mermaid readability**: `gantt` task and section labels are raised from Mermaid's 11 px default to 14 px through the public `gantt.fontSize` / `sectionFontSize` options, set by the in-process renderer. Axis tick labels and internal layout metrics stay as Mermaid produces them. **Limit:** `c4context` stereotype text is fixed at about 12 px by the upstream c4 renderer; there is no safe knob to enlarge it without overflowing boxes measured at that size, so it is recorded as a **known degradation**, not silently restyled.
 - **Dark Mermaid contrast**: automated WCAG-AA contrast assertions cover `mindmap`, `kanban`, `journey`, `gantt` and `c4context` (node text vs. node background). Other diagram types are checked for geometry, visible text and successful rasterisation only; per-type human visual review of dark themes remains **NOT RUN**. In `c4context`, relation labels inherit Mermaid's fixed `#444444` on dark themes, which can be low-contrast; overriding it with global CSS would leak into other diagram types, so that case stays unasserted and **NOT RUN**.
 - **PDF / print tables**: cell text now carries bold, italic, inline-code background, link colour/underline and link annotations, and long cells paginate instead of being truncated. Row splitting uses a fixed line-height estimate, so exceptionally tall cells may spill onto more pages than a browser would use.
 - **Chinese line breaking in PDF / print**: a simplified kinsoku pass keeps closing punctuation off line starts and opening brackets off line ends. It is not full UAX #14 line breaking with punctuation squeezing, so line breaks can still differ from the editing surface (cosmic-text).
@@ -129,25 +130,24 @@ cargo build --workspace
 cargo test --workspace
 cargo run -p veil -- <file.md>
 
-# veil-full.exe：离线 Mermaid（QuickJS + mermaid.js）
-cargo build --release --bin veil-full --features mermaid-offline
-cargo test -p veil --features mermaid-offline
+# release product: one veil.exe, offline Mermaid included by default
+cargo build --release --bin veil
+cargo test -p veil-mermaid-offline
 ```
 
-Baseline: 1904 passed / 0 failed / 14 ignored (2026-11-20, serial `cargo test --workspace --all-features -- --test-threads=1`; the remote-SVG mock uses a 20 ms wall-clock deadline, so parallel runs can produce false timeouts). With default features, `cargo test -p veil` is 215 passed / 1 ignored, the 4-test difference being feature-gated Mermaid tests. `cargo clippy --workspace --all-features --all-targets -- -D warnings` zero warnings.
+Baseline: 1911 passed / 0 failed / 15 ignored (2026-11-20, serial `cargo test --workspace --release -- --test-threads=1`; the remote-SVG mock uses a 20 ms wall-clock deadline, so parallel runs can produce false timeouts). `cargo test -p veil --lib` is 221 passed / 1 ignored with the default feature set, which now includes the offline engine. `cargo clippy --workspace --all-targets -- -D warnings` zero warnings.
 
 ## Tier-0 Gate: Real Launch Smoke
 
-Green tests do not prove that the exe users double-click actually opens. Before publishing, run the real launch smoke against both release binaries:
+Green tests do not prove that the exe users double-click actually opens. Before publishing, run the real launch smoke against the release binary:
 
 ```powershell
-pwsh -File tools/smoke_launch.ps1 -ExePath target-default/release/veil.exe -ExpectedTitlePattern '^veil' -MaxLaunchMs 1000
-pwsh -File tools/smoke_launch.ps1 -ExePath target-full/release/veil-full.exe -ExpectedTitlePattern '^veil' -MaxLaunchMs 1000
+pwsh -File tools/smoke_launch.ps1 -ExePath target/release/veil.exe -ExpectedTitlePattern '^veil' -MaxLaunchMs 1000
 ```
 
-The window budget is **1 second**: `-MaxLaunchMs` (default 1000) measures process start → `MainWindowHandle` becoming non-zero, and a slower window fails with `stage=launch-too-slow` even when the window eventually opens, the title is correct, and the exit code is 0. `-TimeoutSeconds` (default 5) only bounds probing so that "slow" can be told apart from "never appeared"; it never relaxes the 1 s budget. The script also verifies the title is non-empty (and matches `-ExpectedTitlePattern` when given), treats `panicked at` / `buffer_mut` / `Must set size of surface` in stderr as a failure even if a window appeared, then requests a normal close and checks the exit code. Failures exit non-zero with a structured `SMOKE FAIL ... stage=process-exited|window-timeout|launch-too-slow|stderr-panic|...` line; the PASS line always reports `launch_ms` and `max_ms`. It refuses to run when another `veil`/`veil-full` process is already running and never kills processes it did not start.
+The window budget is **1 second**: `-MaxLaunchMs` (default 1000) measures process start → `MainWindowHandle` becoming non-zero, and a slower window fails with `stage=launch-too-slow` even when the window eventually opens, the title is correct, and the exit code is 0. `-TimeoutSeconds` (default 5) only bounds probing so that "slow" can be told apart from "never appeared"; it never relaxes the 1 s budget. The script also verifies the title is non-empty (and matches `-ExpectedTitlePattern` when given), treats `panicked at` / `buffer_mut` / `Must set size of surface` in stderr as a failure even if a window appeared, then requests a normal close and checks the exit code. Failures exit non-zero with a structured `SMOKE FAIL ... stage=process-exited|window-timeout|launch-too-slow|stderr-panic|...` line; the PASS line always reports `launch_ms` and `max_ms`. It refuses to run when another `veil` process is already running and never kills processes it did not start.
 
-**A smoke failure blocks the release**, regardless of unit tests, clippy, size gates, or screenshots, and it must be run locally against the final binaries before publishing. Release-blocking priority: the smoke comes first; because the CI gate has to verify the exact artifacts it uploads, the release workflow runs the same script after tests/boundary gates and before upload, never with `continue-on-error`. GitHub-hosted Windows runners may lack an interactive desktop (no `MainWindowHandle`), so the authoritative run is local; if a local PASS is followed by an environment-only CI failure, record it in the release notes with the local log instead of weakening the gate.
+**A smoke failure blocks the release**, regardless of unit tests, clippy, size gates, or screenshots, and it must be run locally against the final binary before publishing. Release-blocking priority: the smoke comes first; because the CI gate has to verify the exact artifacts it uploads, the release workflow runs the same script after tests/boundary gates and before upload, never with `continue-on-error`. GitHub-hosted Windows runners may lack an interactive desktop (no `MainWindowHandle`), so the authoritative run is local; if a local PASS is followed by an environment-only CI failure, record it in the release notes with the local log instead of weakening the gate.
 
 ## Red Numbers (targets vs measured)
 
@@ -162,9 +162,7 @@ Measured on release build, probe-serialized; performance rows re-verified 2026-1
 | Cold start (window handle; P2 comparison definition) | — | 30 ms (2026-10-30, `tools/bench/measure.ps1`) |
 | Keystroke→commit p95 on 100 K-word doc | ≤ 16 ms | 0.973 ms / 1.566 ms (`perf_keystroke_path` 5,005 blocks / `perf_keystroke_10k_blocks` 10,500 blocks; same machine, re-measured 2026-11-18; previous record 1.297 / 1.796) ✅ |
 | Resident memory, 100 K-word doc (private working set) | ≤ 150 MB | 40.76 MB (2026-11-05) |
-| Installed size — code + data (non-icon) | ≤ 6 MiB (Phase A baseline; superseded by the Wave 3/4 PDF export gate) | 9,972,547 B (exe minus 89,277 B icons: `veil.ico` 46,688 + `veil-doc.ico` 42,589; 2026-11-20) |
-| Installed size — total single-file `veil.exe` | ≤ 10 MiB = 10,485,760 B | 9.60 MiB = 10,064,384 B (target ≈9 MiB; 2026-11-20, v1.8 baseline + mermaid.ink SVG + resvg + remote-image fetch) |
-| Installed size — total single-file `veil-full.exe` | ≤ 14 MiB = 14,680,064 B | 13.34 MiB = 13,993,984 B (target ≈13 MiB; 2026-11-20, + QuickJS + full `mermaid.js`, +3.75 MiB over `veil.exe`) |
+| Installed size — total single-file `veil.exe` | ≤ 14 MiB = 14,680,064 B | 13.35 MiB = 13,995,008 B (2026-11-20, single product: offline Mermaid engine + full `mermaid.js` + resvg, lazy-initialised) |
 | `veil-core` unit + property tests | ≥ 80 | 347 |
 | E2E assertions | ≥ 20 | 41 (3 e2e scenarios: open→save→reopen, table+image paste, find/replace→crash recovery→self-clean) ✅ |
 | Markdown roundtrip (no edits: output == input bytes; byte comparison) | 100% | 100% |

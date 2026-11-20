@@ -16,6 +16,11 @@ jobs:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
 
+      # 与 release.yml 同理：缓存恢复的指纹可能比 checkout 源码更新，导致复用
+      # 旧测试二进制而出现假绿/假红。只清工作区 crate，保留依赖缓存。
+      - name: 清理工作区产物
+        run: cargo clean -p veil -p veil-ui -p veil-core -p veil-mermaid-offline
+
       - name: 格式检查
         run: cargo fmt --all -- --check
 

@@ -322,6 +322,7 @@ keys! {
     NoticeConfigNotSaved => "notice.config_not_saved", "配置未保存：{}";
     ErrEventLoopCreate => "error.event_loop_create", "创建事件循环失败: {}";
     ErrEventLoopRun => "error.event_loop_run", "事件循环错误: {}";
+    FatalWindowCreate => "error.window_create", "无法创建窗口：图形环境不可用";
     CliUsage => "cli.usage", "用法: veil [--new-window] [路径]";
     CliUnknownOption => "cli.unknown_option", "未知参数：{}；{}";
     CliInvalidPath => "cli.invalid_path", "文档路径无效";

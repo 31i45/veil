@@ -134,20 +134,20 @@ cargo build --release --bin veil-full --features mermaid-offline
 cargo test -p veil --features mermaid-offline
 ```
 
-Baseline: 1897 passed / 0 failed / 15 ignored (2026-11-20, serial `cargo test --workspace --all-features -- --test-threads=1`; the remote-SVG mock uses a 20 ms wall-clock deadline, so parallel runs can produce false timeouts). With default features, `cargo test -p veil` is 215 passed / 1 ignored, the 4-test difference being feature-gated Mermaid tests. `cargo clippy --workspace --all-features --all-targets -- -D warnings` zero warnings.
+Baseline: 1904 passed / 0 failed / 14 ignored (2026-11-20, serial `cargo test --workspace --all-features -- --test-threads=1`; the remote-SVG mock uses a 20 ms wall-clock deadline, so parallel runs can produce false timeouts). With default features, `cargo test -p veil` is 215 passed / 1 ignored, the 4-test difference being feature-gated Mermaid tests. `cargo clippy --workspace --all-features --all-targets -- -D warnings` zero warnings.
 
 ## Tier-0 Gate: Real Launch Smoke
 
 Green tests do not prove that the exe users double-click actually opens. Before publishing, run the real launch smoke against both release binaries:
 
 ```powershell
-pwsh -File tools/smoke_launch.ps1 -ExePath target-default/release/veil.exe
-pwsh -File tools/smoke_launch.ps1 -ExePath target-full/release/veil-full.exe
+pwsh -File tools/smoke_launch.ps1 -ExePath target-default/release/veil.exe -ExpectedTitlePattern '^veil' -MaxLaunchMs 1000
+pwsh -File tools/smoke_launch.ps1 -ExePath target-full/release/veil-full.exe -ExpectedTitlePattern '^veil' -MaxLaunchMs 1000
 ```
 
-The script starts the exe, waits up to `-TimeoutSeconds` (default 5) for a visible main window, verifies the title is non-empty (and matches `-ExpectedTitlePattern` if given), treats `panicked at` / `buffer_mut` / `Must set size of surface` in stderr as a failure even if a window appeared, then requests a normal close and checks the exit code. Failures exit non-zero with a structured `SMOKE FAIL ... stage=process-exited|window-timeout|stderr-panic|...` line. It refuses to run when another `veil`/`veil-full` process is already running and never kills processes it did not start.
+The window budget is **1 second**: `-MaxLaunchMs` (default 1000) measures process start → `MainWindowHandle` becoming non-zero, and a slower window fails with `stage=launch-too-slow` even when the window eventually opens, the title is correct, and the exit code is 0. `-TimeoutSeconds` (default 5) only bounds probing so that "slow" can be told apart from "never appeared"; it never relaxes the 1 s budget. The script also verifies the title is non-empty (and matches `-ExpectedTitlePattern` when given), treats `panicked at` / `buffer_mut` / `Must set size of surface` in stderr as a failure even if a window appeared, then requests a normal close and checks the exit code. Failures exit non-zero with a structured `SMOKE FAIL ... stage=process-exited|window-timeout|launch-too-slow|stderr-panic|...` line; the PASS line always reports `launch_ms` and `max_ms`. It refuses to run when another `veil`/`veil-full` process is already running and never kills processes it did not start.
 
-**A smoke failure blocks the release**, regardless of unit tests, clippy, size gates, or screenshots. The release workflow runs the same script after building both exes; because GitHub-hosted Windows runners may lack an interactive desktop (no `MainWindowHandle`), the authoritative run is local, before publishing.
+**A smoke failure blocks the release**, regardless of unit tests, clippy, size gates, or screenshots, and it must be run locally against the final binaries before publishing. Release-blocking priority: the smoke comes first; because the CI gate has to verify the exact artifacts it uploads, the release workflow runs the same script after tests/boundary gates and before upload, never with `continue-on-error`. GitHub-hosted Windows runners may lack an interactive desktop (no `MainWindowHandle`), so the authoritative run is local; if a local PASS is followed by an environment-only CI failure, record it in the release notes with the local log instead of weakening the gate.
 
 ## Red Numbers (targets vs measured)
 
@@ -163,8 +163,8 @@ Measured on release build, probe-serialized; performance rows re-verified 2026-1
 | Keystroke→commit p95 on 100 K-word doc | ≤ 16 ms | 0.973 ms / 1.566 ms (`perf_keystroke_path` 5,005 blocks / `perf_keystroke_10k_blocks` 10,500 blocks; same machine, re-measured 2026-11-18; previous record 1.297 / 1.796) ✅ |
 | Resident memory, 100 K-word doc (private working set) | ≤ 150 MB | 40.76 MB (2026-11-05) |
 | Installed size — code + data (non-icon) | ≤ 6 MiB (Phase A baseline; superseded by the Wave 3/4 PDF export gate) | 9,972,547 B (exe minus 89,277 B icons: `veil.ico` 46,688 + `veil-doc.ico` 42,589; 2026-11-20) |
-| Installed size — total single-file `veil.exe` | ≤ 10 MiB = 10,485,760 B | 9.60 MiB = 10,062,848 B (target ≈9 MiB; 2026-11-20, v1.8 baseline + mermaid.ink SVG + resvg + remote-image fetch) |
-| Installed size — total single-file `veil-full.exe` | ≤ 14 MiB = 14,680,064 B | 13.34 MiB = 13,992,448 B (target ≈13 MiB; 2026-11-20, + QuickJS + full `mermaid.js`, +3.75 MiB over `veil.exe`) |
+| Installed size — total single-file `veil.exe` | ≤ 10 MiB = 10,485,760 B | 9.60 MiB = 10,064,384 B (target ≈9 MiB; 2026-11-20, v1.8 baseline + mermaid.ink SVG + resvg + remote-image fetch) |
+| Installed size — total single-file `veil-full.exe` | ≤ 14 MiB = 14,680,064 B | 13.34 MiB = 13,993,984 B (target ≈13 MiB; 2026-11-20, + QuickJS + full `mermaid.js`, +3.75 MiB over `veil.exe`) |
 | `veil-core` unit + property tests | ≥ 80 | 347 |
 | E2E assertions | ≥ 20 | 41 (3 e2e scenarios: open→save→reopen, table+image paste, find/replace→crash recovery→self-clean) ✅ |
 | Markdown roundtrip (no edits: output == input bytes; byte comparison) | 100% | 100% |

@@ -28,7 +28,7 @@ mod wic;
 mod windows;
 
 pub use assoc::{parse_command, run as run_assoc};
-pub use error::{open_failure_text, show_error, show_info, OpenFailure};
+pub use error::{fatal_error, open_failure_text, show_error, show_info, OpenFailure};
 
 use std::path::PathBuf;
 

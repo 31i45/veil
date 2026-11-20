@@ -17231,6 +17231,30 @@ fn startup_error_opens_in_app_modal() {
     assert_eq!(a.doc.path, None, "失败时以空白草稿开窗");
 }
 
+/// 窗口建不起来时应用内模态不可见：打开失败详情必须留存，供 Shell 取走并弹原生错误框。
+#[test]
+fn startup_error_is_staged_for_window_failure_and_taken_once() {
+    let store = MemStore::default();
+    let mut a = app_startup_error("a.md", &store);
+    assert_eq!(
+        a.window_state.startup_error.as_deref(),
+        Some(STARTUP_ERROR_MESSAGE)
+    );
+    assert_eq!(
+        a.window_state.take_startup_error().as_deref(),
+        Some(STARTUP_ERROR_MESSAGE)
+    );
+    assert!(a.window_state.take_startup_error().is_none(), "只上报一次");
+}
+
+/// 正常启动（无打开失败）不得留下启动错误，否则会误报为致命错误。
+#[test]
+fn normal_start_has_no_staged_startup_error() {
+    let store = MemStore::default();
+    let a = app("正文", None, false, &store);
+    assert!(a.window_state.startup_error.is_none());
+}
+
 #[test]
 fn startup_error_retry_loads_same_path() {
     let store = MemStore::default();

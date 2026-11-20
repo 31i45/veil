@@ -130,20 +130,20 @@ cargo test --workspace
 cargo run -p veil -- <file.md>
 ```
 
-当前 1897 项测试全绿（串行 `cargo test --workspace --all-features -- --test-threads=1`：1897 passed / 0 failed / 15 ignored，2026-11-20；远程 SVG mock 使用 20 ms 墙钟截止，并行执行可能假超时）；默认特性下 `cargo test -p veil` 为 215 passed / 1 ignored，差额 4 项为特性门控的 Mermaid 测试。`cargo clippy --workspace --all-features --all-targets -- -D warnings` 零警告。
+当前 1904 项测试全绿（串行 `cargo test --workspace --all-features -- --test-threads=1`：1904 passed / 0 failed / 14 ignored，2026-11-20；远程 SVG mock 使用 20 ms 墙钟截止，并行执行可能假超时）；默认特性下 `cargo test -p veil` 为 215 passed / 1 ignored，差额 4 项为特性门控的 Mermaid 测试。`cargo clippy --workspace --all-features --all-targets -- -D warnings` 零警告。
 
 ## 零级门禁：真实启动冒烟
 
 测试全绿不等于用户双击的 exe 能打开。发布前必须对两个 release 产物运行真实启动冒烟：
 
 ```powershell
-pwsh -File tools/smoke_launch.ps1 -ExePath target-default/release/veil.exe
-pwsh -File tools/smoke_launch.ps1 -ExePath target-full/release/veil-full.exe
+pwsh -File tools/smoke_launch.ps1 -ExePath target-default/release/veil.exe -ExpectedTitlePattern '^veil' -MaxLaunchMs 1000
+pwsh -File tools/smoke_launch.ps1 -ExePath target-full/release/veil-full.exe -ExpectedTitlePattern '^veil' -MaxLaunchMs 1000
 ```
 
-脚本会启动 exe，在 `-TimeoutSeconds`（默认 5 秒）内等待主窗口出现，校验标题非空（给出 `-ExpectedTitlePattern` 时还需匹配），即使窗口已出现，只要 stderr 含 `panicked at` / `buffer_mut` / `Must set size of surface` 也判失败；随后请求正常关闭并检查退出码。失败时非零退出，并打印结构化 `SMOKE FAIL ... stage=process-exited|window-timeout|stderr-panic|...` 行。启动前若已有同名 `veil`/`veil-full` 进程，脚本会明确失败并要求先手动关闭，绝不杀它未启动的进程。
+出窗预算是 **1 秒**：`-MaxLaunchMs`（默认 1000）测量「进程启动 → `MainWindowHandle` 非零」，超限即 `stage=launch-too-slow` 判 FAIL——即使窗口最终出现、标题正确、退出码为 0 也不例外。`-TimeoutSeconds`（默认 5 秒）只决定探测时长，用于区分「慢启动」与「压根没出窗」，绝不放宽 1 秒预算。脚本还会校验标题非空（给出 `-ExpectedTitlePattern` 时还需匹配），即使窗口已出现，只要 stderr 含 `panicked at` / `buffer_mut` / `Must set size of surface` 也判失败；随后请求正常关闭并检查退出码。失败时非零退出，并打印结构化 `SMOKE FAIL ... stage=process-exited|window-timeout|launch-too-slow|stderr-panic|...` 行，PASS 行同时包含 `launch_ms` 与 `max_ms`。启动前若已有同名 `veil`/`veil-full` 进程，脚本会明确失败并要求先手动关闭，绝不杀它未启动的进程。
 
-**冒烟失败一律不得发布**，单元测试、clippy、体积门禁、截图都不能替代。发布工作流在构建两个 exe 后会运行同一脚本；GitHub 托管 Windows runner 可能没有交互桌面（拿不到 `MainWindowHandle`），因此发布前以本地运行为准。
+**冒烟失败一律不得发布**，单元测试、clippy、体积门禁、截图都不能替代，且发布前必须在本地对最终产物运行。发布阻断优先级：冒烟第一；CI 因必须验证最终要上传的产物，在测试/边界门禁之后、上传之前执行同一脚本，且不得使用 `continue-on-error`。GitHub 托管 Windows runner 可能没有交互桌面（拿不到 `MainWindowHandle`），因此权威口径是本地运行；若本地 PASS 而 CI 出现纯环境性失败，应在 release notes 记录并附本地日志，而不是削弱门禁。
 
 ## 数字红线（目标值与实测）
 
@@ -159,8 +159,8 @@ pwsh -File tools/smoke_launch.ps1 -ExePath target-full/release/veil-full.exe
 | 10 万字文档击键→提交上屏延迟 p95 | ≤ 16 ms | 0.973 ms / 1.566 ms（`perf_keystroke_path` 5,005 块 / `perf_keystroke_10k_blocks` 10,500 块；同机 2026-11-18 复测；上一轮记录 1.297 / 1.796）✅ |
 | 10 万字文档常驻内存（私有工作集） | ≤ 150 MB | 40.76 MB（20 页深滚动后 WorkingSet，2026-11-05 实测） |
 | 安装产物体积 — 运行时代码（非图标） | ≤ 6 MiB（Phase A 基准；Wave 3/4 PDF 导出门槛已覆盖） | 9,972,547 B（exe 减 89,277 B 图标资源：`veil.ico` 46,688 + `veil-doc.ico` 42,589，2026-11-20） |
-| 安装产物体积 — 合计单文件 `veil.exe` | ≤ 10 MiB = 10,485,760 B | 9.60 MiB = 10,062,848 B（目标 ≈9 MiB；2026-11-20，v1.8 基线 + mermaid.ink SVG + resvg + 远程图片 fetch；较 v1.8.0 的 9,970,176 B +92,672 B） |
-| 安装产物体积 — 合计单文件 `veil-full.exe` | ≤ 14 MiB = 14,680,064 B | 13.34 MiB = 13,992,448 B（目标 ≈13 MiB；2026-11-20，+ QuickJS + 完整 `mermaid.js`，较 `veil.exe` +3.75 MiB） |
+| 安装产物体积 — 合计单文件 `veil.exe` | ≤ 10 MiB = 10,485,760 B | 9.60 MiB = 10,064,384 B（目标 ≈9 MiB；2026-11-20，v1.8 基线 + mermaid.ink SVG + resvg + 远程图片 fetch；较 v1.8.0 的 9,970,176 B +94,208 B） |
+| 安装产物体积 — 合计单文件 `veil-full.exe` | ≤ 14 MiB = 14,680,064 B | 13.34 MiB = 13,993,984 B（目标 ≈13 MiB；2026-11-20，+ QuickJS + 完整 `mermaid.js`，较 `veil.exe` +3.75 MiB） |
 | `veil-core` 单元+属性测试数 | ≥ 80 | 347 |
 | e2e 断言数 | ≥ 20 | 41（3 个 e2e_ 场景测试：写作闭环打开→保存→重开、表格+图片粘贴落盘、查找替换→崩溃恢复→自清）✅ |
 | Markdown 往返一致率（无编辑时输出 == 输入字节；按字节比较） | 100% | 100% |

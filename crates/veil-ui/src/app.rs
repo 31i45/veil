@@ -747,6 +747,9 @@ pub(crate) struct WindowState {
     /// 测试专用窗口尺寸覆盖：headless 测试无 winit 窗口，需要验证超宽窗口排版时注入。
     #[cfg(test)]
     pub(crate) test_size: Option<(u32, u32)>,
+    /// 启动失败的可读详情：文档打开错误在 `App::new` 预置，窗口/呈现上下文创建失败时追加原始诊断。
+    /// 仅在「首窗创建失败」时由 Shell 取走并作为致命错误上报；正常启动路径不消费。
+    pub(crate) startup_error: Option<String>,
 }
 impl Default for WindowState {
     fn default() -> Self {
@@ -777,7 +780,15 @@ impl Default for WindowState {
             code_copied: None,
             #[cfg(test)]
             test_size: None,
+            startup_error: None,
         }
+    }
+}
+
+impl WindowState {
+    /// 取走启动失败详情（一次性）：Shell 只在首窗创建失败时消费。
+    pub(crate) fn take_startup_error(&mut self) -> Option<String> {
+        self.startup_error.take()
     }
 }
 
@@ -1090,6 +1101,8 @@ impl App {
         }
         app.watch_current();
         if let Some(err) = open_error {
+            // 窗口建不起来时这条详情就是用户唯一能看到的线索，先留存再交给应用内模态。
+            app.window_state.startup_error = Some(err.message.clone());
             app.show_startup_error(err);
         }
         app
@@ -1805,6 +1818,14 @@ impl App {
 }
 
 impl App {
+    /// 记录启动失败详情：已有文档打开错误时保留（用户更关心打开了什么），追加窗口侧诊断。
+    fn record_startup_error(&mut self, detail: String) {
+        self.window_state.startup_error = Some(match self.window_state.startup_error.take() {
+            Some(existing) => format!("{existing}\n{detail}"),
+            None => detail,
+        });
+    }
+
     pub(crate) fn create_window(&mut self, event_loop: &ActiveEventLoop) -> Option<WindowId> {
         if self.window_state.window.is_some() {
             return None;
@@ -1844,6 +1865,7 @@ impl App {
             Ok(w) => Arc::new(w),
             Err(e) => {
                 eprintln!("创建窗口失败: {e}");
+                self.record_startup_error(format!("创建窗口失败: {e}"));
                 return None;
             }
         };
@@ -1853,6 +1875,7 @@ impl App {
             Ok(c) => c,
             Err(e) => {
                 eprintln!("创建呈现上下文失败: {e}");
+                self.record_startup_error(format!("创建呈现上下文失败: {e}"));
                 return None;
             }
         };

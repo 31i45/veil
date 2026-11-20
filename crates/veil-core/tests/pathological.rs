@@ -17,7 +17,9 @@ fn cases() -> Vec<(&'static str, String)> {
     // CJK 8000 段
     let mut s = String::new();
     for i in 0..8000 {
-        s.push_str(&format!("第{i}段中文内容，用于检验长文档的解析与分块稳定性。\n\n"));
+        s.push_str(&format!(
+            "第{i}段中文内容，用于检验长文档的解析与分块稳定性。\n\n"
+        ));
     }
     out.push(("cjk_8000_paragraphs", s));
 
@@ -73,7 +75,10 @@ fn cases() -> Vec<(&'static str, String)> {
 #[test]
 #[ignore = "病态输入探针，release 下运行才有参考意义"]
 fn pathological_inputs_matrix() {
-    println!("{:<24} {:>10} {:>10} {:>9} {:>7}", "case", "bytes", "ms", "blocks", "roundtrip");
+    println!(
+        "{:<24} {:>10} {:>10} {:>9} {:>7}",
+        "case", "bytes", "ms", "blocks", "roundtrip"
+    );
     for (name, text) in cases() {
         let bytes = text.len();
         let t = Instant::now();
@@ -87,7 +92,10 @@ fn pathological_inputs_matrix() {
         match result {
             Ok((blocks, rt)) => {
                 let ok = rt.as_deref() == Some(text.as_str()) || text.is_empty();
-                println!("{name:<24} {bytes:>10} {ms:>10.2} {blocks:>9} {:>7}", if ok { "是" } else { "否" });
+                println!(
+                    "{name:<24} {bytes:>10} {ms:>10.2} {blocks:>9} {:>7}",
+                    if ok { "是" } else { "否" }
+                );
                 assert!(ok, "{name}: 往返不一致");
             }
             Err(_) => panic!("{name}: 解析 panic"),

@@ -91,6 +91,24 @@ pub(crate) enum CtxKind {
     Image { path: String, missing: bool },
 }
 
+/// 提示与分隔线保持可见，但不参与 hover、命中或键盘执行。
+pub(crate) fn action_enabled(action: CtxAction) -> bool {
+    !matches!(action, CtxAction::Separator | CtxAction::ImageMissingHint)
+}
+
+/// 右键提示列与真实键盘绑定共用既有 shortcut 词条；无绑定的动作不显示提示。
+pub(crate) fn shortcut(action: CtxAction) -> Option<Key> {
+    match action {
+        CtxAction::Cut => Some(Key::ShortcutCut),
+        CtxAction::Copy => Some(Key::ShortcutCopy),
+        CtxAction::Paste => Some(Key::ShortcutPaste),
+        CtxAction::SelectAll => Some(Key::ShortcutSelectAll),
+        CtxAction::CopyCodeBlock => Some(Key::ShortcutCopyCode),
+        CtxAction::InsertImage => Some(Key::ShortcutInsertImage),
+        _ => None,
+    }
+}
+
 /// 各类上下文的项集（单一来源：布局/命中/分发共用）。
 /// 分隔线按语义分组：编辑类 / 选择类 / 链接类 / 表格结构 / 对齐 / 剪贴板。
 pub(crate) fn items_for(kind: CtxKind) -> Vec<(Key, CtxAction)> {
@@ -127,10 +145,7 @@ pub(crate) fn items_for(kind: CtxKind) -> Vec<(Key, CtxAction)> {
         ],
         CtxKind::MermaidBlock => vec![
             (Key::CtxMermaidPreview, CtxAction::MermaidPreview),
-            (
-                Key::CtxMermaidPreviewImage,
-                CtxAction::MermaidPreviewImage,
-            ),
+            (Key::CtxMermaidPreviewImage, CtxAction::MermaidPreviewImage),
             (Key::CtxMermaidInsertImage, CtxAction::MermaidInsertImage),
             (Key::Empty, CtxAction::Separator),
             (Key::CtxMermaidCopySource, CtxAction::MermaidCopySource),
@@ -363,6 +378,8 @@ pub(crate) struct Layout {
     pub(crate) top_pad: f32,
     /// (项下标, 相对面板顶部的 y 偏移)；分隔符不在此列。
     pub(crate) rows: Vec<(usize, f32)>,
+    /// 可见但不可执行的提示项；绘制保留，hover/命中/键盘导航跳过。
+    disabled: Vec<usize>,
 }
 
 pub(crate) fn layout(
@@ -378,19 +395,27 @@ pub(crate) fn layout(
     let item_h = crate::theme::surface::row_height(scale);
     // 分组只用间距，不画分隔线（S3）。
     let sep_h = space::S * scale;
+    let gap = space::XL * scale;
     let widest = items
         .iter()
         .filter(|(_, a)| *a != CtxAction::Separator)
-        .map(|(l, _)| text_width(t(*l), scale))
+        .map(|(l, a)| {
+            text_width(t(*l), scale)
+                + shortcut(*a).map_or(0.0, |key| gap + text_width(t(key), scale))
+        })
         .fold(0.0_f32, f32::max);
     let w = (widest + 2.0 * pad).max(120.0 * scale);
     let mut cur = top_pad;
     let mut rows = Vec::with_capacity(items.len());
+    let mut disabled = Vec::new();
     for (i, (_, a)) in items.iter().enumerate() {
         if *a == CtxAction::Separator {
             cur += sep_h;
         } else {
             rows.push((i, cur));
+            if !action_enabled(*a) {
+                disabled.push(i);
+            }
             cur += item_h;
         }
     }
@@ -406,6 +431,7 @@ pub(crate) fn layout(
         pad,
         top_pad,
         rows,
+        disabled,
     }
 }
 
@@ -419,6 +445,7 @@ pub(crate) fn hit(l: &Layout, x: f32, y: f32) -> Option<usize> {
         .iter()
         .find(|&&(_, off)| dy >= off && dy < off + l.item_h)
         .map(|&(i, _)| i)
+        .filter(|i| !l.disabled.contains(i))
 }
 
 #[cfg(test)]
@@ -454,9 +481,7 @@ mod tests {
         });
         assert!(expanded.iter().any(|&(_, a)| a == CtxAction::FoldDetails));
         assert!(
-            !expanded
-                .iter()
-                .any(|&(_, a)| a == CtxAction::UnfoldDetails),
+            !expanded.iter().any(|&(_, a)| a == CtxAction::UnfoldDetails),
             "已展开时不得再列展开"
         );
 
@@ -480,9 +505,7 @@ mod tests {
             path: "img/a.png".into(),
             missing: false,
         });
-        assert!(normal
-            .iter()
-            .any(|&(_, a)| a == CtxAction::CopyImagePath));
+        assert!(normal.iter().any(|&(_, a)| a == CtxAction::CopyImagePath));
         assert!(normal.iter().any(|&(_, a)| a == CtxAction::ReloadImage));
         assert!(!normal
             .iter()
@@ -493,10 +516,59 @@ mod tests {
             missing: true,
         });
         assert_eq!(missing[0].1, CtxAction::ImageMissingHint);
-        assert!(missing
-            .iter()
-            .any(|&(_, a)| a == CtxAction::CopyImagePath));
+        assert!(missing.iter().any(|&(_, a)| a == CtxAction::CopyImagePath));
         assert!(missing.iter().any(|&(_, a)| a == CtxAction::ReloadImage));
+    }
+
+    #[test]
+    fn missing_image_hint_is_visible_but_not_actionable() {
+        let items = items_for(CtxKind::Image {
+            path: "img/gone.png".into(),
+            missing: true,
+        });
+        let l = layout(&items, 100.0, 100.0, 800.0, 600.0, 1.0);
+        let (hint, off) = l.rows[0];
+        assert_eq!(items[hint].1, CtxAction::ImageMissingHint);
+        assert!(!action_enabled(items[hint].1));
+        assert_eq!(hit(&l, l.x + 2.0, l.y + off + l.item_h / 2.0), None);
+        let next = l.rows[1];
+        assert_eq!(
+            hit(&l, l.x + 2.0, l.y + next.1 + l.item_h / 2.0),
+            Some(next.0),
+            "禁用提示不得吞掉后续真实命令"
+        );
+    }
+
+    #[test]
+    fn dialog_commands_use_ellipsis_consistently() {
+        let insert = items_for(CtxKind::Block)
+            .into_iter()
+            .find(|(_, action)| *action == CtxAction::InsertImage)
+            .expect("正文右键应提供插入图片");
+        assert!(
+            t(insert.0).ends_with('…'),
+            "插入图片会打开系统文件对话框，右键标签必须带省略号"
+        );
+    }
+
+    #[test]
+    fn shortcut_hints_match_real_bindings_and_reserve_width() {
+        for (action, key) in [
+            (CtxAction::Cut, Key::ShortcutCut),
+            (CtxAction::Copy, Key::ShortcutCopy),
+            (CtxAction::Paste, Key::ShortcutPaste),
+            (CtxAction::SelectAll, Key::ShortcutSelectAll),
+            (CtxAction::CopyCodeBlock, Key::ShortcutCopyCode),
+            (CtxAction::InsertImage, Key::ShortcutInsertImage),
+        ] {
+            assert_eq!(shortcut(action), Some(key));
+            assert!(!t(key).is_empty());
+        }
+        let with = vec![(Key::CtxCopyCode, CtxAction::CopyCodeBlock)];
+        let without = vec![(Key::CtxCopyLink, CtxAction::CopyLink)];
+        let a = layout(&with, 0.0, 0.0, 800.0, 600.0, 1.0);
+        let b = layout(&without, 0.0, 0.0, 800.0, 600.0, 1.0);
+        assert!(a.w > b.w, "快捷键提示必须计入菜单宽度，避免裁切");
     }
 
     /// 代码块上下文：首项为复制代码块，且不混入无关项（无剪切/插入图片）。

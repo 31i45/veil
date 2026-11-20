@@ -404,19 +404,19 @@ mod tests {
     fn decodes_two_by_two_bmp_with_row_padding() {
         // 自顶向下：红、绿、蓝、白（BGR 存储）
         let pixels = [
-            [0u8, 0, 255],     // 左上 红
-            [0, 255, 0],       // 右上 绿
-            [255, 0, 0],       // 左下 蓝
-            [255, 255, 255],   // 右下 白
+            [0u8, 0, 255],   // 左上 红
+            [0, 255, 0],     // 右上 绿
+            [255, 0, 0],     // 左下 蓝
+            [255, 255, 255], // 右下 白
         ];
         let path = temp_input_named("bmp2", "input.bmp", &bmp_24(2, 2, &pixels));
         let img = decode_image(&path).expect("2x2 BMP 必须解码成功");
         assert_eq!((img.width, img.height), (2, 2));
         let expected = [
-            255u8, 0, 0, 255,       // 红
-            0, 255, 0, 255,         // 绿
-            0, 0, 255, 255,         // 蓝
-            255, 255, 255, 255,     // 白
+            255u8, 0, 0, 255, // 红
+            0, 255, 0, 255, // 绿
+            0, 0, 255, 255, // 蓝
+            255, 255, 255, 255, // 白
         ];
         assert_eq!(
             img.pixels.as_slice(),

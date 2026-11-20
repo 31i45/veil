@@ -16,20 +16,106 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.99.1
+          components: clippy
 
       - name: Cache cargo builds
         uses: Swatinem/rust-cache@v2
 
-      - name: Build release binary
-        run: cargo build --release -p veil
+      - name: Build veil.exe
+        env:
+          CARGO_TARGET_DIR: target-default
+        run: cargo build --release --bin veil
 
-      - name: Report artifact size
+      - name: Build veil-full.exe
+        env:
+          CARGO_TARGET_DIR: target-full
+        run: cargo build --release --bin veil-full --features mermaid-offline
+
+      - name: cargo test default features
+        env:
+          CARGO_TARGET_DIR: target-default
         run: |
-          $exe = Get-Item target\release\veil.exe
-          Write-Host "Veil Release: $([math]::Round($exe.Length/1MB, 2)) MiB ($($exe.Length) bytes)"
-          $vi = $exe.VersionInfo
-          Write-Host "Version: $($vi.ProductVersion) / FileVersion: $($vi.FileVersion)"
+          cargo test --workspace --release
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: cargo test mermaid-offline
+        env:
+          CARGO_TARGET_DIR: target-full
+        run: |
+          cargo test --workspace --release --features mermaid-offline
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: cargo clippy
+        env:
+          CARGO_TARGET_DIR: target-full
+        run: |
+          cargo clippy --workspace --all-features --all-targets -- -D warnings
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      # 门禁必须放在测试之后：cargo test 会重建 bin，先门禁后测试可能放过
+      # 被测试构建覆盖过的产物。这里校验的正是最终要上传的二进制。
+      - name: Gate veil.exe boundary
+        shell: pwsh
+        run: |
+          $exe = "target-default\release\veil.exe"
+          $sizeMB = [math]::Round((Get-Item $exe).Length / 1MB, 2)
+          Write-Host "veil.exe size: $sizeMB MiB (target: 9.x, budget: 10.0)"
+          if ((Get-Item $exe).Length -gt 10.0MB) {
+            Write-Host "FAIL: veil.exe exceeds 10.0 MiB budget"
+            exit 1
+          }
+          $bytes = [System.IO.File]::ReadAllBytes((Resolve-Path $exe))
+          $text = [System.Text.Encoding]::ASCII.GetString($bytes)
+          $needles = @('QuickJS','rquickjs','linkedom','cytoscape','fcose','veil-mermaid-offline')
+          foreach ($n in $needles) {
+            if ($text.Contains($n)) {
+              Write-Host "FAIL: veil.exe contains '$n' (must NOT contain offline engine strings)"
+              exit 1
+            }
+          }
+          Write-Host "PASS: veil.exe boundary clean (no offline engine strings, size OK)"
+
+      - name: Gate veil-full.exe boundary
+        shell: pwsh
+        run: |
+          $exe = "target-full\release\veil-full.exe"
+          $sizeMB = [math]::Round((Get-Item $exe).Length / 1MB, 2)
+          Write-Host "veil-full.exe size: $sizeMB MiB (target: 13.x, budget: 14.0)"
+          if ((Get-Item $exe).Length -gt 14.0MB) {
+            Write-Host "FAIL: veil-full.exe exceeds 14.0 MiB budget"
+            exit 1
+          }
+          $bytes = [System.IO.File]::ReadAllBytes((Resolve-Path $exe))
+          $text = [System.Text.Encoding]::ASCII.GetString($bytes)
+          foreach ($n in @('QuickJS','rquickjs','linkedom','cytoscape','fcose')) {
+            if (-not $text.Contains($n)) {
+              Write-Host "FAIL: veil-full.exe missing '$n'"
+              exit 1
+            }
+          }
+          Write-Host "PASS: veil-full.exe boundary correct (offline engine strings present, size OK)"
+
+      - name: Report artifact sizes
+        run: |
+          foreach ($path in @('target-default\release\veil.exe', 'target-full\release\veil-full.exe')) {
+            $exe = Get-Item $path
+            Write-Host "$($exe.Name): $([math]::Round($exe.Length/1MB, 2)) MiB ($($exe.Length) bytes)"
+            $vi = $exe.VersionInfo
+            Write-Host "  Version: $($vi.ProductVersion) / FileVersion: $($vi.FileVersion)"
+          }
+
+      - name: Generate SHA-256 checksums
+        run: |
+          foreach ($path in @('target-default\release\veil.exe', 'target-full\release\veil-full.exe')) {
+            $exe = Get-Item $path
+            $hash = Get-FileHash -LiteralPath $exe.FullName -Algorithm SHA256
+            $checksum = "$($hash.Hash.ToLowerInvariant())  $($exe.Name)"
+            Set-Content -LiteralPath "$($exe.FullName).sha256" -Value $checksum -Encoding ascii
+            Write-Host "$($exe.Name).sha256: $checksum"
+          }
 
       - name: Extract release notes from CHANGELOG
         run: |
@@ -52,4 +138,8 @@ jobs:
         with:
           name: Veil ${{ github.ref_name }}
           body_path: release-notes.md
-          files: target/release/veil.exe
+          files: |
+            target-default/release/veil.exe
+            target-default/release/veil.exe.sha256
+            target-full/release/veil-full.exe
+            target-full/release/veil-full.exe.sha256

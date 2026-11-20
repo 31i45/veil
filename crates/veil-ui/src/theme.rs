@@ -3,7 +3,6 @@
 //! 零 GUI 依赖：解析/序列化/路径推导/主题判定全部为纯函数，headless 可测。
 //! 平台能力（注册表系统外观、DWM 深色标题栏/Mica、配置落盘）以 trait 声明，由产品层注入。
 
-
 //!
 //! 配置格式（极简，共 15 个顶层键）：
 //! ```toml
@@ -98,9 +97,9 @@ impl SyntaxColors {
     /// 与 Theme::light().syntax 同源：都从 nord_light.tmTheme 加载，保证一致。
     pub fn default_light() -> Self {
         static CACHE: OnceLock<SyntaxColors> = OnceLock::new();
-        *CACHE.get_or_init(|| Self::from_tmtheme_bytes(
-            include_bytes!("../assets/themes/nord_light.tmTheme")
-        ))
+        *CACHE.get_or_init(|| {
+            Self::from_tmtheme_bytes(include_bytes!("../assets/themes/nord_light.tmTheme"))
+        })
     }
 
     /// 从 .tmTheme plist 字节直接解析出 Veil 的 7 字段色板。
@@ -123,18 +122,28 @@ impl SyntaxColors {
         };
 
         // tmTheme 顶层是 dict → "settings" 数组 → 跳过第一个全局 settings dict → 遍历 scope rule dicts
-        let Some(root_dict) = root.as_dictionary() else { return out; };
+        let Some(root_dict) = root.as_dictionary() else {
+            return out;
+        };
         let Some(settings_arr) = root_dict.get("settings").and_then(|v| v.as_array()) else {
             return out;
         };
 
         for dict in settings_arr.iter().skip(1) {
-            let Some(d) = dict.as_dictionary() else { continue };
+            let Some(d) = dict.as_dictionary() else {
+                continue;
+            };
             // scope 字符串
-            let Some(scope_str) = d.get("scope").and_then(|v| v.as_string()) else { continue };
+            let Some(scope_str) = d.get("scope").and_then(|v| v.as_string()) else {
+                continue;
+            };
             // foreground 颜色 "#RRGGBB"
-            let Some(style) = d.get("settings").and_then(|v| v.as_dictionary()) else { continue };
-            let Some(fg_hex) = style.get("foreground").and_then(|v| v.as_string()) else { continue };
+            let Some(style) = d.get("settings").and_then(|v| v.as_dictionary()) else {
+                continue;
+            };
+            let Some(fg_hex) = style.get("foreground").and_then(|v| v.as_string()) else {
+                continue;
+            };
 
             let rgb = match parse_hex_color(fg_hex) {
                 Some(c) => c,
@@ -173,7 +182,9 @@ impl SyntaxColors {
 fn parse_hex_color(hex: &str) -> Option<[u8; 3]> {
     // "#RRGGBB" 或 "RRGGBB" 或 "#RRGGBBAA"
     let hex = hex.trim_start_matches('#');
-    if hex.len() < 6 { return None; }
+    if hex.len() < 6 {
+        return None;
+    }
     let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
     let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
     let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
@@ -479,6 +490,8 @@ pub struct Config {
     pub smooth_scroll: bool,
     /// 远程图片自动加载（默认开）；false = 全局阻止，只显示 alt 文本。
     pub allow_remote_images: bool,
+    /// Mermaid 下载插入策略（默认 false）；true = 直接写远程 URL；false = 落盘 assets 目录。
+    pub mermaid_insert_url: bool,
     /// 制表符宽度（2 或 4，默认 4）；其它值夹到 4。
     pub tab_width: u8,
     /// 图片缓存字节上限（MiB，默认 200）；0 = 不限制，超出按 LRU 逐出。
@@ -499,6 +512,7 @@ impl Default for Config {
             doc_line_height: DEFAULT_DOC_LINE_HEIGHT,
             smooth_scroll: false,
             allow_remote_images: true,
+            mermaid_insert_url: false,
             tab_width: DEFAULT_TAB_WIDTH,
             image_cache_limit_mb: DEFAULT_IMAGE_CACHE_LIMIT_MB,
             window: None,
@@ -513,7 +527,7 @@ impl Config {
             "# Veil 配置（自动生成）\n# mode: system（跟随系统）| light | dark\nmode = \"{}\"\n\
              export_margin_mm = {}\nexport_page_numbers = {}\nexport_toc = {}\n\
              doc_font_family = \"{}\"\ndoc_font_size = {}\ndoc_line_height = {}\n\
-             smooth_scroll = {}\nallow_remote_images = {}\ntab_width = {}\n\
+             smooth_scroll = {}\nallow_remote_images = {}\nmermaid_insert_url = {}\ntab_width = {}\n\
              image_cache_limit_mb = {}\n",
             self.mode.as_str(),
             self.export_margin_mm,
@@ -524,6 +538,7 @@ impl Config {
             self.doc_line_height,
             self.smooth_scroll,
             self.allow_remote_images,
+            self.mermaid_insert_url,
             self.tab_width,
             self.image_cache_limit_mb,
         );
@@ -586,11 +601,20 @@ fn edit_existing_toml(text: &str, cfg: Config) -> Option<String> {
         "doc_line_height",
         toml_edit::value(f64::from(cfg.doc_line_height)),
     );
-    set_item(&mut doc, "smooth_scroll", toml_edit::value(cfg.smooth_scroll));
+    set_item(
+        &mut doc,
+        "smooth_scroll",
+        toml_edit::value(cfg.smooth_scroll),
+    );
     set_item(
         &mut doc,
         "allow_remote_images",
         toml_edit::value(cfg.allow_remote_images),
+    );
+    set_item(
+        &mut doc,
+        "mermaid_insert_url",
+        toml_edit::value(cfg.mermaid_insert_url),
     );
     set_item(
         &mut doc,
@@ -604,7 +628,11 @@ fn edit_existing_toml(text: &str, cfg: Config) -> Option<String> {
     );
     const WINDOW_KEYS: [&str; 4] = ["window_width", "window_height", "window_x", "window_y"];
     if let Some(w) = cfg.window {
-        set_item(&mut doc, WINDOW_KEYS[0], toml_edit::value(i64::from(w.width)));
+        set_item(
+            &mut doc,
+            WINDOW_KEYS[0],
+            toml_edit::value(i64::from(w.width)),
+        );
         set_item(
             &mut doc,
             WINDOW_KEYS[1],
@@ -672,7 +700,9 @@ pub fn parse_config(text: &str) -> ConfigParse {
                 None => out.ignored += 1,
             },
             "export_margin_mm" => {
-                let v = value.as_float().or_else(|| value.as_integer().map(|i| i as f64));
+                let v = value
+                    .as_float()
+                    .or_else(|| value.as_integer().map(|i| i as f64));
                 match v {
                     Some(v) if v.is_finite() && v >= 0.0 => out.config.export_margin_mm = v as f32,
                     _ => out.ignored += 1,
@@ -695,14 +725,18 @@ pub fn parse_config(text: &str) -> ConfigParse {
                 None => out.ignored += 1,
             },
             "doc_font_size" => {
-                let v = value.as_float().or_else(|| value.as_integer().map(|i| i as f64));
+                let v = value
+                    .as_float()
+                    .or_else(|| value.as_integer().map(|i| i as f64));
                 match v {
                     Some(v) if v.is_finite() => font_size = Some(v as f32),
                     _ => out.ignored += 1,
                 }
             }
             "doc_line_height" => {
-                let v = value.as_float().or_else(|| value.as_integer().map(|i| i as f64));
+                let v = value
+                    .as_float()
+                    .or_else(|| value.as_integer().map(|i| i as f64));
                 match v {
                     Some(v) if v.is_finite() => line_height = Some(v as f32),
                     _ => out.ignored += 1,
@@ -714,6 +748,10 @@ pub fn parse_config(text: &str) -> ConfigParse {
             },
             "allow_remote_images" => match value.as_bool() {
                 Some(v) => out.config.allow_remote_images = v,
+                None => out.ignored += 1,
+            },
+            "mermaid_insert_url" => match value.as_bool() {
+                Some(v) => out.config.mermaid_insert_url = v,
                 None => out.ignored += 1,
             },
             // 已移除的旧键（进程内 Mermaid 渲染开关）：静默忽略，不产生「无法识别」提示。
@@ -731,15 +769,15 @@ pub fn parse_config(text: &str) -> ConfigParse {
             },
             "window_width" => {
                 win_seen[0] = true;
-                win_w = value.as_integer().and_then(|n| {
-                    (480..=8192).contains(&(n as u32)).then_some(n as u32)
-                });
+                win_w = value
+                    .as_integer()
+                    .and_then(|n| (480..=8192).contains(&(n as u32)).then_some(n as u32));
             }
             "window_height" => {
                 win_seen[1] = true;
-                win_h = value.as_integer().and_then(|n| {
-                    (360..=8192).contains(&(n as u32)).then_some(n as u32)
-                });
+                win_h = value
+                    .as_integer()
+                    .and_then(|n| (360..=8192).contains(&(n as u32)).then_some(n as u32));
             }
             "window_x" => {
                 win_seen[2] = true;
@@ -774,10 +812,7 @@ pub fn parse_config(text: &str) -> ConfigParse {
 /// 提取所有 key → Value 对。优先用 toml_edit 严格解析（合法 TOML）；
 /// 若失败（重复键等宽容场景）则 fallback 到手动逐行 key=value 提取，
 /// 值类型由 toml_edit::Value::from_str 解析（自动处理引号/布尔/数字）。
-fn collect_entries(
-    text: &str,
-    ignored: &mut usize,
-) -> Vec<(String, toml_edit::Value)> {
+fn collect_entries(text: &str, ignored: &mut usize) -> Vec<(String, toml_edit::Value)> {
     match toml_edit::DocumentMut::from_str(text) {
         Ok(doc) => {
             let mut out = Vec::new();
@@ -1063,7 +1098,8 @@ mod tests {
 
     #[test]
     fn save_preserves_comments_unknown_keys_and_order() {
-        let original = "# 手写注释\nmode = \"light\" # 行尾注释\nmy_unknown = 123\ninline = { a = 1 }\n";
+        let original =
+            "# 手写注释\nmode = \"light\" # 行尾注释\nmy_unknown = 123\ninline = { a = 1 }\n";
         let cfg = Config {
             mode: ThemeMode::Dark,
             export_toc: false,
@@ -1388,6 +1424,33 @@ mod tests {
     }
 
     #[test]
+    fn mermaid_insert_url_defaults_local_and_respects_explicit_values() {
+        let missing = parse("mode = \"light\"\n");
+        assert!(!missing.config.mermaid_insert_url);
+        assert_eq!(missing.ignored, 0);
+        assert!(
+            parse("mermaid_insert_url = true\n")
+                .config
+                .mermaid_insert_url
+        );
+        assert!(
+            !parse("mermaid_insert_url = false\n")
+                .config
+                .mermaid_insert_url
+        );
+
+        for insert_url in [false, true] {
+            let cfg = Config {
+                mermaid_insert_url: insert_url,
+                ..Config::default()
+            };
+            let text = cfg.to_toml();
+            assert!(text.contains(&format!("mermaid_insert_url = {insert_url}")));
+            assert_eq!(parse(&text).config, cfg);
+        }
+    }
+
+    #[test]
     fn mode_str_round_trips() {
         for mode in [ThemeMode::System, ThemeMode::Light, ThemeMode::Dark] {
             assert_eq!(ThemeMode::parse(mode.as_str()), Some(mode));
@@ -1691,4 +1754,3 @@ mod tests {
         assert_eq!(config_path_of(None, None, None), None);
     }
 }
-

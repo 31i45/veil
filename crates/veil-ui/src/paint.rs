@@ -9,7 +9,7 @@ use crate::geometry::{Rect, MARGIN};
 use crate::i18n::{t, tf, Key};
 use crate::view::table::{CellImgAsset, CellMath};
 use crate::view::{
-    cell_math_spans, ctx_menu, image_is_standalone, block_details_spans, node_active, outline,
+    block_details_spans, cell_math_spans, ctx_menu, image_is_standalone, node_active, outline,
     oversize_notice, quick_open, search, BlockLayout, Frame, ImageCaption, InlineAsset, InlineFold,
     InlineImg, LayoutEngine, LayoutKey, Memo, OverKind, TableKey, UnderKind,
 };
@@ -417,7 +417,8 @@ fn paint_frontmatter_collapsed(
     let arrow = (7.0 * scale).round().max(5.0) as i32;
     draw_arrow_right(frame, ax, cy, arrow, theme.muted);
     let tx = ax + arrow + (8.0 * scale).round() as i32;
-    if let Some(lab) = labels.get_or_insert(engine, t(Key::FrontMatterCollapsed), theme.muted, scale)
+    if let Some(lab) =
+        labels.get_or_insert(engine, t(Key::FrontMatterCollapsed), theme.muted, scale)
     {
         frame.blit(&lab.pixels, lab.w, lab.h, tx, cy - lab.h as i32 / 2);
         let lx = tx + lab.w as i32 + (8.0 * scale).round() as i32;
@@ -801,6 +802,20 @@ impl App {
                     align,
                 });
             }
+            // Mermaid 块位图占位：cache 里有该 block_id 的 MermaidImage → 构造 InlineImg
+            // 覆盖整个块（含围栏），LayoutEngine 用 NBSP 占位 + paint 按 key blit。
+            if matches!(kind, BlockKind::Mermaid) {
+                if let Some(bm) = self.cache.mermaid_imgs.get(&id) {
+                    imgs.push(InlineImg {
+                        range,
+                        key: InlineAsset::Mermaid(id.0.to_string()),
+                        width: bm.width,
+                        height: bm.height,
+                        baseline: bm.height,
+                        align: None,
+                    });
+                }
+            }
             let l = match toc_text {
                 Some(toc) => self.engine.layout_toc(&toc, width),
                 None => {
@@ -828,7 +843,12 @@ impl App {
             self.cache.layouts.insert(
                 id,
                 Memo {
-                    key: LayoutKey { base, reveal, toc, highlight_epoch: self.engine.highlight_epoch },
+                    key: LayoutKey {
+                        base,
+                        reveal,
+                        toc,
+                        highlight_epoch: self.engine.highlight_epoch,
+                    },
                     value: l,
                 },
             );
@@ -1064,8 +1084,7 @@ impl App {
         let (dx, dy, h) = match cell.caret_map.as_ref() {
             Some(map) => {
                 let rel = caret.saturating_sub(cell.doc_start).min(map.len);
-                map.caret_at(rel)
-                    .unwrap_or((0.0, 0.0, map.line_height()))
+                map.caret_at(rel).unwrap_or((0.0, 0.0, map.line_height()))
             }
             None => (0.0, 0.0, self.engine.doc_line_height() * scale),
         };
@@ -1396,7 +1415,9 @@ impl App {
             }
             let (id, kind, range, top) = (g.id, g.kind.clone(), g.range, g.top);
             let sy = (vp.y + top - self.window_state.scroll_y) as i32;
-            if (sy as f32) >= vp.y + vp.h || sy + self.block_height_with(g, base, caret) as i32 <= vp.y as i32 {
+            if (sy as f32) >= vp.y + vp.h
+                || sy + self.block_height_with(g, base, caret) as i32 <= vp.y as i32
+            {
                 continue; // 视口外不画（布局已缓存，光栅按需）
             }
             if self.math_shows_image(id, &range) {
@@ -1438,6 +1459,7 @@ impl App {
                     | BlockKind::IndentedCode
                     | BlockKind::HtmlBlock
                     | BlockKind::FrontMatter(_)
+                    | BlockKind::Mermaid
             ) {
                 let (rw, rh) = {
                     let r = &self.cache.rasters[&id].value;
@@ -1445,11 +1467,18 @@ impl App {
                 };
                 let pad_x = (crate::tokens::doc::CODE_PAD_X * scale).round() as i32;
                 let pad_y = (crate::tokens::doc::CODE_PAD_Y * scale).round() as i32;
+                // Mermaid 块若已有位图渲染态，文本光栅只含 NBSP 占位，高度 = 位图高度。
+                // 必须用 block_height_with 取整块高度（含位图撑开的部分），否则代码底色只盖占位。
+                let bg_h = if matches!(kind, BlockKind::Mermaid) {
+                    self.block_height_with(g, base, caret)
+                } else {
+                    rh as f32
+                };
                 frame.fill_rect(
                     self.content_x() as i32 - pad_x,
                     sy - pad_y,
                     rw + 2 * pad_x as u32,
-                    rh + 2 * pad_y as u32,
+                    (bg_h + 2.0 * pad_y as f32).max(1.0) as u32,
                     crate::tokens::palette::code_bg(&theme),
                 );
             }
@@ -1608,6 +1637,17 @@ impl App {
                                 dx,
                                 dy,
                             );
+                        }
+                    }
+                    InlineAsset::Mermaid(block_id_str) => {
+                        // key = block_id.to_string()，转回 BlockId 查 mermaid_imgs
+                        if let Ok(bid) = block_id_str.parse::<u64>() {
+                            let block_id = veil_core::BlockId(bid);
+                            if let Some(img) = self.cache.mermaid_imgs.get(&block_id) {
+                                frame.blit_scaled(
+                                    &img.data, img.width, img.height, p.width, p.height, dx, dy,
+                                );
+                            }
                         }
                     }
                 }
@@ -2804,7 +2844,7 @@ impl App {
         let fade = self.ui_state.ctx.fade.view(hover);
         // S3：只有卡片边界线；分组间距由布局提供，不再绘制分隔线。
         for (i, off) in &l.rows {
-            let Some((label, _)) = items.get(*i) else {
+            let Some((label, action)) = items.get(*i) else {
                 continue;
             };
             let iy = l.y + off;
@@ -2819,14 +2859,31 @@ impl App {
                     [h[0], h[1], h[2], a],
                 );
             }
-            if let Some(lab) = self.ui_state.chrome.labels.get_or_insert(
-                &mut self.engine,
-                t(*label),
-                theme.text,
-                scale,
-            ) {
+            let color = if ctx_menu::action_enabled(*action) {
+                theme.text
+            } else {
+                theme.muted
+            };
+            if let Some(lab) =
+                self.ui_state
+                    .chrome
+                    .labels
+                    .get_or_insert(&mut self.engine, t(*label), color, scale)
+            {
                 let y = (iy + l.item_h / 2.0 - lab.h as f32 / 2.0).round() as i32;
                 frame.blit(&lab.pixels, lab.w, lab.h, (l.x + l.pad).round() as i32, y);
+            }
+            if let Some(shortcut) = ctx_menu::shortcut(*action) {
+                if let Some(lab) = self.ui_state.chrome.labels.get_or_insert(
+                    &mut self.engine,
+                    t(shortcut),
+                    theme.muted,
+                    scale,
+                ) {
+                    let x = (l.x + l.w - l.pad - lab.w as f32).round() as i32;
+                    let y = (iy + l.item_h / 2.0 - lab.h as f32 / 2.0).round() as i32;
+                    frame.blit(&lab.pixels, lab.w, lab.h, x, y);
+                }
             }
         }
     }
@@ -3540,7 +3597,8 @@ mod tests {
 
     #[test]
     fn table_html_image_seed_never_strips_visible_alt() {
-        let doc = "| 左 <img src=\"a.png\" alt=\"HTMLalt\"> 右 | ![MDalt](b.png) |\n| --- | --- |\n";
+        let doc =
+            "| 左 <img src=\"a.png\" alt=\"HTMLalt\"> 右 | ![MDalt](b.png) |\n| --- | --- |\n";
         let session = veil_core::Session::open(doc);
         let (id, _, _) = session.blocks()[0];
         let table = session.table(id).unwrap();
@@ -3760,10 +3818,7 @@ mod tests {
         // 再删除同一列回到原文（列数、转义与内容逐字节一致）
         assert_eq!(table_delete_column(&inserted, 1), src);
         // 追加空行按 header 的 2 列补齐，不因转义竖线多出列
-        assert_eq!(
-            table_append_row(src),
-            format!("{src}|  |  |\n")
-        );
+        assert_eq!(table_append_row(src), format!("{src}|  |  |\n"));
     }
 
     #[test]

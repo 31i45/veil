@@ -170,14 +170,22 @@ pub(super) fn scan_one(buf: &Buffer, line: usize, total: usize) -> (BlockKind, u
         return (BlockKind::AtxHeading(level), 1);
     }
     if let Some((ch, len, lang)) = fence_open(&text) {
+        let kind = if lang
+            .as_deref()
+            .is_some_and(|l| l.eq_ignore_ascii_case("mermaid"))
+        {
+            BlockKind::Mermaid
+        } else {
+            BlockKind::FencedCode(lang)
+        };
         let mut n = 1;
         while line + n < total {
             if fence_close(&line_text(buf, line + n), ch, len) {
-                return (BlockKind::FencedCode(lang), n + 1);
+                return (kind, n + 1);
             }
             n += 1;
         }
-        return (BlockKind::FencedCode(lang), n); // 未闭合围栏吞咽至 EOF（GFM 行为）
+        return (kind, n); // 未闭合围栏吞咽至 EOF（GFM 行为）
     }
     match math_marker(text.trim()) {
         Some(true) => return (BlockKind::Math, 1), // 单行 `$$x$$`
@@ -573,9 +581,9 @@ fn looks_like_toml_frontmatter(lines: &[&str]) -> bool {
             };
             let key = key.trim();
             !key.is_empty()
-                && key.chars().all(|c| {
-                    c.is_alphanumeric() || matches!(c, '_' | '-' | '.' | '"' | '\'')
-                })
+                && key
+                    .chars()
+                    .all(|c| c.is_alphanumeric() || matches!(c, '_' | '-' | '.' | '"' | '\''))
         })
 }
 
@@ -2562,9 +2570,7 @@ mod tests {
         let ks = kinds(&b);
         assert_eq!(
             ks[0].0,
-            BlockKind::FrontMatter(
-                "title = \"Veil\"\n\n[draft]\n\nlist = [1, 2]\n".to_string()
-            )
+            BlockKind::FrontMatter("title = \"Veil\"\n\n[draft]\n\nlist = [1, 2]\n".to_string())
         );
         assert_eq!(ks[0].2, 5);
         assert_eq!(ks[1], (BlockKind::Paragraph, 5, 6));
@@ -2931,7 +2937,10 @@ mod tests {
         let b = Buffer::new("para\n<hr>\n");
         assert_eq!(
             kinds(&b),
-            [(BlockKind::Paragraph, 0, 1), (BlockKind::ThematicBreak, 1, 2)]
+            [
+                (BlockKind::Paragraph, 0, 1),
+                (BlockKind::ThematicBreak, 1, 2)
+            ]
         );
     }
 

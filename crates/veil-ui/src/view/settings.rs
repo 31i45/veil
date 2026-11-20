@@ -1615,7 +1615,8 @@ mod tests {
     }
 
     #[test]
-    fn geom_value_text_stays_left_of_clear_button() {        for (w, h, x, y) in [(2560u32, 1440u32, -1920i32, -200i32), (1681, 864, 8, 8)] {
+    fn geom_value_text_stays_left_of_clear_button() {
+        for (w, h, x, y) in [(2560u32, 1440u32, -1920i32, -200i32), (1681, 864, 8, 8)] {
             let form = geom_form(w, h, x, y);
             let layout = layout_for(viewport(1280.0, 800.0), &form);
             let value_rect = layout
@@ -1669,7 +1670,11 @@ mod tests {
             .position(|f| matches!(f.kind, FieldKind::WindowGeom))
             .expect("几何字段存在");
         form.fields[geom_idx].value = FieldValue::Geom(None);
-        assert_eq!(form.apply(&config).window, None, "清除后 apply 不得复活旧几何");
+        assert_eq!(
+            form.apply(&config).window,
+            None,
+            "清除后 apply 不得复活旧几何"
+        );
 
         // 模拟「恢复默认」：默认 Config 无几何记录。
         let defaults = SettingsForm::from_config(&Config::default());

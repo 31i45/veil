@@ -287,6 +287,135 @@ fn menu_definitions_cover_shortcuts() {
     );
 }
 
+fn expected_input_action(action: MenuAction) -> crate::input::Action {
+    use crate::editor::Intent;
+    use crate::input::Action;
+    match action {
+        MenuAction::New => Action::New,
+        MenuAction::NewWindow => Action::NewWindow,
+        MenuAction::Open => Action::Open,
+        MenuAction::QuickOpen => Action::QuickOpen,
+        MenuAction::Save => Action::Save,
+        MenuAction::SaveAs => Action::SaveAs,
+        MenuAction::Export => Action::Export,
+        MenuAction::ExportPdf => Action::ExportPdf,
+        MenuAction::Print => Action::Print,
+        MenuAction::VersionHistory => Action::VersionHistory,
+        MenuAction::Undo => Action::Doc(Intent::Undo),
+        MenuAction::Redo => Action::Doc(Intent::Redo),
+        MenuAction::Cut => Action::Cut,
+        MenuAction::Copy => Action::Copy,
+        MenuAction::Paste => Action::Paste,
+        MenuAction::SelectAll => Action::Doc(Intent::SelectAll),
+        MenuAction::ToggleOutline => Action::OpenOutline,
+        MenuAction::Find => Action::Find,
+        MenuAction::Replace => Action::Replace,
+        MenuAction::InsertImage => Action::InsertImage,
+        MenuAction::ToggleBold => Action::Doc(Intent::ToggleWrap("**")),
+        MenuAction::ToggleItalic => Action::Doc(Intent::ToggleWrap("*")),
+        MenuAction::InsertLink => Action::Doc(Intent::InsertLink),
+        MenuAction::ToggleSourceMode => Action::OpenSourceMode,
+        MenuAction::ZoomIn => Action::ZoomIn,
+        MenuAction::ZoomOut => Action::ZoomOut,
+        MenuAction::ZoomReset => Action::ZoomReset,
+        MenuAction::ToggleFullscreen => Action::ToggleFullscreen,
+        MenuAction::Settings => Action::OpenSettings,
+        other => panic!("{other:?} 不应有需要键盘映射的菜单快捷键"),
+    }
+}
+
+fn dispatch_shortcut(shortcut: &str) -> crate::input::Action {
+    use crate::input::Mods;
+    use winit::keyboard::{Key as WKey, KeyCode, NamedKey, PhysicalKey};
+
+    let mut mods = Mods::default();
+    let mut parts = shortcut.split('+').peekable();
+    while let Some(part) = parts.peek().copied() {
+        match part {
+            "Ctrl" => mods.ctrl = true,
+            "Shift" => mods.shift = true,
+            "Alt" => mods.alt = true,
+            _ => break,
+        }
+        parts.next();
+    }
+    let name = parts.next().expect("快捷键含主键");
+    assert!(parts.next().is_none(), "快捷键格式无效: {shortcut}");
+    let logical = if name == "F11" {
+        WKey::Named(NamedKey::F11)
+    } else {
+        WKey::Character(name.into())
+    };
+    let key = if mods.ctrl && !mods.alt {
+        crate::interaction::ctrl_punctuation(&logical, PhysicalKey::Code(KeyCode::KeyA))
+            .or_else(|| crate::interaction::map_key_parts(None, logical, mods))
+    } else {
+        crate::interaction::map_key_parts(None, logical, mods)
+    }
+    .unwrap_or_else(|| panic!("winit 映射未识别菜单快捷键: {shortcut}"));
+    match crate::mode::route(crate::mode::Mode::Document, key, mods, false) {
+        crate::mode::Cmd::Edit(action) => action,
+        other => panic!("菜单快捷键未分发为真实动作: {shortcut} → {other:?}"),
+    }
+}
+
+#[test]
+fn menu_shortcuts_match_winit_mapping_and_real_dispatch() {
+    let mut with_shortcuts = 0;
+    for menu in MENUS {
+        for (label, shortcut, action) in menu.items {
+            if *action == MenuAction::Separator {
+                assert_eq!((*label, *shortcut), (Key::Empty, Key::Empty));
+                continue;
+            }
+            assert!(!t(*label).is_empty(), "菜单标签不得为空: {action:?}");
+            if *shortcut == Key::Empty {
+                assert!(matches!(
+                    action,
+                    MenuAction::PrintPreview
+                        | MenuAction::Quit
+                        | MenuAction::ThemeSystem
+                        | MenuAction::ThemeLight
+                        | MenuAction::ThemeDark
+                        | MenuAction::ToggleFocus
+                        | MenuAction::ToggleTypewriter
+                        | MenuAction::ToggleRemoteImages
+                ));
+                continue;
+            }
+            with_shortcuts += 1;
+            assert_eq!(
+                dispatch_shortcut(t(*shortcut)),
+                expected_input_action(*action),
+                "菜单快捷键文案与真实输入分发不一致: {} / {action:?}",
+                t(*shortcut)
+            );
+        }
+    }
+    assert_eq!(with_shortcuts, 29, "全部 29 个显示快捷键都必须经过真实分发");
+}
+
+#[test]
+fn dialog_commands_use_ellipsis_consistently() {
+    for menu in MENUS {
+        for (label, _, action) in menu.items {
+            let should = matches!(
+                action,
+                MenuAction::Open
+                    | MenuAction::SaveAs
+                    | MenuAction::Print
+                    | MenuAction::InsertImage
+                    | MenuAction::Settings
+            );
+            assert_eq!(
+                t(*label).ends_with('…'),
+                should,
+                "省略号与是否打开后续对话框不一致: {action:?}"
+            );
+        }
+    }
+}
+
 #[test]
 fn print_entry_label_has_no_export_wording() {
     // 「打印…」只负责系统打印对话框；PDF 导出由上方独立的「导出 PDF」承载
@@ -295,7 +424,7 @@ fn print_entry_label_has_no_export_wording() {
         .iter()
         .find(|(_, _, a)| *a == MenuAction::Print)
         .expect("文件菜单应含打印项");
-    assert_eq!(t(print.0), "打印");
+    assert_eq!(t(print.0), "打印…");
     assert_eq!(t(print.1), "Ctrl+Shift+P");
     assert!(
         !MENUS[0]

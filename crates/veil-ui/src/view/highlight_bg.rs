@@ -13,9 +13,7 @@
 use std::sync::mpsc;
 use std::sync::Arc;
 
-use crate::view::highlight::{
-    merge_adjacent, kind_of, lookup_syntax, syntaxes, TokenKind,
-};
+use crate::view::highlight::{kind_of, lookup_syntax, merge_adjacent, syntaxes, TokenKind};
 use syntect::parsing::{ParseState, ScopeStack};
 
 /// 投递给后台线程的 parse 任务。

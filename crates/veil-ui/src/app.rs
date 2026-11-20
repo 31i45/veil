@@ -19,11 +19,12 @@ use crate::docio::{decode, encode};
 use crate::document::{history, recovery, session};
 use crate::editor::Editor;
 use crate::geometry::{clamp_window_geom, ScreenRect, BASE_LINE_HEIGHT};
-use crate::i18n::{t, tf, Key};
+use crate::i18n::{clip_error, t, tf, Key};
 use crate::image::{AssetStore, ImageData, ImageLoader};
 use crate::input::Mods;
 use crate::interaction::ZOOM_WHEEL_PX;
 use crate::math::MathRenderer;
+use crate::mermaid_renderer::MermaidRenderer;
 use crate::print::{Print, PrintState};
 use crate::theme::{
     self, Config, ConfigStore, ExportStyle, SystemTheme, Theme, ThemeEnv, ThemeMode, WindowEffects,
@@ -167,12 +168,15 @@ pub trait FileWatcher {
 pub trait Exporter {
     /// `target` 为调用方已选定的输出路径（草稿态经对话框选定）；None 表示沿用
     /// 源文件同目录同名规则（`source_path.with_extension("html")`）。
+    /// `mermaids` 是已光栅化的 Mermaid 渲染结果（BlockId → MermaidImage）。
+    /// None 或空时，Mermaid 块降级为源码代码围栏。
     fn export_html(
         &mut self,
         session: &veil_core::Session,
         style: ExportStyle,
         source_path: Option<&Path>,
         target: Option<&Path>,
+        mermaids: Option<&std::collections::HashMap<veil_core::BlockId, crate::MermaidImage>>,
     ) -> Result<PathBuf, String>;
 }
 
@@ -324,6 +328,7 @@ pub struct Ports {
     /// 本地时钟：状态栏「已保存 HH:MM」的唯一时间来源（测试注入固定值）。
     pub clock: Box<dyn Clock>,
     pub math: Box<dyn MathRenderer>,
+    pub mermaid: Box<dyn MermaidRenderer>,
     pub images: Box<dyn ImageLoader>,
     pub assets: Box<dyn AssetStore>,
     pub exporter: Box<dyn Exporter>,
@@ -475,6 +480,16 @@ pub(crate) struct PendingMermaidFetch {
     pub(crate) block_end: Option<usize>,
     /// 预览浮层标题（图型名）。
     pub(crate) title: String,
+}
+
+/// Mermaid 自动实时预览请求：后台线程下载 mermaid.ink PNG，
+/// 回包后直接嵌进编辑界面的 LayoutEngine 管线（不经预览浮层）。
+#[derive(Clone, Debug)]
+pub(crate) struct PendingMermaidAuto {
+    pub(crate) block_id: BlockId,
+    pub(crate) source_hash: u64,
+    pub(crate) url: String,
+    pub(crate) dark: bool,
 }
 
 impl Default for UIState {
@@ -727,6 +742,10 @@ pub(crate) struct App {
     pub(crate) cache: Cache,
     /// 等待 mermaid.ink 回包的 Mermaid 在线渲染请求（用户显式触发）。
     pub(crate) pending_mermaid_fetch: Option<PendingMermaidFetch>,
+    /// Mermaid 自动实时预览：后台下载 mermaid.ink PNG，回包后直接嵌进 LayoutEngine 管线。
+    pub(crate) pending_mermaid_auto: Vec<PendingMermaidAuto>,
+    /// 已请求过的 Mermaid (source_hash, dark) 集合——同一源码 + 主题不重复请求。
+    pub(crate) mermaid_auto_requested: std::collections::HashSet<(u64, bool)>,
     /// 会话内是否已提示过「源码将发送给 mermaid.ink」。
     pub(crate) mermaid_ink_notice_shown: bool,
     pub(crate) input_state: InputState,
@@ -752,6 +771,7 @@ pub(crate) struct AppPorts {
     pub(crate) store: Box<dyn FileStore>,
     pub(crate) clock: Box<dyn Clock>,
     pub(crate) math: Box<dyn MathRenderer>,
+    pub(crate) mermaid: Box<dyn MermaidRenderer>,
     pub(crate) images: Box<dyn ImageLoader>,
     pub(crate) assets: Box<dyn AssetStore>,
     pub(crate) exporter: Box<dyn Exporter>,
@@ -901,6 +921,7 @@ impl App {
             store: ports.store,
             clock: ports.clock,
             math: ports.math,
+            mermaid: ports.mermaid,
             images: ports.images,
             assets: ports.assets,
             exporter: ports.exporter,
@@ -953,6 +974,8 @@ impl App {
             index: BlockIndex::default(),
             cache,
             pending_mermaid_fetch: None,
+            pending_mermaid_auto: Vec::new(),
+            mermaid_auto_requested: std::collections::HashSet::new(),
             mermaid_ink_notice_shown: false,
             callouts,
             input_state: InputState {
@@ -1065,6 +1088,12 @@ impl App {
         self.doc.export_style = ExportStyle::from_theme(&self.input_state.theme);
         self.input_state.revs.theme += 1;
         self.ui_state.chrome.clear_label_cache();
+        // Mermaid 位图随主题重渲：dark 参数进 URL，主题切换必须清空位图/失败记忆/去重集合，
+        // 下一帧 trigger_mermaid_auto 会按新 theme 重新投递 mermaid_ink_svg_url
+        self.cache.mermaid_imgs.clear();
+        self.cache.mermaid_failed.clear();
+        self.mermaid_auto_requested.clear();
+        self.pending_mermaid_auto.clear();
         // 代次递增后按新调色板重排/重渲：只重做可见块，几何按新高度重算
         self.refresh_index();
         self.ensure_layouts_visible();
@@ -1157,6 +1186,16 @@ impl App {
     /// 全部布局失配重排（本地图片缓存键不变，不触发重新读盘）。
     pub(crate) fn toggle_remote_images(&mut self) {
         self.config.allow_remote_images = !self.config.allow_remote_images;
+        // 通知后台 MermaidFetcher 开关状态，防止阻止后继续接收新 request()
+        self.ports
+            .mermaid
+            .set_allowed(self.config.allow_remote_images);
+        // 阻止时清空 pending Mermaid 自动预览队列 + 去重集合
+        // （已在 cache.mermaid_imgs 的位图保留——它们已在内存，不占网络）
+        if !self.config.allow_remote_images {
+            self.pending_mermaid_auto.clear();
+            self.mermaid_auto_requested.clear();
+        }
         let saved = self.save_config(ConfigSave::RemoteImages);
         self.input_state.revs.remote_images += 1;
         self.refresh_index();
@@ -1176,16 +1215,108 @@ impl App {
         self.request_redraw();
     }
 
-    /// 取走已完成的远程图片结果：成功入会话缓存、失败记入记忆（本批仅提示一次），
-    /// 任一结果都递增远程图片代次并按主题切换同序列重排重绘。
-    pub(crate) fn poll_remote_images(&mut self) {
-        let results = self.ports.images.poll_remote();
-        if results.is_empty() {
+    /// 自动触发 Mermaid 实时预览：扫描所有 BlockKind::Mermaid 块，
+    /// 非源码模式 + caret 不在块内 + 未请求过 → 生成 mermaid.ink SVG URL 并投递
+    /// MermaidRenderer 后台线程（HTTP 下载 + resvg 光栅化）。
+    /// 与远程图片管线共享 allow_remote_images 开关；首次远程投递会显示一次
+    /// 「源码将发送给 mermaid.ink」提示，离线实现不提示。
+    ///
+    /// 失败记忆策略：同一 (source_hash, dark) 连续失败 ≥ MAX_MERMAID_FAIL_COUNT（3）
+    /// 次才永久禁用；源码超限（> 128 KiB）不进失败记忆，允许用户编辑后自动重试。
+    pub(crate) fn trigger_mermaid_auto(&mut self) {
+        // 远程图片开关拦截：阻止时不得发起任何出站请求（离线渲染器不受此限）
+        if self.ports.mermaid.requires_network() && !self.config.allow_remote_images {
             return;
         }
+        if self.source_mode() {
+            return;
+        }
+        let theme_dark = self.input_state.theme.dark;
+        let caret = self.effective_caret();
+        let session = self.editor.session();
+        /// 同一源码连续失败 N 次后永久禁用自动预览，直到源码变化或主题切换。
+        const MAX_MERMAID_FAIL_COUNT: u8 = 3;
+
+        for (block_id, kind, range) in session.blocks() {
+            if kind != veil_core::BlockKind::Mermaid {
+                continue;
+            }
+            // caret 在块内 → 编辑态，不自动渲染（与 math_shows_image 同逻辑）
+            if range.start <= caret && caret <= range.end {
+                continue;
+            }
+            // 源码 hash + 主题做去重键：同一 Mermaid 块同一主题只请求一次。
+            // 必须用 fenced_code_source 取围栏**内容**：block range 含 ``` 围栏行，
+            // 直接 text_slice 会把 fence 一起喂给 mermaid（解析失败 / HTTP 400）。
+            let source = session
+                .fenced_code_source(block_id)
+                .map(|(_, body)| body)
+                .unwrap_or_default();
+            // 空块没有可渲染图形；远程 mermaid.ink 会对此返回 HTTP 400。
+            // 仅拦截联网实现，veil-full 的本地渲染路径保持原行为。
+            if self.ports.mermaid.requires_network() && source.trim().is_empty() {
+                continue;
+            }
+            let source_hash = {
+                use std::hash::{Hash, Hasher};
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                source.hash(&mut h);
+                h.finish()
+            };
+            let key = (source_hash, theme_dark);
+            // 已成功渲染过的块不再请求
+            if self.cache.mermaid_imgs.contains_key(&block_id) {
+                continue;
+            }
+            // 已请求过（pending）的不再重复投递（等待回包）
+            if self.mermaid_auto_requested.contains(&key) {
+                continue;
+            }
+            // 同一源码连续失败 ≥ MAX 次 → 永久禁用自动预览
+            if self.cache.mermaid_failed.get(&key).copied().unwrap_or(0) >= MAX_MERMAID_FAIL_COUNT {
+                continue;
+            }
+            // 源码超长 → mermaid.ink 压缩后仍可能超限，直接跳过 + 提示
+            // 不进失败记忆：用户编辑源码变小后应该能自动重试
+            if source.len() > 128 * 1024 {
+                self.ui_state.chrome.notice = t(Key::NoticeMermaidSourceTooLarge).into();
+                continue;
+            }
+
+            let url = veil_core::mermaid_ink_svg_url(&source, theme_dark);
+            // 自动预览同样把源码发给第三方：首次投递必须提示一次，不能静默上传。
+            if self.ports.mermaid.requires_network() && !self.mermaid_ink_notice_shown {
+                self.mermaid_ink_notice_shown = true;
+                self.ui_state.chrome.notice = t(Key::NoticeMermaidInkNotice).into();
+            }
+            self.mermaid_auto_requested.insert(key);
+            self.pending_mermaid_auto.push(PendingMermaidAuto {
+                block_id,
+                source_hash,
+                url: url.clone(),
+                dark: theme_dark,
+            });
+            self.ports.mermaid.request(url, source, theme_dark);
+        }
+    }
+
+    /// 取走已完成的远程图片 + Mermaid 渲染结果。
+    ///
+    /// 两条管线：
+    /// 1. 远程图片管线：`ports.images.poll_remote()` 取走 `ImageData`（PNG 解码后的字节）
+    ///    —— 普通远程 `<img>` 和旧的 mermaid PNG URL 共用这条。
+    /// 2. Mermaid SVG 管线：`ports.mermaid.poll()` 取走 resvg 光栅化的 `MermaidImage`
+    ///    —— 当前 trigger_mermaid_auto 已切到这条（mermaid_ink_svg_url）。
+    ///
+    /// 任一结果都递增 remote_images 代次并触发重排重绘。
+    pub(crate) fn poll_remote_images(&mut self) {
+        // —— 管线 1：远程图片（PNG/JPEG/WebP 等 ImageData） ——
+        let img_results = self.ports.images.poll_remote();
+        let img_had = !img_results.is_empty();
         let mut failed = false;
-        for (url, result) in results {
+        for (url, result) in img_results {
             self.cache.remote_pending.remove(&url);
+            // 1a. 用户手动触发的 mermaid PNG 预览（旧入口，仍走图片管线）
             if let Some(pending) = self.pending_mermaid_fetch.clone() {
                 if pending.url == url {
                     self.pending_mermaid_fetch = None;
@@ -1193,6 +1324,24 @@ impl App {
                     continue;
                 }
             }
+            // 1b. 自动 Mermaid PNG 预览（旧管线，已废弃但保留匹配以防误投递）
+            if let Some(pos) = self.pending_mermaid_auto.iter().position(|p| p.url == url) {
+                let pending = self.pending_mermaid_auto.remove(pos);
+                match result {
+                    Ok(img) => {
+                        self.cache.remote_failed.remove(&url);
+                        self.cache.insert_remote_image(url, img);
+                    }
+                    Err(_) => {
+                        self.cache.remote_failed.insert(url);
+                        failed = true;
+                        self.mermaid_auto_requested
+                            .remove(&(pending.source_hash, pending.dark));
+                    }
+                }
+                continue;
+            }
+            // 1c. 普通远程图片请求
             match result {
                 Ok(img) => {
                     self.cache.remote_failed.remove(&url);
@@ -1204,16 +1353,54 @@ impl App {
                 }
             }
         }
-        if failed {
-            self.ui_state.chrome.notice = t(Key::NoticeRemoteImageFailed).into();
+
+        // —— 管线 2：Mermaid SVG + resvg 光栅化 ——
+        let mermaid_results = self.ports.mermaid.poll();
+        let mut mermaid_changed = false;
+        // Mermaid 专属失败原因（裁剪后进状态栏）：与普通远程图片失败区分，符合 AC-7
+        let mut mermaid_err: Option<String> = None;
+        for (url, result) in mermaid_results {
+            if let Some(pos) = self.pending_mermaid_auto.iter().position(|p| p.url == url) {
+                let pending = self.pending_mermaid_auto.remove(pos);
+                match result {
+                    Ok(bitmap) => {
+                        let key = (pending.source_hash, pending.dark);
+                        // 成功渲染后清除失败记忆：同一源码下次变更（key 变了）自然重新计时
+                        self.cache.mermaid_failed.remove(&key);
+                        self.mermaid_auto_requested.remove(&key);
+                        self.cache.mermaid_imgs.insert(pending.block_id, bitmap);
+                        mermaid_changed = true;
+                    }
+                    Err(e) => {
+                        // 同一 (source_hash, dark) 连续失败 N 次才永久禁用
+                        let key = (pending.source_hash, pending.dark);
+                        let count = self.cache.mermaid_failed.get(&key).copied().unwrap_or(0);
+                        self.cache.mermaid_failed.insert(key, count + 1);
+                        self.mermaid_auto_requested.remove(&key);
+                        failed = true;
+                        mermaid_err = Some(clip_error(&e));
+                        eprintln!("Mermaid 渲染失败 (连续第 {} 次): {e}", count + 1);
+                    }
+                }
+            }
         }
-        self.input_state.revs.remote_images += 1;
-        self.refresh_index();
-        self.ensure_layouts_visible();
-        self.ensure_math_visible();
-        self.ensure_tables_visible();
-        self.recompute_geometry();
-        self.request_redraw();
+
+        if failed || mermaid_changed || img_had {
+            if failed {
+                // Mermaid 失败优先展示其具体原因（已裁剪为单行）；普通远程图片失败用通用文案
+                self.ui_state.chrome.notice = match mermaid_err {
+                    Some(e) => tf(Key::NoticeMermaidInkFailed, &[&e]),
+                    None => t(Key::NoticeRemoteImageFailed).into(),
+                };
+            }
+            self.input_state.revs.remote_images += 1;
+            self.refresh_index();
+            self.ensure_layouts_visible();
+            self.ensure_math_visible();
+            self.ensure_tables_visible();
+            self.recompute_geometry();
+            self.request_redraw();
+        }
     }
 
     pub(crate) fn win_size(&self) -> (u32, u32) {
@@ -1389,6 +1576,7 @@ impl App {
     pub(crate) fn tick(&mut self, now: Instant) {
         self.poll_external();
         self.poll_system_theme(now);
+        self.trigger_mermaid_auto();
         self.poll_remote_images();
         // 只读浏览版本历史期间冻结所有持久化副作用：浏览不得改变文档字节，
         // 也不得在预览暂存实时编辑器时触发自动保存/恢复写盘。
@@ -1484,8 +1672,7 @@ impl App {
             // 周期快照失败同样不可静默（release 无控制台）：状态栏留痕。
             if let Some(e) = current_err {
                 eprintln!("版本快照写入失败: {e}");
-                self.ui_state.chrome.notice =
-                    tf(Key::NoticeSnapshotFailed, &[&e]);
+                self.ui_state.chrome.notice = tf(Key::NoticeSnapshotFailed, &[&e]);
             } else if let Some(n) = archive_notice {
                 self.ui_state.chrome.notice = n;
             }

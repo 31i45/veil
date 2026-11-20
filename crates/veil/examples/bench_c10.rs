@@ -7,7 +7,10 @@ use veil_core::Session;
 use veil_ui::LayoutEngine;
 
 fn main() {
-    let path = format!("{}\\veil-walkthrough\\03-10万字.txt", std::env::var("TEMP").unwrap());
+    let path = format!(
+        "{}\\veil-walkthrough\\03-10万字.txt",
+        std::env::var("TEMP").unwrap()
+    );
     let text = std::fs::read_to_string(&path).expect("读取 10 万字文件失败");
     let chars = text.chars().count();
     let bytes = text.len();
@@ -30,7 +33,16 @@ fn main() {
     for (id, kind, range) in &blocks {
         let body = session.text_slice(*range).unwrap_or_default();
         let inlines = session.block_inlines(*id).unwrap_or_default();
-        let l = eng.layout_block(kind.clone(), &body, *range, &inlines, 1200.0, usize::MAX, &[], false);
+        let l = eng.layout_block(
+            kind.clone(),
+            &body,
+            *range,
+            &inlines,
+            1200.0,
+            usize::MAX,
+            &[],
+            false,
+        );
         black_box(l.height);
     }
     let full_layout_ms = t.elapsed().as_secs_f64() * 1000.0;
@@ -40,8 +52,10 @@ fn main() {
     let open_pass = open_ms <= 2000.0;
     let layout_pass = full_layout_ms <= 2000.0;
     println!("---");
-    println!("C10 门禁（打开 ≤2s）: open={open_ms:.0}ms {} | layout={full_layout_ms:.0}ms {}",
+    println!(
+        "C10 门禁（打开 ≤2s）: open={open_ms:.0}ms {} | layout={full_layout_ms:.0}ms {}",
         if open_pass { "✅" } else { "❌" },
-        if layout_pass { "✅" } else { "❌" });
+        if layout_pass { "✅" } else { "❌" }
+    );
     println!("内存: 需要任务管理器真机实测（私有工作集 ≤150MB）");
 }

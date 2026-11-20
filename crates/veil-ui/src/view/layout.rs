@@ -29,6 +29,8 @@ pub enum InlineAsset {
     Math(String),
     /// 文档内图片：键 = 按文档目录解析后的绝对路径（自然尺寸缓存）。
     Image(String),
+    /// Mermaid 块位图：键 = block_id.to_string()（通过 BlockId → MermaidImage 寻址）。
+    Mermaid(String),
 }
 
 /// 行内资源图（输入）：非激活 Math/Image 节点的渲染结果，供占位排版。
@@ -623,7 +625,8 @@ fn kind_scale(kind: &BlockKind) -> f32 {
         BlockKind::FencedCode(_)
         | BlockKind::IndentedCode
         | BlockKind::HtmlBlock
-        | BlockKind::FrontMatter(_) => typography::CODE_SCALE,
+        | BlockKind::FrontMatter(_)
+        | BlockKind::Mermaid => typography::CODE_SCALE,
         _ => 1.0,
     }
 }
@@ -1160,6 +1163,7 @@ impl LayoutEngine {
                 | BlockKind::IndentedCode
                 | BlockKind::Math
                 | BlockKind::Table
+                | BlockKind::Mermaid
                 // Details 内是整块源码文本，标签消隐后不应在 CJK↔ASCII 边界补空格，
                 // 否则 summary 首字前会多出一个游标空格。
                 | BlockKind::Details { .. }
@@ -1172,6 +1176,7 @@ impl LayoutEngine {
                     | BlockKind::IndentedCode
                     | BlockKind::Math
                     | BlockKind::Table
+                    | BlockKind::Mermaid
             )
         {
             subs.extend(hard_break_subs(
@@ -1221,7 +1226,8 @@ impl LayoutEngine {
             BlockKind::FencedCode(Some(lang)) => {
                 // 长代码块（行数/字节数超阈值）首次渲染跳过高亮：先上默认色首帧，
                 // 后台 parse 完成后通过 LayoutKey 失效触发重排，此时缓存已命中 → 同步产出颜色。
-                let is_long = body.lines().count() >= crate::view::highlight::LONG_CODE_THRESHOLD_LINES
+                let is_long = body.lines().count()
+                    >= crate::view::highlight::LONG_CODE_THRESHOLD_LINES
                     || body.len() >= crate::view::highlight::LONG_CODE_THRESHOLD_BYTES;
                 let cache_hit = self.highlighter.has(block.start);
                 if is_long && !cache_hit {
@@ -1242,7 +1248,8 @@ impl LayoutEngine {
                                 body: body.to_string(),
                                 epoch: current_epoch,
                             });
-                            self.pending_background_ticks.insert(block.start, current_epoch);
+                            self.pending_background_ticks
+                                .insert(block.start, current_epoch);
                         }
                     }
                     // 返回空 spans → to_styles 产出覆盖整个 body 的全默认色段。
@@ -1448,7 +1455,7 @@ impl LayoutEngine {
         }
         height += notice_h;
         // 占位段首字形定位：x = 字形左缘，图顶 = 行基线(line_y) - baseline；块高扩展到图底。
-        // 图片底边贴基线，高位图会把图顶推到行顶之上：钳到行顶，避免上侵前一块
+        // 图片与 Mermaid 底边贴基线，高位图会把图顶推到行顶之上：钳到行顶，避免上侵前一块
         // （同块后续视觉行的重叠属 v0 已知简化，块高已扩展故不影响后续块）。
         let mut placed: Vec<PlacedImg> = Vec::new();
         for im in &kept {
@@ -1477,15 +1484,15 @@ impl LayoutEngine {
             let Some((x, line_y, line_top)) = at else {
                 continue;
             }; // 防御：占位段必有 NBSP 字形
-            // 独占视觉行的图片按 `<img align>` 在版心内水平对齐（占位自身不可见，
-            // 移动位图不会与文本重叠；行内图片的 align 已在 shell 侧置空）。
+               // 独占视觉行的图片按 `<img align>` 在版心内水平对齐（占位自身不可见，
+               // 移动位图不会与文本重叠；行内图片的 align 已在 shell 侧置空）。
             let x = match im.align {
                 Some(veil_core::ImageAlign::Center) => ((width - im.width as f32) * 0.5).max(0.0),
                 Some(veil_core::ImageAlign::Right) => (width - im.width as f32).max(0.0),
                 _ => x,
             };
             let mut y = line_y - im.baseline as f32; // 可为负（图高出行顶），frame.blit 裁剪
-            if matches!(im.key, InlineAsset::Image(_)) {
+            if matches!(im.key, InlineAsset::Image(_) | InlineAsset::Mermaid(_)) {
                 y = y.max(line_top);
             }
             height = height.max(y + im.height as f32);
@@ -1802,7 +1809,8 @@ impl LayoutEngine {
                     .iter()
                     .find(|(s, e, _)| *s <= g.start && g.start < *e)
                     .map_or(0.0, |&(_, _, dy)| dy);
-                let physical = g.physical((shift, run.line_y + script_dy), 1.0);
+                let baseline = (run.line_y + script_dy).round();
+                let physical = g.physical((shift, baseline), 1.0);
                 let fs = &mut self.font_system;
                 let key_color = Color::rgb(base[0], base[1], base[2]);
                 self.swash
@@ -2833,9 +2841,11 @@ fn block_subs(
         BlockKind::AtxHeading(level) => heading_subs(level, body, block, caret),
         BlockKind::SetextHeading(_) => setext_subs(body, block, caret),
         BlockKind::FencedCode(lang) => fenced_subs(body, block, caret, lang.as_deref()),
+        // Mermaid 独立块类型：badge 渲染复用 fenced_subs 的 mermaid 分支逻辑
+        BlockKind::Mermaid => fenced_subs(body, block, caret, Some("mermaid")),
         // 折叠块：标签由 inline 消隐机制去掉后，再压掉标签行的换行与块内 Markdown
         // 结构标记，让 summary / 正文以可见文本（段落）形式完整显示。
-        BlockKind::Details { .. } => details_subs(body, block, caret),
+        BlockKind::Details { .. } => details_subs(body),
         _ => Vec::new(),
     }
 }
@@ -2877,15 +2887,13 @@ fn setext_subs(body: &str, block: Range, caret: usize) -> Vec<Sub> {
     vec![Sub::fill(start, body.len(), " ".repeat(n))]
 }
 
-/// `<details>` **头块**的非激活渲染（B3 起头块只含开标签行 + summary 行）：
+/// `<details>` **头块**渲染（B3 起头块只含开标签行 + summary 行）：
 /// 1) 显式消隐 `<details>` / `<summary>` / `</summary>` 裸标签（header 内的
 ///    `<details>` 未闭合，行内解析退化为 HtmlLiteral，不参与 collect_elide）；
 /// 2) 消隐头块内全部换行，让 summary 压成单行（折叠态高度 = 一行；
 ///    summary 与正文已拆成兄弟块，不再需要逐行清理 Markdown 结构标记）。
-fn details_subs(body: &str, block: Range, caret: usize) -> Vec<Sub> {
-    if node_active(block, caret) {
-        return Vec::new();
-    }
+///    光标进入头块或右键落光标时不恢复标签行，避免折叠几何被隐藏正文重新撑开。
+fn details_subs(body: &str) -> Vec<Sub> {
     let mut out = Vec::new();
     elide_details_tag(body, "<details", &mut out);
     elide_details_tag(body, "<summary", &mut out);
@@ -3604,6 +3612,7 @@ pub(super) fn attrs_of(
                 | BlockKind::IndentedCode
                 | BlockKind::HtmlBlock
                 | BlockKind::FrontMatter(_)
+                | BlockKind::Mermaid
         ) {
         match mono_family {
             Some(name) => a.family(Family::Name(name)),
@@ -3634,6 +3643,9 @@ pub(super) fn attrs_of(
     };
     a
 }
+
+#[cfg(test)]
+mod typography_tests;
 
 #[cfg(test)]
 mod tests {
@@ -4885,7 +4897,11 @@ mod tests {
         center.align = Some(veil_core::ImageAlign::Center);
         let (_, l) = layout_with_imgs(text, usize::MAX, 400.0, &[center]);
         assert_eq!(l.imgs.len(), 1);
-        assert!((l.imgs[0].x - 180.0).abs() < 1.0, "center x={}", l.imgs[0].x);
+        assert!(
+            (l.imgs[0].x - 180.0).abs() < 1.0,
+            "center x={}",
+            l.imgs[0].x
+        );
         let mut right = image(node, 40, 10);
         right.align = Some(veil_core::ImageAlign::Right);
         let (_, l) = layout_with_imgs(text, usize::MAX, 400.0, &[right]);
@@ -5867,7 +5883,9 @@ mod tests {
         assert_eq!(s.serialize(), src, "视图消隐不得改写文档");
         let raw_session = Session::open(raw);
         let (_, kind, range) = raw_session.blocks()[0].clone();
-        let inlines = raw_session.block_inlines(raw_session.blocks()[0].0).unwrap();
+        let inlines = raw_session
+            .block_inlines(raw_session.blocks()[0].0)
+            .unwrap();
         let source = LayoutEngine::new().layout_block(
             kind.clone(),
             &raw[range.start..range.end],
@@ -6226,6 +6244,27 @@ mod tests {
         println!("[N9] paragraph Han families = {par_fam:?}, face = {par_id:?}");
         assert_eq!(cb_fam, par_fam, "代码块 Han 应与正文 Han 同族");
         assert_eq!(cb_id, par_id, "代码块 Han 与正文 Han 应为同一 face");
+    }
+
+    #[test]
+    fn mermaid_attrs_match_fenced_mono_and_preserve_paragraph_doc_font() {
+        let attrs_for = |kind| {
+            attrs_of(
+                kind,
+                Style::default(),
+                [0, 0, 0],
+                DocFontFamily::Serif,
+                Some("Consolas"),
+                16.0,
+            )
+        };
+        let mermaid = attrs_for(BlockKind::Mermaid);
+        let fenced = attrs_for(BlockKind::FencedCode(None));
+        assert_eq!(mermaid.family, fenced.family);
+        assert_eq!(mermaid.family, Family::Name("Consolas"));
+
+        let paragraph = attrs_for(BlockKind::Paragraph);
+        assert_eq!(paragraph.family, Family::Name("SimSun"));
     }
 
     #[test]

@@ -210,7 +210,7 @@ pub fn actual_blocks(s: &Session) -> Vec<B> {
         let b = match kind {
             BlockKind::Paragraph => B::P,
             BlockKind::AtxHeading(n) | BlockKind::SetextHeading(n) => B::H(n),
-            BlockKind::FencedCode(_) | BlockKind::IndentedCode => B::Pre,
+            BlockKind::FencedCode(_) | BlockKind::IndentedCode | BlockKind::Mermaid => B::Pre,
             BlockKind::Math => B::Other,
             BlockKind::Table => B::Table,
             BlockKind::BlockQuote | BlockKind::Admonition(_) | BlockKind::Callout(_) => B::Quote,

@@ -12,6 +12,7 @@
 #[cfg(windows)]
 use std::sync::mpsc::{self, Receiver, Sender};
 
+use veil_ui::i18n::{t, tf, Key};
 use veil_ui::ImageData;
 
 /// URL 长度上限（trim 后，字节）。
@@ -78,30 +79,30 @@ impl HttpUrl {
 pub(crate) fn validate_url(url: &str) -> Result<HttpUrl, String> {
     let s = url.trim();
     if s.is_empty() {
-        return Err("URL 为空".into());
+        return Err(t(Key::HttpUrlEmpty).into());
     }
     if s.len() > MAX_URL_LEN {
-        return Err(format!("URL 过长（上限 {MAX_URL_LEN} 字符）"));
+        return Err(tf(Key::HttpUrlTooLong, &[&MAX_URL_LEN.to_string()]));
     }
     if s.chars().any(char::is_control) {
-        return Err("URL 含控制字符".into());
+        return Err(t(Key::HttpUrlControl).into());
     }
     let (scheme, rest) = s
         .split_once("://")
-        .ok_or_else(|| "URL 缺少协议头（仅支持 http/https）".to_string())?;
+        .ok_or_else(|| t(Key::HttpUrlMissingScheme).to_string())?;
     let secure = match scheme.to_ascii_lowercase().as_str() {
         "http" => false,
         "https" => true,
-        other => return Err(format!("不支持的协议：{other}")),
+        other => return Err(tf(Key::HttpUnsupportedScheme, &[other])),
     };
     // authority 到首个 / ? # 为止
     let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
     let authority = &rest[..end];
     if authority.is_empty() {
-        return Err("URL 缺少主机名".into());
+        return Err(t(Key::HttpUrlMissingHost).into());
     }
     if authority.contains('@') {
-        return Err("URL 不允许包含用户信息".into());
+        return Err(t(Key::HttpUrlUserInfo).into());
     }
     let (host, port) = split_authority(authority, secure)?;
     validate_host(&host, port_was_bracketed(authority))?;
@@ -124,14 +125,14 @@ fn split_authority(authority: &str, secure: bool) -> Result<(String, u16), Strin
     let (host, port_raw) = if let Some(rest) = authority.strip_prefix('[') {
         let close = rest
             .find(']')
-            .ok_or_else(|| "IPv6 主机缺少右括号".to_string())?;
+            .ok_or_else(|| t(Key::HttpIpv6MissingBracket).to_string())?;
         let host = &rest[..close];
         let tail = &rest[close + 1..];
         let port = match tail {
             "" => None,
-            t => Some(
-                t.strip_prefix(':')
-                    .ok_or_else(|| "主机名后存在非法字符".to_string())?,
+            tail => Some(
+                tail.strip_prefix(':')
+                    .ok_or_else(|| t(Key::HttpHostTrailingChars).to_string())?,
             ),
         };
         (host.to_string(), port)
@@ -139,7 +140,7 @@ fn split_authority(authority: &str, secure: bool) -> Result<(String, u16), Strin
         match authority.rsplit_once(':') {
             Some((h, p)) => {
                 if h.contains(':') {
-                    return Err("IPv6 主机必须用方括号包裹".into());
+                    return Err(t(Key::HttpIpv6NeedsBrackets).into());
                 }
                 (h.to_string(), Some(p))
             }
@@ -156,14 +157,14 @@ fn split_authority(authority: &str, secure: bool) -> Result<(String, u16), Strin
         }
         Some(p) => {
             if p.is_empty() {
-                return Err("端口为空".into());
+                return Err(t(Key::HttpPortEmpty).into());
             }
             if !p.bytes().all(|b| b.is_ascii_digit()) {
-                return Err(format!("端口非法：{p}"));
+                return Err(tf(Key::HttpPortInvalid, &[p]));
             }
-            let n: u32 = p.parse().map_err(|_| format!("端口非法：{p}"))?;
+            let n: u32 = p.parse().map_err(|_| tf(Key::HttpPortInvalid, &[p]))?;
             if n == 0 || n > 65535 {
-                return Err(format!("端口超出范围：{p}"));
+                return Err(tf(Key::HttpPortOutOfRange, &[p]));
             }
             n as u16
         }
@@ -174,40 +175,40 @@ fn split_authority(authority: &str, secure: bool) -> Result<(String, u16), Strin
 /// 主机合法性：拒绝本机/私网/保留地址与数字/十六进制字面量主机。
 fn validate_host(host: &str, bracketed: bool) -> Result<(), String> {
     if host.is_empty() {
-        return Err("URL 缺少主机名".into());
+        return Err(t(Key::HttpUrlMissingHost).into());
     }
     if host
         .chars()
         .any(|c| c == '\\' || c.is_whitespace() || c.is_control())
     {
-        return Err("主机名含非法字符".into());
+        return Err(t(Key::HttpHostInvalidChars).into());
     }
     let ip: Option<std::net::IpAddr> = host.parse().ok();
     if bracketed && ip.is_none() {
-        return Err(format!("IPv6 地址非法：{host}"));
+        return Err(tf(Key::HttpIpv6Invalid, &[host]));
     }
     let lower = host.to_ascii_lowercase();
     if lower == "localhost" || lower.ends_with(".localhost") {
-        return Err("不允许访问本机地址".into());
+        return Err(t(Key::HttpLocalhostBlocked).into());
     }
     match ip {
         Some(std::net::IpAddr::V4(v4)) => {
             if blocked_v4(v4) {
-                return Err(format!("不允许访问内网/保留地址：{host}"));
+                return Err(tf(Key::HttpPrivateAddressBlocked, &[host]));
             }
         }
         Some(std::net::IpAddr::V6(v6)) => {
             if blocked_v6(v6) {
-                return Err(format!("不允许访问内网/保留地址：{host}"));
+                return Err(tf(Key::HttpPrivateAddressBlocked, &[host]));
             }
         }
         None => {
             // 浏览器会把 2130706433 / 0x7f000001 当 IPv4 解析：数字/十六进制主机一律拒绝
             if numeric_like_host(&lower) {
-                return Err(format!("不允许数字/十六进制主机名：{host}"));
+                return Err(tf(Key::HttpNumericHostBlocked, &[host]));
             }
             if !valid_domain(&lower) {
-                return Err(format!("主机名非法：{host}"));
+                return Err(tf(Key::HttpHostInvalid, &[host]));
             }
         }
     }
@@ -293,7 +294,7 @@ fn request_target(rest: &str) -> String {
 pub(crate) fn resolve_redirect(base: &HttpUrl, location: &str) -> Result<HttpUrl, String> {
     let loc = location.trim();
     if loc.is_empty() {
-        return Err("重定向地址为空".into());
+        return Err(t(Key::HttpRedirectEmpty).into());
     }
     if loc.contains("://") {
         return validate_url(loc);
@@ -495,7 +496,9 @@ const WINHTTP_DISABLE_REDIRECTS: u32 = 4;
 /// WINHTTP_FLAG_SECURE：https 请求必须置位。
 #[cfg(windows)]
 const WINHTTP_FLAG_SECURE: u32 = 0x0080_0000;
-/// WINHTTP_QUERY_STATUS_CODE / WINHTTP_QUERY_CONTENT_LENGTH / WINHTTP_QUERY_LOCATION。
+/// WINHTTP_QUERY_CONTENT_TYPE / CONTENT_LENGTH / STATUS_CODE / LOCATION。
+#[cfg(windows)]
+const WINHTTP_QUERY_CONTENT_TYPE: u32 = 1;
 #[cfg(windows)]
 const WINHTTP_QUERY_CONTENT_LENGTH: u32 = 5;
 #[cfg(windows)]
@@ -506,12 +509,19 @@ const WINHTTP_QUERY_LOCATION: u32 = 33;
 #[cfg(windows)]
 const WINHTTP_QUERY_FLAG_NUMBER: u32 = 0x2000_0000;
 
+/// 原始 HTTP 200 响应：Mermaid 需要同时校验 Content-Type 与 body。
+#[derive(Debug)]
+pub(crate) struct RawResponse {
+    pub(crate) body: Vec<u8>,
+    pub(crate) content_type: Option<String>,
+}
+
 /// 一次请求的结果：200 带响应体，重定向带 Location，其余只有状态码。
-#[cfg(windows)]
 struct Hop {
     status: u32,
     location: Option<String>,
     body: Option<Vec<u8>>,
+    content_type: Option<String>,
 }
 
 /// WinHTTP 句柄的 RAII 包装：离开作用域即关闭（含全部失败路径）。
@@ -520,9 +530,9 @@ struct Internet(sys::Hinter);
 
 #[cfg(windows)]
 impl Internet {
-    fn adopt(raw: sys::Hinter, what: &str) -> Result<Self, String> {
+    fn adopt(raw: sys::Hinter, what: Key) -> Result<Self, String> {
         if raw.is_null() {
-            Err(format!("{what}失败（错误码 {}）", last_error()))
+            Err(code_error(what))
         } else {
             Ok(Self(raw))
         }
@@ -551,6 +561,53 @@ fn last_error() -> u32 {
     unsafe { sys::GetLastError() }
 }
 
+#[cfg(windows)]
+fn code_error(what: Key) -> String {
+    tf(Key::HttpErrWithCode, &[t(what), &last_error().to_string()])
+}
+
+/// 抓取远程资源并返回原始响应（跳过图片解码）。
+/// 与 `fetch` 共享重定向/超时/降级策略；供 Mermaid SVG 下载复用。
+#[cfg(windows)]
+pub(crate) fn fetch_raw_response(url: &str) -> Result<RawResponse, String> {
+    fetch_raw_with(url, fetch_once)
+}
+
+/// 原始响应的逐跳驱动。测试注入内存 hop，可真实覆盖重定向与降级且零网络。
+fn fetch_raw_with(
+    url: &str,
+    mut once: impl FnMut(&HttpUrl) -> Result<Hop, String>,
+) -> Result<RawResponse, String> {
+    let mut current = validate_url(url)?;
+    let mut hops = 0usize;
+    loop {
+        let hop = once(&current)?;
+        match hop.status {
+            200 => {
+                return Ok(RawResponse {
+                    body: hop.body.unwrap_or_default(),
+                    content_type: hop.content_type,
+                });
+            }
+            301 | 302 | 303 | 307 | 308 => {
+                if hops >= MAX_REDIRECTS {
+                    return Err(tf(Key::HttpRedirectTooMany, &[&MAX_REDIRECTS.to_string()]));
+                }
+                let location = hop
+                    .location
+                    .ok_or_else(|| t(Key::HttpRedirectMissingLocation).to_string())?;
+                let next = resolve_redirect(&current, &location)?;
+                if is_downgrade(&current, &next) {
+                    return Err(t(Key::HttpRedirectDowngrade).to_string());
+                }
+                current = next;
+                hops += 1;
+            }
+            status => return Err(format!("HTTP {status}")),
+        }
+    }
+}
+
 /// 抓取并按 WIC 解码远程图片：只接受 200，手动跟跳（最多 3 次），响应体上限 20 MiB。
 #[cfg(windows)]
 fn fetch(url: &str) -> Result<ImageData, String> {
@@ -565,14 +622,14 @@ fn fetch(url: &str) -> Result<ImageData, String> {
             }
             301 | 302 | 303 | 307 | 308 => {
                 if hops >= MAX_REDIRECTS {
-                    return Err(format!("重定向次数超过 {MAX_REDIRECTS} 次"));
+                    return Err(tf(Key::HttpRedirectTooMany, &[&MAX_REDIRECTS.to_string()]));
                 }
                 let location = hop
                     .location
-                    .ok_or_else(|| "重定向响应缺少 Location".to_string())?;
+                    .ok_or_else(|| t(Key::HttpRedirectMissingLocation).to_string())?;
                 let next = resolve_redirect(&current, &location)?;
                 if is_downgrade(&current, &next) {
-                    return Err("拒绝从 https 跳转到 http".to_string());
+                    return Err(t(Key::HttpRedirectDowngrade).to_string());
                 }
                 current = next;
                 hops += 1;
@@ -600,21 +657,23 @@ fn fetch_once(url: &HttpUrl) -> Result<Hop, String> {
         )
     };
     if ok == 0 {
-        return Err(format!("发送请求失败（错误码 {}）", last_error()));
+        return Err(code_error(Key::HttpOpSendRequest));
     }
     let ok = unsafe { sys::WinHttpReceiveResponse(request.raw(), std::ptr::null_mut()) };
     if ok == 0 {
-        return Err(format!("接收响应失败（错误码 {}）", last_error()));
+        return Err(code_error(Key::HttpOpReceiveResponse));
     }
 
     let status = query_status(&request)?;
     if status == 200 {
         check_content_length(&request)?;
+        let content_type = query_header_string(&request, WINHTTP_QUERY_CONTENT_TYPE)?;
         let body = read_body(&request)?;
         return Ok(Hop {
             status,
             location: None,
             body: Some(body),
+            content_type,
         });
     }
     let location = if matches!(status, 301 | 302 | 303 | 307 | 308) {
@@ -626,6 +685,7 @@ fn fetch_once(url: &HttpUrl) -> Result<Hop, String> {
         status,
         location,
         body: None,
+        content_type: None,
     })
 }
 
@@ -641,7 +701,7 @@ fn open_session() -> Result<Internet, String> {
             0,
         )
     };
-    let session = Internet::adopt(raw, "打开 WinHTTP 会话")?;
+    let session = Internet::adopt(raw, Key::HttpOpOpenSession)?;
     let ok = unsafe {
         sys::WinHttpSetTimeouts(
             session.raw(),
@@ -652,7 +712,7 @@ fn open_session() -> Result<Internet, String> {
         )
     };
     if ok == 0 {
-        return Err(format!("设置 WinHTTP 超时失败（错误码 {}）", last_error()));
+        return Err(code_error(Key::HttpOpSetTimeouts));
     }
     Ok(session)
 }
@@ -661,7 +721,7 @@ fn open_session() -> Result<Internet, String> {
 fn open_connect(session: &Internet, url: &HttpUrl) -> Result<Internet, String> {
     let host = super::wide(&url.host);
     let raw = unsafe { sys::WinHttpConnect(session.raw(), host.as_ptr(), url.port, 0) };
-    Internet::adopt(raw, "连接远程主机")
+    Internet::adopt(raw, Key::HttpOpConnect)
 }
 
 #[cfg(windows)]
@@ -680,7 +740,7 @@ fn open_request(connect: &Internet, url: &HttpUrl) -> Result<Internet, String> {
             flags,
         )
     };
-    let request = Internet::adopt(raw, "创建 HTTP 请求")?;
+    let request = Internet::adopt(raw, Key::HttpOpCreateRequest)?;
     // 禁 Cookie/认证/自动重定向：抓图不携带会话凭据，跳转必须逐跳复核。
     // WINHTTP_OPTION_DISABLE_FEATURE 只接受请求句柄；设在会话句柄会返回
     // ERROR_WINHTTP_ACCESS_TYPE_DENIED(12018)，导致请求根本发不出去。
@@ -695,7 +755,7 @@ fn open_request(connect: &Internet, url: &HttpUrl) -> Result<Internet, String> {
         )
     };
     if ok == 0 {
-        return Err(format!("配置 HTTP 请求失败（错误码 {}）", last_error()));
+        return Err(code_error(Key::HttpOpConfigureRequest));
     }
     Ok(request)
 }
@@ -715,7 +775,7 @@ fn query_status(request: &Internet) -> Result<u32, String> {
         )
     };
     if ok == 0 {
-        return Err(format!("读取响应状态失败（错误码 {}）", last_error()));
+        return Err(code_error(Key::HttpOpReadStatus));
     }
     Ok(value)
 }
@@ -792,7 +852,7 @@ fn read_body(request: &Internet) -> Result<Vec<u8>, String> {
             )
         };
         if ok == 0 {
-            return Err(format!("读取响应数据失败（错误码 {}）", last_error()));
+            return Err(code_error(Key::HttpOpReadBody));
         }
         if read == 0 {
             break;
@@ -807,10 +867,9 @@ fn read_body(request: &Internet) -> Result<Vec<u8>, String> {
 
 #[cfg(windows)]
 fn too_large_text(bytes: u64) -> String {
-    format!(
-        "远程图片超过 {} MiB 上限（{} 字节）",
-        MAX_BYTES / (1024 * 1024),
-        bytes
+    tf(
+        Key::HttpResponseTooLarge,
+        &[&(MAX_BYTES / (1024 * 1024)).to_string(), &bytes.to_string()],
     )
 }
 
@@ -818,11 +877,11 @@ fn too_large_text(bytes: u64) -> String {
 #[cfg(windows)]
 fn decode_bytes(bytes: &[u8]) -> Result<ImageData, String> {
     if bytes.is_empty() {
-        return Err("远程图片响应为空".into());
+        return Err(t(Key::HttpResponseEmpty).into());
     }
     let path = temp_path(bytes);
     if let Err(e) = std::fs::write(&path, bytes) {
-        return Err(format!("写入远程图片临时文件失败：{e}"));
+        return Err(tf(Key::HttpTempWriteFailed, &[&e.to_string()]));
     }
     let decoded = super::decode_image(&path);
     let _ = std::fs::remove_file(&path);
@@ -1013,6 +1072,56 @@ mod tests {
         // 每跳都走同一校验：降级目标或内网目标在 resolve 阶段即被拒绝
         assert!(resolve_redirect(&https, "http://127.0.0.1/x.png").is_err());
         assert!(resolve_redirect(&https, "http://example.com/x.png").is_ok());
+    }
+
+    #[test]
+    fn raw_response_mock_follows_redirect_and_preserves_content_type() {
+        let mut calls = 0usize;
+        let response = fetch_raw_with("https://example.com/start.svg", |url| {
+            calls += 1;
+            if calls == 1 {
+                assert_eq!(url.target, "/start.svg");
+                Ok(Hop {
+                    status: 302,
+                    location: Some("/final.svg".into()),
+                    body: None,
+                    content_type: None,
+                })
+            } else {
+                assert_eq!(url.origin(), "https://example.com");
+                assert_eq!(url.target, "/final.svg");
+                Ok(Hop {
+                    status: 200,
+                    location: None,
+                    body: Some(b"<svg/>".to_vec()),
+                    content_type: Some("image/svg+xml; charset=utf-8".into()),
+                })
+            }
+        })
+        .expect("mock redirect should succeed");
+        assert_eq!(calls, 2);
+        assert_eq!(response.body, b"<svg/>");
+        assert_eq!(
+            response.content_type.as_deref(),
+            Some("image/svg+xml; charset=utf-8")
+        );
+    }
+
+    #[test]
+    fn raw_response_mock_rejects_https_downgrade_before_second_request() {
+        let mut calls = 0usize;
+        let error = fetch_raw_with("https://example.com/start.svg", |_| {
+            calls += 1;
+            Ok(Hop {
+                status: 301,
+                location: Some("http://example.com/final.svg".into()),
+                body: None,
+                content_type: None,
+            })
+        })
+        .expect_err("HTTPS downgrade must fail");
+        assert!(error.contains("https") && error.contains("http"), "{error}");
+        assert_eq!(calls, 1, "downgraded URL must never be fetched");
     }
 
     #[cfg(windows)]

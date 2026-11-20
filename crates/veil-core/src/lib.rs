@@ -1,3 +1,4 @@
+//! 策略层 (Strategy)：数据模型 + 纯计算，无 IO，无 GUI。
 //! veil-core：Veil 的纯逻辑内核。零 GUI、零异步运行时依赖（INSTANCE §2 硬门禁）。
 //!
 //! 唯一公开入口是 [`Session`] 门面（docs/01-define-design.md B2 深模块判定）。
@@ -17,8 +18,8 @@ pub mod toc;
 pub use callouts::CalloutRegistry;
 pub use link_safety::{link_scheme, link_url_is_safe, percent_decode_path};
 pub use mermaid::{
-    detect_type, mermaid_ink_png_url, mermaid_live_url, MermaidTemplate, CLASS_TEMPLATE,
-    ER_TEMPLATE, FLOWCHART_TEMPLATE, MERMAID_INK_BASE, MERMAID_INK_INSERT_WIDTH,
+    detect_type, mermaid_ink_png_url, mermaid_ink_svg_url, mermaid_live_url, MermaidTemplate,
+    CLASS_TEMPLATE, ER_TEMPLATE, FLOWCHART_TEMPLATE, MERMAID_INK_BASE, MERMAID_INK_INSERT_WIDTH,
     MERMAID_INK_PREVIEW_WIDTH, MERMAID_LIVE_BASE, SEQUENCE_TEMPLATE, STATE_TEMPLATE,
 };
 pub use range::{Bias, MarkId, Range};

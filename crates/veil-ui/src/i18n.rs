@@ -49,13 +49,13 @@ keys! {
 
     MenuFileNew => "menu.file.new", "新建";
     MenuFileNewWindow => "menu.file.new_window", "新建窗口";
-    MenuFileOpen => "menu.file.open", "打开";
+    MenuFileOpen => "menu.file.open", "打开…";
     MenuFileQuickOpen => "menu.file.quick_open", "快速打开";
     MenuFileSave => "menu.file.save", "保存";
-    MenuFileSaveAs => "menu.file.save_as", "另存为";
+    MenuFileSaveAs => "menu.file.save_as", "另存为…";
     MenuFileExportHtml => "menu.file.export_html", "导出 HTML";
     MenuFileExportPdf => "menu.file.export_pdf", "导出 PDF";
-    MenuFilePrint => "menu.file.print", "打印";
+    MenuFilePrint => "menu.file.print", "打印…";
     MenuFilePrintPreview => "menu.file.print_preview", "打印预览";
     MenuFileVersionHistory => "menu.file.version_history", "版本历史";
     MenuFileQuit => "menu.file.quit", "关闭窗口";
@@ -71,7 +71,7 @@ keys! {
     MenuEditLink => "menu.edit.link", "链接";
     MenuEditFind => "menu.edit.find", "查找";
     MenuEditReplace => "menu.edit.replace", "替换";
-    MenuEditInsertImage => "menu.edit.insert_image", "插入图片";
+    MenuEditInsertImage => "menu.edit.insert_image", "插入图片…";
 
     MenuViewOutline => "menu.view.outline", "大纲面板";
     MenuViewZoomIn => "menu.view.zoom_in", "放大";
@@ -102,6 +102,7 @@ keys! {
     ShortcutRedo => "shortcut.redo", "Ctrl+Shift+Z";
     ShortcutCut => "shortcut.cut", "Ctrl+X";
     ShortcutCopy => "shortcut.copy", "Ctrl+C";
+    ShortcutCopyCode => "shortcut.copy_code", "Ctrl+Shift+C";
     ShortcutPaste => "shortcut.paste", "Ctrl+V";
     ShortcutSelectAll => "shortcut.select_all", "Ctrl+A";
     ShortcutBold => "shortcut.bold", "Ctrl+B";
@@ -175,14 +176,14 @@ keys! {
     CtxSelectAll => "ctx.select_all", "全选";
     CtxOpenInBrowser => "ctx.open_in_browser", "在浏览器中打开";
     CtxCopyLink => "ctx.copy_link", "复制链接地址";
-    CtxInsertImage => "ctx.insert_image", "插入图片";
+    CtxInsertImage => "ctx.insert_image", "插入图片…";
     CtxCopyImagePath => "ctx.copy_image_path", "复制图片路径";
     CtxCopyCode => "ctx.copy_code", "复制代码块";
     CtxReloadImage => "ctx.reload_image", "重新加载图片";
     CtxImageMissing => "ctx.image_missing", "图片文件缺失（当前显示替代文本）";
-    CtxMermaidPreview => "ctx.mermaid.preview", "在 mermaid.live 预览";
-    CtxMermaidPreviewImage => "ctx.mermaid.preview_image", "预览图片（在线渲染）";
-    CtxMermaidInsertImage => "ctx.mermaid.insert_image", "下载并插入图片";
+    CtxMermaidPreview => "ctx.mermaid.preview", "在 mermaid.live 编辑（在线）";
+    CtxMermaidPreviewImage => "ctx.mermaid.preview_image", "预览当前源码图";
+    CtxMermaidInsertImage => "ctx.mermaid.insert_image", "插入图片快照（独立，可能过期）";
     CtxMermaidCopySource => "ctx.mermaid.copy_source", "复制源码";
     CtxMermaidCopyLink => "ctx.mermaid.copy_link", "复制预览链接";
     CtxMermaidInsertFlowchart => "ctx.mermaid.insert_flowchart", "插入流程图模板";
@@ -320,6 +321,11 @@ keys! {
     NoticeConfigNotSaved => "notice.config_not_saved", "配置未保存：{}";
     ErrEventLoopCreate => "error.event_loop_create", "创建事件循环失败: {}";
     ErrEventLoopRun => "error.event_loop_run", "事件循环错误: {}";
+    CliUsage => "cli.usage", "用法: veil [--new-window] [路径]";
+    CliUnknownOption => "cli.unknown_option", "未知参数：{}；{}";
+    CliInvalidPath => "cli.invalid_path", "文档路径无效";
+    CliCurrentDir => "cli.current_dir", "无法确定当前目录: {}";
+    CliPathOutOfBounds => "cli.path_out_of_bounds", "文档路径越界";
 
     // ---- 编辑交互提示 ----
     NoticeFullscreenOn => "notice.fullscreen_on", "全屏（F11 退出）";
@@ -327,6 +333,8 @@ keys! {
     NoticeZoom => "notice.zoom", "缩放 {}%";
     NoticeImagePasteNeedsFile => "notice.image_paste_needs_file", "图片粘贴需要关联文件（草稿无落盘目录）";
     NoticeImageSaveFailed => "notice.image_save_failed", "图片落盘失败：{}";
+    NoticeMermaidSnapshotNeedsFile => "notice.mermaid_snapshot_needs_file", "Mermaid 快照未插入：请先保存文档，再写入本地图片";
+    NoticeMermaidSnapshotSaveFailed => "notice.mermaid_snapshot_save_failed", "Mermaid 快照保存失败，未修改原文：{}";
     NoticeImageReadFailed => "notice.image_read_failed", "图片读取失败：{}";
     NoticeInsertImageNeedsFile => "notice.insert_image_needs_file", "插入图片需要关联文件（草稿无相对路径基准）";
     NoticeUnsupportedImage => "notice.unsupported_image", "所选文件不是支持的图片格式";
@@ -345,11 +353,12 @@ keys! {
     NoticeTypewriterMode => "notice.typewriter_mode", "打字机模式：{}";
     NoticeRemoteImageFailed => "notice.remote_image_failed", "部分远程图片加载失败，已显示替代文本";
     NoticeMermaidInkNotice => "notice.mermaid_ink_notice", "图片由 mermaid.ink 在线渲染：该图源码将发送给第三方服务";
-    NoticeMermaidRemoteBlocked => "notice.mermaid_remote_blocked", "已关闭远程图片加载，无法在线渲染；可改用「在 mermaid.live 预览」";
-    NoticeMermaidInkFailed => "notice.mermaid_ink_failed", "在线渲染失败：{}；可改用「在 mermaid.live 预览」";
-    NoticeMermaidImageInserted => "notice.mermaid_image_inserted", "已插入 Mermaid 图片：{}";
+    NoticeMermaidRemoteBlocked => "notice.mermaid_remote_blocked", "已关闭远程图片加载，无法在线渲染；可改用「在 mermaid.live 编辑」";
+    NoticeMermaidInkFailed => "notice.mermaid_ink_failed", "Mermaid 渲染失败：{}；可改用「在 mermaid.live 编辑」";
+    NoticeMermaidImageInserted => "notice.mermaid_image_inserted", "已插入独立 Mermaid 图片快照（不会随源码更新）：{}";
     NoticeRemoteImagesBlocked => "notice.remote_images_blocked", "已阻止远程图片";
     NoticeRemoteImagesAllowed => "notice.remote_images_allowed", "已允许远程图片";
+    NoticeMermaidSourceTooLarge => "notice.mermaid_source_too_large", "Mermaid 源码超过 128 KiB，跳过在线渲染";
     ToggleOn => "toggle.on", "开";
     ToggleOff => "toggle.off", "关";
 
@@ -432,6 +441,11 @@ keys! {
         "以下 ProgID 值由其他程序写入，已保留未覆盖：{}";
     AssocUnregisterKept => "assoc.note.unregister_kept",
         "以下关联项不是本程序写入或已被改写，已保留：{}";
+    AssocProgIdDescription => "assoc.item.prog_id_description", "ProgID 描述";
+    AssocOpenCommand => "assoc.item.open_command", "打开命令";
+    AssocAppIcon => "assoc.item.app_icon", "veil.exe 图标";
+    AssocOpenWithEntry => "assoc.item.open_with_entry", "「打开方式」项";
+    AssocMarkdownDefault => "assoc.item.markdown_default", ".md 默认值";
     AssocManualDefault => "assoc.note.manual_default",
         "\n\n要让 .md 双击默认由 Veil 打开，请在「设置 → 应用 → 默认应用」中选择 Veil：Windows 不允许程序自行修改默认应用。";
     AssocRegisteredBody => "assoc.registered_body",
@@ -516,6 +530,52 @@ keys! {
     WicConvertPixels => "wic.convert_pixels", "转换像素格式";
     WicReadSize => "wic.read_size", "读取图片尺寸";
     WicReadPixels => "wic.read_pixels", "读取图片像素";
+
+    // ---- 平台层（启动 / IPC / HTTP） ----
+    IpcPathAbsolute => "ipc.path_absolute", "IPC 文档路径必须是绝对路径";
+    IpcPathUtf8 => "ipc.path_utf8", "IPC 文档路径不是有效 UTF-8";
+    IpcPathInvalid => "ipc.path_invalid", "IPC 文档路径无效";
+    IpcPathTooLong => "ipc.path_too_long", "IPC 文档路径过长";
+    IpcConnectPrimary => "ipc.connect_primary", "无法连接 Veil 主进程: {}";
+    IpcUnknown => "ipc.unknown", "未知错误";
+    IpcUnsupported => "ipc.unsupported", "当前平台不支持单实例 IPC；将使用独立进程";
+    ErrMermaidHttpUnsupported => "error.mermaid_http_unsupported", "当前平台不支持 Mermaid HTTP 传输";
+    HttpUrlEmpty => "http.url_empty", "URL 为空";
+    HttpUrlTooLong => "http.url_too_long", "URL 过长（上限 {} 字符）";
+    HttpUrlControl => "http.url_control", "URL 含控制字符";
+    HttpUrlMissingScheme => "http.url_missing_scheme", "URL 缺少协议头（仅支持 http/https）";
+    HttpUnsupportedScheme => "http.unsupported_scheme", "不支持的协议：{}";
+    HttpUrlMissingHost => "http.url_missing_host", "URL 缺少主机名";
+    HttpUrlUserInfo => "http.url_user_info", "URL 不允许包含用户信息";
+    HttpIpv6MissingBracket => "http.ipv6_missing_bracket", "IPv6 主机缺少右括号";
+    HttpHostTrailingChars => "http.host_trailing_chars", "主机名后存在非法字符";
+    HttpIpv6NeedsBrackets => "http.ipv6_needs_brackets", "IPv6 主机必须用方括号包裹";
+    HttpPortEmpty => "http.port_empty", "端口为空";
+    HttpPortInvalid => "http.port_invalid", "端口非法：{}";
+    HttpPortOutOfRange => "http.port_out_of_range", "端口超出范围：{}";
+    HttpHostInvalidChars => "http.host_invalid_chars", "主机名含非法字符";
+    HttpIpv6Invalid => "http.ipv6_invalid", "IPv6 地址非法：{}";
+    HttpLocalhostBlocked => "http.localhost_blocked", "不允许访问本机地址";
+    HttpPrivateAddressBlocked => "http.private_address_blocked", "不允许访问内网/保留地址：{}";
+    HttpNumericHostBlocked => "http.numeric_host_blocked", "不允许数字/十六进制主机名：{}";
+    HttpHostInvalid => "http.host_invalid", "主机名非法：{}";
+    HttpRedirectEmpty => "http.redirect_empty", "重定向地址为空";
+    HttpRedirectTooMany => "http.redirect_too_many", "重定向次数超过 {} 次";
+    HttpRedirectMissingLocation => "http.redirect_missing_location", "重定向响应缺少 Location";
+    HttpRedirectDowngrade => "http.redirect_downgrade", "拒绝从 https 跳转到 http";
+    HttpErrWithCode => "http.err_with_code", "{}失败（错误码 {}）";
+    HttpOpOpenSession => "http.op.open_session", "打开 WinHTTP 会话";
+    HttpOpConnect => "http.op.connect", "连接远程主机";
+    HttpOpCreateRequest => "http.op.create_request", "创建 HTTP 请求";
+    HttpOpSetTimeouts => "http.op.set_timeouts", "设置 WinHTTP 超时";
+    HttpOpConfigureRequest => "http.op.configure_request", "配置 HTTP 请求";
+    HttpOpSendRequest => "http.op.send_request", "发送请求";
+    HttpOpReceiveResponse => "http.op.receive_response", "接收响应";
+    HttpOpReadStatus => "http.op.read_status", "读取响应状态";
+    HttpOpReadBody => "http.op.read_body", "读取响应数据";
+    HttpResponseTooLarge => "http.response_too_large", "远程图片超过 {} MiB 上限（{} 字节）";
+    HttpResponseEmpty => "http.response_empty", "远程图片响应为空";
+    HttpTempWriteFailed => "http.temp_write_failed", "写入远程图片临时文件失败：{}";
 
     // ---- 设置模态 ----
     ModalSettingsTitle => "modal.settings.title", "设置";
@@ -617,6 +677,22 @@ pub fn tf(key: Key, args: &[&str]) -> String {
     out
 }
 
+/// 错误信息单行裁剪：仅取首行，超过 `MAX_ERR_CHARS` 字符时截断并追加省略号。
+///
+/// 远程渲染/RPC 错误可能携带 URL、SVG 片段或反序列化细节，直接拼进状态栏会撑爆
+/// 单行提示。这里按字符（非字节）裁剪，保证 UTF-8 边界安全；完整信息仍由调用点
+/// 写 stderr 供排查。
+pub fn clip_error(msg: &str) -> String {
+    const MAX_ERR_CHARS: usize = 120;
+    let first_line = msg.lines().next().unwrap_or("").trim();
+    if first_line.chars().count() <= MAX_ERR_CHARS {
+        return first_line.to_string();
+    }
+    let mut out: String = first_line.chars().take(MAX_ERR_CHARS).collect();
+    out.push('…');
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -706,7 +782,7 @@ mod tests {
     #[test]
     fn spot_check_matches_legacy_literals() {
         assert_eq!(t(Key::MenuFile), "文件");
-        assert_eq!(t(Key::MenuFilePrint), "打印");
+        assert_eq!(t(Key::MenuFilePrint), "打印…");
         assert_eq!(t(Key::ShortcutPrint), "Ctrl+Shift+P");
         assert_eq!(t(Key::MenuCurrent), "当前");
         assert_eq!(t(Key::ModalOpenFailedTitle), "打开失败");
@@ -737,6 +813,26 @@ mod tests {
         // 缺参：返回词条原文（占位符保留），不静默吞成空串
         assert_eq!(tf(Key::StatusSaved, &[]), " · 已保存 {}");
         assert_eq!(tf(Key::MenuFile, &["多余"]), "文件");
+    }
+
+    /// 错误裁剪：只取首行；超长按字符截断并加省略号；UTF-8 安全。
+    #[test]
+    fn clip_error_keeps_first_line_and_caps_length() {
+        // 多行错误只留首行（去掉尾部空白）
+        assert_eq!(
+            clip_error("HTTP: connection reset by peer\n  at line 2\n  at line 3"),
+            "HTTP: connection reset by peer"
+        );
+        // 短错误原样保留
+        assert_eq!(clip_error("timeout"), "timeout");
+        // 超长错误截到 120 字符 + 省略号，且不破坏中文字符边界
+        let long = "错".repeat(200);
+        let clipped = clip_error(&long);
+        assert_eq!(clipped.chars().count(), 121, "120 字符 + 省略号");
+        assert!(clipped.ends_with('…'));
+        // 恰好 120 字符不加省略号
+        let exact = "a".repeat(120);
+        assert_eq!(clip_error(&exact), exact);
     }
 
     /// 参数不足：整体回退为词条原文，不半填、不空串、不 panic。

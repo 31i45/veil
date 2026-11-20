@@ -8,11 +8,11 @@ mod frame;
 pub(crate) mod highlight;
 pub(crate) mod highlight_bg;
 pub(crate) mod history;
+pub(crate) mod image_preview;
 mod layout;
 pub(crate) mod linebreak;
 pub(crate) mod modal;
 pub(crate) mod outline;
-pub(crate) mod image_preview;
 pub(crate) mod print_preview;
 pub(crate) mod quick_open;
 pub(crate) mod search;
@@ -30,14 +30,13 @@ pub use frame::Frame;
 pub(crate) use history::History;
 #[cfg(test)]
 pub(crate) use layout::fit_size_box;
+pub(crate) use layout::image_display_size;
 pub(crate) use layout::toc_display_text;
 #[cfg(test)]
 pub(crate) use layout::MAX_BLOCK_BYTES;
 pub(crate) use layout::{
     block_details_spans, cell_image_alt_spans, cell_math_spans, node_active, oversize_notice,
 };
-pub(crate) use layout::image_display_size;
-pub(crate) use veil_core::image_standalone as image_is_standalone;
 pub(crate) use layout::{
     list_content_start, list_marker_of, ordered_list_epoch, ordered_list_ordinals, toc_list_epoch,
     ListMarker,
@@ -47,3 +46,4 @@ pub(crate) use layout::{OverKind, UnderKind};
 pub(crate) use outline::{Outline, OutlineEntry};
 pub(crate) use quick_open::QuickOpen;
 pub(crate) use search::Search;
+pub(crate) use veil_core::image_standalone as image_is_standalone;

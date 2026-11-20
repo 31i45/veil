@@ -165,7 +165,12 @@ impl Highlighter {
     }
 
     /// 高亮整块文本。`key` 为块起始偏移（同块编辑不变化，块整体平移会自然失配）。
-    pub fn highlight(&mut self, key: usize, lang: &str, text: &str) -> Vec<(usize, usize, TokenKind)> {
+    pub fn highlight(
+        &mut self,
+        key: usize,
+        lang: &str,
+        text: &str,
+    ) -> Vec<(usize, usize, TokenKind)> {
         // 后台预计算路径优先：命中且文本未变 → 零 parse 直接返回。
         if let Some((cached_text, spans)) = self.bg_spans.get(&key) {
             if cached_text == text {
@@ -346,7 +351,11 @@ mod tests {
     fn assert_spans_valid(text: &str, spans: &[(usize, usize, TokenKind)]) {
         for &(start, end, _) in spans {
             assert!(start <= end, "start={start} > end={end}（text={text:?}）");
-            assert!(end <= text.len(), "end={end} > len={}（text={text:?}）", text.len());
+            assert!(
+                end <= text.len(),
+                "end={end} > len={}（text={text:?}）",
+                text.len()
+            );
             assert!(
                 text.is_char_boundary(start),
                 "start={start} 非字符边界（text={text:?}）"
@@ -396,7 +405,10 @@ mod tests {
             // 三引号中文串
             ("python", "s = \"\"\"中文三引号😀\n第二行\"\"\""),
             // 中文标识符 + 中文注释混排
-            ("markdown", "```rust\nfn 中文() { println!(\"你好😀\"); }\n```"),
+            (
+                "markdown",
+                "```rust\nfn 中文() { println!(\"你好😀\"); }\n```",
+            ),
         ];
         for &(lang, src) in cases {
             let sp = hl(lang, src);
@@ -556,10 +568,8 @@ mod tests {
         // 预先 cache_spans → 后续 highlight 应直接返回， blocks 缓存不变（未 parse）
         let mut h = Highlighter::default();
         let body = "fn cached() { let x = 1; }\n".repeat(3);
-        let fake_spans: Vec<(usize, usize, TokenKind)> = vec![
-            (0, 2, TokenKind::Keyword),
-            (3, 9, TokenKind::Function),
-        ];
+        let fake_spans: Vec<(usize, usize, TokenKind)> =
+            vec![(0, 2, TokenKind::Keyword), (3, 9, TokenKind::Function)];
         h.cache_spans(7, body.clone(), fake_spans.clone());
         assert!(h.has(7));
         // 同步 parse 路径未命中 → 走 bg_spans 快速路径

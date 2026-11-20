@@ -82,8 +82,13 @@ fn hex(c: [u8; 3]) -> String {
 
 /// 会话 → 自包含 HTML 文档（纯函数，headless 可测）。
 /// `style` 为当前主题快照（值语义），由调用方（App）在主题切换点同步，本函数不感知主题。
-pub fn html_of(session: &Session, style: &ExportStyle, font: &latex_rust::MathFont) -> String {
-    html_of_doc(session, style, font, None)
+pub fn html_of(
+    session: &Session,
+    style: &ExportStyle,
+    font: &latex_rust::MathFont,
+    mermaids: Option<&std::collections::HashMap<veil_core::BlockId, veil_ui::MermaidImage>>,
+) -> String {
+    html_of_doc(session, style, font, None, mermaids)
 }
 
 /// 同 [`html_of`]，但可用 `base_dir` 把文档内相对图片内嵌为 data URI。
@@ -93,6 +98,7 @@ pub fn html_of_doc(
     style: &ExportStyle,
     font: &latex_rust::MathFont,
     base_dir: Option<&Path>,
+    mermaids: Option<&std::collections::HashMap<veil_core::BlockId, veil_ui::MermaidImage>>,
 ) -> String {
     let mut body = String::new();
     let blocks = session.blocks();
@@ -152,6 +158,35 @@ pub fn html_of_doc(
         if kind == BlockKind::Math {
             let tex = session.math_source(id).unwrap_or_default();
             body.push_str(&math_html(&tex, font));
+            i += 1;
+            continue;
+        }
+        // BlockKind::Mermaid：优先用缓存中的 SVG 内嵌，退化为 base64 PNG，无数据时降级源码围栏。
+        if kind == BlockKind::Mermaid {
+            if let Some(mermaid) = mermaids.and_then(|m| m.get(&id)) {
+                if let Some(svg) = &mermaid.svg_text {
+                    body.push_str(&format!(
+                        "<div class=\"veil-mermaid\" style=\"text-align:center;\">{}</div>\n",
+                        svg
+                    ));
+                    i += 1;
+                    continue;
+                }
+                // 只有位图：base64 内嵌
+                let b64 = STANDARD.encode(&mermaid.data);
+                body.push_str(&format!(
+                    "<div class=\"veil-mermaid\" style=\"text-align:center;\"><img src=\"data:image/png;base64,{}\" width=\"{}\" height=\"{}\" alt=\"Mermaid diagram\"/></div>\n",
+                    b64, mermaid.width, mermaid.height
+                ));
+                i += 1;
+                continue;
+            }
+            // 缓存无 Mermaid 数据：降级为源码围栏 + 注释提示
+            let source = session.text_slice(range).unwrap_or_default();
+            body.push_str(&format!(
+                "<!-- Mermaid 渲染数据不可用：导出时未预览过该块。可在浏览器中打开 https://mermaid.live 查看源码。 -->\n<pre><code class=\"language-mermaid\">{}</code></pre>\n",
+                escape_html(&source),
+            ));
             i += 1;
             continue;
         }
@@ -1124,8 +1159,7 @@ fn strip_unsafe_url_attrs(attr_src: &str, tag: &str) -> Option<String> {
         let drop = name.is_empty()
             || name.starts_with("on")
             || matches!(name.as_str(), "srcdoc" | "srcset" | "ping")
-            || (is_url_attr(&name)
-                && val.is_none_or(|v| !url_attr_is_safe(tag, &name, v)));
+            || (is_url_attr(&name) && val.is_none_or(|v| !url_attr_is_safe(tag, &name, v)));
         if drop {
             changed = true;
         } else {
@@ -1693,9 +1727,7 @@ fn decode_entity(s: &str) -> Option<(char, usize)> {
 
 /// 去掉本地路径上的 `?query` 与 `#fragment`（导出只关心文件本身）。
 fn strip_query_fragment(value: &str) -> &str {
-    let cut = value
-        .find(['?', '#'])
-        .unwrap_or(value.len());
+    let cut = value.find(['?', '#']).unwrap_or(value.len());
     &value[..cut]
 }
 
@@ -1728,7 +1760,13 @@ fn is_data_image(value: &str) -> bool {
     let Some(mime) = rest.strip_suffix(";base64") else {
         return false;
     };
-    let known = ["image/png", "image/jpeg", "image/gif", "image/webp", "image/bmp"];
+    let known = [
+        "image/png",
+        "image/jpeg",
+        "image/gif",
+        "image/webp",
+        "image/bmp",
+    ];
     if !known.contains(&mime) {
         return false;
     }
@@ -1771,7 +1809,6 @@ pub(crate) fn unique_file_path(path: &Path) -> PathBuf {
     path.to_path_buf()
 }
 
-
 /// 产品层导出器：HTML 写到源文件同名的 .html（经 FileStore 原子写）。
 pub struct HtmlExporter {
     pub font: latex_rust::MathFont,
@@ -1785,6 +1822,7 @@ impl Exporter for HtmlExporter {
         style: ExportStyle,
         source_path: Option<&Path>,
         target: Option<&Path>,
+        mermaids: Option<&std::collections::HashMap<veil_core::BlockId, veil_ui::MermaidImage>>,
     ) -> Result<PathBuf, String> {
         let out = match target {
             Some(t) => t.to_path_buf(),
@@ -1799,8 +1837,8 @@ impl Exporter for HtmlExporter {
         // 本地图片按文档所在目录解析并内嵌（草稿无源路径时保留相对外链）。
         let base_dir = source_path.and_then(|p| p.parent());
         let html = match base_dir {
-            Some(dir) => html_of_doc(session, &style, &self.font, Some(dir)),
-            None => html_of(session, &style, &self.font),
+            Some(dir) => html_of_doc(session, &style, &self.font, Some(dir), mermaids),
+            None => html_of(session, &style, &self.font, mermaids),
         };
         self.store.save(&out, html.as_bytes())?;
         Ok(out)
@@ -1821,9 +1859,85 @@ mod tests {
     /// 从完整文档中切出 body 段（模板外壳另有钉死测试）。
     fn body_of(md: &str) -> String {
         let s = Session::open(md);
-        let html = html_of(&s, &ExportStyle::default(), &font());
+        let html = html_of(&s, &ExportStyle::default(), &font(), None);
         let body = html.split_once("<body>\n").unwrap().1;
         body.strip_suffix("</body>\n</html>\n").unwrap().to_string()
+    }
+
+    /// 完整版把 11.12.0 corpus 的每张本地 SVG 内嵌；关闭远程图片也不影响导出。
+    #[cfg(feature = "mermaid-offline")]
+    #[test]
+    fn offline_mermaid_corpus_html_is_self_contained() {
+        use veil_ui::MermaidRenderer;
+
+        let mut markdown = String::new();
+        for (name, source) in veil_mermaid_offline::corpus::MERMAID_11_12_CORPUS {
+            markdown.push_str(&format!("## {name}\n\n```mermaid\n{source}\n```\n\n"));
+        }
+        let session = Session::open(&markdown);
+        let ids: Vec<_> = session
+            .blocks()
+            .into_iter()
+            .filter_map(|(id, kind, _)| (kind == BlockKind::Mermaid).then_some(id))
+            .collect();
+        assert_eq!(
+            ids.len(),
+            veil_mermaid_offline::corpus::MERMAID_11_12_CORPUS.len()
+        );
+
+        let mut renderer = crate::platform::mermaid_offline::OfflineMermaid::new();
+        assert!(!renderer.requires_network());
+        renderer.set_allowed(false);
+        let mut images = HashMap::new();
+        let mut svg_roots = Vec::new();
+        for (&(name, source), id) in veil_mermaid_offline::corpus::MERMAID_11_12_CORPUS
+            .iter()
+            .zip(ids)
+        {
+            let image = renderer
+                .render_blocking(name.into(), source.into(), false)
+                .unwrap_or_else(|error| panic!("{name}: {error}"));
+            let svg = image
+                .svg_text
+                .clone()
+                .unwrap_or_else(|| panic!("{name}: missing local SVG"));
+            assert!(
+                !svg.to_ascii_lowercase().contains("foreignobject"),
+                "{name}"
+            );
+            let root_end = svg
+                .find('>')
+                .unwrap_or_else(|| panic!("{name}: no SVG root"));
+            svg_roots.push((name, svg[..=root_end].to_string()));
+            images.insert(id, image);
+        }
+
+        let html = html_of(&session, &ExportStyle::default(), &font(), Some(&images));
+        assert_eq!(
+            html.matches("<div class=\"veil-mermaid\"").count(),
+            svg_roots.len(),
+            "每个 corpus 块都必须使用本地 Mermaid 数据"
+        );
+        assert!(html.matches("<svg").count() >= svg_roots.len());
+        for (name, root) in &svg_roots {
+            assert!(
+                html.contains(root.as_str()),
+                "{name}: 本地 SVG 根节点未内嵌"
+            );
+        }
+        let lower = html.to_ascii_lowercase();
+        for forbidden in [
+            "mermaid.ink",
+            "mermaid.live",
+            "mermaid 渲染数据不可用",
+            "foreignobject",
+            "<script",
+            "src=\"http",
+            "href=\"http",
+            "@import",
+        ] {
+            assert!(!lower.contains(forbidden), "导出不得包含 {forbidden}");
+        }
     }
 
     #[test]
@@ -1857,7 +1971,8 @@ mod tests {
     }
 
     #[test]
-    fn inline_abbr_title_entity_is_not_double_escaped() {        // TASK04-D007：作者已写好的实体只做一次处理，不得变成 `&amp;amp;`。
+    fn inline_abbr_title_entity_is_not_double_escaped() {
+        // TASK04-D007：作者已写好的实体只做一次处理，不得变成 `&amp;amp;`。
         let body = body_of("<abbr title=\"A &amp; B\">AB</abbr>\n");
         assert_eq!(body, "<p><abbr title=\"A &amp; B\">AB</abbr></p>\n");
         // 裸 `&` 仍必须转义为实体。
@@ -2021,7 +2136,7 @@ mod tests {
             r##"[{"name":"FIXME","label":"待修复","color":"#c00","icon":"!"}]"##,
         );
         let s = Session::open_with_callouts("> [!FIXME]\n> 内容\n", &reg);
-        let html = html_of(&s, &ExportStyle::default(), &font());
+        let html = html_of(&s, &ExportStyle::default(), &font(), None);
         let body = html.split_once("<body>\n").unwrap().1;
         assert!(
             body.contains("<div class=\"callout callout-fixme\""),
@@ -2291,7 +2406,7 @@ mod tests {
     #[test]
     fn document_shell_wraps_body() {
         let s = Session::open("x\n");
-        let html = html_of(&s, &ExportStyle::default(), &font());
+        let html = html_of(&s, &ExportStyle::default(), &font(), None);
         assert!(
             html.starts_with("<!DOCTYPE html>\n<html"),
             "实际输出: {html}"
@@ -2318,7 +2433,7 @@ mod tests {
     #[test]
     fn shell_colors_follow_style_and_dark_declares_scheme() {
         let s = Session::open("x\n");
-        let light = html_of(&s, &ExportStyle::default(), &font());
+        let light = html_of(&s, &ExportStyle::default(), &font(), None);
         // 默认浅色：与改造前硬编码色一致（视觉不回退）
         assert!(light.contains("background:#ffffff"), "实际输出: {light}");
         assert!(light.contains("color:#1e1e1e"), "实际输出: {light}");
@@ -2328,7 +2443,7 @@ mod tests {
             !light.contains("color-scheme: dark"),
             "浅色不得声明深色 color-scheme"
         );
-        let dark = html_of(&s, &dark_style(), &font());
+        let dark = html_of(&s, &dark_style(), &font(), None);
         assert!(dark.contains("background:#1e1e1e"), "实际输出: {dark}");
         assert!(dark.contains("color:#dcdcdc"), "实际输出: {dark}");
         assert!(dark.contains("a{color:#7fb4f5}"), "实际输出: {dark}");
@@ -2422,7 +2537,7 @@ mod tests {
     fn export_has_no_remote_resources() {
         // 单文件自包含是离线编辑器的硬约束：不得引入任何 http(s) 资源或 @import
         for style in [ExportStyle::default(), dark_style()] {
-            let html = html_of(&Session::open("# T\n\n[a](b.md)\n"), &style, &font());
+            let html = html_of(&Session::open("# T\n\n[a](b.md)\n"), &style, &font(), None);
             assert!(!html.contains("src=\"http"), "不得引用远程图片/脚本");
             assert!(!html.contains("href=\"http"), "不得引用远程样式/链接");
             assert!(!html.contains("@import"), "不得 @import 远程样式表");
@@ -2728,7 +2843,7 @@ mod tests {
     #[test]
     fn footnote_export_stays_self_contained() {
         let s = Session::open("x[^1]\n\n[^1]: **粗**\n");
-        let html = html_of(&s, &ExportStyle::default(), &font());
+        let html = html_of(&s, &ExportStyle::default(), &font(), None);
         assert!(!html.contains("http"), "实际输出: {html}");
         assert!(
             html.contains(".fnref a{text-decoration:none}"),
@@ -2768,13 +2883,13 @@ mod tests {
         let s = Session::open("# T\n");
         let style = ExportStyle::default();
         let got = e
-            .export_html(&s, style, Some(Path::new("dir/a.md")), None)
+            .export_html(&s, style, Some(Path::new("dir/a.md")), None, None)
             .unwrap();
         assert_eq!(got, PathBuf::from("dir/a.html")); // 同名换扩展名
         let bytes = files.borrow()[Path::new("dir/a.html")].clone();
         assert_eq!(
             String::from_utf8(bytes).unwrap(),
-            html_of(&s, &style, &font())
+            html_of(&s, &style, &font(), None)
         ); // 落盘内容 = html_of 输出
     }
 
@@ -2788,7 +2903,7 @@ mod tests {
         };
         let s = Session::open("x\n");
         assert!(e
-            .export_html(&s, ExportStyle::default(), None, None)
+            .export_html(&s, ExportStyle::default(), None, None, None)
             .is_err()); // 草稿：可读错误
         assert!(files.borrow().is_empty()); // 无半截产物
     }
@@ -2809,6 +2924,7 @@ mod tests {
                 ExportStyle::default(),
                 None,
                 Some(Path::new("out/draft.html")),
+                None,
             )
             .unwrap();
         assert_eq!(got, PathBuf::from("out/draft.html"));
@@ -2871,7 +2987,7 @@ mod tests {
         std::fs::create_dir_all(dir.join("assets")).unwrap();
         std::fs::write(dir.join("assets/p.png"), PNG_HEADER).unwrap();
         let s = Session::open("![pic](assets/p.png)\n");
-        let html = html_of_doc(&s, &ExportStyle::default(), &font(), Some(&dir));
+        let html = html_of_doc(&s, &ExportStyle::default(), &font(), Some(&dir), None);
         assert!(
             html.contains("src=\"data:image/png;base64,iVBORw0KGgoAAAAA\""),
             "须内嵌为 data URI: {html}"
@@ -2884,7 +3000,7 @@ mod tests {
     fn missing_local_image_degrades_without_src() {
         let dir = temp_dir("missing");
         let s = Session::open("![pic](assets/missing.png)\n");
-        let html = html_of_doc(&s, &ExportStyle::default(), &font(), Some(&dir));
+        let html = html_of_doc(&s, &ExportStyle::default(), &font(), Some(&dir), None);
         assert!(!html.contains("src="), "不得保留断链: {html}");
         assert!(
             html.contains("<img alt=\"pic\">") && html.contains("<!-- veil image unavailable -->"),
@@ -2897,10 +3013,13 @@ mod tests {
     fn non_raster_image_is_not_embedded() {
         // SVG 可携带脚本，导出器只内嵌位图格式。
         let dir = temp_dir("svg");
-        std::fs::write(dir.join("v.svg"), b"<svg xmlns=\"http://www.w3.org/2000/svg\"/>")
-            .unwrap();
+        std::fs::write(
+            dir.join("v.svg"),
+            b"<svg xmlns=\"http://www.w3.org/2000/svg\"/>",
+        )
+        .unwrap();
         let s = Session::open("![v](v.svg)\n");
-        let html = html_of_doc(&s, &ExportStyle::default(), &font(), Some(&dir));
+        let html = html_of_doc(&s, &ExportStyle::default(), &font(), Some(&dir), None);
         assert!(!html.contains("src="), "SVG 不得内嵌/外链: {html}");
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -2912,8 +3031,12 @@ mod tests {
         bytes.resize(MAX_INLINE_IMAGE_BYTES as usize + 1, 0);
         std::fs::write(dir.join("big.png"), &bytes).unwrap();
         let s = Session::open("![big](big.png)\n");
-        let html = html_of_doc(&s, &ExportStyle::default(), &font(), Some(&dir));
-        assert!(!html.contains("src="), "超限图片应降级: {}", &html[..200.min(html.len())]);
+        let html = html_of_doc(&s, &ExportStyle::default(), &font(), Some(&dir), None);
+        assert!(
+            !html.contains("src="),
+            "超限图片应降级: {}",
+            &html[..200.min(html.len())]
+        );
         assert!(html.contains("<!-- veil image unavailable -->"));
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -2926,6 +3049,7 @@ mod tests {
             &Session::open(&format!("{long}\n")),
             &ExportStyle::default(),
             &font(),
+            None,
         );
         assert!(
             html.contains("overflow-wrap:anywhere") && html.contains("word-break:break-word"),
@@ -2953,6 +3077,7 @@ mod tests {
                 ExportStyle::default(),
                 None,
                 Some(&first),
+                None,
             )
             .unwrap();
         assert_eq!(got, dir.join("doc (3).html"));
@@ -2964,7 +3089,10 @@ mod tests {
     fn data_uri_images_only_allow_raster_mime() {
         // 自包含 data URI 只对位图放行；SVG/文本 data URI 仍按危险 scheme 处理。
         let body = body_of("![x](data:image/png;base64,iVBORw0KGgo=)\n");
-        assert!(body.contains("src=\"data:image/png;base64,iVBORw0KGgo=\""), "{body}");
+        assert!(
+            body.contains("src=\"data:image/png;base64,iVBORw0KGgo=\""),
+            "{body}"
+        );
         let body = body_of("![x](data:image/svg+xml;base64,PHN2Zy8+)\n");
         assert!(!body.contains("data:image/svg"), "{body}");
         assert!(!body.contains("src="), "{body}");

@@ -1259,12 +1259,10 @@ mod tests {
             highlight: None,
             color: [0, 0, 0],
         })];
-        let s = String::from_utf8_lossy(&content_stream(&page, &primary, Some(&fallback))).to_string();
+        let s =
+            String::from_utf8_lossy(&content_stream(&page, &primary, Some(&fallback))).to_string();
         assert!(s.contains("/F1"), "应有主字体 run: {s}");
-        let after_fallback = s
-            .split("/F2")
-            .nth(1)
-            .expect("emoji 应切到回退字体");
+        let after_fallback = s.split("/F2").nth(1).expect("emoji 应切到回退字体");
         assert!(
             after_fallback.contains("<0001> Tj"),
             "emoji 应写回退字体真实 CID 而非 ?: {s}"
@@ -1331,14 +1329,8 @@ mod tests {
             highlight: None,
             color: [0, 0, 0],
         })]];
-        let bytes = render_pages(
-            &pages,
-            &[],
-            &[],
-            &[],
-            Path::new(find_cjk_font().unwrap()),
-        )
-        .expect("渲染 PDF");
+        let bytes = render_pages(&pages, &[], &[], &[], Path::new(find_cjk_font().unwrap()))
+            .expect("渲染 PDF");
         let s = String::from_utf8_lossy(&bytes);
         assert!(s.contains("/F2"), "应嵌入并使用回退字体");
         assert!(s.contains("<D83DDE00>"), "ToUnicode 应映射 emoji 代理对");
@@ -1392,8 +1384,7 @@ mod tests {
             "不得把 U+20BB7 降级为 `?` 的 CID：{content}"
         );
         assert!(
-            String::from_utf8_lossy(&build_to_unicode_cmap(&fb.cid_to_char))
-                .contains("<D842DFB7>"),
+            String::from_utf8_lossy(&build_to_unicode_cmap(&fb.cid_to_char)).contains("<D842DFB7>"),
             "ToUnicode 应映射 𠮷 的 UTF-16 代理对 D842 DFB7"
         );
 
@@ -1446,7 +1437,8 @@ mod tests {
                 top_y: 64.0,
             },
         ];
-        let bytes = render_pages(&pages, &[], &outline, &[], Path::new(font_path)).expect("应产出 PDF");
+        let bytes =
+            render_pages(&pages, &[], &outline, &[], Path::new(font_path)).expect("应产出 PDF");
         assert!(bytes.starts_with(b"%PDF-"));
         assert!(bytes.ends_with(b"%%EOF"));
         let s = String::from_utf8_lossy(&bytes);
@@ -1505,7 +1497,8 @@ mod tests {
                 top_y: 320.0,
             },
         ];
-        let bytes = render_pages(&pages, &[], &outline, &[], Path::new(font_path)).expect("应产出 PDF");
+        let bytes =
+            render_pages(&pages, &[], &outline, &[], Path::new(font_path)).expect("应产出 PDF");
         let s = String::from_utf8_lossy(&bytes).to_uppercase();
         assert_eq!(s.matches("/TITLE").count(), outline.len(), "书签数=标题数");
         assert_eq!(

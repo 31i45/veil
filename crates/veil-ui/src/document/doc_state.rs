@@ -524,6 +524,59 @@ impl App {
         true
     }
 
+    /// 导出/打印前置：把缓存缺失的 Mermaid 块同步渲染补齐（有预算上限）。
+    /// 后台请求可能还在飞、caret 在块内被跳过、长文档未轮到——这些块在导出时
+    /// 会退化成源码围栏，与「三端同源」不符，故在入口处补一次阻塞渲染。
+    /// 失败静默：导出继续走已有的源码围栏降级（不打断用户）。
+    pub(crate) fn ensure_mermaid_for_export(&mut self) {
+        // 尊重远程图片总开关（AC-5）：关闭时不得发起任何网络请求（离线渲染不受限）
+        if self.ports.mermaid.requires_network() && !self.config.allow_remote_images {
+            return;
+        }
+        // 先收集缺失块，避免持有 session 借用时改 cache
+        let missing: Vec<(veil_core::BlockId, String)> = {
+            let session = self.editor.session();
+            let mut out = Vec::new();
+            for (id, kind, _range) in session.blocks() {
+                if kind != veil_core::BlockKind::Mermaid {
+                    continue;
+                }
+                if self.cache.mermaid_imgs.contains_key(&id) {
+                    continue;
+                }
+                // 围栏内容（不含 ``` 行），与自动预览取源一致
+                let body = session
+                    .fenced_code_source(id)
+                    .map(|(_, body)| body)
+                    .unwrap_or_default();
+                out.push((id, body));
+            }
+            out
+        };
+        if missing.is_empty() {
+            return;
+        }
+        let dark = self.input_state.theme.dark;
+        let started = std::time::Instant::now();
+        // 预算上限：最多 16 次实际渲染 / 总耗时 10s，避免病态文档卡死导出。
+        // 超限跳过的块不计数，避免大源码块把后续小块饿死。
+        let mut rendered = 0usize;
+        for (id, source) in missing {
+            if rendered >= 16 || started.elapsed() > std::time::Duration::from_secs(10) {
+                break;
+            }
+            // 与 trigger_mermaid_auto 相同上限：> 128 KiB 跳过（不发网络请求）
+            if source.len() > 128 * 1024 {
+                continue;
+            }
+            rendered += 1;
+            let url = veil_core::mermaid_ink_svg_url(&source, dark);
+            if let Ok(img) = self.ports.mermaid.render_blocking(url, source, dark) {
+                self.cache.mermaid_imgs.insert(id, img);
+            }
+        }
+    }
+
     /// Ctrl+E：经注入的 Exporter 导出 HTML。导出是显式副作用：无论文档是否有关联路径，
     /// 都先弹保存对话框确认输出位置（建议路径 = 同目录同名 `.html`，草稿为裸名，
     /// 由平台层补「文档」目录）。取消即中止，不产生文件；失败走 notice 不崩溃。
@@ -538,11 +591,25 @@ impl App {
             self.request_redraw();
             return;
         };
+        self.ensure_mermaid_for_export();
+        // 克隆 mermaid 渲染结果（导出低频，克隆可接受）。
+        let mermaids: std::collections::HashMap<_, _> = self
+            .cache
+            .mermaid_imgs
+            .iter()
+            .map(|(k, v)| (*k, v.clone()))
+            .collect();
+        let mermaid_ref = if mermaids.is_empty() {
+            None
+        } else {
+            Some(&mermaids)
+        };
         match self.ports.exporter.export_html(
             self.editor.session(),
             self.doc.export_style,
             self.doc.path.as_deref(),
             Some(&target),
+            mermaid_ref,
         ) {
             Ok(p) => {
                 self.ui_state.chrome.notice = tf(Key::NoticeExportedHtml, &[&path_label(Some(&p))]);

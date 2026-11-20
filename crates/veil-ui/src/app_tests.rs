@@ -4,7 +4,7 @@ use crate::app::*;
 use crate::chrome;
 use crate::chrome::MenuAction;
 use crate::docio::encode;
-use crate::document::block_index::{gap_after, gap_between, BlockGeom};
+use crate::document::block_index::{gap_after, gap_before, gap_between, BlockGeom};
 use crate::document::recovery;
 use crate::document::ExternalState;
 use crate::editor::Intent;
@@ -14,6 +14,7 @@ use crate::image::{AssetMigration, AssetStore, ImageData, ImageLoader};
 use crate::input::{Action, Key, Mods};
 use crate::interaction::map_key_parts;
 use crate::math::{MathImage, MathRenderer};
+use crate::mermaid_renderer::{MermaidImage, MermaidRenderer};
 use crate::mode::{Mode, TextSink};
 use crate::paint::{can_present, fit_size, local_image_path};
 use crate::print::{ExportOptions, NoPrint, PreviewPage, Print, PrintSession};
@@ -526,6 +527,7 @@ fn app_clip(html: Option<&str>, plain: Option<&str>) -> App {
             }),
             store: Box::new(MemStore::default()),
             math: Box::new(m),
+            mermaid: Box::new(NoopMermaid),
             images: Box::new(NoImages),
             assets: Box::new(NoAssets),
             exporter: Box::new(NoExport),
@@ -613,6 +615,380 @@ impl MathRenderer for FakeMath {
     }
 }
 
+/// 测试用 MermaidRenderer 空实现：不做任何渲染，poll 永远返回空。
+/// 现有测试大多不涉及 Mermaid 渲染，注入此实现即可通过 Ports 构造。
+struct NoopMermaid;
+impl MermaidRenderer for NoopMermaid {
+    fn request(&mut self, _label: String, _source: String, _dark: bool) {}
+    fn poll(&mut self) -> Vec<(String, Result<MermaidImage, String>)> {
+        Vec::new()
+    }
+    fn set_dpi_scale(&mut self, _scale: f32) {}
+}
+
+/// 可观测的 MermaidRenderer stub：记录所有 request 调用；allowed=false 时 Renderer
+/// 自身丢弃 request；poll 从预设队列返回结果（用于失败计数/超限跳过驱动）。
+///
+/// 所有内部状态都用 Rc/Cell 包起来，derive Clone 后与 Box<dyn MermaidRenderer> 共享
+/// poll() 结果队列（key + 位图/错误）。
+type MermaidPollQueue = Rc<RefCell<Vec<(String, Result<MermaidImage, String>)>>>;
+/// render_blocking() 预设结果槽。
+type MermaidBlockingSlot = Rc<RefCell<Option<Result<MermaidImage, String>>>>;
+/// request() 收到的 Mermaid 源码日志。
+type MermaidSourceLog = Rc<RefCell<Vec<String>>>;
+
+/// 同一份底层数据——测试可在外层通过 clone 句柄断言 Box 里 Renderer 的真实状态。
+#[derive(Clone)]
+struct RecordingMermaid {
+    /// request() 收到的所有 URL（allowed=false 时不会被 push）
+    requests: Rc<RefCell<Vec<String>>>,
+    /// request() 收到的源码（校验围栏是否已被剥离）
+    sources: MermaidSourceLog,
+    /// allowed 开关；Renderer 内部 self.request() 读取，false 时跳过
+    allowed: Rc<Cell<bool>>,
+    /// poll() 返回队列；每次 poll 调 `take` 全部取走
+    poll_queue: MermaidPollQueue,
+    /// render_blocking() 调用次数（导出/打印前置补齐路径）
+    blocking_calls: Rc<Cell<usize>>,
+    /// render_blocking() 预设返回值；None 时按 trait 默认语义失败
+    blocking_result: MermaidBlockingSlot,
+    /// false 模拟 veil-full 的本地 renderer，手动预览/快照不得访问网络。
+    network: bool,
+}
+impl RecordingMermaid {
+    fn new() -> Self {
+        Self {
+            requests: Rc::new(RefCell::new(Vec::new())),
+            sources: Rc::new(RefCell::new(Vec::new())),
+            allowed: Rc::new(Cell::new(true)),
+            poll_queue: Rc::new(RefCell::new(Vec::new())),
+            blocking_calls: Rc::new(Cell::new(0)),
+            blocking_result: Rc::new(RefCell::new(None)),
+            network: true,
+        }
+    }
+    fn offline(mut self) -> Self {
+        self.network = false;
+        self
+    }
+    fn push_err(&self, url: String, msg: &str) {
+        self.poll_queue
+            .borrow_mut()
+            .push((url, Err(msg.to_string())));
+    }
+    fn request_count(&self) -> usize {
+        self.requests.borrow().len()
+    }
+    fn last_request_url(&self) -> Option<String> {
+        self.requests.borrow().last().cloned()
+    }
+    fn last_request_source(&self) -> Option<String> {
+        self.sources.borrow().last().cloned()
+    }
+    /// 直接改 Renderer 内部 allowed 状态（用 Rc<Cell> 共享，不需要 &mut self）。
+    fn set_allowed_state(&self, allowed: bool) {
+        self.allowed.set(allowed);
+    }
+    /// 设置 render_blocking() 的返回结果（导出前置补齐测试用）。
+    fn set_blocking_ok(&self, img: MermaidImage) {
+        *self.blocking_result.borrow_mut() = Some(Ok(img));
+    }
+    /// render_blocking() 调用次数。
+    fn blocking_count(&self) -> usize {
+        self.blocking_calls.get()
+    }
+}
+impl MermaidRenderer for RecordingMermaid {
+    fn request(&mut self, label: String, source: String, _dark: bool) {
+        if !self.allowed.get() {
+            return;
+        }
+        self.requests.borrow_mut().push(label);
+        self.sources.borrow_mut().push(source);
+    }
+    fn poll(&mut self) -> Vec<(String, Result<MermaidImage, String>)> {
+        std::mem::take(&mut *self.poll_queue.borrow_mut())
+    }
+    fn set_dpi_scale(&mut self, _scale: f32) {}
+    fn set_allowed(&mut self, allowed: bool) {
+        self.allowed.set(allowed);
+    }
+    fn requires_network(&self) -> bool {
+        self.network
+    }
+    fn render_blocking(
+        &mut self,
+        _label: String,
+        _source: String,
+        _dark: bool,
+    ) -> Result<MermaidImage, String> {
+        self.blocking_calls.set(self.blocking_calls.get() + 1);
+        self.blocking_result
+            .borrow()
+            .clone()
+            .unwrap_or_else(|| Err("blocking render unsupported".into()))
+    }
+}
+
+/// 带 RecordingMermaid 端口的 App 装配（Mermaid 稳定性测试专用）。
+fn app_with_mermaid(text: &str, mermaid: RecordingMermaid) -> App {
+    let doc = Doc {
+        text: text.into(),
+        path: None,
+        bom: false,
+        resume: false,
+        open_error: None,
+    };
+    let m = FakeMath {
+        fail: false,
+        calls: Rc::new(RefCell::new(Vec::new())),
+    };
+    App::new(
+        doc,
+        Ports {
+            clipboard: Box::new(NoClip),
+            store: Box::new(MemStore::default()),
+            math: Box::new(m),
+            mermaid: Box::new(mermaid),
+            images: Box::new(NoImages),
+            assets: Box::new(NoAssets),
+            exporter: Box::new(NoExport),
+            dialogs: Box::new(NoDialogs),
+            watcher: Box::new(NoWatcher),
+            theme_env: theme::test_support::env(),
+            persist_env: persist_env(),
+            print: Box::new(NoPrint),
+            url_opener: no_url(),
+            clock: fixed_clock(),
+        },
+    )
+}
+
+// ---- Mermaid 稳定性加固测试（set_allowed / 失败计数 / 超限 notice） ----
+
+/// set_allowed(false) 时 Renderer 自身拒绝新 request：URL 不进入 requests 记录，
+/// poll 仍返回空——App 层 trigger_mermaid_auto 虽然仍被调用（config.allow_remote_images 未改），
+/// 但 Renderer 内部 early-return 阻止了实际投递。
+#[test]
+fn mermaid_set_allowed_false_blocks_new_requests() {
+    let mermaid = RecordingMermaid::new();
+    let doc = "前文\n\n```mermaid\ngraph TD\nA-->B\n```\n";
+    let mut a = app_with_mermaid(doc, mermaid.clone());
+
+    // 第 1 轮：allowed=true（默认）→ request 正常记录
+    a.trigger_mermaid_auto();
+    assert_eq!(mermaid.request_count(), 1, "allowed=true 时应投递 request");
+
+    // 清 App 层去重守卫（mermaid_auto_requested / pending），让第二次 trigger 能走到 Renderer
+    a.mermaid_auto_requested.clear();
+    a.pending_mermaid_auto.clear();
+
+    // Renderer 层禁止：request 被内部 early-return 丢弃，requests 不增加
+    mermaid.set_allowed_state(false);
+    a.trigger_mermaid_auto();
+    assert_eq!(
+        mermaid.request_count(),
+        1,
+        "allowed=false 时 Renderer 应丢弃新 request"
+    );
+
+    // 恢复 allowed=true 后应能正常投递
+    mermaid.set_allowed_state(true);
+    a.mermaid_auto_requested.clear();
+    a.trigger_mermaid_auto();
+    assert_eq!(mermaid.request_count(), 2, "恢复 allowed=true 后应正常投递");
+}
+
+/// 回归：投递的源码必须是围栏**内容**，不能带 ```mermaid 围栏行。
+/// 带围栏会让 mermaid 报 "No diagram type detected"，mermaid.ink 直接 400。
+#[test]
+fn mermaid_request_source_strips_fence() {
+    let mermaid = RecordingMermaid::new();
+    let doc = "前文\n\n```mermaid\ngraph TD\nA-->B\n```\n";
+    let mut a = app_with_mermaid(doc, mermaid.clone());
+    a.trigger_mermaid_auto();
+    let source = mermaid.last_request_source().expect("request 未投递");
+    assert!(!source.contains("```"), "源码仍含围栏: {source:?}");
+    assert!(source.contains("graph TD"), "围栏内容丢失: {source:?}");
+}
+
+/// 空块与纯空白块没有可渲染图形，不得向 mermaid.ink 投递必然 HTTP 400 的请求；
+/// 同一文档中的非空块仍须正常渲染。
+#[test]
+fn mermaid_empty_remote_sources_skip_requests() {
+    let mermaid = RecordingMermaid::new();
+    let doc =
+        "前文\n\n```mermaid\n```\n\n```mermaid\n \n\t\n```\n\n```mermaid\ngraph TD\nA-->B\n```\n";
+    let mut a = app_with_mermaid(doc, mermaid.clone());
+
+    a.trigger_mermaid_auto();
+
+    assert_eq!(mermaid.request_count(), 1, "只有非空块应投递 request");
+    assert_eq!(
+        mermaid.last_request_source().as_deref(),
+        Some("graph TD\nA-->B")
+    );
+}
+
+/// 自动预览会向 mermaid.ink 发送源码：首次投递必须给出一次性第三方提示，
+/// 后续请求不再重复打扰；离线实现完全不提示。
+#[test]
+fn mermaid_auto_remote_third_party_notice_shown_once() {
+    let mermaid = RecordingMermaid::new();
+    let doc = "前文\n\n```mermaid\ngraph TD\nA-->B\n```\n";
+    let mut a = app_with_mermaid(doc, mermaid.clone());
+    assert!(a.ui_state.chrome.notice.is_empty(), "启动时不应有提示");
+
+    a.trigger_mermaid_auto();
+    assert_eq!(mermaid.request_count(), 1);
+    assert!(a.mermaid_ink_notice_shown, "首次自动远程渲染必须标记已提示");
+    assert_eq!(
+        a.ui_state.chrome.notice,
+        t(I18nKey::NoticeMermaidInkNotice),
+        "首次自动远程渲染必须显示明确的第三方上传提示"
+    );
+
+    // 清掉 App 层去重，模拟第二个块再次投递：不得重复提示
+    a.ui_state.chrome.notice.clear();
+    a.mermaid_auto_requested.clear();
+    a.pending_mermaid_auto.clear();
+    a.trigger_mermaid_auto();
+    assert_eq!(mermaid.request_count(), 2);
+    assert!(
+        a.ui_state.chrome.notice.is_empty(),
+        "同一会话不得重复提示第三方上传"
+    );
+}
+
+/// 空白拦截只针对联网实现；veil-full 本地渲染即使关闭远程图片仍走原路径。
+#[test]
+fn mermaid_offline_auto_render_ignores_remote_switch() {
+    let mermaid = RecordingMermaid::new().offline();
+    let doc = "前文\n\n```mermaid\ngraph TD\nA-->B\n```\n";
+    let mut a = app_with_mermaid(doc, mermaid.clone());
+    a.config.allow_remote_images = false;
+
+    a.trigger_mermaid_auto();
+
+    assert_eq!(
+        mermaid.request_count(),
+        1,
+        "本地非空块不得被远程开关或空白拦截影响"
+    );
+    assert_eq!(
+        mermaid.last_request_source().as_deref(),
+        Some("graph TD\nA-->B")
+    );
+    assert!(
+        !a.mermaid_ink_notice_shown,
+        "离线实现不得出现第三方上传提示"
+    );
+}
+/// 同一 (source_hash, dark) 连续失败 ≥ 3 次后，trigger_mermaid_auto 跳过第 4 次 request。
+/// 失败次数由 poll_remote_images 的 Err 分支累加，trigger_mermaid_auto 开头检查 ≥ 3 就 continue。
+#[test]
+fn mermaid_failed_count_reaches_three_skips_fourth_request() {
+    let mermaid = RecordingMermaid::new();
+    let doc = "前文\n\n```mermaid\ngraph TD\nA-->B\n```\n";
+    let mut a = app_with_mermaid(doc, mermaid.clone());
+    assert!(a.config.allow_remote_images, "默认允许远程图片");
+
+    // 辅助：一轮完整失败 → trigger 投递 → poll 消费 Err → failed 递增
+    let run_fail_round = |a: &mut App, m: &RecordingMermaid| {
+        a.trigger_mermaid_auto();
+        // 把 poll_queue 填上与最近 request URL 匹配的 Err
+        if let Some(url) = m.last_request_url() {
+            m.push_err(url, "模拟渲染失败");
+        }
+        a.poll_remote_images();
+    };
+
+    run_fail_round(&mut a, &mermaid);
+    assert_eq!(mermaid.request_count(), 1, "第 1 轮应投递并失败");
+
+    run_fail_round(&mut a, &mermaid);
+    assert_eq!(mermaid.request_count(), 2, "第 2 轮应再次投递并失败");
+
+    run_fail_round(&mut a, &mermaid);
+    assert_eq!(mermaid.request_count(), 3, "第 3 轮应再次投递并失败");
+
+    // 第 4 次：failed 计数已达 3 → trigger_mermaid_auto 检查 ≥ 3 直接 continue
+    a.trigger_mermaid_auto();
+    assert_eq!(mermaid.request_count(), 3, "连续 3 次失败后应跳过新请求");
+}
+
+/// 源码 > 128 KiB → trigger_mermaid_auto 跳过投递并在状态栏设置 notice。
+/// 超大源码不进 mermaid_failed（用户编辑源码变小后应能自动重试）。
+#[test]
+fn mermaid_source_too_large_skips_and_sets_notice() {
+    let mermaid = RecordingMermaid::new();
+    let huge_body = "x".repeat(128 * 1024 + 100);
+    let doc = format!("前文\n\n```mermaid\n{}\n```\n", huge_body);
+    let mut a = app_with_mermaid(&doc, mermaid.clone());
+
+    a.trigger_mermaid_auto();
+    assert_eq!(mermaid.request_count(), 0, "> 128 KiB 源码不应投递 request");
+    assert!(
+        a.ui_state.chrome.notice.contains("128 KiB"),
+        "应设置源码超限 notice（实际: {:?}）",
+        a.ui_state.chrome.notice
+    );
+}
+
+/// 导出前置补齐：缓存缺失的 Mermaid 块应走 render_blocking 同步渲染并写入缓存；
+/// 已补齐的块不重复渲染。
+#[test]
+fn export_ensure_renders_missing_mermaid_blocks() {
+    let mermaid = RecordingMermaid::new();
+    mermaid.set_blocking_ok(MermaidImage {
+        data: vec![0; 4],
+        width: 1,
+        height: 1,
+        svg_text: None,
+        px_to_pt: 0.375,
+    });
+    let doc = "前文\n\n```mermaid\ngraph TD\nA-->B\n```\n";
+    let mut a = app_with_mermaid(doc, mermaid.clone());
+    assert!(a.cache.mermaid_imgs.is_empty(), "初始缓存应为空");
+
+    a.ensure_mermaid_for_export();
+    assert_eq!(mermaid.blocking_count(), 1, "缺失块应触发 1 次同步渲染");
+    assert_eq!(a.cache.mermaid_imgs.len(), 1, "渲染结果应写入缓存");
+    let id = a
+        .editor
+        .session()
+        .blocks()
+        .into_iter()
+        .find(|(_, kind, _)| *kind == BlockKind::Mermaid)
+        .map(|(id, _, _)| id)
+        .expect("文档应含 Mermaid 块");
+    assert!(a.cache.mermaid_imgs.contains_key(&id));
+
+    // 幂等：缓存命中后不重复阻塞渲染
+    a.ensure_mermaid_for_export();
+    assert_eq!(mermaid.blocking_count(), 1, "缓存命中不应重复渲染");
+}
+
+/// allow_remote_images = false 时导出前置补齐不得发起任何渲染/网络请求。
+#[test]
+fn export_ensure_respects_remote_images_off() {
+    let mermaid = RecordingMermaid::new();
+    mermaid.set_blocking_ok(MermaidImage {
+        data: vec![0; 4],
+        width: 1,
+        height: 1,
+        svg_text: None,
+        px_to_pt: 0.375,
+    });
+    let doc = "前文\n\n```mermaid\ngraph TD\nA-->B\n```\n";
+    let mut a = app_with_mermaid(doc, mermaid.clone());
+    a.config.allow_remote_images = false;
+
+    a.ensure_mermaid_for_export();
+    assert_eq!(mermaid.blocking_count(), 0, "远程图片关闭时不得发起渲染");
+    assert!(a.cache.mermaid_imgs.is_empty(), "缓存不应被写入");
+}
+
 /// 默认导出器：不记录、恒失败（不关心导出的既有测试用）。
 struct NoExport;
 impl Exporter for NoExport {
@@ -622,6 +998,7 @@ impl Exporter for NoExport {
         _style: ExportStyle,
         _p: Option<&Path>,
         _t: Option<&Path>,
+        _mermaids: Option<&std::collections::HashMap<veil_core::BlockId, MermaidImage>>,
     ) -> Result<PathBuf, String> {
         Err("未注入导出器".into())
     }
@@ -646,6 +1023,7 @@ fn app_math(text: &str, fail: bool) -> (App, MathCalls) {
             clipboard: Box::new(NoClip),
             store: Box::new(MemStore::default()),
             math: Box::new(m),
+            mermaid: Box::new(NoopMermaid),
             images: Box::new(NoImages),
             assets: Box::new(NoAssets),
             exporter: Box::new(NoExport),
@@ -868,6 +1246,7 @@ fn app_with_images(
             clipboard: Box::new(NoClip),
             store: Box::new(MemStore::default()),
             math: Box::new(m),
+            mermaid: Box::new(NoopMermaid),
             images: Box::new(FakeImages {
                 files: files.clone(),
                 calls: calls.clone(),
@@ -1365,7 +1744,10 @@ fn standalone_image_geometry_refreshes_after_async_load() {
     let shown = layout_of_text(&a, REMOTE_URL).imgs[0].height as f32;
     let after_h = geom_of_text(&a, REMOTE_URL).height;
     let after_top = geom_of_text(&a, "1.1 背景").top;
-    assert!(after_h > before_h, "加载后块高应增大：{before_h} -> {after_h}");
+    assert!(
+        after_h > before_h,
+        "加载后块高应增大：{before_h} -> {after_h}"
+    );
     assert_eq!(after_h, shown, "加载后块高 = 图片实际显示高度");
     assert!(
         (after_top - before_top - (after_h - before_h)).abs() < 0.5,
@@ -1456,11 +1838,8 @@ fn inline_image_alt_is_not_rendered_as_caption() {
 
 #[test]
 fn missing_image_caption_stays_visible() {
-    let (mut a, _, _files) = app_with_images(
-        "前文\n\n![找不到](missing.png)\n",
-        Some("dir/doc.md"),
-        &[],
-    );
+    let (mut a, _, _files) =
+        app_with_images("前文\n\n![找不到](missing.png)\n", Some("dir/doc.md"), &[]);
     a.ensure_layouts_all();
     let l = layout_of_text(&a, "![找不到]");
     assert!(l.layout_text().contains("找不到"), "图片缺失时题注仍可读");
@@ -1589,6 +1968,7 @@ fn app_paste_image(
             }),
             store: Box::new(MemStore::default()),
             math: Box::new(m),
+            mermaid: Box::new(NoopMermaid),
             images: Box::new(NoImages),
             assets: Box::new(FakeAssets {
                 result,
@@ -1673,6 +2053,7 @@ fn paste_image_files_prefer_file_list_over_path_text() {
                 fail: false,
                 calls: Rc::new(RefCell::new(Vec::new())),
             }),
+            mermaid: Box::new(NoopMermaid),
             images: Box::new(FakeImages {
                 files: Rc::new(RefCell::new(files)),
                 calls: loads.clone(),
@@ -1773,6 +2154,7 @@ fn app_remote(text: &str, config: Box<dyn ConfigStore>, images: RemoteImages) ->
                 fail: false,
                 calls: Rc::new(RefCell::new(Vec::new())),
             }),
+            mermaid: Box::new(NoopMermaid),
             images: Box::new(images),
             assets: Box::new(NoAssets),
             exporter: Box::new(NoExport),
@@ -1993,6 +2375,7 @@ fn app_drop(
             clipboard: Box::new(NoClip),
             store: Box::new(MemStore::default()),
             math: Box::new(m),
+            mermaid: Box::new(NoopMermaid),
             images: Box::new(FakeImages {
                 files: Rc::new(RefCell::new(map)),
                 calls: images.clone(),
@@ -2166,12 +2549,7 @@ fn table_grid_hit_is_precise_for_plain_cells() {
     let (cell_x, cell_w, cell_y, cell_h) = {
         let t = a.cache.tables.get(&id).unwrap();
         let cell = &t.cells[3]; // 第 2 行第 2 列
-        (
-            cell.x,
-            cell.w,
-            t.rows[1].top,
-            t.rows[1].height,
-        )
+        (cell.x, cell.w, t.rows[1].top, t.rows[1].height)
     };
     let y = cell_y + cell_h / 2.0;
     assert_eq!(
@@ -3130,6 +3508,7 @@ fn app_with(
             clipboard: Box::new(NoClip),
             store: Box::new(store.clone()),
             math: Box::new(m),
+            mermaid: Box::new(NoopMermaid),
             images: Box::new(NoImages),
             assets: Box::new(NoAssets),
             exporter: Box::new(NoExport),
@@ -3176,6 +3555,7 @@ fn app_code_copy(text: &str) -> (App, Rc<RefCell<Vec<String>>>) {
             clipboard: Box::new(ClipLog(log.clone())),
             store: Box::new(MemStore::default()),
             math: Box::new(m),
+            mermaid: Box::new(NoopMermaid),
             images: Box::new(NoImages),
             assets: Box::new(NoAssets),
             exporter: Box::new(NoExport),
@@ -3216,6 +3596,7 @@ fn app_startup_error(path: &str, store: &MemStore) -> App {
             clipboard: Box::new(NoClip),
             store: Box::new(store.clone()),
             math: Box::new(m),
+            mermaid: Box::new(NoopMermaid),
             images: Box::new(NoImages),
             assets: Box::new(NoAssets),
             exporter: Box::new(NoExport),
@@ -3278,6 +3659,7 @@ fn app_history_with_assets(
             clipboard: Box::new(NoClip),
             store: Box::new(store.clone()),
             math: Box::new(m),
+            mermaid: Box::new(NoopMermaid),
             images: Box::new(NoImages),
             assets,
             exporter: Box::new(NoExport),
@@ -3309,6 +3691,7 @@ impl Exporter for FakeExport {
         style: ExportStyle,
         source_path: Option<&Path>,
         target: Option<&Path>,
+        _mermaids: Option<&std::collections::HashMap<veil_core::BlockId, MermaidImage>>,
     ) -> Result<PathBuf, String> {
         self.calls.borrow_mut().push((
             session.serialize(),
@@ -3358,6 +3741,7 @@ fn app_export(text: &str, path: Option<&str>, fail: bool) -> (App, ExportCalls) 
             clipboard: Box::new(NoClip),
             store: Box::new(MemStore::default()),
             math: Box::new(m),
+            mermaid: Box::new(NoopMermaid),
             images: Box::new(NoImages),
             assets: Box::new(NoAssets),
             exporter: Box::new(e),
@@ -3408,6 +3792,7 @@ fn app_export_with_dialog(
             clipboard: Box::new(NoClip),
             store: Box::new(MemStore::default()),
             math: Box::new(m),
+            mermaid: Box::new(NoopMermaid),
             images: Box::new(NoImages),
             assets: Box::new(NoAssets),
             exporter: Box::new(e),
@@ -3914,6 +4299,7 @@ fn app_dialogs(
             clipboard: Box::new(NoClip),
             store: Box::new(store.clone()),
             math: Box::new(m),
+            mermaid: Box::new(NoopMermaid),
             images: Box::new(NoImages),
             assets: Box::new(NoAssets),
             exporter: Box::new(NoExport),
@@ -4847,6 +5233,7 @@ fn app_watch_dialogs(
             clipboard: Box::new(NoClip),
             store: Box::new(store.clone()),
             math: Box::new(m),
+            mermaid: Box::new(NoopMermaid),
             images: Box::new(NoImages),
             assets: Box::new(NoAssets),
             exporter: Box::new(NoExport),
@@ -4967,6 +5354,7 @@ fn app_confirm(
             clipboard: Box::new(NoClip),
             store: Box::new(store.clone()),
             math: Box::new(m),
+            mermaid: Box::new(NoopMermaid),
             images: Box::new(NoImages),
             assets: Box::new(NoAssets),
             exporter: Box::new(NoExport),
@@ -6189,6 +6577,7 @@ fn save_as_rebinds_watcher() {
             clipboard: Box::new(NoClip),
             store: Box::new(store.clone()),
             math: Box::new(m),
+            mermaid: Box::new(NoopMermaid),
             images: Box::new(NoImages),
             assets: Box::new(NoAssets),
             exporter: Box::new(NoExport),
@@ -6265,6 +6654,7 @@ fn app_theme(config: Box<dyn ConfigStore>, system: Rc<Cell<Option<bool>>>) -> Ap
             clipboard: Box::new(NoClip),
             store: Box::new(MemStore::default()),
             math: Box::new(m),
+            mermaid: Box::new(NoopMermaid),
             images: Box::new(NoImages),
             assets: Box::new(NoAssets),
             exporter: Box::new(NoExport),
@@ -6391,7 +6781,10 @@ fn settings_theme_switch_dark_to_system_repaints_palette() {
 /// 字号/行高修改即时生效（无需重启），且进入基础键触发重排。
 #[test]
 fn settings_typography_change_applies_without_restart() {
-    let mut a = app_theme(Box::new(MemConfig::default()), Rc::new(Cell::new(Some(false))));
+    let mut a = app_theme(
+        Box::new(MemConfig::default()),
+        Rc::new(Cell::new(Some(false))),
+    );
     a.ensure_layouts_all();
     let (id, _, _) = a.editor.session().blocks()[0].clone();
     let base0 = a.base_key();
@@ -6501,13 +6894,14 @@ fn pointer_shape_follows_hover_target() {
     let mut a = app(text, None, false, &store);
     a.ensure_layouts_all();
     let vp = a.viewport();
-    a.input_state.mouse =
-        PhysicalPosition::new((a.content_x() + 4.0) as f64, (vp.y + 4.0) as f64);
+    a.input_state.mouse = PhysicalPosition::new((a.content_x() + 4.0) as f64, (vp.y + 4.0) as f64);
     a.apply_pointer();
     assert_eq!(a.window_state.pointer, Some(CursorIcon::Text));
-    let g = a.index.blocks.iter().find(|g| {
-        matches!(g.kind, BlockKind::FencedCode(_))
-    });
+    let g = a
+        .index
+        .blocks
+        .iter()
+        .find(|g| matches!(g.kind, BlockKind::FencedCode(_)));
     let h = a.code_header_layout(g.unwrap()).expect("代码头部");
     a.input_state.mouse = PhysicalPosition::new(
         (h.button.x + h.button.w / 2.0) as f64,
@@ -6716,7 +7110,10 @@ fn clearing_geometry_suppresses_geometry_write_on_close() {
     }
     a.resolve_settings(BTN_OK);
     assert_eq!(a.config.window, None, "清除后 apply 必须移除几何");
-    assert!(!a.window_state.geom_dirty, "清除后必须丢弃本会话 resize 脏位");
+    assert!(
+        !a.window_state.geom_dirty,
+        "清除后必须丢弃本会话 resize 脏位"
+    );
     assert_eq!(a.window_state.geom, None, "清除后不得保留会话几何");
 
     a.window_state.exit_requested = true;
@@ -8159,7 +8556,7 @@ fn apply_persist_event(
             // 与用户编辑对持久化机器的输入完全同效：置脏 + 登记活动时刻。
             // 不走 after_edit：几何/排版与本次性质无关，跳过可把 100×30 步压到秒级。
             if a.editor.apply(Intent::InsertText("x".into())).is_some() {
-                a.persist_state.persist.note_activity(Instant::now());
+                a.persist_state.persist.note_activity(*clock);
             }
         }
         PersistEvent::DiskChange(v) => disk(store, "a.md", &version_bytes(*v)),
@@ -8477,9 +8874,9 @@ fn perf_keystroke_attribution() {
                 };
                 let kind = g.kind.clone();
                 let range = g.range;
-                let Some(lk) = a
-                    .cache
-                    .raster_key(id, &kind, range, base, caret, a.toc_layout_epoch(g))
+                let Some(lk) =
+                    a.cache
+                        .raster_key(id, &kind, range, base, caret, a.toc_layout_epoch(g))
                 else {
                     continue;
                 };
@@ -8767,6 +9164,7 @@ fn app_persist(
             clipboard: Box::new(NoClip),
             store: Box::new(store.clone()),
             math: Box::new(m),
+            mermaid: Box::new(NoopMermaid),
             images: Box::new(NoImages),
             assets: Box::new(NoAssets),
             exporter: Box::new(NoExport),
@@ -8822,6 +9220,7 @@ fn app_persist_dialogs(
             clipboard: Box::new(NoClip),
             store: Box::new(store.clone()),
             math: Box::new(m),
+            mermaid: Box::new(NoopMermaid),
             images: Box::new(NoImages),
             assets: Box::new(NoAssets),
             exporter: Box::new(NoExport),
@@ -10362,7 +10761,8 @@ fn switching_document_clears_link_tooltip() {
 }
 
 #[test]
-fn link_hover_hits_table_cell_link() {    let store = MemStore::default();
+fn link_hover_hits_table_cell_link() {
+    let store = MemStore::default();
     let mut a = app(
         "p\n\n| [站点](www.example.com) | b |\n| --- | --- |\n| c | d |\n",
         None,
@@ -11208,6 +11608,7 @@ fn e2e_table_edit_and_image_paste() {
                 fail: false,
                 calls: Rc::new(RefCell::new(Vec::new())),
             }),
+            mermaid: Box::new(NoopMermaid),
             images: Box::new(NoImages),
             assets: Box::new(FakeAssets {
                 result: Ok("t.assets/image-1.png".into()),
@@ -11444,6 +11845,7 @@ fn app_print(text: &str, print: Box<dyn Print>) -> App {
             clipboard: Box::new(NoClip),
             store: Box::new(MemStore::default()),
             math: Box::new(m),
+            mermaid: Box::new(NoopMermaid),
             images: Box::new(NoImages),
             assets: Box::new(NoAssets),
             exporter: Box::new(NoExport),
@@ -11654,6 +12056,7 @@ fn print_hard_cuts_atomic_block_taller_than_page() {
             clipboard: Box::new(NoClip),
             store: Box::new(MemStore::default()),
             math: Box::new(TallMath),
+            mermaid: Box::new(NoopMermaid),
             images: Box::new(NoImages),
             assets: Box::new(NoAssets),
             exporter: Box::new(NoExport),
@@ -12126,26 +12529,14 @@ fn ctrl_numpad_zoom_keys_match_main_keyboard() {
     // DEF-T06-004：小键盘 +/-/0 与主键盘缩放一致；NumLock 关时逻辑键可能不是字符，
     // 因此物理键必须兜底识别。
     for (logical, physical, want) in [
-        (
-            WKey::Named(NamedKey::Space),
-            KeyCode::NumpadAdd,
-            Key::Equal,
-        ),
-        (
-            WKey::Character("+".into()),
-            KeyCode::NumpadAdd,
-            Key::Equal,
-        ),
+        (WKey::Named(NamedKey::Space), KeyCode::NumpadAdd, Key::Equal),
+        (WKey::Character("+".into()), KeyCode::NumpadAdd, Key::Equal),
         (
             WKey::Named(NamedKey::ArrowDown),
             KeyCode::NumpadSubtract,
             Key::Minus,
         ),
-        (
-            WKey::Named(NamedKey::Insert),
-            KeyCode::Numpad0,
-            Key::Digit0,
-        ),
+        (WKey::Named(NamedKey::Insert), KeyCode::Numpad0, Key::Digit0),
     ] {
         assert_eq!(
             crate::interaction::ctrl_punctuation(&logical, PhysicalKey::Code(physical)),
@@ -12834,7 +13225,10 @@ fn toml_frontmatter_flag_tracks_single_block_edits() {
             .expect("应存在 TOML 段落")
     };
     let i = find_toml(&a);
-    assert!(!a.index.blocks[i].frontmatter_like, "初始 `++` 不是 Front Matter");
+    assert!(
+        !a.index.blocks[i].frontmatter_like,
+        "初始 `++` 不是 Front Matter"
+    );
     assert!(a.index.blocks[i].height > 0.0);
 
     // 首行与末行都补成 `+++`：同一块内变成合法 TOML Front Matter。
@@ -12865,13 +13259,20 @@ fn toml_frontmatter_flag_tracks_single_block_edits() {
     a.ensure_layouts_all();
     a.render();
     let i = find_toml(&a);
-    assert!(!a.index.blocks[i].frontmatter_like, "删回后不得残留 Front Matter");
+    assert!(
+        !a.index.blocks[i].frontmatter_like,
+        "删回后不得残留 Front Matter"
+    );
     assert!(a.index.blocks[i].height > 0.0, "非 Front Matter 必须占高度");
-    assert!(doc_text(&a).contains("++\nkey = 1\n++\n"), "编辑往返后末行回到 `++`");
+    assert!(
+        doc_text(&a).contains("++\nkey = 1\n++\n"),
+        "编辑往返后末行回到 `++`"
+    );
 }
 
 #[test]
-fn source_mode_hides_math_image_and_table_grid() {    let store = MemStore::default();
+fn source_mode_hides_math_image_and_table_grid() {
+    let store = MemStore::default();
     let text = "前言\n\n$$\nx=1\n$$\n\n| a | b |\n| - | - |\n| 1 | 2 |\n";
     let mut a = app(text, None, false, &store);
     a.editor.set_caret(0); // 光标只在首段，公式/表格块均非激活
@@ -13020,7 +13421,10 @@ fn toc_refreshes_after_heading_added_and_deleted_without_reopening() {
         .expect("应识别 TOC 标记块")
         .id;
     let text = a.cache.layouts[&marker_id].layout_text().to_string();
-    assert!(text.contains("• 一") && text.contains("   • 二"), "初始目录: {text:?}");
+    assert!(
+        text.contains("• 一") && text.contains("   • 二"),
+        "初始目录: {text:?}"
+    );
     assert!(!text.contains("新章"));
 
     // 文末新增二级标题：真实编辑链路（增量索引 + 视口排版）。
@@ -13154,10 +13558,18 @@ fn toc_render_is_shared_in_focus_and_typewriter_modes() {
 
     a.toggle_focus();
     a.ensure_layouts_all();
-    assert_eq!(a.cache.layouts[&marker].layout_text(), plain, "专注模式同一渲染");
+    assert_eq!(
+        a.cache.layouts[&marker].layout_text(),
+        plain,
+        "专注模式同一渲染"
+    );
     a.toggle_typewriter();
     a.ensure_layouts_all();
-    assert_eq!(a.cache.layouts[&marker].layout_text(), plain, "打字机模式同一渲染");
+    assert_eq!(
+        a.cache.layouts[&marker].layout_text(),
+        plain,
+        "打字机模式同一渲染"
+    );
     assert_eq!(a.editor.session().serialize(), src);
     assert!(!a.editor.is_dirty());
     assert_eq!(a.editor.session().undo_depth(), 0);
@@ -13269,7 +13681,10 @@ fn narrow_twelve_column_table_fits_and_tail_does_not_overlap() {
             .iter()
             .find(|g| g.kind == BlockKind::Paragraph && g.range.start > table.range.start)
             .expect("应有表格后的段落");
-        let tl = a.cache.table(table.id, a.table_key(table.id)).expect("网格已排版");
+        let tl = a
+            .cache
+            .table(table.id, a.table_key(table.id))
+            .expect("网格已排版");
         assert!(
             tl.width <= a.content_width() + 0.5,
             "scale={scale}: 表格宽 {} 超出可用宽 {}",
@@ -13453,10 +13868,7 @@ fn empty_mermaid_body_start(doc: &str) -> usize {
 /// 把鼠标放到 mermaid 块首行（卡片头）内；空块允许整块卡片命中。
 fn hover_mermaid_block(a: &mut App) {
     a.ensure_layouts_all();
-    let id = block_id_of(
-        a,
-        |k| matches!(k, BlockKind::FencedCode(Some(l)) if l.eq_ignore_ascii_case("mermaid")),
-    );
+    let id = block_id_of(a, |k| matches!(k, BlockKind::Mermaid));
     let top = geom(a, id).top;
     let scale = a.input_state.scale;
     let vp = a.viewport();
@@ -13585,6 +13997,7 @@ fn app_remote_assets(
                 fail: false,
                 calls: Rc::new(RefCell::new(Vec::new())),
             }),
+            mermaid: Box::new(NoopMermaid),
             images: Box::new(images),
             assets: Box::new(assets),
             exporter: Box::new(NoExport),
@@ -13597,6 +14010,16 @@ fn app_remote_assets(
             clock: fixed_clock(),
         },
     )
+}
+
+fn test_mermaid_image(width: u32, height: u32) -> MermaidImage {
+    MermaidImage {
+        data: vec![255; (width * height * 4) as usize],
+        width,
+        height,
+        svg_text: None,
+        px_to_pt: 0.375,
+    }
 }
 
 /// 在 mermaid 块上右键并执行指定菜单项。
@@ -13672,6 +14095,7 @@ fn mermaid_online_insert_writes_asset_as_one_undo_step() {
             calls: calls.clone(),
         },
     );
+    assert!(!a.config.mermaid_insert_url, "缺省配置必须走本地资产");
     let depth0 = a.editor.session().undo_depth();
 
     exec_mermaid_action(&mut a, ctx_menu::CtxAction::MermaidInsertImage);
@@ -13696,6 +14120,264 @@ fn mermaid_online_insert_writes_asset_as_one_undo_step() {
     );
 }
 
+#[test]
+fn mermaid_online_explicit_url_config_writes_remote_reference() {
+    let store = MemStore::default();
+    let images = RemoteImages::default();
+    let requests = images.requests.clone();
+    let calls = Rc::new(RefCell::new(Vec::new()));
+    let doc = "p\n\n```mermaid\ngraph TD\nA-->B\n```\n";
+    let mut a = app_remote_assets(
+        doc,
+        None,
+        &store,
+        images.clone(),
+        FakeAssets {
+            result: Ok("d.assets/mermaid-1.png".into()),
+            calls: calls.clone(),
+        },
+    );
+    a.config.mermaid_insert_url = true;
+
+    exec_mermaid_action(&mut a, ctx_menu::CtxAction::MermaidInsertImage);
+    let url = requests.borrow()[0].clone();
+    *images.results.borrow_mut() = vec![(url.clone(), Ok(solid(20, 10)))];
+    a.poll_remote_images();
+
+    let text = a.editor.session().serialize();
+    assert!(
+        text.contains(&format!("]({url})")),
+        "显式 true 应写远程 URL：{text}"
+    );
+    assert!(calls.borrow().is_empty(), "URL 模式不得另写本地资产");
+    assert!(a.ui_state.chrome.notice.contains("不会随源码更新"));
+}
+
+#[test]
+fn mermaid_offline_insert_ignores_url_config_and_remote_switch() {
+    let store = MemStore::default();
+    let images = RemoteImages::default();
+    let requests = images.requests.clone();
+    let calls = Rc::new(RefCell::new(Vec::new()));
+    let mermaid = RecordingMermaid::new().offline();
+    mermaid.set_blocking_ok(test_mermaid_image(20, 10));
+    let doc = "p\n\n```mermaid\ngraph TD\nA-->B\n```\n";
+    let mut a = app_remote_assets(
+        doc,
+        Some("C:\\tmp\\d.md"),
+        &store,
+        images,
+        FakeAssets {
+            result: Ok("d.assets/mermaid-1.png".into()),
+            calls: calls.clone(),
+        },
+    );
+    a.ports.mermaid = Box::new(mermaid.clone());
+    a.config.allow_remote_images = false;
+    a.config.mermaid_insert_url = true;
+
+    exec_mermaid_action(&mut a, ctx_menu::CtxAction::MermaidInsertImage);
+
+    assert!(requests.borrow().is_empty(), "完整版快照不得发起远程请求");
+    assert_eq!(mermaid.blocking_count(), 1);
+    assert_eq!(calls.borrow().len(), 1, "即使配置 true 也必须本地落盘");
+    let inserted = a.editor.session().serialize();
+    assert!(
+        inserted.contains("![](d.assets/mermaid-1.png)"),
+        "{inserted}"
+    );
+    assert!(!inserted.contains("https://mermaid.ink"), "{inserted}");
+    assert!(inserted.contains("graph TD\nA-->B"), "活源码必须保留");
+    assert!(a.ui_state.chrome.notice.contains("不会随源码更新"));
+
+    // 后续编辑只改活源码；独立快照引用保持原样，也不触发第二次落盘。
+    let source_edit = inserted.find("A-->B").unwrap() + "A-->B".len();
+    a.editor.set_caret(source_edit);
+    a.insert_paste("\nA-->C");
+    let edited = a.editor.session().serialize();
+    assert!(edited.contains("A-->B\nA-->C"));
+    assert!(edited.contains("![](d.assets/mermaid-1.png)"));
+    assert_eq!(calls.borrow().len(), 1, "编辑源码不得重写独立快照");
+}
+
+#[test]
+fn mermaid_offline_preview_works_when_remote_images_blocked() {
+    let store = MemStore::default();
+    let images = RemoteImages::default();
+    let requests = images.requests.clone();
+    let mermaid = RecordingMermaid::new().offline();
+    mermaid.set_blocking_ok(test_mermaid_image(12, 8));
+    let doc = "p\n\n```mermaid\ngraph TD\nA-->B\n```\n";
+    let mut a = app_remote_assets(
+        doc,
+        None,
+        &store,
+        images,
+        FakeAssets {
+            result: Ok("d.assets/mermaid-1.png".into()),
+            calls: Rc::new(RefCell::new(Vec::new())),
+        },
+    );
+    a.ports.mermaid = Box::new(mermaid.clone());
+    a.config.allow_remote_images = false;
+
+    exec_mermaid_action(&mut a, ctx_menu::CtxAction::MermaidPreviewImage);
+
+    assert!(requests.borrow().is_empty());
+    assert_eq!(mermaid.blocking_count(), 1);
+    let preview = a.ui_state.image_preview.as_ref().expect("本地预览应打开");
+    assert!(preview.key.starts_with("mermaid-manual:"));
+    assert!(a.cache.remote_image(&preview.key).is_some());
+    assert_eq!(a.editor.session().serialize(), doc, "预览不得修改原文");
+}
+
+#[test]
+fn mermaid_local_snapshot_draft_failure_preserves_document() {
+    let store = MemStore::default();
+    let images = RemoteImages::default();
+    let requests = images.requests.clone();
+    let calls = Rc::new(RefCell::new(Vec::new()));
+    let doc = "p\n\n```mermaid\ngraph TD\nA-->B\n```\n";
+    let mut a = app_remote_assets(
+        doc,
+        None,
+        &store,
+        images.clone(),
+        FakeAssets {
+            result: Ok("d.assets/mermaid-1.png".into()),
+            calls: calls.clone(),
+        },
+    );
+    assert!(!a.config.mermaid_insert_url);
+
+    exec_mermaid_action(&mut a, ctx_menu::CtxAction::MermaidInsertImage);
+    let url = requests.borrow()[0].clone();
+    *images.results.borrow_mut() = vec![(url, Ok(solid(20, 10)))];
+    a.poll_remote_images();
+
+    assert_eq!(a.editor.session().serialize(), doc);
+    assert!(!a.editor.is_dirty());
+    assert!(calls.borrow().is_empty(), "草稿没有路径，不应尝试落盘");
+    assert_eq!(
+        a.ui_state.chrome.notice,
+        t(I18nKey::NoticeMermaidSnapshotNeedsFile)
+    );
+    assert!(!a.editor.session().serialize().contains("mermaid.ink"));
+}
+
+#[test]
+fn mermaid_offline_snapshot_save_failure_has_no_url_fallback() {
+    let store = MemStore::default();
+    let images = RemoteImages::default();
+    let requests = images.requests.clone();
+    let calls = Rc::new(RefCell::new(Vec::new()));
+    let mermaid = RecordingMermaid::new().offline();
+    mermaid.set_blocking_ok(test_mermaid_image(20, 10));
+    let doc = "p\n\n```mermaid\ngraph TD\nA-->B\n```\n";
+    let mut a = app_remote_assets(
+        doc,
+        Some("C:\\tmp\\d.md"),
+        &store,
+        images,
+        FakeAssets {
+            result: Err("只读目录".into()),
+            calls: calls.clone(),
+        },
+    );
+    a.ports.mermaid = Box::new(mermaid);
+    a.config.mermaid_insert_url = true;
+
+    exec_mermaid_action(&mut a, ctx_menu::CtxAction::MermaidInsertImage);
+
+    assert!(requests.borrow().is_empty());
+    assert_eq!(calls.borrow().len(), 1);
+    assert_eq!(a.editor.session().serialize(), doc, "失败不得改坏原文");
+    assert!(!a.editor.is_dirty());
+    assert!(!a.editor.session().serialize().contains("mermaid.ink"));
+    assert!(a.ui_state.chrome.notice.contains("未修改原文"));
+    assert!(a.ui_state.chrome.notice.contains("只读目录"));
+}
+
+#[test]
+fn mermaid_offline_render_failure_preserves_source_without_url_fallback() {
+    let store = MemStore::default();
+    let images = RemoteImages::default();
+    let requests = images.requests.clone();
+    let calls = Rc::new(RefCell::new(Vec::new()));
+    let mermaid = RecordingMermaid::new().offline();
+    *mermaid.blocking_result.borrow_mut() = Some(Err("本地渲染失败".into()));
+    let doc = "p\n\n```mermaid\ngraph TD\nA-->B\n```\n";
+    let mut a = app_remote_assets(
+        doc,
+        Some("C:\\tmp\\d.md"),
+        &store,
+        images,
+        FakeAssets {
+            result: Ok("d.assets/mermaid-1.png".into()),
+            calls: calls.clone(),
+        },
+    );
+    a.ports.mermaid = Box::new(mermaid);
+    a.config.mermaid_insert_url = true;
+
+    exec_mermaid_action(&mut a, ctx_menu::CtxAction::MermaidInsertImage);
+
+    assert!(requests.borrow().is_empty());
+    assert!(calls.borrow().is_empty());
+    assert_eq!(a.editor.session().serialize(), doc);
+    assert!(!a.editor.is_dirty());
+    assert!(a.ui_state.chrome.notice.contains("本地渲染失败"));
+    assert!(!a.editor.session().serialize().contains("mermaid.ink"));
+}
+
+#[test]
+fn mermaid_snapshot_relative_path_survives_document_move() {
+    let store = MemStore::default();
+    let images = RemoteImages::default();
+    let requests = images.requests.clone();
+    let doc = "p\n\n```mermaid\ngraph TD\nA-->B\n```\n";
+    let mut a = app_remote_assets(
+        doc,
+        Some("C:\\old\\d.md"),
+        &store,
+        images.clone(),
+        FakeAssets {
+            result: Ok("d.assets/mermaid-1.png".into()),
+            calls: Rc::new(RefCell::new(Vec::new())),
+        },
+    );
+    exec_mermaid_action(&mut a, ctx_menu::CtxAction::MermaidInsertImage);
+    let url = requests.borrow()[0].clone();
+    *images.results.borrow_mut() = vec![(url, Ok(solid(20, 10)))];
+    a.poll_remote_images();
+    let inserted = a.editor.session().serialize();
+    assert!(inserted.contains("![](d.assets/mermaid-1.png)"));
+
+    let moved_doc = PathBuf::from("C:\\moved\\d.md");
+    let moved_png = PathBuf::from("C:\\moved\\d.assets\\mermaid-1.png");
+    assert_eq!(
+        local_image_path("d.assets/mermaid-1.png", Some(&moved_doc)),
+        Some(moved_png.clone())
+    );
+    let (mut moved, loads, _files) = app_with_images(
+        &inserted,
+        Some("C:\\moved\\d.md"),
+        &[("C:\\moved\\d.assets/mermaid-1.png", 20, 10)],
+    );
+    moved.ensure_layouts_all();
+
+    assert_eq!(
+        loads.borrow().as_slice(),
+        &[moved_png],
+        "移动后重新打开应按新文档目录加载相对快照"
+    );
+    assert_eq!(
+        moved.editor.session().serialize(),
+        inserted,
+        "移动不得改写 Markdown 字节"
+    );
+}
+
 /// 关闭远程图片时，两项在线渲染不出现在菜单里（仍保留 mermaid.live 预览）。
 #[test]
 fn mermaid_online_items_hidden_when_remote_images_blocked() {
@@ -13705,13 +14387,7 @@ fn mermaid_online_items_hidden_when_remote_images_blocked() {
     a.config.allow_remote_images = false;
     hover_mermaid_block(&mut a);
     a.on_right_click();
-    let acts: Vec<_> = a
-        .ui_state
-        .ctx
-        .items()
-        .iter()
-        .map(|&(_, act)| act)
-        .collect();
+    let acts: Vec<_> = a.ui_state.ctx.items().iter().map(|&(_, act)| act).collect();
     assert!(
         !acts.contains(&ctx_menu::CtxAction::MermaidPreviewImage),
         "关闭远程图片后不应出现在线预览"
@@ -13762,6 +14438,187 @@ fn mermaid_preview_opens_mermaid_live() {
     let urls = calls.borrow();
     assert_eq!(urls.len(), 1, "应走在线预览");
     assert!(urls[0].starts_with("https://mermaid.live/"), "{}", urls[0]);
+    assert_eq!(a.editor.session().serialize(), doc);
+}
+
+#[test]
+fn mermaid_non_active_image_caret_reveal_and_code_background_preserve_source() {
+    let mermaid = RecordingMermaid::new();
+    let doc = "前文\n\n```mermaid\ngraph TD\nA-->B\n```\n";
+    let mut a = app_with_mermaid(doc, mermaid.clone());
+    a.trigger_mermaid_auto();
+    let url = mermaid.last_request_url().expect("应请求自动预览");
+    mermaid
+        .poll_queue
+        .borrow_mut()
+        .push((url, Ok(test_mermaid_image(20, 10))));
+    a.poll_remote_images();
+    a.ensure_layouts_all();
+
+    let id = block_id_of(&a, |k| matches!(k, BlockKind::Mermaid));
+    assert!(
+        a.cache.layouts[&id]
+            .imgs
+            .iter()
+            .any(|img| matches!(img.key, InlineAsset::Mermaid(_))),
+        "非激活块应显示自动渲染图"
+    );
+
+    let body = doc.find("graph TD").unwrap();
+    a.editor.set_caret(body);
+    a.ensure_layouts_all();
+    let layout = &a.cache.layouts[&id];
+    assert!(layout.layout_text().contains("```mermaid"));
+    assert!(layout.layout_text().contains("graph TD\nA-->B"));
+    assert!(
+        !layout
+            .imgs
+            .iter()
+            .any(|img| matches!(img.key, InlineAsset::Mermaid(_))),
+        "caret 进入后必须 Reveal 源码而不是永久显示图片"
+    );
+    assert_eq!(a.editor.session().serialize(), doc, "Reveal 不得改写原文");
+
+    a.recompute_geometry();
+    let g = a.index.blocks.iter().find(|g| g.id == id).unwrap();
+    let scale = a.input_state.scale;
+    let pad_x = (crate::tokens::doc::CODE_PAD_X * scale).round() as i32;
+    let pad_y = (crate::tokens::doc::CODE_PAD_Y * scale).round() as i32;
+    let x = a.content_x() as i32 - pad_x;
+    let y = (a.viewport().y + g.top - a.window_state.scroll_y) as i32 - pad_y;
+    let code_bg = a.input_state.theme.code_bg;
+    let sample_h = (a.engine.doc_line_height() * scale).max(1.0) as u32;
+    let frame = a.render();
+    assert!(
+        any_pixel(frame, x, y, pad_x.max(1) as u32, sample_h, |pixel| pixel
+            == code_bg,),
+        "Mermaid 源码态应沿用代码背景"
+    );
+    assert_eq!(
+        a.editor.session().serialize(),
+        doc,
+        "绘制不得改变 Markdown 往返字节"
+    );
+}
+
+#[test]
+fn mermaid_async_bitmap_stays_inside_own_block_before_and_after_scroll() {
+    let mermaid = RecordingMermaid::new();
+    let doc = "# Mermaid 上下文走查\n\n## 空 Mermaid\n\n```mermaid\n```\n\n## 非空 Mermaid\n\n```mermaid\nflowchart TD\n    A[开始] --> B[结束]\n```\n\n尾部正文。\n";
+    let mut a = app_with_mermaid(doc, mermaid.clone());
+    a.trigger_mermaid_auto();
+    let url = mermaid.last_request_url().expect("非空块应请求自动预览");
+    let mut bitmap = test_mermaid_image(96, 120);
+    for px in bitmap.data.chunks_exact_mut(4) {
+        px.copy_from_slice(&[237, 12, 160, 255]);
+    }
+    mermaid.poll_queue.borrow_mut().push((url, Ok(bitmap)));
+    a.poll_remote_images();
+    a.ensure_layouts_all();
+    a.recompute_geometry();
+
+    let source_at = doc.find("flowchart TD").unwrap();
+    let heading_at = doc.find("非空 Mermaid").unwrap();
+    let image_id = a
+        .index
+        .blocks
+        .iter()
+        .find(|g| {
+            g.kind == BlockKind::Mermaid && g.range.start <= source_at && source_at <= g.range.end
+        })
+        .unwrap()
+        .id;
+    let heading_id = a
+        .index
+        .blocks
+        .iter()
+        .find(|g| g.range.start <= heading_at && heading_at <= g.range.end)
+        .unwrap()
+        .id;
+    let empty_id = a
+        .index
+        .blocks
+        .iter()
+        .find(|g| g.kind == BlockKind::Mermaid && g.id != image_id)
+        .unwrap()
+        .id;
+    assert!(
+        a.cache.layouts[&empty_id].imgs.is_empty(),
+        "空块不得借用后续块位图"
+    );
+
+    let (px, py, pw, ph, layout_h) = {
+        let layout = &a.cache.layouts[&image_id].value;
+        let p = layout
+            .imgs
+            .iter()
+            .find(|p| matches!(p.key, InlineAsset::Mermaid(_)))
+            .expect("异步回包后应重排出 Mermaid 位图");
+        (p.x, p.y, p.width, p.height, layout.height)
+    };
+    assert!(py >= 0.0, "位图不得向上越出自己的块：y={py}");
+    assert!(
+        py + ph as f32 <= layout_h + 0.01,
+        "块高必须包含完整位图：y={py}, h={ph}, layout_h={layout_h}"
+    );
+    let (image_top, image_h, heading_top, heading_h, tail_top) = {
+        let image = a.index.blocks.iter().find(|g| g.id == image_id).unwrap();
+        let heading = a.index.blocks.iter().find(|g| g.id == heading_id).unwrap();
+        let tail = a.index.blocks.last().unwrap();
+        (
+            image.top,
+            image.height,
+            heading.top,
+            heading.height,
+            tail.top,
+        )
+    };
+    assert!(
+        heading_top + heading_h <= image_top,
+        "相邻标题与图块几何不得重叠"
+    );
+    assert!(
+        image_top + image_h <= tail_top,
+        "位图底缘不得越过后续正文起点"
+    );
+
+    for scroll in [0.0, 17.0] {
+        a.window_state.scroll_y = scroll;
+        let vp = a.viewport();
+        let cx = a.content_x() as i32;
+        let cw = a.content_width() as u32;
+        let heading_y = (vp.y + heading_top - scroll) as i32;
+        let image_y = (vp.y + image_top - scroll + py) as i32;
+        let frame = a.render();
+        assert!(
+            ink_pixels(frame, cx, heading_y, cw, heading_h as u32) > 0,
+            "滚动 {scroll} 后相邻标题仍应可见"
+        );
+        assert!(
+            !any_pixel(frame, cx, heading_y, cw, heading_h as u32, |p| p[0] > 200
+                && p[1] < 80
+                && p[2] > 100),
+            "滚动 {scroll} 后 Mermaid 像素不得覆盖相邻标题"
+        );
+        assert!(
+            any_pixel(frame, cx + px as i32, image_y, pw, ph, |p| p
+                == [237, 12, 160, 255]),
+            "滚动 {scroll} 后位图应绘制在自己的块内"
+        );
+    }
+}
+
+#[test]
+fn mermaid_copy_source_copies_body_without_changing_document() {
+    let store = MemStore::default();
+    let doc = "p\n\n```mermaid\ngraph TD\nA-->B\n```\n";
+    let copied = Rc::new(RefCell::new(Vec::new()));
+    let mut a = app(doc, None, false, &store);
+    a.ports.clipboard = Box::new(ClipLog(copied.clone()));
+
+    exec_mermaid_action(&mut a, ctx_menu::CtxAction::MermaidCopySource);
+
+    assert_eq!(copied.borrow().as_slice(), &["graph TD\nA-->B".to_string()]);
     assert_eq!(a.editor.session().serialize(), doc);
 }
 
@@ -13827,10 +14684,7 @@ fn empty_mermaid_hint_absent_in_source_mode() {
     let store = MemStore::default();
     let mut a = app(EMPTY_MERMAID_DOC, None, false, &store);
     a.ensure_layouts_all();
-    let id = block_id_of(
-        &a,
-        |k| matches!(k, BlockKind::FencedCode(Some(l)) if l.eq_ignore_ascii_case("mermaid")),
-    );
+    let id = block_id_of(&a, |k| matches!(k, BlockKind::Mermaid));
     assert!(
         a.cache.layouts[&id]
             .layout_text()
@@ -14088,6 +14942,138 @@ fn details_collapsed_child_blocks_have_zero_height() {
     assert!(any, "展开后子块应恢复真实高度");
 }
 
+#[test]
+fn details_active_summary_recollapse_restores_geometry_and_tail_anchor() {
+    let store = MemStore::default();
+    let doc = "# Details 验收\n\n## 1. 默认收起\n\n<details>\n<summary>点我展开（默认收起）</summary>\n\n折叠正文第一段。\n\n### 折叠内三级标题\n\n- 折叠内列表项\n\n</details>\n\n## 2. 后续标题\n\n尾部锚点。\n";
+    let mut a = app(doc, None, false, &store);
+    a.refresh_index();
+    a.ensure_layouts_all();
+    a.recompute_geometry();
+    let details_id = block_id_of(&a, |k| matches!(k, BlockKind::Details { .. }));
+    let next_at = doc.find("2. 后续标题").unwrap();
+    let tail_at = doc.find("尾部锚点").unwrap();
+    let next_id = a
+        .index
+        .blocks
+        .iter()
+        .find(|g| g.range.start <= next_at && next_at <= g.range.end)
+        .unwrap()
+        .id;
+    let tail_id = a
+        .index
+        .blocks
+        .iter()
+        .find(|g| g.range.start <= tail_at && tail_at <= g.range.end)
+        .unwrap()
+        .id;
+    let snapshot = |a: &App| {
+        let header = a.index.blocks.iter().find(|g| g.id == details_id).unwrap();
+        let next = a.index.blocks.iter().find(|g| g.id == next_id).unwrap();
+        let tail = a.index.blocks.iter().find(|g| g.id == tail_id).unwrap();
+        (header.top, header.height, next.top, tail.top)
+    };
+    let collapsed = snapshot(&a);
+    let logical_line_h = a.engine.doc_line_height();
+    let scale = a.input_state.scale;
+    let line_h = logical_line_h * scale;
+    assert!(
+        (collapsed.1 - line_h).abs() < 0.6,
+        "初始折叠只保留 summary 行高"
+    );
+    let header = a.index.blocks.iter().find(|g| g.id == details_id).unwrap();
+    let next = a.index.blocks.iter().find(|g| g.id == next_id).unwrap();
+    // 源码为 </details>\n\n## 后续标题：折叠后仅保留闭标签后的一个真空行，
+    // 隐藏正文的行数不得再以 blank_lines 形式进入后续标题的 top。
+    let expected_gap = (gap_after(&header.kind).max(gap_before(&next.kind))
+        + crate::tokens::doc::BLANK_LINE_LINES * logical_line_h)
+        * scale;
+    assert!(
+        (collapsed.2 - (collapsed.0 + collapsed.1 + expected_gap)).abs() < 0.01,
+        "后续标题应紧跟 summary 与正常块间距：top={} expected={}",
+        collapsed.2,
+        collapsed.0 + collapsed.1 + expected_gap
+    );
+
+    // 模拟右键菜单落光标：激活 summary 不得恢复标签行或隐藏正文高度。
+    a.editor.set_caret(doc.find("点我展开").unwrap());
+    a.ensure_layouts_all();
+    a.recompute_geometry();
+    assert_eq!(snapshot(&a), collapsed, "summary 激活前后折叠几何必须一致");
+    let header_text = a.cache.layouts[&details_id].value.layout_text().to_string();
+    assert!(
+        header_text.starts_with("点我展开"),
+        "折叠态应只画 summary：{header_text:?}"
+    );
+    assert!(!header_text.contains("<details") && !header_text.contains("<summary"));
+    assert!(a
+        .index
+        .blocks
+        .iter()
+        .filter(|g| g.container.details_depth > 0)
+        .all(|g| a.block_height(g) == 0.0));
+
+    a.toggle_details(details_id);
+    a.ensure_layouts_all();
+    a.recompute_geometry();
+    let expanded = snapshot(&a);
+    assert!(expanded.2 > collapsed.2, "展开应把后续标题向下推");
+    assert!(expanded.3 > collapsed.3, "展开应把尾部锚点向下推");
+    let nested_at = doc.find("折叠内三级标题").unwrap();
+    let nested = a
+        .index
+        .blocks
+        .iter()
+        .find(|g| g.range.start <= nested_at && nested_at <= g.range.end)
+        .expect("嵌套 Markdown 标题应拆成子块");
+    assert!(a.block_height(nested) > 0.0);
+    assert!(a.cache.layouts[&nested.id]
+        .value
+        .layout_text()
+        .contains("折叠内三级标题"));
+
+    // 光标在即将隐藏的正文中再折叠：应吸附到 summary，且后续块回到初始位置。
+    a.editor.set_caret(doc.find("折叠正文第一段").unwrap());
+    a.toggle_details(details_id);
+    a.ensure_layouts_all();
+    a.recompute_geometry();
+    assert_eq!(
+        snapshot(&a),
+        collapsed,
+        "再折叠必须完整恢复后续块与尾部锚点"
+    );
+    assert!(a
+        .index
+        .blocks
+        .iter()
+        .filter(|g| g.container.details_depth > 0)
+        .all(|g| a.block_height(g) == 0.0));
+    let header_text = a.cache.layouts[&details_id].value.layout_text().to_string();
+    assert!(!header_text.contains("折叠正文") && !header_text.contains("<details"));
+
+    let vp = a.viewport();
+    let cx = a.content_x() as i32;
+    let cw = a.content_width() as u32;
+    let summary_y = (vp.y + collapsed.0) as i32;
+    let next_y = (vp.y + collapsed.2) as i32;
+    let next_h = a
+        .index
+        .blocks
+        .iter()
+        .find(|g| g.id == next_id)
+        .unwrap()
+        .height;
+    let frame = a.render();
+    assert!(
+        ink_pixels(frame, cx, summary_y, cw, line_h as u32) > 0,
+        "再折叠后 summary 应可见"
+    );
+    assert!(
+        ink_pixels(frame, cx, next_y, cw, next_h as u32) > 0,
+        "后续标题应紧邻可见"
+    );
+}
+
 /// B3：折叠态下上下移动光标跳过隐藏子块（落到 summary 或下一块）。
 #[test]
 fn collapsed_details_caret_skips_hidden_children() {
@@ -14254,10 +15240,7 @@ fn quote_container_details_collapse_toggles_by_summary_click() {
     let (top_n_e, _, _) = geom(&a, next_id);
     assert_eq!(top_e, top_c, "块顶不应因展开而移动");
     assert!(h_e > h_c, "展开后块高应增大：{h_c} → {h_e}");
-    assert!(
-        top_n_e > top_n,
-        "后续块应随展开下移：{top_n} → {top_n_e}"
-    );
+    assert!(top_n_e > top_n, "后续块应随展开下移：{top_n} → {top_n_e}");
 
     // 再点 summary → 收起。
     a.input_state.mouse = PhysicalPosition::new(
@@ -14288,7 +15271,10 @@ fn list_item_container_details_collapse_toggles() {
     a.ensure_layouts_all();
     let id = block_id_of(&a, |k| matches!(k, BlockKind::ListItem { .. }));
     let collapsed = a.cache.layouts[&id].value.layout_text().to_string();
-    assert!(collapsed.contains("更多"), "收起态应显示 summary：{collapsed:?}");
+    assert!(
+        collapsed.contains("更多"),
+        "收起态应显示 summary：{collapsed:?}"
+    );
     assert!(
         !collapsed.contains("隐藏正文"),
         "收起态正文必须隐藏：{collapsed:?}"
@@ -14621,7 +15607,8 @@ fn html_img_missing_or_remote_placeholder_and_alt_visible() {
 #[test]
 fn html_img_local_inline_uses_image_path() {
     let text = "行内 <img src=\"logo.png\" alt=\"本地\"> 后\n";
-    let (mut a, calls, _files) = app_with_images(text, Some("dir/doc.md"), &[("dir/logo.png", 20, 10)]);
+    let (mut a, calls, _files) =
+        app_with_images(text, Some("dir/doc.md"), &[("dir/logo.png", 20, 10)]);
     a.editor.set_caret(text.len() - 1);
     a.ensure_layouts_all();
     let id = a.index.blocks[0].id;
@@ -15618,7 +16605,6 @@ fn image_preview_renders_overlay_frame() {
     let sum = |p: u32| (p & 0xff) + ((p >> 8) & 0xff) + ((p >> 16) & 0xff);
     assert!(sum(after) < sum(before), "预览覆盖层应压暗背景");
 }
-
 
 // ===== 光标闪烁状态机（无 GUI，直接驱动 tick） =====
 

@@ -23,10 +23,7 @@ impl CalloutRegistry {
     pub fn from_json(text: &str) -> Self {
         match serde_json::from_str::<serde_json::Value>(text) {
             Ok(serde_json::Value::Array(arr)) => {
-                let entries = arr
-                    .iter()
-                    .filter_map(parse_entry)
-                    .collect();
+                let entries = arr.iter().filter_map(parse_entry).collect();
                 Self { entries }
             }
             _ => Self::default(),
@@ -192,9 +189,7 @@ mod tests {
     #[test]
     fn emoji_and_non_bmp_characters_are_valid() {
         // 代理对 emoji 🎨 = U+1F3A8 = surrogate pair D83C DFA8
-        let r = CalloutRegistry::from_json(
-            r##"[{"name":"art","label":"艺术 🎨","icon":"🎨"}]"##,
-        );
+        let r = CalloutRegistry::from_json(r##"[{"name":"art","label":"艺术 🎨","icon":"🎨"}]"##);
         let c = r.get("art").unwrap();
         assert_eq!(c.label, "艺术 🎨");
         assert_eq!(c.icon, "🎨");
@@ -214,9 +209,8 @@ mod tests {
     #[test]
     fn control_characters_in_string_are_accepted() {
         // 手写 parser 原样 push(c) 无校验；serde_json 也接受（标准 JSON 允许 U+0000~U+001F）
-        let r = CalloutRegistry::from_json(
-            r##"[{"name":"ctrl","label":"制表\t水平","icon":"\t"}]"##,
-        );
+        let r =
+            CalloutRegistry::from_json(r##"[{"name":"ctrl","label":"制表\t水平","icon":"\t"}]"##);
         let c = r.get("ctrl").unwrap();
         assert_eq!(c.label, "制表\t水平");
     }
@@ -228,7 +222,11 @@ mod tests {
             r##"[{"name":123,"label":"数字名"},{"name":"ok","label":"ok","color":["not","a","string"]}]"##,
         );
         let names: Vec<&str> = r.entries().iter().map(|c| c.name.as_str()).collect();
-        assert_eq!(names, vec!["ok"], "name 非 string 整条跳过，color 非 string 只 color 缺省");
+        assert_eq!(
+            names,
+            vec!["ok"],
+            "name 非 string 整条跳过，color 非 string 只 color 缺省"
+        );
         assert_eq!(r.get("ok").unwrap().color, [136, 136, 136]);
     }
 }

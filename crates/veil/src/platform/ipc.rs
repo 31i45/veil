@@ -3,6 +3,7 @@
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Receiver;
+use veil_ui::i18n::{t, Key as I18nKey};
 
 const MAGIC: &[u8; 4] = b"VEIL";
 const VERSION: u8 = 1;
@@ -24,16 +25,16 @@ pub enum Instance {
 
 fn validate_path(path: &Path) -> Result<(), String> {
     if !path.is_absolute() {
-        return Err("IPC 文档路径必须是绝对路径".into());
+        return Err(t(I18nKey::IpcPathAbsolute).into());
     }
     let text = path
         .to_str()
-        .ok_or_else(|| "IPC 文档路径不是有效 UTF-8".to_string())?;
+        .ok_or_else(|| t(I18nKey::IpcPathUtf8).to_string())?;
     if text.is_empty() || text.contains('\0') {
-        return Err("IPC 文档路径无效".into());
+        return Err(t(I18nKey::IpcPathInvalid).into());
     }
     if text.len() > MAX_PATH_BYTES {
-        return Err("IPC 文档路径过长".into());
+        return Err(t(I18nKey::IpcPathTooLong).into());
     }
     Ok(())
 }
@@ -117,6 +118,7 @@ mod imp {
     use std::os::windows::io::{AsRawHandle, FromRawHandle};
     use std::sync::mpsc::{channel, Receiver};
     use std::time::{Duration, Instant};
+    use veil_ui::i18n::{t, tf, Key as I18nKey};
 
     type Handle = *mut c_void;
     const ERROR_ALREADY_EXISTS: u32 = 183;
@@ -322,9 +324,9 @@ mod imp {
                 }
             }
         }
-        Err(format!(
-            "无法连接 Veil 主进程: {}",
-            last.map_or_else(|| "未知错误".into(), |e| e.to_string())
+        Err(tf(
+            I18nKey::IpcConnectPrimary,
+            &[&last.map_or_else(|| t(I18nKey::IpcUnknown).into(), |e| e.to_string())],
         ))
     }
 }
@@ -369,7 +371,7 @@ pub fn acquire() -> Result<Instance, String> {
 
 #[cfg(not(windows))]
 pub fn send(_request: &IpcRequest) -> Result<(), String> {
-    Err("当前平台不支持单实例 IPC；将使用独立进程".into())
+    Err(t(I18nKey::IpcUnsupported).into())
 }
 
 #[cfg(test)]

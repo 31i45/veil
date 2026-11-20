@@ -65,7 +65,12 @@ mod tests {
         touch_recent(&mut r, PathBuf::from("f5.md"));
         assert_eq!(r[0], PathBuf::from("f5.md"));
         assert_eq!(r.len(), RECENT_CAP, "去重后不膨胀");
-        assert_eq!(r.iter().filter(|p| p.as_path() == Path::new("f5.md")).count(), 1);
+        assert_eq!(
+            r.iter()
+                .filter(|p| p.as_path() == Path::new("f5.md"))
+                .count(),
+            1
+        );
     }
 
     #[test]
@@ -74,7 +79,8 @@ mod tests {
         let text = encode_session(&recent);
         assert_eq!(parse_session(&text), recent);
         // 坏行/空值/未知键不影响其余行；重复路径按首次出现保序
-        let messy = "garbage\nrecent=\nrecent=D:\\x.md\nrecent=D:\\y.md\nrecent=D:\\x.md\nfoo=bar\n";
+        let messy =
+            "garbage\nrecent=\nrecent=D:\\x.md\nrecent=D:\\y.md\nrecent=D:\\x.md\nfoo=bar\n";
         assert_eq!(
             parse_session(messy),
             vec![PathBuf::from("D:\\x.md"), PathBuf::from("D:\\y.md")]

@@ -175,9 +175,7 @@ impl Session {
     /// 视图索引快照：一次枚举同时带出容器上下文与块行号，避免调用方逐块再查
     /// id 索引或为块间空行重新切片文本。
     #[allow(clippy::type_complexity)]
-    pub fn block_entries(
-        &self,
-    ) -> Vec<(BlockId, BlockKind, Range, BlockContainer, usize, usize)> {
+    pub fn block_entries(&self) -> Vec<(BlockId, BlockKind, Range, BlockContainer, usize, usize)> {
         self.syntax
             .blocks()
             .iter()

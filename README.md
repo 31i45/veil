@@ -53,7 +53,7 @@ Three crates, one-way dependency (`veil` → `veil-ui` → `veil-core`, no rever
 
 > Before v1.0, `veil-egui` was renamed `veil-ui`. The crate had already been egui-free since ADR-005; the old name no longer matched the facts. Boundaries and responsibilities unchanged.
 >
-> Mermaid has no embedded renderer: an in-process engine (QuickJS-ng + resvg + a 1.7 MB Tiny bundle) was shipped in v1.9.0 and removed in the next line because a low-frequency feature should not add 4.7 MB for every user. The full implementation remains available in the v1.9.0 tag.
+> Two release binaries share one codebase. `veil.exe` keeps the lean v1.8 baseline plus mermaid.ink SVG fetching and a local resvg rasteriser; `veil-full.exe` additionally links QuickJS and the full `mermaid.js`, so every Mermaid type renders without any network. The v1.9.0 Tiny-subset engine (QuickJS-ng + resvg + a 1.7 MB hand-assembled bundle) is not coming back: the full engine supersedes it.
 
 ## What It Does
 
@@ -91,7 +91,7 @@ Three crates, one-way dependency (`veil` → `veil-ui` → `veil-core`, no rever
 32. Outline panel (`Ctrl+Shift+O`): headings of the current document as a click-to-jump list, refreshed as you edit, with an explicit empty state when the document has no headings
 33. View controls: zoom 50%–300% in 10% steps via `Ctrl+=` / `Ctrl+-` / `Ctrl+0` or `Ctrl+wheel` (trackpad pinch included; session-only, not persisted), and `F11` full screen
 34. Windows: `Ctrl+Shift+N` opens an independent window; the current window keeps its document, caret and dirty state
-35. Mermaid diagrams (authoring flow, no embedded engine): a `mermaid` fenced block stays a source card with its code and templates. Right-click offers **Open in mermaid.live** (copies the block and opens the editor; the URL is built locally, nothing is sent), **Preview image** and **Download & insert image**: the last two ask mermaid.ink to render the diagram as PNG on that click only (the source is sent to that third-party service; a one-time notice says so, and both items disappear when **View → Block Remote Images** is on). Preview opens the existing image overlay; insert writes `<doc>.assets/mermaid-N.png` and appends `![](relative-path)` after the block as one undo step. Exported HTML/PDF simply carry that PNG. Diagrams do not update on edit — re-run the action to replace the image
+35. Mermaid diagrams: a `mermaid` fenced block stays a source card with its code and templates. In `veil-full.exe` the block renders locally (QuickJS + full `mermaid.js`, all diagram types including mindmap) with no network access; editing the source re-renders after a debounce. In `veil.exe` a visible block previews automatically while **View → Block Remote Images** is enabled: the block source is sent to mermaid.ink and the returned SVG is rasterised locally, and the first automatic request shows a one-time notice naming that third party. Right-click additionally offers **Open in mermaid.live** (copies the block and opens the editor; the URL is built locally, nothing is sent), **Preview image** and **Download & insert image**; the render-and-insert items disappear when remote images are blocked. Both binaries keep the source as the single truth: the caret shows the fence with code background, monospace font and a copy button. **Download & insert image** writes `<doc>.assets/mermaid-N.png` and appends `![](relative-path)` after the block as one undo step, by default in both binaries; `veil.exe` writes a remote URL only when `mermaid_insert_url = true` is set explicitly, and `veil-full.exe` always uses the local snapshot. A snapshot is an independent, possibly stale image — never a live bidirectional diagram, and the source is never deleted or hidden permanently
 
 ## What It Won't Do (still out of scope)
 
@@ -101,24 +101,28 @@ Three crates, one-way dependency (`veil` → `veil-ui` → `veil-core`, no rever
 - Plugin system
 - Mobile / PWA (desktop exe only)
 - Table visual editing beyond the delivered subset (merge/split cells); content editing, row/column insert/delete, column alignment and column-width drag are supported
-- Embedded diagram rendering: no Mermaid engine is linked. Inline preview/insert delegates to mermaid.ink only on explicit click, and the editor link uses a locally built mermaid.live URL
+- A browser engine or WebView for diagrams: `veil.exe` fetches Mermaid SVG from mermaid.ink on demand — automatic preview while remote images are allowed, or an explicit preview/insert action — and rasterises it locally with resvg; `veil-full.exe` bundles QuickJS + the full `mermaid.js` and renders entirely offline. Neither product ships Chromium; `foreignObject` output is disabled so resvg can rasterise labels
 - A separate rich-text document model: the text stays Markdown, and Ctrl+/ is a view toggle over the same document
-- Background networking: no sync, no update check, no telemetry; the only outbound requests are made on demand when rendering remote images in a document, or when you explicitly click **Preview image / Download & insert image** on a Mermaid block (sent to mermaid.ink), and can be disabled globally via **View → Block Remote Images**. External links are handed to the system default program; Export and PDF never include remote resources.
+- Background networking: no sync, no update check, no telemetry. In `veil-full.exe` Mermaid never touches the network. In `veil.exe`, while **View → Block Remote Images** is enabled, visible Mermaid blocks and ordinary remote images are fetched on demand — Mermaid block source goes to mermaid.ink (first automatic request shows a one-time notice), and blocking remote images stops both pipelines. `mermaid.live` is only opened by an explicit user action and is never used as an image API. External links are handed to the system default program; Export and PDF never include remote resources.
 - Competitor-parity items deliberately declined: a separate whole-word toggle (the regex mode's `\b` covers it), `Ctrl+Shift+K` delete-line (`Alt+↑` / `Alt+↓` already covers line operations), and a separate H5/H6 type scale (indentation expresses level). Auto-pairing of brackets/quotes shipped in v1.5 and is no longer on this list
 
 ## Build / Run / Test
 
 Requires: Rust stable (edition 2021). Acceptance environment: Windows 11 23H2+. Mica acrylic degrades to a solid colour where it is unavailable. Windows 10 has not been recorded on real hardware and is not claimed as verified.
 
-Interface text ships in Chinese (zh-CN) only: the i18n layer is a single-locale table with no English entries, so English labels quoted in this README are translations of the shipped Chinese strings.
+Interface text ships in Chinese (zh-CN) only: the i18n layer is a single-locale table with no English entries, so English labels quoted in this README are translations of the shipped Chinese strings. Veil does not detect the system display language and has no runtime language switch. Document text, exported content, and text inside diagrams are not translated with the interface.
 
 ```powershell
 cargo build --workspace
 cargo test --workspace
 cargo run -p veil -- <file.md>
+
+# veil-full.exe：离线 Mermaid（QuickJS + mermaid.js）
+cargo build --release --bin veil-full --features mermaid-offline
+cargo test -p veil --features mermaid-offline
 ```
 
-Baseline: 1791 passed / 0 failed / 14 ignored (2026-11-18, `cargo test --workspace`, after the Mermaid engine removal); `cargo clippy --workspace --all-targets -- -D warnings` zero warnings.
+Baseline: 1863 passed / 0 failed / 15 ignored (2026-11-20, `cargo test --workspace --all-features`); the default-feature release run is 1859 passed / 15 ignored, the 4-test difference being feature-gated Mermaid tests. `cargo clippy --workspace --all-features --all-targets -- -D warnings` zero warnings.
 
 ## Red Numbers (targets vs measured)
 
@@ -133,8 +137,9 @@ Measured on release build, probe-serialized; performance rows re-verified 2026-1
 | Cold start (window handle; P2 comparison definition) | — | 30 ms (2026-10-30, `tools/bench/measure.ps1`) |
 | Keystroke→commit p95 on 100 K-word doc | ≤ 16 ms | 0.973 ms / 1.566 ms (`perf_keystroke_path` 5,005 blocks / `perf_keystroke_10k_blocks` 10,500 blocks; same machine, re-measured 2026-11-18; previous record 1.297 / 1.796) ✅ |
 | Resident memory, 100 K-word doc (private working set) | ≤ 150 MB | 40.76 MB (2026-11-05) |
-| Installed size — code + data (non-icon) | ≤ 6 MiB (Phase A baseline; superseded by the Wave 3/4 PDF export gate) | 9,844,035 B (exe minus 89,277 B icons: `veil.ico` 46,688 + `veil-doc.ico` 42,589; 2026-11-18) |
-| Installed size — total single-file `veil.exe` | ≤ 10 MiB = 10,485,760 B (every increment must be recorded) | 9,933,312 B ≈ 9.47 MiB (local release build, pinned toolchain; 2026-11-18; −36,864 B vs v1.8.0 9,970,176 B after removing the Mermaid engine). v1.9.0 was the one release that shipped the embedded renderer: 14,683,136 B locally / 14,689,280 B on CI |
+| Installed size — code + data (non-icon) | ≤ 6 MiB (Phase A baseline; superseded by the Wave 3/4 PDF export gate) | 9,979,715 B (exe minus 89,277 B icons: `veil.ico` 46,688 + `veil-doc.ico` 42,589; 2026-11-20) |
+| Installed size — total single-file `veil.exe` | ≤ 10 MiB = 10,485,760 B | 9.60 MiB = 10,068,992 B (target ≈9 MiB; 2026-11-20, v1.8 baseline + mermaid.ink SVG + resvg + remote-image fetch) |
+| Installed size — total single-file `veil-full.exe` | ≤ 14 MiB = 14,680,064 B | 13.35 MiB = 13,998,080 B (target ≈13 MiB; 2026-11-20, + QuickJS + full `mermaid.js`, +3.75 MiB over `veil.exe`) |
 | `veil-core` unit + property tests | ≥ 80 | 343 |
 | E2E assertions | ≥ 20 | 41 (3 e2e scenarios: open→save→reopen, table+image paste, find/replace→crash recovery→self-clean) ✅ |
 | Markdown roundtrip (no edits: output == input bytes; byte comparison) | 100% | 100% |

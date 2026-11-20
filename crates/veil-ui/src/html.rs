@@ -455,7 +455,10 @@ fn render_table(children: &[Node]) -> Option<String> {
                     render_inline(x, &mut inner);
                 }
                 // 单元格内换行无法在 GFM 表格表达：改用 `<br>`；竖线必须转义。
-                let cell = inner.trim().replace('|', "\\|").replace(['\n', '\r'], "<br>");
+                let cell = inner
+                    .trim()
+                    .replace('|', "\\|")
+                    .replace(['\n', '\r'], "<br>");
                 cells.push(cell);
             }
             if !cells.is_empty() {
@@ -482,7 +485,11 @@ fn render_table(children: &[Node]) -> Option<String> {
     for row in &mut rows {
         row.resize(ncols, String::new());
     }
-    let mut out = format!("| {} |\n| {} |", rows[0].join(" | "), vec!["---"; ncols].join(" | "));
+    let mut out = format!(
+        "| {} |\n| {} |",
+        rows[0].join(" | "),
+        vec!["---"; ncols].join(" | ")
+    );
     for row in rows.iter().skip(1) {
         out.push('\n');
         out.push_str(&format!("| {} |", row.join(" | ")));
@@ -490,7 +497,8 @@ fn render_table(children: &[Node]) -> Option<String> {
     Some(out)
 }
 
-fn render_pre(children: &[Node]) -> Option<String> {    let mut raw = String::new();
+fn render_pre(children: &[Node]) -> Option<String> {
+    let mut raw = String::new();
     for c in children {
         raw_text(c, &mut raw);
     }

@@ -10308,14 +10308,16 @@ fn quick_open_takes_ime_text_and_preempts_search() {
     assert_eq!(doc_text(&a), "x", "文档内容不受输入影响");
 }
 
-/// 10k+ 块大文档击键探针（默认忽略）：验证编辑到上屏 p95 ≤16ms 预算。
-/// cargo test -p veil-ui --release -- --ignored --nocapture perf_keystroke_10k_blocks
+/// 20k+ 块大文档击键探针（默认忽略）：驱动真实 App 路径（editor apply + after_edit +
+/// paint），上报击键 p50/p95/max，并断言零丢字与保存字节逐字节一致。
+/// cargo test -p veil-ui --release --lib -- --ignored --nocapture perf_20k_blocks
 #[test]
 #[ignore = "性能探针，不参与常规门禁"]
-fn perf_keystroke_10k_blocks() {
-    // 每轮 7 块，1500 轮 ≈ 10500 块
-    let mut text = String::with_capacity(500_000);
-    for i in 0..1500 {
+fn perf_20k_blocks() {
+    // 每轮 7 块（标题 / 正文 / 两条列表项 / 代码块 / 引用 / 分隔线），
+    // 3000 轮 ≈ 21000 块，即约 21k 压力文档（converge-single-veil-surface G2 口径）。
+    let mut text = String::with_capacity(1_000_000);
+    for i in 0..3000 {
         text.push_str(&format!(
             "## Section {i}\n\nParagraph {i} with **bold** text, `code`, and a [link](https://example.com/{i}).\n\n- item A {i}\n- item B {i}\n\n```rust\nfn f{i}() -> u32 {{ {i} }}\n```\n\n> quote {i}\n\n---\n\n"
         ));
@@ -10343,11 +10345,12 @@ fn perf_keystroke_10k_blocks() {
             .min(samples.len() - 1);
         samples[i]
     };
-    println!("perf_10k_blocks={n}");
-    println!("perf_10k_keystroke_ms_p50={:.3}", pick(0.5));
-    println!("perf_10k_keystroke_ms_p95={:.3}", pick(0.95));
+    println!("perf_20k_blocks={n}");
+    println!("perf_20k_samples_n={}", samples.len());
+    println!("perf_20k_keystroke_ms_p50={:.3}", pick(0.5));
+    println!("perf_20k_keystroke_ms_p95={:.3}", pick(0.95));
     println!(
-        "perf_10k_keystroke_ms_max={:.3}",
+        "perf_20k_keystroke_ms_max={:.3}",
         samples[samples.len() - 1]
     );
     // 零丢字：300 次击键必须一字不少地落在文档里（Task 11 门禁）。

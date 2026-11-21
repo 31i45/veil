@@ -24,7 +24,7 @@ S1 初测按「每次布局都重算整块」估算，得到 42–152 ms / 1000 
 | `SyntaxSet` 冷加载 | 0.9 ms（惰性：首次遇到代码块才加载） |
 | 常驻内存（加载后 / 1000 行 Rust 后） | 7.1 MB / 22.2 MB 增量 |
 
-### 增量复核（S1-b，`spikes/syntect-size/src/bin/incr_bench.rs`）
+### 增量复核（S1-b，本地原型 `syntect-size` 的 `incr_bench`，已清理）
 
 | 场景 | p50 | p95 | 重解析行数 |
 |---|---|---|---|

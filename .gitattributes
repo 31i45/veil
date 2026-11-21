@@ -17,3 +17,11 @@ Cargo.lock text eol=lf
 # YAML workflows — GitHub Actions prefers LF
 *.yml text eol=lf
 *.yaml text eol=lf
+
+# Binary assets — never apply text normalization or text diffs
+*.png binary
+*.pdf binary
+
+# Repo config text files — keep LF to avoid CRLF churn
+.gitignore text eol=lf
+.gitattributes text eol=lf

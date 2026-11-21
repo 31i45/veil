@@ -35,6 +35,7 @@ spikes/
 
 # ─── Build / release artifacts ───
 release-bundle/
+release-bundle/**/*.pdb
 veil-artifact/
 veil-windows-x86_64.zip
 
@@ -46,6 +47,11 @@ bench/results/
 .screenshots/
 # Real-machine evidence bundle (screenshots/logs, local only)
 /evidence/
+# Evidence summaries referenced by evaluation/README/CHANGELOG stay tracked;
+# only run scratch inside evidence is ignored (never tracked).
+evidence/**/_work/
+evidence/**/_home/
+evidence/**/*.tmp
 
 # ─── Real-device walkthrough evidence (PNG screenshots, local only) ───
 docs/review/evidence/**/*.png

@@ -10,7 +10,7 @@
 
 已核实：`katex` crate 0.4.6 存在（Rust bindings to KaTeX，内嵌 JS 引擎）；`rquickjs` 0.14.0 存在；`latex-rust` 2.1.1 存在（纯 Rust 排版 + 光栅化，字体内嵌；3.0.1 要求 Rust 1.99，当前工具链不可用，锁定 2.1.1）。
 
-## Spike 结果一（2026-10-24，windows-msvc，release 构建，`spikes/katex-timing`）
+## Spike 结果一（2026-10-24，windows-msvc，release 构建，本地原型 `katex-timing`，已清理）
 
 | 路径 | 结果 |
 |---|---|
@@ -20,7 +20,7 @@
 
 **致命阻塞（2026-10-25 切片 6 启动时确认）**：KaTeX `renderToString` 的产物是 HTML/MathML 字符串，而本项目的呈现管线是 softbuffer 像素直绘、且黑名单禁止一切 webview（INSTANCE §6）。HTML → 位图需要布局引擎级光栅器（webview / 自研 HTML 子集渲染器），前者违禁、后者工作量不可控。即 rquickjs 路径「能跑 JS」但「出不了像素」，否决。
 
-## Spike 结果二（2026-10-25，windows-msvc，release 构建，`spikes/latex-rust-check`，与 katex-timing 同口径 4 类公式 ×100 次）
+## Spike 结果二（2026-10-25，windows-msvc，release 构建，本地原型 `latex-rust-check`，已清理，与 katex-timing 同口径 4 类公式 ×100 次）
 
 | 指标 | 实测 |
 |---|---|
@@ -56,7 +56,7 @@
 
 ## 2026-11-16 复核：typst-math 体积与依赖下界
 
-- 方法：独立 spike `spikes/math-compare`，只链接 typst 0.15.1 的编译器与排版路径（`typst::compile::<PagedDocument>`），不含字体与 LaTeX→Typst 转换，因此测得的是体积与依赖下界。
+- 方法：独立本地原型 `math-compare`（已清理，`spikes/` 不入库），只链接 typst 0.15.1 的编译器与排版路径（`typst::compile::<PagedDocument>`），不含字体与 LaTeX→Typst 转换，因此测得的是体积与依赖下界。
 - 结果：exe 增量 +15,857,664 B（≈15.1 MiB）；叠加现有 7,761,408 B 后约 22.5 MiB，超 20 MiB 硬门禁。typst 子树新增 267 个 crate，workspace 传递依赖将从 101 涨到约 350，超 200 门禁。release + LTO 构建 16 分 24 秒。
 - 结论：保留 `latex-rust`（当前 3.0，PNG 路径）。未做渲染质量/单条耗时对比——体积与依赖已在渲染之前否决。
 - 重开条件：产品明确把「出版社级公式排版」列为一等目标，并同时批准放宽体积与依赖门禁；或出现可直接消费 LaTeX、输出位图/SVG、增量 ≤ 3 MiB 且依赖 ≤ 30 的纯 Rust 组件。

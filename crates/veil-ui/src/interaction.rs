@@ -427,7 +427,9 @@ impl App {
     /// 草稿（无关联文件）拒绝（无写入基准），文档不变、不置脏；落盘失败同样保持原样并提示。
     pub(crate) fn insert_image_data(&mut self, img: &crate::image::ImageData) {
         let Some(doc) = self.doc.path.clone() else {
-            self.ui_state.chrome.notice = t(I18nKey::NoticeImagePasteNeedsFile).into();
+            self.ui_state
+                .chrome
+                .notify_error(t(I18nKey::NoticeImagePasteNeedsFile));
             eprintln!("图片粘贴需要关联文件（草稿无落盘目录）");
             self.request_redraw();
             return;
@@ -456,19 +458,25 @@ impl App {
         occurrence: Option<usize>,
     ) {
         let Some(doc) = self.doc.path.clone() else {
-            self.ui_state.chrome.notice = t(I18nKey::NoticeMermaidSnapshotNeedsFile).into();
+            self.ui_state
+                .chrome
+                .notify_error(t(I18nKey::NoticeMermaidSnapshotNeedsFile));
             self.request_redraw();
             return;
         };
         let Some(end) = self.mermaid_snapshot_anchor(source_hash, occurrence) else {
-            self.ui_state.chrome.notice = t(I18nKey::NoticeMermaidSnapshotStale).into();
+            self.ui_state
+                .chrome
+                .notify_error(t(I18nKey::NoticeMermaidSnapshotStale));
             self.request_redraw();
             return;
         };
         match self.ports.assets.save_pasted_image(&doc, img) {
             Ok(rel) => {
                 if !self.editor.set_caret(end) {
-                    self.ui_state.chrome.notice = t(I18nKey::NoticeMermaidSnapshotStale).into();
+                    self.ui_state
+                        .chrome
+                        .notify_error(t(I18nKey::NoticeMermaidSnapshotStale));
                     self.request_redraw();
                     return;
                 }
@@ -580,7 +588,9 @@ impl App {
     /// 草稿（无关联文件）拒绝（无相对路径基准）；非图片扩展名拒绝；取消无副作用。
     pub(crate) fn insert_image_via_dialog(&mut self) {
         let Some(doc) = self.doc.path.clone() else {
-            self.ui_state.chrome.notice = t(I18nKey::NoticeInsertImageNeedsFile).into();
+            self.ui_state
+                .chrome
+                .notify_error(t(I18nKey::NoticeInsertImageNeedsFile));
             self.request_redraw();
             return;
         };
@@ -588,7 +598,9 @@ impl App {
             return;
         };
         if !crate::image::is_image_path(&img) {
-            self.ui_state.chrome.notice = t(I18nKey::NoticeUnsupportedImage).into();
+            self.ui_state
+                .chrome
+                .notify_error(t(I18nKey::NoticeUnsupportedImage));
             self.request_redraw();
             return;
         }
@@ -989,7 +1001,9 @@ impl App {
         if self.menu_flags().can_export {
             return true;
         }
-        self.ui_state.chrome.notice = t(I18nKey::NoticeOutputEmptyDocument).into();
+        self.ui_state
+            .chrome
+            .notify_error(t(I18nKey::NoticeOutputEmptyDocument));
         self.request_redraw();
         false
     }
@@ -1207,7 +1221,9 @@ impl App {
         match id {
             Some(id) => self.copy_code_block(id),
             None => {
-                self.ui_state.chrome.notice = t(I18nKey::NoticeCodeBlockRequired).into();
+                self.ui_state
+                    .chrome
+                    .notify_error(t(I18nKey::NoticeCodeBlockRequired));
                 self.request_redraw();
             }
         }
@@ -1440,9 +1456,10 @@ impl App {
                 Some((path, missing)) => {
                     if missing {
                         // 缺失图片：菜单打开时给出可见提示（DEF-T67-E1-005）。
-                        self.ui_state.chrome.notice =
+                        self.ui_state.chrome.notify_error(
                             crate::i18n::t(crate::i18n::Key::NoticeImageMissing)
-                                .replace("{}", &path);
+                                .replace("{}", &path),
+                        );
                     }
                     (CtxKind::Image { path, missing }, None, None, None, None)
                 }
@@ -2139,7 +2156,9 @@ impl App {
         match def {
             Some(def) => self.jump_to_offset(def.start),
             None => {
-                self.ui_state.chrome.notice = t(I18nKey::NoticeFootnoteDefMissing).to_string();
+                self.ui_state
+                    .chrome
+                    .notify_error(t(I18nKey::NoticeFootnoteDefMissing));
                 self.request_redraw();
             }
         }
@@ -2185,7 +2204,9 @@ impl App {
         match target {
             Some(start) => self.jump_to_offset(start),
             None => {
-                self.ui_state.chrome.notice = t(I18nKey::NoticeFootnoteRefMissing).to_string();
+                self.ui_state
+                    .chrome
+                    .notify_error(t(I18nKey::NoticeFootnoteRefMissing));
                 self.request_redraw();
             }
         }
@@ -2225,7 +2246,9 @@ impl App {
         match target {
             Some(start) => self.jump_to_offset(start),
             None => {
-                self.ui_state.chrome.notice = t(I18nKey::NoticeAnchorMissing).to_string();
+                self.ui_state
+                    .chrome
+                    .notify_error(t(I18nKey::NoticeAnchorMissing));
                 self.request_redraw();
             }
         }
@@ -2242,7 +2265,9 @@ impl App {
         // 裸 `www.` 链接在源码里没有协议，打开前补齐（否则被协议白名单拒绝）
         let target = crate::normalize_link_url(trimmed);
         if !crate::url_is_openable(&target) {
-            self.ui_state.chrome.notice = tf(I18nKey::NoticeLinkUnsupported, &[&target]);
+            self.ui_state
+                .chrome
+                .notify_error(tf(I18nKey::NoticeLinkUnsupported, &[&target]));
             self.request_redraw();
             return;
         }
@@ -2279,8 +2304,9 @@ impl App {
                     if veil_core::link_url_is_safe(&target) {
                         self.ports.clipboard.set(&target);
                     } else {
-                        self.ui_state.chrome.notice =
-                            tf(I18nKey::NoticeLinkUnsupported, &[&target]);
+                        self.ui_state
+                            .chrome
+                            .notify_error(tf(I18nKey::NoticeLinkUnsupported, &[&target]));
                         self.request_redraw();
                     }
                 }

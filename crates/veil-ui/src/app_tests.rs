@@ -12453,7 +12453,10 @@ fn print_hard_cuts_atomic_block_taller_than_page() {
 fn print_stub_notices_when_platform_missing() {
     let mut a = app_print("x\n", Box::new(NoPrint));
     a.perform_menu(MenuAction::Print);
-    assert_eq!(a.ui_state.chrome.notice, "当前平台暂不支持打印");
+    assert_eq!(
+        a.ui_state.chrome.notice,
+        "当前平台暂不支持打印；可改用「导出 PDF」，保存后从阅读器打印"
+    );
     assert!(a.window_state.print.is_none(), "NoPrint 不进入打印态");
 }
 
@@ -12461,7 +12464,10 @@ fn print_stub_notices_when_platform_missing() {
 fn export_pdf_stub_notices_when_platform_missing() {
     let mut a = app_print("x\n", Box::new(NoPrint));
     a.perform_menu(MenuAction::ExportPdf);
-    assert_eq!(a.ui_state.chrome.notice, "当前平台暂不支持导出 PDF");
+    assert_eq!(
+        a.ui_state.chrome.notice,
+        "当前平台暂不支持导出 PDF；可改用「导出 HTML」，或改在支持打印的平台上重试"
+    );
     assert!(a.window_state.print.is_none(), "无平台实现时不进入打印态");
 }
 
@@ -17525,6 +17531,47 @@ fn print_and_pdf_failure_notices_are_errors_and_survive_ttl() {
         b.ui_state.chrome.notice.contains("导出 PDF 失败"),
         "PDF 导出失败不得在 TTL 后自动消失: {:?}",
         b.ui_state.chrome.notice
+    );
+}
+
+/// 打印端口：模拟平台层拿不到打印机上下文（hDC 为空）。
+struct NoPrinterContextPrint;
+impl Print for NoPrinterContextPrint {
+    fn print(&mut self, session: &mut PrintSession) {
+        session.notice_error(t(I18nKey::PrintNoPrinterContext));
+    }
+}
+
+/// 无打印机上下文属明确失败：错误分级、超过 TTL 仍保留，且文案含下一步。
+#[test]
+fn no_printer_context_notice_is_error_with_next_step_and_survives_ttl() {
+    let mut a = app_print("x\n", Box::new(NoPrinterContextPrint));
+    a.print_document();
+    let notice = &a.ui_state.chrome.notice;
+    assert!(
+        notice.contains("无法获取打印机上下文"),
+        "须保留失败原因：{notice}"
+    );
+    assert!(
+        notice.contains("检查打印机连接") && notice.contains("重试"),
+        "须提示检查打印机并重试：{notice}"
+    );
+    assert!(
+        notice.contains("导出 PDF"),
+        "须给出改用导出 PDF 的出口：{notice}"
+    );
+    assert_eq!(
+        a.ui_state.chrome.current_notice_kind(),
+        chrome::NoticeKind::Error,
+        "无打印机上下文必须按错误分级：{notice}"
+    );
+    let t0 = Instant::now();
+    a.tick(t0);
+    a.tick(t0 + Duration::from_secs(60));
+    assert!(
+        a.ui_state.chrome.notice.contains("无法获取打印机上下文"),
+        "错误通知不得在 TTL 后自动消失: {:?}",
+        a.ui_state.chrome.notice
     );
 }
 

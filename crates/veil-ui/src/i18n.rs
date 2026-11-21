@@ -393,8 +393,10 @@ keys! {
     DropOpenDocument => "drop.open_document", "松开以打开文档：{}";
 
     // ---- 打印 / 导出 ----
-    PrintUnsupportedPdf => "print.unsupported_pdf", "当前平台暂不支持导出 PDF";
-    PrintUnsupportedPrint => "print.unsupported_print", "当前平台暂不支持打印";
+    PrintUnsupportedPdf => "print.unsupported_pdf",
+        "当前平台暂不支持导出 PDF；可改用「导出 HTML」，或改在支持打印的平台上重试";
+    PrintUnsupportedPrint => "print.unsupported_print",
+        "当前平台暂不支持打印；可改用「导出 PDF」，保存后从阅读器打印";
     ImagePreviewTitle => "image.preview_title", "图片预览 · {} · {}";
     ImagePreviewHint => "image.preview_hint",
         "滚轮/方向键平移 · Ctrl+滚轮或 +/- 缩放 · 0 适应窗口 · Esc 或点击遮罩关闭";
@@ -402,17 +404,20 @@ keys! {
     ExportUntitledPdf => "export.untitled_pdf", "未命名.pdf";
     ExportUntitledHtml => "export.untitled_html", "未命名.html";
     ExportUntitledMarkdown => "export.untitled_markdown", "未命名.md";
-    NoticePrintFailed => "notice.print_failed", "打印失败：{}";
+    NoticePrintFailed => "notice.print_failed",
+        "打印失败：{}；可重试打印，或检查打印机是否联机、驱动是否正常后重试";
     ModalPrintFailedTitle => "modal.print_failed.title", "打印失败";
     ModalPrintFailedBody => "modal.print_failed.body",
         "原因：{}\n\n下一步：可重试重新打开打印对话框，或检查打印机是否联机、驱动是否正常。";
-    NoticeExportPdfFailed => "notice.export_pdf_failed", "导出 PDF 失败：{}";
+    NoticeExportPdfFailed => "notice.export_pdf_failed",
+        "导出 PDF 失败：{}；可重试导出，或检查目标目录是否可写、文件是否被占用后重试";
     ModalExportPdfFailedTitle => "modal.export_pdf_failed.title", "导出 PDF 失败";
     ModalExportPdfFailedBody => "modal.export_pdf_failed.body",
         "原因：{}\n\n下一步：可重试导出，或取消后检查系统是否安装可用的中文字体、目标目录是否可写、文件是否被占用；既有 PDF 不会被修改。";
 
     // ---- 平台层（打印 / PDF） ----
-    PrintNoPrinterContext => "print.no_printer_context", "打印失败：无法获取打印机上下文";
+    PrintNoPrinterContext => "print.no_printer_context",
+        "打印失败：无法获取打印机上下文；请检查打印机连接后重试，或改用导出 PDF";
     PrintSentPagesUnified => "print.sent_pages_unified", "已发送 {} 页到打印机（与 PDF 同一版面）";
     PrintUnifiedFallback => "print.unified_fallback", "统一版面不可用，回退屏幕渲染打印：{}";
     PrintSentPagesScreen => "print.sent_pages_screen", "已发送 {} 页到打印机（屏幕渲染）";
@@ -870,6 +875,81 @@ mod tests {
         assert!(
             notice.contains("目标目录"),
             "须提示检查目标目录是否可写: {notice}"
+        );
+    }
+
+    /// 打印 / PDF 失败提示：保留原因 + 可执行下一步，且与成功态文案可区分。
+    #[test]
+    fn print_failures_have_actionable_next_step() {
+        let unsupported_print = t(Key::PrintUnsupportedPrint);
+        assert!(
+            unsupported_print.contains("不支持打印"),
+            "须保留原因: {unsupported_print}"
+        );
+        assert!(
+            unsupported_print.contains("导出 PDF") && unsupported_print.contains("打印"),
+            "须给出改用导出 PDF 的出口: {unsupported_print}"
+        );
+
+        let unsupported_pdf = t(Key::PrintUnsupportedPdf);
+        assert!(
+            unsupported_pdf.contains("不支持导出 PDF"),
+            "须保留原因: {unsupported_pdf}"
+        );
+        assert!(
+            unsupported_pdf.contains("导出 HTML"),
+            "须给出改用导出 HTML 的出口: {unsupported_pdf}"
+        );
+
+        let print_failed = tf(Key::NoticePrintFailed, &["设备离线"]);
+        assert!(
+            print_failed.contains("设备离线"),
+            "须保留原因: {print_failed}"
+        );
+        assert!(
+            print_failed.contains("打印机") && print_failed.contains("重试"),
+            "须提示检查打印机并重试: {print_failed}"
+        );
+
+        let pdf_failed = tf(Key::NoticeExportPdfFailed, &["拒绝访问"]);
+        assert!(pdf_failed.contains("拒绝访问"), "须保留原因: {pdf_failed}");
+        assert!(
+            pdf_failed.contains("目标目录") && pdf_failed.contains("重试"),
+            "须提示检查目标目录后重试: {pdf_failed}"
+        );
+
+        let no_context = t(Key::PrintNoPrinterContext);
+        assert!(
+            no_context.contains("无法获取打印机上下文"),
+            "须保留原因: {no_context}"
+        );
+        assert!(
+            no_context.contains("检查打印机连接") && no_context.contains("重试"),
+            "须提示检查打印机并重试: {no_context}"
+        );
+        assert!(
+            no_context.contains("导出 PDF"),
+            "须给出改用导出 PDF 的出口: {no_context}"
+        );
+
+        // 成功态是「已发送 / 已导出」，失败态不得与其中任一条混同。
+        for success in [
+            t(Key::PrintSentPagesUnified),
+            t(Key::PrintSentPagesScreen),
+            t(Key::PrintExportedPdf),
+        ] {
+            assert!(
+                success.starts_with("已"),
+                "成功态文案必须以「已」开头: {success}"
+            );
+            assert!(!print_failed.contains(success), "失败文案混入成功态");
+            assert!(!pdf_failed.contains(success), "失败文案混入成功态");
+            assert!(!no_context.contains(success), "失败文案混入成功态");
+        }
+        assert!(
+            print_failed.contains("失败")
+                && pdf_failed.contains("失败")
+                && no_context.contains("失败")
         );
     }
 

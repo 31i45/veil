@@ -744,7 +744,7 @@ impl Print for WinPrint {
             unsafe { GlobalFree(pd.h_dev_names) };
         }
         if hdc.is_null() {
-            session.notice(t(Key::PrintNoPrinterContext));
+            session.notice_error(t(Key::PrintNoPrinterContext));
             return;
         }
         // 用户已确认打印：补齐缺失的 Mermaid 渲染（同步、有预算），

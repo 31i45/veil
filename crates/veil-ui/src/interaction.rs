@@ -100,7 +100,7 @@ impl App {
         let Some(key) = map_key(event, self.input_state.mods) else {
             return;
         };
-        self.route_key(key);
+        self.route_key_with_focus(key);
         crate::perf::key(started.elapsed());
     }
 

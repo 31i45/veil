@@ -245,7 +245,8 @@ keys! {
     BtnRestoreDefaults => "button.restore_defaults", "恢复默认";
 
     // ---- 保存 / 打开 / 导出 失败与提示 ----
-    NoticeWatchUnavailable => "notice.watch_unavailable", "文件监听不可用: {}";
+    NoticeWatchUnavailable => "notice.watch_unavailable",
+        "文件监听不可用: {}；重新打开该文件即可再次尝试";
     NoticeConflictNameExhausted => "notice.conflict_name_exhausted", "冲突副本名已耗尽";
     NoticeExternalBackupFailed => "notice.external_backup_failed", "外部版本备份失败：取消保存 {}";
     NoticeSaved => "notice.saved", "已保存：{}";
@@ -255,7 +256,8 @@ keys! {
         "{}\n\n原因：{}\n\n下一步：可重试本次保存，或用「另存为」写入其他位置；当前修改仍保留在编辑器中。";
     ModalExternalBackupFailBody => "modal.external_backup_fail.body",
         "{}\n\n原因：外部版本备份失败（{}）。\n\n下一步：为避免覆盖外部修改，本次保存已取消；可重试或「另存为」写入其他位置。";
-    NoticeRecoveryWriteFailed => "notice.recovery_write_failed", "崩溃恢复写入失败：{}";
+    NoticeRecoveryWriteFailed => "notice.recovery_write_failed",
+        "崩溃恢复写入失败：{}；可检查磁盘空间或权限后重试";
     NoticeFileRestored => "notice.file_restored", "文件已恢复：{}";
     NoticeExternalChanged => "notice.external_changed", "检测到外部修改：保存时将先备份磁盘版本";
     NoticeExternalDeleted => "notice.external_deleted", "文件已被外部删除；保存将重建";
@@ -279,7 +281,8 @@ keys! {
     NoticeSavedAs => "notice.saved_as", "已另存为：{}";
     NoticeHistoryMigrationFailed => "notice.history_migration_failed",
         "文档已保存到：{}；但版本历史迁移失败（{}），旧历史仍保留在临时会话目录";
-    NoticeSnapshotFailed => "notice.snapshot_failed", "版本历史写入失败：{}（正文已保留，可稍后重试保存）";
+    NoticeSnapshotFailed => "notice.snapshot_failed",
+        "版本历史写入失败：{}（正文已保留；可检查磁盘空间或写入权限后重试保存）";
     NoticeAssetsMigrationIncomplete => "notice.assets_migration_incomplete",
         "已另存为：{}；有 {} 个相对图片资产未能迁移（源缺失或复制失败），新位置可能显示断图";
     NoticeSaveAsFailed => "notice.save_as_failed", "另存为失败：{}；可 Ctrl+Shift+S 重试或换一个位置";
@@ -305,7 +308,8 @@ keys! {
     NoticeNewDraft => "notice.new_draft", "已新建空白文档";
 
     // ---- 快照 ----
-    NoticeSnapshotReadFailed => "notice.snapshot_read_failed", "读取快照失败：{}";
+    NoticeSnapshotReadFailed => "notice.snapshot_read_failed",
+        "读取快照失败：{}；可关闭版本历史后重试，或检查快照文件是否被占用";
     NoticeSelectVersion => "notice.select_version", "请先选择一个版本";
     NoticeRestoredVersion => "notice.restored_version", "已恢复该版本（Ctrl+Z 可撤销）";
     NoticeSelectVersionToDelete => "notice.select_version_to_delete", "请先选择要删除的版本";
@@ -313,19 +317,24 @@ keys! {
     ModalDeleteSnapshotBody => "modal.delete_snapshot.body",
         "{}（{}）\n\n将永久删除该版本，此操作不可撤销。\n\n下一步：确认删除，或取消保留。";
     NoticeDeletedSnapshot => "notice.deleted_snapshot", "已删除该版本快照";
-    NoticeDeleteSnapshotFailed => "notice.delete_snapshot_failed", "删除快照失败：{}";
+    NoticeDeleteSnapshotFailed => "notice.delete_snapshot_failed",
+        "删除快照失败：{}；可检查磁盘空间或文件是否被占用后重试";
     NoticeNoHistory => "notice.no_history", "暂无版本历史可清空";
     ModalClearHistoryTitle => "modal.clear_history.title", "清空版本历史";
     ModalClearHistoryBody => "modal.clear_history.body",
         "将永久删除本文档的全部 {} 份历史快照。\n\n此操作不可撤销；当前文档内容不受影响。\n\n下一步：确认清空，或取消保留。";
     NoticeHistoryCleared => "notice.history_cleared", "已清空版本历史（{} 份）";
-    NoticeClearHistoryFailed => "notice.clear_history_failed", "清空历史失败：{}";
+    NoticeClearHistoryFailed => "notice.clear_history_failed",
+        "清空历史失败：{}；可检查磁盘空间或文件是否被占用后重试";
 
     // ---- 启动 / 配置 ----
     NoticeConfigIgnored => "notice.config_ignored", "配置有 {} 处无法识别，已忽略";
     NoticeConfigInvalid => "notice.config_invalid", "配置文件无效，已用默认主题: {}";
     NoticeRecovered => "notice.recovered",
-        "已从崩溃恢复「{}」的未保存内容；恢复时间 {}。当前内容尚未保存，按 Ctrl+S 保存";
+        "已从崩溃恢复「{}」的未保存内容；恢复时间 {}。当前内容尚未保存，按 Ctrl+S 保存（{}）";
+    RecoveredSaveToDir => "notice.recovered.save_to_dir", "写回原文件所在目录「{}」";
+    RecoveredSaveToFile => "notice.recovered.save_to_file", "写回原文件";
+    RecoveredSaveChooseLocation => "notice.recovered.save_choose_location", "选择新的保存位置";
     NoticeTheme => "notice.theme", "主题：{}";
     NoticeConfigNotSaved => "notice.config_not_saved", "配置未保存：{}";
     ErrEventLoopCreate => "error.event_loop_create", "创建事件循环失败: {}";
@@ -877,20 +886,79 @@ mod tests {
         );
     }
 
-    /// 崩溃恢复提示不硬编码文件名：对象与时间都由调用点以参数注入。
+    /// 崩溃恢复提示不硬编码文件名：对象、时间、保存去向都由调用点以参数注入。
     #[test]
     fn recovered_notice_renders_object_time_and_save_hint() {
         assert_eq!(
             t(Key::NoticeRecovered).matches("{}").count(),
-            2,
-            "恢复对象与时间必须是占位符参数"
+            3,
+            "恢复对象、时间与保存去向必须都是占位符参数"
         );
-        let notice = tf(Key::NoticeRecovered, &["a.md", "14:32"]);
+        let save_hint = tf(Key::RecoveredSaveToDir, &["资料归档"]);
+        let notice = tf(Key::NoticeRecovered, &["a.md", "14:32", &save_hint]);
         assert!(notice.contains("崩溃恢复"), "须说明来源: {notice}");
         assert!(notice.contains("「a.md」"), "须含恢复对象: {notice}");
         assert!(notice.contains("14:32"), "须含恢复时间: {notice}");
         assert!(notice.contains("尚未保存"), "须说明当前未保存: {notice}");
         assert!(notice.contains("Ctrl+S"), "须给出保存方式: {notice}");
+        assert!(
+            notice.contains("原文件所在目录「资料归档」"),
+            "有原路径时须说明保存回原位置: {notice}"
+        );
+        // 无原路径：保存去向应说明可选择新位置，而不是照抄文件名。
+        let choose = t(Key::RecoveredSaveChooseLocation);
+        let notice = tf(Key::NoticeRecovered, &["未命名草稿", "14:32", choose]);
+        assert!(
+            notice.contains("选择新的保存位置"),
+            "无路径时须说明可选择保存位置: {notice}"
+        );
+        // 有路径但取不到父目录名（如盘符根目录）：说明写回原文件，不编造位置。
+        let file = t(Key::RecoveredSaveToFile);
+        let notice = tf(Key::NoticeRecovered, &["a.md", "14:32", file]);
+        assert!(
+            notice.contains("写回原文件") && !notice.contains("目录"),
+            "取不到目录名时只说写回原文件: {notice}"
+        );
+    }
+
+    /// 快照读写删、清空历史与文件监听失败：保留原因，并给出可执行的下一步。
+    #[test]
+    fn storage_and_watch_failures_offer_actionable_next_step() {
+        let write = tf(Key::NoticeSnapshotFailed, &["磁盘已满"]);
+        assert!(write.contains("磁盘已满"), "须保留原因: {write}");
+        assert!(
+            write.contains("磁盘空间") && write.contains("权限") && write.contains("重试"),
+            "写入失败须给可执行出口: {write}"
+        );
+        let read = tf(Key::NoticeSnapshotReadFailed, &["快照已损坏"]);
+        assert!(read.contains("快照已损坏"), "须保留原因: {read}");
+        assert!(
+            read.contains("重试") && read.contains("关闭版本历史"),
+            "读取失败须说明如何重试: {read}"
+        );
+        for (key, reason) in [
+            (Key::NoticeDeleteSnapshotFailed, "拒绝访问"),
+            (Key::NoticeClearHistoryFailed, "拒绝访问"),
+        ] {
+            let text = tf(key, &[reason]);
+            assert!(text.contains(reason), "须保留原因: {text}");
+            assert!(
+                text.contains("磁盘空间") && text.contains("重试"),
+                "删除类失败须给可执行出口: {text}"
+            );
+        }
+        let watch = tf(Key::NoticeWatchUnavailable, &["没有权限"]);
+        assert!(watch.contains("没有权限"), "须保留原因: {watch}");
+        assert!(
+            watch.contains("重新打开该文件"),
+            "监听失败须说明如何再次尝试: {watch}"
+        );
+        let recovery = tf(Key::NoticeRecoveryWriteFailed, &["磁盘已满"]);
+        assert!(recovery.contains("磁盘已满"), "须保留原因: {recovery}");
+        assert!(
+            recovery.contains("重试"),
+            "恢复写入失败须给可执行出口: {recovery}"
+        );
     }
 
     /// 错误裁剪：只取首行；超长按字符截断并加省略号；UTF-8 安全。

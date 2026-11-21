@@ -46,8 +46,8 @@
 | 风险 | 验证方式 | 缓解措施 |
 |---|---|---|
 | rope 依赖维护停滞 | `cargo search` 版本号已核（xi-rope 0.3.0 上游停更、lapce-xi-rope 0.4.0 活跃 fork）；实现期复查更新日期 | ADR-001：选活跃 fork + vendor 退路；mark 语义在 veil-core 自封装，rope 可替换 |
-| egui IME 输入抽象不支持自绘 preedit | ✅ 已验证（2026-10-24 spike，`spikes/winit-ime`，winit 0.30 + 微软拼音真机人工确认）：`Ime::Preedit` 逐击键送达（组合串 + 光标字节区间），`Ime::Commit` 文本正确，`set_ime_cursor_area` 候选框跟随正确 | 风险解除：绕开 egui 输入抽象、在 winit 层直收 IME 事件的路径成立（INSTANCE §7 接缝不变） |
-| JS 引擎跑 KaTeX 首屏性能不足（公式密集文档） | ✅ 已验证（2026-10-24 spike，`spikes/katex-timing`）：`katex` crate 在 windows-msvc 不可用（quick-js 后端不支持该 target；duktape 后端缺 `Array.prototype.fill`，矩阵环境渲染失败），主路径改为 `rquickjs` 直集成（ADR-002 已修订）。实测：引擎冷启动 29ms，100 公式 210ms（均值 2.1ms/个） | 100 公式同步渲染占 70% 冷启动预算 → 异步渲染 + `BlockRenderCacheId` 缓存确认为必要设计，首屏禁止同步阻塞 |
+| egui IME 输入抽象不支持自绘 preedit | ✅ 已验证（2026-10-24 spike，本地原型 `winit-ime`（已清理），winit 0.30 + 微软拼音真机人工确认）：`Ime::Preedit` 逐击键送达（组合串 + 光标字节区间），`Ime::Commit` 文本正确，`set_ime_cursor_area` 候选框跟随正确 | 风险解除：绕开 egui 输入抽象、在 winit 层直收 IME 事件的路径成立（INSTANCE §7 接缝不变） |
+| JS 引擎跑 KaTeX 首屏性能不足（公式密集文档） | ✅ 已验证（2026-10-24 spike，本地原型 `katex-timing`（已清理））：`katex` crate 在 windows-msvc 不可用（quick-js 后端不支持该 target；duktape 后端缺 `Array.prototype.fill`，矩阵环境渲染失败），主路径改为 `rquickjs` 直集成（ADR-002 已修订）。实测：引擎冷启动 29ms，100 公式 210ms（均值 2.1ms/个） | 100 公式同步渲染占 70% 冷启动预算 → 异步渲染 + `BlockRenderCacheId` 缓存确认为必要设计，首屏禁止同步阻塞 |
 
 ---
 

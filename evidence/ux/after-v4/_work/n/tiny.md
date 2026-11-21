@@ -1,4 +1,0 @@
-# tiny
-
-dirty
-

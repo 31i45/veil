@@ -1,7 +1,7 @@
 # Veil v3.0.0 最终验收报告（evaluation）
 
 > **正式版 / tracked。** 本文件是 `evidence/evaluation/task9-draft.md` 的最终收口版本，所有 `FINAL_PENDING` 已用最终干净重建产物的真实命令输出/SHA 替换。**最终结论：`PASS WITH LIMITS`。**
-> **引用范围**：`evidence/render`、`evidence/startup`、`evidence/input`、`evidence/g0`、`evidence/ci`、`evidence/not-run`、`evidence/decision`、`evidence/mermaid`、`evidence/print` 与 `target/release/release-record.json`；凡数字均附原始证据路径。
+> **引用范围**：`evidence/render`、`evidence/startup`、`evidence/input`、`evidence/g0`、`evidence/ci`、`evidence/not-run`、`evidence/decision`、`evidence/mermaid`、`evidence/print` 与 `evidence/release/release-record.json`（`target/` 为可再生产物，归档副本在 `evidence/release/`）；凡数字均附原始证据路径。
 > **纪律**：未执行项不写 PASS；needs-user 项（真实 Actions、不可用 DPI、真实 IME、实体打印、真实网络抓包）不得冒充 PASS；旧 FAIL 证据不覆盖。本报告不 commit / 不 push。
 
 ---
@@ -10,7 +10,7 @@
 
 | 项 | 状态 | 说明 |
 |---|---|---|
-| 最终干净重建产物（字节 / SHA-256 / 版本） | **PASS** | `veil.exe` **13,998,592 B = 13.35 MiB**；SHA-256 **`58c9ad0decfd614da73098a006ac0773b2515cd49c56684b3f1aec5fd0d4ab75`**；版本 **3.0.0**；commit **`97d3a60`**（`97d3a60654117338bfdb9368a088bbd83c303418`）；UTC **2026-11-21**（`target/release/release-record.json`） |
+| 最终干净重建产物（字节 / SHA-256 / 版本） | **PASS** | `veil.exe` **13,998,592 B = 13.35 MiB**；SHA-256 **`58c9ad0decfd614da73098a006ac0773b2515cd49c56684b3f1aec5fd0d4ab75`**；版本 **3.0.0**；commit **`97d3a60`**（`97d3a60654117338bfdb9368a088bbd83c303418`）；UTC **2026-11-21**（`evidence/release/release-record.json`） |
 | 最终冷启动 p50 / p95 / 空闲 RSS（绑定最终 exe） | **PASS** | D1 探针 n=30：p50 102.7 ms、p95 119.65 ms、max 144.72 ms；空闲 WorkingSet 中位 ~44.02 MiB，较旧轻量版 +0.43 MiB（`evidence/startup/task9-final/d1/summary.md`） |
 | 最终 20k 块击键 p95（绑定最终 exe） | **PASS** | 两次实测 p50 2.357 / 2.38 ms、p95 2.825 / 2.812 ms、max 3.291 / 5.419 ms；最差 p95 2.825 ms ≤ 16 ms（`evidence/input/perf-20k-final.md`） |
 | 最终 G0 往返一致性（绑定最终 exe） | **PASS** | G0 最小子集 9/9 通过，覆盖源码字节往返、保存、快照、导出 HTML/PDF、打印同源（`evidence/g0/task9-final.md`）；workspace 全量 `cargo test --workspace --release -- --test-threads=1` 实测 **1919 passed / 0 failed / 15 ignored**（2026-11-21，commit `97d3a60`），`release-record.json` 中 `status=passed` |

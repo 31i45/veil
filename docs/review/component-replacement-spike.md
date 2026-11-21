@@ -18,7 +18,7 @@
 
 ## S1：syntect（代码高亮）
 
-spike：`spikes/syntect-size`（fancy-regex）与 `spikes/syntect-onig`（onig），同一 10 语言 × 1000 行固定语料。
+spike：本地原型 `syntect-size`（fancy-regex）与 `syntect-onig`（onig），同一 10 语言 × 1000 行固定语料（原型目录不入库，已清理）。
 
 | 指标 | 现有自研状态机 | syntect 5.3.0 `default-fancy` | syntect 5.3.0 `default-onig` |
 |---|---|---|---|
@@ -43,7 +43,7 @@ spike：`spikes/syntect-size`（fancy-regex）与 `spikes/syntect-onig`（onig�
 
 ## S1-b：增量高亮复核（fancy）
 
-spike：`spikes/syntect-size/src/bin/incr_bench.rs`。按行缓存 `ParseState`：行文本与行首状态一致即复用，否则从该行重解析。
+spike：本地原型 `syntect-size` 的 `incr_bench`（已清理）。按行缓存 `ParseState`：行文本与行首状态一致即复用，否则从该行重解析。
 
 | 指标 | 结果 |
 |---|---|
@@ -60,7 +60,7 @@ spike：`spikes/syntect-size/src/bin/incr_bench.rs`。按行缓存 `ParseState`�
 
 ## S2：toml_edit（配置）
 
-spike：`spikes/toml-edit`，toml_edit 0.22.27。
+spike：本地原型 `toml-edit`（已清理），toml_edit 0.22.27。
 
 | 样本 | 现有手写解析 | toml_edit |
 |---|---|---|
@@ -80,7 +80,7 @@ spike：`spikes/toml-edit`，toml_edit 0.22.27。
 
 ## S3：typst-math（公式）
 
-spike：`spikes/math-compare`，只链接 `typst` 0.15.1 + `typst-layout` 0.15.1 的编译器与排版路径（`typst::compile::<PagedDocument>`）。**不含字体（typst-assets）与 LaTeX→Typst 转换（mitex）**，因此是体积与依赖的下界。固定 20 条样本见 `spikes/math-compare/samples.md`。
+spike：本地原型 `math-compare`（已清理），只链接 `typst` 0.15.1 + `typst-layout` 0.15.1 的编译器与排版路径（`typst::compile::<PagedDocument>`）。**不含字体（typst-assets）与 LaTeX→Typst 转换（mitex）**，因此是体积与依赖的下界。固定 20 条样本清单随原型删除，结论与数字保留在本文与 ADR-002。
 
 | 指标 | 结果 |
 |---|---|

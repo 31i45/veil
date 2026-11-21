@@ -1,0 +1,68 @@
+{
+  "schema_version": 1,
+  "version": "3.0.0",
+  "artifact": "target/release/veil.exe",
+  "bytes": 14012928,
+  "sha256": "ff23c4d9621d586e8edcee90fb7d573c6df0665b98c4ae4a32fdfb974ddd25d0",
+  "started_at": "2026-11-21T13:25:56.4019959+00:00",
+  "timestamp": "2026-11-21T13:38:10.2297263+00:00",
+  "elapsed_seconds": 733.983,
+  "status": "passed",
+  "release_ready": true,
+  "error": null,
+  "build": {
+    "status": "passed",
+    "command": "cargo build --release --bin veil",
+    "exit_code": 0
+  },
+  "size_gate": {
+    "status": "passed",
+    "limit_bytes": 14680064,
+    "margin_bytes": 667136
+  },
+  "feature_gate": {
+    "status": "passed",
+    "method": "ASCII decoding of the built veil.exe bytes; no source scan",
+    "required": [
+      "QuickJS",
+      "linkedom",
+      "mermaid"
+    ],
+    "found": [
+      "QuickJS",
+      "linkedom",
+      "mermaid"
+    ],
+    "missing": []
+  },
+  "smoke": {
+    "status": "passed",
+    "command": "pwsh -NoProfile -File tools/smoke_launch.ps1 -ExePath target/release/veil.exe -ExpectedTitlePattern '^veil' -MaxLaunchMs 1000",
+    "exit_code": 0
+  },
+  "tests": {
+    "status": "passed",
+    "reason": null,
+    "command": "cargo test --workspace --release -- --test-threads=1",
+    "exit_code": 0
+  },
+  "clippy": {
+    "status": "passed",
+    "reason": null,
+    "command": "cargo clippy --workspace --all-targets -- -D warnings",
+    "exit_code": 0
+  },
+  "checksum": {
+    "status": "passed",
+    "algorithm": "SHA-256",
+    "path": "target/release/veil.exe.sha256",
+    "post_archive_status": "passed",
+    "post_archive_sha256": "ff23c4d9621d586e8edcee90fb7d573c6df0665b98c4ae4a32fdfb974ddd25d0",
+    "bundled_sha256": "ff23c4d9621d586e8edcee90fb7d573c6df0665b98c4ae4a32fdfb974ddd25d0"
+  },
+  "archive": {
+    "status": "passed",
+    "reason": null,
+    "path": "release-bundle/veil-v3.0.0"
+  }
+}

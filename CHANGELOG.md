@@ -4,7 +4,7 @@ Veil 版本迭代记录。每个版本的详细修复清单见对应 git tag 的
 
 ## v3.0.0 — 2026-11-21
 
-**BREAKING**：只发布一个 `veil.exe`；Mermaid 改为进程内本地渲染。最终干净重建产物 2026-11-21（commit `0d229eb`）；2026-11-20 为初版构建，其体积/SHA 仅作历史参照。
+**BREAKING**：只发布一个 `veil.exe`；Mermaid 改为进程内本地渲染。最终干净重建产物 2026-11-21（commit `0d229eb`，SHA 见 Notes）；UX 实测构建为同源码的 `8DF551F8…9B456763`，不是最终发布包；2026-11-20 为初版构建，其体积/SHA 仅作历史参照。
 
 ### BREAKING
 - 停止发布 `veil-full.exe`：删除 `veil-full` bin、`required-features` 分支与 `target-full` 发布路径。**迁移：此前使用较大离线发行包的用户直接改用新的 `veil.exe`，能力不减**；文件关联与 `/register` 行为不变
@@ -43,9 +43,9 @@ Veil 版本迭代记录。每个版本的详细修复清单见对应 git tag 的
 - 20k 击键探针：新增 `perf_20k_blocks`（21,000 块 / 300 样本）覆盖 G2 门槛，当时构建（`ce038eb`）实测最差 p95 3.031 ms ≤ 16 ms（历史证据 `evidence/ux/final-v3/perf/run2.log`；最终产物复测见 Notes）
 
 ### Notes
-- **最终体积（2026-11-21 UX 收口干净重建，commit `0d229eb`，绑定 `evidence/ux/after-v7/` 与 `final-v5/`）**：14,012,928 B ≈ 13.36 MiB（门禁 ≤14 MiB，余量 667,136 B）；SHA-256 `8DF551F8D363C73DE1F35887042BEC7775E5AB8D1FFEDB50F365AE7E9B456763`。历史参照：commit `c19a082` 为 14,011,392 B / SHA `B921300F…F237DE3B`（`after-v6/`、`final-v4/`）；commit `ce038eb` 为 14,010,880 B / SHA `FC6BCCD4…F9D01C`（`after-v5/`、`final-v3/` 为其历史证据）；commit `345d8c6` 为 14,010,368 B / SHA `17d8e081…beca5ee1`（`after-v3/`、`final-v2/`）；commit `77b88e2` 为 14,010,880 B / SHA `C24599BE…CC1269`（`after-v4/`）；commit `7c00765` 同为 14,010,368 B / SHA `25fea5f3…2b67`（`after-v2/`、`final/` 为更早的历史中间证据）；commit `97d3a60` 为 13,998,592 B / SHA `58c9ad0d…d4ab75`；2026-11-20 初版构建 13,995,008 B / SHA `3f7e164b…a596b`（均不作最终发布物校验）。
-- **门禁**：最终机器可读发布记录 `target/release/release-record.json` 记录 build / size_gate / feature_gate（QuickJS + linkedom + mermaid 命中）/ smoke / tests / clippy / checksum / archive 全部 `status=passed`，`release_ready=true`（commit `0d229eb`）；最终一次 `veil-ui` lib 分项为 **1281 passed / 11 ignored**。此前 commit `c19a082` 为 1280 passed / 11 ignored，commit `ce038eb` 为 1278 passed / 11 ignored，commit `97d3a60` 的串行 `cargo test --workspace --release -- --test-threads=1` 记录为 **1919 passed / 0 failed / 15 ignored**；2026-11-20 初版构建记录为 1911 passed / 15 ignored（均为历史参照）。
-- 构建与门禁原始记录见 `evidence/release/v3-build.md`（初版）与 `target/release/release-record.json`（最终）
+- **最终发布产物（2026-11-21 UX 收口干净重建，commit `0d229eb`）**：14,012,928 B ≈ 13.36 MiB（门禁 ≤14 MiB，余量 667,136 B）；SHA-256 `FF23C4D9621D586E8EDCEE90FB7D573C6DF0665B98C4AE4A32FDFB974DDD25D0`（`FF23C4D9…DD25D0`）。UX 证据（`evidence/ux/after-v7/`、`final-v5/`）绑定的是同一源码的前一构建 `8DF551F8D363C73DE1F35887042BEC7775E5AB8D1FFEDB50F365AE7E9B456763`（同为 14,012,928 B，差异仅为 PE 时间戳），不属于最终发布包。历史参照：commit `c19a082` 为 14,011,392 B / SHA `B921300F…F237DE3B`（`after-v6/`、`final-v4/`）；commit `ce038eb` 为 14,010,880 B / SHA `FC6BCCD4…F9D01C`（`after-v5/`、`final-v3/` 为其历史证据）；commit `345d8c6` 为 14,010,368 B / SHA `17d8e081…beca5ee1`（`after-v3/`、`final-v2/`）；commit `77b88e2` 为 14,010,880 B / SHA `C24599BE…CC1269`（`after-v4/`）；commit `7c00765` 同为 14,010,368 B / SHA `25fea5f3…2b67`（`after-v2/`、`final/` 为更早的历史中间证据）；commit `97d3a60` 为 13,998,592 B / SHA `58c9ad0d…d4ab75`；2026-11-20 初版构建 13,995,008 B / SHA `3f7e164b…a596b`（均不作最终发布物校验）。
+- **门禁**：最终机器可读发布记录 `evidence/release/release-record.json`（由构建输出 `target/release/` 下的同名文件在构建后归档；`target/` 为可再生产物）记录 build / size_gate / feature_gate（QuickJS + linkedom + mermaid 命中）/ smoke / tests / clippy / checksum / archive 全部 `status=passed`，`release_ready=true`（commit `0d229eb`）；最终一次 `veil-ui` lib 分项为 **1281 passed / 11 ignored**。此前 commit `c19a082` 为 1280 passed / 11 ignored，commit `ce038eb` 为 1278 passed / 11 ignored，commit `97d3a60` 的串行 `cargo test --workspace --release -- --test-threads=1` 记录为 **1919 passed / 0 failed / 15 ignored**；2026-11-20 初版构建记录为 1911 passed / 15 ignored（均为历史参照）。
+- 构建与门禁原始记录见 `evidence/release/v3-build.md`（初版）与 `evidence/release/release-record.json`（最终；`target/` 已清理，可用 `tools/release.ps1` 重建）
 
 ## v2.0.1 — 2026-11-20
 
@@ -105,7 +105,7 @@ Mermaid L1 内嵌渲染（QuickJS-ng 内嵌官方 Tiny mermaid + resvg 栅格化
 
 ### Notes
 - 发布：workspace 版本 1.9.0，tag `v1.9.0`；GitHub Actions `release.yml` 以 `cargo build --release -p veil --features mermaid-render` 构建并上传 `veil.exe`
-- spike 实测与结论见 `spikes/quickjs-mermaid-spike/RESULTS.md`（断言三例 PASS、引擎冷启字节码路径 58ms、体积增量 4.93 MiB）
+- spike 实测与结论：本地原型 `quickjs-mermaid-spike` 已清理（`spikes/` 不入库），结论保留于此——断言三例 PASS、引擎冷启字节码路径 58ms、体积增量 4.93 MiB
 - `mermaid-render` cargo feature 可整体裁掉渲染栈（依赖 125 包、exe 回 ≤10 MiB 口径）
 
 ## v1.8.0 — 2026-11-17

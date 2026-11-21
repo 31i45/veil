@@ -9,8 +9,14 @@
 > `after/` 是暴露 R1–R3 的 v1 中间版；`after-v6/` 与 `final-v4/`（`c19a082`）、
 > `after-v5/` 与 `final-v3/`（`ce038eb`）、`after-v4/`（`77b88e2`）、
 > `after-v3/` 与 `final-v2/`（`345d8c6`）、`after-v2/` 与 `final/`（`25fea5f3…2b67` / `7c00765`）
-> 均为历史中间证据，原样保留，不删除、不改写；
+> 均为历史中间证据；其中实拍 PNG/PDF 已于 2026-11-21 清理删除，各轮 md/json/txt/log 摘要保留原路径（清理记录见 `evaluation-release-cleanup.md`）。
 > 本轮所有数字均来自 `after-v7/` 与 `final-v5/`，不沿用旧目录。
+>
+> **发布产物说明（2026-11-21 推送前补记）**：最终发布包为 `veil.exe` **14,012,928 B = 13.36 MiB**，
+> SHA-256 **`ff23c4d9621d586e8edcee90fb7d573c6df0665b98c4ae4a32fdfb974ddd25d0`**（`FF23C4D9…DD25D0`）。
+> 本报告实际施测的构建是 `8DF551F8D363C73DE1F35887042BEC7775E5AB8D1FFEDB50F365AE7E9B456763`：
+> 两者同一源码（`0d229eb`）、同一字节数，差异仅为 PE 时间戳。UX 数字是在该源码上测得，不因时间戳变化而失效；
+> 下文 UX 证据继续绑定 `8DF551F8…9B456763`（实际测 UX 的构建），最终发布包不另作 UX 复测。
 
 ---
 
@@ -137,7 +143,7 @@
 
 | 编号 | v1 残留（after/） | 根因 | v7 复验（after-v7 / `0d229eb`） | 判定 |
 |---|---|---|---|---|
-| **R1** | 700 px 长名 + 脏态 + 错误通知时，` · 未保存` 与右侧统计被通知挤掉 | 通知压缩左文时只留 `identity`，保存态被让位；旧测试分别覆盖长名与短名通知，未组合 | 左文 `…stuvwxyz.md · 第四层 · 未保存` ｜ 右文 `28 字 · 行 4，列 26`；通知为状态栏上方 6 行浮层，全文无省略（`after-v7/screenshots/f-700-longname-notice/02-*`；放大图为历史证据 `after-v2/screenshots/f-700-longname-notice/statusbar-notice-zoom-x2.png`）；修复 `chrome/paint.rs:256-262`，测试 `chrome/tests.rs:1396` | **PASS** |
+| **R1** | 700 px 长名 + 脏态 + 错误通知时，` · 未保存` 与右侧统计被通知挤掉 | 通知压缩左文时只留 `identity`，保存态被让位；旧测试分别覆盖长名与短名通知，未组合 | 左文 `…stuvwxyz.md · 第四层 · 未保存` ｜ 右文 `28 字 · 行 4，列 26`；通知为状态栏上方 6 行浮层，全文无省略（`after-v7/screenshots/f-700-longname-notice/02-*`；放大图为历史中间证据 `after-v2/screenshots/f-700-longname-notice/statusbar-notice-zoom-x2.png`，该 PNG 已清理，摘要保留在同目录 `walkthrough.log`）；修复 `chrome/paint.rs:256-262`，测试 `chrome/tests.rs:1396` | **PASS** |
 | **R2** | 文件菜单 `导出 HTML/PDF` 主标签被压成 `导…`，原因被压成 `空文档...出的内容` | 弹窗宽度只量标签 + 快捷键，未计原因；原因固定占 62% 行宽 | `导出 HTML…`、`导出 PDF…`、`打印…` 动作名完整（`…` 为词条自带），禁用原因完整 `空文档没有可导出的内容`；宽度上限 420 逻辑 px（`after-v7/screenshots/g-file-menu/02-*`）；修复 `chrome/mod.rs:343,367-389`、`chrome/paint.rs:617-632`，测试 `1432,1524` | **PASS** |
 | **R3** | 崩溃恢复提示中「恢复时间」被中段省略吞掉，只剩对象与去向 | 恢复提示走 `fit_middle`，时间落在被省略的中段 | 单行浮层逐字完整：对象 `recover-me.md`、时间 `20:17`、去向 `写回原文件所在目录「recovery」`（`after-v7/screenshots/k-recovery-run2/02-*`）；修复 `chrome/paint.rs:274-325`，测试 `1473` | **PASS** |
 | **R4** | 基线把 `1707×960 / 1707×912` 当作物理屏与工作区，据此断言默认窗超高 | DPI 未感知读数误记为物理值 | 真实物理屏 **2560×1440**、工作区 **2560×1368**、逻辑 1707×960 / 1707×912；窗口 1372×1106 完整落在工作区（`after-v7/screenshots/j-full-window/window-rect.txt`）。更正已写入 `baseline/{README.md,facts.md}` 的 Corrigendum，原始截图/日志与 SHA 不改写 | **已更正** |

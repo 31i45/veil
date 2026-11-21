@@ -1,7 +1,7 @@
 # evaluation-release-cleanup.md（Task 7.1 复核报告）
 
-> 状态：**已清理、已通过门禁、已推送**。本文件仅由 Task 7 更新，**不 commit、不 push**（当前工作树中本文件为未提交修改）。
-> 复核日期：2026-11-21。基线提交：`79a8079 docs(ux): bind final evidence to the shipped binary`；发布提交：`e9b2256 chore: clean repository, archive release evidence, add manual QA and strategy`。
+> 状态：**已清理、已通过门禁、已推送**。本文件已随 `4271228` 提交并推送到 `origin/main`。
+> 复核日期：2026-11-21。基线提交：`79a8079 docs(ux): bind final evidence to the shipped binary`；清理提交：`e9b2256 chore: clean repository, archive release evidence, add manual QA and strategy`；报告提交：`4271228 docs: finalize repository cleanup report`。
 
 ## 0. 结论
 
@@ -120,7 +120,7 @@ Count: 0
 - 推送范围 `0b5092b..e9b2256` 共 **19 个提交**；本地 `main` 与 `origin/main` 指向同一提交。
 - 未 force push、未改写历史；`git status -sb` 无 ahead/behind 标记。
 - 推送后执行 `cargo clean`，`target/`、`target-default/`、`.screenshots/`、`spikes/` 已确认不存在。
-- 本次 Task 7 仅更新本文件；复核结束时工作树仅有本文件 1 项未提交修改（按要求不 commit、不 push）。
+- 本次 Task 7 报告已随 `4271228` 提交并推送；复核结束时工作树干净。
 
 ## 7. 人工测试协议与策略文档（已交付）
 

@@ -4,7 +4,7 @@
 //! 平台能力（注册表系统外观、DWM 深色标题栏/Mica、配置落盘）以 trait 声明，由产品层注入。
 
 //!
-//! 配置格式（极简，共 15 个顶层键）：
+//! 配置格式（极简，共 14 个顶层键）：
 //! ```toml
 //! mode = "system"        # system | light | dark
 //! export_margin_mm = 20  # PDF 页边距（毫米）
@@ -15,7 +15,7 @@
 //! doc_line_height = 22   # 正文基准行高（物理像素），夹取 字号..=字号×3
 //! allow_remote_images = false  # 默认阻止普通远程图片；true = 用户显式允许
 //! tab_width = 4          # 制表符宽度（2 或 4），默认 4
-//! image_cache_limit_mb = 200  # 图片缓存字节上限（MiB），0 = 不限制
+//! # 图片缓存字节上限固化为常量 DEFAULT_IMAGE_CACHE_LIMIT_MB（200 MiB），不再可配置
 //! # 以下四项仅在窗口几何已知时成组写入（旧配置不含这些键）
 //! window_width = 1200    # 逻辑宽，480..=8192
 //! window_height = 800    # 逻辑高，360..=8192
@@ -234,7 +234,7 @@ pub struct Theme {
 /// 代码块底色（code_bg）与表头底色（table_head_bg）是 Card 档的特化，
 /// 不归本枚举直接映射——调用方按需经 `tokens::palette::code_bg` / `table_head_bg` 取。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-#[allow(dead_code)] // API 预留：paint 层仍经 palette 模块消费，SurfaceLevel 后续批次会有更多使用点
+#[allow(dead_code)] // API 预留：paint 层仍经 palette 模块消费，SurfaceLevel 后续批次会有更多使用点（当前仅测试锁定映射）
 pub enum SurfaceLevel {
     Base,
     Card,
@@ -243,7 +243,7 @@ pub enum SurfaceLevel {
 
 impl Theme {
     /// 按档取 surface 底色。
-    #[allow(dead_code)] // 同 SurfaceLevel：后续批次消费
+    #[allow(dead_code)] // 同 SurfaceLevel：后续批次消费（当前仅测试锁定三档映射）
     pub fn surface(&self, level: SurfaceLevel) -> [u8; 4] {
         match level {
             SurfaceLevel::Base => self.bg,
@@ -455,9 +455,8 @@ const DOC_FONT_FAMILY_MAX_LEN: usize = 64;
 /// 制表符宽度默认值（兼容 2 与 4，Task D 新增）。
 const DEFAULT_TAB_WIDTH: u8 = 4;
 /// 图片缓存字节上限默认值（MiB）：容纳一屏图文混排的若干张大图，超出后按 LRU 逐出。
-const DEFAULT_IMAGE_CACHE_LIMIT_MB: u32 = 200;
-/// 图片缓存上限允许的最大值（MiB）：防止手写配置把上限设成天文数字变相关闭逐出。
-const IMAGE_CACHE_LIMIT_MB_MAX: u32 = 4096;
+/// 已从 Config 固化为常量：UI 不再暴露、config.toml 不再读取/写出（旧键静默忽略）。
+pub(crate) const DEFAULT_IMAGE_CACHE_LIMIT_MB: u32 = 200;
 
 /// 正文字号夹取：10..=32。
 fn clamp_font_size(v: f32) -> f32 {
@@ -489,8 +488,6 @@ pub struct Config {
     pub allow_remote_images: bool,
     /// 制表符宽度（2 或 4，默认 4）；其它值夹到 4。
     pub tab_width: u8,
-    /// 图片缓存字节上限（MiB，默认 200）；0 = 不限制，超出按 LRU 逐出。
-    pub image_cache_limit_mb: u32,
     /// 上次退出时的窗口几何；首次运行或配置缺失时为 `None`。
     pub window: Option<WindowGeom>,
 }
@@ -507,7 +504,6 @@ impl Default for Config {
             doc_line_height: DEFAULT_DOC_LINE_HEIGHT,
             allow_remote_images: false,
             tab_width: DEFAULT_TAB_WIDTH,
-            image_cache_limit_mb: DEFAULT_IMAGE_CACHE_LIMIT_MB,
             window: None,
         }
     }
@@ -520,8 +516,7 @@ impl Config {
             "# Veil 配置（自动生成）\n# mode: system（跟随系统）| light | dark\nmode = \"{}\"\n\
              export_margin_mm = {}\nexport_page_numbers = {}\nexport_toc = {}\n\
              doc_font_family = \"{}\"\ndoc_font_size = {}\ndoc_line_height = {}\n\
-             allow_remote_images = {}\ntab_width = {}\n\
-             image_cache_limit_mb = {}\n",
+             allow_remote_images = {}\ntab_width = {}\n",
             self.mode.as_str(),
             self.export_margin_mm,
             self.export_page_numbers,
@@ -531,7 +526,6 @@ impl Config {
             self.doc_line_height,
             self.allow_remote_images,
             self.tab_width,
-            self.image_cache_limit_mb,
         );
         if let Some(w) = self.window {
             text.push_str(&format!(
@@ -602,11 +596,8 @@ fn edit_existing_toml(text: &str, cfg: Config) -> Option<String> {
         "tab_width",
         toml_edit::value(i64::from(cfg.tab_width)),
     );
-    set_item(
-        &mut doc,
-        "image_cache_limit_mb",
-        toml_edit::value(i64::from(cfg.image_cache_limit_mb)),
-    );
+    // 已固化的旧键：保存时主动剥离，旧配置在下次保存后自动清理。
+    doc.remove("image_cache_limit_mb");
     const WINDOW_KEYS: [&str; 4] = ["window_width", "window_height", "window_x", "window_y"];
     if let Some(w) = cfg.window {
         set_item(
@@ -737,13 +728,9 @@ pub fn parse_config(text: &str) -> ConfigParse {
                 Some(v) if v == 2 || v == 4 => out.config.tab_width = v as u8,
                 _ => out.ignored += 1,
             },
-            // 0 = 不限制；上限 4096 MiB 防止手写值变相关闭逐出，越界按非法计数
-            "image_cache_limit_mb" => match value.as_integer() {
-                Some(v) if (0..=i64::from(IMAGE_CACHE_LIMIT_MB_MAX)).contains(&v) => {
-                    out.config.image_cache_limit_mb = v as u32;
-                }
-                _ => out.ignored += 1,
-            },
+            // 已移除的旧键（图片缓存上限）：已固化为常量 DEFAULT_IMAGE_CACHE_LIMIT_MB，
+            // 任何值静默忽略，不改变行为、不产生「无法识别」提示。
+            "image_cache_limit_mb" => {}
             "window_width" => {
                 win_seen[0] = true;
                 win_w = value
@@ -1367,54 +1354,55 @@ mod tests {
         assert_eq!(p.ignored, 1);
     }
 
+    /// 图片缓存上限已固化为常量 DEFAULT_IMAGE_CACHE_LIMIT_MB：旧配置中的
+    /// `image_cache_limit_mb` 键（任何值，含非法字面量）一律静默忽略，
+    /// 不改变行为、不产生「无法识别」提示。
     #[test]
     fn image_cache_limit_defaults_and_parses_integer() {
-        // 空配置 / 旧配置缺键：默认 200 MiB，且不产生 ignored
+        // 固化常量仍为 200 MiB（运行时图片缓存限额的单一来源）
+        assert_eq!(DEFAULT_IMAGE_CACHE_LIMIT_MB, 200);
+        // 空配置不产生 ignored
         let p = parse("");
-        assert_eq!(p.config.image_cache_limit_mb, 200);
         assert_eq!(p.ignored, 0);
-        assert_eq!(
-            parse("image_cache_limit_mb = 512\n")
-                .config
-                .image_cache_limit_mb,
-            512
-        );
-        // 0 = 不限制
-        assert_eq!(
-            parse("image_cache_limit_mb = 0\n")
-                .config
-                .image_cache_limit_mb,
-            0
-        );
-        // 非法（负数/超上限/字符串/浮点）：回落默认并计数
+        // 旧键任何值都不得改变配置、不得计数
         for text in [
+            "image_cache_limit_mb = 512\n",
+            "image_cache_limit_mb = 0\n",
             "image_cache_limit_mb = -1",
             "image_cache_limit_mb = 4097",
             "image_cache_limit_mb = \"200\"",
             "image_cache_limit_mb = 1.5",
         ] {
             let p = parse(text);
-            assert_eq!(p.config.image_cache_limit_mb, 200, "{text}");
-            assert_eq!(p.ignored, 1, "{text}");
+            assert_eq!(p.ignored, 0, "旧键不得产生无法识别提示：{text}");
+            assert_eq!(p.config, Config::default(), "旧键不得改变任何行为：{text}");
         }
     }
 
+    /// 新序列化不再写出 `image_cache_limit_mb`；含旧键的配置在保留式保存时被剥离，
+    /// 往返解析恒等（旧键不回流为配置项）。
     #[test]
     fn image_cache_limit_round_trips_through_toml() {
-        for limit in [0u32, 200, 512] {
-            let cfg = Config {
-                image_cache_limit_mb: limit,
-                ..Config::default()
-            };
-            let text = cfg.to_toml();
-            assert!(
-                text.contains(&format!("image_cache_limit_mb = {limit}")),
-                "序列化必须写 {limit}: {text}"
-            );
-            let p = parse(&text);
-            assert_eq!(p.config, cfg, "往返恒等");
-            assert_eq!(p.ignored, 0);
-        }
+        // 全新序列化不得包含该键
+        assert!(
+            !Config::default().to_toml().contains("image_cache_limit_mb"),
+            "序列化不应再写出 image_cache_limit_mb"
+        );
+        // 含旧键的配置：解析不受影响（ignored 为 0、配置为默认）
+        let legacy = "mode = \"dark\"\nimage_cache_limit_mb = 512\n";
+        let p = parse(legacy);
+        assert_eq!(p.ignored, 0);
+        let expected = Config {
+            mode: ThemeMode::Dark,
+            ..Config::default()
+        };
+        assert_eq!(p.config, expected);
+        // 保留式保存后旧键被剥离，重新解析仍恒等
+        let saved = expected.to_toml_preserving(Some(legacy));
+        assert!(!saved.contains("image_cache_limit_mb"), "保存应剥离旧键");
+        let p2 = parse(&saved);
+        assert_eq!(p2.config, expected);
+        assert_eq!(p2.ignored, 0);
     }
 
     #[test]

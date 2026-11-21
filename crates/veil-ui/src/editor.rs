@@ -80,7 +80,7 @@ pub struct Editor {
 
 impl Editor {
     /// 默认构造（无自定义 Callout 配置）：测试与不需要配置的调用方使用。
-    #[allow(dead_code)]
+    #[allow(dead_code)] // 仅 cfg(test) 与无配置调用方使用；生产路径走 new_with_callouts
     pub fn new(text: &str) -> Self {
         Self::new_with_callouts(text, &veil_core::CalloutRegistry::default())
     }

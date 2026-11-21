@@ -28,8 +28,8 @@ impl Autosave {
     }
 
     /// 预留 getter：生产代码路径从不调用（自动保存完全由 deadline/activity 驱动），
-    /// 仅被 cfg(test) 场景用来断言默认值。标记 allow dead_code 以消除 pub fn 的无调用警告。
-    #[allow(dead_code)]
+    /// 仅被 cfg(test) 场景用来断言默认值。
+    #[allow(dead_code)] // 仅 cfg(test) 使用：断言默认 idle 时长
     pub fn idle(&self) -> Duration {
         self.idle
     }

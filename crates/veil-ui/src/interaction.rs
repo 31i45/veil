@@ -3244,7 +3244,6 @@ impl App {
     /// - OK（BTN_OK）：把表单值应用到 Config，写 config.toml（ConfigSave::All），刷新 UI（主题/字体/滚动等立即生效）。
     /// - Reset Defaults（BTN_RESET_DEFAULTS）：只在表单内恢复默认（用户还可以 OK/Cancel）。
     /// - Cancel（BTN_CANCEL）：关闭不写盘。
-    #[allow(dead_code)]
     pub(crate) fn resolve_settings(&mut self, id: u16) {
         use crate::view::settings::{BTN_CANCEL, BTN_OK, BTN_RESET_DEFAULTS};
         let Some(s) = self.ui_state.settings.as_mut() else {
@@ -3295,7 +3294,6 @@ impl App {
     ///
     /// 走 `refresh_theme_visuals` 而非只换 `Theme` 值：主题代次必须递增，否则
     /// Dark→System（系统为浅色）时布局/光栅缓存仍按旧深色主题命中，正文保持浅灰。
-    #[allow(dead_code)]
     pub(crate) fn refresh_settings_effects(&mut self) {
         // 1) 主题：mode 变了需要重新取系统深色并刷新 Theme 派生值
         if self.config.mode == ThemeMode::System {

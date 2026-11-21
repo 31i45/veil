@@ -3410,7 +3410,6 @@ fn first_cell_after(tbl: &veil_core::Table, caret: usize) -> Option<usize> {
 // ---- GFM 表格行/列 Markdown 变换（T3：纯字符串，零核心依赖） ----
 /// 行 → 单元格文本：与内核解析同一转义口径（`\|`、code span 内的 `|` 不切列）。
 /// 写路径不得自行按裸 `|` 切分，否则含转义竖线的单元格会被拆散并改写源码。
-#[allow(dead_code)]
 fn split_row(row: &str) -> Vec<String> {
     let cells: Vec<String> = veil_core::split_table_row(row)
         .into_iter()
@@ -3422,13 +3421,11 @@ fn split_row(row: &str) -> Vec<String> {
     cells
 }
 
-#[allow(dead_code)]
 fn join_row(cells: &[String]) -> String {
     let parts: Vec<String> = cells.iter().map(|s| format!(" {} ", s)).collect();
     format!("|{}|", parts.join("|"))
 }
 
-#[allow(dead_code)]
 fn sep_cell_for(align: veil_core::CellAlign) -> String {
     match align {
         veil_core::CellAlign::None => "---".into(),
@@ -3438,7 +3435,7 @@ fn sep_cell_for(align: veil_core::CellAlign) -> String {
     }
 }
 
-#[allow(dead_code)]
+#[allow(dead_code)] // 仅 cfg(test) 使用：断言插入列不改动既有列对齐
 fn parse_aligns(sep_line: &str) -> Vec<veil_core::CellAlign> {
     let cells = split_row(sep_line);
     let mut out = Vec::with_capacity(cells.len());

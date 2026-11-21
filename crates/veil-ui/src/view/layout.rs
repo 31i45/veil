@@ -1231,7 +1231,7 @@ impl LayoutEngine {
                     || body.len() >= crate::view::highlight::LONG_CODE_THRESHOLD_BYTES;
                 let cache_hit = self.highlighter.has(block.start);
                 if is_long && !cache_hit {
-                    // 投递后台 parse 任务；epoch 用当前 highlight_epoch，后续回填时校验。
+                    // 投递后台 parse 任务；epoch 仅用于本地去重（pending_background_ticks），回填不校验结果 epoch。
                     if let Some(tx) = &self.bg_tx {
                         // 去重：同一 key 在本 epoch 已投递则不重复。
                         let current_epoch = self.highlight_epoch;
@@ -1246,7 +1246,6 @@ impl LayoutEngine {
                                 key: block.start,
                                 lang: lang.to_string(),
                                 body: body.to_string(),
-                                epoch: current_epoch,
                             });
                             self.pending_background_ticks
                                 .insert(block.start, current_epoch);

@@ -7,8 +7,8 @@
 //!   OnceLock<T> 只要 T: Sync 即 Sync；SyntaxSet 内部只有 OnceCell + Vec，只读安全。
 //! - 后台 parse 完全在 `catch_unwind` 保护内，panicked 时静默丢弃该任务、不重试、
 //!   不崩主线程。channel Sender drop 后后台线程自动退出。
-//! - 任务与结果都带 epoch：主线程回填前校验 epoch — 后台 parse 期间块被重解析
-//!   （起始偏移变了）或编辑了内容 → 新 epoch → spans 静默丢弃。
+//! - 任务投递时记录 epoch 到 pending_background_ticks，仅用于同 key 去重；
+//!   后台 parse 期间块被重解析或编辑后，旧 spans 由 Highlighter 的 body 比对兜底丢弃。
 
 use std::sync::mpsc;
 use std::sync::Arc;
@@ -27,18 +27,13 @@ pub(crate) struct BgTask {
     pub(crate) lang: String,
     /// 块完整文本（后台整块 parse 一次性使用）。
     pub(crate) body: String,
-    /// 投递时的 epoch：同 key 多 epoch 只认最新。
-    pub(crate) epoch: u64,
 }
 
 /// 后台 parse 完成后回主线程的结果。
 #[derive(Debug)]
-#[allow(dead_code)]
 pub(crate) struct BgResult {
     /// 块起始偏移（同 BgTask.key）。
     pub(crate) key: usize,
-    /// 与 BgTask 同 epoch，主线程校验匹配才缓存。
-    pub(crate) epoch: u64,
     /// 后台 parse 使用的原始文本，主线程用来确认块未被编辑（编辑后 text 会变 → 丢弃）。
     pub(crate) body: String,
     /// parse 产出的致密 spans（主线程直接 cache_spans）。
@@ -99,7 +94,6 @@ fn bg_parse(task: BgTask) -> Option<BgResult> {
     merge_adjacent(&mut out);
     Some(BgResult {
         key: task.key,
-        epoch: task.epoch,
         body: task.body,
         spans: out,
     })
@@ -149,7 +143,6 @@ mod tests {
             key: 42,
             lang: "rust".to_string(),
             body: body.clone(),
-            epoch: 0,
         })
         .unwrap();
 
@@ -180,7 +173,6 @@ mod tests {
             key: 100,
             lang: "brainfuck".to_string(),
             body: "++++++++++[>+++++++>++++++++++>+++>+<<<<-]".to_string(),
-            epoch: 0,
         })
         .unwrap();
         std::thread::sleep(Duration::from_millis(200));
@@ -196,7 +188,6 @@ mod tests {
             key: 0,
             lang: "rust".to_string(),
             body: "let x = 1;".into(),
-            epoch: 0,
         });
         drop(tx);
         std::thread::sleep(Duration::from_millis(200));
@@ -214,7 +205,6 @@ mod tests {
                 key: i,
                 lang: "rust".to_string(),
                 body: body.clone(),
-                epoch: 0,
             })
             .unwrap();
         }
@@ -248,7 +238,6 @@ mod tests {
             key: 0,
             lang: "rust".to_string(),
             body: body.clone(),
-            epoch: 0,
         })
         .expect("已知语言应返回 Some");
         let mut last_end = 0;

@@ -346,7 +346,6 @@ pub(crate) enum ConfigSave {
     Window,
     RemoteImages,
     /// 完整写入：settings 模态 OK 时，把所有字段一次性写 config.toml。
-    #[allow(dead_code)]
     All,
 }
 
@@ -404,7 +403,6 @@ pub(crate) struct ActiveModal {
 
 /// 设置模态：承载 SettingsForm + 独立交互态 + 独立布局。
 /// 与 ActiveModal 平行（不走 ModalSpec），因为设置模态有 10+ 可编辑表单控件。
-#[allow(dead_code)]
 pub(crate) struct SettingsModal {
     pub(crate) form: crate::view::settings::SettingsForm,
     pub(crate) state: crate::view::settings::SettingsState,
@@ -1033,9 +1031,9 @@ impl App {
         if start.missing {
             persist.set_missing(true);
         }
-        // 图片缓存字节上限来自配置（默认 200 MiB，0 = 不限制）
+        // 图片缓存字节上限固化为常量 DEFAULT_IMAGE_CACHE_LIMIT_MB（200 MiB，0 = 不限制）
         let mut cache = Cache::default();
-        cache.set_image_limit_mb(app_config.image_cache_limit_mb);
+        cache.set_image_limit_mb(theme::DEFAULT_IMAGE_CACHE_LIMIT_MB);
         let mut app = App {
             doc: DocState {
                 path: start.doc.path.clone(),

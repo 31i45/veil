@@ -35,7 +35,7 @@ pub(crate) mod surface {
     pub const SHADOW_DARK_GAIN: f32 = 1.25;
     /// High 档阴影层（模态对话框）：比 Low 档多两层、外扩更大、alpha 更浓，
     /// 强化「应用内对话框」层级，叠加大致等效 10px 高斯模糊。
-    #[allow(dead_code)] // 模态对话框 paint 改造后消费
+    #[allow(dead_code)] // 模态对话框 paint 改造后消费（当前仅测试锁定形态）
     pub const HIGH_SHADOW_LAYERS: &[(f32, u8)] = &[
         (10.0, 4),
         (8.0, 6),
@@ -46,7 +46,7 @@ pub(crate) mod surface {
         (1.0, 34),
     ];
     /// High 档深色主题阴影 alpha 增益（模态在深底上需更强存在感）
-    #[allow(dead_code)] // 同上
+    #[allow(dead_code)] // 模态对话框 paint 改造后消费（当前仅 high_shadow_alpha / 测试使用）
     pub const HIGH_SHADOW_DARK_GAIN: f32 = 1.35;
     /// 模态卡片圆角（px）：比普通浮层大一级，强调「应用内对话框」的层级。
     pub const DIALOG_RADIUS: f32 = 8.0;
@@ -174,7 +174,7 @@ pub(crate) mod surface {
     }
 
     /// High 档阴影单层 alpha：模态专用，深色增益更强。
-    #[allow(dead_code)] // 模态对话框 paint 改造后消费
+    #[allow(dead_code)] // 模态对话框 paint 改造后消费（当前仅测试锁定行为）
     pub fn high_shadow_alpha(base: u8, dark: bool) -> u8 {
         if dark {
             (base as f32 * HIGH_SHADOW_DARK_GAIN).round().min(255.0) as u8
@@ -187,10 +187,9 @@ pub(crate) mod surface {
 /// 间距刻度（px，1.0× 基准）：4 的倍数，用于替代散落的间距字面量。
 pub(crate) mod space {
     pub const XS: f32 = 4.0;
-    #[allow(dead_code)] // 预留：待后续布局迁移消费，当前 paint 仅用到 XS/M/XL
     pub const S: f32 = 8.0;
     pub const M: f32 = 12.0;
-    #[allow(dead_code)] // 预留：待后续布局迁移消费
+    #[allow(dead_code)] // 预留：待后续布局迁移消费，当前 paint 仅用到 XS/S/M/XL（L 仅测试引用）
     pub const L: f32 = 16.0;
     pub const XL: f32 = 24.0;
 }

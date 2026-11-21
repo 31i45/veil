@@ -13,8 +13,10 @@ use crate::app::{App, Doc, Ports};
 use crate::i18n::{t, tf, Key};
 
 // 直接编译产品的同一错误提示入口；测试不复制 MessageBoxW 产品逻辑。
+// 只复用其中的产品提示入口，其余平台函数不在本测试目标调用。
 #[cfg(all(test, windows))]
-#[allow(dead_code)] // 只复用其中的产品提示入口，其余平台函数不在本测试目标调用。
+#[allow(dead_code)]
+// 引入外部 product_error 模块：仅复用提示入口，其余平台函数本测试目标不调用（该文件属 veil crate，不在本次可改范围）
 #[path = "../../veil/src/platform/error.rs"]
 mod product_error;
 

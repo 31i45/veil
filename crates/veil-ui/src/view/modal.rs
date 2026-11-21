@@ -475,7 +475,7 @@ fn paint_buttons(
                 let fg = theme.accent_text;
                 if focused {
                     // Primary 底色就是 accent，焦点环改用反色才可见。
-                    focus_ring(frame, rect, radius, fg, fill);
+                    focus_ring(frame, rect, radius, fg, fill, scale);
                 }
                 draw_button_text(frame, text, &button.display_label(), fg, rect, line_h);
             }
@@ -519,7 +519,8 @@ fn paint_buttons(
                     } else {
                         palette::surface_popup(theme)
                     };
-                    focus_ring(frame, rect, radius, theme.accent, inner);
+                    let ring = focus_ring_color(theme, [inner[0], inner[1], inner[2]]);
+                    focus_ring(frame, rect, radius, ring, inner, scale);
                 }
                 draw_button_text(frame, text, &button.display_label(), fg, rect, line_h);
             }
@@ -545,20 +546,64 @@ fn stroke_rounded(
     }
 }
 
-/// 焦点环：按钮矩形内缩 1px 画 1px 描边；内层填回底色/悬停色。
-fn focus_ring(frame: &mut Frame, rect: Rect, radius: f32, color: [u8; 3], inner: [u8; 4]) {
-    let x = rect.x.round() as i32 + 1;
-    let y = rect.y.round() as i32 + 1;
+/// 焦点环颜色：accent 在该底上不足 3:1（非文本对比门禁）时退回正文前景色。
+/// 深色主题 accent/popup 实测约 2.1:1，直接画会被底色吞没。
+pub(crate) fn focus_ring_color(theme: &Theme, bg: [u8; 3]) -> [u8; 3] {
+    if contrast_ratio(theme.accent, bg) >= 3.0 {
+        theme.accent
+    } else {
+        theme.text
+    }
+}
+
+/// WCAG 相对亮度（sRGB 线性化）。
+fn relative_luminance(c: [u8; 3]) -> f32 {
+    let ch = |v: u8| {
+        let s = v as f32 / 255.0;
+        if s <= 0.03928 {
+            s / 12.92
+        } else {
+            ((s + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    0.2126 * ch(c[0]) + 0.7152 * ch(c[1]) + 0.0722 * ch(c[2])
+}
+
+/// 两色对比度（1:1 … 21:1）。
+fn contrast_ratio(a: [u8; 3], b: [u8; 3]) -> f32 {
+    let (l1, l2) = (relative_luminance(a), relative_luminance(b));
+    let (hi, lo) = if l1 > l2 { (l1, l2) } else { (l2, l1) };
+    (hi + 0.05) / (lo + 0.05)
+}
+
+/// 焦点环：按钮矩形内缩 1px 起画 `scale` 像素描边（150% DPI 下不因 1px 变细而隐形），
+/// 内层填回底色/悬停色。
+fn focus_ring(
+    frame: &mut Frame,
+    rect: Rect,
+    radius: f32,
+    color: [u8; 3],
+    inner: [u8; 4],
+    scale: f32,
+) {
+    let t = scale.round().max(1.0) as u32;
     let w = rect.w.round().max(0.0) as u32;
     let h = rect.h.round().max(0.0) as u32;
-    if w <= 2 || h <= 2 {
+    if w <= 2 + 2 * t || h <= 2 + 2 * t {
         return;
     }
+    let x = rect.x.round() as i32 + 1;
+    let y = rect.y.round() as i32 + 1;
     let r = (radius - 1.0).max(0.0);
     frame.fill_rounded_rect(x, y, w - 2, h - 2, r, [color[0], color[1], color[2], 255]);
-    if w > 4 && h > 4 {
-        frame.fill_rounded_rect(x + 1, y + 1, w - 4, h - 4, (r - 1.0).max(0.0), inner);
-    }
+    frame.fill_rounded_rect(
+        x + t as i32,
+        y + t as i32,
+        w - 2 - 2 * t,
+        h - 2 - 2 * t,
+        (r - t as f32).max(0.0),
+        inner,
+    );
 }
 
 /// 按钮文字居中（水平按实测宽、垂直按正文行高），不做截断（按钮尺寸由文字决定）。
@@ -977,6 +1022,34 @@ mod tests {
         assert_eq!(ModalState::new(&no_primary).focused, 0);
     }
 
+    /// 未保存关闭对话框：默认焦点必须是最安全动作（保存），绝不能落在「不保存」；
+    /// Esc 也必须通往安全出口「取消」。
+    #[test]
+    fn unsaved_close_dialog_defaults_to_safe_action() {
+        use crate::i18n::{t, Key as I18nKey};
+        let s = ModalSpec::new(
+            "是否保存对「a.md」的更改？",
+            t(I18nKey::ModalUnsavedBody),
+            vec![
+                ModalButton::new(1, t(I18nKey::BtnSave), ButtonRole::Primary).with_mnemonic('s'),
+                ModalButton::new(2, t(I18nKey::BtnDontSave), ButtonRole::Danger).with_mnemonic('c'),
+                ModalButton::new(3, t(I18nKey::BtnCancel), ButtonRole::Secondary),
+            ],
+        );
+        let mut st = ModalState::new(&s);
+        assert_ne!(
+            s.buttons[st.focused].label,
+            t(I18nKey::BtnDontSave),
+            "默认焦点不得是「不保存」"
+        );
+        assert_eq!(st.on_key(&Key::Enter, false, &s), Some(1), "回车默认=保存");
+        assert_eq!(
+            st.on_key(&Key::Escape, false, &s),
+            Some(3),
+            "Esc=取消（安全出口）"
+        );
+    }
+
     /// 助记符必须以半角大写括号后缀上屏，否则用户不知道按哪个字母；无声明则原样。
     #[test]
     fn mnemonic_suffix_is_displayed_on_buttons() {
@@ -1083,6 +1156,54 @@ mod tests {
             "离开按钮应返回变化"
         );
         assert!(!st.on_hover((vp().x + 1.0, vp().y + 1.0), &l));
+    }
+
+    /// 焦点环必须在浅/深主题、弹窗底与悬停底上都达到非文本对比 3:1；
+    /// 深色主题的 accent 直接压在 popup 上不足 3:1，必须回退到正文前景色。
+    #[test]
+    fn focus_ring_meets_non_text_contrast_in_both_themes() {
+        for theme in [Theme::light(), Theme::dark()] {
+            let popup = palette::surface_popup(&theme);
+            let hover = theme.hover;
+            for bg in [
+                [popup[0], popup[1], popup[2]],
+                [hover[0], hover[1], hover[2]],
+            ] {
+                let ring = focus_ring_color(&theme, bg);
+                let c = contrast_ratio(ring, bg);
+                assert!(
+                    c >= 3.0,
+                    "焦点环对比不足: dark={} ring={ring:?} bg={bg:?} c={c:.2}",
+                    theme.dark
+                );
+            }
+            // 深色主题若仍用 accent 会被底色吞没，显式锁死回退行为。
+            if theme.dark {
+                let popup = [popup[0], popup[1], popup[2]];
+                assert_eq!(
+                    focus_ring_color(&theme, popup),
+                    theme.text,
+                    "深色主题焦点环必须回退到正文前景色"
+                );
+            }
+        }
+    }
+
+    /// 150% DPI：焦点环按 scale 加粗到 2px，避免 1px 物理线在高 DPI 下变细而隐形。
+    #[test]
+    fn focus_ring_thickens_with_scale() {
+        let rect = Rect {
+            x: 10.0,
+            y: 10.0,
+            w: 60.0,
+            h: 40.0,
+        };
+        let mut frame = Frame::new(80, 60, [0, 0, 0, 255]);
+        focus_ring(&mut frame, rect, 0.0, [255, 0, 0], [0, 0, 255, 255], 1.5);
+        assert_eq!([frame.get(11, 11)[0], frame.get(11, 11)[1]], [255, 0]);
+        assert_eq!([frame.get(12, 12)[0], frame.get(12, 12)[1]], [255, 0]);
+        let inner = frame.get(13, 13);
+        assert_eq!([inner[0], inner[1], inner[2]], [0, 0, 255], "环内仍为底色");
     }
 
     fn pixel_case(theme: Theme) {

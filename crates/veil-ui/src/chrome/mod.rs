@@ -507,13 +507,110 @@ pub fn path_label(p: Option<&Path>) -> String {
     }
 }
 
-/// 状态栏文本：(左, 右)。左 = path_label + 脏标 + 外部变更提示 + 源码模式提示 + 保存态；
+/// 状态栏左文分段：显示顺序 = 文件身份 → 外部变更 → 源码模式 → 保存态。
+///
+/// 显示顺序与优先级解耦：保存态虽然显示在最后，却是仅次于文件身份的必留信息。
+/// 各段独立成串，供绘制层按可用宽度逐级丢弃低优先级段。
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub struct StatusParts {
+    pub identity: String,
+    pub external: String,
+    pub source: String,
+    pub save: String,
+}
+
+impl StatusParts {
+    /// 全量左文（既有显示顺序）。
+    pub fn full(&self) -> String {
+        format!(
+            "{}{}{}{}",
+            self.identity, self.external, self.source, self.save
+        )
+    }
+
+    /// 丢弃最低优先级的源码模式。
+    pub fn without_source(&self) -> String {
+        format!("{}{}{}", self.identity, self.external, self.save)
+    }
+
+    /// 仅保留文件身份与保存态（两者都不允许被静默吞掉）。
+    pub fn core(&self) -> String {
+        format!("{}{}", self.identity, self.save)
+    }
+}
+
+/// 状态栏左文降级档位（优先级高 → 低：文件身份 > 保存态 > 外部变更 > 源码模式）。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum StatusTier {
+    Full,
+    NoSource,
+    Core,
+}
+
+/// 纯决策：按优先级从最低段开始丢，返回可用宽能容纳的最高档位。
+/// `Core` 仍超宽时由绘制层收缩文件名，因此这里恒定可返回。
+pub fn pick_status_tier(full_w: f32, no_source_w: f32, avail: f32) -> StatusTier {
+    if full_w <= avail {
+        StatusTier::Full
+    } else if no_source_w <= avail {
+        StatusTier::NoSource
+    } else {
+        StatusTier::Core
+    }
+}
+
+/// 状态栏左文分段构造（单一来源）。脏态只用「 · 未保存」表达，不再叠加 ` *`。
+pub fn status_parts(
+    path: Option<&Path>,
+    dirty: bool,
+    external: ExternalState,
+    source_mode: bool,
+    saved_hhmm: Option<&str>,
+) -> StatusParts {
+    let mut parts = StatusParts {
+        identity: path_label(path),
+        external: String::new(),
+        source: String::new(),
+        save: String::new(),
+    };
+    parts.external = match external {
+        ExternalState::None => String::new(),
+        ExternalState::Changed => t(Key::StatusExternalChanged).to_string(),
+        ExternalState::BackedUp => t(Key::StatusExternalBackedUp).to_string(),
+        ExternalState::Missing => t(Key::StatusExternalMissing).to_string(),
+    };
+    if source_mode {
+        parts.source = t(Key::StatusSourceMode).to_string();
+    }
+    if dirty {
+        parts.save = t(Key::StatusUnsaved).to_string();
+    } else if let Some(hhmm) = saved_hhmm {
+        parts.save = tf(Key::StatusSaved, &[hhmm]);
+    }
+    parts
+}
+
+/// 状态栏右文：全文字数 + 行列。
+pub fn status_stats(words: usize, line: usize, col: usize) -> String {
+    tf(
+        Key::StatusStats,
+        &[&words.to_string(), &line.to_string(), &col.to_string()],
+    )
+}
+
+/// 极窄窗口下右文的退化形式：仅字数（行列信息让位于左文可读性）。
+pub fn status_words(words: usize) -> String {
+    tf(Key::StatusWords, &[&words.to_string()])
+}
+
+/// 状态栏文本：(左, 右)。左 = 文件身份 + 外部变更 + 源码模式 + 保存态；
 /// 右 = 全文字数 + 行列。
 ///
-/// 保存态是显性文字（不只靠 `*`）：脏 → `· 未保存`；干净且本会话保存过 →
-/// `· 已保存 HH:MM`（时间由注入的 Clock 提供）。外部修改/文件缺失/源码模式后缀
-/// 保持既有顺序与文案，保存态追加在其后。
-#[allow(clippy::too_many_arguments)] // 状态栏聚合字段，调用点只有绘制一处
+/// 保存态是显性文字：脏 → `· 未保存`；干净且本会话保存过 → `· 已保存 HH:MM`
+/// （时间由注入的 Clock 提供）。外部修改/文件缺失/源码模式后缀保持既有顺序与文案。
+/// 绘制路径走 `layout_status`（同源分段 + 优先级降级），本函数保留给断言全量文案的测试。
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)] // 状态栏聚合字段，调用点只有测试
 pub fn status_line(
     path: Option<&Path>,
     dirty: bool,
@@ -524,31 +621,27 @@ pub fn status_line(
     line: usize,
     col: usize,
 ) -> (String, String) {
-    let mut left = path_label(path);
-    if dirty {
-        left.push_str(t(Key::StatusDirtyMark));
-    }
-    match external {
-        ExternalState::None => {}
-        ExternalState::Changed => left.push_str(t(Key::StatusExternalChanged)),
-        ExternalState::BackedUp => left.push_str(t(Key::StatusExternalBackedUp)),
-        ExternalState::Missing => left.push_str(t(Key::StatusExternalMissing)),
-    }
-    if source_mode {
-        left.push_str(t(Key::StatusSourceMode));
-    }
-    if dirty {
-        left.push_str(t(Key::StatusUnsaved));
-    } else if let Some(hhmm) = saved_hhmm {
-        left.push_str(&tf(Key::StatusSaved, &[hhmm]));
-    }
     (
-        left,
-        tf(
-            Key::StatusStats,
-            &[&words.to_string(), &line.to_string(), &col.to_string()],
-        ),
+        status_parts(path, dirty, external, source_mode, saved_hhmm).full(),
+        status_stats(words, line, col),
     )
+}
+
+/// 状态栏通知语义类别。显式标注，不按文案猜测：
+/// 错误类不参与自动超时（保留到被新通知替换或用户处理），其余类别短暂显示。
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum NoticeKind {
+    #[default]
+    Info,
+    Success,
+    Error,
+}
+
+impl NoticeKind {
+    /// 是否参与定时消退（错误类恒不自动消失）。
+    pub fn expires(self) -> bool {
+        self != NoticeKind::Error
+    }
 }
 
 /// chrome 交互态与标签缓存。`notice` 为状态栏临时提示（动作失败/成功）。
@@ -559,6 +652,9 @@ pub struct Chrome {
     /// (菜单下标, 项下标)
     pub hover_item: Option<(usize, usize)>,
     pub notice: String,
+    /// `notice` 的语义类别，与 `notice_kind_text` 配对；文本被直接替换时失效为 Info。
+    pub notice_kind: NoticeKind,
+    pub(crate) notice_kind_text: String,
     /// 悬停最近文件项时，临时保存的原状态栏提示（离开后恢复）。
     pub(crate) saved_notice: Option<String>,
     /// 拖动滚动条时鼠标相对滑块顶边的偏移。
@@ -578,6 +674,28 @@ pub struct Chrome {
 impl Chrome {
     pub fn is_open(&self) -> bool {
         self.open.is_some()
+    }
+
+    /// 写入通知并显式标注语义类别。错误类不会自动超时。
+    pub fn notify(&mut self, text: impl Into<String>, kind: NoticeKind) {
+        let text = text.into();
+        self.notice = text.clone();
+        self.notice_kind = kind;
+        self.notice_kind_text = text;
+    }
+
+    /// 错误通知：保留到被新通知替换或用户处理。
+    pub fn notify_error(&mut self, text: impl Into<String>) {
+        self.notify(text, NoticeKind::Error);
+    }
+
+    /// 当前通知的有效类别：文本被外部直接替换后配对失效，按 Info 处理，    /// 避免上一条错误通知的「不超时」语义污染后续成功提示。
+    pub fn current_notice_kind(&self) -> NoticeKind {
+        if self.notice == self.notice_kind_text {
+            self.notice_kind
+        } else {
+            NoticeKind::Info
+        }
     }
 
     pub fn close(&mut self) {
@@ -660,17 +778,25 @@ pub(crate) fn action_checked(action: MenuAction, flags: MenuFlags) -> bool {
     }
 }
 
-/// 菜单项是否可用：不可用时置灰、不可高亮、不可回车/点击执行。
+/// 禁用原因（单一来源）：不可用时返回给用户看的原因词条，可用时 None。
 /// 只表达「此刻必然无效果」的项；拿不准的（如剪贴板是否为空）一律保持可用。
-pub(crate) fn action_enabled(action: MenuAction, flags: MenuFlags) -> bool {
+/// 菜单可在快捷键列/悬浮说明中以 muted 文本呈现该原因，避免只置灰不解释。
+pub(crate) fn disabled_reason(action: MenuAction, flags: MenuFlags) -> Option<Key> {
     match action {
-        MenuAction::Separator => false,
-        MenuAction::Save => flags.can_save,
-        MenuAction::Export | MenuAction::ExportPdf | MenuAction::Print => flags.can_export,
-        MenuAction::Undo => flags.can_undo,
-        MenuAction::Redo => flags.can_redo,
-        _ => true,
+        MenuAction::Save if !flags.can_save => Some(Key::DisabledNoChanges),
+        MenuAction::Export | MenuAction::ExportPdf | MenuAction::Print if !flags.can_export => {
+            Some(Key::DisabledEmptyDocument)
+        }
+        MenuAction::Undo if !flags.can_undo => Some(Key::DisabledNothingToUndo),
+        MenuAction::Redo if !flags.can_redo => Some(Key::DisabledNothingToRedo),
+        _ => None,
     }
+}
+
+/// 菜单项是否可用：不可用时置灰、不可高亮、不可回车/点击执行。
+/// 与 `disabled_reason` 同源，保证「置灰」与「解释」不会各说各话。
+pub(crate) fn action_enabled(action: MenuAction, flags: MenuFlags) -> bool {
+    !matches!(action, MenuAction::Separator) && disabled_reason(action, flags).is_none()
 }
 
 #[cfg(test)]

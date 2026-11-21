@@ -408,6 +408,154 @@ fn menu_shortcuts_match_winit_mapping_and_real_dispatch() {
     assert_eq!(with_shortcuts, 29, "全部 29 个显示快捷键都必须经过真实分发");
 }
 
+/// 命令矩阵（Task 3.3）：动作 → 快捷键 的唯一对照表。
+/// 断言：主菜单每项都在这张表里、同动作只有一个主入口、提示键与真实分发一致。
+#[test]
+fn menu_command_matrix_maps_each_action_to_its_real_shortcut() {
+    let matrix: &[(MenuAction, Key)] = &[
+        (MenuAction::New, Key::ShortcutNew),
+        (MenuAction::NewWindow, Key::ShortcutNewWindow),
+        (MenuAction::Open, Key::ShortcutOpen),
+        (MenuAction::QuickOpen, Key::ShortcutQuickOpen),
+        (MenuAction::Save, Key::ShortcutSave),
+        (MenuAction::SaveAs, Key::ShortcutSaveAs),
+        (MenuAction::Export, Key::ShortcutExportHtml),
+        (MenuAction::ExportPdf, Key::ShortcutExportPdf),
+        (MenuAction::Print, Key::ShortcutPrint),
+        (MenuAction::VersionHistory, Key::ShortcutVersionHistory),
+        (MenuAction::Undo, Key::ShortcutUndo),
+        (MenuAction::Redo, Key::ShortcutRedo),
+        (MenuAction::Cut, Key::ShortcutCut),
+        (MenuAction::Copy, Key::ShortcutCopy),
+        (MenuAction::Paste, Key::ShortcutPaste),
+        (MenuAction::SelectAll, Key::ShortcutSelectAll),
+        (MenuAction::ToggleBold, Key::ShortcutBold),
+        (MenuAction::ToggleItalic, Key::ShortcutItalic),
+        (MenuAction::InsertLink, Key::ShortcutLink),
+        (MenuAction::Find, Key::ShortcutFind),
+        (MenuAction::Replace, Key::ShortcutReplace),
+        (MenuAction::InsertImage, Key::ShortcutInsertImage),
+        (MenuAction::ToggleOutline, Key::ShortcutOutline),
+        (MenuAction::ZoomIn, Key::ShortcutZoomIn),
+        (MenuAction::ZoomOut, Key::ShortcutZoomOut),
+        (MenuAction::ZoomReset, Key::ShortcutZoomReset),
+        (MenuAction::ToggleFullscreen, Key::ShortcutFullscreen),
+        (MenuAction::ToggleSourceMode, Key::ShortcutSourceMode),
+        (MenuAction::Settings, Key::ShortcutSettings),
+        // 以下动作没有真实按键路由：明确不显示快捷键，不编造。
+        (MenuAction::Quit, Key::Empty),
+        (MenuAction::ThemeSystem, Key::Empty),
+        (MenuAction::ThemeLight, Key::Empty),
+        (MenuAction::ThemeDark, Key::Empty),
+        (MenuAction::ToggleFocus, Key::Empty),
+        (MenuAction::ToggleRemoteImages, Key::Empty),
+    ];
+
+    let mut seen = Vec::new();
+    let mut shown = 0;
+    for menu in MENUS {
+        for (label, shortcut, action) in menu.items {
+            if *action == MenuAction::Separator {
+                continue;
+            }
+            assert!(
+                !seen.contains(action),
+                "动作 {action:?} 在主菜单出现两次，必须只有一个主入口"
+            );
+            seen.push(*action);
+            let want = matrix
+                .iter()
+                .find(|(a, _)| a == action)
+                .unwrap_or_else(|| panic!("命令矩阵缺少主菜单动作 {action:?}"))
+                .1;
+            assert_eq!(
+                *shortcut,
+                want,
+                "{action:?} 的快捷键提示与命令矩阵不一致: {}",
+                t(*shortcut)
+            );
+            assert!(!t(*label).is_empty(), "菜单标签不得为空: {action:?}");
+            if want != Key::Empty {
+                shown += 1;
+                assert_eq!(
+                    dispatch_shortcut(t(*shortcut)),
+                    expected_input_action(*action),
+                    "{action:?} 的提示键必须能真实分发"
+                );
+            }
+        }
+    }
+    assert_eq!(seen.len(), 35, "主菜单应覆盖 35 个静态动作");
+    assert_eq!(shown, 29, "矩阵内显示快捷键的动作数与既有红线一致");
+
+    // 最近文件是动态项：出现在菜单里但没有（也不应有）快捷键提示。
+    let rows = menu_rows(0, &["a.md".to_string()]);
+    let (_, hint, action) = rows
+        .iter()
+        .find(|(_, _, a)| matches!(a, MenuAction::OpenRecent(_)))
+        .expect("文件菜单应含最近文件");
+    assert_eq!(*action, MenuAction::OpenRecent(0));
+    assert_eq!(*hint, "", "最近文件没有可显示的快捷键");
+}
+
+/// 禁用项必须解释原因（Task 3.2）：与 `action_enabled` 同源，
+/// 不允许出现「被置灰但没有任何原因」的非分隔线动作。
+#[test]
+fn disabled_menu_actions_always_explain_why() {
+    let none = MenuFlags::default();
+    let all = MenuFlags {
+        can_save: true,
+        can_export: true,
+        can_undo: true,
+        can_redo: true,
+        ..MenuFlags::default()
+    };
+    let mut reasons = Vec::new();
+    for menu in MENUS {
+        for (_, _, action) in menu.items {
+            if *action == MenuAction::Separator {
+                assert_eq!(disabled_reason(*action, none), None, "分隔线不是禁用项");
+                continue;
+            }
+            if action_enabled(*action, none) {
+                assert_eq!(
+                    disabled_reason(*action, none),
+                    None,
+                    "{action:?} 可用时不得带禁用原因"
+                );
+            } else {
+                let reason = disabled_reason(*action, none)
+                    .unwrap_or_else(|| panic!("{action:?} 被置灰却没有原因"));
+                assert!(!t(reason).is_empty(), "{action:?} 的原因文案为空");
+                reasons.push(reason);
+            }
+            assert!(
+                action_enabled(*action, all),
+                "{action:?} 在全部能力可用时应恢复可执行"
+            );
+        }
+    }
+    // 保存 / 导出三件套 / 撤销 / 重做：默认态共 6 项禁用，原因只来自 4 个词条。
+    assert_eq!(reasons.len(), 6, "默认态应有 6 个禁用项: {reasons:?}");
+    for want in [
+        Key::DisabledNoChanges,
+        Key::DisabledEmptyDocument,
+        Key::DisabledNothingToUndo,
+        Key::DisabledNothingToRedo,
+    ] {
+        assert!(reasons.contains(&want), "缺少禁用原因词条 {want:?}");
+        assert!(!t(want).is_empty());
+    }
+    assert_eq!(
+        reasons
+            .iter()
+            .filter(|r| **r == Key::DisabledEmptyDocument)
+            .count(),
+        3,
+        "导出 HTML / 导出 PDF / 打印共享同一空文档原因"
+    );
+}
+
 #[test]
 fn dialog_commands_use_ellipsis_consistently() {
     for menu in MENUS {
@@ -589,8 +737,8 @@ fn status_line_variants() {
             3
         ),
         (
-            // 脏态必须以「未保存」文字表达（`*` 只是标题栏习惯，状态栏不靠它单独表态）
-            "a.md · dir *（外部修改已备份） · 未保存".into(),
+            // 脏态只用「未保存」表达（状态栏不再叠加 `*`，避免双重信号）
+            "a.md · dir（外部修改已备份） · 未保存".into(),
             "1234 字 · 行 12，列 3".into()
         )
     );
@@ -625,7 +773,7 @@ fn status_line_shows_saved_time_only_when_clean() {
     // 脏态优先：即便已有保存时刻也不得显示「已保存」
     assert_eq!(
         status_line(p, true, ExternalState::None, false, Some("14:32"), 0, 1, 1).0,
-        "a.md * · 未保存"
+        "a.md · 未保存"
     );
 }
 
@@ -639,11 +787,11 @@ fn status_line_marks_source_mode() {
     // 与外部状态共存时追加在最后，关闭时逐字节等于旧输出
     assert_eq!(
         status_line(p, true, ExternalState::Changed, true, None, 0, 1, 1).0,
-        "a.md *（外部修改）（源码模式） · 未保存"
+        "a.md（外部修改）（源码模式） · 未保存"
     );
     assert_eq!(
         status_line(p, true, ExternalState::Changed, false, None, 0, 1, 1).0,
-        "a.md *（外部修改） · 未保存"
+        "a.md（外部修改） · 未保存"
     );
 }
 
@@ -656,7 +804,7 @@ fn status_line_marks_external_states() {
     );
     assert_eq!(
         status_line(p, true, ExternalState::Missing, false, None, 0, 1, 1).0,
-        "a.md *（文件缺失） · 未保存"
+        "a.md（文件缺失） · 未保存"
     );
 }
 
@@ -1016,4 +1164,222 @@ fn scrollbar_thumb_painted_when_overflowing() {
 
     chrome.scroll_hover = true;
     assert_eq!(draw(&mut chrome).get(x, y), theme.thumb, "悬停滑块加亮");
+}
+
+// ---- Task 1：状态栏优先级 / 通知降级 / 禁用原因呈现 ----
+
+#[test]
+fn status_tier_drops_low_priority_segments_first() {
+    // 全量放得下：保持完整
+    assert_eq!(pick_status_tier(300.0, 260.0, 500.0), StatusTier::Full);
+    // 放不下全量但丢源码模式后放得下
+    assert_eq!(pick_status_tier(500.0, 400.0, 450.0), StatusTier::NoSource);
+    // 两者都放不下：降到「文件名 + 保存态」，由绘制层收缩文件名
+    assert_eq!(
+        pick_status_tier(500.0, 400.0, 300.0),
+        StatusTier::Core,
+        "优先级决策只允许先丢源码模式、再丢外部变更"
+    );
+    // Core 也必须能返回（不允许返回「无内容」）
+    assert_eq!(pick_status_tier(999.0, 999.0, 0.0), StatusTier::Core);
+}
+
+#[test]
+fn status_parts_keep_file_identity_and_save_state() {
+    let parts = status_parts(
+        Some(Path::new("dir/a.md")),
+        true,
+        ExternalState::Changed,
+        true,
+        Some("14:32"),
+    );
+    assert_eq!(parts.full(), "a.md · dir（外部修改）（源码模式） · 未保存");
+    assert_eq!(parts.without_source(), "a.md · dir（外部修改） · 未保存");
+    assert_eq!(parts.core(), "a.md · dir · 未保存");
+    assert!(!parts.full().contains(" *"), "状态栏不得再有重复脏标");
+}
+
+/// 700 px 窗口 + 深目录长文件名 + 脏态 + 外部变更 + 源码模式：
+/// 文件名与「未保存」必须同时可读，先被省略的是源码模式。
+#[test]
+fn status_layout_700px_long_path_keeps_filename_and_unsaved() {
+    let mut engine = LayoutEngine::new();
+    let mut chrome = Chrome::default();
+    let long_name =
+        "2026-11-21-ux-baseline-ji-shen-mu-lu-chang-wen-jian-ming-ce-shi-yong-li-abcdefghijklmnop.md";
+    let path = Path::new("D:/资料归档-2026/第二层目录名称同样很长-用于验证路径截断/third-level-directory-with-a-rather-long-name/第四层")
+        .join(long_name);
+    let fit = chrome.layout_status(
+        &mut engine,
+        Some(&path),
+        true,
+        ExternalState::Changed,
+        true,
+        Some("14:32"),
+        1234,
+        5,
+        23,
+        700.0,
+        1.0,
+    );
+    assert!(
+        fit.left.contains("未保存"),
+        "保存态不得被省略: {}",
+        fit.left
+    );
+    assert!(
+        fit.left.starts_with("2026-11-21-ux-baseline"),
+        "文件名开头应保留: {}",
+        fit.left
+    );
+    assert!(
+        !fit.left.contains("源码模式"),
+        "最低优先级的源码模式应先被丢弃: {}",
+        fit.left
+    );
+    // 左右互不重叠：左文 + 间距 + 右文不超过右缘
+    let left_x = crate::tokens::space::M;
+    let right_edge = 700.0 - SCROLL_W - crate::tokens::space::M;
+    let gap = crate::tokens::space::M;
+    assert!(
+        left_x + fit.left_w + gap + fit.right_w <= right_edge + 0.5,
+        "左右状态文本重叠: left={} right={}",
+        fit.left_w,
+        fit.right_w
+    );
+    assert!(
+        fit.right.contains("行 5"),
+        "宽裕时右文保持完整: {}",
+        fit.right
+    );
+}
+
+fn status_paint(
+    w: u32,
+    h: u32,
+    notice: Option<&str>,
+    chrome: &mut Chrome,
+    engine: &mut LayoutEngine,
+) -> Frame {
+    let mut frame = Frame::new(w, h, [255, 255, 255, 255]);
+    let theme = Theme::light();
+    if let Some(n) = notice {
+        chrome.notify_error(n);
+    }
+    chrome.paint(
+        &mut frame,
+        engine,
+        viewport(w, h, 1.0),
+        1.0,
+        &theme,
+        Some(Path::new("a.md")),
+        true,
+        ExternalState::None,
+        None,
+        0,
+        1,
+        1,
+        100.0,
+        0.0,
+        &[],
+        MenuFlags::default(),
+    );
+    frame
+}
+
+/// 极窄窗口：中段/右区都容不下通知时也必须画出来（本次退回最小浮层），不得静默丢弃。
+#[test]
+fn notice_still_painted_in_extremely_narrow_window() {
+    let notice = "保存失败：拒绝访问。 (os error 5)；可 Ctrl+S 重试，或 Ctrl+Shift+S 另存为";
+    let mut engine = LayoutEngine::new();
+    let mut chrome = Chrome::default();
+    let without = status_paint(140, 160, None, &mut chrome, &mut engine);
+    let with = status_paint(140, 160, Some(notice), &mut chrome, &mut engine);
+    let mut diff = 0usize;
+    for y in 0..160 {
+        for x in 0..140 {
+            if without.get(x, y) != with.get(x, y) {
+                diff += 1;
+            }
+        }
+    }
+    assert!(diff > 0, "窄窗口下通知必须仍然可见（不得直接不画）");
+    assert_eq!(chrome.notice, notice, "绘制不得吞掉通知文本");
+}
+
+#[test]
+fn notice_painted_in_narrow_window_too() {
+    let notice = "已恢复「a.md」的未保存内容（尚未保存）";
+    let mut engine = LayoutEngine::new();
+    let mut chrome = Chrome::default();
+    let without = status_paint(320, 200, None, &mut chrome, &mut engine);
+    let with = status_paint(320, 200, Some(notice), &mut chrome, &mut engine);
+    let mut diff = 0usize;
+    for y in 0..200 {
+        for x in 0..320 {
+            if without.get(x, y) != with.get(x, y) {
+                diff += 1;
+            }
+        }
+    }
+    assert!(diff > 0, "通知在中段不足时必须走降级路径而非消失");
+}
+
+/// 禁用项不能只置灰：右键提示列改为 muted 的禁用原因（长原因可截断）。
+#[test]
+fn disabled_menu_item_paints_reason_text() {
+    let theme = Theme::light();
+    let p = popup_layout(0, 1.0, &[], 500.0);
+    let (_, ix, iy, iw, ih) = *p
+        .items
+        .iter()
+        .find(|(i, _, _, _, _)| *i == 5)
+        .expect("文件菜单第 6 行应为「保存」");
+    let zone = |flags: MenuFlags| -> Vec<[u8; 4]> {
+        let mut engine = LayoutEngine::new();
+        let mut frame = Frame::new(500, 400, [255, 255, 255, 255]);
+        let mut chrome = Chrome {
+            open: Some(0),
+            ..Default::default()
+        };
+        chrome.paint(
+            &mut frame,
+            &mut engine,
+            viewport(500, 400, 1.0),
+            1.0,
+            &theme,
+            None,
+            false,
+            ExternalState::None,
+            None,
+            0,
+            1,
+            1,
+            500.0,
+            0.0,
+            &[],
+            flags,
+        );
+        let mut out = Vec::new();
+        for y in iy as u32..(iy + ih) as u32 {
+            for x in (ix + iw * 0.5) as u32..(ix + iw) as u32 {
+                out.push(frame.get(x, y));
+            }
+        }
+        out
+    };
+    let disabled = zone(MenuFlags::default());
+    let enabled = zone(MenuFlags {
+        can_save: true,
+        ..MenuFlags::default()
+    });
+    assert_eq!(
+        disabled_reason(MenuAction::Save, MenuFlags::default()),
+        Some(Key::DisabledNoChanges),
+        "保存禁用原因与 action_enabled 同源"
+    );
+    assert_ne!(
+        disabled, enabled,
+        "禁用行的右侧必须画出原因文本，而不是与快捷键列相同的空白/文案"
+    );
 }

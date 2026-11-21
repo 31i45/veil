@@ -11,20 +11,22 @@ use softbuffer::{Context, Surface};
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, Ime, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::ActiveEventLoop;
+use winit::keyboard::{Key as WKey, NamedKey as WNamedKey};
 use winit::window::{Icon, Window, WindowId};
 
 use crate::autosave::Autosave;
-use crate::chrome::{self, Chrome, Viewport};
+use crate::chrome::{self, Chrome, NoticeKind, Viewport};
 use crate::docio::{decode, encode};
 use crate::document::{history, recovery, session};
 use crate::editor::Editor;
 use crate::geometry::{clamp_window_geom, ScreenRect, BASE_LINE_HEIGHT};
 use crate::i18n::{clip_error, t, tf, Key};
 use crate::image::{AssetStore, ImageData, ImageLoader};
-use crate::input::Mods;
+use crate::input::{Key as InputKey, Mods};
 use crate::interaction::ZOOM_WHEEL_PX;
 use crate::math::MathRenderer;
 use crate::mermaid_renderer::MermaidRenderer;
+use crate::mode::Mode;
 use crate::print::{Print, PrintState};
 use crate::theme::{
     self, Config, ConfigStore, ExportStyle, SystemTheme, Theme, ThemeEnv, ThemeMode, WindowEffects,
@@ -38,7 +40,7 @@ use crate::view::{
 
 use crate::document::block_index::BlockIndex;
 use crate::document::Persist;
-use veil_core::BlockId;
+use veil_core::{BlockId, Range};
 
 /// 外部文件监听轮询间隔（切片 16）：事件在实现侧入队，主线程按此节奏非阻塞取走。
 /// 仅在有路径时设置唤醒，草稿空转不产生周期性唤醒。
@@ -50,8 +52,8 @@ const REMOTE_POLL: Duration = Duration::from_millis(100);
 /// 光标闪烁半周期（600 ms 可见 / 600 ms 不可见）——标准文本编辑器节拍。
 const CURSOR_BLINK: Duration = Duration::from_millis(600);
 
-/// 状态栏提示存活时长：同一文本展示满该时长即自动消退（含错误提示，
-/// 避免释放后被永久占用）；新提示写入后重新计时。
+/// 状态栏提示的短暂存活时长（成功/普通提示）；新提示写入后重新计时。
+/// 错误类通知（`NoticeKind::Error`）不参与该超时，保留到被新通知替换或用户处理。
 const NOTICE_TTL: Duration = Duration::from_secs(6);
 
 /// 系统剪贴板抽象：实现由产品层（veil）注入，本层不依赖具体剪贴板库（INSTANCE §6）。
@@ -455,6 +457,17 @@ pub(crate) struct UIState {
     pub(crate) history: History,
     /// 图片放大预览覆盖层：纯视图态，关闭后文档字节与光标不变。
     pub(crate) image_preview: Option<ImagePreview>,
+    /// 正文焦点快照（键盘闭环）：最近一次处于正文模式时的光标/选区/滚动。
+    /// `Esc` 关闭浮层后据此归还焦点，保证 caret/selection/scroll 与打开前一致。
+    pub(crate) focus_return: Option<DocFocus>,
+}
+
+/// 正文焦点快照：`caret` 与 `selection` 用文档偏移表达，`scroll` 用视口像素。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct DocFocus {
+    pub(crate) caret: usize,
+    pub(crate) selection: Option<Range>,
+    pub(crate) scroll: f32,
 }
 
 /// 图片放大预览（覆盖层）：键为本地绝对路径或远程 URL（与行内图片缓存同键）。
@@ -499,6 +512,7 @@ impl Default for UIState {
             expanded_details: std::collections::HashSet::new(),
             expanded_inline_details: std::collections::HashSet::new(),
             frontmatter_revealed: false,
+            focus_return: None,
         }
     }
 }
@@ -877,11 +891,20 @@ fn startup_doc(ports: &mut AppPorts, doc: Doc) -> StartupDoc {
                     _ => {
                         out.baseline = disk; // 磁盘读不到时 None → 以内容编码兜底
                         out.missing = r.path.is_some() && out.baseline.is_none();
+                        // 恢复提示带上真实对象与时间：路径为文件名的文件，无路径即「未命名草稿」；
+                        // 时间为本次恢复发生的本地时刻（恢复文件本身不含时间戳）。
+                        let name = r
+                            .path
+                            .as_ref()
+                            .and_then(|p| p.file_name())
+                            .and_then(|n| n.to_str())
+                            .unwrap_or(t(Key::UntitledDraft));
+                        let hhmm = ports.clock.local_hhmm();
+                        out.notice = tf(Key::NoticeRecovered, &[name, &hhmm]);
                         out.doc.text = r.text;
                         out.doc.path = r.path;
                         out.doc.bom = r.bom;
                         out.recovered = true;
-                        out.notice = t(Key::NoticeRecovered).into();
                         // 快照仍在磁盘上且已被本会话消费：记下它的指纹，保存成功时才能
                         // 正确作废。否则 clear_recovery 会误判「本会话没写过」而跳过清除，
                         // 导致旧草稿每次启动都被恢复、每次都要另存为（3e 修 R1）。
@@ -1055,11 +1078,14 @@ impl App {
             last_blink: None,
             last_seen_caret: initial_caret,
         };
-        app.ui_state.chrome.notice = if start.notice.is_empty() {
-            config_notice
-        } else {
-            start.notice // 恢复提示优先于配置提示
-        };
+        app.ui_state.chrome.notify(
+            if start.notice.is_empty() {
+                config_notice
+            } else {
+                start.notice // 恢复提示优先于配置提示
+            },
+            NoticeKind::Info,
+        );
         app.engine.set_syntax_colors(app.input_state.theme.syntax);
         app.engine.set_link_color(app.input_state.theme.link);
         app.engine.set_muted_color(app.input_state.theme.muted);
@@ -1181,7 +1207,9 @@ impl App {
         self.input_state.last_theme_check = None;
         self.refresh_theme_visuals();
         // 先给成功提示再落盘：保存失败时错误提示更重要，覆盖为「配置未保存」
-        self.ui_state.chrome.notice = tf(Key::NoticeTheme, &[mode.label()]);
+        self.ui_state
+            .chrome
+            .notify(tf(Key::NoticeTheme, &[mode.label()]), NoticeKind::Success);
         self.save_config(ConfigSave::Theme);
         self.request_redraw();
     }
@@ -1211,7 +1239,9 @@ impl App {
         }
         let text = merged.to_toml_preserving(raw.as_deref());
         if let Err(e) = self.ports.config.save(&text) {
-            self.ui_state.chrome.notice = tf(Key::NoticeConfigNotSaved, &[&e.to_string()]);
+            self.ui_state
+                .chrome
+                .notify_error(tf(Key::NoticeConfigNotSaved, &[&e.to_string()]));
             eprintln!("配置保存失败: {e}");
             return false;
         }
@@ -1255,11 +1285,14 @@ impl App {
         // 保存失败时保留 save_config 写入的「配置未保存」，不得假报开关已持久化
         // （DEF-T10-008）。
         if saved {
-            self.ui_state.chrome.notice = if self.config.allow_remote_images {
-                t(Key::NoticeRemoteImagesAllowed).into()
-            } else {
-                t(Key::NoticeRemoteImagesBlocked).into()
-            };
+            self.ui_state.chrome.notify(
+                if self.config.allow_remote_images {
+                    t(Key::NoticeRemoteImagesAllowed)
+                } else {
+                    t(Key::NoticeRemoteImagesBlocked)
+                },
+                NoticeKind::Success,
+            );
         }
         self.request_redraw();
     }
@@ -1321,7 +1354,9 @@ impl App {
             // 源码超长 → 直接跳过 + 提示；不进失败记忆：
             // 用户编辑源码变小后应该能自动重试
             if source.len() > 128 * 1024 {
-                self.ui_state.chrome.notice = t(Key::NoticeMermaidSourceTooLarge).into();
+                self.ui_state
+                    .chrome
+                    .notify_error(t(Key::NoticeMermaidSourceTooLarge));
                 continue;
             }
 
@@ -1405,10 +1440,10 @@ impl App {
         if failed || mermaid_changed || img_had {
             if failed {
                 // Mermaid 失败优先展示其具体原因（已裁剪为单行）；普通远程图片失败用通用文案
-                self.ui_state.chrome.notice = match mermaid_err {
+                self.ui_state.chrome.notify_error(match mermaid_err {
                     Some(e) => tf(Key::NoticeMermaidRenderFailed, &[&e]),
-                    None => t(Key::NoticeRemoteImageFailed).into(),
-                };
+                    None => t(Key::NoticeRemoteImageFailed).to_string(),
+                });
             }
             self.input_state.revs.remote_images += 1;
             self.refresh_index();
@@ -1643,13 +1678,19 @@ impl App {
         self.expire_notice(now);
     }
 
-    /// 状态栏提示超时消退：同一条文本从首次被看到起计时，到期清空并重绘。
+    /// 状态栏提示超时消退：同一文本从首次被看到起计时，到期清空并重绘。
+    /// 错误类通知不参与超时，保留到被新通知替换或用户处理。
     fn expire_notice(&mut self, now: Instant) {
-        let notice = &self.ui_state.chrome.notice;
-        if notice.is_empty() {
+        if self.ui_state.chrome.notice.is_empty() {
             self.window_state.notice_seen = None;
             return;
         }
+        if !self.ui_state.chrome.current_notice_kind().expires() {
+            // 错误提示常驻：清掉计时，下一次新通知会重新计时。
+            self.window_state.notice_seen = None;
+            return;
+        }
+        let notice = &self.ui_state.chrome.notice;
         match &self.window_state.notice_seen {
             Some((text, at)) if text == notice => {
                 if now.duration_since(*at) >= NOTICE_TTL {
@@ -1693,9 +1734,11 @@ impl App {
             // 周期快照失败同样不可静默（release 无控制台）：状态栏留痕。
             if let Some(e) = current_err {
                 eprintln!("版本快照写入失败: {e}");
-                self.ui_state.chrome.notice = tf(Key::NoticeSnapshotFailed, &[&e]);
+                self.ui_state
+                    .chrome
+                    .notify_error(tf(Key::NoticeSnapshotFailed, &[&e]));
             } else if let Some(n) = archive_notice {
-                self.ui_state.chrome.notice = n;
+                self.ui_state.chrome.notify_error(n);
             }
         }
         // 重置节流 deadline
@@ -1751,6 +1794,56 @@ impl App {
     }
 }
 
+/// 首窗默认逻辑尺寸（无窗口几何记录时使用）。
+const DEFAULT_WIN_W: u32 = 900;
+const DEFAULT_WIN_H: u32 = 700;
+/// 非客户区预留（物理像素）：覆盖标题栏与边框；150% 下实测约 22×56。
+const NON_CLIENT_W: u32 = 24;
+const NON_CLIENT_H: u32 = 64;
+
+/// 首窗几何：把默认逻辑尺寸收敛到当前监视器工作区内并居中，保证窗口与标题栏不越界。
+/// `screens` 为空（无显示器信息）时原样返回默认尺寸。
+pub(crate) fn fit_initial_window(
+    desired_w: u32,
+    desired_h: u32,
+    screens: &[(ScreenRect, f32)],
+) -> WindowGeom {
+    let Some(&(screen, scale)) = screens.first() else {
+        return WindowGeom {
+            width: desired_w.max(1),
+            height: desired_h.max(1),
+            x: 0,
+            y: 0,
+        };
+    };
+    let scale = if scale.is_finite() && scale > 0.0 {
+        scale
+    } else {
+        1.0
+    };
+    let max_w = (((screen.w.saturating_sub(NON_CLIENT_W)) as f32) / scale)
+        .floor()
+        .max(1.0) as u32;
+    let max_h = (((screen.h.saturating_sub(NON_CLIENT_H)) as f32) / scale)
+        .floor()
+        .max(1.0) as u32;
+    let width = desired_w.clamp(1, max_w);
+    let height = desired_h.clamp(1, max_h);
+    let phys_w = (width as f32 * scale).round() as i64;
+    let phys_h = (height as f32 * scale).round() as i64;
+    let outer_w = phys_w + NON_CLIENT_W as i64;
+    let outer_h = phys_h + NON_CLIENT_H as i64;
+    let x = screen.x as i64 + (screen.w as i64 - outer_w).max(0) / 2;
+    let y = screen.y as i64 + (screen.h as i64 - outer_h).max(0) / 2;
+    let clamp_pos = |v: i64| v.clamp(i32::MIN as i64, i32::MAX as i64) as i32;
+    WindowGeom {
+        width,
+        height,
+        x: clamp_pos(x),
+        y: clamp_pos(y),
+    }
+}
+
 impl App {
     /// 记录启动失败详情：已有文档打开错误时保留（用户更关心打开了什么），追加窗口侧诊断。
     fn record_startup_error(&mut self, detail: String) {
@@ -1765,36 +1858,38 @@ impl App {
             return None;
         }
         // 窗口几何（3d）：读回上次退出时的逻辑尺寸 + 物理坐标，先按当前显示器集合夹取，
-        // 避免显示器拔出/分辨率改变后窗口落在屏外。无几何记录时沿用默认 900×700。
-        let screens: Vec<ScreenRect> = event_loop
+        // 避免显示器拔出/分辨率改变后窗口落在屏外。无几何记录时把默认 900×700
+        // 收敛到当前监视器工作区（150% 小屏下不再超高）并居中。
+        let monitors: Vec<(ScreenRect, f32)> = event_loop
             .available_monitors()
             .map(|m| {
                 let pos = m.position();
                 let size = m.size();
-                ScreenRect {
-                    x: pos.x,
-                    y: pos.y,
-                    w: size.width,
-                    h: size.height,
-                }
+                (
+                    ScreenRect {
+                        x: pos.x,
+                        y: pos.y,
+                        w: size.width,
+                        h: size.height,
+                    },
+                    m.scale_factor() as f32,
+                )
             })
             .collect();
+        let screens: Vec<ScreenRect> = monitors.iter().map(|(s, _)| *s).collect();
         let saved_geom = self.config.window.map(|g| clamp_window_geom(g, &screens));
-        let mut attrs = Window::default_attributes()
+        let initial_geom = fit_initial_window(DEFAULT_WIN_W, DEFAULT_WIN_H, &monitors);
+        let geom = saved_geom.unwrap_or(initial_geom);
+        let attrs = Window::default_attributes()
             .with_title(self.title_text())
-            .with_inner_size(match saved_geom {
-                Some(g) => LogicalSize::new(g.width as f32, g.height as f32),
-                None => LogicalSize::new(900.0, 700.0),
-            })
+            .with_inner_size(LogicalSize::new(geom.width as f32, geom.height as f32))
+            .with_position(PhysicalPosition::new(geom.x, geom.y))
             // 3e 修 A1：exe 内嵌 ICO 只喂任务栏/文件管理器，标题栏图标须显式设置
             .with_window_icon(Some(
                 Icon::from_rgba(crate::icon::icon_rgba(), 32, 32).expect("32×32 RGBA 尺寸恒合法"),
             ))
             // 首帧完整性（Task 5）：首帧准备好之前不显示，避免露出黑色未绘制区域
             .with_visible(false);
-        if let Some(g) = saved_geom {
-            attrs = attrs.with_position(PhysicalPosition::new(g.x, g.y));
-        }
         let window = match event_loop.create_window(attrs) {
             Ok(w) => Arc::new(w),
             Err(e) => {
@@ -1988,7 +2083,12 @@ impl App {
             WindowEvent::HoveredFile(path) => self.hover_file(Some(path)),
             WindowEvent::HoveredFileCancelled => self.hover_file(None),
             WindowEvent::KeyboardInput { event, .. } => {
+                // 键盘闭环：无浮层时持续记录正文焦点；Esc 从浮层回到正文时归还。
+                let escape = event.state == ElementState::Pressed
+                    && matches!(event.logical_key, WKey::Named(WNamedKey::Escape));
+                let was_open = self.begin_keyboard_route();
                 self.on_key(&event);
+                self.end_keyboard_route(was_open, escape);
             }
             WindowEvent::ModifiersChanged(m) => {
                 let s = m.state();
@@ -2052,6 +2152,10 @@ impl App {
             } => {
                 // 「退出」已不再是点击的副作用：模态结论会写 exit_requested
                 self.on_left_click();
+                // 鼠标改光标后刷新快照，否则 Esc 归还的是上一次键盘位置。
+                if !self.keyboard_overlay_open() {
+                    self.ui_state.focus_return = Some(self.doc_focus());
+                }
             }
             WindowEvent::MouseInput {
                 state: ElementState::Pressed,
@@ -2069,6 +2173,10 @@ impl App {
                 self.ui_state.chrome.scroll_drag = None;
                 self.ui_state.search.pressed = None;
                 self.end_col_drag();
+                // 拖选结束：选区已定型，刷新快照供随后的 Esc 归还。
+                if !self.keyboard_overlay_open() {
+                    self.ui_state.focus_return = Some(self.doc_focus());
+                }
             }
             WindowEvent::MouseWheel { delta, .. } => {
                 // 图片放大预览：滚轮只服务预览（普通=平移，Ctrl=缩放），不滚动背景文档。
@@ -2098,6 +2206,10 @@ impl App {
                     MouseScrollDelta::PixelDelta(p) => p.y as f32,
                 };
                 self.on_wheel(d);
+                // 滚轮改滚动位置后刷新快照，保证 Esc 归还的是用户最后看到的位置。
+                if !self.keyboard_overlay_open() {
+                    self.ui_state.focus_return = Some(self.doc_focus());
+                }
             }
             WindowEvent::RedrawRequested => {
                 // 先合并执行待处理尺寸变化，再绘制（一帧一次）
@@ -2153,6 +2265,76 @@ impl App {
             || self.ui_state.quick.open
             || self.ui_state.search.open
             || self.ui_state.history.open
+    }
+
+    /// 当前是否有独占键盘的浮层（含未进入 `Mode` 的模态/设置/图片预览）。
+    fn keyboard_overlay_open(&self) -> bool {
+        self.ui_state.modal.is_some()
+            || self.ui_state.settings.is_some()
+            || self.ui_state.image_preview.is_some()
+            || self.mode() != Mode::Document
+    }
+
+    /// 正文焦点快照：caret/选区/滚动同源读取，避免三处各写一遍。
+    fn doc_focus(&self) -> DocFocus {
+        DocFocus {
+            caret: self.editor.caret(),
+            selection: self.editor.selection(),
+            scroll: self.window_state.scroll_y,
+        }
+    }
+
+    /// 键盘路由前：无浮层时刷新快照（浮层内不得覆盖，否则归还的是浮层内位置）。
+    fn begin_keyboard_route(&mut self) -> bool {
+        let open = self.keyboard_overlay_open();
+        if !open {
+            self.ui_state.focus_return = Some(self.doc_focus());
+        }
+        open
+    }
+
+    /// 键盘路由后：仅当「Esc 关闭了浮层」才归还正文焦点与插入点。
+    /// 不做无差别归还：回车接受快速打开会换文档，此时保留新文档的焦点。
+    fn end_keyboard_route(&mut self, was_open: bool, escape: bool) {
+        let open = self.keyboard_overlay_open();
+        if escape && was_open && !open {
+            if let Some(focus) = self.ui_state.focus_return.take() {
+                self.restore_doc_focus(focus);
+            }
+        }
+        if !open {
+            self.ui_state.focus_return = Some(self.doc_focus());
+        }
+    }
+
+    /// 归还正文焦点：光标/选区/滚动回到打开浮层前的位置。
+    /// 浮层内若改写文本（替换/恢复），失效偏移保持原样（尽力而为，不 panic）。
+    fn restore_doc_focus(&mut self, focus: DocFocus) {
+        let len = self.editor.session().text_len();
+        let _restored = match focus.selection.filter(|r| r.end <= len) {
+            Some(range) => {
+                self.editor.set_caret(range.start) && self.editor.set_caret_extend(range.end)
+            }
+            None if focus.caret <= len => self.editor.set_caret(focus.caret),
+            None => false,
+        };
+        // 偏移失效（浮层内改写文本）时光标保持原样，滚动仍归还到打开前位置。
+        let vp = self.viewport();
+        let max = chrome::max_scroll(vp, self.doc_height());
+        let y = focus.scroll.clamp(0.0, max);
+        self.window_state.goal_y = y;
+        self.window_state.scroll_y = y;
+        self.set_ime_area();
+        self.request_redraw();
+    }
+
+    /// 单个内部键的路由入口（测试与事件循环共用语义）：包装 `route_key`，
+    /// 让纯键盘路径也拥有与真实键盘一致的焦点记录与 Esc 归还。
+    pub(crate) fn route_key_with_focus(&mut self, key: InputKey) {
+        let escape = key == InputKey::Escape;
+        let was_open = self.begin_keyboard_route();
+        self.route_key(key);
+        self.end_keyboard_route(was_open, escape);
     }
 
     /// 保存当前窗口几何并报告是否应关闭。Shell 据此只移除一个 WindowId。

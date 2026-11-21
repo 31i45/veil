@@ -116,41 +116,43 @@ pub(crate) fn shortcut(action: CtxAction) -> Option<Key> {
 
 /// 各类上下文的项集（单一来源：布局/命中/分发共用）。
 /// 分隔线按语义分组：编辑类 / 选择类 / 链接类 / 表格结构 / 对齐 / 剪贴板。
+/// 与主菜单同义的动作复用主菜单词条（剪切/复制/粘贴/全选/插入图片），
+/// 保证两个入口文案永远一致，不在两处各自维护一份同文本词条。
 pub(crate) fn items_for(kind: CtxKind) -> Vec<(Key, CtxAction)> {
     match kind {
         CtxKind::Selection => vec![
-            (Key::CtxCut, CtxAction::Cut),
-            (Key::CtxCopy, CtxAction::Copy),
-            (Key::CtxPaste, CtxAction::Paste),
+            (Key::MenuEditCut, CtxAction::Cut),
+            (Key::MenuEditCopy, CtxAction::Copy),
+            (Key::MenuEditPaste, CtxAction::Paste),
             (Key::Empty, CtxAction::Separator),
             (Key::MenuEditBold, CtxAction::ToggleBold),
             (Key::MenuEditItalic, CtxAction::ToggleItalic),
             (Key::MenuEditLink, CtxAction::InsertLink),
             (Key::Empty, CtxAction::Separator),
-            (Key::CtxSelectAll, CtxAction::SelectAll),
+            (Key::MenuEditSelectAll, CtxAction::SelectAll),
         ],
         CtxKind::Link => vec![
             // 「打开」在「复制」之前：链接上下文的首要意图是跳转
             (Key::CtxOpenInBrowser, CtxAction::OpenLink),
             (Key::CtxCopyLink, CtxAction::CopyLink),
             (Key::Empty, CtxAction::Separator),
-            (Key::CtxCopy, CtxAction::Copy),
-            (Key::CtxPaste, CtxAction::Paste),
+            (Key::MenuEditCopy, CtxAction::Copy),
+            (Key::MenuEditPaste, CtxAction::Paste),
             (Key::Empty, CtxAction::Separator),
-            (Key::CtxSelectAll, CtxAction::SelectAll),
+            (Key::MenuEditSelectAll, CtxAction::SelectAll),
         ],
         CtxKind::Block => vec![
-            (Key::CtxPaste, CtxAction::Paste),
-            (Key::CtxSelectAll, CtxAction::SelectAll),
+            (Key::MenuEditPaste, CtxAction::Paste),
+            (Key::MenuEditSelectAll, CtxAction::SelectAll),
             (Key::Empty, CtxAction::Separator),
-            (Key::CtxInsertImage, CtxAction::InsertImage),
+            (Key::MenuEditInsertImage, CtxAction::InsertImage),
         ],
         // 代码块：复制源码为唯一新增项；其余为标准块操作（粘贴/全选）。
         CtxKind::CodeBlock { .. } => vec![
             (Key::CtxCopyCode, CtxAction::CopyCodeBlock),
             (Key::Empty, CtxAction::Separator),
-            (Key::CtxPaste, CtxAction::Paste),
-            (Key::CtxSelectAll, CtxAction::SelectAll),
+            (Key::MenuEditPaste, CtxAction::Paste),
+            (Key::MenuEditSelectAll, CtxAction::SelectAll),
         ],
         CtxKind::MermaidBlock => vec![
             (Key::CtxMermaidPreview, CtxAction::MermaidPreview),
@@ -169,8 +171,8 @@ pub(crate) fn items_for(kind: CtxKind) -> Vec<(Key, CtxAction)> {
             ),
             (Key::CtxMermaidInsertClass, CtxAction::MermaidInsertClass),
             (Key::Empty, CtxAction::Separator),
-            (Key::CtxPaste, CtxAction::Paste),
-            (Key::CtxSelectAll, CtxAction::SelectAll),
+            (Key::MenuEditPaste, CtxAction::Paste),
+            (Key::MenuEditSelectAll, CtxAction::SelectAll),
         ],
         // 空块没有可预览/可复制的源码，只保留三条模板项（与提示行点击同源）。
         CtxKind::MermaidEmptyBlock => vec![
@@ -193,10 +195,10 @@ pub(crate) fn items_for(kind: CtxKind) -> Vec<(Key, CtxAction)> {
                 items.push((Key::CtxUnfold, CtxAction::UnfoldDetails));
             }
             items.push((Key::Empty, CtxAction::Separator));
-            items.push((Key::CtxCopy, CtxAction::Copy));
-            items.push((Key::CtxPaste, CtxAction::Paste));
+            items.push((Key::MenuEditCopy, CtxAction::Copy));
+            items.push((Key::MenuEditPaste, CtxAction::Paste));
             items.push((Key::Empty, CtxAction::Separator));
-            items.push((Key::CtxSelectAll, CtxAction::SelectAll));
+            items.push((Key::MenuEditSelectAll, CtxAction::SelectAll));
             items
         }
         // 图片：复制路径/重新加载；缺失时首项给出可见提示（DEF-T67-E1-005）。
@@ -209,8 +211,8 @@ pub(crate) fn items_for(kind: CtxKind) -> Vec<(Key, CtxAction)> {
             items.push((Key::CtxCopyImagePath, CtxAction::CopyImagePath));
             items.push((Key::CtxReloadImage, CtxAction::ReloadImage));
             items.push((Key::Empty, CtxAction::Separator));
-            items.push((Key::CtxPaste, CtxAction::Paste));
-            items.push((Key::CtxSelectAll, CtxAction::SelectAll));
+            items.push((Key::MenuEditPaste, CtxAction::Paste));
+            items.push((Key::MenuEditSelectAll, CtxAction::SelectAll));
             items
         }
         CtxKind::Table(tc) => {
@@ -239,8 +241,8 @@ pub(crate) fn items_for(kind: CtxKind) -> Vec<(Key, CtxAction)> {
             items.push((Key::CtxTableAlignCenter, CtxAction::TableAlignCenter));
             items.push((Key::CtxTableAlignRight, CtxAction::TableAlignRight));
             items.push((Key::Empty, CtxAction::Separator));
-            items.push((Key::CtxPaste, CtxAction::Paste));
-            items.push((Key::CtxSelectAll, CtxAction::SelectAll));
+            items.push((Key::MenuEditPaste, CtxAction::Paste));
+            items.push((Key::MenuEditSelectAll, CtxAction::SelectAll));
             items
         }
     }
@@ -815,5 +817,137 @@ mod tests {
         // 面板高度 = 上内边距 + 可点项行高 + 分组间距 + 下内边距
         let expect = 2.0 * l.top_pad + l.item_h * l.rows.len() as f32 + 8.0 * seps as f32;
         assert!((l.h - expect).abs() < 0.01, "高度包含分组间距");
+    }
+
+    /// 全部上下文类别（含表头/单列、缺失图片、空 Mermaid 等边界）。
+    fn all_kinds() -> Vec<CtxKind> {
+        vec![
+            CtxKind::Selection,
+            CtxKind::Link,
+            CtxKind::Block,
+            CtxKind::CodeBlock { id: BlockId(1) },
+            CtxKind::MermaidBlock,
+            CtxKind::MermaidEmptyBlock,
+            CtxKind::Details {
+                id: BlockId(2),
+                expanded: true,
+            },
+            CtxKind::Details {
+                id: BlockId(2),
+                expanded: false,
+            },
+            CtxKind::Image {
+                path: "img/a.png".into(),
+                missing: false,
+            },
+            CtxKind::Image {
+                path: "img/gone.png".into(),
+                missing: true,
+            },
+            CtxKind::Table(TableCtx {
+                body_row: Some(0),
+                col: 0,
+                ncols: 3,
+            }),
+            CtxKind::Table(TableCtx {
+                body_row: None,
+                col: 0,
+                ncols: 1,
+            }),
+        ]
+    }
+
+    /// 右键与主菜单同义动作的对应关系（其余动作只存在于右键）。
+    fn main_equivalent(action: CtxAction) -> Option<crate::chrome::MenuAction> {
+        use crate::chrome::MenuAction;
+        Some(match action {
+            CtxAction::Cut => MenuAction::Cut,
+            CtxAction::Copy => MenuAction::Copy,
+            CtxAction::Paste => MenuAction::Paste,
+            CtxAction::SelectAll => MenuAction::SelectAll,
+            CtxAction::ToggleBold => MenuAction::ToggleBold,
+            CtxAction::ToggleItalic => MenuAction::ToggleItalic,
+            CtxAction::InsertLink => MenuAction::InsertLink,
+            CtxAction::InsertImage => MenuAction::InsertImage,
+            _ => return None,
+        })
+    }
+
+    /// 命令矩阵横跨两个入口：同一动作在右键与主菜单必须同词条、同快捷键提示。
+    #[test]
+    fn ctx_shared_actions_reuse_main_menu_label_and_shortcut() {
+        use crate::chrome::MENUS;
+        for kind in all_kinds() {
+            for (label, action) in items_for(kind) {
+                if action == CtxAction::Separator {
+                    continue;
+                }
+                let Some(main) = main_equivalent(action) else {
+                    continue;
+                };
+                let (main_label, main_shortcut) = MENUS
+                    .iter()
+                    .flat_map(|m| m.items.iter())
+                    .find(|(_, _, a)| *a == main)
+                    .map(|(l, s, _)| (*l, *s))
+                    .unwrap_or_else(|| panic!("主菜单缺少 {main:?}"));
+                assert_eq!(
+                    label, main_label,
+                    "{action:?} 在右键与主菜单必须复用同一词条"
+                );
+                assert_eq!(
+                    shortcut(action),
+                    Some(main_shortcut),
+                    "{action:?} 的快捷键提示必须与主菜单一致"
+                );
+                assert!(!t(label).is_empty());
+            }
+        }
+    }
+
+    /// 没有真实键盘分发路径的动作不得编造快捷键提示。
+    #[test]
+    fn ctx_actions_without_keyboard_binding_have_no_shortcut() {
+        for action in [
+            CtxAction::OpenLink,
+            CtxAction::CopyLink,
+            CtxAction::MermaidPreview,
+            CtxAction::MermaidPreviewImage,
+            CtxAction::MermaidInsertImage,
+            CtxAction::MermaidCopySource,
+            CtxAction::MermaidInsertFlowchart,
+            CtxAction::MermaidInsertSequence,
+            CtxAction::MermaidInsertClass,
+            CtxAction::FoldDetails,
+            CtxAction::UnfoldDetails,
+            CtxAction::CopyImagePath,
+            CtxAction::ReloadImage,
+            CtxAction::TableInsertRowAbove,
+            CtxAction::TableInsertRowBelow,
+            CtxAction::TableDeleteRow,
+            CtxAction::TableInsertColumnLeft,
+            CtxAction::TableInsertColumnRight,
+            CtxAction::TableDeleteColumn,
+            CtxAction::TableAlignLeft,
+            CtxAction::TableAlignCenter,
+            CtxAction::TableAlignRight,
+        ] {
+            assert_eq!(shortcut(action), None, "{action:?} 无绑定，不应显示快捷键");
+        }
+    }
+
+    /// 禁用项不得静默变灰：右键里唯一的禁用项（缺失图片提示）标签本身即原因。
+    #[test]
+    fn disabled_ctx_items_explain_themselves() {
+        for kind in all_kinds() {
+            for (label, action) in items_for(kind) {
+                if action == CtxAction::Separator || action_enabled(action) {
+                    continue;
+                }
+                let text = t(label);
+                assert!(!text.is_empty(), "{action:?} 禁用但无说明");
+                assert!(text.contains("缺失"), "{action:?} 禁用原因必须可读: {text}");
+            }
+        }
     }
 }

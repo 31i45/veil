@@ -8,7 +8,7 @@ use crate::document::block_index::{gap_after, gap_before, gap_between, BlockGeom
 use crate::document::recovery;
 use crate::document::ExternalState;
 use crate::editor::Intent;
-use crate::geometry::{BASE_LINE_HEIGHT, MARGIN, PARA_GAP};
+use crate::geometry::{ScreenRect, BASE_LINE_HEIGHT, MARGIN, PARA_GAP};
 use crate::i18n::{t, Key as I18nKey};
 use crate::image::{AssetMigration, AssetStore, ImageData, ImageLoader};
 use crate::input::{Action, Key, Mods};
@@ -9748,6 +9748,10 @@ fn recovery_written_after_idle_and_restored_on_restart() {
         b.ui_state.chrome.notice.contains("崩溃恢复"),
         "恢复后给出可读提示"
     );
+    let notice = &b.ui_state.chrome.notice;
+    assert!(notice.contains("「a.md」"), "提示须含恢复对象: {notice}");
+    assert!(notice.contains("14:32"), "提示须含恢复时间: {notice}");
+    assert!(notice.contains("Ctrl+S"), "提示须给出保存方式: {notice}");
 }
 
 #[test]
@@ -9803,6 +9807,13 @@ fn recovery_draft_without_path_restored_dirty() {
         !b.persist_state.persist.missing(),
         "草稿无磁盘目标：不置缺失态"
     );
+    let notice = &b.ui_state.chrome.notice;
+    assert!(
+        notice.contains("未命名草稿"),
+        "无路径草稿须以「未命名草稿」作为恢复对象: {notice}"
+    );
+    assert!(notice.contains("14:32"), "提示须含恢复时间: {notice}");
+    assert!(notice.contains("Ctrl+S"), "提示须给出保存方式: {notice}");
 }
 
 #[test]
@@ -17301,4 +17312,475 @@ fn code_header_hidden_in_source_mode() {
             "源码模式不得绘制代码块头部控件"
         );
     }
+}
+
+// ---- Task 1：通知分级生命周期 / 首窗尺寸收敛 ----
+
+/// 错误类通知不参与 6 秒超时：保留到被新通知替换或用户处理；成功提示照常短暂显示。
+#[test]
+fn error_notice_does_not_expire_automatically() {
+    let store = MemStore::default();
+    let mut a = app("正文", None, false, &store);
+    a.ui_state
+        .chrome
+        .notify_error("保存失败：拒绝访问。 (os error 5)；可 Ctrl+S 重试");
+    let t0 = Instant::now();
+    a.tick(t0);
+    a.tick(t0 + Duration::from_secs(60));
+    assert!(
+        a.ui_state.chrome.notice.contains("保存失败"),
+        "错误通知不得自动消退: {:?}",
+        a.ui_state.chrome.notice
+    );
+    assert_eq!(
+        a.ui_state.chrome.current_notice_kind(),
+        chrome::NoticeKind::Error
+    );
+
+    // 新通知替换旧通知后，生命周期回到「短暂显示」。
+    a.ui_state
+        .chrome
+        .notify("已保存", chrome::NoticeKind::Success);
+    a.tick(t0 + Duration::from_secs(61));
+    a.tick(t0 + Duration::from_secs(75));
+    assert!(
+        a.ui_state.chrome.notice.is_empty(),
+        "成功提示应短暂显示后消退: {:?}",
+        a.ui_state.chrome.notice
+    );
+}
+
+/// 直接替换 `notice` 文本时类别失效为 Info，避免旧错误通知的常驻语义污染新提示。
+#[test]
+fn direct_notice_assignment_resets_kind() {
+    let store = MemStore::default();
+    let mut a = app("正文", None, false, &store);
+    a.ui_state.chrome.notify_error("失败");
+    a.ui_state.chrome.notice = "已打开：a.md".into();
+    assert_eq!(
+        a.ui_state.chrome.current_notice_kind(),
+        chrome::NoticeKind::Info
+    );
+}
+
+/// 导出对话框：总是给出目标路径，用于触发导出器失败路径。
+struct ExportPathDialog;
+impl FileDialog for ExportPathDialog {
+    fn open_markdown(&mut self) -> Option<PathBuf> {
+        None
+    }
+    fn save_markdown(&mut self, _suggested: &str) -> Option<PathBuf> {
+        None
+    }
+    fn save_export(&mut self, _suggested: &str, _ext: &str) -> Option<PathBuf> {
+        Some(PathBuf::from("out.html"))
+    }
+}
+
+/// 打印端口：直接走失败出口，模拟平台层打印/PDF 失败。
+struct FailingPrint;
+impl Print for FailingPrint {
+    fn print(&mut self, session: &mut PrintSession) {
+        session.print_error("模拟打印失败");
+    }
+    fn export_pdf(&mut self, session: &mut PrintSession) {
+        session.export_pdf_error("模拟导出失败");
+    }
+}
+
+/// 自动保存失败按错误分级：超过 TTL 仍保留；下一次成功通知替换后恢复短时行为。
+#[test]
+fn autosave_failure_notice_is_error_and_survives_ttl() {
+    use crate::document::doc_state::SaveKind;
+    let store = MemStore {
+        fail_save: true,
+        ..MemStore::default()
+    };
+    let mut a = dirty_app("ab", Some("a.md"), &store);
+    a.save(SaveKind::Auto);
+    assert!(
+        a.ui_state.chrome.notice.contains("保存失败"),
+        "自动保存失败必须可见：{}",
+        a.ui_state.chrome.notice
+    );
+    assert_eq!(
+        a.ui_state.chrome.current_notice_kind(),
+        chrome::NoticeKind::Error
+    );
+    let t0 = Instant::now();
+    a.tick(t0);
+    a.tick(t0 + Duration::from_secs(60));
+    assert!(
+        a.ui_state.chrome.notice.contains("保存失败"),
+        "自动保存失败不得在 TTL 后自动消失: {:?}",
+        a.ui_state.chrome.notice
+    );
+
+    // 下一次成功通知替换错误提示，并回到「短暂显示」。
+    a.ui_state
+        .chrome
+        .notify("已保存", chrome::NoticeKind::Success);
+    a.tick(t0 + Duration::from_secs(61));
+    a.tick(t0 + Duration::from_secs(75));
+    assert!(
+        a.ui_state.chrome.notice.is_empty(),
+        "成功提示应短暂显示后消退: {:?}",
+        a.ui_state.chrome.notice
+    );
+}
+
+/// 版本历史写入失败按错误分级：超过 TTL 仍保留。
+#[test]
+fn snapshot_failure_notice_is_error_and_survives_ttl() {
+    use crate::document::doc_state::SaveKind;
+    let store = MemStore::default();
+    let snap = FakeSnapshot::default();
+    snap.fail_save.set(true);
+    let mut a = dirty_app("ab", Some("a.md"), &store);
+    a.ports.snapshot = Box::new(snap.clone());
+    a.save(SaveKind::Auto);
+    assert!(
+        a.ui_state.chrome.notice.contains("版本历史写入失败"),
+        "快照失败必须可见：{}",
+        a.ui_state.chrome.notice
+    );
+    assert_eq!(
+        a.ui_state.chrome.current_notice_kind(),
+        chrome::NoticeKind::Error
+    );
+    let t0 = Instant::now();
+    a.tick(t0);
+    a.tick(t0 + Duration::from_secs(60));
+    assert!(
+        a.ui_state.chrome.notice.contains("版本历史写入失败"),
+        "快照失败不得在 TTL 后自动消失: {:?}",
+        a.ui_state.chrome.notice
+    );
+}
+
+/// HTML 导出失败按错误分级：超过 TTL 仍保留。
+#[test]
+fn export_failure_notice_is_error_and_survives_ttl() {
+    let store = MemStore::default();
+    let mut a = app("正文", Some("a.md"), false, &store);
+    a.ports.dialogs = Box::new(ExportPathDialog);
+    a.export_now();
+    assert!(
+        a.ui_state.chrome.notice.contains("导出失败"),
+        "导出失败必须可见：{}",
+        a.ui_state.chrome.notice
+    );
+    assert_eq!(
+        a.ui_state.chrome.current_notice_kind(),
+        chrome::NoticeKind::Error
+    );
+    let t0 = Instant::now();
+    a.tick(t0);
+    a.tick(t0 + Duration::from_secs(60));
+    assert!(
+        a.ui_state.chrome.notice.contains("导出失败"),
+        "导出失败不得在 TTL 后自动消失: {:?}",
+        a.ui_state.chrome.notice
+    );
+}
+
+/// 打印与 PDF 导出失败按错误分级：超过 TTL 仍保留。
+#[test]
+fn print_and_pdf_failure_notices_are_errors_and_survive_ttl() {
+    let mut a = app_print("x\n", Box::new(FailingPrint));
+    a.print_document();
+    assert!(
+        a.ui_state.chrome.notice.contains("打印失败"),
+        "打印失败必须可见：{}",
+        a.ui_state.chrome.notice
+    );
+    assert_eq!(
+        a.ui_state.chrome.current_notice_kind(),
+        chrome::NoticeKind::Error
+    );
+    let t0 = Instant::now();
+    a.tick(t0);
+    a.tick(t0 + Duration::from_secs(60));
+    assert!(
+        a.ui_state.chrome.notice.contains("打印失败"),
+        "打印失败不得在 TTL 后自动消失: {:?}",
+        a.ui_state.chrome.notice
+    );
+
+    let mut b = app_print("x\n", Box::new(FailingPrint));
+    b.export_pdf();
+    assert!(
+        b.ui_state.chrome.notice.contains("导出 PDF 失败"),
+        "PDF 导出失败必须可见：{}",
+        b.ui_state.chrome.notice
+    );
+    assert_eq!(
+        b.ui_state.chrome.current_notice_kind(),
+        chrome::NoticeKind::Error
+    );
+    b.tick(t0);
+    b.tick(t0 + Duration::from_secs(60));
+    assert!(
+        b.ui_state.chrome.notice.contains("导出 PDF 失败"),
+        "PDF 导出失败不得在 TTL 后自动消失: {:?}",
+        b.ui_state.chrome.notice
+    );
+}
+
+/// 150% 小屏（工作区 1707×912 物理）：默认 900×700 逻辑必须收敛高度并居中不越界。
+#[test]
+fn initial_window_fits_small_150pct_screen() {
+    let screens = [(
+        ScreenRect {
+            x: 0,
+            y: 0,
+            w: 1707,
+            h: 912,
+        },
+        1.5_f32,
+    )];
+    let g = fit_initial_window(900, 700, &screens);
+    assert_eq!(g.width, 900, "宽度仍放得下");
+    assert!(g.height < 700, "高度必须收敛到工作区: {}", g.height);
+    let phys_w = (g.width as f32 * 1.5).round() as i32;
+    let phys_h = (g.height as f32 * 1.5).round() as i32;
+    assert!(g.x >= 0 && g.x + phys_w <= 1707, "横向不得越界: {:?}", g);
+    assert!(g.y >= 0 && g.y + phys_h <= 912, "纵向不得越界: {:?}", g);
+}
+
+/// 大屏（1920×1080 @100%）：默认尺寸保持，且在屏幕内居中。
+#[test]
+fn initial_window_keeps_default_on_large_screen() {
+    let screens = [(
+        ScreenRect {
+            x: 0,
+            y: 0,
+            w: 1920,
+            h: 1080,
+        },
+        1.0_f32,
+    )];
+    let g = fit_initial_window(900, 700, &screens);
+    assert_eq!((g.width, g.height), (900, 700));
+    assert!(g.x > 0 && g.x + 900 <= 1920);
+    assert!(g.y > 0 && g.y + 700 <= 1080);
+}
+
+/// 无显示器信息：原样返回默认尺寸，不 panic。
+#[test]
+fn initial_window_without_screens_keeps_default() {
+    let g = fit_initial_window(900, 700, &[]);
+    assert_eq!((g.width, g.height, g.x, g.y), (900, 700, 0, 0));
+}
+
+// ===== 键盘闭环与焦点归还（Task 4） =====
+
+/// Ctrl + 单键：真实路径与测试共用取模后的 `route_key_with_focus`。
+fn ctrl_key(a: &mut App, key: Key) {
+    a.input_state.mods.ctrl = true;
+    a.route_key_with_focus(key);
+    a.input_state.mods.ctrl = false;
+}
+
+/// 焦点环对比度（WCAG）：测试侧独立实现，避免与被测代码共用同一个函数。
+fn ring_contrast(a: [u8; 3], b: [u8; 3]) -> f32 {
+    let lum = |c: [u8; 3]| {
+        let ch = |v: u8| {
+            let s = v as f32 / 255.0;
+            if s <= 0.03928 {
+                s / 12.92
+            } else {
+                ((s + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * ch(c[0]) + 0.7152 * ch(c[1]) + 0.0722 * ch(c[2])
+    };
+    let (l1, l2) = (lum(a), lum(b));
+    let (hi, lo) = if l1 > l2 { (l1, l2) } else { (l2, l1) };
+    (hi + 0.05) / (lo + 0.05)
+}
+
+#[test]
+fn keyboard_ctrl_o_dispatches_open_dialog_and_replaces_document() {
+    let store = MemStore::default();
+    disk(&store, "b.md", b"# new");
+    let (mut a, calls) = app_dialogs("old", Some("a.md"), false, &store, Some("b.md"), None);
+    ctrl_key(&mut a, Key::O);
+    assert_eq!(
+        calls.borrow().as_slice(),
+        &["open".to_string()],
+        "Ctrl+O 必须分发到系统打开对话框"
+    );
+    assert_eq!(doc_text(&a), "# new");
+    assert_eq!(a.doc.path.as_deref(), Some(Path::new("b.md")));
+}
+
+#[test]
+fn keyboard_search_esc_restores_caret_selection_and_scroll() {
+    let store = MemStore::default();
+    let text: String = (0..80).map(|i| format!("第 {i} 行 alpha\n")).collect();
+    let mut a = app(&text, None, false, &store);
+    a.ensure_layouts_all();
+    assert!(a.editor.set_caret(3) && a.editor.set_caret_extend(6));
+    a.window_state.goal_y = 40.0;
+    a.window_state.scroll_y = 40.0;
+    let caret = a.editor.caret();
+    let selection = a.editor.selection();
+    let scroll = a.window_state.scroll_y;
+    let before = doc_text(&a);
+
+    ctrl_key(&mut a, Key::F);
+    assert!(a.ui_state.search.open);
+    a.route_key_with_focus(Key::Text("alpha".into()));
+    assert_eq!(a.ui_state.search.query, "alpha");
+    assert_ne!(
+        a.window_state.scroll_y, scroll,
+        "查找跳转改变了滚动，还原断言才有意义"
+    );
+
+    a.route_key_with_focus(Key::Escape);
+    assert!(!a.ui_state.search.open, "Esc 必须一次关闭查找栏");
+    assert_eq!(a.editor.caret(), caret);
+    assert_eq!(a.editor.selection(), selection);
+    assert_eq!(a.window_state.scroll_y, scroll);
+    assert_eq!(doc_text(&a), before, "Esc 不得误删字符");
+}
+
+#[test]
+fn keyboard_replace_tab_stays_in_bar_and_esc_restores_focus() {
+    let store = MemStore::default();
+    let text: String = (0..80).map(|i| format!("第 {i} 行 alpha\n")).collect();
+    let mut a = app(&text, None, false, &store);
+    a.ensure_layouts_all();
+    assert!(a.editor.set_caret(3) && a.editor.set_caret_extend(6));
+    a.window_state.goal_y = 40.0;
+    a.window_state.scroll_y = 40.0;
+    let caret = a.editor.caret();
+    let selection = a.editor.selection();
+    let scroll = a.window_state.scroll_y;
+    let before = doc_text(&a);
+
+    ctrl_key(&mut a, Key::H);
+    assert!(a.ui_state.search.open && a.ui_state.search.replace_open);
+    assert_eq!(a.ui_state.search.focus, search::Field::Query);
+    a.route_key_with_focus(Key::Text("alpha".into()));
+    a.route_key_with_focus(Key::Tab);
+    assert_eq!(
+        a.ui_state.search.focus,
+        search::Field::Replace,
+        "Tab 只在查询/替换框之间切换"
+    );
+    assert_eq!(doc_text(&a), before, "Tab 不得逃出查找栏去缩进正文");
+    a.route_key_with_focus(Key::Text("beta".into()));
+    assert_eq!(a.ui_state.search.replace, "beta");
+    assert_eq!(doc_text(&a), before, "未确认替换前正文不变");
+
+    a.route_key_with_focus(Key::Escape);
+    assert!(!a.ui_state.search.open);
+    assert_eq!(a.editor.caret(), caret);
+    assert_eq!(a.editor.selection(), selection);
+    assert_eq!(a.window_state.scroll_y, scroll);
+}
+
+#[test]
+fn keyboard_quick_open_esc_restores_focus_without_editing() {
+    let store = MemStore::default();
+    let text: String = (0..80).map(|i| format!("第 {i} 行\n")).collect();
+    let mut a = app(&text, None, false, &store);
+    a.ensure_layouts_all();
+    a.editor.set_caret(3);
+    a.window_state.goal_y = 24.0;
+    a.window_state.scroll_y = 24.0;
+    let caret = a.editor.caret();
+    let scroll = a.window_state.scroll_y;
+    let before = doc_text(&a);
+
+    ctrl_key(&mut a, Key::P);
+    assert!(a.ui_state.quick.open);
+    a.route_key_with_focus(Key::Text("zzz".into()));
+    a.route_key_with_focus(Key::Tab);
+    assert!(a.ui_state.quick.open, "Tab 不得关闭或逃出快速打开");
+    assert_eq!(doc_text(&a), before, "快速打开过滤串不得写入正文");
+
+    a.route_key_with_focus(Key::Escape);
+    assert!(!a.ui_state.quick.open);
+    assert_eq!(a.editor.caret(), caret);
+    assert_eq!(a.window_state.scroll_y, scroll);
+    assert_eq!(doc_text(&a), before);
+}
+
+#[test]
+fn keyboard_settings_tab_cycles_inside_and_esc_restores_focus() {
+    let store = MemStore::default();
+    let text: String = (0..80).map(|i| format!("第 {i} 行\n")).collect();
+    let mut a = app(&text, None, false, &store);
+    a.ensure_layouts_all();
+    a.editor.set_caret(3);
+    a.window_state.goal_y = 24.0;
+    a.window_state.scroll_y = 24.0;
+    let caret = a.editor.caret();
+    let scroll = a.window_state.scroll_y;
+    let before = doc_text(&a);
+
+    ctrl_key(&mut a, Key::Comma);
+    assert!(a.ui_state.settings.is_some(), "Ctrl+, 打开设置");
+    for _ in 0..8 {
+        a.route_key_with_focus(Key::Tab);
+        assert!(a.ui_state.settings.is_some(), "Tab 不得逃出设置模态");
+    }
+    assert_eq!(doc_text(&a), before, "设置内 Tab 不得触碰正文");
+
+    a.route_key_with_focus(Key::Escape);
+    assert!(a.ui_state.settings.is_none(), "Esc 取消设置");
+    assert_eq!(a.editor.caret(), caret);
+    assert_eq!(a.window_state.scroll_y, scroll);
+    assert_eq!(doc_text(&a), before);
+}
+
+#[test]
+fn keyboard_modal_tab_cycles_inside_and_esc_cancels() {
+    let store = MemStore::default();
+    disk(&store, "a.md", b"old");
+    let mut a = app("old", Some("a.md"), false, &store);
+    a.editor.apply(Intent::InsertText("改".into())).unwrap();
+    a.confirm_close();
+    assert!(a.ui_state.modal.is_some());
+    let n = a.ui_state.modal.as_ref().unwrap().spec.buttons.len();
+    for _ in 0..(n * 2 + 1) {
+        a.route_key_with_focus(Key::Tab);
+        let m = a.ui_state.modal.as_ref().expect("Tab 不得逃出模态");
+        assert!(m.state.focused < n, "焦点下标越界");
+    }
+    assert!(!a.window_state.exit_requested, "Tab 不得触发默认动作");
+    a.route_key_with_focus(Key::Escape);
+    assert!(a.ui_state.modal.is_none(), "Esc 取消并关闭模态");
+    assert!(!a.window_state.exit_requested, "取消不得退出窗口");
+}
+
+#[test]
+fn search_focus_ring_is_visible_against_popup() {
+    let store = MemStore::default();
+    let mut a = app("alpha\n", None, false, &store);
+    a.open_search();
+    let (w, h) = a.win_size();
+    let l = a.search_rect().unwrap();
+    let theme = a.input_state.theme;
+    let popup = crate::tokens::palette::surface_popup(&theme);
+    let ring = crate::view::modal::focus_ring_color(&theme, [popup[0], popup[1], popup[2]]);
+    let mut f = Frame::new(w, h, theme.bg);
+    a.paint_search(&mut f);
+
+    let x0 = l.text.x.round() as u32;
+    let mut found = false;
+    for x in x0.saturating_sub(1)..=x0 + 2 {
+        for y in (l.text.y + 2.0) as u32..(l.text.y + l.text.h - 2.0) as u32 {
+            let px = f.get(x, y);
+            if [px[0], px[1], px[2]] == ring {
+                found = true;
+            }
+        }
+    }
+    assert!(found, "焦点字段必须绘制可见焦点环");
+    let c = ring_contrast(ring, [popup[0], popup[1], popup[2]]);
+    assert!(c >= 3.0, "焦点环与 popup 底对比不足: {c:.2}");
 }

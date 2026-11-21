@@ -5,15 +5,103 @@
   [string]$Version
 )
 
-$ErrorActionPreference = 'Continue'
+$ErrorActionPreference = 'Stop'
+# 原生命令统一由 $LASTEXITCODE 判定；不让 PowerShell 的 ErrorActionPreference 改写其失败语义。
+$PSNativeCommandUseErrorActionPreference = $false
 $Stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
 $RepoRoot = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 Set-Location $RepoRoot
 
+$ExePath = Join-Path $RepoRoot 'target\release\veil.exe'
+$ChecksumPath = "$ExePath.sha256"
+$RecordPath = Join-Path $RepoRoot 'target\release\release-record.json'
+$SizeLimitBytes = 14MB
+$FeatureNames = @('QuickJS', 'linkedom', 'mermaid')
+$BundleDir = $null
+$ArchiveReady = $false
+$ReleaseRecord = [ordered]@{
+  schema_version = 1
+  version = $Version
+  artifact = 'target/release/veil.exe'
+  bytes = $null
+  sha256 = $null
+  started_at = [DateTimeOffset]::UtcNow.ToString('o')
+  timestamp = $null
+  elapsed_seconds = $null
+  status = 'skipped'
+  release_ready = $false
+  error = $null
+  build = [ordered]@{ status = 'skipped'; command = 'cargo build --release --bin veil'; exit_code = $null }
+  size_gate = [ordered]@{ status = 'skipped'; limit_bytes = $SizeLimitBytes; margin_bytes = $null }
+  feature_gate = [ordered]@{
+    status = 'skipped'
+    method = 'ASCII decoding of the built veil.exe bytes; no source scan'
+    required = $FeatureNames
+    found = @()
+    missing = @()
+  }
+  smoke = [ordered]@{
+    status = 'skipped'
+    command = "pwsh -NoProfile -File tools/smoke_launch.ps1 -ExePath target/release/veil.exe -ExpectedTitlePattern '^veil' -MaxLaunchMs 1000"
+    exit_code = $null
+  }
+  tests = [ordered]@{ status = 'skipped'; reason = 'not reached'; command = 'cargo test --workspace --release -- --test-threads=1'; exit_code = $null }
+  clippy = [ordered]@{ status = 'skipped'; reason = 'not reached'; command = 'cargo clippy --workspace --all-targets -- -D warnings'; exit_code = $null }
+  checksum = [ordered]@{
+    status = 'skipped'
+    algorithm = 'SHA-256'
+    path = 'target/release/veil.exe.sha256'
+    post_archive_status = 'skipped'
+    post_archive_sha256 = $null
+    bundled_sha256 = $null
+  }
+  archive = [ordered]@{ status = 'skipped'; reason = 'not reached'; path = $null }
+}
+
 function Write-Step($n, $desc) { Write-Host ''; Write-Host "== Step $n ($desc) ==" -ForegroundColor Cyan }
 function Write-OK($msg)     { Write-Host "  OK  $msg" -ForegroundColor Green }
 function Write-Warn($msg)   { Write-Host "  WARN $msg" -ForegroundColor Yellow }
-function Write-Fail($msg)   { Write-Host "  FAIL $msg" -ForegroundColor Red; exit 1 }
+
+function Write-ReleaseRecord {
+  param([switch]$BestEffort)
+
+  try {
+    $RequiredGates = @('build', 'size_gate', 'feature_gate', 'smoke', 'tests', 'clippy', 'checksum')
+    $Failed = @($RequiredGates | Where-Object { $ReleaseRecord[$_].status -eq 'failed' }).Count -gt 0
+    $Incomplete = @($RequiredGates | Where-Object { $ReleaseRecord[$_].status -ne 'passed' }).Count -gt 0
+    if (-not $SkipArchive -and $ReleaseRecord.checksum.post_archive_status -ne 'passed') { $Incomplete = $true }
+
+    $ReleaseRecord.release_ready = -not $ReleaseRecord.error -and -not $Failed -and -not $Incomplete
+    $ReleaseRecord.status = if ($ReleaseRecord.error -or $Failed) { 'failed' } elseif ($Incomplete) { 'skipped' } else { 'passed' }
+    $ReleaseRecord.timestamp = [DateTimeOffset]::UtcNow.ToString('o')
+    $ReleaseRecord.elapsed_seconds = [math]::Round($Stopwatch.Elapsed.TotalSeconds, 3)
+    $Json = $ReleaseRecord | ConvertTo-Json -Depth 8
+    $Destinations = @($RecordPath)
+    if ($ArchiveReady -and $BundleDir) { $Destinations += Join-Path $BundleDir 'release-record.json' }
+    foreach ($Destination in $Destinations) {
+      $Parent = Split-Path -Parent $Destination
+      New-Item -ItemType Directory -Force -Path $Parent -ErrorAction Stop | Out-Null
+      [System.IO.File]::WriteAllText($Destination, $Json + [Environment]::NewLine, [System.Text.UTF8Encoding]::new($false))
+    }
+  } catch {
+    if (-not $BestEffort) { throw }
+    Write-Warn "could not write release record: $($_.Exception.Message)"
+  }
+}
+
+function Write-Fail($msg) {
+  $ReleaseRecord.error = $msg
+  Write-ReleaseRecord -BestEffort
+  Write-Host "  FAIL $msg" -ForegroundColor Red
+  exit 1
+}
+
+trap {
+  $ReleaseRecord.error = $_.Exception.Message
+  Write-ReleaseRecord -BestEffort
+  Write-Host "  FAIL $($ReleaseRecord.error)" -ForegroundColor Red
+  exit 1
+}
 
 Write-Host "Working directory: $(Get-Location)"
 
@@ -21,55 +109,104 @@ Write-Host "Working directory: $(Get-Location)"
 if (-not $Version) {
   $Version = (Select-String -Path (Join-Path $RepoRoot 'Cargo.toml') -Pattern '^version = "([^"]+)"' | Select-Object -First 1).Matches.Groups[1].Value
 }
+$ReleaseRecord.version = $Version
 Write-Host "Veil Release v$Version" -ForegroundColor Magenta
 
 # Step 1: pre-flight
 Write-Step 1 'pre-flight checks'
 $GitStatus = git status --porcelain
+$GitExit = $LASTEXITCODE
+if ($GitExit -ne 0) { Write-Fail "git status failed with exit $GitExit" }
 if ($GitStatus) { Write-Warn "git status not clean: $($GitStatus.Count) line(s) not committed" } else { Write-OK 'git status clean' }
 $TagExists = git tag -l "v$Version"
+$TagExit = $LASTEXITCODE
+if ($TagExit -ne 0) { Write-Fail "git tag failed with exit $TagExit" }
 if ($TagExists) { Write-OK "tag v$Version exists" } else { Write-Warn "tag v$Version not found" }
 $RustVerLine = rustc --version
+$RustExit = $LASTEXITCODE
+if ($RustExit -ne 0) { Write-Fail "rustc --version failed with exit $RustExit" }
 $RustVer = ($RustVerLine -split ' ')[1]
 if ([version]$RustVer -ge [version]'1.75') { Write-OK "Rust $RustVer [ge] 1.75" } else { Write-Warn "Rust $RustVer older than 1.75" }
 
-# Step 2: cargo test
+# Step 2: cargo test（与 release workflow 同为 release + 串行口径）
 if (-not $SkipTest) {
-  Write-Step 2 'cargo test --workspace'
-  cargo test --workspace 2>&1 | Select-Object -Last 5
-  if ($LASTEXITCODE -ne 0) { Write-Fail "cargo test failed with exit $LASTEXITCODE" }
+  Write-Step 2 'cargo test --workspace --release -- --test-threads=1'
+  $ReleaseRecord.tests.status = 'failed'
+  $ReleaseRecord.tests.reason = $null
+  cargo test --workspace --release -- --test-threads=1 | Select-Object -Last 5
+  $TestExit = $LASTEXITCODE
+  $ReleaseRecord.tests.exit_code = $TestExit
+  if ($TestExit -ne 0) { Write-Fail "cargo test failed with exit $TestExit" }
+  $ReleaseRecord.tests.status = 'passed'
   Write-OK 'cargo test passed'
-} else { Write-Host '  SKIP cargo test' }
+} else {
+  $ReleaseRecord.tests.reason = '-SkipTest specified'
+  Write-Host '  SKIP cargo test (release record: skipped)'
+}
 
 # Step 3: cargo clippy
 if (-not $SkipClippy) {
-  Write-Step 3 'cargo clippy'
-  cargo clippy --workspace --all-targets -- -D warnings 2>&1 | Select-Object -Last 3
-  if ($LASTEXITCODE -ne 0) { Write-Fail 'cargo clippy failed' }
+  Write-Step 3 'cargo clippy --workspace --all-targets -- -D warnings'
+  $ReleaseRecord.clippy.status = 'failed'
+  $ReleaseRecord.clippy.reason = $null
+  cargo clippy --workspace --all-targets -- -D warnings | Select-Object -Last 3
+  $ClippyExit = $LASTEXITCODE
+  $ReleaseRecord.clippy.exit_code = $ClippyExit
+  if ($ClippyExit -ne 0) { Write-Fail "cargo clippy failed with exit $ClippyExit" }
+  $ReleaseRecord.clippy.status = 'passed'
   Write-OK 'cargo clippy clean'
-} else { Write-Host '  SKIP cargo clippy' }
+} else {
+  $ReleaseRecord.clippy.reason = '-SkipClippy specified'
+  Write-Host '  SKIP cargo clippy (release record: skipped)'
+}
 
 # Step 4: clean + release build
 Write-Step 4 'clean + release build'
-cargo clean -p veil -p veil-ui -p veil-core -p veil-mermaid-offline --release 2>$null
-Write-Host '  Cleaned veil/veil-ui/veil-core/veil-mermaid-offline release artifacts'
-cargo build --release -p veil 2>&1 | Select-Object -Last 3
-if ($LASTEXITCODE -ne 0) { Write-Fail 'cargo build --release failed' }
-$Exe = Get-Item target\release\veil.exe
+$ReleaseRecord.build.status = 'failed'
+cargo clean -p veil -p veil-ui -p veil-core -p veil-mermaid-offline | Select-Object -Last 3
+$CleanExit = $LASTEXITCODE
+$ReleaseRecord.build.exit_code = $CleanExit
+if ($CleanExit -ne 0) { Write-Fail "cargo clean failed with exit $CleanExit" }
+Write-Host '  Cleaned veil/veil-ui/veil-core/veil-mermaid-offline artifacts'
+cargo build --release --bin veil | Select-Object -Last 3
+$BuildExit = $LASTEXITCODE
+$ReleaseRecord.build.exit_code = $BuildExit
+if ($BuildExit -ne 0) { Write-Fail "cargo build --release --bin veil failed with exit $BuildExit" }
+$ReleaseRecord.build.status = 'passed'
+$Exe = Get-Item -LiteralPath $ExePath -ErrorAction Stop
 Write-OK "Release build done: $($Exe.Length) bytes, build time $($Exe.LastWriteTime)"
 
-# Step 5: verify artifact
+# Step 5: verify the single executable and its binary feature evidence
 Write-Step 5 'verify artifact'
 $vi = $Exe.VersionInfo
 $SizeMiB = [math]::Round($Exe.Length / 1MB, 2)
-$SizeBytes = $Exe.Length
-$SizeLimitBytes = 14MB
+$SizeBytes = [int64]$Exe.Length
 $SizeMarginBytes = $SizeLimitBytes - $SizeBytes
+$ReleaseRecord.bytes = $SizeBytes
+$ReleaseRecord.size_gate.margin_bytes = $SizeMarginBytes
+$SizeOk = $SizeBytes -le $SizeLimitBytes
+$ReleaseRecord.size_gate.status = if ($SizeOk) { 'passed' } else { 'failed' }
+
+$ReleaseExecutables = @(Get-ChildItem -LiteralPath (Split-Path -Parent $ExePath) -Filter '*.exe' -File)
+$SingleExeOk = $ReleaseExecutables.Count -eq 1 -and $ReleaseExecutables[0].Name -eq 'veil.exe'
+$BinaryText = [System.Text.Encoding]::ASCII.GetString([System.IO.File]::ReadAllBytes($Exe.FullName))
+$FoundFeatures = @()
+$MissingFeatures = @()
+foreach ($Name in $FeatureNames) {
+  if ($BinaryText.Contains($Name)) { $FoundFeatures += $Name } else { $MissingFeatures += $Name }
+}
+$FeaturesOk = $MissingFeatures.Count -eq 0
+$ReleaseRecord.feature_gate.status = if ($FeaturesOk) { 'passed' } else { 'failed' }
+$ReleaseRecord.feature_gate.found = @($FoundFeatures)
+$ReleaseRecord.feature_gate.missing = @($MissingFeatures)
+
 $Checks = @(
   @{ n='FileVersion';   ok = $vi.FileVersion -match '^\d+\.'; val=$vi.FileVersion },
   @{ n='ProductVersion';ok = $vi.ProductVersion -match '^\d+\.'; val=$vi.ProductVersion },
   @{ n='FileDescription'; ok = $vi.FileDescription -eq 'Veil Markdown 编辑器'; val=$vi.FileDescription },
-  @{ n='Size <= 14 MiB';  ok = ($Exe.Length -ge 4MB) -and ($Exe.Length -le $SizeLimitBytes); val="$SizeMiB MiB" },
+  @{ n='single veil.exe'; ok = $SingleExeOk; val="$($ReleaseExecutables.Count) exe file(s) in target/release" },
+  @{ n='Size <= 14 MiB';  ok = $SizeOk; val="$SizeMiB MiB" },
+  @{ n='offline binary markers'; ok = $FeaturesOk; val="found=$($FoundFeatures -join ','); missing=$($MissingFeatures -join ',')" },
   @{ n='icons/veil.ico'; ok = (Test-Path 'icons/veil.ico'); val="$(if(Test-Path 'icons/veil.ico'){(Get-Item 'icons/veil.ico').Length}else{'missing'})" },
   @{ n='LICENSE';       ok = (Test-Path 'LICENSE'); val="$(if(Test-Path 'LICENSE'){(Get-Content 'LICENSE' -TotalCount 1)}else{'missing'})" },
   @{ n='CHANGELOG.md';  ok = (Test-Path 'CHANGELOG.md'); val='v3.0.0 present' }
@@ -80,25 +217,74 @@ foreach ($c in $Checks) {
 $AllOk = ($Checks | Where-Object { -not $_.ok }).Count -eq 0
 if (-not $AllOk) { Write-Fail 'artifact verification failed, see WARN above' }
 
-# Step 6: archive release-bundle
-if (-not $SkipArchive) {
-  Write-Step 6 'archive release-bundle'
-  $BundleDir = "release-bundle\veil-v$Version"
-  if (Test-Path $BundleDir) { Remove-Item -Recurse -Force $BundleDir }
-  New-Item -ItemType Directory -Force -Path $BundleDir | Out-Null
-  New-Item -ItemType Directory -Force -Path "$BundleDir\icons" | Out-Null
-  Copy-Item target\release\veil.exe $BundleDir\ -Force
-  if (Test-Path target\release\veil.pdb) { Copy-Item target\release\veil.pdb $BundleDir\ -Force }
-  Copy-Item README.md $BundleDir\ -Force
-  Copy-Item LICENSE $BundleDir\ -Force
-  Copy-Item CHANGELOG.md $BundleDir\ -Force
-  Copy-Item icons\veil.ico "$BundleDir\icons\" -Force
-  $BundleFiles = Get-ChildItem $BundleDir -Recurse
-  Write-OK "Bundle archived at $BundleDir ($($BundleFiles.Count) files)"
-} else { Write-Host '  SKIP archive' }
+# Step 6: real launch smoke against the same single artifact
+Write-Step 6 'smoke launch veil.exe'
+$ReleaseRecord.smoke.status = 'failed'
+pwsh -NoProfile -File (Join-Path $RepoRoot 'tools\smoke_launch.ps1') -ExePath $ExePath -ExpectedTitlePattern '^veil' -MaxLaunchMs 1000
+$SmokeExit = $LASTEXITCODE
+$ReleaseRecord.smoke.exit_code = $SmokeExit
+if ($SmokeExit -ne 0) { Write-Fail "smoke launch failed with exit $SmokeExit" }
+$ReleaseRecord.smoke.status = 'passed'
+Write-OK 'smoke launch passed'
 
-# Step 7: summary
+# Step 7: generate and validate the conventional SHA-256 sidecar
+Write-Step 7 'generate SHA-256'
+$ReleaseRecord.checksum.status = 'failed'
+$Sha256 = (Get-FileHash -LiteralPath $ExePath -Algorithm SHA256).Hash.ToLowerInvariant()
+$ReleaseRecord.sha256 = $Sha256
+$ChecksumLine = "$Sha256  veil.exe"
+Set-Content -LiteralPath $ChecksumPath -Value $ChecksumLine -Encoding ascii
+$Expected = ((Get-Content -LiteralPath $ChecksumPath -Raw).Trim() -split '\s+')[0]
+$Actual = (Get-FileHash -LiteralPath $ExePath -Algorithm SHA256).Hash.ToLowerInvariant()
+if ($Expected -ne $Sha256 -or $Actual -ne $Expected) { Write-Fail 'SHA-256 sidecar validation failed' }
+$ReleaseRecord.checksum.status = 'passed'
+Write-OK "veil.exe.sha256 = $ChecksumLine"
+
+# Step 8: archive release-bundle, including its checksum
+if (-not $SkipArchive) {
+  Write-Step 8 'archive release-bundle'
+  $ReleaseRecord.archive.status = 'failed'
+  $ReleaseRecord.archive.reason = $null
+  $BundleDir = Join-Path $RepoRoot "release-bundle\veil-v$Version"
+  $ReleaseRecord.archive.path = "release-bundle/veil-v$Version"
+  if (Test-Path -LiteralPath $BundleDir) { Remove-Item -LiteralPath $BundleDir -Recurse -Force }
+  New-Item -ItemType Directory -Force -Path $BundleDir | Out-Null
+  New-Item -ItemType Directory -Force -Path (Join-Path $BundleDir 'icons') | Out-Null
+  Copy-Item -LiteralPath $ExePath -Destination $BundleDir -Force
+  Copy-Item -LiteralPath $ChecksumPath -Destination $BundleDir -Force
+  $PdbPath = Join-Path $RepoRoot 'target\release\veil.pdb'
+  if (Test-Path -LiteralPath $PdbPath) { Copy-Item -LiteralPath $PdbPath -Destination $BundleDir -Force }
+  Copy-Item -LiteralPath (Join-Path $RepoRoot 'README.md') -Destination $BundleDir -Force
+  Copy-Item -LiteralPath (Join-Path $RepoRoot 'LICENSE') -Destination $BundleDir -Force
+  Copy-Item -LiteralPath (Join-Path $RepoRoot 'CHANGELOG.md') -Destination $BundleDir -Force
+  Copy-Item -LiteralPath (Join-Path $RepoRoot 'icons\veil.ico') -Destination (Join-Path $BundleDir 'icons') -Force
+  $ArchiveReady = $true
+  $ReleaseRecord.archive.status = 'passed'
+  $BundleFiles = Get-ChildItem -LiteralPath $BundleDir -Recurse -File
+  Write-OK "Bundle archived at $BundleDir ($($BundleFiles.Count) files before release record)"
+
+  # 归档完成后重读原产物和包内产物；任一变化都必须阻断发布。
+  $ReleaseRecord.checksum.post_archive_status = 'failed'
+  $PostArchiveHash = (Get-FileHash -LiteralPath $ExePath -Algorithm SHA256).Hash.ToLowerInvariant()
+  $BundledHash = (Get-FileHash -LiteralPath (Join-Path $BundleDir 'veil.exe') -Algorithm SHA256).Hash.ToLowerInvariant()
+  $ReleaseRecord.checksum.post_archive_sha256 = $PostArchiveHash
+  $ReleaseRecord.checksum.bundled_sha256 = $BundledHash
+  $ExpectedAfterArchive = ((Get-Content -LiteralPath $ChecksumPath -Raw).Trim() -split '\s+')[0]
+  if ($PostArchiveHash -ne $Sha256 -or $BundledHash -ne $Sha256 -or $ExpectedAfterArchive -ne $Sha256) {
+    Write-Fail 'post-archive SHA-256 verification failed: executable or sidecar changed'
+  }
+  $ReleaseRecord.checksum.post_archive_status = 'passed'
+  Write-OK 'post-archive SHA-256 unchanged for target and bundled veil.exe'
+} else {
+  Write-Step 8 'archive release-bundle'
+  $ReleaseRecord.archive.reason = '-SkipArchive specified; post-archive check not applicable'
+  Write-Host '  SKIP archive (release record: skipped)'
+}
+
+# Step 9: machine-readable record + human summary
 $Stopwatch.Stop()
+Write-ReleaseRecord
+Write-OK "Release record written: $RecordPath"
 Write-Host ''
 Write-Host '=====================================================' -ForegroundColor Magenta
 Write-Host "  Veil v$Version Release Summary" -ForegroundColor Magenta
@@ -106,13 +292,24 @@ Write-Host '=====================================================' -ForegroundCo
 Write-Host "  Version     : $($vi.ProductVersion)"
 Write-Host "  Size        : $SizeMiB MiB ($SizeBytes bytes)"
 Write-Host "  Size Margin : $SizeMarginBytes bytes to 14 MiB"
+Write-Host "  SHA-256     : $Sha256"
 Write-Host "  FileDescr   : $($vi.FileDescription)"
 Write-Host "  Build Time  : $($Exe.LastWriteTime)"
 Write-Host "  Elapsed     : $([math]::Round($Stopwatch.Elapsed.TotalSeconds, 1)) s"
-if (-not $SkipTest)   { Write-Host '  Tests       : passed' } else { Write-Host '  Tests       : SKIPPED' }
-if (-not $SkipClippy) { Write-Host '  Clippy      : clean' } else { Write-Host '  Clippy      : SKIPPED' }
+Write-Host "  Size gate   : $($ReleaseRecord.size_gate.status)"
+Write-Host "  Feature gate: $($ReleaseRecord.feature_gate.status) ($($FeatureNames -join '/'))"
+Write-Host "  Smoke       : $($ReleaseRecord.smoke.status)"
+Write-Host "  Tests       : $($ReleaseRecord.tests.status)"
+Write-Host "  Clippy      : $($ReleaseRecord.clippy.status)"
+Write-Host "  Checksum    : $($ReleaseRecord.checksum.status); post-archive=$($ReleaseRecord.checksum.post_archive_status)"
 if (-not $SkipArchive) { Write-Host "  Bundle      : release-bundle\veil-v$Version\" }
+Write-Host "  Record      : target\release\release-record.json"
+Write-Host "  Overall     : $($ReleaseRecord.status); release_ready=$($ReleaseRecord.release_ready)"
 Write-Host '=====================================================' -ForegroundColor Magenta
 Write-Host ''
-Write-OK 'Release complete'
+if ($ReleaseRecord.release_ready) {
+  Write-OK 'Release complete; all required gates passed'
+} else {
+  Write-Warn "Release artifacts complete, but required gates were skipped; overall=$($ReleaseRecord.status), release_ready=false"
+}
 exit 0

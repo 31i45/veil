@@ -2,8 +2,8 @@
 //!
 //! 设计取舍：
 //! - `Key` 枚举与 zh-CN 表由同一份宏生成，穷举性由构造保证（不会出现「有 key 无词条」）；
-//! - 词条按语言分表（`zh-CN` / `en-US`），`t()` 按 `LOCALES` 顺序回退；本次只填 zh-CN，
-//!   en-US 留空（后续补翻译只需填表，不改调用点）；
+//! - 词条按语言分表（`zh-CN` / `en-US`），`t()` 按 `LOCALES` 顺序回退；zh-CN 全量，
+//!   en-US 可按需补翻译（只需填表，不改调用点）；
 //! - 缺失 key 回退显示 key 的稳定 id（如 `menu.file.new`），debug 构建断言提示；
 //!   测试构建跳过断言，保证「回退不 panic」可被单测覆盖。
 //!
@@ -179,7 +179,7 @@ keys! {
     CtxCopyCode => "ctx.copy_code", "复制代码块";
     CtxReloadImage => "ctx.reload_image", "重新加载图片";
     CtxImageMissing => "ctx.image_missing", "图片文件缺失（当前显示替代文本）";
-    CtxMermaidPreview => "ctx.mermaid.preview", "在 mermaid.live 编辑（复制源码）";
+    CtxMermaidPreview => "ctx.mermaid.preview", "在 mermaid.live 打开（复制源码）";
     CtxMermaidPreviewImage => "ctx.mermaid.preview_image", "预览当前源码图";
     CtxMermaidInsertImage => "ctx.mermaid.insert_image", "插入本地图片快照（保留源码）";
     CtxMermaidCopySource => "ctx.mermaid.copy_source", "复制源码";
@@ -345,6 +345,8 @@ keys! {
     NoticeAnchorMissing => "notice.anchor_missing", "未找到锚点";
     NoticeLinkUnsupported => "notice.link_unsupported", "无法打开链接：不支持的链接地址 {}";
     NoticeLinkFailed => "notice.link_failed", "无法打开链接: {}";
+    NoticeMermaidLiveOpenFailed => "notice.mermaid_live_open_failed",
+        "无法打开 mermaid.live：{}。Mermaid 源码已复制；请手动打开 https://mermaid.live/ 并粘贴源码";
     NoticeImageMissing => "notice.image_missing", "图片文件缺失，已显示替代文本：{}";
     NoticeCodeCopied => "notice.code_copied", "已复制代码块";
     NoticeCodeBlockRequired => "notice.code_block_required", "光标不在代码块内";
@@ -590,17 +592,35 @@ keys! {
     NoticeSettingsSaveFailed => "notice.settings_save_failed", "设置保存失败：{}";
 }
 
+/// 已翻译的 en-US 词条；缺失项继续回退 zh-CN。
+pub const EN_US: &[(Key, &str)] = &[
+    (
+        Key::CtxMermaidPreview,
+        "Open in mermaid.live (copies source)",
+    ),
+    (
+        Key::NoticeMermaidLiveOpenFailed,
+        "Could not open mermaid.live: {}. Mermaid source copied; manually open https://mermaid.live/ and paste the source",
+    ),
+];
+
 /// 语言表：`code` 为 BCP 47 风格标签；`entries` 为空表示尚未翻译，回退到下一份表。
 pub struct Locale {
     pub code: &'static str,
     pub entries: &'static [(Key, &'static str)],
 }
 
-/// 单语言场景（zh-CN）。后续新增语言时追加非空条目 + 在此数组补 Locale。
-pub const LOCALES: &[Locale] = &[Locale {
-    code: "zh-CN",
-    entries: ZH_CN,
-}];
+/// 默认 zh-CN；en-US 已翻译条目优先，未翻译条目回退 zh-CN。
+pub const LOCALES: &[Locale] = &[
+    Locale {
+        code: "zh-CN",
+        entries: ZH_CN,
+    },
+    Locale {
+        code: "en-US",
+        entries: EN_US,
+    },
+];
 
 /// 当前语言（固定 zh-CN；多语言支持时改为可注入）。
 pub const CURRENT_LOCALE: &str = "zh-CN";
@@ -785,7 +805,23 @@ mod tests {
         );
         assert_eq!(t(Key::StatusExternalChanged), "（外部修改）");
         assert_eq!(t(Key::MermaidEmptyHint), "空 Mermaid 块 — 点击插入模板");
+        assert_eq!(
+            t(Key::CtxMermaidPreview),
+            "在 mermaid.live 打开（复制源码）"
+        );
         assert_eq!(t(Key::CalloutNote), "Note");
+    }
+
+    #[test]
+    fn mermaid_live_wording_is_consistent_in_zh_and_en() {
+        assert_eq!(
+            translate(LOCALES, "en-US", Key::CtxMermaidPreview),
+            Some("Open in mermaid.live (copies source)")
+        );
+        let en_error = translate(LOCALES, "en-US", Key::NoticeMermaidLiveOpenFailed)
+            .expect("英文失败提示已翻译");
+        assert!(en_error.contains("Mermaid source copied"));
+        assert!(en_error.contains("manually open https://mermaid.live/ and paste the source"));
     }
 
     /// 参数化模板：顺序填充、缺参不 panic、无占位符原样返回。

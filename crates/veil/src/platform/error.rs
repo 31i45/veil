@@ -76,6 +76,20 @@ pub fn show_error(title: &str, text: &str) {
     eprintln!("{title}: {text}");
 }
 
+/// 非首窗创建失败的唯一产品提示入口：真实事件循环测试也调用此函数，而非复制弹框逻辑。
+/// 原生框在独立 UI 线程运行，调用方仍等待关闭；避免 winit 事件线程的模态消息循环相互干扰。
+pub fn show_window_create_error(message: &str) {
+    #[cfg(windows)]
+    std::thread::scope(|scope| {
+        scope
+            .spawn(|| show_error(t(Key::FatalWindowCreate), message))
+            .join()
+            .expect("原生错误提示线程异常退出");
+    });
+    #[cfg(not(windows))]
+    show_error(t(Key::FatalWindowCreate), message);
+}
+
 /// 致命启动错误正文：原始诊断 + 可执行下一步（纯函数，便于不弹框地测试）。
 pub fn fatal_error_text(message: &str) -> String {
     format!("{message}\n\n请检查图形环境后重试；文档内容未被修改。")

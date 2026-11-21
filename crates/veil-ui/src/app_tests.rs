@@ -55,7 +55,7 @@ impl UrlOpener for NoUrl {
     }
 }
 
-fn no_url() -> Box<dyn UrlOpener> {
+pub(crate) fn no_url() -> Box<dyn UrlOpener> {
     Box::new(NoUrl)
 }
 
@@ -560,7 +560,7 @@ fn app_clip(html: Option<&str>, plain: Option<&str>) -> App {
     )
 }
 
-fn doc_text(a: &App) -> String {
+pub(crate) fn doc_text(a: &App) -> String {
     let s = a.editor.session();
     s.text_slice(Range::new(0, s.text_len()))
         .expect("全文档区间恒合法")
@@ -806,7 +806,10 @@ fn mermaid_failed_count_reaches_three_skips_fourth_request() {
     let mermaid = RecordingMermaid::new();
     let doc = "前文\n\n```mermaid\ngraph TD\nA-->B\n```\n";
     let mut a = app_with_mermaid(doc, mermaid.clone());
-    assert!(a.config.allow_remote_images, "默认允许远程图片");
+    assert!(
+        !a.config.allow_remote_images,
+        "默认阻止普通远程图片，不影响本地 Mermaid"
+    );
 
     // 辅助：一轮完整失败 → trigger 投递 → poll 消费 Err → failed 递增
     let run_fail_round = |a: &mut App, m: &RecordingMermaid| {
@@ -1649,6 +1652,7 @@ fn standalone_image_geometry_refreshes_after_async_load() {
         Box::new(MemConfig::default()),
         images,
     );
+    a.config.allow_remote_images = true;
     a.window_state.test_size = Some((1280, 800));
     a.ensure_layouts_all();
     a.recompute_geometry();
@@ -2033,7 +2037,7 @@ fn paste_image_asset_failure_keeps_document_unchanged() {
     assert_eq!(f.calls.borrow().len(), 1);
 }
 
-// ---- 远程图片（v1.4）：默认自动加载 + 全局阻止开关 ----
+// ---- 远程图片（v1.4）：默认阻止 + 用户显式允许开关 ----
 
 /// 远程图片 mock 的结果队列句柄：(url, 加载结果)。
 type RemoteResults = Rc<RefCell<Vec<(String, Result<ImageData, String>)>>>;
@@ -2104,6 +2108,7 @@ fn remote_image_requested_once_when_allowed() {
         Box::new(MemConfig::default()),
         images,
     );
+    a.config.allow_remote_images = true;
     a.ensure_layouts_all();
     assert_eq!(requests.borrow().as_slice(), &[REMOTE_URL.to_string()]);
     assert!(a.cache.remote_pending.contains(REMOTE_URL));
@@ -2114,7 +2119,7 @@ fn remote_image_requested_once_when_allowed() {
 }
 
 #[test]
-fn remote_image_not_requested_when_globally_blocked() {
+fn remote_image_not_requested_by_default() {
     let images = RemoteImages::default();
     let requests = images.requests.clone();
     let mut a = app_remote(
@@ -2122,9 +2127,9 @@ fn remote_image_not_requested_when_globally_blocked() {
         Box::new(MemConfig::default()),
         images,
     );
-    a.config.allow_remote_images = false;
+    assert!(!a.config.allow_remote_images, "缺省配置必须阻止远程图片");
     a.ensure_layouts_all();
-    assert!(requests.borrow().is_empty(), "阻止后不得发起请求");
+    assert!(requests.borrow().is_empty(), "默认阻止时不得发起请求");
     assert!(a.cache.remote_pending.is_empty());
 }
 
@@ -2137,6 +2142,7 @@ fn remote_poll_success_caches_bitmap_and_bumps_generation() {
         Box::new(MemConfig::default()),
         images,
     );
+    a.config.allow_remote_images = true;
     a.ensure_layouts_all();
     let before = a.input_state.revs.remote_images;
     results
@@ -2168,6 +2174,7 @@ fn remote_poll_failure_is_remembered_without_retry() {
         Box::new(MemConfig::default()),
         images,
     );
+    a.config.allow_remote_images = true;
     a.ensure_layouts_all();
     results
         .borrow_mut()
@@ -2193,6 +2200,7 @@ fn remote_cache_cleared_on_document_switch() {
         Box::new(MemConfig::default()),
         images,
     );
+    a.config.allow_remote_images = true;
     a.ensure_layouts_all();
     results
         .borrow_mut()
@@ -2217,6 +2225,7 @@ fn html_img_remote_src_uses_same_request_path() {
         Box::new(MemConfig::default()),
         images,
     );
+    a.config.allow_remote_images = true;
     a.ensure_layouts_all();
     assert_eq!(
         requests.borrow().as_slice(),
@@ -2274,7 +2283,7 @@ fn settings_changes_update_view_menu_state_immediately() {
     use crate::view::settings::{FieldValue, BTN_OK};
     let cfg = MemConfig::default();
     let mut a = app_remote("abc", Box::new(cfg), RemoteImages::default());
-    assert!(a.config.allow_remote_images);
+    assert!(!a.config.allow_remote_images, "缺省配置必须阻止远程图片");
 
     a.open_settings();
     {
@@ -3468,7 +3477,7 @@ fn thematic_break_elides_and_keeps_line_height() {
 }
 
 #[derive(Clone, Default)]
-struct MemStore {
+pub(crate) struct MemStore {
     files: Rc<RefCell<HashMap<PathBuf, Vec<u8>>>>,
     fail_save: bool,
     fail_paths: Rc<RefCell<Vec<PathBuf>>>,
@@ -3507,6 +3516,29 @@ fn app(text: &str, path: Option<&str>, bom: bool, store: &MemStore) -> App {
 }
 
 /// 可替换 URL 打开端口的无路径/有路径装配（链接打开测试用）。
+pub(crate) fn ports(store: &MemStore, url_opener: Box<dyn UrlOpener>) -> Ports {
+    let m = FakeMath {
+        fail: false,
+        calls: Rc::new(RefCell::new(Vec::new())),
+    };
+    Ports {
+        clipboard: Box::new(NoClip),
+        store: Box::new(store.clone()),
+        math: Box::new(m),
+        mermaid: Box::new(NoopMermaid),
+        images: Box::new(NoImages),
+        assets: Box::new(NoAssets),
+        exporter: Box::new(NoExport),
+        dialogs: Box::new(NoDialogs),
+        watcher: Box::new(NoWatcher),
+        theme_env: theme::test_support::env(),
+        persist_env: persist_env(),
+        print: Box::new(NoPrint),
+        url_opener,
+        clock: fixed_clock(),
+    }
+}
+
 fn app_with(
     text: &str,
     path: Option<&str>,
@@ -3521,29 +3553,7 @@ fn app_with(
         resume: false,
         open_error: None,
     };
-    let m = FakeMath {
-        fail: false,
-        calls: Rc::new(RefCell::new(Vec::new())),
-    };
-    App::new(
-        doc,
-        Ports {
-            clipboard: Box::new(NoClip),
-            store: Box::new(store.clone()),
-            math: Box::new(m),
-            mermaid: Box::new(NoopMermaid),
-            images: Box::new(NoImages),
-            assets: Box::new(NoAssets),
-            exporter: Box::new(NoExport),
-            dialogs: Box::new(NoDialogs),
-            watcher: Box::new(NoWatcher),
-            theme_env: theme::test_support::env(),
-            persist_env: persist_env(),
-            print: Box::new(NoPrint),
-            url_opener,
-            clock: fixed_clock(),
-        },
-    )
+    App::new(doc, ports(store, url_opener))
 }
 
 /// 记录型剪贴板：断言复制出的原文（不依赖系统剪贴板）。
@@ -7212,13 +7222,13 @@ fn settings_save_failure_is_not_overwritten_by_success_notice() {
 fn remote_image_toggle_save_failure_keeps_error_notice() {
     let mut a = app_theme(Box::new(FailSaveConfig), Rc::new(Cell::new(Some(false))));
     a.toggle_remote_images();
-    assert!(!a.config.allow_remote_images, "开关本身仍翻转");
+    assert!(a.config.allow_remote_images, "开关本身仍翻转");
     assert!(
         a.ui_state.chrome.notice.contains("配置未保存"),
         "失败提示不得被开关状态提示覆盖：{}",
         a.ui_state.chrome.notice
     );
-    assert!(!a.ui_state.chrome.notice.contains("已阻止远程图片"));
+    assert!(!a.ui_state.chrome.notice.contains("已允许远程图片"));
 }
 
 /// DEF-T11-E1-002：从设置面板切深色后，导出样式快照必须同步为深色。
@@ -14772,6 +14782,45 @@ fn mermaid_preview_copies_source_and_opens_site_without_source_url() {
         "源码必须复制到剪贴板"
     );
     assert_eq!(a.editor.session().serialize(), doc, "外部动作不得修改文档");
+}
+
+#[test]
+fn mermaid_preview_open_failure_keeps_source_and_shows_recovery_notice() {
+    let store = MemStore::default();
+    let doc = "p\n\n```mermaid\ngraph TD\nA-->B\n```\n";
+    let calls = Rc::new(RefCell::new(Vec::new()));
+    let mut a = app_with(
+        doc,
+        None,
+        false,
+        &store,
+        Box::new(FakeUrl {
+            calls: calls.clone(),
+            result: Err("模拟浏览器失败".into()),
+        }),
+    );
+    let log = Rc::new(RefCell::new(Vec::new()));
+    a.ports.clipboard = Box::new(ClipLog(log.clone()));
+
+    exec_mermaid_preview(&mut a);
+
+    assert_eq!(
+        calls.borrow().as_slice(),
+        &["https://mermaid.live/".to_string()]
+    );
+    assert_eq!(log.borrow().as_slice(), &["graph TD\nA-->B".to_string()]);
+    assert!(a
+        .ui_state
+        .chrome
+        .notice
+        .contains("无法打开 mermaid.live：模拟浏览器失败"));
+    assert!(a.ui_state.chrome.notice.contains("Mermaid 源码已复制"));
+    assert!(a
+        .ui_state
+        .chrome
+        .notice
+        .contains("手动打开 https://mermaid.live/ 并粘贴源码"));
+    assert_eq!(a.editor.session().serialize(), doc, "失败不得修改文档");
 }
 
 #[test]

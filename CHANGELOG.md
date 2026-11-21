@@ -4,7 +4,7 @@ Veil 版本迭代记录。每个版本的详细修复清单见对应 git tag 的
 
 ## v3.0.0 — 2026-11-21
 
-**BREAKING**：只发布一个 `veil.exe`；Mermaid 改为进程内本地渲染。最终干净重建产物 2026-11-21（commit `97d3a60`）；2026-11-20 为初版构建，其体积/SHA 仅作历史参照。
+**BREAKING**：只发布一个 `veil.exe`；Mermaid 改为进程内本地渲染。最终干净重建产物 2026-11-21（commit `345d8c6`）；2026-11-20 为初版构建，其体积/SHA 仅作历史参照。
 
 ### BREAKING
 - 停止发布 `veil-full.exe`：删除 `veil-full` bin、`required-features` 分支与 `target-full` 发布路径。**迁移：此前使用较大离线发行包的用户直接改用新的 `veil.exe`，能力不减**；文件关联与 `/register` 行为不变
@@ -19,6 +19,18 @@ Veil 版本迭代记录。每个版本的详细修复清单见对应 git tag 的
 - 发布管线只剩一条：一次干净构建（默认 feature）、一次串行测试、一次 clippy、一次门禁、一次冒烟、一份 SHA-256；`CARGO_TARGET_DIR` 统一为默认 `target`
 - workspace 版本号升至 3.0.0
 
+### Fixed（UX 工艺：反馈、焦点与可发现性，commits `eb8825a`、`3d6adf4`、`7c00765`、`345d8c6`）
+- 状态栏按「文件名 > 保存态 > 外部变更 > 源码模式」降级，长路径与窄窗口下不再截断「未保存 / 已保存」；移除与「未保存」重复的 ` *` 脏标
+- 通知不再静默丢失：中段空间不足时依次压缩左文、占用右文、浮层显示；错误类通知不再 6 秒自动消失，保留到下一次通知或用户处理
+- 导出失败提示补齐下一步；崩溃恢复提示说明恢复对象、时间与保存去向；未保存关闭对话框逐项说明保存 / 不保存 / 取消的后果，默认焦点为保存
+- 菜单与右键菜单显示真实快捷键，禁用项显示原因；新增命令矩阵测试锁定同一动作单一主入口
+- `Esc` 关闭查找、快速打开、设置、右键菜单后归还正文焦点，光标、选区与滚动位置不变；焦点环在浅/深主题下保持可见
+- 首窗按 Windows 工作区收敛尺寸与位置，150% 小屏不再出现窗口超出屏幕或被任务栏遮挡
+- 收尾修复 R1：700px 长名 + 脏态 + 错误通知不再挤掉「 · 未保存」与右侧统计，通知升级为状态栏上方浮层并完整折行
+- 收尾修复 R2：文件菜单把禁用原因计入弹窗宽度，动作名与原因不再被中段省略，宽度上限 420 逻辑 px
+- 收尾修复 R3：崩溃恢复提示改走浮层，完整保留恢复对象、恢复时间与保存去向
+- 图片类失败提示补齐「原因 + 下一步」：读取、保存、格式不支持、文件缺失与远程加载失败均说明可执行的下一步，并新增测试锁定（commit `345d8c6`）
+
 ### Fixed（Task 9A：两路评审可控 FAIL 闭环，commits `518ae84`、`97d3a60`）
 - 普通远程图片默认关闭：仅在用户显式 opt-in（视图 → 允许远程图片）后才加载 http/https 图片，默认零后台网络；导出/PDF 永不包含远程资源
 - `mermaid.live` 打开失败可见且可恢复：浏览器打开失败时给出用户可见提示与恢复动作，不再静默失败；菜单命名统一为「在 mermaid.live 打开」并补失败路径测试
@@ -27,8 +39,8 @@ Veil 版本迭代记录。每个版本的详细修复清单见对应 git tag 的
 - 20k 击键探针：新增 `perf_20k_blocks`（21,000 块 / 300 样本）覆盖 G2 门槛，最终 exe 实测最差 p95 2.825 ms ≤ 16 ms（`evidence/input/perf-20k-final.md`）
 
 ### Notes
-- **最终体积（2026-11-21 干净重建，commit `97d3a60`，绑定全部最终证据）**：13,998,592 B ≈ 13.35 MiB（门禁 ≤14 MiB，余量 681,472 B）；SHA-256 `58c9ad0decfd614da73098a006ac0773b2515cd49c56684b3f1aec5fd0d4ab75`。历史参照：2026-11-20 初版构建 13,995,008 B / SHA `3f7e164bc6e6b7eba67b950a004d6ed84e6b15db2283959c09824d96a63e596b`（不作最终发布物校验）
-- **门禁**：最终机器可读发布记录 `target/release/release-record.json` 记录 build / size_gate / feature_gate（QuickJS + linkedom + mermaid 命中）/ smoke / tests / clippy / checksum / archive 全部 `status=passed`，`release_ready=true`。最终串行 `cargo test --workspace --release -- --test-threads=1` 为 **1919 passed / 0 failed / 15 ignored**（2026-11-21，commit `97d3a60`；`cargo fmt --check` 与 `cargo clippy --workspace --all-targets -- -D warnings` 均零错误）；2026-11-20 初版构建记录为 1911 passed / 15 ignored（历史参照）
+- **最终体积（2026-11-21 UX 收尾干净重建，commit `345d8c6`，绑定全部最终证据）**：14,010,368 B ≈ 13.36 MiB（门禁 ≤14 MiB，余量 669,696 B）；SHA-256 `17d8e0813ff4197e58fd2335867a6118c10941772342b85334650183beca5ee1`。历史参照：commit `7c00765` 同为 14,010,368 B / SHA `25fea5f3a65430211f05d9bfa2ec0667672c88d31aac66f90de4bc56acee2b67`（`evidence/ux/after-v2/`、`final/` 为上一构建的历史中间证据）；commit `97d3a60` 为 13,998,592 B / SHA `58c9ad0decfd614da73098a006ac0773b2515cd49c56684b3f1aec5fd0d4ab75`；2026-11-20 初版构建 13,995,008 B / SHA `3f7e164bc6e6b7eba67b950a004d6ed84e6b15db2283959c09824d96a63e596b`（均不作最终发布物校验）
+- **门禁**：最终机器可读发布记录 `target/release/release-record.json` 记录 build / size_gate / feature_gate（QuickJS + linkedom + mermaid 命中）/ smoke / tests / clippy / checksum / archive 全部 `status=passed`，`release_ready=true`（commit `345d8c6`）。此前 commit `97d3a60` 的串行 `cargo test --workspace --release -- --test-threads=1` 记录为 **1919 passed / 0 failed / 15 ignored**；2026-11-20 初版构建记录为 1911 passed / 15 ignored（均为历史参照，UX 收尾后的测试总数不在本文件重复记录）
 - 构建与门禁原始记录见 `evidence/release/v3-build.md`（初版）与 `target/release/release-record.json`（最终）
 
 ## v2.0.1 — 2026-11-20

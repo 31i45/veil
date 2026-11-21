@@ -78,7 +78,7 @@ veil.exe /unregister   # 只撤销 /register 创建、且当前值仍属于自�
 18. 行与导航编辑：`Alt+↑` / `Alt+↓` 移动当前行（一次 undo），`PgUp` / `PgDn` 翻页并保留目标列，`Ctrl+Backspace` / `Ctrl+Delete` 按词删除且不跨行
 19. 查找替换：新增「区分大小写」开关（默认关、会话内保持）；正则模式（`.*` 按钮或 `Alt+R`，会话内保持）支持行锚定 `^`/`$`、捕获组替换（`$1` / `${name}`）与非法模式的就地错误提示；`Enter` 替换当前命中并前进，`Ctrl+Enter` 全部替换
 20. 可读行宽：窗口宽度 >1600 px 时正文列约 40 个全角字宽并居中；H4–H6 按层级缩进；标题段距大于正文段距
-21. 状态可见：状态栏显示「文件名 · 已保存 HH:MM」，脏态显示「· 未保存」；CLI 打开失败弹出可见错误框并以退出码 1 结束
+21. 状态可见：状态栏按「文件名 > 保存态 > 外部变更 > 源码模式」降级，脏态显示「· 未保存」，干净时显示「· 已保存 HH:MM」；错误通知保留到你处理或下一次动作；CLI 打开失败弹出可见错误框并以退出码 1 结束
 22. 光标表达焦点：窗口聚焦时实心、失焦时空心，零定时器、零空闲唤醒
 23. 状态过渡：菜单栏、菜单项、大纲、快速打开、右键菜单、查找栏与对话框按钮的悬停/按下高亮以 120 ms ease-out cubic 淡入淡出；仅在动画进行中推进，空闲路径仍然零定时器、不唤醒进程；系统关闭「显示动画」时直接跳到终态
 24. 远程图片（v1.4）：http/https 图片默认关闭，勾选「视图 → 允许远程图片」后才全局加载；抓取失败降级为 alt 占位并在状态栏提示一次。请求不携带 Cookie、`Referer` 或任何凭据，UA 固定为 `Veil/<version>`，连接/读取超时 10 s，响应体上限 20 MiB，最多跟随 3 次重定向且拒绝 https→http 降级，拒绝 localhost / 回环 / 私有 / 链路本地地址。导出与 PDF 永不包含远程资源
@@ -155,7 +155,7 @@ pwsh -File tools/smoke_launch.ps1 -ExePath target/release/veil.exe -ExpectedTitl
 
 ## 数字红线（目标值与实测）
 
-发布构建、探针串行；最终性能/体积行绑定 2026-11-21 干净重建产物（commit `97d3a60`，`veil.exe` 13,998,592 B，SHA-256 `58c9ad0d…d4ab75`）；其余行保留原测量日期。命令：`cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo run --release -p veil --example bench_typing`、`cargo test -p veil-ui --release --lib -- --ignored --nocapture --test-threads=1 perf_20k_blocks`、`cargo build --release -p veil` + `(Get-Item target\release\veil.exe).Length`，依赖计数用 `cargo tree -p veil --edges normal --prefix none`。方法与明细见 `docs/review/keystroke-attribution.md`。
+发布构建、探针串行；最终性能/体积行绑定 2026-11-21 最终重建产物（commit `345d8c6`，`veil.exe` 14,010,368 B，SHA-256 `17d8e081…beca5ee1`）；其余行保留原测量日期。命令：`cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo run --release -p veil --example bench_typing`、`cargo test -p veil-ui --release --lib -- --ignored --nocapture --test-threads=1 perf_20k_blocks`、`cargo build --release -p veil` + `(Get-Item target\release\veil.exe).Length`，依赖计数用 `cargo tree -p veil --edges normal --prefix none`。方法与明细见 `docs/review/keystroke-attribution.md`。
 
 | 指标 | 目标值 | 实测 |
 |---|---|---|
@@ -164,9 +164,9 @@ pwsh -File tools/smoke_launch.ps1 -ExePath target/release/veil.exe -ExpectedTitl
 | 冷启动（bench 工具，进程创建→打开→首屏排版；p50 / max） | 观察项 | 576.46 / 599.98 ms（2026-11-09，`cargo run --release -p veil --example bench_typing`；基线 520.87 / 533.85 → +10.7% / +12.4%，回退门禁 ≤ 20%） |
 | 冷启动（墙钟，进程创建→首帧；环境观察项） | ≤ 300 ms | 450–529 ms（其中 440–470 ms 在 `main` 之前，属本机进程创建段开销；2026-10-31） |
 | 冷启动（窗口句柄口径；P2 对比口径） | — | 30 ms（2026-10-30，`tools/bench/measure.ps1`） |
-| 10 万字文档击键→提交上屏延迟 p95 | ≤ 16 ms | p50 2.36–2.38 ms · p95 2.81–2.83 ms · max ≤5.42 ms（`perf_20k_blocks` 21,000 块 / 300 样本，2 次，最终 exe 2026-11-21 commit `97d3a60`；最差 p95 2.825 ms ≤ 16 ms。早期 10k 记录：0.973 / 1.566 ms）✅ |
+| 10 万字文档击键→提交上屏延迟 p95 | ≤ 16 ms | p50 2.33–2.40 ms · p95 2.70–2.86 ms · max ≤3.19 ms（`perf_20k_blocks` 21,000 块 / 300 样本，2 次，最终 exe 2026-11-21 commit `345d8c6`；最差 p95 2.856 ms ≤ 16 ms。早期 10k 记录：0.973 / 1.566 ms）✅ |
 | 10 万字文档常驻内存（私有工作集） | ≤ 150 MB | 40.76 MB（20 页深滚动后 WorkingSet，2026-11-05 实测） |
-| 安装产物体积 — 合计单文件 `veil.exe` | ≤ 14 MiB = 14,680,064 B | 13.35 MiB = 13,998,592 B（2026-11-21 最终干净重建，commit `97d3a60`，SHA-256 `58c9ad0d…d4ab75`；单一产物：离线 Mermaid 引擎 + 完整 `mermaid.js` + resvg，引擎惰性初始化） |
+| 安装产物体积 — 合计单文件 `veil.exe` | ≤ 14 MiB = 14,680,064 B | 13.36 MiB = 14,010,368 B（2026-11-21 最终干净重建，commit `345d8c6`，SHA-256 `17d8e081…beca5ee1`；单一产物：离线 Mermaid 引擎 + 完整 `mermaid.js` + resvg，引擎惰性初始化） |
 | `veil-core` 单元+属性测试数 | ≥ 80 | 347 |
 | e2e 断言数 | ≥ 20 | 41（3 个 e2e_ 场景测试：写作闭环打开→保存→重开、表格+图片粘贴落盘、查找替换→崩溃恢复→自清）✅ |
 | Markdown 往返一致率（无编辑时输出 == 输入字节；按字节比较） | 100% | 100% |

@@ -435,7 +435,9 @@ impl App {
         match self.ports.assets.save_pasted_image(&doc, img) {
             Ok(rel) => self.insert_paste(&self.image_paragraph_markup(&rel)),
             Err(e) => {
-                self.ui_state.chrome.notice = tf(I18nKey::NoticeImageSaveFailed, &[&e.to_string()]);
+                self.ui_state
+                    .chrome
+                    .notify_error(tf(I18nKey::NoticeImageSaveFailed, &[&e.to_string()]));
                 eprintln!("图片落盘失败（文档未改动）: {e}");
                 self.request_redraw();
             }
@@ -475,8 +477,10 @@ impl App {
                 self.ui_state.chrome.notice = tf(I18nKey::NoticeMermaidImageInserted, &[&rel]);
             }
             Err(e) => {
-                self.ui_state.chrome.notice =
-                    tf(I18nKey::NoticeMermaidSnapshotSaveFailed, &[&e.to_string()]);
+                self.ui_state.chrome.notify_error(tf(
+                    I18nKey::NoticeMermaidSnapshotSaveFailed,
+                    &[&e.to_string()],
+                ));
                 self.request_redraw();
             }
         }
@@ -562,8 +566,9 @@ impl App {
             match self.ports.images.load(path) {
                 Ok(img) => self.insert_image_data(&img),
                 Err(e) => {
-                    self.ui_state.chrome.notice =
-                        tf(I18nKey::NoticeImageReadFailed, &[&e.to_string()]);
+                    self.ui_state
+                        .chrome
+                        .notify_error(tf(I18nKey::NoticeImageReadFailed, &[&e.to_string()]));
                     eprintln!("图片读取失败（文档未改动）{}: {e}", path.display());
                     self.request_redraw();
                 }
@@ -616,7 +621,9 @@ impl App {
         match self.ports.images.load(&path) {
             Ok(img) => self.insert_image_data(&img),
             Err(e) => {
-                self.ui_state.chrome.notice = tf(I18nKey::NoticeImageReadFailed, &[&e.to_string()]);
+                self.ui_state
+                    .chrome
+                    .notify_error(tf(I18nKey::NoticeImageReadFailed, &[&e.to_string()]));
                 eprintln!("图片读取失败（文档未改动）{}: {e}", path.display());
                 self.request_redraw();
             }
@@ -2240,7 +2247,9 @@ impl App {
             return;
         }
         if let Err(e) = self.ports.url_opener.open_url(&target) {
-            self.ui_state.chrome.notice = tf(I18nKey::NoticeLinkFailed, &[&e.to_string()]);
+            self.ui_state
+                .chrome
+                .notify_error(tf(I18nKey::NoticeLinkFailed, &[&e.to_string()]));
         }
         self.request_redraw();
     }
@@ -2302,7 +2311,7 @@ impl App {
                 if action == CtxAction::MermaidPreview {
                     let result = self.ports.url_opener.open_url("https://mermaid.live/");
                     if let Some(notice) = mermaid_live_open_notice(result) {
-                        self.ui_state.chrome.notice = notice;
+                        self.ui_state.chrome.notify_error(notice);
                         self.request_redraw();
                     }
                 }
@@ -2354,8 +2363,10 @@ impl App {
                         if !insert {
                             self.cache.remote_failed.insert(label);
                         }
-                        self.ui_state.chrome.notice =
-                            tf(I18nKey::NoticeMermaidRenderFailed, &[&clip_error(&e)]);
+                        self.ui_state.chrome.notify_error(tf(
+                            I18nKey::NoticeMermaidRenderFailed,
+                            &[&clip_error(&e)],
+                        ));
                         self.request_redraw();
                     }
                 }

@@ -28,7 +28,7 @@ pub trait Print {
 
     /// 直接导出 PDF（无打印对话框）。默认实现仅提示，不产生输出。
     fn export_pdf(&mut self, session: &mut PrintSession) {
-        session.notice(t(Key::PrintUnsupportedPdf));
+        session.notice_error(t(Key::PrintUnsupportedPdf));
     }
 }
 
@@ -36,7 +36,7 @@ pub trait Print {
 pub struct NoPrint;
 impl Print for NoPrint {
     fn print(&mut self, session: &mut PrintSession) {
-        session.notice(t(Key::PrintUnsupportedPrint));
+        session.notice_error(t(Key::PrintUnsupportedPrint));
     }
 }
 
@@ -159,9 +159,15 @@ impl PrintSession<'_> {
         self.app.request_redraw();
     }
 
+    /// 错误状态栏提示：不参与自动超时，保留到被新通知替换或用户处理。
+    pub fn notice_error(&mut self, msg: &str) {
+        self.app.ui_state.chrome.notify_error(msg.to_string());
+        self.app.request_redraw();
+    }
+
     /// 打印失败/中断：与其它失败态同一错误弹窗（重试重新打印 / 取消）。
     pub fn print_error(&mut self, reason: &str) {
-        self.app.ui_state.chrome.notice = tf(Key::NoticePrintFailed, &[reason]);
+        self.notice_error(&tf(Key::NoticePrintFailed, &[reason]));
         self.app.show_error_modal(
             t(Key::ModalPrintFailedTitle),
             tf(Key::ModalPrintFailedBody, &[reason]),
@@ -184,7 +190,7 @@ impl PrintSession<'_> {
 
     /// 导出 PDF 失败：与应用内其它失败态共用同一错误弹窗（重试 / 取消）。
     pub fn export_pdf_error(&mut self, reason: &str) {
-        self.app.ui_state.chrome.notice = tf(Key::NoticeExportPdfFailed, &[reason]);
+        self.notice_error(&tf(Key::NoticeExportPdfFailed, &[reason]));
         let buttons = vec![
             crate::view::modal::ModalButton::new(
                 1,

@@ -37,7 +37,9 @@ impl App {
             return;
         };
         if let Err(e) = self.ports.watcher.watch(&path) {
-            self.ui_state.chrome.notice = tf(Key::NoticeWatchUnavailable, &[&e]);
+            self.ui_state
+                .chrome
+                .notify_error(tf(Key::NoticeWatchUnavailable, &[&e]));
             eprintln!("文件监听不可用 {}: {e}", path.display());
         }
     }
@@ -121,7 +123,9 @@ impl App {
                         eprintln!("检测到外部修改，原文件已备份到 {}", bp.display());
                     }
                     Err(e) => {
-                        self.ui_state.chrome.notice = tf(Key::NoticeExternalBackupFailed, &[&e]);
+                        self.ui_state
+                            .chrome
+                            .notify_error(tf(Key::NoticeExternalBackupFailed, &[&e]));
                         eprintln!("外部修改备份失败，取消保存（不覆盖原文件）: {e}");
                         if kind == SaveKind::Manual {
                             self.show_error_modal(
@@ -182,14 +186,16 @@ impl App {
                 self.record_current_snapshot();
                 // 留档失败在成功提示之后落地：正文/磁盘已保存，但历史不可静默缺失。
                 if let Some(n) = archive_notice {
-                    self.ui_state.chrome.notice = n;
+                    self.ui_state.chrome.notify_error(n);
                 }
                 self.clear_recovery(); // 磁盘已是最新：恢复副本作废（0b）
                 self.update_title();
             }
             Err(e) => {
                 // 失败不沉默：保持 dirty、不动 last_saved_hhmm，并给出可行动的下一步
-                self.ui_state.chrome.notice = tf(Key::NoticeSaveFailed, &[&e]);
+                self.ui_state
+                    .chrome
+                    .notify_error(tf(Key::NoticeSaveFailed, &[&e]));
                 eprintln!("保存失败 {}: {e}", path.display());
                 // 仅手工保存弹错误弹窗；自动保存失败留在状态栏，避免打断正在输入的用户。
                 if kind == SaveKind::Manual {
@@ -218,7 +224,9 @@ impl App {
         let key = self.doc.history_key;
         if let Err(e) = self.ports.snapshot.save_snapshot(key, &text) {
             eprintln!("版本快照写入失败（key={key:016x}）: {e}");
-            self.ui_state.chrome.notice = tf(Key::NoticeSnapshotFailed, &[&e]);
+            self.ui_state
+                .chrome
+                .notify_error(tf(Key::NoticeSnapshotFailed, &[&e]));
         }
     }
 
@@ -334,7 +342,9 @@ impl App {
             }
             Err(e) => {
                 self.persist_state.recovery_failed_at = Some(now);
-                self.ui_state.chrome.notice = tf(Key::NoticeRecoveryWriteFailed, &[&e]);
+                self.ui_state
+                    .chrome
+                    .notify_error(tf(Key::NoticeRecoveryWriteFailed, &[&e]));
                 eprintln!("崩溃恢复写入失败: {e}");
             }
         }
@@ -493,7 +503,9 @@ impl App {
         let (text, bom) = match decode(&disk) {
             Ok(x) => x,
             Err(e) => {
-                self.ui_state.chrome.notice = t(Key::NoticeExternalUnreadable).into();
+                self.ui_state
+                    .chrome
+                    .notify_error(t(Key::NoticeExternalUnreadable));
                 eprintln!("外部版本解码失败 {}: {e}", path.display());
                 return false;
             }
@@ -653,7 +665,9 @@ impl App {
                 eprintln!("已导出 {}", p.display());
             }
             Err(e) => {
-                self.ui_state.chrome.notice = tf(Key::NoticeExportFailed, &[&e]);
+                self.ui_state
+                    .chrome
+                    .notify_error(tf(Key::NoticeExportFailed, &[&e]));
                 eprintln!("导出失败: {e}");
                 self.show_error_modal(
                     t(Key::ModalExportFailedTitle),
@@ -745,12 +759,14 @@ impl App {
                     None => None,
                 };
                 if let Some(n) = asset_notice.or(history_notice).or(archive_notice) {
-                    self.ui_state.chrome.notice = n;
+                    self.ui_state.chrome.notify_error(n);
                 }
                 self.update_title();
             }
             Err(e) => {
-                self.ui_state.chrome.notice = tf(Key::NoticeSaveAsFailed, &[&e]);
+                self.ui_state
+                    .chrome
+                    .notify_error(tf(Key::NoticeSaveAsFailed, &[&e]));
                 eprintln!("另存为失败 {}: {e}", path.display());
                 self.show_error_modal(
                     t(Key::ModalSaveAsFailedTitle),
@@ -849,10 +865,10 @@ impl App {
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| message.lines().next().unwrap_or("").trim());
-        self.ui_state.chrome.notice = tf(
+        self.ui_state.chrome.notify_error(tf(
             Key::NoticeErrorWhileModalOpen,
             &[title, &clip_error(reason)],
-        );
+        ));
         self.request_redraw();
     }
 
@@ -1069,7 +1085,9 @@ impl App {
                 if !self.editor.is_dirty() {
                     self.execute_intent(intent);
                 } else {
-                    self.ui_state.chrome.notice = t(Key::NoticeSaveIncomplete).into();
+                    self.ui_state
+                        .chrome
+                        .notify_error(t(Key::NoticeSaveIncomplete));
                 }
             }
             2 => {
@@ -1111,7 +1129,9 @@ impl App {
         let bytes = match self.ports.store.load(&path) {
             Ok(b) => b,
             Err(e) => {
-                self.ui_state.chrome.notice = tf(Key::NoticeOpenFailed, &[&e]);
+                self.ui_state
+                    .chrome
+                    .notify_error(tf(Key::NoticeOpenFailed, &[&e]));
                 eprintln!("打开失败 {}: {e}", path.display());
                 self.show_open_error(&path, &e);
                 self.request_redraw();
@@ -1121,7 +1141,9 @@ impl App {
         let (text, bom) = match decode(&bytes) {
             Ok(x) => x,
             Err(e) => {
-                self.ui_state.chrome.notice = tf(Key::NoticeOpenFailed, &[&e]);
+                self.ui_state
+                    .chrome
+                    .notify_error(tf(Key::NoticeOpenFailed, &[&e]));
                 eprintln!("打开失败 {}: {e}", path.display());
                 self.show_open_error(&path, &e);
                 self.request_redraw();

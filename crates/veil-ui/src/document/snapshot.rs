@@ -142,7 +142,9 @@ impl App {
             }
             Err(e) => {
                 // 损坏/缺失快照：保留原预览，状态栏给出可读原因，不崩溃
-                self.ui_state.chrome.notice = tf(Key::NoticeSnapshotReadFailed, &[&e]);
+                self.ui_state
+                    .chrome
+                    .notify_error(tf(Key::NoticeSnapshotReadFailed, &[&e]));
             }
         }
         self.request_redraw();
@@ -204,7 +206,9 @@ impl App {
         let text = match self.ports.snapshot.read_snapshot(key, meta.ts_ms) {
             Ok(t) => t,
             Err(e) => {
-                self.ui_state.chrome.notice = tf(Key::NoticeSnapshotReadFailed, &[&e]);
+                self.ui_state
+                    .chrome
+                    .notify_error(tf(Key::NoticeSnapshotReadFailed, &[&e]));
                 self.request_redraw();
                 return;
             }
@@ -301,7 +305,10 @@ impl App {
                     }
                 }
             }
-            Err(e) => self.ui_state.chrome.notice = tf(Key::NoticeDeleteSnapshotFailed, &[&e]),
+            Err(e) => self
+                .ui_state
+                .chrome
+                .notify_error(tf(Key::NoticeDeleteSnapshotFailed, &[&e])),
         }
         self.request_redraw();
     }
@@ -344,7 +351,10 @@ impl App {
                 let loaded = self.ports.snapshot.list_snapshots(key);
                 self.history_apply_entries(loaded);
             }
-            Err(e) => self.ui_state.chrome.notice = tf(Key::NoticeClearHistoryFailed, &[&e]),
+            Err(e) => self
+                .ui_state
+                .chrome
+                .notify_error(tf(Key::NoticeClearHistoryFailed, &[&e])),
         }
         self.request_redraw();
     }

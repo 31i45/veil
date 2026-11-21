@@ -117,6 +117,12 @@ keys! {
     ShortcutSourceMode => "shortcut.source_mode", "Ctrl+/";
     ShortcutSettings => "shortcut.settings", "Ctrl+,";
 
+    // ---- 菜单禁用原因（禁用项右侧 muted 说明，避免静默变灰） ----
+    DisabledNoChanges => "disabled.no_changes", "没有需要保存的更改";
+    DisabledEmptyDocument => "disabled.empty_document", "空文档没有可导出的内容";
+    DisabledNothingToUndo => "disabled.nothing_to_undo", "没有可撤销的操作";
+    DisabledNothingToRedo => "disabled.nothing_to_redo", "没有可重做的操作";
+
     // ---- 窗口标题 / 状态栏 ----
     WindowTitle => "title.window", "veil — {}";
     AppTitle => "title.app", "veil";
@@ -125,7 +131,6 @@ keys! {
     TitleExternalBackedUp => "title.external_backed_up", " (外部修改已备份)";
     TitleExternalMissing => "title.external_missing", " (文件缺失)";
 
-    StatusDirtyMark => "status.dirty_mark", " *";
     StatusExternalChanged => "status.external_changed", "（外部修改）";
     StatusExternalBackedUp => "status.external_backed_up", "（外部修改已备份）";
     StatusExternalMissing => "status.external_missing", "（文件缺失）";
@@ -133,6 +138,7 @@ keys! {
     StatusUnsaved => "status.unsaved", " · 未保存";
     StatusSaved => "status.saved", " · 已保存 {}";
     StatusStats => "status.stats", "{} 字 · 行 {}，列 {}";
+    StatusWords => "status.words", "{} 字";
 
     // ---- 快速打开 ----
     QuickOpenPlaceholder => "quick_open.placeholder", "快速打开：输入文件名，回车打开";
@@ -262,7 +268,8 @@ keys! {
     NoticeExportCancelled => "notice.export_cancelled", "导出已取消";
     NoticeOutputEmptyDocument => "notice.output_empty_document", "空文档没有可导出或打印的内容";
     NoticeExportedHtml => "notice.exported_html", "已导出 HTML：{}";
-    NoticeExportFailed => "notice.export_failed", "导出失败：{}";
+    NoticeExportFailed => "notice.export_failed",
+        "导出失败：{}；可重试导出，或检查目标目录是否可写后换一个位置";
     NoticeErrorWhileModalOpen => "notice.error_while_modal_open",
         "{}：{}（请先关闭当前弹窗，再重试）";
     ModalExportFailedTitle => "modal.export_failed.title", "导出失败";
@@ -283,7 +290,8 @@ keys! {
     ModalOpenFailedBody => "modal.open_failed.body",
         "{}\n\n原因：{}\n\n下一步：可重试读取同一文件，或重新选择其他文件；当前文档内容未被改动。";
     ModalUnsavedTitle => "modal.unsaved.title", "是否保存对「{}」的更改？";
-    ModalUnsavedBody => "modal.unsaved.body", "未保存的修改在关闭后将无法恢复。";
+    ModalUnsavedBody => "modal.unsaved.body",
+        "「保存」：把本次修改写回原文件。\n「不保存」：丢弃本次修改，关闭后无法恢复。\n「取消」：返回文档继续编辑。";
     NoticeCancelled => "notice.cancelled", "已取消操作";
     NoticeCancelledWhat => "notice.cancelled_what", "已取消{}";
     ActionOpen => "action.open", "打开";
@@ -316,7 +324,8 @@ keys! {
     // ---- 启动 / 配置 ----
     NoticeConfigIgnored => "notice.config_ignored", "配置有 {} 处无法识别，已忽略";
     NoticeConfigInvalid => "notice.config_invalid", "配置文件无效，已用默认主题: {}";
-    NoticeRecovered => "notice.recovered", "已从崩溃恢复未保存的内容；确认后请保存";
+    NoticeRecovered => "notice.recovered",
+        "已从崩溃恢复「{}」的未保存内容；恢复时间 {}。当前内容尚未保存，按 Ctrl+S 保存";
     NoticeTheme => "notice.theme", "主题：{}";
     NoticeConfigNotSaved => "notice.config_not_saved", "配置未保存：{}";
     ErrEventLoopCreate => "error.event_loop_create", "创建事件循环失败: {}";
@@ -836,6 +845,52 @@ mod tests {
         // 缺参：返回词条原文（占位符保留），不静默吞成空串
         assert_eq!(tf(Key::StatusSaved, &[]), " · 已保存 {}");
         assert_eq!(tf(Key::MenuFile, &["多余"]), "文件");
+    }
+
+    /// 错误类提示统一「原因 + 下一步」：导出失败必须给出可执行出口。
+    #[test]
+    fn export_failed_notice_has_actionable_next_step() {
+        let notice = tf(Key::NoticeExportFailed, &["磁盘已满"]);
+        assert!(notice.contains("磁盘已满"), "须保留原因: {notice}");
+        assert!(notice.contains("重试"), "须给重试出口: {notice}");
+        assert!(
+            notice.contains("目标目录"),
+            "须提示检查目标目录是否可写: {notice}"
+        );
+    }
+
+    /// 未保存关闭对话框：正文逐项说明三个按钮各自的后果，缺一不可。
+    #[test]
+    fn unsaved_body_explains_each_button_consequence() {
+        let body = t(Key::ModalUnsavedBody);
+        assert!(
+            body.contains("「保存」") && body.contains("原文件"),
+            "保存=写回原文件: {body}"
+        );
+        assert!(
+            body.contains("「不保存」") && body.contains("丢弃"),
+            "不保存=丢弃本次修改: {body}"
+        );
+        assert!(
+            body.contains("「取消」") && body.contains("继续编辑"),
+            "取消=返回文档继续编辑: {body}"
+        );
+    }
+
+    /// 崩溃恢复提示不硬编码文件名：对象与时间都由调用点以参数注入。
+    #[test]
+    fn recovered_notice_renders_object_time_and_save_hint() {
+        assert_eq!(
+            t(Key::NoticeRecovered).matches("{}").count(),
+            2,
+            "恢复对象与时间必须是占位符参数"
+        );
+        let notice = tf(Key::NoticeRecovered, &["a.md", "14:32"]);
+        assert!(notice.contains("崩溃恢复"), "须说明来源: {notice}");
+        assert!(notice.contains("「a.md」"), "须含恢复对象: {notice}");
+        assert!(notice.contains("14:32"), "须含恢复时间: {notice}");
+        assert!(notice.contains("尚未保存"), "须说明当前未保存: {notice}");
+        assert!(notice.contains("Ctrl+S"), "须给出保存方式: {notice}");
     }
 
     /// 错误裁剪：只取首行；超长按字符截断并加省略号；UTF-8 安全。

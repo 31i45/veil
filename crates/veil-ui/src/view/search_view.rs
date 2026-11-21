@@ -89,17 +89,39 @@ impl App {
             crate::tokens::palette::surface_popup(&theme),
             theme.chrome_border,
         );
-        // S4 focus：焦点字段用安静底色表达（不再画 accent 下划线）。
+        // S4 focus：焦点字段用安静底色表达，外加与背景保持 ≥3:1 的 1px 焦点环
+        // （深色主题 accent 直接压在 popup 上会被吞掉，由 modal 的同一色源回退）。
+        let popup = crate::tokens::palette::surface_popup(&theme);
+        let ring = crate::view::modal::focus_ring_color(&theme, [popup[0], popup[1], popup[2]]);
         let field_radius = (crate::theme::surface::corner_radius(scale) - 2.0 * scale).max(0.0);
         let paint_field = |frame: &mut Frame, r: Rect| {
-            frame.fill_rounded_rect(
-                r.x.round() as i32,
-                r.y.round() as i32,
-                r.w.ceil() as u32,
-                r.h.ceil() as u32,
-                field_radius,
-                crate::tokens::state::focus_bg(&theme),
-            );
+            let x = r.x.round() as i32;
+            let y = r.y.round() as i32;
+            let w = r.w.ceil() as u32;
+            let h = r.h.ceil() as u32;
+            let t = scale.round().max(1.0) as u32;
+            if w > 2 * t && h > 2 * t {
+                let radius_inner = (field_radius - t as f32).max(0.0);
+                frame.fill_rounded_rect(x, y, w, h, field_radius, [ring[0], ring[1], ring[2], 255]);
+                // 先把环内铺回不透明 popup，再叠半透明焦点底色：
+                // 否则 focus_bg 会与环色混合，字段比静息底色更暗。
+                frame.fill_rounded_rect(
+                    x + t as i32,
+                    y + t as i32,
+                    w - 2 * t,
+                    h - 2 * t,
+                    radius_inner,
+                    popup,
+                );
+                frame.fill_rounded_rect(
+                    x + t as i32,
+                    y + t as i32,
+                    w - 2 * t,
+                    h - 2 * t,
+                    radius_inner,
+                    crate::tokens::state::focus_bg(&theme),
+                );
+            }
         };
         if search.focus == search::Field::Query {
             paint_field(frame, l.text);

@@ -1,0 +1,36 @@
+# 最小尺寸验证（target/release/veil.exe 14,010,880 B, SHA-256 FC6BCCD4…9D01C, commit ce038eb）
+# 环境：DPI 144（scale 1.5，logical = physical / 1.5）；工作区 0,0,2560,1368 物理；物理屏 2560x1440
+# 命令与原始数据：screenshots/m-min-size/*/metrics.txt；驱动脚本 _work/extreme.ps1、_work/min-drag.ps1、_work/min-config.ps1
+
+[A] 程序化设置客户区 140×160 物理（SetWindowPos，一次）
+    请求外框 162×216 → 实际外框 162×216，实际客户区 140×160 物理 = 93.33×106.67 逻辑
+    钳制到 ≥520×360 逻辑：**否**
+    证据：screenshots/m-min-size/physical-140x160/{metrics.txt,request.png}
+
+[B] 程序化设置 140×160 逻辑（=210×240 物理，一次）
+    请求外框 232×296 → 实际外框 232×296，实际客户区 210×240 物理 = 140×160 逻辑
+    钳制到 ≥520×360 逻辑：**否**
+    证据：screenshots/m-min-size/logical-140x160/{metrics.txt,request.png}
+
+[C] 同一产物回答 WM_GETMINMAXINFO
+    ptMinTrackSize = 802×596 外框 → 客户区下限 780×540 物理 = 520×360 逻辑（非零，已注册）
+
+[D] 真实鼠标从窗口右下角边框向左上拖（用户 sizing 路径）
+    1372×1106（客户区 1350×1050）→ 拖拽后外框 802×596，客户区 780×540 = 520×360 逻辑
+    钳制到 ≥520×360 逻辑：**是**（精确等于下限）
+    证据：screenshots/m-min-size/drag-min/{metrics.txt,notice.png}
+
+[E] 恢复路径：config.toml 记录 window_width=480 window_height=360（解析允许的下限）
+    外框 802×596 @40,60，客户区 780×540 = 520×360 逻辑 → 被最小尺寸钳制
+    证据：screenshots/m-min-size/restore-480x360/{metrics.txt,launch.png}
+    对照：window_width=93 window_height=107（低于解析下限 480×360）整组被忽略 → 默认 900×700
+  
+[F] 最小尺寸下错误通知（只读长路径文档 → 自动保存失败）
+    首行「保存失败：拒绝访问。 (os error 5) (写入」与末行「…；可 Ctrl+S 重试，或 Ctrl+Shift+S 另存为」均完整可见；
+    状态栏「…stuvwxyz.md · 第四层 · 未保存 ｜ 15 字 · 行 1，列 25」不被裁切
+    证据：screenshots/m-min-size/drag-min/notice.png（63739 B，SHA 5559AF64…8625A7B8）
+
+结论：最小尺寸已注册并只在「用户 sizing / 应用恢复」路径生效；同进程外的程序化 SetWindowPos 可绕过
+（Windows 只对用户 sizing 应用 WM_GETMINMAXINFO 的 tracking size，应用未在 WM_WINDOWPOSCHANGING 自钳制）。
+按任务口径“把窗口设为 140×160 后确认被钳制到 ≥520×360 逻辑” → **不成立（FAIL）**；
+用户拖拽与恢复路径 → **成立（PASS）**。

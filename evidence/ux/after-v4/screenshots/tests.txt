@@ -1,0 +1,60 @@
+=== notice_overlay ===
+[1m[92m   Compiling[0m veil-core v3.0.0 (D:\VSCode\Veil\crates\veil-core)
+[1m[92m   Compiling[0m veil-ui v3.0.0 (D:\VSCode\Veil\crates\veil-ui)
+[1m[92m    Finished[0m ]8;;https://doc.rust-lang.org/cargo/reference/profiles.html#default-profiles\`test` profile [unoptimized + debuginfo]]8;;\ target(s) in 21.91s
+[1m[92m     Running[0m unittests src\lib.rs (target\debug\deps\veil_ui-7804f91d8339b8b2.exe)
+
+running 1 test
+test chrome::tests::notice_overlay_layout_keeps_rows_in_client_area_and_first_last ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1286 filtered out; finished in 0.48s
+
+[1m[92m     Running[0m tests\boundary_guard.rs (target\debug\deps\boundary_guard-39525de58fb1a071.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s
+
+=== print/pdf notices ===
+[1m[92m    Finished[0m ]8;;https://doc.rust-lang.org/cargo/reference/profiles.html#default-profiles\`test` profile [unoptimized + debuginfo]]8;;\ target(s) in 1.03s
+[1m[92m     Running[0m unittests src\lib.rs (target\debug\deps\veil_ui-7804f91d8339b8b2.exe)
+
+running 1 test
+test app_tests::print_and_pdf_failure_notices_are_errors_and_survive_ttl ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1286 filtered out; finished in 0.36s
+
+[1m[92m     Running[0m tests\boundary_guard.rs (target\debug\deps\boundary_guard-39525de58fb1a071.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s
+
+[1m[92m    Finished[0m ]8;;https://doc.rust-lang.org/cargo/reference/profiles.html#default-profiles\`test` profile [unoptimized + debuginfo]]8;;\ target(s) in 1.02s
+[1m[92m     Running[0m unittests src\lib.rs (target\debug\deps\veil_ui-7804f91d8339b8b2.exe)
+
+running 1 test
+test app_tests::no_printer_context_notice_is_error_with_next_step_and_survives_ttl ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1286 filtered out; finished in 0.18s
+
+[1m[92m     Running[0m tests\boundary_guard.rs (target\debug\deps\boundary_guard-39525de58fb1a071.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s
+
+[1m[92m    Finished[0m ]8;;https://doc.rust-lang.org/cargo/reference/profiles.html#default-profiles\`test` profile [unoptimized + debuginfo]]8;;\ target(s) in 0.99s
+[1m[92m     Running[0m unittests src\lib.rs (target\debug\deps\veil_ui-7804f91d8339b8b2.exe)
+
+running 1 test
+test i18n::tests::print_failures_have_actionable_next_step ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1286 filtered out; finished in 0.00s
+
+[1m[92m     Running[0m tests\boundary_guard.rs (target\debug\deps\boundary_guard-39525de58fb1a071.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s
+

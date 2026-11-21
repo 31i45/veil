@@ -1,0 +1,9 @@
+WindowRect=60,60,292,356 outer=232x296
+Client=210 x 240 at physical DPI 144
+PrintWindowOk=True
+DarkTextBands=15..29,58..77,90..113,136..136,142..142,145..146
+OverlayCardY=54..201 (147 high)
+LineH=27
+RowsY=60..87,87..114,114..141,141..168,168..195
+ClientBox=0,0,210,240 : all rows inside=true; below menu(45), above status(201)
+Note=Visible text: first "保存失败：拒绝" and last "另存为"; intermediate wrapped lines intentionally omitted; no half-line clipping; card bottom padding visible.

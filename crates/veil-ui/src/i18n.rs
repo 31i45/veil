@@ -260,8 +260,10 @@ keys! {
         "崩溃恢复写入失败：{}；可检查磁盘空间或权限后重试";
     NoticeFileRestored => "notice.file_restored", "文件已恢复：{}";
     NoticeExternalChanged => "notice.external_changed", "检测到外部修改：保存时将先备份磁盘版本";
-    NoticeExternalDeleted => "notice.external_deleted", "文件已被外部删除；保存将重建";
-    NoticeExternalUnreadable => "notice.external_unreadable", "文件暂不可读（可能被外部程序占用）";
+    NoticeExternalDeleted => "notice.external_deleted",
+        "文件已被外部删除；编辑器中内容仍在，可继续编辑，或用「另存为」保存到新位置";
+    NoticeExternalUnreadable => "notice.external_unreadable",
+        "文件暂不可读（可能被外部程序占用）；编辑器中内容仍在，可继续编辑或另存为";
     ModalExternalChangedTitle => "modal.external_changed.title", "「{}」已被外部修改";
     ModalExternalChangedBody => "modal.external_changed.body", "磁盘文件已被其他程序修改。重新加载将丢弃未保存的修改；保留当前可继续编辑，保存时会先备份磁盘版本。";
     NoticeExternalReloaded => "notice.external_reloaded", "已重新加载外部修改：{}";
@@ -361,11 +363,16 @@ keys! {
     NoticeInsertImageNeedsFile => "notice.insert_image_needs_file", "插入图片需要先保存文档";
     NoticeUnsupportedImage => "notice.unsupported_image",
         "所选文件不是支持的图片格式；下一步：改用 PNG/JPEG/WebP 等支持的格式";
-    NoticeFootnoteDefMissing => "notice.footnote_def_missing", "未找到脚注定义";
-    NoticeFootnoteRefMissing => "notice.footnote_ref_missing", "未找到脚注引用";
-    NoticeAnchorMissing => "notice.anchor_missing", "未找到锚点";
-    NoticeLinkUnsupported => "notice.link_unsupported", "无法打开链接：不支持的链接地址 {}";
-    NoticeLinkFailed => "notice.link_failed", "无法打开链接: {}";
+    NoticeFootnoteDefMissing => "notice.footnote_def_missing",
+        "未找到脚注定义；下一步：检查脚注名称是否与引用一致";
+    NoticeFootnoteRefMissing => "notice.footnote_ref_missing",
+        "未找到脚注引用；下一步：检查脚注名称是否与定义一致";
+    NoticeAnchorMissing => "notice.anchor_missing",
+        "未找到锚点；下一步：检查锚点名称是否与标题一致";
+    NoticeLinkUnsupported => "notice.link_unsupported",
+        "无法打开链接：不支持的链接地址 {}；下一步：改用 http/https 链接，或复制到浏览器打开";
+    NoticeLinkFailed => "notice.link_failed",
+        "无法打开链接：{}；下一步：检查系统默认浏览器，或复制链接手动打开";
     NoticeMermaidLiveOpenFailed => "notice.mermaid_live_open_failed",
         "无法打开 mermaid.live：{}。Mermaid 源码已复制；请手动打开 https://mermaid.live/ 并粘贴源码";
     NoticeImageMissing => "notice.image_missing",
@@ -1129,5 +1136,69 @@ mod tests {
         // 参数恰好/多余时行为不变
         assert_eq!(tf(Key::StatusSaved, &["09:30"]), " · 已保存 09:30");
         assert_eq!(tf(Key::MenuFile, &["多余"]), "文件");
+    }
+
+    /// 链接 / 脚注 / 锚点提示：现状之外必须给出用户真能执行的下一步。
+    #[test]
+    fn link_and_reference_notices_offer_next_step() {
+        let unsupported = tf(Key::NoticeLinkUnsupported, &["file:///tmp/a.md"]);
+        assert!(
+            unsupported.contains("不支持的链接地址") && unsupported.contains("file:///tmp/a.md"),
+            "须保留现状与地址: {unsupported}"
+        );
+        assert!(unsupported.contains("下一步"), "须给下一步: {unsupported}");
+        assert!(
+            unsupported.contains("http/https") && unsupported.contains("复制到浏览器打开"),
+            "须说明改用 http/https 或复制到浏览器: {unsupported}"
+        );
+
+        let failed = tf(Key::NoticeLinkFailed, &["未找到可用程序"]);
+        assert!(failed.contains("未找到可用程序"), "须保留原因: {failed}");
+        assert!(failed.contains("下一步"), "须给下一步: {failed}");
+        assert!(
+            failed.contains("默认浏览器") && failed.contains("复制链接手动打开"),
+            "须说明检查默认浏览器或复制链接: {failed}"
+        );
+
+        for (key, current, hint) in [
+            (Key::NoticeFootnoteDefMissing, "未找到脚注定义", "引用一致"),
+            (Key::NoticeFootnoteRefMissing, "未找到脚注引用", "定义一致"),
+            (Key::NoticeAnchorMissing, "未找到锚点", "标题一致"),
+        ] {
+            let text = t(key);
+            assert!(text.contains(current), "须保留现状: {text}");
+            assert!(text.contains("下一步"), "须给下一步: {text}");
+            assert!(
+                text.contains("检查") && text.contains(hint),
+                "须说明核对方式: {text}"
+            );
+        }
+    }
+
+    /// 外部文件异常：说明文件现状、编辑器内容仍在，并给出另存为出口。
+    #[test]
+    fn external_file_notices_state_content_survives() {
+        let deleted = t(Key::NoticeExternalDeleted);
+        assert!(deleted.contains("已被外部删除"), "须说明现状: {deleted}");
+        assert!(
+            deleted.contains("内容仍在"),
+            "须说明编辑器内容仍在: {deleted}"
+        );
+        assert!(deleted.contains("另存为"), "须给出另存为出口: {deleted}");
+        assert!(
+            deleted.contains("新位置"),
+            "须说明可保存到新位置: {deleted}"
+        );
+
+        let unreadable = t(Key::NoticeExternalUnreadable);
+        assert!(unreadable.contains("暂不可读"), "须说明现状: {unreadable}");
+        assert!(
+            unreadable.contains("内容仍在"),
+            "须说明编辑器内容仍在: {unreadable}"
+        );
+        assert!(
+            unreadable.contains("继续编辑") && unreadable.contains("另存为"),
+            "须给出继续编辑或另存为出口: {unreadable}"
+        );
     }
 }

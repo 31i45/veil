@@ -1254,6 +1254,71 @@ fn status_layout_700px_long_path_keeps_filename_and_unsaved() {
     );
 }
 
+/// 900 px 窗口 + 深目录长文件名 + 脏态 + 外部变更 + 源码模式：
+/// 文件名与「未保存」仍须可读，且状态栏通知在此宽度下不得被吞。
+#[test]
+fn status_layout_900px_long_path_keeps_filename_and_unsaved() {
+    let mut engine = LayoutEngine::new();
+    let mut chrome = Chrome::default();
+    let long_name =
+        "2026-11-21-ux-baseline-ji-shen-mu-lu-chang-wen-jian-ming-ce-shi-yong-li-abcdefghijklmnop.md";
+    let path = Path::new("D:/资料归档-2026/第二层目录名称同样很长-用于验证路径截断/third-level-directory-with-a-rather-long-name/第四层")
+        .join(long_name);
+    let fit = chrome.layout_status(
+        &mut engine,
+        Some(&path),
+        true,
+        ExternalState::Changed,
+        true,
+        Some("14:32"),
+        1234,
+        5,
+        23,
+        900.0,
+        1.0,
+    );
+    assert!(
+        fit.left.contains("未保存"),
+        "保存态不得被省略: {}",
+        fit.left
+    );
+    assert!(
+        fit.left.starts_with("2026-11-21-ux-baseline"),
+        "文件名开头应保留: {}",
+        fit.left
+    );
+    // 左右互不重叠：左文 + 间距 + 右文不超过右缘
+    let left_x = crate::tokens::space::M;
+    let right_edge = 900.0 - SCROLL_W - crate::tokens::space::M;
+    let gap = crate::tokens::space::M;
+    assert!(
+        left_x + fit.left_w + gap + fit.right_w <= right_edge + 0.5,
+        "左右状态文本重叠: left={} right={}",
+        fit.left_w,
+        fit.right_w
+    );
+    assert!(
+        fit.right.contains("行 5"),
+        "宽裕时右文保持完整: {}",
+        fit.right
+    );
+
+    // 同一宽度下带通知绘制：通知仍须可见，且不得被绘制层清空。
+    let notice = "文件监听不可用: 没有权限；重新打开该文件即可再次尝试";
+    let without = status_paint(900, 700, None, &mut chrome, &mut engine);
+    let with = status_paint(900, 700, Some(notice), &mut chrome, &mut engine);
+    let mut diff = 0usize;
+    for y in 0..700 {
+        for x in 0..900 {
+            if without.get(x, y) != with.get(x, y) {
+                diff += 1;
+            }
+        }
+    }
+    assert!(diff > 0, "900px 下状态栏通知必须仍然可见");
+    assert_eq!(chrome.notice, notice, "绘制不得吞掉通知文本");
+}
+
 fn status_paint(
     w: u32,
     h: u32,

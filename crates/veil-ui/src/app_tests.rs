@@ -36,6 +36,7 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 use veil_core::{BlockId, BlockKind, InlineKind, Range};
 use winit::dpi::PhysicalPosition;
+use winit::event::{DeviceId, MouseScrollDelta, TouchPhase, WindowEvent};
 use winit::keyboard::Key as WKey;
 use winit::keyboard::{KeyCode, NamedKey, PhysicalKey};
 
@@ -17539,13 +17540,58 @@ fn initial_window_fits_small_150pct_screen() {
         },
         1.5_f32,
     )];
-    let g = fit_initial_window(900, 700, &screens);
+    let g = fit_initial_window(900, 700, &screens, None);
     assert_eq!(g.width, 900, "宽度仍放得下");
     assert!(g.height < 700, "高度必须收敛到工作区: {}", g.height);
     let phys_w = (g.width as f32 * 1.5).round() as i32;
     let phys_h = (g.height as f32 * 1.5).round() as i32;
     assert!(g.x >= 0 && g.x + phys_w <= 1707, "横向不得越界: {:?}", g);
     assert!(g.y >= 0 && g.y + phys_h <= 912, "纵向不得越界: {:?}", g);
+}
+
+/// 150% 小屏 + 任务栏：工作区 1707×864（任务栏占 48px），首窗必须整体落在
+/// 工作区内并留边距，而不是按整屏 912 高收敛后压住任务栏。
+#[test]
+fn initial_window_fits_work_area_above_taskbar_on_150pct_screen() {
+    let screens = [(
+        ScreenRect {
+            x: 0,
+            y: 0,
+            w: 1707,
+            h: 912,
+        },
+        1.5_f32,
+    )];
+    let work_area = (
+        ScreenRect {
+            x: 0,
+            y: 0,
+            w: 1707,
+            h: 864,
+        },
+        1.5_f32,
+    );
+    let g = fit_initial_window(900, 700, &screens, Some(work_area));
+    assert_eq!(g.width, 900, "宽度仍放得下");
+    assert!(g.height < 700, "高度必须收敛到工作区: {}", g.height);
+    assert!(
+        g.height < 554,
+        "任务栏必须参与收敛（整屏可用高度为 554）: {}",
+        g.height
+    );
+    let phys_w = (g.width as f32 * 1.5).round() as i32;
+    let phys_h = (g.height as f32 * 1.5).round() as i32;
+    // 外框 = 客户区 + 非客户区；上下左右各留 8px。
+    assert!(
+        g.x >= 8 && g.x + phys_w + 24 <= 1707 - 8,
+        "横向不得贴边: {:?}",
+        g
+    );
+    assert!(
+        g.y >= 8 && g.y + phys_h + 64 <= 864 - 8,
+        "纵向不得压住任务栏: {:?}",
+        g
+    );
 }
 
 /// 大屏（1920×1080 @100%）：默认尺寸保持，且在屏幕内居中。
@@ -17560,7 +17606,7 @@ fn initial_window_keeps_default_on_large_screen() {
         },
         1.0_f32,
     )];
-    let g = fit_initial_window(900, 700, &screens);
+    let g = fit_initial_window(900, 700, &screens, None);
     assert_eq!((g.width, g.height), (900, 700));
     assert!(g.x > 0 && g.x + 900 <= 1920);
     assert!(g.y > 0 && g.y + 700 <= 1080);
@@ -17569,7 +17615,7 @@ fn initial_window_keeps_default_on_large_screen() {
 /// 无显示器信息：原样返回默认尺寸，不 panic。
 #[test]
 fn initial_window_without_screens_keeps_default() {
-    let g = fit_initial_window(900, 700, &[]);
+    let g = fit_initial_window(900, 700, &[], None);
     assert_eq!((g.width, g.height, g.x, g.y), (900, 700, 0, 0));
 }
 
@@ -17644,6 +17690,37 @@ fn keyboard_search_esc_restores_caret_selection_and_scroll() {
     assert_eq!(a.editor.selection(), selection);
     assert_eq!(a.window_state.scroll_y, scroll);
     assert_eq!(doc_text(&a), before, "Esc 不得误删字符");
+}
+
+/// 滚轮走 `handle_window_event` 生产路径后必须刷新焦点快照，
+/// 随后查找→Esc 归还到用户最后滚到的位置。
+#[test]
+fn mouse_wheel_syncs_focus_snapshot_before_search_esc_restore() {
+    let store = MemStore::default();
+    let text: String = (0..200).map(|i| format!("第 {i} 行 alpha\n")).collect();
+    let mut a = app(&text, None, false, &store);
+    a.ensure_layouts_all();
+    a.handle_window_event(WindowEvent::MouseWheel {
+        device_id: DeviceId::dummy(),
+        delta: MouseScrollDelta::PixelDelta(PhysicalPosition::new(0.0, -120.0)),
+        phase: TouchPhase::Moved,
+    });
+    let wheeled = a.window_state.scroll_y;
+    assert!(wheeled > 0.0, "滚轮必须实际滚动正文: {wheeled}");
+    assert_eq!(
+        a.ui_state.focus_return.map(|f| f.scroll),
+        Some(wheeled),
+        "滚轮后快照必须同步到当前滚动位置"
+    );
+
+    ctrl_key(&mut a, Key::F);
+    a.route_key_with_focus(Key::Text("alpha".into()));
+    a.route_key_with_focus(Key::Escape);
+    assert!(!a.ui_state.search.open);
+    assert_eq!(
+        a.window_state.scroll_y, wheeled,
+        "Esc 关闭查找后必须回到滚轮后的位置"
+    );
 }
 
 #[test]

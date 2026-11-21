@@ -11,7 +11,6 @@ use softbuffer::{Context, Surface};
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, Ime, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::ActiveEventLoop;
-use winit::keyboard::{Key as WKey, NamedKey as WNamedKey};
 use winit::window::{Icon, Window, WindowId};
 
 use crate::autosave::Autosave;
@@ -891,16 +890,28 @@ fn startup_doc(ports: &mut AppPorts, doc: Doc) -> StartupDoc {
                     _ => {
                         out.baseline = disk; // 磁盘读不到时 None → 以内容编码兜底
                         out.missing = r.path.is_some() && out.baseline.is_none();
-                        // 恢复提示带上真实对象与时间：路径为文件名的文件，无路径即「未命名草稿」；
-                        // 时间为本次恢复发生的本地时刻（恢复文件本身不含时间戳）。
+                        // 恢复提示带上真实对象、时间与保存去向：路径为文件名的文件，无路径即「未命名草稿」；
+                        // 时间为本次恢复发生的本地时刻（恢复文件本身不含时间戳）。保存去向按原路径
+                        // 推导（父目录名），无路径时说明可直接选择新位置，避免提示只在状态栏止步。
                         let name = r
                             .path
                             .as_ref()
                             .and_then(|p| p.file_name())
                             .and_then(|n| n.to_str())
                             .unwrap_or(t(Key::UntitledDraft));
+                        let save_hint = match r
+                            .path
+                            .as_ref()
+                            .and_then(|p| p.parent())
+                            .and_then(|dir| dir.file_name())
+                            .and_then(|n| n.to_str())
+                        {
+                            Some(dir) => tf(Key::RecoveredSaveToDir, &[dir]),
+                            None if r.path.is_some() => t(Key::RecoveredSaveToFile).to_string(),
+                            None => t(Key::RecoveredSaveChooseLocation).to_string(),
+                        };
                         let hhmm = ports.clock.local_hhmm();
-                        out.notice = tf(Key::NoticeRecovered, &[name, &hhmm]);
+                        out.notice = tf(Key::NoticeRecovered, &[name, &hhmm, &save_hint]);
                         out.doc.text = r.text;
                         out.doc.path = r.path;
                         out.doc.bom = r.bom;
@@ -1800,15 +1811,68 @@ const DEFAULT_WIN_H: u32 = 700;
 /// 非客户区预留（物理像素）：覆盖标题栏与边框；150% 下实测约 22×56。
 const NON_CLIENT_W: u32 = 24;
 const NON_CLIENT_H: u32 = 64;
+/// 首窗与工作区边缘的留白（物理像素，每侧）：避免贴住任务栏/屏幕边缘。
+const WORK_AREA_MARGIN: u32 = 8;
 
-/// 首窗几何：把默认逻辑尺寸收敛到当前监视器工作区内并居中，保证窗口与标题栏不越界。
+/// 系统主显示器工作区（物理像素）：Windows 用 `SPI_GETWORKAREA` 扣除任务栏/停靠栏；
+/// 非 Windows 或调用失败返回 None，由 winit 显示器整屏矩形回退。
+#[cfg(windows)]
+fn system_work_area() -> Option<ScreenRect> {
+    #[repr(C)]
+    struct WorkRect {
+        left: i32,
+        top: i32,
+        right: i32,
+        bottom: i32,
+    }
+    #[link(name = "user32")]
+    extern "system" {
+        fn SystemParametersInfoW(
+            action: u32,
+            param: u32,
+            data: *mut core::ffi::c_void,
+            win_ini: u32,
+        ) -> i32;
+    }
+    const SPI_GETWORKAREA: u32 = 0x0030;
+    let mut rect = WorkRect {
+        left: 0,
+        top: 0,
+        right: 0,
+        bottom: 0,
+    };
+    // SAFETY: rect 是有效的可写 RECT；SPI_GETWORKAREA 只写入该结构，不持有指针。
+    let ok = unsafe {
+        SystemParametersInfoW(SPI_GETWORKAREA, 0, (&mut rect as *mut WorkRect).cast(), 0)
+    };
+    if ok == 0 {
+        return None;
+    }
+    let w = (rect.right - rect.left).max(0) as u32;
+    let h = (rect.bottom - rect.top).max(0) as u32;
+    (w > 0 && h > 0).then_some(ScreenRect {
+        x: rect.left,
+        y: rect.top,
+        w,
+        h,
+    })
+}
+
+#[cfg(not(windows))]
+fn system_work_area() -> Option<ScreenRect> {
+    None
+}
+
+/// 首窗几何：把默认逻辑尺寸收敛到当前显示器工作区（优先 `work_area`，否则整屏）
+/// 内并居中，保证窗口与标题栏不越界且不压住任务栏。
 /// `screens` 为空（无显示器信息）时原样返回默认尺寸。
 pub(crate) fn fit_initial_window(
     desired_w: u32,
     desired_h: u32,
     screens: &[(ScreenRect, f32)],
+    work_area: Option<(ScreenRect, f32)>,
 ) -> WindowGeom {
-    let Some(&(screen, scale)) = screens.first() else {
+    let Some(&(screen, screen_scale)) = screens.first() else {
         return WindowGeom {
             width: desired_w.max(1),
             height: desired_h.max(1),
@@ -1816,15 +1880,18 @@ pub(crate) fn fit_initial_window(
             y: 0,
         };
     };
+    let (area, scale) = work_area.unwrap_or((screen, screen_scale));
     let scale = if scale.is_finite() && scale > 0.0 {
         scale
     } else {
         1.0
     };
-    let max_w = (((screen.w.saturating_sub(NON_CLIENT_W)) as f32) / scale)
+    let chrome_w = 2 * WORK_AREA_MARGIN + NON_CLIENT_W;
+    let chrome_h = 2 * WORK_AREA_MARGIN + NON_CLIENT_H;
+    let max_w = (((area.w.saturating_sub(chrome_w)) as f32) / scale)
         .floor()
         .max(1.0) as u32;
-    let max_h = (((screen.h.saturating_sub(NON_CLIENT_H)) as f32) / scale)
+    let max_h = (((area.h.saturating_sub(chrome_h)) as f32) / scale)
         .floor()
         .max(1.0) as u32;
     let width = desired_w.clamp(1, max_w);
@@ -1833,8 +1900,10 @@ pub(crate) fn fit_initial_window(
     let phys_h = (height as f32 * scale).round() as i64;
     let outer_w = phys_w + NON_CLIENT_W as i64;
     let outer_h = phys_h + NON_CLIENT_H as i64;
-    let x = screen.x as i64 + (screen.w as i64 - outer_w).max(0) / 2;
-    let y = screen.y as i64 + (screen.h as i64 - outer_h).max(0) / 2;
+    let avail_w = area.w as i64 - i64::from(2 * WORK_AREA_MARGIN);
+    let avail_h = area.h as i64 - i64::from(2 * WORK_AREA_MARGIN);
+    let x = area.x as i64 + i64::from(WORK_AREA_MARGIN) + (avail_w - outer_w).max(0) / 2;
+    let y = area.y as i64 + i64::from(WORK_AREA_MARGIN) + (avail_h - outer_h).max(0) / 2;
     let clamp_pos = |v: i64| v.clamp(i32::MIN as i64, i32::MAX as i64) as i32;
     WindowGeom {
         width,
@@ -1859,26 +1928,40 @@ impl App {
         }
         // 窗口几何（3d）：读回上次退出时的逻辑尺寸 + 物理坐标，先按当前显示器集合夹取，
         // 避免显示器拔出/分辨率改变后窗口落在屏外。无几何记录时把默认 900×700
-        // 收敛到当前监视器工作区（150% 小屏下不再超高）并居中。
-        let monitors: Vec<(ScreenRect, f32)> = event_loop
+        // 收敛到当前主显示器工作区（150% 小屏 + 任务栏下不再被遮挡）并居中。
+        let monitor_rect = |m: &winit::monitor::MonitorHandle| {
+            let pos = m.position();
+            let size = m.size();
+            (
+                ScreenRect {
+                    x: pos.x,
+                    y: pos.y,
+                    w: size.width,
+                    h: size.height,
+                },
+                m.scale_factor() as f32,
+            )
+        };
+        let mut monitors: Vec<(ScreenRect, f32)> = event_loop
             .available_monitors()
-            .map(|m| {
-                let pos = m.position();
-                let size = m.size();
-                (
-                    ScreenRect {
-                        x: pos.x,
-                        y: pos.y,
-                        w: size.width,
-                        h: size.height,
-                    },
-                    m.scale_factor() as f32,
-                )
-            })
+            .map(|m| monitor_rect(&m))
             .collect();
+        // 工作区来自系统主显示器：把主显示器排到首位，保证工作区与其缩放同源。
+        let primary = event_loop.primary_monitor().map(|m| monitor_rect(&m));
+        if let Some((primary_rect, _)) = primary {
+            if let Some(i) = monitors.iter().position(|(rect, _)| *rect == primary_rect) {
+                monitors.swap(0, i);
+            }
+        }
+        let work_area = match (primary, monitors.first()) {
+            (Some((primary_rect, primary_scale)), Some((first, _))) if *first == primary_rect => {
+                system_work_area().map(|area| (area, primary_scale))
+            }
+            _ => None,
+        };
         let screens: Vec<ScreenRect> = monitors.iter().map(|(s, _)| *s).collect();
         let saved_geom = self.config.window.map(|g| clamp_window_geom(g, &screens));
-        let initial_geom = fit_initial_window(DEFAULT_WIN_W, DEFAULT_WIN_H, &monitors);
+        let initial_geom = fit_initial_window(DEFAULT_WIN_W, DEFAULT_WIN_H, &monitors, work_area);
         let geom = saved_geom.unwrap_or(initial_geom);
         let attrs = Window::default_attributes()
             .with_title(self.title_text())
@@ -2082,14 +2165,9 @@ impl App {
             WindowEvent::DroppedFile(path) => self.drop_file(path),
             WindowEvent::HoveredFile(path) => self.hover_file(Some(path)),
             WindowEvent::HoveredFileCancelled => self.hover_file(None),
-            WindowEvent::KeyboardInput { event, .. } => {
-                // 键盘闭环：无浮层时持续记录正文焦点；Esc 从浮层回到正文时归还。
-                let escape = event.state == ElementState::Pressed
-                    && matches!(event.logical_key, WKey::Named(WNamedKey::Escape));
-                let was_open = self.begin_keyboard_route();
-                self.on_key(&event);
-                self.end_keyboard_route(was_open, escape);
-            }
+            // `on_key` 经 `route_key_with_focus` 路由：无浮层时持续记录正文焦点，
+            // Esc 从浮层回到正文时归还，与测试走同一入口。
+            WindowEvent::KeyboardInput { event, .. } => self.on_key(&event),
             WindowEvent::ModifiersChanged(m) => {
                 let s = m.state();
                 self.input_state.mods = Mods {

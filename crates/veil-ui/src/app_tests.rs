@@ -17666,6 +17666,50 @@ fn initial_window_without_screens_keeps_default() {
     assert_eq!((g.width, g.height, g.x, g.y), (900, 700, 0, 0));
 }
 
+/// 最小尺寸必须小于默认 900×700（小屏不被强行放大），且在 150% DPI 下
+/// 仍能完整显示菜单栏 + 4 行通知浮层 + 状态栏，而不是只剩首行。
+#[test]
+fn min_window_size_keeps_four_notice_lines_and_status_readable() {
+    let (min_w, min_h) = MIN_WINDOW_SIZE;
+    assert!(
+        min_w > 0.0 && min_h > 0.0 && min_w <= 900.0 && min_h <= 700.0,
+        "最小尺寸须为正且不大于默认 900×700: {min_w}×{min_h}"
+    );
+    let scale = 1.5_f32;
+    let need_h = (chrome::MENU_H
+        + chrome::STATUS_H
+        + MIN_NOTICE_LINES * crate::tokens::typography::UI_LINE_HEIGHT
+        + 2.0 * crate::tokens::space::S)
+        * scale;
+    assert!(
+        min_h * scale >= need_h,
+        "150% 下最小高度 {min_h} 逻辑须容纳菜单栏+状态栏+{MIN_NOTICE_LINES} 行通知（需 {need_h} 物理）"
+    );
+}
+
+/// 极小工作区：首窗收敛也不得低于最小尺寸（最小尺寸是硬约束）。
+#[test]
+fn initial_window_never_falls_below_min_size_on_tiny_work_area() {
+    let screens = [(
+        ScreenRect {
+            x: 0,
+            y: 0,
+            w: 200,
+            h: 200,
+        },
+        1.0_f32,
+    )];
+    let g = fit_initial_window(900, 700, &screens, None);
+    assert!(
+        g.width >= MIN_WINDOW_SIZE.0 as u32,
+        "宽度不得低于最小: {g:?}"
+    );
+    assert!(
+        g.height >= MIN_WINDOW_SIZE.1 as u32,
+        "高度不得低于最小: {g:?}"
+    );
+}
+
 // ===== 键盘闭环与焦点归还（Task 4） =====
 
 /// Ctrl + 单键：真实路径与测试共用取模后的 `route_key_with_focus`。

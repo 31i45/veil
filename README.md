@@ -137,7 +137,7 @@ cargo build --release --bin veil
 cargo test -p veil-mermaid-offline
 ```
 
-Final release gate: serial `cargo test --workspace --release -- --test-threads=1` passed at commit `c19a082` (`release-record.json`, `tests.status=passed`); the re-runnable `veil-ui` lib breakdown is **1280 passed / 11 ignored**. Earlier, commit `97d3a60` recorded 1919 passed / 0 failed / 15 ignored (the remote-SVG mock uses a 20 ms wall-clock deadline, so parallel runs can produce false timeouts). `cargo test -p veil --lib` is 221 passed / 1 ignored with the default feature set, which now includes the offline engine. `cargo clippy --workspace --all-targets -- -D warnings` zero warnings.
+Final release gate: serial `cargo test --workspace --release -- --test-threads=1` passed at commit `0d229eb` (`release-record.json`, `tests.status=passed`); the re-runnable `veil-ui` lib breakdown is **1281 passed / 11 ignored**. Earlier, commit `97d3a60` recorded 1919 passed / 0 failed / 15 ignored (the remote-SVG mock uses a 20 ms wall-clock deadline, so parallel runs can produce false timeouts). `cargo test -p veil --lib` is 221 passed / 1 ignored with the default feature set, which now includes the offline engine. `cargo clippy --workspace --all-targets -- -D warnings` zero warnings.
 
 Release CI runs on `v*` tag pushes and through `workflow_dispatch`. Manual dispatch defaults to `dry_run=true` and runs Linux core check/test plus the Windows build, tests, clippy, artifact boundary, smoke and SHA-256 validation without creating or uploading a GitHub Release. Only a `v*` tag push can publish. Smoke failures are never hidden with `continue-on-error`.
 
@@ -155,7 +155,7 @@ The window budget is **1 second**: `-MaxLaunchMs` (default 1000) measures proces
 
 ## Red Numbers (targets vs measured)
 
-Measured on release build, probe-serialized; final performance/size rows bound to the 2026-11-21 final rebuild (commit `c19a082`, `veil.exe` 14,011,392 B, SHA-256 `B921300F…F237DE3B`); earlier rows retain their original measurement dates. Commands: `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo run --release -p veil --example bench_typing`, `cargo test -p veil-ui --release --lib -- --ignored --nocapture --test-threads=1 perf_20k_blocks`, `cargo build --release -p veil` + `(Get-Item target\release\veil.exe).Length`, and `cargo tree -p veil --edges normal --prefix none` for dependency counts. Keystroke attribution detail in `docs/review/keystroke-attribution.md`.
+Measured on release build, probe-serialized; final performance/size rows bound to the 2026-11-21 final rebuild (commit `0d229eb`, `veil.exe` 14,012,928 B, SHA-256 `8DF551F8…9B456763`); earlier rows retain their original measurement dates. Commands: `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo run --release -p veil --example bench_typing`, `cargo test -p veil-ui --release --lib -- --ignored --nocapture --test-threads=1 perf_20k_blocks`, `cargo build --release -p veil` + `(Get-Item target\release\veil.exe).Length`, and `cargo tree -p veil --edges normal --prefix none` for dependency counts. Keystroke attribution detail in `docs/review/keystroke-attribution.md`.
 
 | Metric | Target | Measured |
 |---|---|---|
@@ -164,9 +164,9 @@ Measured on release build, probe-serialized; final performance/size rows bound t
 | Cold start (bench harness, process create → open → first layout; p50 / max) | observation only | 576.46 / 599.98 ms (2026-11-09, `cargo run --release -p veil --example bench_typing`; baseline 520.87 / 533.85 → +10.7% / +12.4%, regression gate ≤ 20%) |
 | Cold start (wall clock, process create → first frame; observation only) | ≤ 300 ms | 450–529 ms (440–470 ms before `main`, process-create overhead on this machine; 2026-10-31) |
 | Cold start (window handle; P2 comparison definition) | — | 30 ms (2026-10-30, `tools/bench/measure.ps1`) |
-| Keystroke→commit p95 on 100 K-word doc | ≤ 16 ms | p50 2.519–2.537 ms · p95 2.907–2.958 ms · max ≤3.864 ms (`perf_20k_blocks` 21,000 blocks / 300 samples, 2 runs, final exe 2026-11-21 commit `c19a082`; worst p95 2.958 ms ≤ 16 ms. Earlier 10k record: 0.973 / 1.566 ms) ✅ |
+| Keystroke→commit p95 on 100 K-word doc | ≤ 16 ms | p50 2.231–2.268 ms · p95 2.556–2.615 ms · max ≤3.468 ms (`perf_20k_blocks` 21,000 blocks / 300 samples, 2 runs, final exe 2026-11-21 commit `0d229eb`; worst p95 2.615 ms ≤ 16 ms. Earlier 10k record: 0.973 / 1.566 ms) ✅ |
 | Resident memory, 100 K-word doc (private working set) | ≤ 150 MB | 40.76 MB (2026-11-05) |
-| Installed size — total single-file `veil.exe` | ≤ 14 MiB = 14,680,064 B | 13.36 MiB = 14,011,392 B (2026-11-21 final clean rebuild, commit `c19a082`, SHA-256 `B921300F…F237DE3B`; single product: offline Mermaid engine + full `mermaid.js` + resvg, lazy-initialised) |
+| Installed size — total single-file `veil.exe` | ≤ 14 MiB = 14,680,064 B | 13.36 MiB = 14,012,928 B (2026-11-21 final clean rebuild, commit `0d229eb`, SHA-256 `8DF551F8…9B456763`; single product: offline Mermaid engine + full `mermaid.js` + resvg, lazy-initialised) |
 | `veil-core` unit + property tests | ≥ 80 | 347 |
 | E2E assertions | ≥ 20 | 41 (3 e2e scenarios: open→save→reopen, table+image paste, find/replace→crash recovery→self-clean) ✅ |
 | Markdown roundtrip (no edits: output == input bytes; byte comparison) | 100% | 100% |

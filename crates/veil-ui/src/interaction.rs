@@ -41,6 +41,13 @@ const ZOOM_STEP: f32 = 0.1;
 const ZOOM_MIN: f32 = 0.5;
 const ZOOM_MAX: f32 = 3.0;
 
+/// mermaid.live 打开结果的用户可见反馈；源码已在调用前复制，失败时给出手动恢复路径。
+fn mermaid_live_open_notice(result: Result<(), String>) -> Option<String> {
+    result
+        .err()
+        .map(|e| tf(I18nKey::NoticeMermaidLiveOpenFailed, &[&clip_error(&e)]))
+}
+
 impl App {
     /// 编辑后统一入口：重建索引、视口跟随光标、请求重绘。
     /// 仅内容编辑重启自动保存静默期；纯光标移动不推迟落盘。
@@ -2293,7 +2300,11 @@ impl App {
                 // 打开站点首页，URL 不携带源码；产品自身不上传、不抓取。
                 self.ports.clipboard.set(&body);
                 if action == CtxAction::MermaidPreview {
-                    let _ = self.ports.url_opener.open_url("https://mermaid.live/");
+                    let result = self.ports.url_opener.open_url("https://mermaid.live/");
+                    if let Some(notice) = mermaid_live_open_notice(result) {
+                        self.ui_state.chrome.notice = notice;
+                        self.request_redraw();
+                    }
                 }
             }
             // Mermaid 手动预览/快照只走进程内本地渲染，不改写活源码。
@@ -4508,5 +4519,25 @@ impl App {
             );
         }
         (margin, vp.y + margin - scroll, line_h)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mermaid_live_open_success_has_no_error_notice() {
+        assert_eq!(mermaid_live_open_notice(Ok(())), None);
+    }
+
+    #[test]
+    fn mermaid_live_open_failure_explains_manual_recovery() {
+        let notice = mermaid_live_open_notice(Err("浏览器不可用\n详细堆栈".into()))
+            .expect("打开失败必须产生用户可见提示");
+        assert!(notice.contains("无法打开 mermaid.live：浏览器不可用"));
+        assert!(notice.contains("Mermaid 源码已复制"));
+        assert!(notice.contains("手动打开 https://mermaid.live/ 并粘贴源码"));
+        assert!(!notice.contains("详细堆栈"), "状态栏只显示首行错误");
     }
 }

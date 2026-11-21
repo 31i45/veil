@@ -5,8 +5,14 @@
 
 .DESCRIPTION
   启动指定 exe，等待主窗口出现，验证标题与 stderr 无 softbuffer/panic 痕迹，
-  然后请求正常关闭并检查退出码。子进程始终使用脚本创建的临时 VEIL_HOME，
-  不传文档路径，避免读取真实配置或恢复用户文档。
+  然后请求正常关闭并检查退出码。子进程始终使用脚本创建的临时 VEIL_HOME、
+  APPDATA、USERPROFILE 与工作目录，不传 CLI 文档路径。唯一输入文档和恢复态都由
+  脚本在隔离目录生成；真实用户配置、会话与用户文档路径不提供给被测进程。
+
+  持久化隔离断言：恢复文件只在 VEIL_HOME 被清理，session.txt 与 config.toml 只在
+  VEIL_HOME 产生；隔离 APPDATA、工作目录和文档目录的文件列表、SHA-256、长度及
+  LastWriteTimeUtc 均保持不变。哨兵不变证明这些位置未被写入，不是 OS 读取审计；
+  读取路径优先级由 veil_home_overrides_config_and_data_paths 纯测试覆盖。
 
   窗口探测只使用 Win32 EnumWindows + GetWindowText 按标题枚举目标进程的顶层
   窗口，不回退到 Process.MainWindowHandle（Session 0 下该句柄为 0 并不代表
@@ -204,6 +210,38 @@ function Get-TailLines {
     return $lines[($lines.Count - $Count)..($lines.Count - 1)]
 }
 
+# 只枚举脚本创建的隔离树。文件内容哈希证明字节未改；路径、类型、长度和 UTC
+# 写入时间同时入指纹，能发现新增、删除、替换与仅改写时间戳。目录也纳入以发现空目录。
+function Get-TreeFingerprint {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $root = [System.IO.Path]::GetFullPath($Path)
+    $rows = @(Get-ChildItem -LiteralPath $root -Recurse -Force | Sort-Object FullName | ForEach-Object {
+        $isDirectory = $_.PSIsContainer
+        [pscustomobject][ordered]@{
+            path = $_.FullName.Substring($root.Length).TrimStart('\')
+            kind = $(if ($isDirectory) { 'directory' } else { 'file' })
+            length = $(if ($isDirectory) { 0 } else { $_.Length })
+            last_write_utc_ticks = $_.LastWriteTimeUtc.Ticks
+            sha256 = $(if ($isDirectory) { '' } else { (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash })
+        }
+    })
+    return ConvertTo-Json -InputObject $rows -Compress -Depth 3
+}
+
+function Assert-TreeUnchanged {
+    param(
+        [Parameter(Mandatory = $true)][string]$Name,
+        [Parameter(Mandatory = $true)][string]$Before,
+        [Parameter(Mandatory = $true)][string]$Path
+    )
+
+    $after = Get-TreeFingerprint -Path $Path
+    if ($Before -cne $after) {
+        throw "$Name changed; before=$Before; after=$after"
+    }
+}
+
 $resolved = $null
 try { $resolved = (Resolve-Path -LiteralPath $ExePath -ErrorAction Stop).ProviderPath } catch { }
 if (-not $resolved -or -not (Test-Path -LiteralPath $resolved -PathType Leaf)) {
@@ -228,9 +266,57 @@ $tempDir = [System.IO.Path]::GetTempPath()
 $stdoutPath = Join-Path $tempDir "veil-smoke-$stamp.stdout.log"
 $stderrPath = Join-Path $tempDir "veil-smoke-$stamp.stderr.log"
 $smokeHome = Join-Path $tempDir "veil-smoke-$stamp.home"
-New-Item -ItemType Directory -Path $smokeHome -ErrorAction Stop | Out-Null
+$smokeAppData = Join-Path $tempDir "veil-smoke-$stamp.appdata"
+$smokeAppDataVeil = Join-Path $smokeAppData 'Veil'
+$smokeWork = Join-Path $tempDir "veil-smoke-$stamp.work"
+$smokeUserProfile = Join-Path $tempDir "veil-smoke-$stamp.profile"
+$smokeDocuments = Join-Path $smokeUserProfile 'Documents'
+$smokeDocument = Join-Path $smokeDocuments 'veil-isolation-input.md'
+New-Item -ItemType Directory -Force -ErrorAction Stop -Path `
+    $smokeHome, $smokeAppDataVeil, (Join-Path $smokeAppDataVeil 'snapshots'), `
+    $smokeWork, (Join-Path $smokeWork 'Veil'), $smokeDocuments | Out-Null
+
+# 所有哨兵都位于临时树；脚本不枚举或指纹化真实 APPDATA/用户文档。
+$utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+$sentinelFiles = @(
+    (Join-Path $smokeAppDataVeil 'config.toml'),
+    (Join-Path $smokeAppDataVeil 'callouts.json'),
+    (Join-Path $smokeAppDataVeil 'recovery.dat'),
+    (Join-Path $smokeAppDataVeil 'session.txt'),
+    (Join-Path $smokeAppDataVeil 'snapshots\decoy.meta'),
+    (Join-Path $smokeWork 'Veil\config.toml'),
+    (Join-Path $smokeWork 'decoy.md'),
+    (Join-Path $smokeDocuments 'do-not-open.md')
+)
+foreach ($sentinel in $sentinelFiles) {
+    [System.IO.File]::WriteAllText(
+        $sentinel,
+        "VEIL-SMOKE-SENTINEL $stamp`n",
+        $utf8NoBom)
+}
+
+# 合法恢复槽指向隔离文档且内容与磁盘一致：产品启动应清槽、登记 session，
+# 而不是读取隔离 APPDATA 中的同名哨兵。正常关窗再写窗口配置。
+$documentText = "# Veil isolated smoke`n`nOnly this temporary document may be read.`n"
+[System.IO.File]::WriteAllText($smokeDocument, $documentText, $utf8NoBom)
+$documentPathBytes = $utf8NoBom.GetBytes($smokeDocument)
+$recoveryText = "VEIL-RECOVERY-1`nbom=0`npath_len=$($documentPathBytes.Length)`n$smokeDocument`n$documentText"
+$smokeRecovery = Join-Path $smokeHome 'recovery.dat'
+[System.IO.File]::WriteAllText($smokeRecovery, $recoveryText, $utf8NoBom)
+
+$appDataBefore = Get-TreeFingerprint -Path $smokeAppData
+$workBefore = Get-TreeFingerprint -Path $smokeWork
+$documentsBefore = Get-TreeFingerprint -Path $smokeDocuments
 $previousVeilHome = $env:VEIL_HOME
+$previousAppData = $env:APPDATA
+$previousUserProfile = $env:USERPROFILE
+$previousHome = $env:HOME
+$previousXdgConfigHome = $env:XDG_CONFIG_HOME
 $env:VEIL_HOME = $smokeHome
+$env:APPDATA = $smokeAppData
+$env:USERPROFILE = $smokeUserProfile
+$env:HOME = $smokeUserProfile
+$env:XDG_CONFIG_HOME = Join-Path $smokeAppData 'xdg'
 
 $proc = $null
 $stage = 'init'
@@ -247,7 +333,7 @@ $probeSource = 'none'
 try {
     $stage = 'process-start'
     $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
-    $proc = Start-Process -FilePath $exeFull -PassThru `
+    $proc = Start-Process -FilePath $exeFull -PassThru -WorkingDirectory $smokeWork `
         -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
     try { $targetSessionId = (Get-Process -Id $proc.Id).SessionId } catch { $targetSessionId = -1 }
 
@@ -422,6 +508,10 @@ finally {
         } catch { }
     }
     $env:VEIL_HOME = $previousVeilHome
+    $env:APPDATA = $previousAppData
+    $env:USERPROFILE = $previousUserProfile
+    $env:HOME = $previousHome
+    $env:XDG_CONFIG_HOME = $previousXdgConfigHome
     Start-Sleep -Milliseconds 100
     $stderrText = Get-LogText -Path $stderrPath
     $stdoutText = Get-LogText -Path $stdoutPath
@@ -438,6 +528,37 @@ if ($stage -in @('pass', 'pass-degraded') -and $panicHits.Count -gt 0) {
     $detail = 'stderr contains a softbuffer/panic signature after otherwise successful smoke assertions'
 }
 
+$isolationText = 'not-run'
+if ($stage -in @('pass', 'pass-degraded')) {
+    try {
+        if (Test-Path -LiteralPath $smokeRecovery) {
+            throw 'recovery.dat was not cleared inside VEIL_HOME'
+        }
+        $configArtifact = Join-Path $smokeHome 'config.toml'
+        $sessionArtifact = Join-Path $smokeHome 'session.txt'
+        if (-not (Test-Path -LiteralPath $configArtifact -PathType Leaf) -or
+            (Get-Item -LiteralPath $configArtifact).Length -le 0) {
+            throw 'config.toml was not produced inside VEIL_HOME'
+        }
+        if (-not (Test-Path -LiteralPath $sessionArtifact -PathType Leaf)) {
+            throw 'session.txt was not produced inside VEIL_HOME'
+        }
+        $sessionText = [System.IO.File]::ReadAllText($sessionArtifact)
+        if (-not $sessionText.Contains($smokeDocument)) {
+            throw "session.txt does not reference only the isolated document: $sessionText"
+        }
+        Assert-TreeUnchanged -Name 'isolated APPDATA sentinel tree' -Before $appDataBefore -Path $smokeAppData
+        Assert-TreeUnchanged -Name 'isolated working-directory sentinel tree' -Before $workBefore -Path $smokeWork
+        Assert-TreeUnchanged -Name 'isolated documents tree' -Before $documentsBefore -Path $smokeDocuments
+        $isolationText = 'pass'
+    }
+    catch {
+        $stage = 'isolation-failed'
+        $detail = $_.Exception.Message
+        $isolationText = 'fail'
+    }
+}
+
 $status = if ($stage -in @('pass', 'pass-degraded')) { 'PASS' } else { 'FAIL' }
 $hwndText = if ($hwnd -ne [IntPtr]::Zero) { '0x{0:X}' -f $hwnd.ToInt64() } else { 'none' }
 $exitText = if ($null -ne $exitCode) {
@@ -451,6 +572,10 @@ Write-Host ("SMOKE {0} exe={1} stage={2} launch_ms={3} max_ms={4} hwnd={5} title
     $status, $exeFull, $stage, $launchMs, $MaxLaunchMs, $hwndText, $titleText, $exitText, $panicText, $TimeoutSeconds, `
     $currentSessionId, $targetSessionId, $userInteractive.ToString().ToLowerInvariant(), $interactiveDesktop.ToString().ToLowerInvariant(), $probeSource, 'isolated')
 
+if ($isolationText -eq 'pass') {
+    Write-Host 'SMOKE ISOLATION PASS config=veil_home session=veil_home recovery=cleared_in_veil_home appdata_sentinels=unchanged workdir_sentinels=unchanged documents=unchanged fingerprint=path+kind+length+last_write_utc+sha256 read_audit=not-covered'
+}
+
 if ($stage -eq 'pass-degraded') {
     Write-Host "  degraded=true detail=$detail"
 }
@@ -463,7 +588,7 @@ if ($status -eq 'FAIL') {
 }
 
 Remove-Item -LiteralPath $stdoutPath, $stderrPath -Force -ErrorAction SilentlyContinue
-Remove-Item -LiteralPath $smokeHome -Recurse -Force -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath $smokeHome, $smokeAppData, $smokeWork, $smokeUserProfile -Recurse -Force -ErrorAction SilentlyContinue
 
 if ($status -eq 'FAIL') { exit 1 }
 exit 0

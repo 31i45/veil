@@ -232,7 +232,7 @@ pub fn run() {
             url_opener: platform::url_opener(),
         },
         // 非首窗创建失败（如第二窗口）：发布构建无控制台，必须弹可见错误框。
-        |message| platform::show_error(t(Key::FatalWindowCreate), message),
+        platform::show_window_create_error,
         doc_requests,
     );
     drop(primary);

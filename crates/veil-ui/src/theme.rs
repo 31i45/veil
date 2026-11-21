@@ -13,7 +13,7 @@
 //! doc_font_family = "system"  # system | sans | serif | mono
 //! doc_font_size = 16     # 正文基准字号（物理像素），夹取 10..=32
 //! doc_line_height = 22   # 正文基准行高（物理像素），夹取 字号..=字号×3
-//! allow_remote_images = true  # 远程图片默认自动加载；false = 全局阻止
+//! allow_remote_images = false  # 默认阻止普通远程图片；true = 用户显式允许
 //! tab_width = 4          # 制表符宽度（2 或 4），默认 4
 //! image_cache_limit_mb = 200  # 图片缓存字节上限（MiB），0 = 不限制
 //! # 以下四项仅在窗口几何已知时成组写入（旧配置不含这些键）
@@ -485,7 +485,7 @@ pub struct Config {
     pub doc_font_size: f32,
     /// 正文行高（物理像素基准，夹取 字号..=字号×3）。
     pub doc_line_height: f32,
-    /// 远程图片自动加载（默认开）；false = 全局阻止，只显示 alt 文本。
+    /// 普通远程图片自动加载（默认关）；true = 用户显式允许，false = 全局阻止，只显示 alt 文本。
     pub allow_remote_images: bool,
     /// 制表符宽度（2 或 4，默认 4）；其它值夹到 4。
     pub tab_width: u8,
@@ -505,7 +505,7 @@ impl Default for Config {
             doc_font_family: DocFontFamily::System,
             doc_font_size: DEFAULT_DOC_FONT_SIZE,
             doc_line_height: DEFAULT_DOC_LINE_HEIGHT,
-            allow_remote_images: true,
+            allow_remote_images: false,
             tab_width: DEFAULT_TAB_WIDTH,
             image_cache_limit_mb: DEFAULT_IMAGE_CACHE_LIMIT_MB,
             window: None,
@@ -1344,13 +1344,13 @@ mod tests {
     }
 
     #[test]
-    fn allow_remote_images_defaults_true_and_parses_bool() {
-        // 空配置 / 旧配置缺键：默认自动加载，且不产生 ignored
+    fn allow_remote_images_defaults_false_and_parses_explicit_bool() {
+        // 空配置 / 旧配置缺键：默认阻止，且不产生 ignored
         let p = parse("");
-        assert!(p.config.allow_remote_images);
+        assert!(!p.config.allow_remote_images);
         assert_eq!(p.ignored, 0);
-        assert!(parse("mode = \"dark\"\n").config.allow_remote_images);
-        // 显式关闭 / 打开
+        assert!(!parse("mode = \"dark\"\n").config.allow_remote_images);
+        // 用户显式关闭 / 打开的既有配置均保留原语义
         assert!(
             !parse("allow_remote_images = false")
                 .config
@@ -1361,9 +1361,9 @@ mod tests {
                 .config
                 .allow_remote_images
         );
-        // 非法字面量：回落默认并计数
+        // 非法字面量：回落安全默认并计数
         let p = parse("allow_remote_images = \"false\"");
-        assert!(p.config.allow_remote_images);
+        assert!(!p.config.allow_remote_images);
         assert_eq!(p.ignored, 1);
     }
 

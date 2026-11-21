@@ -41,6 +41,9 @@ mod view;
 
 #[cfg(test)]
 mod app_tests;
+// 测试内按原路径加载产品平台错误框实现时，保持其 veil_ui 引用不变。
+#[cfg(test)]
+extern crate self as veil_ui;
 
 pub use app::{
     content_hash, format_unix_ms_utc, normalize_link_url, url_is_openable, Clipboard, Clock, Doc,

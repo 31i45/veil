@@ -1,0 +1,1 @@
+WorkAreaPhysical=0,0,2560,1368 BoundsPhysical=0,0,2560,1440

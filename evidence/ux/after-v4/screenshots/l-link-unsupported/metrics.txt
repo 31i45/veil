@@ -1,0 +1,5 @@
+ClickClient=120,95
+Window=1350x1050 client
+PrintWindow1=True
+PrintWindow2=True
+IntervalSeconds=7

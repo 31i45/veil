@@ -1,0 +1,14 @@
+{
+  "theme": "dark",
+  "walkthrough_exit": 0,
+  "close": "pid=17460 closeMainWindow=True exited=True",
+  "temp_root": "C:\\Users\\31i45\\AppData\\Local\\Temp\\veil-uxfinal-458cc635f9e74d88b971e9b5bc27ea31\\tmp\\veil-uxfinal-c02a2cc179204b1bbaf7608036ec51a1",
+  "config": "mode=\"dark\"",
+  "corpus_sha256": "0A2345A076DDB7AB2EE1D0082AF28F8F72DA1BC0F4BE9C1D5396AB835362C106",
+  "html_bytes": 78577,
+  "html_sha256": "B667DBE6CAF5E51DDFF5BFCD36005D93C632BB6F6B8C6697CAFE56B919855B98",
+  "pdf_bytes": 27774154,
+  "pdf_sha256": "8120795C45632B75373AEBCCBD22BE740E34C1E5EA9C9140A946A0467725D1BB",
+  "html_walkthrough_exit": 1,
+  "pdf_walkthrough_exit": 1
+}

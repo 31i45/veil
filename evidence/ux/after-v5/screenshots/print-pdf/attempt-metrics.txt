@@ -1,0 +1,7 @@
+dialog=hwnd=1836472 1281x720
+confirm_popup=hwnd=1640848 549x214
+target_pdf=D:\VSCode\Veil\evidence\ux\after-v5\_work\p\pdf\locked.pdf
+target_pdf_bytes=16
+target_pdf_readonly=True
+client=1350x1050
+shot_modal_ok=False shot_notice_ok=False

@@ -1,0 +1,12 @@
+method=real_mouse_drag_from_bottom_right_border
+dpi=144 scale=1.5
+before_outer_px=1372x1106 before_client_px=1350x1050
+drag_from=(1961,1229)_to=(713,247)
+after_drag_client_px=780x540
+after_drag_client_logical=520x360
+final_outer_px=802x596 final_client_px=780x540
+final_client_logical=520x360
+clamped_to_min_520x360_logical=True
+client_equals_expected_min_px=True
+printwindow_ok=True
+dark_text_row_bands_in_client=15..32,58..77,114..165,229..251,407..407,409..421,431..435,437..447,449..449,458..475,487..488,490..501,503..504,513..528

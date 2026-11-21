@@ -4,7 +4,7 @@ Veil 版本迭代记录。每个版本的详细修复清单见对应 git tag 的
 
 ## v3.0.0 — 2026-11-21
 
-**BREAKING**：只发布一个 `veil.exe`；Mermaid 改为进程内本地渲染。最终干净重建产物 2026-11-21（commit `c19a082`）；2026-11-20 为初版构建，其体积/SHA 仅作历史参照。
+**BREAKING**：只发布一个 `veil.exe`；Mermaid 改为进程内本地渲染。最终干净重建产物 2026-11-21（commit `0d229eb`）；2026-11-20 为初版构建，其体积/SHA 仅作历史参照。
 
 ### BREAKING
 - 停止发布 `veil-full.exe`：删除 `veil-full` bin、`required-features` 分支与 `target-full` 发布路径。**迁移：此前使用较大离线发行包的用户直接改用新的 `veil.exe`，能力不减**；文件关联与 `/register` 行为不变
@@ -19,7 +19,7 @@ Veil 版本迭代记录。每个版本的详细修复清单见对应 git tag 的
 - 发布管线只剩一条：一次干净构建（默认 feature）、一次串行测试、一次 clippy、一次门禁、一次冒烟、一份 SHA-256；`CARGO_TARGET_DIR` 统一为默认 `target`
 - workspace 版本号升至 3.0.0
 
-### Fixed（UX 工艺：反馈、焦点与可发现性，commits `eb8825a`、`3d6adf4`、`7c00765`、`345d8c6`、`77b88e2`、`ce038eb`、`c19a082`）
+### Fixed（UX 工艺：反馈、焦点与可发现性，commits `eb8825a`、`3d6adf4`、`7c00765`、`345d8c6`、`77b88e2`、`ce038eb`、`c19a082`、`0d229eb`）
 - 状态栏按「文件名 > 保存态 > 外部变更 > 源码模式」降级，长路径与窄窗口下不再截断「未保存 / 已保存」；移除与「未保存」重复的 ` *` 脏标
 - 通知不再静默丢失：中段空间不足时依次压缩左文、占用右文、浮层显示；错误类通知不再 6 秒自动消失，保留到下一次通知或用户处理
 - 导出失败提示补齐下一步；崩溃恢复提示说明恢复对象、时间与保存去向；未保存关闭对话框逐项说明保存 / 不保存 / 取消的后果，默认焦点为保存
@@ -31,8 +31,9 @@ Veil 版本迭代记录。每个版本的详细修复清单见对应 git tag 的
 - 收尾修复 R3：崩溃恢复提示改走浮层，完整保留恢复对象、恢复时间与保存去向
 - 图片类失败提示补齐「原因 + 下一步」：读取、保存、格式不支持、文件缺失与远程加载失败均说明可执行的下一步，并新增测试锁定（commit `345d8c6`）
 - 最小窗口 520×360：用户拖拽与配置恢复路径钳制到 520×360 逻辑，最小尺寸下错误通知与状态栏仍完整可读（commit `ce038eb`）
-- 错误通知常驻复验：链接不支持与图片格式错误通知在 7 秒后逐字节不变，不再随 TTL 自动消失（commit `77b88e2`）
-- 链接与外部文件提示补齐「原因 + 下一步」：链接不支持 / 打开失败、文件被外部删除 / 暂不可读均说明现状与可执行下一步，错误通知 7 秒后逐字节不变（commit `c19a082`）
+- 错误类通知常驻复验：链接不支持与图片格式错误通知在 7 秒后逐字节不变，不再随 TTL 自动消失（commit `77b88e2`）
+- 链接与外部文件提示补齐「原因 + 下一步」：链接不支持 / 打开失败属错误类，通知 7 秒后逐字节不变；文件被外部删除 / 暂不可读沿用短时的状态提示（6 s），但文案已含现状与可执行下一步（commit `c19a082`）
+- 失败文案全量穷举：新增 `all_failure_notices_offer_next_step` 锁测试，覆盖 A/D 类 51 个 Key（含 3 个致命启动、4 个 CLI），逐条断言现状词 + 「下一步」/「重启应用」，并显式排除 B/C 类纯引导与成功/状态提示；配置未保存与 Mermaid 快照失败补实拍（commit `0d229eb`）
 
 ### Fixed（Task 9A：两路评审可控 FAIL 闭环，commits `518ae84`、`97d3a60`）
 - 普通远程图片默认关闭：仅在用户显式 opt-in（视图 → 允许远程图片）后才加载 http/https 图片，默认零后台网络；导出/PDF 永不包含远程资源
@@ -42,8 +43,8 @@ Veil 版本迭代记录。每个版本的详细修复清单见对应 git tag 的
 - 20k 击键探针：新增 `perf_20k_blocks`（21,000 块 / 300 样本）覆盖 G2 门槛，当时构建（`ce038eb`）实测最差 p95 3.031 ms ≤ 16 ms（历史证据 `evidence/ux/final-v3/perf/run2.log`；最终产物复测见 Notes）
 
 ### Notes
-- **最终体积（2026-11-21 UX 收口干净重建，commit `c19a082`，绑定 `evidence/ux/after-v6/` 与 `final-v4/`）**：14,011,392 B ≈ 13.36 MiB（门禁 ≤14 MiB，余量 668,672 B）；SHA-256 `B921300F9795244C66B5BDC4E977AFD0653B947E0761C5269E6D0CEDF237DE3B`。历史参照：commit `ce038eb` 为 14,010,880 B / SHA `FC6BCCD4…F9D01C`（`after-v5/`、`final-v3/` 为其历史证据）；commit `345d8c6` 为 14,010,368 B / SHA `17d8e081…beca5ee1`（`after-v3/`、`final-v2/`）；commit `77b88e2` 为 14,010,880 B / SHA `C24599BE…CC1269`（`after-v4/`）；commit `7c00765` 同为 14,010,368 B / SHA `25fea5f3…2b67`（`after-v2/`、`final/` 为更早的历史中间证据）；commit `97d3a60` 为 13,998,592 B / SHA `58c9ad0d…d4ab75`；2026-11-20 初版构建 13,995,008 B / SHA `3f7e164b…a596b`（均不作最终发布物校验）。
-- **门禁**：最终机器可读发布记录 `target/release/release-record.json` 记录 build / size_gate / feature_gate（QuickJS + linkedom + mermaid 命中）/ smoke / tests / clippy / checksum / archive 全部 `status=passed`，`release_ready=true`（commit `c19a082`）；最终一次 `veil-ui` lib 分项为 **1280 passed / 11 ignored**。此前 commit `ce038eb` 为 1278 passed / 11 ignored，commit `97d3a60` 的串行 `cargo test --workspace --release -- --test-threads=1` 记录为 **1919 passed / 0 failed / 15 ignored**；2026-11-20 初版构建记录为 1911 passed / 15 ignored（均为历史参照）。
+- **最终体积（2026-11-21 UX 收口干净重建，commit `0d229eb`，绑定 `evidence/ux/after-v7/` 与 `final-v5/`）**：14,012,928 B ≈ 13.36 MiB（门禁 ≤14 MiB，余量 667,136 B）；SHA-256 `8DF551F8D363C73DE1F35887042BEC7775E5AB8D1FFEDB50F365AE7E9B456763`。历史参照：commit `c19a082` 为 14,011,392 B / SHA `B921300F…F237DE3B`（`after-v6/`、`final-v4/`）；commit `ce038eb` 为 14,010,880 B / SHA `FC6BCCD4…F9D01C`（`after-v5/`、`final-v3/` 为其历史证据）；commit `345d8c6` 为 14,010,368 B / SHA `17d8e081…beca5ee1`（`after-v3/`、`final-v2/`）；commit `77b88e2` 为 14,010,880 B / SHA `C24599BE…CC1269`（`after-v4/`）；commit `7c00765` 同为 14,010,368 B / SHA `25fea5f3…2b67`（`after-v2/`、`final/` 为更早的历史中间证据）；commit `97d3a60` 为 13,998,592 B / SHA `58c9ad0d…d4ab75`；2026-11-20 初版构建 13,995,008 B / SHA `3f7e164b…a596b`（均不作最终发布物校验）。
+- **门禁**：最终机器可读发布记录 `target/release/release-record.json` 记录 build / size_gate / feature_gate（QuickJS + linkedom + mermaid 命中）/ smoke / tests / clippy / checksum / archive 全部 `status=passed`，`release_ready=true`（commit `0d229eb`）；最终一次 `veil-ui` lib 分项为 **1281 passed / 11 ignored**。此前 commit `c19a082` 为 1280 passed / 11 ignored，commit `ce038eb` 为 1278 passed / 11 ignored，commit `97d3a60` 的串行 `cargo test --workspace --release -- --test-threads=1` 记录为 **1919 passed / 0 failed / 15 ignored**；2026-11-20 初版构建记录为 1911 passed / 15 ignored（均为历史参照）。
 - 构建与门禁原始记录见 `evidence/release/v3-build.md`（初版）与 `target/release/release-record.json`（最终）
 
 ## v2.0.1 — 2026-11-20

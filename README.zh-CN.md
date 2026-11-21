@@ -137,7 +137,7 @@ cargo build --release --bin veil
 cargo test -p veil-mermaid-offline
 ```
 
-最终发布门禁：串行 `cargo test --workspace --release -- --test-threads=1` 在 commit `c19a082` 通过（`release-record.json`，`tests.status=passed`）；可复核的 `veil-ui` lib 分项为 **1280 passed / 11 ignored**。此前 commit `97d3a60` 记录为 1919 passed / 0 failed / 15 ignored（远程 SVG mock 使用 20 ms 墙钟截止，并行执行可能假超时）；默认特性下 `cargo test -p veil --lib` 为 221 passed / 1 ignored（默认特性现已包含离线引擎）。`cargo clippy --workspace --all-targets -- -D warnings` 零警告。
+最终发布门禁：串行 `cargo test --workspace --release -- --test-threads=1` 在 commit `0d229eb` 通过（`release-record.json`，`tests.status=passed`）；可复核的 `veil-ui` lib 分项为 **1281 passed / 11 ignored**。此前 commit `97d3a60` 记录为 1919 passed / 0 failed / 15 ignored（远程 SVG mock 使用 20 ms 墙钟截止，并行执行可能假超时）；默认特性下 `cargo test -p veil --lib` 为 221 passed / 1 ignored（默认特性现已包含离线引擎）。`cargo clippy --workspace --all-targets -- -D warnings` 零警告。
 
 Release CI 在 `v*` tag push 与 `workflow_dispatch` 时运行。手动触发默认 `dry_run=true`，执行 Linux core check/test 以及 Windows 构建、测试、clippy、产物边界、冒烟与 SHA-256 校验，但不创建、不上传 GitHub Release；只有 `v*` tag push 可以发布。任何冒烟失败都不得用 `continue-on-error` 掩盖。
 
@@ -155,7 +155,7 @@ pwsh -File tools/smoke_launch.ps1 -ExePath target/release/veil.exe -ExpectedTitl
 
 ## 数字红线（目标值与实测）
 
-发布构建、探针串行；最终性能/体积行绑定 2026-11-21 最终重建产物（commit `c19a082`，`veil.exe` 14,011,392 B，SHA-256 `B921300F…F237DE3B`）；其余行保留原测量日期。命令：`cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo run --release -p veil --example bench_typing`、`cargo test -p veil-ui --release --lib -- --ignored --nocapture --test-threads=1 perf_20k_blocks`、`cargo build --release -p veil` + `(Get-Item target\release\veil.exe).Length`，依赖计数用 `cargo tree -p veil --edges normal --prefix none`。方法与明细见 `docs/review/keystroke-attribution.md`。
+发布构建、探针串行；最终性能/体积行绑定 2026-11-21 最终重建产物（commit `0d229eb`，`veil.exe` 14,012,928 B，SHA-256 `8DF551F8…9B456763`）；其余行保留原测量日期。命令：`cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo run --release -p veil --example bench_typing`、`cargo test -p veil-ui --release --lib -- --ignored --nocapture --test-threads=1 perf_20k_blocks`、`cargo build --release -p veil` + `(Get-Item target\release\veil.exe).Length`，依赖计数用 `cargo tree -p veil --edges normal --prefix none`。方法与明细见 `docs/review/keystroke-attribution.md`。
 
 | 指标 | 目标值 | 实测 |
 |---|---|---|
@@ -164,9 +164,9 @@ pwsh -File tools/smoke_launch.ps1 -ExePath target/release/veil.exe -ExpectedTitl
 | 冷启动（bench 工具，进程创建→打开→首屏排版；p50 / max） | 观察项 | 576.46 / 599.98 ms（2026-11-09，`cargo run --release -p veil --example bench_typing`；基线 520.87 / 533.85 → +10.7% / +12.4%，回退门禁 ≤ 20%） |
 | 冷启动（墙钟，进程创建→首帧；环境观察项） | ≤ 300 ms | 450–529 ms（其中 440–470 ms 在 `main` 之前，属本机进程创建段开销；2026-10-31） |
 | 冷启动（窗口句柄口径；P2 对比口径） | — | 30 ms（2026-10-30，`tools/bench/measure.ps1`） |
-| 10 万字文档击键→提交上屏延迟 p95 | ≤ 16 ms | p50 2.519–2.537 ms · p95 2.907–2.958 ms · max ≤3.864 ms（`perf_20k_blocks` 21,000 块 / 300 样本，2 次，最终 exe 2026-11-21 commit `c19a082`；最差 p95 2.958 ms ≤ 16 ms。早期 10k 记录：0.973 / 1.566 ms）✅ |
+| 10 万字文档击键→提交上屏延迟 p95 | ≤ 16 ms | p50 2.231–2.268 ms · p95 2.556–2.615 ms · max ≤3.468 ms（`perf_20k_blocks` 21,000 块 / 300 样本，2 次，最终 exe 2026-11-21 commit `0d229eb`；最差 p95 2.615 ms ≤ 16 ms。早期 10k 记录：0.973 / 1.566 ms）✅ |
 | 10 万字文档常驻内存（私有工作集） | ≤ 150 MB | 40.76 MB（20 页深滚动后 WorkingSet，2026-11-05 实测） |
-| 安装产物体积 — 合计单文件 `veil.exe` | ≤ 14 MiB = 14,680,064 B | 13.36 MiB = 14,011,392 B（2026-11-21 最终干净重建，commit `c19a082`，SHA-256 `B921300F…F237DE3B`；单一产物：离线 Mermaid 引擎 + 完整 `mermaid.js` + resvg，引擎惰性初始化） |
+| 安装产物体积 — 合计单文件 `veil.exe` | ≤ 14 MiB = 14,680,064 B | 13.36 MiB = 14,012,928 B（2026-11-21 最终干净重建，commit `0d229eb`，SHA-256 `8DF551F8…9B456763`；单一产物：离线 Mermaid 引擎 + 完整 `mermaid.js` + resvg，引擎惰性初始化） |
 | `veil-core` 单元+属性测试数 | ≥ 80 | 347 |
 | e2e 断言数 | ≥ 20 | 41（3 个 e2e_ 场景测试：写作闭环打开→保存→重开、表格+图片粘贴落盘、查找替换→崩溃恢复→自清）✅ |
 | Markdown 往返一致率（无编辑时输出 == 输入字节；按字节比较） | 100% | 100% |

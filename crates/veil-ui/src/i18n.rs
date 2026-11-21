@@ -351,13 +351,16 @@ keys! {
     NoticeFullscreenOff => "notice.fullscreen_off", "已退出全屏";
     NoticeZoom => "notice.zoom", "缩放 {}%";
     NoticeImagePasteNeedsFile => "notice.image_paste_needs_file", "插入图片需要先保存文档";
-    NoticeImageSaveFailed => "notice.image_save_failed", "图片保存失败：{}";
+    NoticeImageSaveFailed => "notice.image_save_failed",
+        "图片保存失败：{}；下一步：检查目标目录是否可写，或另存文档后重试";
     NoticeMermaidSnapshotNeedsFile => "notice.mermaid_snapshot_needs_file", "Mermaid 快照未插入：请先保存文档，再写入本地图片";
     NoticeMermaidSnapshotSaveFailed => "notice.mermaid_snapshot_save_failed", "Mermaid 快照保存失败，未修改原文：{}";
     NoticeMermaidSnapshotStale => "notice.mermaid_snapshot_stale", "Mermaid 源码已变化或文档已切换，快照未插入（正文未修改）";
-    NoticeImageReadFailed => "notice.image_read_failed", "图片读取失败：{}";
+    NoticeImageReadFailed => "notice.image_read_failed",
+        "图片读取失败：{}；下一步：检查文件是否存在、是否有读取权限，然后重新加载图片";
     NoticeInsertImageNeedsFile => "notice.insert_image_needs_file", "插入图片需要先保存文档";
-    NoticeUnsupportedImage => "notice.unsupported_image", "所选文件不是支持的图片格式";
+    NoticeUnsupportedImage => "notice.unsupported_image",
+        "所选文件不是支持的图片格式；下一步：改用 PNG/JPEG/WebP 等支持的格式";
     NoticeFootnoteDefMissing => "notice.footnote_def_missing", "未找到脚注定义";
     NoticeFootnoteRefMissing => "notice.footnote_ref_missing", "未找到脚注引用";
     NoticeAnchorMissing => "notice.anchor_missing", "未找到锚点";
@@ -365,14 +368,16 @@ keys! {
     NoticeLinkFailed => "notice.link_failed", "无法打开链接: {}";
     NoticeMermaidLiveOpenFailed => "notice.mermaid_live_open_failed",
         "无法打开 mermaid.live：{}。Mermaid 源码已复制；请手动打开 https://mermaid.live/ 并粘贴源码";
-    NoticeImageMissing => "notice.image_missing", "图片文件缺失，已显示替代文本：{}";
+    NoticeImageMissing => "notice.image_missing",
+        "图片文件缺失，已显示替代文本：{}；下一步：右键可重新加载图片或复制图片路径";
     NoticeCodeCopied => "notice.code_copied", "已复制代码块";
     NoticeCodeBlockRequired => "notice.code_block_required", "光标不在代码块内";
     CodeCopyButton => "code.copy_button", "复制";
     CodeCopiedButton => "code.copied_button", "已复制";
     FrontMatterCollapsed => "doc.frontmatter_collapsed", "Front Matter";
     NoticeFocusMode => "notice.focus_mode", "专注模式：{}";
-    NoticeRemoteImageFailed => "notice.remote_image_failed", "部分远程图片加载失败，已显示替代文本";
+    NoticeRemoteImageFailed => "notice.remote_image_failed",
+        "部分远程图片加载失败，已显示替代文本；下一步：检查链接是否有效，或右键重新加载图片";
     NoticeMermaidRenderFailed => "notice.mermaid_render_failed", "图表渲染失败：{}。请检查 Mermaid 语法";
     NoticeMermaidImageInserted => "notice.mermaid_image_inserted",
         "已插入本地图片快照；上方 Mermaid 源码块仍是活预览，快照不会随源码更新：{}";
@@ -958,6 +963,55 @@ mod tests {
         assert!(
             recovery.contains("重试"),
             "恢复写入失败须给可执行出口: {recovery}"
+        );
+    }
+
+    /// 图片类失败提示：保留原因之外，必须给出用户真能执行的下一步。
+    #[test]
+    fn image_failures_offer_actionable_next_step() {
+        let save = tf(Key::NoticeImageSaveFailed, &["磁盘已满"]);
+        assert!(save.contains("磁盘已满"), "须保留原因: {save}");
+        assert!(save.contains("下一步"), "须给下一步: {save}");
+        assert!(
+            save.contains("目标目录是否可写") && save.contains("另存"),
+            "保存失败须说明检查目标目录或另存: {save}"
+        );
+
+        let read = tf(Key::NoticeImageReadFailed, &["文件不存在"]);
+        assert!(read.contains("文件不存在"), "须保留原因: {read}");
+        assert!(read.contains("下一步"), "须给下一步: {read}");
+        assert!(
+            read.contains("读取权限") && read.contains("重新加载图片"),
+            "读取失败须说明检查权限并重新加载: {read}"
+        );
+
+        let unsupported = t(Key::NoticeUnsupportedImage);
+        assert!(
+            unsupported.contains("不是支持的图片格式"),
+            "须保留原因: {unsupported}"
+        );
+        assert!(unsupported.contains("下一步"), "须给下一步: {unsupported}");
+        assert!(
+            unsupported.contains("PNG")
+                && unsupported.contains("JPEG")
+                && unsupported.contains("WebP"),
+            "须说明可改用的格式: {unsupported}"
+        );
+
+        let missing = tf(Key::NoticeImageMissing, &["img/a.png"]);
+        assert!(missing.contains("img/a.png"), "须保留原因: {missing}");
+        assert!(missing.contains("下一步"), "须给下一步: {missing}");
+        assert!(
+            missing.contains("重新加载图片") && missing.contains("复制图片路径"),
+            "须指向真实存在的右键项: {missing}"
+        );
+
+        let remote = t(Key::NoticeRemoteImageFailed);
+        assert!(remote.contains("远程图片加载失败"), "须保留原因: {remote}");
+        assert!(remote.contains("下一步"), "须给下一步: {remote}");
+        assert!(
+            remote.contains("链接") && remote.contains("重新加载图片"),
+            "须说明检查链接或右键重新加载: {remote}"
         );
     }
 

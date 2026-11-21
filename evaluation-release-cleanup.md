@@ -1,40 +1,51 @@
-# evaluation-release-cleanup.md（Task 1 清理执行记录）
+# evaluation-release-cleanup.md（Task 7.1 复核报告）
 
-> 状态：**已执行清理；未 commit、未 push**。本文件由 Task 0 审计草稿更新为 Task 1 实测结果，草稿中的估算已替换为实测值。
-> 执行时间：2026-11-21。基线提交：`79a8079 docs(ux): bind final evidence to the shipped binary`。
+> 状态：**已清理、已通过门禁、已推送**。本文件仅由 Task 7 更新，**不 commit、不 push**（当前工作树中本文件为未提交修改）。
+> 复核日期：2026-11-21。基线提交：`79a8079 docs(ux): bind final evidence to the shipped binary`；发布提交：`e9b2256 chore: clean repository, archive release evidence, add manual QA and strategy`。
 
-## 0. 最终发布产物与门禁（2026-11-21 收口）
+## 0. 结论
+
+**`PASS WITH LIMITS`**。可控项（清理、证据保留、门禁、推送）全部有实测证据；LIMITS 仅限以下三类，均不属于本轮可自动闭环项：
+
+| LIMITS | 内容 |
+|---|---|
+| L1 外部人工项 | 真实中文 IME、100% / 125% / 200% DPI、实体打印、真实 GitHub Actions、Linux 桌面、真实断网抓包 —— **NOT RUN**，协议见 §7，不得写成 PASS（§8）。 |
+| L2 `.trae` 未清理 | `.trae/specs/**/evidence/` 截图约 52 MB 未删：删除包装器对 `.trae` 全目录设 denylist，操作被拒；spec 文档与证据原样保留（§3、§4）。 |
+| L3 API 边界 | 用户拖拽与 config 恢复路径已精确钳制最小窗口 520×360；程序化 `SetWindowPos` 仍可绕过（OS API 层，非用户路径），见 `evaluation-ux.md` §5.1 裁决“PASS（已知边界）”。 |
+
+**纪律**：未执行的验证一律保持 `NOT RUN`；本报告与 `evaluation.md`、`evaluation-ux.md` 均未把 NOT RUN 写成 PASS。
+
+## 1. 最终发布产物
 
 | 项 | 结果 |
 |---|---|
-| 产物 | `veil.exe` **14,012,928 B = 13.36 MiB**（门禁 ≤14 MiB = 14,680,064 B，余量 667,136 B） |
-| SHA-256 | **`ff23c4d9621d586e8edcee90fb7d573c6df0665b98c4ae4a32fdfb974ddd25d0`**（`FF23C4D9…DD25D0`） |
-| 源码 | commit `0d229eb` |
-| 门禁 | fmt、workspace release 测试（`cargo test --workspace --release -- --test-threads=1`）、clippy、size、feature（`QuickJS` / `linkedom` / `mermaid` 命中）、smoke、checksum **全部 passed**；`release_ready=true`，机器可读记录 `evidence/release/release-record.json` |
-| 归档副本 | `evidence/release/{release-record.json,veil.exe.sha256}` 已用 `target/release/` 同名文件覆盖，SHA-256 复核与最终产物一致；`release-bundle/veil-v3.0.0/veil.exe.sha256` 同为该值 |
-| 与 UX 证据 | `evaluation-ux.md` 绑定的 `8DF551F8…9B456763` 是同源码、同字节数的前一构建（差异仅 PE 时间戳），**不是最终发布包**；UX 数字在该源码上测得，不失效 |
-| `.trae` 限制 | `.trae/` 57.95 MB / 835 文件未清理：删除包装器对 `.trae` 全目录设 denylist，操作被拒；spec 文档与 evidence 原样保留（见 §4） |
-| 推送状态 | **PENDING**（本轮未 commit、未 push） |
+| 产物 | `release-bundle/veil-v3.0.0/veil.exe` **14,012,928 B = 13.36 MiB**（门禁上限 14,680,064 B = 14 MiB，余量 667,136 B） |
+| SHA-256 | **`ff23c4d9621d586e8edcee90fb7d573c6df0665b98c4ae4a32fdfb974ddd25d0`** |
+| 源码 | `0d229eb fix(ux): make every failure notice actionable`；`e9b2256` 仅新增文档/清理（未触及 `crates/`、`Cargo.*`、`tools/`），不改变二进制 |
+| 门禁 | fmt、workspace release 测试、clippy、size、feature、smoke、checksum **全部 passed**；`release_ready=true`（明细见 §5） |
+| 机器可读记录 | `evidence/release/release-record.json`（`status=passed`，`release_ready=true`），文件 SHA-256 `272EDA49…427B4C` |
+| 归档一致性 | `evidence/release/release-record.json` 与 `release-bundle/veil-v3.0.0/release-record.json` 逐字节一致；两份 `veil.exe.sha256` 内容均为 `ff23c4d9…dd25d0`（文件 SHA-256 `783DCAF9…438A96`） |
+| 与 UX 证据的关系 | `evaluation-ux.md` 绑定的 `8DF551F8D363C7…9B456763` 是与最终包**同源码、同字节数**的前一构建（仅 PE 时间戳不同），UX 数字仍有效；更早的 `97d3a60 / 58c9ad0d… / 13,998,592 B` 见 `evaluation.md` §1，为历史构建记录 |
 
-## 1. 清理前后实测（体积 / 文件数）
+## 2. 清理前后实测（体积 / 文件数）
 
-| 目录 | 清理前 | 清理后 | 说明 |
-|---|---:|---:|---|
-| `target/` | 6,193.72 MB / 7,500 | 已删除 | 构建缓存，gitignored |
-| `target-default/` | 1,693.62 MB / 3,281 | 已删除 | 旧默认 feature 构建缓存，gitignored |
-| `spikes/` | 15.18 MB / 302 | 已删除 | gitignored 原型目录（引用风险见 §5 R6） |
-| `.screenshots/` | 0.00 MB / 0 | 已删除 | 仅空 `.tmp` 目录 |
-| `release-bundle/` | 16.20 MB / 8 | **13.48 MB / 7** | 仅删 `veil.pdb`（2.72 MiB） |
-| `evidence/` | 653.65 MB / 4,528 | **312.91 MB / 1,813** | 明细见 §2 |
-| `.trae/` | 57.95 MB / 835 | **57.95 MB / 835** | 未改动（§4） |
-| `bench/` | 0.00 MB / 0 | 0.00 MB / 0 | 空目录 |
-| **合计** | **8,630.32 MB / 16,446** | **384.34 MB / 2,655** | 工作区减少 **8,245.98 MB（≈8.05 GB）/ 13,791 文件** |
+| 目录 | 清理前 | 清理后（重建前） | 当前 | 说明 |
+|---|---:|---:|---:|---|
+| `target/` | 6,193.72 MB / 7,500 | 已删除 | **不存在** | 构建缓存；重建 4,453 文件 / 1,819.63 MB 后，推送完成执行 `cargo clean` 删除 |
+| `target-default/` | 1,693.62 MB / 3,281 | 已删除 | **不存在** | 旧默认 feature 构建缓存 |
+| `spikes/` | 15.18 MB / 302 | 已删除 | **不存在** | 原型目录（引用已改写，见 §9 R6） |
+| `.screenshots/` | 0.00 MB / 0 | 已删除 | **不存在** | 仅空 `.tmp` 目录 |
+| `release-bundle/` | 16.20 MB / 8 | 13.48 MB / 7 | **16.20 MB / 8** | 清理时删 `veil.pdb`；最终归档再次复制 `veil.exe`、`veil.pdb`、记录与文档 |
+| `evidence/` | 653.65 MB / 4,528 | 312.91 MB / 1,813 | **312.91 MB / 1,813** | 明细见下 |
+| `.trae/` | 57.95 MB / 835 | 57.95 MB / 835 | **57.95 MB / 835** | 未改动（denylist，L2） |
+| `bench/` | 0.00 MB / 0 | 0.00 MB / 0 | **0.00 MB / 0** | 空目录 |
+| **合计** | **8,630.32 MB / 16,446** | **384.34 MB / 2,655** | **387.06 MB / 2,656** | 较清理前减少 **8,243.26 MB（≈8.05 GB）/ 13,790 文件** |
 
-`evidence/` 清理后分项：`ux/` 70.51 MB / 1,029、`render/` 237.07 MB / 448、`startup/` 5.07 MB / 302，其余 `ci`、`decision`、`evaluation`、`g0`、`input`、`mermaid`、`not-run`、`print`、`release` 合计 0.23 MB / 28。
+- `evidence/` 当前分项：`render/` 237.07 MB / 448、`ux/` 70.51 MB / 1,029、`startup/` 5.07 MB / 302，其余 `ci`、`decision`、`evaluation`、`g0`、`input`、`mermaid`、`not-run`、`print`、`release` 与根级 6 个文件合计 0.25 MB / 34。
+- `target/` 重建实测 4,453 文件 / 1,819.63 MB ≈ 1.8 GB（release 构建 + 依赖与增量缓存），仍小于清理前 6,193.72 MB；`target/` 为可再生产物，不存档、不入库。
+- `release-bundle/` 当前 8 个文件：`veil.exe`（14,012,928 B）、`veil.pdb`（2.72 MiB）、`veil.exe.sha256`、`release-record.json`、`README.md`、`CHANGELOG.md`、`LICENSE`、`icons/veil.ico`。`veil.pdb` 是最终归档步骤重新生成的调试符号，不影响 `veil.exe` 与 SHA；如需回到 13.48 MB，可单独删除该 pdb。
 
-`target/` 重建后实测 **4,453 文件 / 1,819.63 MB ≈ 1.8 GB**（release 构建 + 依赖与增量缓存），仍远小于清理前的 6,193.72 MB；`target/` 为可再生产物，不入库。最终产物 SHA-256 见 §0。
-
-## 2. 已删除明细（实测）
+## 3. 已删除清单（实测）
 
 | # | 目标 | 实测删除 |
 |---|---|---:|
@@ -42,88 +53,121 @@
 | D2 | `target-default/` | 1,693.62 MB / 3,281 |
 | D3 | `spikes/` | 15.18 MB / 302 |
 | D7 | `evidence/real-machine-2026-11-12/`（grep 确认无文档引用） | 76.28 MB / 1,530 |
-| D8 | `release-bundle/veil-v3.0.0/veil.pdb` | 2.72 MiB / 1 |
-| D9 | `evidence/ux/**/_work/`、`_home/`（先 `git rm -r --cached`） | 479 文件（其中 tracked 125）/ <1 MB |
+| D8 | `release-bundle/veil-v3.0.0/veil.pdb`（清理时；最终归档已重新生成，见 §2） | 2.72 MiB / 1 |
+| D9 | `evidence/ux/**/_work/`、`_home/`（先 `git rm -r --cached`） | 479 文件（tracked 125）/ <1 MB |
 | D12 | `.screenshots/` | 0 文件 |
 
-历史轮次按「保留 md/json/txt 摘要、只删大截图」执行：
+历史轮次按“保留 md/json/txt 摘要、只删大截图”执行：
 
 | 轮次 | 删除内容 | 实测 |
 |---|---|---:|
 | `ux/final` / `final-v2` / `final-v3` / `final-v4` | `*.png`、`*.pdf`（含各 26.5 MB 的 `corpus.pdf`） | 554 文件 / 253.97 MB |
 | `ux/after-v2`…`after-v6` | `*.png`（`screenshots/` 实拍） | 166 文件 / 9.89 MB |
 
-保留的摘要：各轮 `*.md`、`*.json`、`*.csv`、`*.txt`、`*.log`、`*.html`、`*.ps1` 全部留存；`final-v3/perf/run2.log`（`CHANGELOG.md` L43 直接引用）**保留原路径未动**。
+保留的各轮摘要：`*.md`、`*.json`、`*.csv`、`*.txt`、`*.log`、`*.html`、`*.ps1` 全部留存；`final-v3/perf/run2.log`（`CHANGELOG.md` L43 引用）**原路径保留未动**。
 
-## 3. 必须保留清单与存在性抽查
+## 4. 保留清单与证据引用抽检
 
-保留：`evidence/ux/{baseline,after,after-v7,final-v5}`、`evidence/{evaluation,render/task8a-b,render/task9-final,render/task8a/rubric.md,render/rubric-final.md,startup,input,g0,ci,not-run,decision,mermaid,print,release}`、根目录三份 `*-task9-final.md`、`release-bundle/veil-v3.0.0`（`veil.exe` 14,012,928 B、`veil.exe.sha256`、`release-record.json`、文档、图标）。
+保留：`evidence/ux/{baseline,after,after-v7,final-v5}`（另保留 `after-v2…v6`、`final…final-v4` 的摘要文件）、`evidence/{evaluation,render/task8a-b,render/task9-final,render/task8a/rubric.md,render/rubric-final.md,startup,input,g0,ci,not-run,decision,mermaid,print,release}`、`evidence/` 根级三份 `*-task9-final.md`（`actions-linux-needs-user`、`needs-user-dpi-100`、`print-manual`，`evaluation.md` L20 引用）、`release-bundle/veil-v3.0.0` 全部 8 个文件。`evidence/render/{dark,light,task8a/dark,light}`（≈122 MB）因 `evaluation.md` L4 以范围名 `evidence/render` 引用而保留。
 
-抽查（12 条，全部存在）：
+抽检 12 条（逐条 `Test-Path`，全部为 `True`）：
 
-| 路径 | 结果 |
-|---|---|
-| `evidence/ux/after-v7/README.md` | 存在 |
-| `evidence/ux/final-v5/report.md` | 存在 |
-| `evidence/ux/final-v3/perf/run2.log` | 存在（CHANGELOG L43 引用） |
-| `evidence/ux/baseline/facts.md` | 存在 |
-| `evidence/render/task8a-b/rubric.md` | 存在 |
-| `evidence/render/task9-final/summary.md` | 存在 |
-| `evidence/render/task8a/rubric.md` | 存在（evaluation.md L169 引用） |
-| `evidence/startup/task9-final/d1/summary.md` | 存在 |
-| `evidence/release/v3-build.md` | 存在 |
-| `evidence/release/release-record.json` | 存在（已被最终构建输出覆盖，文件 SHA-256 `272EDA49…427B4C`，与 `release-bundle` 副本逐字节一致） |
-| `release-bundle/veil-v3.0.0/veil.exe` | 存在（14,012,928 B，SHA-256 `ff23c4d9…dd25d0`） |
-| `release-bundle/veil-v3.0.0/veil.exe.sha256` | 存在（内容 `ff23c4d9…dd25d0`，文件 SHA-256 `783DCAF9…438A96`） |
+| 路径 | 引用出处 | 结果 |
+|---|---|---|
+| `evidence/ux/after-v7/README.md` | `evaluation-ux.md` L7–L8、L13、L44 | 存在 |
+| `evidence/ux/final-v5/report.md` | `evaluation-ux.md` L7–L8、L13 | 存在 |
+| `evidence/ux/final-v3/perf/run2.log` | `CHANGELOG.md` L43 | 存在 |
+| `evidence/ux/baseline/facts.md` | `evaluation-ux.md` L7（`evidence/ux/baseline` 目录级） | 存在 |
+| `evidence/render/task8a-b/rubric.md` | `evaluation.md` L119、L135、L218 | 存在 |
+| `evidence/render/task9-final/summary.md` | `evaluation.md` L17、L194 | 存在 |
+| `evidence/render/task8a/rubric.md` | `evaluation.md` L169 | 存在 |
+| `evidence/startup/task9-final/d1/summary.md` | `evaluation.md` L14、L31、L68、L234 | 存在 |
+| `evidence/release/v3-build.md` | `CHANGELOG.md` L48 | 存在 |
+| `evidence/release/release-record.json` | `evaluation.md` L4、L13、L18 | 存在（SHA-256 `272EDA49…427B4C`，与 `release-bundle` 副本逐字节一致） |
+| `release-bundle/veil-v3.0.0/veil.exe` | `evidence/release/release-record.json` `archive.path`；spec `release-and-roadmap` TR-4.3（归档必须含 `veil.exe`） | 存在（14,012,928 B，SHA-256 `ff23c4d9…dd25d0`） |
+| `release-bundle/veil-v3.0.0/veil.exe.sha256` | `release-record.json` `checksum.bundled_sha256` | 存在（内容 `ff23c4d9…dd25d0`，文件 SHA-256 `783DCAF9…438A96`） |
 
-## 4. 未执行 / 受阻项
+## 5. 门禁执行明细（推送前）
 
-| 项 | 原因 |
-|---|---|
-| `.trae/specs/**/evidence/` 下截图（约 52 MB） | 本机删除包装器对 `.trae` 全目录设 denylist，操作被拒；**spec 文档与 evidence 均原样保留**。 |
-| `evidence/render/{dark,light}`、`evidence/render/task8a/{dark,light}`（≈122 MB） | 仅被 `evaluation.md` L4 以范围名 `evidence/render` 泛引用；不在明确授权清单内，未删除，避免引用范围名不副实。 |
-| `evidence/ux/final*` 的 PDF 已删 | 与该目录既有「历史证据原样保留」表述不完全一致，属本次清理的授权例外。 |
+| 门禁 | 命令 / 依据 | 结果 |
+|---|---|---|
+| 格式 | `cargo fmt --all -- --check` | **passed** |
+| 测试 | `cargo test --workspace --release -- --test-threads=1` | **passed**（`release-record.json` `tests.status=passed`，exit 0） |
+| Lint | `cargo clippy --workspace --all-targets -- -D warnings` | **passed** |
+| 体积 | 14,012,928 B ≤ 14,680,064 B | **passed**，余量 667,136 B |
+| 特性 | 对 `veil.exe` 字节做 ASCII 解码 | **passed**，`QuickJS` / `linkedom` / `mermaid` 均命中 |
+| 冒烟 | `pwsh -NoProfile -File tools/smoke_launch.ps1 -ExePath target/release/veil.exe -ExpectedTitlePattern '^veil' -MaxLaunchMs 1000` | **passed**，exit 0 |
+| 校验和 | 归档前后 SHA-256 复核 | **passed**，`post_archive_sha256` = `bundled_sha256` = `ff23c4d9…dd25d0` |
+| 汇总 | `evidence/release/release-record.json` | `status=passed`、`release_ready=true`、`error=null` |
 
-## 5. 引用风险
+## 6. 推送状态（已完成）
+
+```
+$ git push origin main
+   0b5092b..e9b2256  main -> main
+
+$ git status -sb
+## main...origin/main
+
+$ git rev-parse HEAD; git rev-parse origin/main
+e9b2256818c4d4024bc5e8b87543593b9035a189
+e9b2256818c4d4024bc5e8b87543593b9035a189
+
+$ git status --porcelain | Measure-Object   # 推送后、本次复核前
+Count: 0
+```
+
+- 推送范围 `0b5092b..e9b2256` 共 **19 个提交**；本地 `main` 与 `origin/main` 指向同一提交。
+- 未 force push、未改写历史；`git status -sb` 无 ahead/behind 标记。
+- 推送后执行 `cargo clean`，`target/`、`target-default/`、`.screenshots/`、`spikes/` 已确认不存在。
+- 本次 Task 7 仅更新本文件；复核结束时工作树仅有本文件 1 项未提交修改（按要求不 commit、不 push）。
+
+## 7. 人工测试协议与策略文档（已交付）
+
+| 交付物 | 位置 | 内容指向 |
+|---|---|---|
+| 人工测试协议 | `docs/manual-test-veil.md`（commit `e9b2256`） | §A 首跑、§B 输入保真（B2 微软拼音 IME）、§C 文件、§D 导航、§E 窗口（E4 四档 DPI）、§F 导出（F3 实体打印）、§G 信任：零出站验证（G1 SniffNet、G2 Wireshark，附 `pktmon` / `dumpcap` 可选命令）、§H 范围（Linux 不在本轮）、30 分钟核心冒烟清单、缺陷记录模板；每项含前置条件、步骤、预期、自动化状态 |
+| 策略报告 | `docs/perfect-writing-surface-strategy.md`（commit `e9b2256`） | §1 现状三件已成立的事、§2 差距、§3 判断（先代码质量与减法）、§4 不做清单、§5 iPhone 式原则、§6 分阶段计划、§7 三个英雄场景、§8 红队五问、§9 下一轮 spec |
+
+两份文档均在 `e9b2256` 中入库，可随仓库直接取用。
+
+## 8. 仍未验证（NOT RUN，不得写成 PASS）
+
+| 项 | 状态 | 依据 / 待执行 |
+|---|---|---|
+| 真实中文 IME 组字与候选窗 | **NOT RUN** | `evaluation.md` L113；协议 `docs/manual-test-veil.md` B2（必须人工） |
+| 100% / 125% / 200% DPI 首帧与视觉 rubric | **NOT RUN** | `evaluation.md` L20、L120；协议 E4（必须人工） |
+| 实体物理打印 | **NOT RUN** | `evaluation.md` L121；协议 F3（必须人工） |
+| 真实 GitHub Actions（dry-run / Windows runner / Linux runner） | **NOT RUN** | `evaluation.md` L19；`evidence/ci/actions.md`；本次 push 不等于 runner 实跑通过 |
+| Linux 桌面版本 | **NOT RUN / 不在范围** | `docs/manual-test-veil.md` §H；仅 Linux CI 对 `veil-core` 做 check/test |
+| 真实断网 / 零后台网络抓包 | **NOT RUN** | `evaluation.md` L23、L263；`evidence/mermaid/offline-only.md` 仅离线渲染证据；协议 G1/G2（必须人工） |
+
+以上六项在 checklist 中保持未勾选，结论不计入 PASS；`evidence/not-run/disposition.md` 为逐项处置记录。
+
+## 9. 引用风险
 
 | ID | 风险 | 状态 |
 |---|---|---|
 | R1 | `CHANGELOG.md` L43 引用 `evidence/ux/final-v3/perf/run2.log` | **已规避**：文件保留原路径。 |
-| R2 | `CHANGELOG.md` L46、`evaluation-ux.md` L7–L12/L134–L135/L206 引用 `after-v2…v6`、`final…final-v4` | **部分降级**：目录与 md/json/txt 摘要仍在，实拍 PNG/PDF 已删；文档未改写（不 commit）。 |
-| R3 | `evaluation.md` L4/L13、`CHANGELOG.md` L47/L48、`README*.md` 引用 `target/release/release-record.json` | **已修复**：统一改指 `evidence/release/release-record.json`（归档副本，字节一致），并注明 `target/` 为可再生产物。 |
-| R4 | `evaluation.md` L4 泛引用 `evidence/render` | 未触发（render 子目录保留）。 |
-| R5 | README L149 smoke 示例 `target/release/veil.exe` | 路径暂不存在，需重建；命令模板语义不变。 |
-| R6 | `CHANGELOG.md` L108、`docs/adr/ADR-002/011/012`、`docs/review/component-replacement-spike.md`、`docs/01-define-design.md` 引用 `spikes/...`（`RESULTS.md`、`samples.md`、`src/bin` 等） | **已修复**：不恢复目录，全部改为「本地原型 `<name>`（已清理）」并保留结论/数字；`spikes/` 仅作为 `.gitignore` 规则名与清理记录出现，不再指向具体文件。 |
-| R7 | `evidence/ux/final*` 的 `corpus.pdf`（每份 26.5 MB）随 D5 删除 | 已回收 211.9 MB；`final-v5` 的两份保留。 |
+| R2 | `CHANGELOG.md` L46、`evaluation-ux.md` L7/L13 引用 `after-v2…v6`、`final…final-v4` | **部分降级**：目录与 md/json/txt 摘要仍在，实拍 PNG/PDF 已删；文档未改写。 |
+| R3 | `evaluation.md` L4/L13、`CHANGELOG.md` L47/L48 原引用 `target/release/` 口径的发布记录；`README*.md` L140 现引用归档副本 | **已修复**：统一改指 `evidence/release/release-record.json`（归档副本，字节一致），并注明 `target/` 为可再生产物。 |
+| R4 | `evaluation.md` L4 泛引用 `evidence/render` | 未触发（render 子目录保留，含 `dark` / `light`）。 |
+| R5 | `README.md` / `README.zh-CN.md` L149 smoke 示例 `target/release/veil.exe` | 路径当前不存在（`cargo clean` 后）；命令模板语义不变，重建后即恢复。 |
+| R6 | `CHANGELOG.md` L108、`docs/adr/ADR-002/011/012`、`docs/review/component-replacement-spike.md`、`docs/01-define-design.md` 引用 `spikes/...` | **已修复**：不恢复目录，全部改为「本地原型 `<name>`（已清理）」并保留结论/数字；`spikes/` 仅作为 `.gitignore` 规则名与清理记录出现。 |
+| R7 | `evidence/ux/final*` 的 `corpus.pdf`（每份 26.5 MB）随历史轮次删除 | 已回收 211.9 MB；`final-v5` 的两份保留。 |
 
-## 6. Git 状态（清理后）
-
-```
-$ git status --short | wc -l
-128
-# 125 个暂存删除（D，来自 git rm -r --cached 的 _work/_home）
-# 3 个未跟踪文档：docs/manual-test-veil.md、docs/perfect-writing-surface-strategy.md、evaluation-release-cleanup.md
-
-$ git ls-files evidence | Select-String _work|_home
-# 无输出
-```
-
-- **推送状态 PENDING**：未 commit、未 push；本地 `main` 仍领先 `origin/main` 18 个提交（文档/清理提交尚未产生）。
-- `evidence/` 仅 `evidence/ux/` 下文件被跟踪，其余为本地未跟踪证据。
-
-## 7. 磁盘空间说明
-
-- 工作区目录实测减少 **8,245.98 MB ≈ 8.05 GB**。
-- 本机删除动作经安全包装器转入 D 盘回收站：清理后 `D:\$Recycle.Bin` 占用 **8.77 GB**，`D:` 可用空间维持 **429.78 GB** 未变。**需用户清空回收站后，约 8 GB 才真正释放**；代理无回收站访问/清空权限。
-
-## 8. 证据保留规则（长期）
+## 10. 证据保留规则（长期）
 
 适用对象：`evidence/**`、`release-bundle/**`、根目录 `evaluation*.md`、`README*.md`、`CHANGELOG.md`。
 
 1. **被引用即保留**：任何被 `evaluation*.md`、`README*.md`、`CHANGELOG.md`、`docs/**` 以具体路径引用的证据（摘要 md/json/csv/txt/log、二进制、截图）必须保留；若要删除，先同步改引用或降级为结论描述。
-2. **中间构建证据可降级**：`_work/`、`_home/`、临时截图/日志、`*.tmp`、中间构建产物（`target/`、`target-default/`、`spikes/`、`release-bundle/**/*.pdb`）不入库；在下一轮最终证据产生后，可删除上一轮的二进制/大图，仅保留 md/json/txt/log 摘要。
+2. **中间构建证据可降级**：`_work/`、`_home/`、临时截图/日志、`*.tmp`、中间构建产物（`target/`、`target-default/`、`spikes/`）不入库；在下一轮最终证据产生后，可删除上一轮的二进制/大图，仅保留 md/json/txt/log 摘要。
 3. **最终证据摘要不动**：`evidence/ux/{baseline,after,after-v7,final-v5}`、`evidence/release/`、`evidence/{render/task9-final,startup/task9-final,input,g0,ci,not-run,decision,mermaid,print}` 等被最终报告引用的摘要继续跟踪，不因清理取消跟踪。
 4. **删除前必须 grep 引用**：`spikes/`、`target/release/release-record.json`、`*.png`、`*.pdf` 等删除前，先全仓库 grep 路径；有引用则先改文档再删除，确保 0 悬空引用。
 5. **路径口径**：发布记录统一引用 `evidence/release/release-record.json`（归档副本）/ `evidence/release/veil.exe.sha256`；`target/release/` 下的同名文件属可再生产物，不作为文档真值。
+6. **例外须记录**：`.trae` 受删除器 denylist 保护（L2），其 spec 截图清理需在删除器策略变更后另行执行，不假装已清。
 
-Task 2 复验：`git status --short` 无 `_work/`、`_home/` 跟踪（仅保留 125 个既有暂存删除）；全仓库 grep `spikes/` 仅命中 `.gitignore` 规则与本文清理记录，无悬空文件引用。
+## 11. 磁盘空间说明
+
+- 工作区目录实测减少 **8,243.26 MB ≈ 8.05 GB**（16,446 → 2,656 文件）。
+- 删除动作经安全包装器转入 D 盘回收站：当前 `D:\$Recycle.Bin` 约 **12.13 GB**，`D:` 可用 **458.58 GB**（2026-11-21 复核实测）。清空回收站后，对应空间才真正释放；代理无回收站清空权限。

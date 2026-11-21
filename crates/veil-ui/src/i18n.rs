@@ -246,24 +246,27 @@ keys! {
 
     // ---- 保存 / 打开 / 导出 失败与提示 ----
     NoticeWatchUnavailable => "notice.watch_unavailable",
-        "文件监听不可用: {}；重新打开该文件即可再次尝试";
-    NoticeConflictNameExhausted => "notice.conflict_name_exhausted", "冲突副本名已耗尽";
-    NoticeExternalBackupFailed => "notice.external_backup_failed", "外部版本备份失败：取消保存 {}";
+        "文件监听不可用: {}；下一步：重新打开该文件即可再次尝试";
+    NoticeConflictNameExhausted => "notice.conflict_name_exhausted",
+        "冲突副本名已耗尽；下一步：清理同目录下的冲突副本，或另存为到其他位置";
+    NoticeExternalBackupFailed => "notice.external_backup_failed",
+        "外部版本备份失败：取消保存 {}；下一步：可检查磁盘空间或权限后重试保存，或另存为";
     NoticeSaved => "notice.saved", "已保存：{}";
-    NoticeSaveFailed => "notice.save_failed", "保存失败：{}；可 Ctrl+S 重试，或 Ctrl+Shift+S 另存为";
+    NoticeSaveFailed => "notice.save_failed",
+        "保存失败：{}；下一步：可 Ctrl+S 重试，或 Ctrl+Shift+S 另存为";
     ModalSaveFailedTitle => "modal.save_failed.title", "保存失败";
     ModalSaveFailedBody => "modal.save_failed.body",
         "{}\n\n原因：{}\n\n下一步：可重试本次保存，或用「另存为」写入其他位置；当前修改仍保留在编辑器中。";
     ModalExternalBackupFailBody => "modal.external_backup_fail.body",
         "{}\n\n原因：外部版本备份失败（{}）。\n\n下一步：为避免覆盖外部修改，本次保存已取消；可重试或「另存为」写入其他位置。";
     NoticeRecoveryWriteFailed => "notice.recovery_write_failed",
-        "崩溃恢复写入失败：{}；可检查磁盘空间或权限后重试";
+        "崩溃恢复写入失败：{}；下一步：可检查磁盘空间或权限后重试";
     NoticeFileRestored => "notice.file_restored", "文件已恢复：{}";
     NoticeExternalChanged => "notice.external_changed", "检测到外部修改：保存时将先备份磁盘版本";
     NoticeExternalDeleted => "notice.external_deleted",
-        "文件已被外部删除；编辑器中内容仍在，可继续编辑，或用「另存为」保存到新位置";
+        "文件已被外部删除；编辑器中内容仍在，下一步：可继续编辑，或用「另存为」保存到新位置";
     NoticeExternalUnreadable => "notice.external_unreadable",
-        "文件暂不可读（可能被外部程序占用）；编辑器中内容仍在，可继续编辑或另存为";
+        "文件暂不可读（可能被外部程序占用）；编辑器中内容仍在，下一步：可继续编辑或另存为";
     ModalExternalChangedTitle => "modal.external_changed.title", "「{}」已被外部修改";
     ModalExternalChangedBody => "modal.external_changed.body", "磁盘文件已被其他程序修改。重新加载将丢弃未保存的修改；保留当前可继续编辑，保存时会先备份磁盘版本。";
     NoticeExternalReloaded => "notice.external_reloaded", "已重新加载外部修改：{}";
@@ -273,21 +276,22 @@ keys! {
     NoticeOutputEmptyDocument => "notice.output_empty_document", "空文档没有可导出或打印的内容";
     NoticeExportedHtml => "notice.exported_html", "已导出 HTML：{}";
     NoticeExportFailed => "notice.export_failed",
-        "导出失败：{}；可重试导出，或检查目标目录是否可写后换一个位置";
+        "导出失败：{}；下一步：可重试导出，或检查目标目录是否可写后换一个位置";
     NoticeErrorWhileModalOpen => "notice.error_while_modal_open",
-        "{}：{}（请先关闭当前弹窗，再重试）";
+        "{}：{}；下一步：请先关闭当前弹窗，再重试";
     ModalExportFailedTitle => "modal.export_failed.title", "导出失败";
     ModalExportFailedBody => "modal.export_failed.body",
         "{}\n\n原因：{}\n\n下一步：可重试导出，或取消后检查目标目录是否可写。";
     NoticeSaveAsCancelled => "notice.save_as_cancelled", "另存为已取消";
     NoticeSavedAs => "notice.saved_as", "已另存为：{}";
     NoticeHistoryMigrationFailed => "notice.history_migration_failed",
-        "文档已保存到：{}；但版本历史迁移失败（{}），旧历史仍保留在临时会话目录";
+        "文档已保存到：{}；但版本历史迁移失败（{}），旧历史仍保留在临时会话目录；下一步：可检查磁盘空间或权限后重试保存";
     NoticeSnapshotFailed => "notice.snapshot_failed",
-        "版本历史写入失败：{}（正文已保留；可检查磁盘空间或写入权限后重试保存）";
+        "版本历史写入失败：{}（正文已保留）；下一步：可检查磁盘空间或写入权限后重试保存";
     NoticeAssetsMigrationIncomplete => "notice.assets_migration_incomplete",
-        "已另存为：{}；有 {} 个相对图片资产未能迁移（源缺失或复制失败），新位置可能显示断图";
-    NoticeSaveAsFailed => "notice.save_as_failed", "另存为失败：{}；可 Ctrl+Shift+S 重试或换一个位置";
+        "已另存为：{}；有 {} 个相对图片资产未能迁移（源缺失或复制失败），新位置可能显示断图；下一步：请检查源图片是否仍存在，并把缺失图片复制到新位置";
+    NoticeSaveAsFailed => "notice.save_as_failed",
+        "另存为失败：{}；下一步：可 Ctrl+Shift+S 重试或换一个位置";
     ModalSaveAsFailedTitle => "modal.save_as_failed.title", "另存为失败";
     ModalSaveAsFailedBody => "modal.save_as_failed.body",
         "{}\n\n原因：{}\n\n下一步：可重试写入同一位置，或换一个目录另存；当前修改仍保留在编辑器中。";
@@ -303,15 +307,17 @@ keys! {
     ActionExportHtml => "action.export_html", "导出 HTML";
     ActionExportPdf => "action.export_pdf", "导出 PDF";
     ActionPrint => "action.print", "打印";
-    NoticeSaveIncomplete => "notice.save_incomplete", "保存未完成（失败或取消），操作已取消";
+    NoticeSaveIncomplete => "notice.save_incomplete",
+        "保存未完成（失败或取消），操作已取消；下一步：可重试保存，或检查失败原因后重试";
     NoticeCancelDirty => "notice.cancel_dirty", "已取消：当前文档仍有未保存的修改";
-    NoticeOpenFailed => "notice.open_failed", "打开失败：{}";
+    NoticeOpenFailed => "notice.open_failed",
+        "打开失败：{}；下一步：可确认文件存在且有读取权限后重试，或重新选择文件";
     NoticeOpened => "notice.opened", "已打开：{}";
     NoticeNewDraft => "notice.new_draft", "已新建空白文档";
 
     // ---- 快照 ----
     NoticeSnapshotReadFailed => "notice.snapshot_read_failed",
-        "读取快照失败：{}；可关闭版本历史后重试，或检查快照文件是否被占用";
+        "读取快照失败：{}；下一步：可关闭版本历史后重试，或检查快照文件是否被占用";
     NoticeSelectVersion => "notice.select_version", "请先选择一个版本";
     NoticeRestoredVersion => "notice.restored_version", "已恢复该版本（Ctrl+Z 可撤销）";
     NoticeSelectVersionToDelete => "notice.select_version_to_delete", "请先选择要删除的版本";
@@ -320,33 +326,42 @@ keys! {
         "{}（{}）\n\n将永久删除该版本，此操作不可撤销。\n\n下一步：确认删除，或取消保留。";
     NoticeDeletedSnapshot => "notice.deleted_snapshot", "已删除该版本快照";
     NoticeDeleteSnapshotFailed => "notice.delete_snapshot_failed",
-        "删除快照失败：{}；可检查磁盘空间或文件是否被占用后重试";
+        "删除快照失败：{}；下一步：可检查磁盘空间或文件是否被占用后重试";
     NoticeNoHistory => "notice.no_history", "暂无版本历史可清空";
     ModalClearHistoryTitle => "modal.clear_history.title", "清空版本历史";
     ModalClearHistoryBody => "modal.clear_history.body",
         "将永久删除本文档的全部 {} 份历史快照。\n\n此操作不可撤销；当前文档内容不受影响。\n\n下一步：确认清空，或取消保留。";
     NoticeHistoryCleared => "notice.history_cleared", "已清空版本历史（{} 份）";
     NoticeClearHistoryFailed => "notice.clear_history_failed",
-        "清空历史失败：{}；可检查磁盘空间或文件是否被占用后重试";
+        "清空历史失败：{}；下一步：可检查磁盘空间或文件是否被占用后重试";
 
     // ---- 启动 / 配置 ----
     NoticeConfigIgnored => "notice.config_ignored", "配置有 {} 处无法识别，已忽略";
-    NoticeConfigInvalid => "notice.config_invalid", "配置文件无效，已用默认主题: {}";
+    NoticeConfigInvalid => "notice.config_invalid",
+        "配置文件无效，已用默认主题: {}；下一步：修正配置文件后重启应用，或删除配置文件以恢复默认设置";
     NoticeRecovered => "notice.recovered",
         "已从崩溃恢复「{}」的未保存内容；恢复时间 {}。当前内容尚未保存，按 Ctrl+S 保存（{}）";
     RecoveredSaveToDir => "notice.recovered.save_to_dir", "写回原文件所在目录「{}」";
     RecoveredSaveToFile => "notice.recovered.save_to_file", "写回原文件";
     RecoveredSaveChooseLocation => "notice.recovered.save_choose_location", "选择新的保存位置";
     NoticeTheme => "notice.theme", "主题：{}";
-    NoticeConfigNotSaved => "notice.config_not_saved", "配置未保存：{}";
-    ErrEventLoopCreate => "error.event_loop_create", "创建事件循环失败: {}";
-    ErrEventLoopRun => "error.event_loop_run", "事件循环错误: {}";
-    FatalWindowCreate => "error.window_create", "无法创建窗口：图形环境不可用";
+    NoticeConfigNotSaved => "notice.config_not_saved",
+        "配置未保存：{}；下一步：可检查配置目录的写入权限或磁盘空间后重试";
+    ErrEventLoopCreate => "error.event_loop_create",
+        "创建事件循环失败: {}；请重启应用；若仍失败，检查图形环境或重新安装";
+    ErrEventLoopRun => "error.event_loop_run",
+        "事件循环错误: {}；请重启应用；若仍失败，检查图形环境或重新安装";
+    FatalWindowCreate => "error.window_create",
+        "无法创建窗口：图形环境不可用；请重启应用；若仍失败，检查图形环境或重新安装";
     CliUsage => "cli.usage", "用法: veil [--new-window] [路径]";
-    CliUnknownOption => "cli.unknown_option", "未知参数：{}；{}";
-    CliInvalidPath => "cli.invalid_path", "文档路径无效";
-    CliCurrentDir => "cli.current_dir", "无法确定当前目录: {}";
-    CliPathOutOfBounds => "cli.path_out_of_bounds", "文档路径越界";
+    CliUnknownOption => "cli.unknown_option",
+        "未知参数：{}；{}；下一步：请检查参数拼写，或按上面的用法重新运行";
+    CliInvalidPath => "cli.invalid_path",
+        "文档路径无效；下一步：请检查路径是否存在、是否为空，修正后重新运行";
+    CliCurrentDir => "cli.current_dir",
+        "无法确定当前目录: {}；下一步：请改用绝对路径重新运行";
+    CliPathOutOfBounds => "cli.path_out_of_bounds",
+        "文档路径越界；下一步：请检查路径中的「..」并使用绝对路径重新运行";
 
     // ---- 编辑交互提示 ----
     NoticeFullscreenOn => "notice.fullscreen_on", "全屏（F11 退出）";
@@ -356,8 +371,10 @@ keys! {
     NoticeImageSaveFailed => "notice.image_save_failed",
         "图片保存失败：{}；下一步：检查目标目录是否可写，或另存文档后重试";
     NoticeMermaidSnapshotNeedsFile => "notice.mermaid_snapshot_needs_file", "Mermaid 快照未插入：请先保存文档，再写入本地图片";
-    NoticeMermaidSnapshotSaveFailed => "notice.mermaid_snapshot_save_failed", "Mermaid 快照保存失败，未修改原文：{}";
-    NoticeMermaidSnapshotStale => "notice.mermaid_snapshot_stale", "Mermaid 源码已变化或文档已切换，快照未插入（正文未修改）";
+    NoticeMermaidSnapshotSaveFailed => "notice.mermaid_snapshot_save_failed",
+        "Mermaid 快照保存失败，未修改原文：{}；下一步：可检查目标目录是否可写后重新插入快照";
+    NoticeMermaidSnapshotStale => "notice.mermaid_snapshot_stale",
+        "Mermaid 源码已变化或文档已切换，快照未插入（正文未修改）；下一步：请重新预览图表并再次插入快照";
     NoticeImageReadFailed => "notice.image_read_failed",
         "图片读取失败：{}；下一步：检查文件是否存在、是否有读取权限，然后重新加载图片";
     NoticeInsertImageNeedsFile => "notice.insert_image_needs_file", "插入图片需要先保存文档";
@@ -374,7 +391,7 @@ keys! {
     NoticeLinkFailed => "notice.link_failed",
         "无法打开链接：{}；下一步：检查系统默认浏览器，或复制链接手动打开";
     NoticeMermaidLiveOpenFailed => "notice.mermaid_live_open_failed",
-        "无法打开 mermaid.live：{}。Mermaid 源码已复制；请手动打开 https://mermaid.live/ 并粘贴源码";
+        "无法打开 mermaid.live：{}。Mermaid 源码已复制；下一步：请手动打开 https://mermaid.live/ 并粘贴源码";
     NoticeImageMissing => "notice.image_missing",
         "图片文件缺失，已显示替代文本：{}；下一步：右键可重新加载图片或复制图片路径";
     NoticeCodeCopied => "notice.code_copied", "已复制代码块";
@@ -385,7 +402,8 @@ keys! {
     NoticeFocusMode => "notice.focus_mode", "专注模式：{}";
     NoticeRemoteImageFailed => "notice.remote_image_failed",
         "部分远程图片加载失败，已显示替代文本；下一步：检查链接是否有效，或右键重新加载图片";
-    NoticeMermaidRenderFailed => "notice.mermaid_render_failed", "图表渲染失败：{}。请检查 Mermaid 语法";
+    NoticeMermaidRenderFailed => "notice.mermaid_render_failed",
+        "图表渲染失败：{}；下一步：请检查 Mermaid 语法后重新预览";
     NoticeMermaidImageInserted => "notice.mermaid_image_inserted",
         "已插入本地图片快照；上方 Mermaid 源码块仍是活预览，快照不会随源码更新：{}";
     NoticeRemoteImagesBlocked => "notice.remote_images_blocked", "已阻止远程图片";
@@ -412,12 +430,12 @@ keys! {
     ExportUntitledHtml => "export.untitled_html", "未命名.html";
     ExportUntitledMarkdown => "export.untitled_markdown", "未命名.md";
     NoticePrintFailed => "notice.print_failed",
-        "打印失败：{}；可重试打印，或检查打印机是否联机、驱动是否正常后重试";
+        "打印失败：{}；下一步：可重试打印，或检查打印机是否联机、驱动是否正常后重试";
     ModalPrintFailedTitle => "modal.print_failed.title", "打印失败";
     ModalPrintFailedBody => "modal.print_failed.body",
         "原因：{}\n\n下一步：可重试重新打开打印对话框，或检查打印机是否联机、驱动是否正常。";
     NoticeExportPdfFailed => "notice.export_pdf_failed",
-        "导出 PDF 失败：{}；可重试导出，或检查目标目录是否可写、文件是否被占用后重试";
+        "导出 PDF 失败：{}；下一步：可重试导出，或检查目标目录是否可写、文件是否被占用后重试";
     ModalExportPdfFailedTitle => "modal.export_pdf_failed.title", "导出 PDF 失败";
     ModalExportPdfFailedBody => "modal.export_pdf_failed.body",
         "原因：{}\n\n下一步：可重试导出，或取消后检查系统是否安装可用的中文字体、目标目录是否可写、文件是否被占用；既有 PDF 不会被修改。";
@@ -624,7 +642,8 @@ keys! {
     SettingsExportMarginMm => "settings.export_margin_mm", "导出 PDF 页边距（毫米，0–50）";
     SettingsTabWidth => "settings.tab_width", "制表符宽度（2 或 4）";
     NoticeSettingsSaved => "notice.settings_saved", "设置已保存";
-    NoticeSettingsSaveFailed => "notice.settings_save_failed", "设置保存失败：{}";
+    NoticeSettingsSaveFailed => "notice.settings_save_failed",
+        "设置保存失败：{}；下一步：可检查配置目录的写入权限或磁盘空间后重试";
 }
 
 /// 已翻译的 en-US 词条；缺失项继续回退 zh-CN。
@@ -635,7 +654,7 @@ pub const EN_US: &[(Key, &str)] = &[
     ),
     (
         Key::NoticeMermaidLiveOpenFailed,
-        "Could not open mermaid.live: {}. Mermaid source copied; manually open https://mermaid.live/ and paste the source",
+        "Could not open mermaid.live: {}. Mermaid source copied; next: manually open https://mermaid.live/ and paste the source",
     ),
 ];
 
@@ -1200,5 +1219,153 @@ mod tests {
             unreadable.contains("继续编辑") && unreadable.contains("另存为"),
             "须给出继续编辑或另存为出口: {unreadable}"
         );
+    }
+
+    /// 失败文案穷举：A 类（可恢复失败）与 D 类（致命启动错误）都必须保留现状，
+    /// 并给出用户可执行的下一步；B 类（纯引导）与 C 类（成功/状态）不得混入。
+    ///
+    /// 清单显式列出，避免按前缀自动分类把内部诊断片段（如 `ErrIoWriteFile`，
+    /// 由上层 Notice 附带下一步）误判为面向用户的失败文案。
+    #[test]
+    fn all_failure_notices_offer_next_step() {
+        // A 类可恢复失败 + D 类致命启动错误。
+        let failures: &[(Key, &str)] = &[
+            (Key::NoticeWatchUnavailable, "文件监听不可用"),
+            (Key::NoticeConflictNameExhausted, "冲突副本名已耗尽"),
+            (Key::NoticeExternalBackupFailed, "外部版本备份失败"),
+            (Key::NoticeSaveFailed, "保存失败"),
+            (Key::ModalSaveFailedBody, "当前修改仍保留在编辑器中"),
+            (Key::ModalExternalBackupFailBody, "外部版本备份失败"),
+            (Key::NoticeRecoveryWriteFailed, "崩溃恢复写入失败"),
+            (Key::NoticeExternalDeleted, "已被外部删除"),
+            (Key::NoticeExternalUnreadable, "暂不可读"),
+            (Key::NoticeExportFailed, "导出失败"),
+            (Key::NoticeErrorWhileModalOpen, "请先关闭当前弹窗"),
+            (Key::ModalExportFailedBody, "可重试导出"),
+            (Key::ModalPrintFailedBody, "重试重新打开打印对话框"),
+            (Key::ModalExportPdfFailedBody, "中文字体"),
+            (Key::NoticeHistoryMigrationFailed, "版本历史迁移失败"),
+            (Key::NoticeSnapshotFailed, "版本历史写入失败"),
+            (Key::NoticeAssetsMigrationIncomplete, "未能迁移"),
+            (Key::NoticeSaveAsFailed, "另存为失败"),
+            (Key::ModalSaveAsFailedBody, "当前修改仍保留在编辑器中"),
+            (Key::ModalOpenFailedBody, "当前文档内容未被改动"),
+            (Key::NoticeSaveIncomplete, "保存未完成"),
+            (Key::NoticeOpenFailed, "打开失败"),
+            (Key::NoticeSnapshotReadFailed, "读取快照失败"),
+            (Key::NoticeDeleteSnapshotFailed, "删除快照失败"),
+            (Key::NoticeClearHistoryFailed, "清空历史失败"),
+            (Key::NoticeConfigInvalid, "配置文件无效"),
+            (Key::NoticeConfigNotSaved, "配置未保存"),
+            (Key::ErrEventLoopCreate, "创建事件循环失败"),
+            (Key::ErrEventLoopRun, "事件循环错误"),
+            (Key::FatalWindowCreate, "无法创建窗口"),
+            (Key::CliUnknownOption, "未知参数"),
+            (Key::CliInvalidPath, "文档路径无效"),
+            (Key::CliCurrentDir, "无法确定当前目录"),
+            (Key::CliPathOutOfBounds, "文档路径越界"),
+            (Key::NoticeImageSaveFailed, "图片保存失败"),
+            (Key::NoticeMermaidSnapshotSaveFailed, "Mermaid 快照保存失败"),
+            (Key::NoticeMermaidSnapshotStale, "快照未插入"),
+            (Key::NoticeImageReadFailed, "图片读取失败"),
+            (Key::NoticeUnsupportedImage, "不是支持的图片格式"),
+            (Key::NoticeFootnoteDefMissing, "未找到脚注定义"),
+            (Key::NoticeFootnoteRefMissing, "未找到脚注引用"),
+            (Key::NoticeAnchorMissing, "未找到锚点"),
+            (Key::NoticeLinkUnsupported, "无法打开链接"),
+            (Key::NoticeLinkFailed, "无法打开链接"),
+            (Key::NoticeMermaidLiveOpenFailed, "无法打开 mermaid.live"),
+            (Key::NoticeImageMissing, "图片文件缺失"),
+            (Key::NoticeRemoteImageFailed, "远程图片加载失败"),
+            (Key::NoticeMermaidRenderFailed, "图表渲染失败"),
+            (Key::NoticePrintFailed, "打印失败"),
+            (Key::NoticeExportPdfFailed, "导出 PDF 失败"),
+            (Key::NoticeSettingsSaveFailed, "设置保存失败"),
+        ];
+        for &(key, current) in failures {
+            let text = t(key);
+            assert!(
+                text.contains(current),
+                "须保留现状「{current}」({key:?}): {text}"
+            );
+            assert!(
+                text.contains("下一步") || text.contains("重启应用"),
+                "失败文案须给出可执行下一步 ({key:?}): {text}"
+            );
+        }
+
+        // D 类：致命启动错误除重启外，还要说明仍失败时的排查方向。
+        for key in [
+            Key::ErrEventLoopCreate,
+            Key::ErrEventLoopRun,
+            Key::FatalWindowCreate,
+        ] {
+            let text = t(key);
+            assert!(
+                text.contains("重启应用"),
+                "须建议重启应用 ({key:?}): {text}"
+            );
+            assert!(
+                text.contains("检查图形环境") && text.contains("重新安装"),
+                "须说明仍失败时的排查方向 ({key:?}): {text}"
+            );
+        }
+
+        // B 类：纯引导（需先保存、光标不在代码块、全屏/缩放提示等）。
+        // C 类：成功/状态（已保存、已复制、主题、字数等）。
+        let guidance_or_status = [
+            Key::NoticeExternalChanged,
+            Key::NoticeOutputEmptyDocument,
+            Key::ModalExternalChangedBody,
+            Key::ModalUnsavedTitle,
+            Key::ModalUnsavedBody,
+            Key::NoticeSelectVersion,
+            Key::NoticeSelectVersionToDelete,
+            Key::NoticeRecovered,
+            Key::NoticeFullscreenOn,
+            Key::NoticeImagePasteNeedsFile,
+            Key::NoticeMermaidSnapshotNeedsFile,
+            Key::NoticeInsertImageNeedsFile,
+            Key::NoticeCodeBlockRequired,
+            Key::NoticeMermaidSourceTooLarge,
+            Key::DropImageNeedsDir,
+            Key::ErrExportDraftNoPath,
+            Key::NoticeSaved,
+            Key::NoticeFileRestored,
+            Key::NoticeExternalReloaded,
+            Key::NoticeExternalKept,
+            Key::NoticeExternalDismissed,
+            Key::NoticeExportCancelled,
+            Key::NoticeExportedHtml,
+            Key::NoticeSaveAsCancelled,
+            Key::NoticeSavedAs,
+            Key::NoticeCancelled,
+            Key::NoticeCancelledWhat,
+            Key::NoticeCancelDirty,
+            Key::NoticeOpened,
+            Key::NoticeNewDraft,
+            Key::NoticeRestoredVersion,
+            Key::NoticeDeletedSnapshot,
+            Key::NoticeNoHistory,
+            Key::NoticeHistoryCleared,
+            Key::NoticeConfigIgnored,
+            Key::NoticeTheme,
+            Key::CliUsage,
+            Key::NoticeFullscreenOff,
+            Key::NoticeZoom,
+            Key::NoticeCodeCopied,
+            Key::NoticeFocusMode,
+            Key::NoticeMermaidImageInserted,
+            Key::NoticeRemoteImagesBlocked,
+            Key::NoticeRemoteImagesAllowed,
+            Key::NoticeSettingsSaved,
+        ];
+        for key in guidance_or_status {
+            let text = t(key);
+            assert!(
+                !text.contains("下一步"),
+                "B/C 类不应混入下一步 ({key:?}): {text}"
+            );
+        }
     }
 }

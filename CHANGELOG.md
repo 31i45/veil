@@ -2,9 +2,9 @@
 
 Veil 版本迭代记录。每个版本的详细修复清单见对应 git tag 的 commit log。
 
-## v3.0.0 — 2026-11-20
+## v3.0.0 — 2026-11-21
 
-**BREAKING**：只发布一个 `veil.exe`；Mermaid 改为进程内本地渲染。
+**BREAKING**：只发布一个 `veil.exe`；Mermaid 改为进程内本地渲染。最终干净重建产物 2026-11-21（commit `97d3a60`）；2026-11-20 为初版构建，其体积/SHA 仅作历史参照。
 
 ### BREAKING
 - 停止发布 `veil-full.exe`：删除 `veil-full` bin、`required-features` 分支与 `target-full` 发布路径。**迁移：此前使用较大离线发行包的用户直接改用新的 `veil.exe`，能力不减**；文件关联与 `/register` 行为不变
@@ -19,10 +19,17 @@ Veil 版本迭代记录。每个版本的详细修复清单见对应 git tag 的
 - 发布管线只剩一条：一次干净构建（默认 feature）、一次串行测试、一次 clippy、一次门禁、一次冒烟、一份 SHA-256；`CARGO_TARGET_DIR` 统一为默认 `target`
 - workspace 版本号升至 3.0.0
 
+### Fixed（Task 9A：两路评审可控 FAIL 闭环，commits `518ae84`、`97d3a60`）
+- 普通远程图片默认关闭：仅在用户显式 opt-in（视图 → 允许远程图片）后才加载 http/https 图片，默认零后台网络；导出/PDF 永不包含远程资源
+- `mermaid.live` 打开失败可见且可恢复：浏览器打开失败时给出用户可见提示与恢复动作，不再静默失败；菜单命名统一为「在 mermaid.live 打开」并补失败路径测试
+- 非首窗创建失败用户可见：第二窗口创建失败时在现存窗口显示可见错误 + 恢复动作，现有文档不丢不关；补行为测试（`shell.rs` +370 行、`platform/error.rs`）
+- `VEIL_HOME` 隔离 smoke：smoke 子进程使用独立临时 `VEIL_HOME` 且不传文档路径，不读写真实 `%APPDATA%\Veil` 或恢复真实用户文档；`tools/smoke_launch.ps1` 记录 SessionId/桌面可用性
+- 20k 击键探针：新增 `perf_20k_blocks`（21,000 块 / 300 样本）覆盖 G2 门槛，最终 exe 实测最差 p95 2.825 ms ≤ 16 ms（`evidence/input/perf-20k-final.md`）
+
 ### Notes
-- 体积（2026-11-20 本机构建）：13,995,008 B ≈ 13.35 MiB（门禁 ≤14 MiB）；SHA-256 `3f7e164bc6e6b7eba67b950a004d6ed84e6b15db2283959c09824d96a63e596b`
-- 测试：串行 `cargo test --workspace --release -- --test-threads=1` 1911 passed / 0 failed / 15 ignored；`cargo test -p veil --lib` 221 passed / 1 ignored；`cargo test -p veil-mermaid-offline` 22 passed / 1 ignored；`cargo clippy --workspace --all-targets -- -D warnings` 零警告
-- 构建与门禁原始记录见 `evidence/release/v3-build.md`
+- **最终体积（2026-11-21 干净重建，commit `97d3a60`，绑定全部最终证据）**：13,998,592 B ≈ 13.35 MiB（门禁 ≤14 MiB，余量 681,472 B）；SHA-256 `58c9ad0decfd614da73098a006ac0773b2515cd49c56684b3f1aec5fd0d4ab75`。历史参照：2026-11-20 初版构建 13,995,008 B / SHA `3f7e164bc6e6b7eba67b950a004d6ed84e6b15db2283959c09824d96a63e596b`（不作最终发布物校验）
+- **门禁**：最终机器可读发布记录 `target/release/release-record.json` 记录 build / size_gate / feature_gate（QuickJS + linkedom + mermaid 命中）/ smoke / tests / clippy / checksum / archive 全部 `status=passed`，`release_ready=true`。最终串行 `cargo test --workspace --release -- --test-threads=1` 为 **1919 passed / 0 failed / 15 ignored**（2026-11-21，commit `97d3a60`；`cargo fmt --check` 与 `cargo clippy --workspace --all-targets -- -D warnings` 均零错误）；2026-11-20 初版构建记录为 1911 passed / 15 ignored（历史参照）
+- 构建与门禁原始记录见 `evidence/release/v3-build.md`（初版）与 `target/release/release-record.json`（最终）
 
 ## v2.0.1 — 2026-11-20
 

@@ -63,7 +63,7 @@ veil.exe /unregister   # 只撤销 /register 创建、且当前值仍属于自�
 3. 光标与选区：grapheme 边界导航；光标进出 `**bold**` 等标记时展开/收起，光标视觉位置不跳；链接使用主题链接色（浅 `#2B6CB0` / 深 `#7FB4F5`），与正文不同色
 4. 文件打开/保存：自动保存、外部修改提示与覆盖前备份
 5. 剪贴板：纯文本、HTML→Markdown 转换、截图粘贴落盘（`<文档名>.assets/`，递增命名不覆盖）
-6. 块级渲染：表格（网格态 + 活动单元格内直接编辑；活动格显示 Markdown 源码，其余单元格渲染粗体/斜体/删除线/行内代码/链接色并隐藏标记）、公式（latex-rust 纯 Rust 路径）、文档内图片（相对路径 PNG；断链降级为 alt 文本；远程 http/https 图片默认自动加载，取消勾选「视图 → 允许远程图片」即全局关闭；加载失败降级为 alt 占位并在状态栏提示一次）
+6. 块级渲染：表格（网格态 + 活动单元格内直接编辑；活动格显示 Markdown 源码，其余单元格渲染粗体/斜体/删除线/行内代码/链接色并隐藏标记）、公式（latex-rust 纯 Rust 路径）、文档内图片（相对路径 PNG；断链降级为 alt 文本；远程 http/https 图片默认关闭，只有勾选「视图 → 允许远程图片」后才加载；加载失败降级为 alt 占位并在状态栏提示一次）
 7. HTML 导出：单文件自包含、无外部资源；内联 CSS 跟随当前浅/深主题（背景、正文、弱化色、链接色、代码底色、边框），深色页面含 `color-scheme: dark`
 8. 配置与主题：顶层 `mode` 单键（system/light/dark，兼容旧 `[theme] mode`）、跟随系统外观、深色标题栏/Mica、切换持久化
 9. 自绘 chrome：菜单栏（↑/↓ 选择、Enter 执行、Esc 关闭，主菜单与右键菜单一致）、状态栏、滚动条；系统文件对话框（打开/另存为）
@@ -81,7 +81,7 @@ veil.exe /unregister   # 只撤销 /register 创建、且当前值仍属于自�
 21. 状态可见：状态栏显示「文件名 · 已保存 HH:MM」，脏态显示「· 未保存」；CLI 打开失败弹出可见错误框并以退出码 1 结束
 22. 光标表达焦点：窗口聚焦时实心、失焦时空心，零定时器、零空闲唤醒
 23. 状态过渡：菜单栏、菜单项、大纲、快速打开、右键菜单、查找栏与对话框按钮的悬停/按下高亮以 120 ms ease-out cubic 淡入淡出；仅在动画进行中推进，空闲路径仍然零定时器、不唤醒进程；系统关闭「显示动画」时直接跳到终态
-24. 远程图片（v1.4）：http/https 图片默认自动加载，取消勾选「视图 → 允许远程图片」即全局关闭；抓取失败降级为 alt 占位并在状态栏提示一次。请求不携带 Cookie、`Referer` 或任何凭据，UA 固定为 `Veil/<version>`，连接/读取超时 10 s，响应体上限 20 MiB，最多跟随 3 次重定向且拒绝 https→http 降级，拒绝 localhost / 回环 / 私有 / 链路本地地址。导出与 PDF 永不包含远程资源
+24. 远程图片（v1.4）：http/https 图片默认关闭，勾选「视图 → 允许远程图片」后才全局加载；抓取失败降级为 alt 占位并在状态栏提示一次。请求不携带 Cookie、`Referer` 或任何凭据，UA 固定为 `Veil/<version>`，连接/读取超时 10 s，响应体上限 20 MiB，最多跟随 3 次重定向且拒绝 https→http 降级，拒绝 localhost / 回环 / 私有 / 链路本地地址。导出与 PDF 永不包含远程资源
 25. 编辑手感（v1.5）：`()` `[]` `{}` `"` `'` 五类自动配对，支持选中包裹与成对退格；光标 600 ms 闪烁在 IME 预编辑与打印时暂停；`Ctrl+,` 设置模态（9 个配置项，改动立即生效）
 26. 大纲与目录：`[TOC]` 行渲染为带标题锚点的嵌套有序列表，并随编辑自动刷新
 27. 图片工作流（v1.6 + 本轮）：alt 文本作为题注；独立图支持 `<img align="left|center|right">` 与显式 `width`/`height`；单击独立图片打开放大预览（滚轮平移、`Ctrl+滚轮` 或 `+`/`-` 缩放、`0` 适应、方向键/翻页平移、`Esc`/遮罩关闭；`Ctrl+单击` 仍落光标显示源码）
@@ -137,7 +137,7 @@ cargo build --release --bin veil
 cargo test -p veil-mermaid-offline
 ```
 
-当前 1911 项测试全绿（串行 `cargo test --workspace --release -- --test-threads=1`：1911 passed / 0 failed / 15 ignored，2026-11-20；远程 SVG mock 使用 20 ms 墙钟截止，并行执行可能假超时）；默认特性下 `cargo test -p veil --lib` 为 221 passed / 1 ignored（默认特性现已包含离线引擎）。`cargo clippy --workspace --all-targets -- -D warnings` 零警告。
+最终 1919 项测试全绿（串行 `cargo test --workspace --release -- --test-threads=1`：1919 passed / 0 failed / 15 ignored，2026-11-21，commit `97d3a60`；远程 SVG mock 使用 20 ms 墙钟截止，并行执行可能假超时）；默认特性下 `cargo test -p veil --lib` 为 221 passed / 1 ignored（默认特性现已包含离线引擎）。`cargo clippy --workspace --all-targets -- -D warnings` 零警告。
 
 Release CI 在 `v*` tag push 与 `workflow_dispatch` 时运行。手动触发默认 `dry_run=true`，执行 Linux core check/test 以及 Windows 构建、测试、clippy、产物边界、冒烟与 SHA-256 校验，但不创建、不上传 GitHub Release；只有 `v*` tag push 可以发布。任何冒烟失败都不得用 `continue-on-error` 掩盖。
 
@@ -155,7 +155,7 @@ pwsh -File tools/smoke_launch.ps1 -ExePath target/release/veil.exe -ExpectedTitl
 
 ## 数字红线（目标值与实测）
 
-发布构建、探针串行；性能项 2026-11-18 复核，测试与体积项 2026-11-18 复核。命令：`cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo run --release -p veil --example bench_typing`、`cargo test -p veil-ui --release --lib -- --ignored --nocapture --test-threads=1 perf_keystroke_path`（10,500 块用 `perf_keystroke_10k_blocks`）、`cargo build --release -p veil` + `(Get-Item target\release\veil.exe).Length`，依赖计数用 `cargo tree -p veil --edges normal --prefix none`。方法与明细见 `docs/review/keystroke-attribution.md`。
+发布构建、探针串行；最终性能/体积行绑定 2026-11-21 干净重建产物（commit `97d3a60`，`veil.exe` 13,998,592 B，SHA-256 `58c9ad0d…d4ab75`）；其余行保留原测量日期。命令：`cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo run --release -p veil --example bench_typing`、`cargo test -p veil-ui --release --lib -- --ignored --nocapture --test-threads=1 perf_20k_blocks`、`cargo build --release -p veil` + `(Get-Item target\release\veil.exe).Length`，依赖计数用 `cargo tree -p veil --edges normal --prefix none`。方法与明细见 `docs/review/keystroke-attribution.md`。
 
 | 指标 | 目标值 | 实测 |
 |---|---|---|
@@ -164,9 +164,9 @@ pwsh -File tools/smoke_launch.ps1 -ExePath target/release/veil.exe -ExpectedTitl
 | 冷启动（bench 工具，进程创建→打开→首屏排版；p50 / max） | 观察项 | 576.46 / 599.98 ms（2026-11-09，`cargo run --release -p veil --example bench_typing`；基线 520.87 / 533.85 → +10.7% / +12.4%，回退门禁 ≤ 20%） |
 | 冷启动（墙钟，进程创建→首帧；环境观察项） | ≤ 300 ms | 450–529 ms（其中 440–470 ms 在 `main` 之前，属本机进程创建段开销；2026-10-31） |
 | 冷启动（窗口句柄口径；P2 对比口径） | — | 30 ms（2026-10-30，`tools/bench/measure.ps1`） |
-| 10 万字文档击键→提交上屏延迟 p95 | ≤ 16 ms | 0.973 ms / 1.566 ms（`perf_keystroke_path` 5,005 块 / `perf_keystroke_10k_blocks` 10,500 块；同机 2026-11-18 复测；上一轮记录 1.297 / 1.796）✅ |
+| 10 万字文档击键→提交上屏延迟 p95 | ≤ 16 ms | p50 2.36–2.38 ms · p95 2.81–2.83 ms · max ≤5.42 ms（`perf_20k_blocks` 21,000 块 / 300 样本，2 次，最终 exe 2026-11-21 commit `97d3a60`；最差 p95 2.825 ms ≤ 16 ms。早期 10k 记录：0.973 / 1.566 ms）✅ |
 | 10 万字文档常驻内存（私有工作集） | ≤ 150 MB | 40.76 MB（20 页深滚动后 WorkingSet，2026-11-05 实测） |
-| 安装产物体积 — 合计单文件 `veil.exe` | ≤ 14 MiB = 14,680,064 B | 13.35 MiB = 13,995,008 B（2026-11-20，单一产物：离线 Mermaid 引擎 + 完整 `mermaid.js` + resvg，引擎惰性初始化） |
+| 安装产物体积 — 合计单文件 `veil.exe` | ≤ 14 MiB = 14,680,064 B | 13.35 MiB = 13,998,592 B（2026-11-21 最终干净重建，commit `97d3a60`，SHA-256 `58c9ad0d…d4ab75`；单一产物：离线 Mermaid 引擎 + 完整 `mermaid.js` + resvg，引擎惰性初始化） |
 | `veil-core` 单元+属性测试数 | ≥ 80 | 347 |
 | e2e 断言数 | ≥ 20 | 41（3 个 e2e_ 场景测试：写作闭环打开→保存→重开、表格+图片粘贴落盘、查找替换→崩溃恢复→自清）✅ |
 | Markdown 往返一致率（无编辑时输出 == 输入字节；按字节比较） | 100% | 100% |

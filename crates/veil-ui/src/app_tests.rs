@@ -11041,7 +11041,10 @@ fn ctrl_click_undefined_footnote_keeps_caret_and_reports() {
     ctrl_click_doc(&mut a, text.find("[^nope]").expect("引用起点"));
 
     assert_eq!(a.editor.caret(), caret0, "光标不变");
-    assert_eq!(a.ui_state.chrome.notice, "未找到脚注定义");
+    assert_eq!(
+        a.ui_state.chrome.notice,
+        "未找到脚注定义；下一步：检查脚注名称是否与引用一致"
+    );
 }
 
 #[test]
@@ -11054,7 +11057,10 @@ fn ctrl_click_missing_anchor_keeps_caret_and_reports() {
     ctrl_click_doc(&mut a, text.find('x').expect("应找到链接文字"));
 
     assert_eq!(a.editor.caret(), caret0, "光标不变");
-    assert_eq!(a.ui_state.chrome.notice, "未找到锚点");
+    assert_eq!(
+        a.ui_state.chrome.notice,
+        "未找到锚点；下一步：检查锚点名称是否与标题一致"
+    );
 }
 
 #[test]

@@ -1808,6 +1808,12 @@ impl App {
 /// 首窗默认逻辑尺寸（无窗口几何记录时使用）。
 const DEFAULT_WIN_W: u32 = 900;
 const DEFAULT_WIN_H: u32 = 700;
+/// 主窗口最小内部尺寸（逻辑像素）：再小状态栏与多行通知浮层就压成不可读。
+/// 仍小于默认 900×700，小屏上不会被强行放大。
+pub(crate) const MIN_WINDOW_SIZE: (f32, f32) = (520.0, 360.0);
+/// 最小高度须完整容纳的通知行数（错误通知常驻，必须可读）。
+#[cfg(test)]
+pub(crate) const MIN_NOTICE_LINES: f32 = 4.0;
 /// 非客户区预留（物理像素）：覆盖标题栏与边框；150% 下实测约 22×56。
 const NON_CLIENT_W: u32 = 24;
 const NON_CLIENT_H: u32 = 64;
@@ -1894,8 +1900,11 @@ pub(crate) fn fit_initial_window(
     let max_h = (((area.h.saturating_sub(chrome_h)) as f32) / scale)
         .floor()
         .max(1.0) as u32;
-    let width = desired_w.clamp(1, max_w);
-    let height = desired_h.clamp(1, max_h);
+    // 最小尺寸是硬约束：工作区极小时也不能把窗口收敛到不可读尺寸；
+    // 由 winit 的最小尺寸保证真实窗口不会更小。
+    let (min_w, min_h) = (MIN_WINDOW_SIZE.0 as u32, MIN_WINDOW_SIZE.1 as u32);
+    let width = desired_w.clamp(min_w, max_w.max(min_w));
+    let height = desired_h.clamp(min_h, max_h.max(min_h));
     let phys_w = (width as f32 * scale).round() as i64;
     let phys_h = (height as f32 * scale).round() as i64;
     let outer_w = phys_w + NON_CLIENT_W as i64;
@@ -1962,10 +1971,14 @@ impl App {
         let screens: Vec<ScreenRect> = monitors.iter().map(|(s, _)| *s).collect();
         let saved_geom = self.config.window.map(|g| clamp_window_geom(g, &screens));
         let initial_geom = fit_initial_window(DEFAULT_WIN_W, DEFAULT_WIN_H, &monitors, work_area);
-        let geom = saved_geom.unwrap_or(initial_geom);
+        let mut geom = saved_geom.unwrap_or(initial_geom);
+        // 历史几何可能记录过更小的尺寸：最小尺寸对恢复路径同样是硬约束。
+        geom.width = geom.width.max(MIN_WINDOW_SIZE.0 as u32);
+        geom.height = geom.height.max(MIN_WINDOW_SIZE.1 as u32);
         let attrs = Window::default_attributes()
             .with_title(self.title_text())
             .with_inner_size(LogicalSize::new(geom.width as f32, geom.height as f32))
+            .with_min_inner_size(LogicalSize::new(MIN_WINDOW_SIZE.0, MIN_WINDOW_SIZE.1))
             .with_position(PhysicalPosition::new(geom.x, geom.y))
             // 3e 修 A1：exe 内嵌 ICO 只喂任务栏/文件管理器，标题栏图标须显式设置
             .with_window_icon(Some(

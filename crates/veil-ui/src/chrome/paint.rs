@@ -110,6 +110,80 @@ pub(super) struct StatusFit {
     pub right_w: f32,
 }
 
+/// 通知浮层几何（逻辑像素）：以状态栏上沿为底向上排版，整体夹在客户区内。
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct NoticeOverlay {
+    /// 卡片左上角与尺寸（`y` 为卡顶；`y + h <= 状态栏上沿`）。
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+    /// 单行行高。
+    pub line_h: f32,
+    /// 每行文本矩形的顶边 y（绝对坐标），长度 = 空间允许保留的行数。
+    pub rows: Vec<f32>,
+}
+
+/// 浮层几何（纯函数，可单测）：从状态栏上沿向上排版并 clamp 到客户区顶部
+/// （不压住菜单栏）；高度不足时减少保留行数，保证每行矩形都在客户区内。
+pub(super) fn notice_overlay_layout(
+    line_count: usize,
+    win_w: f32,
+    win_h: f32,
+    scale: f32,
+) -> NoticeOverlay {
+    let pad = space::M * scale;
+    let w = (win_w - 2.0 * pad).max(1.0);
+    let status_y = (win_h - STATUS_H * scale).max(0.0);
+    let top = (MENU_H * scale).clamp(0.0, status_y);
+    let line_h = typography::UI_LINE_HEIGHT * scale;
+    let vpad = space::S * scale;
+    let avail_h = (status_y - top).max(0.0);
+    // 至少给一行留机会（极端退化窗口也画出来，由下方行矩形钳位保证不越界）。
+    let max_lines = if avail_h <= 2.0 * vpad + line_h {
+        1
+    } else {
+        ((avail_h - 2.0 * vpad) / line_h).floor() as usize
+    };
+    let n = line_count.min(max_lines);
+    let h = (n as f32 * line_h + 2.0 * vpad).min(avail_h);
+    let y = (status_y - h).max(top);
+    let mut rows = Vec::with_capacity(n);
+    for i in 0..n {
+        let ry = y + vpad + i as f32 * line_h;
+        if ry < 0.0 || ry + line_h > win_h + 0.5 {
+            break; // 防御：任何情况下行矩形都不得越出客户区
+        }
+        rows.push(ry);
+    }
+    NoticeOverlay {
+        x: pad,
+        y,
+        w,
+        h,
+        line_h,
+        rows,
+    }
+}
+
+/// 空间不足时保留哪些行：优先首行与末行（中间行让位），绝不省略成半行。
+pub(super) fn notice_overlay_lines(lines: &[String], capacity: usize) -> Vec<String> {
+    if capacity >= lines.len() {
+        return lines.to_vec();
+    }
+    match capacity {
+        0 => Vec::new(),
+        1 => vec![lines.first().cloned().unwrap_or_default()],
+        cap => {
+            let mut out = lines[..cap - 1].to_vec();
+            if let Some(last) = lines.last() {
+                out.push(last.clone());
+            }
+            out
+        }
+    }
+}
+
 /// 通知的落位方式。任何路径都必须真正绘制，不存在「直接不画」或「省略后塞回中段」。
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub(super) enum NoticeSlot {
@@ -272,7 +346,8 @@ impl Chrome {
     }
 
     /// 状态栏上方浮层：按窗口宽度折行完整呈现通知，不做任何字符省略；
-    /// 顶边夹在菜单栏之下，避免盖住菜单。只在状态栏中段与右文区都容不下全文时使用。
+    /// 从状态栏上沿向上排版并夹在客户区内（不压菜单栏）；行高不足时减少行数，
+    /// 但首行与末行都保留在窗口内。只在状态栏中段与右文区都容不下全文时使用。
     #[allow(clippy::too_many_arguments)]
     fn draw_notice_overlay(
         &mut self,
@@ -280,44 +355,35 @@ impl Chrome {
         engine: &mut LayoutEngine,
         text: &str,
         win_w: f32,
-        status_y: f32,
+        win_h: f32,
         scale: f32,
         theme: &Theme,
     ) {
-        let pad = space::M * scale;
-        let inner = (win_w - 2.0 * pad - 2.0 * space::S * scale).max(1.0);
+        let inner = (win_w - 2.0 * space::M * scale - 2.0 * space::S * scale).max(1.0);
         let lines = wrap_notice(engine, text, inner);
-        let line_h = typography::UI_LINE_HEIGHT * scale;
-        let vpad = space::S * scale;
-        let max_oh = (status_y - MENU_H * scale).max(line_h + 2.0 * vpad);
-        let oh = (lines.len() as f32 * line_h + 2.0 * vpad).min(max_oh);
-        let oy = (status_y - oh).max(MENU_H * scale);
-        let ow = (win_w - 2.0 * pad).max(1.0);
+        let layout = notice_overlay_layout(lines.len(), win_w, win_h, scale);
+        let shown = notice_overlay_lines(&lines, layout.rows.len());
         frame.fill_surface_card(
-            pad.round() as i32,
-            oy.round() as i32,
-            ow.ceil() as u32,
-            oh.ceil() as u32,
+            layout.x.round() as i32,
+            layout.y.round() as i32,
+            layout.w.ceil() as u32,
+            layout.h.ceil() as u32,
             scale,
             theme.dark,
             palette::surface_popup(theme),
             theme.chrome_border,
         );
-        let text_x = pad + space::S * scale;
-        for (i, line) in lines.iter().enumerate() {
+        let text_x = layout.x + space::S * scale;
+        for (line, &ry) in shown.iter().zip(layout.rows.iter()) {
             if line.is_empty() {
                 continue;
-            }
-            let ly = oy + vpad + i as f32 * line_h + line_h / 2.0;
-            if ly + line_h / 2.0 > status_y + 0.5 {
-                break;
             }
             self.draw_left(
                 frame,
                 engine,
                 line,
                 text_x,
-                ly,
+                ry + layout.line_h / 2.0,
                 state::disabled_fg(theme),
                 scale,
             );
@@ -524,15 +590,7 @@ impl Chrome {
                 );
             }
             NoticeSlot::Overlay => {
-                self.draw_notice_overlay(
-                    frame,
-                    engine,
-                    &notice_text,
-                    win_w,
-                    status_y,
-                    scale,
-                    theme,
-                );
+                self.draw_notice_overlay(frame, engine, &notice_text, win_w, win_h, scale, theme);
             }
         }
 

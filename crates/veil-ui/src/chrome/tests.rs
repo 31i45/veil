@@ -1372,6 +1372,58 @@ fn notice_still_painted_in_extremely_narrow_window() {
     assert_eq!(chrome.notice, notice, "绘制不得吞掉通知文本");
 }
 
+/// 极窄窗浮层（复审）：布局是纯函数；所有行矩形都在客户区内，高度不足时
+/// 减少行数但首行与末行都保留，而不只是断言「有像素差」。
+#[test]
+fn notice_overlay_layout_keeps_rows_in_client_area_and_first_last() {
+    let notice = "已从崩溃恢复「recover-me.md」的未保存内容；恢复时间 12:44。当前内容尚未保存，按 Ctrl+S 保存（写回原文件所在目录「recovery」）";
+    // 同一逻辑尺寸（140×160）在 100% 与 150% 下的物理像素。
+    for (w, h, scale) in [(140u32, 160u32, 1.0f32), (210, 240, 1.5)] {
+        let mut engine = LayoutEngine::new();
+        let pad = crate::tokens::space::M * scale;
+        let inner = w as f32 - 2.0 * pad - 2.0 * crate::tokens::space::S * scale;
+        let lines = super::paint::wrap_notice(&mut engine, notice, inner);
+        assert!(lines.len() > 4, "用例前提：窄窗下须折出多行: {lines:?}");
+
+        let layout = super::paint::notice_overlay_layout(lines.len(), w as f32, h as f32, scale);
+        let status_y = h as f32 - STATUS_H * scale;
+        assert!(!layout.rows.is_empty(), "浮层至少保留一行");
+        assert!(
+            layout.rows.len() < lines.len(),
+            "空间不足必须减少行数: {} / {}",
+            layout.rows.len(),
+            lines.len()
+        );
+        for &ry in &layout.rows {
+            assert!(ry >= 0.0, "行矩形越出客户区顶部: {ry}");
+            assert!(
+                ry + layout.line_h <= h as f32 + 0.5,
+                "行矩形越出客户区底部: {ry}"
+            );
+            assert!(
+                ry + layout.line_h <= status_y + 0.5,
+                "行矩形越过状态栏上沿: {ry}"
+            );
+        }
+        assert!(
+            layout.y >= 0.0 && layout.y + layout.h <= h as f32 + 0.5,
+            "浮层卡片越出客户区: y={} h={}",
+            layout.y,
+            layout.h
+        );
+        assert!(
+            layout.h <= status_y - MENU_H * scale + 0.5,
+            "浮层不得压住菜单栏: h={} status_y={status_y}",
+            layout.h
+        );
+
+        let shown = super::paint::notice_overlay_lines(&lines, layout.rows.len());
+        assert_eq!(shown.len(), layout.rows.len());
+        assert_eq!(shown.first(), lines.first(), "首行必须可见");
+        assert_eq!(shown.last(), lines.last(), "末行必须可见");
+    }
+}
+
 #[test]
 fn notice_painted_in_narrow_window_too() {
     let notice = "已恢复「a.md」的未保存内容（尚未保存）";

@@ -1390,6 +1390,135 @@ fn notice_painted_in_narrow_window_too() {
     assert!(diff > 0, "通知在中段不足时必须走降级路径而非消失");
 }
 
+/// R1：700px + 长文件名 + 脏态 + 长通知。左文压缩到「文件名 + 保存态」即止，
+/// 「 · 未保存」必须保留；通知要么完整放进中段/右文区，要么升级为浮层，绝不省略。
+#[test]
+fn notice_keeps_unsaved_state_at_700px_long_name() {
+    let mut engine = LayoutEngine::new();
+    let mut chrome = Chrome::default();
+    let long_name =
+        "2026-11-21-ux-after-ji-shen-mu-lu-chang-wen-jian-ming-ce-shi-yong-li-abcdefghijklmnop.md";
+    let path = Path::new("D:/资料归档-2026/第二层目录名称同样很长-用于验证路径截断/third-level-directory-with-a-rather-long-name/第四层")
+        .join(long_name);
+    let notice = "保存失败：拒绝访问。 (os error 5)；可 Ctrl+S 重试，或 Ctrl+Shift+S 另存为";
+    let (fit, slot) = chrome.layout_status_notice(
+        &mut engine,
+        Some(&path),
+        true,
+        ExternalState::Changed,
+        true,
+        None,
+        1234,
+        5,
+        23,
+        700.0,
+        1.0,
+        Some(notice),
+    );
+    assert!(
+        fit.left.ends_with(" · 未保存"),
+        "保存态不得被通知挤掉: {}",
+        fit.left
+    );
+    assert_eq!(
+        slot,
+        super::paint::NoticeSlot::Overlay,
+        "全文放不进状态栏时改浮层"
+    );
+}
+
+/// R2：禁用原因计入弹层宽度后，动作名整名可见、原因同时可见（上限仍为 420px）。
+#[test]
+fn disabled_reason_reserves_width_so_action_name_is_whole() {
+    let mut engine = LayoutEngine::new();
+    let pad = crate::theme::surface::padding(1.0);
+    for (menu, action, label, reason) in [
+        (
+            0,
+            MenuAction::Export,
+            t(Key::MenuFileExportHtml),
+            t(Key::DisabledEmptyDocument),
+        ),
+        (
+            1,
+            MenuAction::Undo,
+            t(Key::MenuEditUndo),
+            t(Key::DisabledNothingToUndo),
+        ),
+    ] {
+        let p = popup_layout(menu, 1.0, &[], 1000.0);
+        assert!(p.w <= 420.0, "菜单宽度上限不得突破: {:.1}", p.w);
+        let inner = p.w - 2.0 * pad;
+        assert!(
+            super::paint::measure_w(&mut engine, label) <= inner,
+            "动作名不得被截断: {label}"
+        );
+        let label_measured = super::paint::measure_w(&mut engine, label);
+        let reason_measured = super::paint::measure_w(&mut engine, reason);
+        assert!(
+            label_measured + crate::tokens::space::XL + reason_measured <= inner + 1.0,
+            "动作名与禁用原因必须同时容纳: {action:?} / {reason} (label={label_measured} reason={reason_measured} inner={inner} p.w={})",
+            p.w
+        );
+        assert!(
+            super::text_width(label, 1.0) + 24.0 + super::text_width(reason, 1.0) <= inner + 0.5,
+            "布局宽度必须为原因列预留: {action:?}"
+        );
+    }
+}
+
+/// R3：崩溃恢复通知含对象/时间/保存去向，任何省略都不允许留在状态栏；
+/// 700px 下必须走浮层，并按内宽折行完整呈现关键字段。
+#[test]
+fn recovery_notice_overlay_keeps_object_time_and_destination() {
+    let mut engine = LayoutEngine::new();
+    let mut chrome = Chrome::default();
+    let long_name =
+        "2026-11-21-ux-after-ji-shen-mu-lu-chang-wen-jian-ming-ce-shi-yong-li-abcdefghijklmnop.md";
+    let path = Path::new("D:/资料归档-2026/第二层目录名称同样很长-用于验证路径截断/third-level-directory-with-a-rather-long-name/第四层")
+        .join(long_name);
+    let notice = "已从崩溃恢复「recover-me.md」的未保存内容；恢复时间 12:44。当前内容尚未保存，按 Ctrl+S 保存（写回原文件所在目录「recovery」）";
+    let (fit, slot) = chrome.layout_status_notice(
+        &mut engine,
+        Some(&path),
+        true,
+        ExternalState::Changed,
+        true,
+        None,
+        23,
+        1,
+        1,
+        700.0,
+        1.0,
+        Some(notice),
+    );
+    assert_eq!(
+        slot,
+        super::paint::NoticeSlot::Overlay,
+        "需要省略时必须改用浮层"
+    );
+    assert!(fit.left.ends_with(" · 未保存"));
+
+    let pad = crate::tokens::space::M;
+    let inner = 700.0 - 2.0 * pad - 2.0 * crate::tokens::space::S;
+    let lines = super::paint::wrap_notice(&mut engine, notice, inner);
+    assert!(lines.len() > 1, "长通知必须折行而非省略: {lines:?}");
+    assert!(
+        !lines.iter().any(|l| l.contains('…')),
+        "浮层不得出现省略号: {lines:?}"
+    );
+    let joined: String = lines.concat();
+    for needle in ["recover-me.md", "12:44", "写回原文件所在目录「recovery」"] {
+        assert!(joined.contains(needle), "浮层缺少关键字段「{needle}」");
+    }
+    for line in &lines {
+        assert!(
+            super::paint::measure_w(&mut engine, line) <= inner + 1.0,
+            "折行超宽: {line}"
+        );
+    }
+}
+
 /// 禁用项不能只置灰：右键提示列改为 muted 的禁用原因（长原因可截断）。
 #[test]
 fn disabled_menu_item_paints_reason_text() {

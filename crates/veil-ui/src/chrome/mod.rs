@@ -364,16 +364,23 @@ pub fn popup_layout(open: usize, scale: f32, recent: &[String], win_w: f32) -> P
         .unwrap_or(0.0);
     let pad = crate::theme::surface::padding(scale);
     let gap = 24.0 * scale;
+    // 宽度同时为「禁用原因」预留：原因在快捷键列位置显示，若不计入宽度，
+    // 动作名会被迫中段省略（用户看不到自己在选什么）。上限仍是 POPUP_MAX_W。
     let widest = rows
         .iter()
         .filter(|(_, _, a)| !matches!(a, MenuAction::Separator))
-        .map(|(label, sc, _)| {
-            text_width(label, scale)
-                + if sc.is_empty() {
-                    0.0
-                } else {
-                    gap + text_width(sc, scale)
-                }
+        .map(|(label, sc, action)| {
+            let shortcut_w = if sc.is_empty() {
+                0.0
+            } else {
+                gap + text_width(sc, scale)
+            };
+            // 原因列留一点余量：text_width 是近似值，实际光栅 ASCII 略宽；
+            // 余量保证动作名与原因同时整段可见，而不是靠省略号收场。
+            let reason_w = disabled_reason_key(*action)
+                .map(|key| gap + text_width(t(key), scale) + space::M * scale)
+                .unwrap_or(0.0);
+            text_width(label, scale) + shortcut_w.max(reason_w)
         })
         .fold(0.0_f32, f32::max);
     let content_w = widest + 2.0 * pad;
@@ -778,19 +785,33 @@ pub(crate) fn action_checked(action: MenuAction, flags: MenuFlags) -> bool {
     }
 }
 
-/// 禁用原因（单一来源）：不可用时返回给用户看的原因词条，可用时 None。
-/// 只表达「此刻必然无效果」的项；拿不准的（如剪贴板是否为空）一律保持可用。
-/// 菜单可在快捷键列/悬浮说明中以 muted 文本呈现该原因，避免只置灰不解释。
-pub(crate) fn disabled_reason(action: MenuAction, flags: MenuFlags) -> Option<Key> {
+/// 动作「可能」被禁用的原因词条（与运行态无关）：供菜单布局预留宽度，
+/// 保证禁用原因出现时动作名无需让位。
+pub(crate) fn disabled_reason_key(action: MenuAction) -> Option<Key> {
     match action {
-        MenuAction::Save if !flags.can_save => Some(Key::DisabledNoChanges),
-        MenuAction::Export | MenuAction::ExportPdf | MenuAction::Print if !flags.can_export => {
+        MenuAction::Save => Some(Key::DisabledNoChanges),
+        MenuAction::Export | MenuAction::ExportPdf | MenuAction::Print => {
             Some(Key::DisabledEmptyDocument)
         }
-        MenuAction::Undo if !flags.can_undo => Some(Key::DisabledNothingToUndo),
-        MenuAction::Redo if !flags.can_redo => Some(Key::DisabledNothingToRedo),
+        MenuAction::Undo => Some(Key::DisabledNothingToUndo),
+        MenuAction::Redo => Some(Key::DisabledNothingToRedo),
         _ => None,
     }
+}
+
+/// 禁用原因（单一来源）：不可用时返回给用户看的原因词条，可用时 None。
+/// 只表达「此刻必然无效果」的项；拿不准的（如剪贴板是否为空）一律保持可用。
+/// 菜单在快捷键列以 muted 文本呈现该原因，避免只置灰不解释。
+pub(crate) fn disabled_reason(action: MenuAction, flags: MenuFlags) -> Option<Key> {
+    let key = disabled_reason_key(action)?;
+    let disabled = match action {
+        MenuAction::Save => !flags.can_save,
+        MenuAction::Export | MenuAction::ExportPdf | MenuAction::Print => !flags.can_export,
+        MenuAction::Undo => !flags.can_undo,
+        MenuAction::Redo => !flags.can_redo,
+        _ => false,
+    };
+    disabled.then_some(key)
 }
 
 /// 菜单项是否可用：不可用时置灰、不可高亮、不可回车/点击执行。

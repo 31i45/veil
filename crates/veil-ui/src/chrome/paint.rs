@@ -11,7 +11,7 @@ use super::{
 use crate::document::ExternalState;
 use crate::i18n::{t, Key};
 use crate::theme::Theme;
-use crate::tokens::{palette, space, state, stroke};
+use crate::tokens::{palette, space, state, stroke, typography};
 use crate::view::{Frame, LayoutEngine};
 
 /// 文本排版宽度：UI 字阶（13px）排版后取文末光标的 x（单行 = 总宽）。
@@ -52,22 +52,74 @@ pub(super) fn ellipsize_middle(engine: &mut LayoutEngine, text: &str, avail: f32
     build(lo)
 }
 
+/// 浮层折行：按内宽贪心断行，中文按字断、英文优先在最近空格断；不插入省略号。
+/// 用于必须完整呈现的通知（崩溃恢复等），保证对象/时间/去向等字段不丢。
+pub(super) fn wrap_notice(engine: &mut LayoutEngine, text: &str, max_w: f32) -> Vec<String> {
+    let mut out = Vec::new();
+    if text.is_empty() {
+        return out;
+    }
+    for para in text.split('\n') {
+        if para.is_empty() {
+            out.push(String::new());
+            continue;
+        }
+        if max_w <= 0.0 {
+            out.push(para.to_string());
+            continue;
+        }
+        let mut start = 0usize;
+        let mut line_w = 0.0f32;
+        let mut last_space: Option<usize> = None;
+        for (byte_idx, ch) in para.char_indices() {
+            let mut buf = [0u8; 4];
+            let cw = measure_w(engine, ch.encode_utf8(&mut buf));
+            if ch == ' ' {
+                last_space = Some(byte_idx);
+            }
+            if line_w + cw > max_w && byte_idx > start {
+                let split = last_space.filter(|&s| s > start).unwrap_or(byte_idx);
+                out.push(para[start..split].trim_end().to_string());
+                start = if split == byte_idx {
+                    byte_idx
+                } else {
+                    split + 1
+                };
+                line_w = 0.0;
+                last_space = None;
+                for (i, c) in para[start..byte_idx].char_indices() {
+                    if c == ' ' {
+                        last_space = Some(start + i);
+                    }
+                    let mut buf = [0u8; 4];
+                    line_w += measure_w(engine, c.encode_utf8(&mut buf));
+                }
+            }
+            line_w += cw;
+        }
+        out.push(para[start..].trim_end().to_string());
+    }
+    out
+}
+
 /// 状态栏左右文本布局结果（像素宽为排版实测值）。
 pub(super) struct StatusFit {
     pub left: String,
-    /// 文件身份原文（通知压缩左文时复用）。
-    pub identity: String,
     pub right: String,
     pub left_w: f32,
     pub right_w: f32,
 }
 
-/// 通知的落位方式。任何路径都必须真正绘制，不存在「直接不画」。
+/// 通知的落位方式。任何路径都必须真正绘制，不存在「直接不画」或「省略后塞回中段」。
 #[derive(Clone, Copy, PartialEq, Debug)]
-enum NoticeSlot {
-    /// 左右文本之间的空白：中心对齐。
+pub(super) enum NoticeSlot {
+    /// 无通知。
+    None,
+    /// 左右文本之间的空白：中心对齐；可容纳全文，否则不使用本档。
     Middle { x0: f32, x1: f32 },
-    /// 最小浮层：中段与右区都不够时，在状态栏上方铺一块带边框的提示条。
+    /// 右文区：右文本次让位，通知全文左对齐绘制。
+    RightText { x0: f32, x1: f32 },
+    /// 状态栏上方浮层：按窗口宽度换行，完整呈现，不省略任何字符。
     Overlay,
 }
 
@@ -151,10 +203,124 @@ impl Chrome {
         }
         StatusFit {
             left,
-            identity: parts.identity,
             right,
             left_w,
             right_w,
+        }
+    }
+
+    /// 在 `layout_status` 之上决定通知落位：左文最多压缩到「文件名 + 保存态」，
+    /// 之后不再为通知牺牲保存态；中段放不下全文时依次占用右文区、升级为浮层。
+    /// 通知永远完整绘制，绝不省略后再塞回中段（R1/R3）。
+    #[allow(clippy::too_many_arguments)] // 状态栏聚合字段
+    pub(super) fn layout_status_notice(
+        &mut self,
+        engine: &mut LayoutEngine,
+        path: Option<&Path>,
+        dirty: bool,
+        external: ExternalState,
+        source_mode: bool,
+        saved_hhmm: Option<&str>,
+        words: usize,
+        line: usize,
+        col: usize,
+        win_w: f32,
+        scale: f32,
+        notice: Option<&str>,
+    ) -> (StatusFit, NoticeSlot) {
+        let mut fit = self.layout_status(
+            engine,
+            path,
+            dirty,
+            external,
+            source_mode,
+            saved_hhmm,
+            words,
+            line,
+            col,
+            win_w,
+            scale,
+        );
+        let Some(text) = notice.filter(|t| !t.is_empty()) else {
+            return (fit, NoticeSlot::None);
+        };
+        let notice_w = measure_w(engine, text);
+        let left_x = space::M * scale;
+        let right_edge = win_w - SCROLL_W * scale - space::M * scale;
+        let gap = space::M * scale;
+        let center_x1 = right_edge - fit.right_w - gap;
+        let x0 = left_x + fit.left_w + gap;
+        if notice_w <= center_x1 - x0 {
+            return (fit, NoticeSlot::Middle { x0, x1: center_x1 });
+        }
+        // 压缩左文：只到「文件名 + 保存态」为止。保存态不再为通知让位。
+        let parts = status_parts(path, dirty, external, source_mode, saved_hhmm);
+        let save_w = measure_w(engine, &parts.save);
+        let room = (center_x1 - left_x - save_w).max(0.0);
+        let identity = self.fit_middle(engine, &parts.identity, room, scale);
+        fit.left = format!("{identity}{}", parts.save);
+        fit.left_w = measure_w(engine, &fit.left);
+        let x0 = left_x + fit.left_w + gap;
+        if notice_w <= center_x1 - x0 {
+            return (fit, NoticeSlot::Middle { x0, x1: center_x1 });
+        }
+        // 占用右文区：右文让位，但通知仍完整绘制（不省略）。
+        if notice_w <= right_edge - x0 {
+            return (fit, NoticeSlot::RightText { x0, x1: right_edge });
+        }
+        (fit, NoticeSlot::Overlay)
+    }
+
+    /// 状态栏上方浮层：按窗口宽度折行完整呈现通知，不做任何字符省略；
+    /// 顶边夹在菜单栏之下，避免盖住菜单。只在状态栏中段与右文区都容不下全文时使用。
+    #[allow(clippy::too_many_arguments)]
+    fn draw_notice_overlay(
+        &mut self,
+        frame: &mut Frame,
+        engine: &mut LayoutEngine,
+        text: &str,
+        win_w: f32,
+        status_y: f32,
+        scale: f32,
+        theme: &Theme,
+    ) {
+        let pad = space::M * scale;
+        let inner = (win_w - 2.0 * pad - 2.0 * space::S * scale).max(1.0);
+        let lines = wrap_notice(engine, text, inner);
+        let line_h = typography::UI_LINE_HEIGHT * scale;
+        let vpad = space::S * scale;
+        let max_oh = (status_y - MENU_H * scale).max(line_h + 2.0 * vpad);
+        let oh = (lines.len() as f32 * line_h + 2.0 * vpad).min(max_oh);
+        let oy = (status_y - oh).max(MENU_H * scale);
+        let ow = (win_w - 2.0 * pad).max(1.0);
+        frame.fill_surface_card(
+            pad.round() as i32,
+            oy.round() as i32,
+            ow.ceil() as u32,
+            oh.ceil() as u32,
+            scale,
+            theme.dark,
+            palette::surface_popup(theme),
+            theme.chrome_border,
+        );
+        let text_x = pad + space::S * scale;
+        for (i, line) in lines.iter().enumerate() {
+            if line.is_empty() {
+                continue;
+            }
+            let ly = oy + vpad + i as f32 * line_h + line_h / 2.0;
+            if ly + line_h / 2.0 > status_y + 0.5 {
+                break;
+            }
+            self.draw_left(
+                frame,
+                engine,
+                line,
+                text_x,
+                ly,
+                state::disabled_fg(theme),
+                scale,
+            );
         }
     }
 
@@ -288,7 +454,8 @@ impl Chrome {
             theme.chrome_border,
         );
         let mid = status_y + status_h / 2.0;
-        let fit = self.layout_status(
+        let notice_text = self.notice.clone();
+        let (fit, slot) = self.layout_status_notice(
             engine,
             path,
             dirty,
@@ -300,52 +467,15 @@ impl Chrome {
             col,
             win_w,
             scale,
+            if notice_text.is_empty() {
+                None
+            } else {
+                Some(&notice_text)
+            },
         );
-        let StatusFit {
-            mut left,
-            identity,
-            right,
-            mut left_w,
-            right_w,
-        } = fit;
+        let StatusFit { left, right, .. } = fit;
         let left_x = space::M * scale;
         let right_edge = win_w - SCROLL_W * scale - space::M * scale;
-        let notice_gap = crate::theme::surface::control_gap(scale);
-        let min_notice = space::XL * scale;
-        let notice_text = self.notice.clone();
-
-        // 通知落位预判：优先中段；不足则压缩左文；再不足占用右文区域；最后浮层。
-        // 任何分支都必须能画出通知（不存在静默丢弃）。
-        let mut slot = None;
-        let mut draw_right = true;
-        if !notice_text.is_empty() {
-            let x0 = left_x + left_w + notice_gap;
-            let x1 = right_edge - right_w - notice_gap;
-            if x1 - x0 >= min_notice {
-                slot = Some(NoticeSlot::Middle { x0, x1 });
-            } else {
-                // (a) 压缩左文到仅文件名：保存态暂时让位于通知。
-                let room = (right_edge - right_w - notice_gap - left_x).max(0.0);
-                left = self.fit_middle(engine, &identity, room, scale);
-                left_w = measure_w(engine, &left);
-                let x0 = left_x + left_w + notice_gap;
-                let x1 = right_edge - right_w - notice_gap;
-                if x1 - x0 >= min_notice {
-                    slot = Some(NoticeSlot::Middle { x0, x1 });
-                } else {
-                    // (b) 临时占用右文区域：右文本次让位给通知。
-                    let x0 = left_x + left_w + notice_gap;
-                    let x1 = right_edge;
-                    if x1 - x0 >= min_notice {
-                        draw_right = false;
-                        slot = Some(NoticeSlot::Middle { x0, x1 });
-                    } else {
-                        // (c) 最小浮层：状态栏上方的一条提示带（右文保留不重叠）。
-                        slot = Some(NoticeSlot::Overlay);
-                    }
-                }
-            }
-        }
 
         self.draw_left(
             frame,
@@ -356,7 +486,7 @@ impl Chrome {
             state::disabled_fg(theme),
             scale,
         );
-        if draw_right {
+        if !matches!(slot, NoticeSlot::RightText { .. }) {
             self.draw_right(
                 frame,
                 engine,
@@ -368,46 +498,42 @@ impl Chrome {
             );
         }
         match slot {
-            Some(NoticeSlot::Middle { x0, x1 }) => {
+            NoticeSlot::None => {}
+            NoticeSlot::Middle { x0, x1 } => {
                 let avail_notice = (x1 - x0).max(1.0);
-                let fitted = self.fit_middle(engine, &notice_text, avail_notice, scale);
-                if let Some(l) =
-                    self.labels
-                        .get_or_insert(engine, &fitted, state::disabled_fg(theme), scale)
-                {
+                if let Some(l) = self.labels.get_or_insert(
+                    engine,
+                    &notice_text,
+                    state::disabled_fg(theme),
+                    scale,
+                ) {
                     let x = x0 + (avail_notice - l.w as f32) / 2.0;
                     let y = mid - l.h as f32 / 2.0;
                     frame.blit(&l.pixels, l.w, l.h, x.round() as i32, y.round() as i32);
                 }
             }
-            Some(NoticeSlot::Overlay) => {
-                let pad = space::M * scale;
-                let ow = (win_w - 2.0 * pad).max(1.0);
-                let oh = status_h;
-                let oy = (status_y - oh).max(0.0);
-                frame.fill_surface_card(
-                    pad.round() as i32,
-                    oy.round() as i32,
-                    ow.ceil() as u32,
-                    oh.ceil() as u32,
-                    scale,
-                    theme.dark,
-                    palette::surface_popup(theme),
-                    theme.chrome_border,
-                );
-                let inner = (ow - 2.0 * space::S * scale).max(1.0);
-                let fitted = self.fit_middle(engine, &notice_text, inner, scale);
+            NoticeSlot::RightText { x0, .. } => {
                 self.draw_left(
                     frame,
                     engine,
-                    &fitted,
-                    pad + space::S * scale,
-                    oy + oh / 2.0,
+                    &notice_text,
+                    x0,
+                    mid,
                     state::disabled_fg(theme),
                     scale,
                 );
             }
-            None => {}
+            NoticeSlot::Overlay => {
+                self.draw_notice_overlay(
+                    frame,
+                    engine,
+                    &notice_text,
+                    win_w,
+                    status_y,
+                    scale,
+                    theme,
+                );
+            }
         }
 
         // 滚动条：胶囊滑块；悬停/拖动时 alpha 由 170 → 255 加亮（深浅主题都可见），
@@ -471,7 +597,7 @@ impl Chrome {
                     }
                 }
                 // 主题项 / 开关项：开启态在右侧显示「当前」（快捷键列复用）。
-                // 禁用项不用置灰了事：右侧改为 muted 的不可用原因，空间不足时截断。
+                // 禁用项不用置灰了事：右侧改为 muted 的不可用原因（宽度已在布局中预留）。
                 let is_current =
                     theme_action_matches(*action, theme.mode) || action_checked(*action, flags);
                 let reason = if enabled {
@@ -487,25 +613,22 @@ impl Chrome {
                     shortcut
                 };
                 let inner = iw - 2.0 * pad;
-                // 提示最多占行内 62%：长原因可截断，标签仍保持可读。
-                let hint_cap = (inner * 0.62).max(0.0);
-                let hint_shown: String = if hint.is_empty() {
-                    String::new()
-                } else if measure_w(engine, hint) > hint_cap && hint_cap > space::S * scale {
-                    ellipsize_middle(engine, hint, hint_cap)
-                } else {
-                    hint.to_string()
-                };
-                let hint_w = if hint_shown.is_empty() {
-                    0.0
-                } else {
-                    space::XL * scale + measure_w(engine, &hint_shown)
-                };
-                let avail = (inner - hint_w).max(0.0);
-                let shown = if measure_w(engine, label) > avail {
-                    ellipsize_middle(engine, label, avail)
+                // 动作名优先：先按整名占宽，剩余空间才给提示列（快捷键/禁用原因）。
+                // 空间不足时省略的只能是提示，动作名永不截断——否则用户看不清在选什么。
+                let label_w = measure_w(engine, label);
+                let shown = if label_w > inner {
+                    ellipsize_middle(engine, label, inner)
                 } else {
                     label.to_string()
+                };
+                let used_label_w = measure_w(engine, &shown);
+                let hint_avail = (inner - used_label_w - space::XL * scale).max(0.0);
+                let hint_shown: String = if hint.is_empty() || hint_avail <= space::S * scale {
+                    String::new()
+                } else if measure_w(engine, hint) > hint_avail {
+                    ellipsize_middle(engine, hint, hint_avail)
+                } else {
+                    hint.to_string()
                 };
                 let label_color = if enabled {
                     theme.text

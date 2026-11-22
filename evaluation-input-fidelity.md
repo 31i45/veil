@@ -72,4 +72,4 @@
 ## 7. 下一步
 
 - `craft-four-dpi-and-distribution-trust`：四档 DPI、签名/SHA/SmartScreen/抓包/Actions。
-- 本地已领先 `origin/main` 11 个提交（含上一 spec 4 个），按要求未推送。
+- 本 spec 的全部提交与上一 spec 4 个提交均只在本机，未推送。

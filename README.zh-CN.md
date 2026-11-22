@@ -34,6 +34,8 @@ if ($actual -ne $expected) { throw "SHA-256 不匹配：预期 $expected，实�
 
 不得拿其他 Release 的侧车文件核验当前 exe。发布自动化支持 Authenticode 签名与 RFC3161 时间戳；没有生产证书的构建会明确记录为 **unsigned（未签名）**。未签名构建或新证书仍可能触发 SmartScreen。SHA-256 一致只能证明文件字节完整，不能代表发布者信誉。若 Windows 出现警告，请核对官方来源、摘要和发布者信息；有任何不一致就停止运行。不要关闭 SmartScreen 或其他 Windows 安全功能。
 
+本次构建的四项外部验证均未执行（**NOT RUN**）：生产签名、真实 SmartScreen、真实网络抓包、本提交远端 GitHub Actions。各项含义见 [PRIVACY.md](PRIVACY.md)。
+
 1. 把 `veil.exe` 放到一个打算长期保留的目录（例如 `%LOCALAPPDATA%\Veil`）。Windows 按路径记录文件关联，之后移动 exe 会让关联失效。
 2. 双击运行，或执行 `veil.exe 某个文件.md`。
 
@@ -228,7 +230,7 @@ pwsh -File tools/smoke_launch.ps1 -ExePath target/release/veil.exe -ExpectedTitl
 
 ## 隐私、安全与支持
 
-Veil 以 MIT 许可证免费分发。**设计上不包含遥测，也没有后台更新检查**；网络能力只在用户显式操作后发生。真实网络抓包验证仍为 **NOT RUN**——它说明什么、不说明什么，见 [PRIVACY.md](PRIVACY.md)。
+Veil 以 MIT 许可证免费分发。**设计上不包含遥测，也没有后台更新检查**；网络能力只在用户显式操作后发生。生产签名、真实 SmartScreen、真实网络抓包与本提交远端 GitHub Actions 均仍为 **NOT RUN**——它们各自说明什么、不说明什么，见 [PRIVACY.md](PRIVACY.md)。
 
 - [PRIVACY.md](PRIVACY.md) — 收集与不收集什么、本地文件位置、网络能力与默认值、远程图片、诊断报告、如何删除数据
 - [SECURITY.md](SECURITY.md) — 支持版本（3.x）、私密漏洞报告渠道、报告内容与范围

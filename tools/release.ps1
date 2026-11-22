@@ -391,7 +391,7 @@ if (-not $SkipArchive) {
   Copy-Item -LiteralPath (Join-Path $RepoRoot 'CHANGELOG.md') -Destination $BundleDir -Force
   Copy-Item -LiteralPath (Join-Path $RepoRoot 'icons\veil.ico') -Destination (Join-Path $BundleDir 'icons') -Force
 
-  # 合规文档与 SBOM 必须随同一发布字节归档；缺失的合规文档只告警并记入发布记录。
+  # 合规文档与 SBOM 必须随同一发布字节归档；任一合规文档缺失即中止发布。
   $ComplianceDocs = @('THIRD-PARTY-LICENSES.md', 'PRIVACY.md', 'SECURITY.md', 'SUPPORT.md')
   $MissingDocs = @()
   foreach ($Doc in $ComplianceDocs) {
@@ -400,11 +400,13 @@ if (-not $SkipArchive) {
       Copy-Item -LiteralPath $DocSource -Destination $BundleDir -Force
     } else {
       $MissingDocs += $Doc
-      Write-Warn "compliance doc missing: $Doc (not copied into bundle)"
     }
   }
   $ReleaseRecord.supply_chain.docs_missing = @($MissingDocs)
-  if ($MissingDocs.Count -eq 0) { Write-OK 'compliance docs bundled' }
+  if ($MissingDocs.Count -gt 0) {
+    Write-Fail "compliance doc missing: $($MissingDocs -join ', '); release bundle requires PRIVACY.md, SECURITY.md, SUPPORT.md and THIRD-PARTY-LICENSES.md"
+  }
+  Write-OK 'compliance docs bundled'
 
   if (Test-Path -LiteralPath $SbomPath) {
     Copy-Item -LiteralPath $SbomPath -Destination $BundleDir -Force

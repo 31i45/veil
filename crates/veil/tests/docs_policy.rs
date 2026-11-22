@@ -112,6 +112,50 @@ fn docs_policy_privacy_lists_four_not_run_items() {
 }
 
 #[test]
+fn docs_policy_readmes_list_four_external_not_run_items() {
+    let root = workspace_root();
+    let readme_en = read_doc(&root, "README.md");
+    let readme_zh = read_doc(&root, "README.zh-CN.md");
+
+    let en_keywords = [
+        "production signing",
+        "real smartscreen",
+        "real network packet capture",
+        "this commit's remote github actions",
+    ];
+    let zh_keywords = [
+        "生产签名",
+        "真实 SmartScreen",
+        "真实网络抓包",
+        "本提交远端 GitHub Actions",
+    ];
+
+    let mut missing = Vec::new();
+    let en_lower = readme_en.to_lowercase();
+    for needle in en_keywords {
+        if !en_lower.contains(needle) {
+            missing.push(format!("`README.md` 缺少英文 NOT RUN 项 `{needle}`"));
+        }
+    }
+    for needle in zh_keywords {
+        if !readme_zh.contains(needle) {
+            missing.push(format!("`README.zh-CN.md` 缺少中文 NOT RUN 项 `{needle}`"));
+        }
+    }
+    for (name, text) in [("README.md", &readme_en), ("README.zh-CN.md", &readme_zh)] {
+        if !text.contains("](PRIVACY.md)") {
+            missing.push(format!("`{name}` 缺少指向 `PRIVACY.md` 的链接"));
+        }
+    }
+
+    assert!(
+        missing.is_empty(),
+        "双 README 必须列全四项外部 NOT RUN（生产签名、真实 SmartScreen、真实抓包、本提交远端 Actions）并链接隐私文档：\n- {}",
+        missing.join("\n- ")
+    );
+}
+
+#[test]
 fn docs_policy_third_party_licenses_cover_bundled_assets() {
     let root = workspace_root();
     let text = read_doc(&root, "THIRD-PARTY-LICENSES.md").to_lowercase();

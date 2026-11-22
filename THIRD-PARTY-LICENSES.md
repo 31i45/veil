@@ -6,10 +6,17 @@
 
 本文件由脚本根据 `cargo metadata --locked --format-version 1` 与仓库内嵌资产清单自动生成，请勿手改。发布门禁以 `-Check` 校验其是否与当前依赖一致。
 
+对于 SPDX OR 表达式，本项目选择白名单内的宽松许可；未选择的许可不构成适用条款。
+
 - Rust 包（含 workspace 成员）：368
 - 内嵌第三方资产：3（Mermaid、linkedom、QuickJS）
-- 无本地许可证全文的包：43
-- 许可证全文条目（按内容 SHA-256 去重）：202
+- 包根目录找到许可证全文的包：322
+- 仅在子目录（递归至 3 层）找到全文的包：1
+- 由 manifest license_file 指定的全文：0
+- 由 workspace 根 LICENSE 覆盖的包：4
+- 无独立许可证文件的包（按 SPDX 标准全文与元数据归属补全）：41
+- 许可证全文条目（本地文件按内容 SHA-256 去重）：204
+- 按 SPDX 标准全文补全的许可证组：3
 
 ## Rust 依赖组件
 
@@ -386,60 +393,79 @@
 
 ## 内嵌第三方资产
 
-以下资产随 `veil.exe` 分发，但不通过 Cargo 依赖引入。
+以下资产随 `veil.exe` 分发，但不通过 Cargo 依赖引入。版权行一律引自可核验的随包来源；来源中没有版权行时明确写出，不代填版权人。
 
 ### Mermaid 11.12.0
 
 - 许可证：MIT
 - 来源：`crates/veil-mermaid-offline/assets/mermaid.min.js`
 - 版本来源：取自打包文件内的 `name:"mermaid",version:"..."` 字段
-- 版权：归上游 Mermaid 项目及其贡献者所有；本仓库未附带独立的版权声明文件，本清单不代填版权人名称。
+- 产物内许可声明（原文引自该文件末尾的 `Bundled license information` 注释块；仅将包裹 URL 的尖括号改为圆括号，其余文字未改动）：
+
+~~~text
+/*! Bundled license information:
+
+dompurify/dist/purify.es.mjs:
+  (*! @license DOMPurify 3.2.6 | (c) Cure53 and other contributors | Released under the Apache license 2.0 and Mozilla Public License 2.0 | github.com/cure53/DOMPurify/blob/3.2.6/LICENSE *)
+
+js-yaml/dist/js-yaml.mjs:
+  (*! js-yaml 4.1.0 https://github.com/nodeca/js-yaml @license MIT *)
+
+lodash-es/lodash.js:
+  (**
+   * @license
+   * Lodash (Custom Build) https://lodash.com/
+   * Build: `lodash modularize exports="es" -o ./`
+   * Copyright OpenJS Foundation and other contributors https://openjsf.org/
+   * Released under MIT license https://lodash.com/license
+   * Based on Underscore.js 1.8.3 http://underscorejs.org/LICENSE
+   * Copyright Jeremy Ashkenas, DocumentCloud and Investigative Reporters & Editors
+   *)
+
+cytoscape/dist/cytoscape.esm.mjs:
+  (*!
+  Embeddable Minimum Strictly-Compliant Promises/A+ 1.1.1 Thenable
+  Copyright (c) 2013-2014 Ralf S. Engelschall (http://engelschall.com)
+  Licensed under The MIT License (http://opensource.org/licenses/MIT)
+  *)
+  (*!
+  Event object based on jQuery events, MIT license
+  
+  https://jquery.org/license/
+  https://tldrlegal.com/license/mit-license
+  https://github.com/jquery/jquery/blob/master/src/event.js
+  *)
+  (*! Bezier curve function generator. Copyright Gaetan Renaudeau. MIT License: http://en.wikipedia.org/wiki/MIT_License *)
+  (*! Runge-Kutta spring physics function generator. Adapted from Framer.js, copyright Koen Bok. MIT License: http://en.wikipedia.org/wiki/MIT_License *)
+*/
+~~~
+
+- Mermaid 自身版权行：上游未在随仓库产物中附带版权行；适用 MIT，版权归属以上游发布为准（https://github.com/mermaid-js/mermaid）。
 
 ### linkedom（bundled）
 
 - 许可证：MIT
 - 来源：`crates/veil-mermaid-offline/assets/linkedom.worker.mjs`（构建时由 `build.rs` 转换为经典脚本）
 - 版本：bundled（打包产物未记录上游版本号；以上游项目发布记录为准）
-- 版权：归上游 linkedom 项目及其贡献者所有；本仓库未附带独立的版权声明文件，本清单不代填版权人名称。
+- 版权行：上游未在随仓库产物中附带版权行；适用 MIT，版权归属以上游发布为准（https://github.com/WebReflection/linkedom）。
 
 ### QuickJS（bundled）
 
 - 许可证：MIT
-- 来源：经 rquickjs-sys 0.9.0 捆绑 的 QuickJS 源码，经 Rust 依赖 `rquickjs` 编译进 `veil.exe`
+- 来源：经 rquickjs-sys 0.9.0 捆绑；QuickJS 源码经 Rust 依赖 `rquickjs` 编译进 `veil.exe`
 - 版本：bundled（由 rquickjs-sys 随 crate 固定，具体版本见 Cargo.lock）
-- 版权：归 QuickJS 上游作者及其贡献者所有；本仓库未附带独立的版权声明文件，本清单不代填版权人名称。
+- 版权行（原文引自 `rquickjs-sys 0.9.0/quickjs/LICENSE`（cargo registry 源目录））：
 
-### MIT 声明
+  Copyright (c) 2017-2021 Fabrice Bellard
+  Copyright (c) 2017-2021 Charlie Gordon
+  Copyright (c) 2023 Ben Noordhuis
+  Copyright (c) 2023 Saúl Ibarra Corretgé
 
-以上内嵌资产均以 MIT 许可证授权。具体版权行由各上游项目在其发布物中声明，本仓库未包含这些版权行，故此处不代填；下列条款为 MIT 许可证正文，版权行以各上游项目为准。
-
-~~~text
-MIT License
-
-Copyright (c) <各上游项目的版权持有人>
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-~~~
+- 上游项目：https://bellard.org/quickjs/
 
 ## 许可证全文
 
-以下文本来自各包 manifest 同目录的 `LICENSE*`、`COPYING*`、`NOTICE*` 文件；按内容 SHA-256 去重并按哈希值排序，每份文本前列出适用包与来源文件名。
+以下文本来自各包 crate 源目录中的 `LICENSE*`、`LICENCE*`、`COPYING*`、`NOTICE*`、`UNLICENSE*` 文件（优先包根目录，其次最多 3 层子目录，跳过 `target/`）；按内容 SHA-256 去重并按哈希值排序，每份文本前列出适用包与来源相对路径。引用文本中的尖括号定界符统一改为圆括号，括号内文字保持原样。
 
 ### 000b4962e6b27176a0ff89cce4be555b16472cafb5671eb2804a8fdac6854793
 
@@ -2415,7 +2441,7 @@ DEALINGS IN THE SOFTWARE.
 - `arrayref` 0.3.9 (`LICENSE`)
 
 ~~~text
-Copyright (c) 2015 David Roundy <roundyd@physics.oregonstate.edu>
+Copyright (c) 2015 David Roundy (roundyd@physics.oregonstate.edu)
 All rights reserved.
 
 Redistribution and use in source and binary forms, with or without
@@ -2729,40 +2755,6 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-~~~
-
-### 1e2b7ade3fb228130408b9990cae6a7618eb314c75aa0b164bfe485d9d9756ee
-
-适用包：
-- `cfg_aliases` 0.2.2 (`NOTICES.md`)
-
-~~~text
-# 3rd Party Notices
-
-The `cfg_aliases!` macro uses a lot of the code from [`tectonic_cfg_support::target_cfg!`] macro which is under the following license:
-
-[`tectonic_cfg_support::target_cfg!`]: https://github.com/tectonic-typesetting/tectonic/blob/f2439b936470ad27bdf92882064bc4702ee01899/cfg_support/src/lib.rs#L166
-
-    tectonic_cfg_support is licensed under the MIT License.
-
-    Permission is hereby granted, free of charge, to any person obtaining a copy
-    of this software and associated documentation files (the “Software”), to deal
-    in the Software without restriction, including without limitation the rights
-    to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-    copies of the Software, and to permit persons to whom the Software is
-    furnished to do so, subject to the following conditions:
-
-    The above copyright notice and this permission notice shall be included in all
-    copies or substantial portions of the Software.
-
-    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-    AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-    OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-    SOFTWARE.
----
 ~~~
 
 ### 209fbbe0ad52d9235e37badf9cadfe4dbdc87203179c0899e738b39ade42177b
@@ -3377,7 +3369,7 @@ DEALINGS IN THE SOFTWARE.
 ~~~text
 Creative Commons CC0 1.0 Universal
 
-<<beginOptional;name=ccOptionalIntro>> CREATIVE COMMONS CORPORATION IS NOT A LAW FIRM AND DOES NOT PROVIDE LEGAL SERVICES. DISTRIBUTION OF THIS DOCUMENT DOES NOT CREATE AN ATTORNEY-CLIENT RELATIONSHIP. CREATIVE COMMONS PROVIDES THIS INFORMATION ON AN "AS-IS" BASIS. CREATIVE COMMONS MAKES NO WARRANTIES REGARDING THE USE OF THIS DOCUMENT OR THE INFORMATION OR WORKS PROVIDED HEREUNDER, AND DISCLAIMS LIABILITY FOR DAMAGES RESULTING FROM THE USE OF THIS DOCUMENT OR THE INFORMATION OR WORKS PROVIDED HEREUNDER.  <<endOptional>>
+((beginOptional;name=ccOptionalIntro)) CREATIVE COMMONS CORPORATION IS NOT A LAW FIRM AND DOES NOT PROVIDE LEGAL SERVICES. DISTRIBUTION OF THIS DOCUMENT DOES NOT CREATE AN ATTORNEY-CLIENT RELATIONSHIP. CREATIVE COMMONS PROVIDES THIS INFORMATION ON AN "AS-IS" BASIS. CREATIVE COMMONS MAKES NO WARRANTIES REGARDING THE USE OF THIS DOCUMENT OR THE INFORMATION OR WORKS PROVIDED HEREUNDER, AND DISCLAIMS LIABILITY FOR DAMAGES RESULTING FROM THE USE OF THIS DOCUMENT OR THE INFORMATION OR WORKS PROVIDED HEREUNDER.  ((endOptional))
 
 Statement of Purpose
 
@@ -5768,7 +5760,7 @@ DEALINGS IN THE SOFTWARE.
 - `slotmap` 1.1.1 (`LICENSE`)
 
 ~~~text
-Copyright (c) 2021 Orson Peters <orsonpeters@gmail.com>
+Copyright (c) 2021 Orson Peters (orsonpeters@gmail.com)
 
 This software is provided 'as-is', without any express or implied warranty. In
 no event will the authors be held liable for any damages arising from the use of
@@ -6495,9 +6487,9 @@ The GUST font license applies to the following fonts:
 %    manifest.
 %
 %    We recommend the manifest be given in a separate file named
-%    MANIFEST-<fontid>.txt, where <fontid> is some unique identification
+%    MANIFEST-(fontid).txt, where (fontid) is some unique identification
 %    of the font family. If a separate "readme" file accompanies the Work,
-%    we recommend a name of the form README-<fontid>.txt.
+%    we recommend a name of the form README-(fontid).txt.
 %
 % The latest version of the LaTeX Project Public License is in
 % http://www.latex-project.org/lppl.txt and version 1.3c or later
@@ -7139,6 +7131,43 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 ~~~
 
+### 7e12e5df4bae12cb21581ba157ced20e1986a0508dd10d0e8a4ab9a4cf94e85c
+
+适用包：
+- `aho-corasick` 1.1.5 (`UNLICENSE`)
+- `byteorder-lite` 0.1.0 (`UNLICENSE`)
+- `memchr` 2.8.3 (`UNLICENSE`)
+- `same-file` 1.0.6 (`UNLICENSE`)
+- `walkdir` 2.5.0 (`UNLICENSE`)
+- `winapi-util` 0.1.11 (`UNLICENSE`)
+
+~~~text
+This is free and unencumbered software released into the public domain.
+
+Anyone is free to copy, modify, publish, use, compile, sell, or
+distribute this software, either in source code form or as a compiled
+binary, for any purpose, commercial or non-commercial, and by any
+means.
+
+In jurisdictions that recognize copyright laws, the author or authors
+of this software dedicate any and all copyright interest in the
+software to the public domain. We make this dedication for the benefit
+of the public at large and to the detriment of our heirs and
+successors. We intend this dedication to be an overt act of
+relinquishment in perpetuity of all present and future rights to this
+software under copyright law.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+IN NO EVENT SHALL THE AUTHORS BE LIABLE FOR ANY CLAIM, DAMAGES OR
+OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
+ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
+OTHER DEALINGS IN THE SOFTWARE.
+
+For more information, please refer to (http://unlicense.org/)
+~~~
+
 ### 7f78b31de4e7a3e2ac8de40e2b409eda313f03637aa62b8416fbde9bdc5ce4c9
 
 适用包：
@@ -7672,8 +7701,8 @@ to attach them to the start of each source file to most effectively
 convey the exclusion of warranty; and each file should have at least
 the "copyright" line and a pointer to where the full notice is found.
 
-    <one line to give the program's name and a brief idea of what it does.>
-    Copyright (C) <year>  <name of author>
+    (one line to give the program's name and a brief idea of what it does.)
+    Copyright (C) (year)  (name of author)
 
     This program is free software; you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -7711,7 +7740,7 @@ necessary.  Here is a sample; alter the names:
   Yoyodyne, Inc., hereby disclaims all copyright interest in the program
   `Gnomovision' (which makes passes at compilers) written by James Hacker.
 
-  <signature of Ty Coon>, 1 April 1989
+  (signature of Ty Coon), 1 April 1989
   Ty Coon, President of Vice
 
 This General Public License does not permit incorporating your program into
@@ -7814,7 +7843,7 @@ DEALINGS IN THE SOFTWARE.
 - `adler2` 2.0.1 (`LICENSE-0BSD`)
 
 ~~~text
-Copyright (C) Jonas Schievink <jonasschievink@gmail.com>
+Copyright (C) Jonas Schievink (jonasschievink@gmail.com)
 
 Permission to use, copy, modify, and/or distribute this software for
 any purpose with or without fee is hereby granted.
@@ -8642,21 +8671,21 @@ SOFTWARE.
 The third-party glue code, under the game-activity-csrc/ directory is covered by
 the Apache 2.0 license only:
 
-Apache License, Version 2.0 (LICENSE-APACHE or <http://www.apache.org/licenses/LICENSE-2.0>)
+Apache License, Version 2.0 (LICENSE-APACHE or (http://www.apache.org/licenses/LICENSE-2.0))
 
 ## SDK Documentation
 
 Documentation for APIs that are direct bindings of Android platform APIs are covered
 by the Apache 2.0 license only:
 
-Apache License, Version 2.0 (LICENSE-APACHE or <http://www.apache.org/licenses/LICENSE-2.0>)
+Apache License, Version 2.0 (LICENSE-APACHE or (http://www.apache.org/licenses/LICENSE-2.0))
 
 ## android-activity
 
 All other code is dual-licensed under either
 
-- MIT License (LICENSE-MIT or <http://opensource.org/licenses/MIT>)
-- Apache License, Version 2.0 (LICENSE-APACHE or <http://www.apache.org/licenses/LICENSE-2.0>)
+- MIT License (LICENSE-MIT or (http://opensource.org/licenses/MIT))
+- Apache License, Version 2.0 (LICENSE-APACHE or (http://www.apache.org/licenses/LICENSE-2.0))
 
 at your option.
 ~~~
@@ -8697,7 +8726,7 @@ SOFTWARE.
 - `kqueue-sys` 1.1.2 (`LICENSE`)
 
 ~~~text
-Copyright (c) 2016 William Orr <will@worrbase.com>
+Copyright (c) 2016 William Orr (will@worrbase.com)
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -11243,6 +11272,33 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ~~~
 
+### b61cf1a75b378860940eb420fd0fd1d8e747fd5dae5f5a2f2c9cd4454e1db78a
+
+适用包：
+- `plist` 1.10.3 (`LICENCE`)
+
+~~~text
+Copyright (c) 2015 Edward Barnard
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+~~~
+
 ### b63e167d61ced1d872a588c5ac764b0dda477d62209dc4f6b6bfea5517d0a24c
 
 适用包：
@@ -12031,9 +12087,9 @@ DEALINGS IN THE SOFTWARE.
 Copyright 2012-2016 The Rust Project Developers.
 Copyright 2016-2026 Frank Denis.
 
-Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-<LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
+Licensed under the Apache License, Version 2.0 (LICENSE-APACHE or
+http://www.apache.org/licenses/LICENSE-2.0) or the MIT license
+(LICENSE-MIT or http://opensource.org/licenses/MIT), at your
 option.
 ~~~
 
@@ -13514,7 +13570,7 @@ STIX Fonts is a trademark of The Institute of Electrical and
 Electronics Engineers, Inc.
 
 This product includes a modified copy of the dvips color names
-(dvipsnam.def), taken from the `%<*dvipsnames>` section of drivers.dtx
+(dvipsnam.def), taken from the `%(*dvipsnames)` section of drivers.dtx
 in the LaTeX graphics bundle.
 
 Copyright 1994 David Carlisle and Sebastian Rahtz
@@ -13592,6 +13648,38 @@ Except as contained in this notice, the name of a copyright holder shall
 not be used in advertising or otherwise to promote the sale, use or other
 dealings in these Data Files or Software without prior written
 authorization of the copyright holder.
+~~~
+
+### f8ff566e562ab34733a732fb8bdbc353652bb7240d8bf45f1516b7c7b698c014
+
+适用包：
+- `rquickjs-sys` 0.9.0 (`quickjs/LICENSE`)
+
+~~~text
+The MIT License (MIT)
+ 
+Copyright (c) 2017-2021 Fabrice Bellard
+Copyright (c) 2017-2021 Charlie Gordon
+Copyright (c) 2023 Ben Noordhuis
+Copyright (c) 2023 Saúl Ibarra Corretgé
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
+THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
 ~~~
 
 ### f9c4c77baa3828004ee54b8a4f2db2e88ed44a6237a493965bf551fac0fcb62d
@@ -13792,51 +13880,292 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ~~~
 
-## 无本地许可证全文的包
+## 无独立许可证文件的包（按 SPDX 标准全文补全）
 
-以下包仅在 `Cargo.toml` 中声明 SPDX 许可证表达式，其 crate 源目录未附带 `LICENSE*`、`COPYING*`、`NOTICE*` 文件。完整条款请查阅 Cargo 源目录（通常为 `$CARGO_HOME/registry/src/<registry>/<name>-<version>/`）或 crates.io 页面。
+以下上游包未在 crate 源中附带独立许可证文件；SPDX `OR` 表达式先按宽松许可优先级选定一个适用许可再分组，各包完整表达式见列表，版权归属见包元数据 authors/repository。每个分组附所选许可证的标准全文。authors 为空时记为“未声明”；authors 中的邮箱尖括号和正文中的尖括号定界符在本文件中以圆括号呈现。
 
-- `block2` 0.5.1 — SPDX：`MIT` — 源目录：`$CARGO_HOME/registry/src/<registry>/block2-0.5.1/`
-- `clipboard-win` 5.4.3 — SPDX：`BSL-1.0` — 源目录：`$CARGO_HOME/registry/src/<registry>/clipboard-win-5.4.3/`
-- `dispatch` 0.2.0 — SPDX：`MIT` — 源目录：`$CARGO_HOME/registry/src/<registry>/dispatch-0.2.0/`
-- `dispatch2` 0.3.1 — SPDX：`Zlib OR Apache-2.0 OR MIT` — 源目录：`$CARGO_HOME/registry/src/<registry>/dispatch2-0.3.1/`
-- `drm-fourcc` 2.2.0 — SPDX：`MIT` — 源目录：`$CARGO_HOME/registry/src/<registry>/drm-fourcc-2.2.0/`
-- `harfrust` 0.5.2 — SPDX：`MIT` — 源目录：`$CARGO_HOME/registry/src/<registry>/harfrust-0.5.2/`
-- `jni` 0.22.4 — SPDX：`MIT OR Apache-2.0` — 源目录：`$CARGO_HOME/registry/src/<registry>/jni-0.22.4/`
-- `jni-macros` 0.22.4 — SPDX：`MIT OR Apache-2.0` — 源目录：`$CARGO_HOME/registry/src/<registry>/jni-macros-0.22.4/`
-- `jni-sys-macros` 0.4.1 — SPDX：`MIT OR Apache-2.0` — 源目录：`$CARGO_HOME/registry/src/<registry>/jni-sys-macros-0.4.1/`
-- `lapce-xi-rope` 0.4.0 — SPDX：`Apache-2.0` — 源目录：`$CARGO_HOME/registry/src/<registry>/lapce-xi-rope-0.4.0/`
-- `ndk` 0.9.0 — SPDX：`MIT OR Apache-2.0` — 源目录：`$CARGO_HOME/registry/src/<registry>/ndk-0.9.0/`
-- `ndk-context` 0.1.1 — SPDX：`MIT OR Apache-2.0` — 源目录：`$CARGO_HOME/registry/src/<registry>/ndk-context-0.1.1/`
-- `ndk-sys` 0.6.0+11769913 — SPDX：`MIT OR Apache-2.0` — 源目录：`$CARGO_HOME/registry/src/<registry>/ndk-sys-0.6.0+11769913/`
-- `objc-sys` 0.3.5 — SPDX：`MIT` — 源目录：`$CARGO_HOME/registry/src/<registry>/objc-sys-0.3.5/`
-- `objc2` 0.5.3 — SPDX：`MIT` — 源目录：`$CARGO_HOME/registry/src/<registry>/objc2-0.5.3/`
-- `objc2` 0.6.5 — SPDX：`MIT` — 源目录：`$CARGO_HOME/registry/src/<registry>/objc2-0.6.5/`
-- `objc2-app-kit` 0.2.2 — SPDX：`MIT` — 源目录：`$CARGO_HOME/registry/src/<registry>/objc2-app-kit-0.2.2/`
-- `objc2-app-kit` 0.3.2 — SPDX：`Zlib OR Apache-2.0 OR MIT` — 源目录：`$CARGO_HOME/registry/src/<registry>/objc2-app-kit-0.3.2/`
-- `objc2-cloud-kit` 0.2.2 — SPDX：`MIT` — 源目录：`$CARGO_HOME/registry/src/<registry>/objc2-cloud-kit-0.2.2/`
-- `objc2-contacts` 0.2.2 — SPDX：`MIT` — 源目录：`$CARGO_HOME/registry/src/<registry>/objc2-contacts-0.2.2/`
-- `objc2-core-data` 0.2.2 — SPDX：`MIT` — 源目录：`$CARGO_HOME/registry/src/<registry>/objc2-core-data-0.2.2/`
-- `objc2-core-foundation` 0.3.2 — SPDX：`Zlib OR Apache-2.0 OR MIT` — 源目录：`$CARGO_HOME/registry/src/<registry>/objc2-core-foundation-0.3.2/`
-- `objc2-core-graphics` 0.3.2 — SPDX：`Zlib OR Apache-2.0 OR MIT` — 源目录：`$CARGO_HOME/registry/src/<registry>/objc2-core-graphics-0.3.2/`
-- `objc2-core-image` 0.2.2 — SPDX：`MIT` — 源目录：`$CARGO_HOME/registry/src/<registry>/objc2-core-image-0.2.2/`
-- `objc2-core-location` 0.2.2 — SPDX：`MIT` — 源目录：`$CARGO_HOME/registry/src/<registry>/objc2-core-location-0.2.2/`
-- `objc2-core-services` 0.3.2 — SPDX：`Zlib OR Apache-2.0 OR MIT` — 源目录：`$CARGO_HOME/registry/src/<registry>/objc2-core-services-0.3.2/`
-- `objc2-encode` 4.1.0 — SPDX：`MIT` — 源目录：`$CARGO_HOME/registry/src/<registry>/objc2-encode-4.1.0/`
-- `objc2-foundation` 0.2.2 — SPDX：`MIT` — 源目录：`$CARGO_HOME/registry/src/<registry>/objc2-foundation-0.2.2/`
-- `objc2-foundation` 0.3.2 — SPDX：`MIT` — 源目录：`$CARGO_HOME/registry/src/<registry>/objc2-foundation-0.3.2/`
-- `objc2-io-surface` 0.3.2 — SPDX：`Zlib OR Apache-2.0 OR MIT` — 源目录：`$CARGO_HOME/registry/src/<registry>/objc2-io-surface-0.3.2/`
-- `objc2-link-presentation` 0.2.2 — SPDX：`MIT` — 源目录：`$CARGO_HOME/registry/src/<registry>/objc2-link-presentation-0.2.2/`
-- `objc2-metal` 0.2.2 — SPDX：`MIT` — 源目录：`$CARGO_HOME/registry/src/<registry>/objc2-metal-0.2.2/`
-- `objc2-quartz-core` 0.2.2 — SPDX：`MIT` — 源目录：`$CARGO_HOME/registry/src/<registry>/objc2-quartz-core-0.2.2/`
-- `objc2-quartz-core` 0.3.2 — SPDX：`Zlib OR Apache-2.0 OR MIT` — 源目录：`$CARGO_HOME/registry/src/<registry>/objc2-quartz-core-0.3.2/`
-- `objc2-symbols` 0.2.2 — SPDX：`MIT` — 源目录：`$CARGO_HOME/registry/src/<registry>/objc2-symbols-0.2.2/`
-- `objc2-ui-kit` 0.2.2 — SPDX：`MIT` — 源目录：`$CARGO_HOME/registry/src/<registry>/objc2-ui-kit-0.2.2/`
-- `objc2-uniform-type-identifiers` 0.2.2 — SPDX：`MIT` — 源目录：`$CARGO_HOME/registry/src/<registry>/objc2-uniform-type-identifiers-0.2.2/`
-- `objc2-user-notifications` 0.2.2 — SPDX：`MIT` — 源目录：`$CARGO_HOME/registry/src/<registry>/objc2-user-notifications-0.2.2/`
-- `plist` 1.10.3 — SPDX：`MIT` — 源目录：`$CARGO_HOME/registry/src/<registry>/plist-1.10.3/`
-- `r-efi` 5.3.0 — SPDX：`MIT OR Apache-2.0 OR LGPL-2.1-or-later` — 源目录：`$CARGO_HOME/registry/src/<registry>/r-efi-5.3.0/`
-- `r-efi` 6.0.0 — SPDX：`MIT OR Apache-2.0 OR LGPL-2.1-or-later` — 源目录：`$CARGO_HOME/registry/src/<registry>/r-efi-6.0.0/`
-- `rquickjs-core` 0.9.0 — SPDX：`MIT` — 源目录：`$CARGO_HOME/registry/src/<registry>/rquickjs-core-0.9.0/`
-- `rquickjs-sys` 0.9.0 — SPDX：`MIT` — 源目录：`$CARGO_HOME/registry/src/<registry>/rquickjs-sys-0.9.0/`
+### Apache-2.0
+
+以下上游包未在 crate 源中附带独立许可证文件；适用 Apache-2.0（各包完整 SPDX 表达式见列表），版权归属见包元数据 authors/repository。
+
+- `lapce-xi-rope` 0.4.0 — SPDX：`Apache-2.0` — repository：https://github.com/lapce/xi-editor — authors：Raph Levien (raph@google.com)
+
+~~~text
+                                 Apache License
+                           Version 2.0, January 2004
+                        http://www.apache.org/licenses/
+
+   TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION
+
+   1. Definitions.
+
+      "License" shall mean the terms and conditions for use, reproduction,
+      and distribution as defined by Sections 1 through 9 of this document.
+
+      "Licensor" shall mean the copyright owner or entity authorized by
+      the copyright owner that is granting the License.
+
+      "Legal Entity" shall mean the union of the acting entity and all
+      other entities that control, are controlled by, or are under common
+      control with that entity. For the purposes of this definition,
+      "control" means (i) the power, direct or indirect, to cause the
+      direction or management of such entity, whether by contract or
+      otherwise, or (ii) ownership of fifty percent (50%) or more of the
+      outstanding shares, or (iii) beneficial ownership of such entity.
+
+      "You" (or "Your") shall mean an individual or Legal Entity
+      exercising permissions granted by this License.
+
+      "Source" form shall mean the preferred form for making modifications,
+      including but not limited to software source code, documentation
+      source, and configuration files.
+
+      "Object" form shall mean any form resulting from mechanical
+      transformation or translation of a Source form, including but
+      not limited to compiled object code, generated documentation,
+      and conversions to other media types.
+
+      "Work" shall mean the work of authorship, whether in Source or
+      Object form, made available under the License, as indicated by a
+      copyright notice that is included in or attached to the work
+      (an example is provided in the Appendix below).
+
+      "Derivative Works" shall mean any work, whether in Source or Object
+      form, that is based on (or derived from) the Work and for which the
+      editorial revisions, annotations, elaborations, or other modifications
+      represent, as a whole, an original work of authorship. For the purposes
+      of this License, Derivative Works shall not include works that remain
+      separable from, or merely link (or bind by name) to the interfaces of,
+      the Work and Derivative Works thereof.
+
+      "Contribution" shall mean any work of authorship, including
+      the original version of the Work and any modifications or additions
+      to that Work or Derivative Works thereof, that is intentionally
+      submitted to Licensor for inclusion in the Work by the copyright owner
+      or by an individual or Legal Entity authorized to submit on behalf of
+      the copyright owner. For the purposes of this definition, "submitted"
+      means any form of electronic, verbal, or written communication sent
+      to the Licensor or its representatives, including but not limited to
+      communication on electronic mailing lists, source code control systems,
+      and issue tracking systems that are managed by, or on behalf of, the
+      Licensor for the purpose of discussing and improving the Work, but
+      excluding communication that is conspicuously marked or otherwise
+      designated in writing by the copyright owner as "Not a Contribution."
+
+      "Contributor" shall mean Licensor and any individual or Legal Entity
+      on behalf of whom a Contribution has been received by Licensor and
+      subsequently incorporated within the Work.
+
+   2. Grant of Copyright License. Subject to the terms and conditions of
+      this License, each Contributor hereby grants to You a perpetual,
+      worldwide, non-exclusive, no-charge, royalty-free, irrevocable
+      copyright license to reproduce, prepare Derivative Works of,
+      publicly display, publicly perform, sublicense, and distribute the
+      Work and such Derivative Works in Source or Object form.
+
+   3. Grant of Patent License. Subject to the terms and conditions of
+      this License, each Contributor hereby grants to You a perpetual,
+      worldwide, non-exclusive, no-charge, royalty-free, irrevocable
+      (except as stated in this section) patent license to make, have made,
+      use, offer to sell, sell, import, and otherwise transfer the Work,
+      where such license applies only to those patent claims licensable
+      by such Contributor that are necessarily infringed by their
+      Contribution(s) alone or by combination of their Contribution(s)
+      with the Work to which such Contribution(s) was submitted. If You
+      institute patent litigation against any entity (including a
+      cross-claim or counterclaim in a lawsuit) alleging that the Work
+      or a Contribution incorporated within the Work constitutes direct
+      or contributory patent infringement, then any patent licenses
+      granted to You under this License for that Work shall terminate
+      as of the date such litigation is filed.
+
+   4. Redistribution. You may reproduce and distribute copies of the
+      Work or Derivative Works thereof in any medium, with or without
+      modifications, and in Source or Object form, provided that You
+      meet the following conditions:
+
+      (a) You must give any other recipients of the Work or
+          Derivative Works a copy of this License; and
+
+      (b) You must cause any modified files to carry prominent notices
+          stating that You changed the files; and
+
+      (c) You must retain, in the Source form of any Derivative Works
+          that You distribute, all copyright, patent, trademark, and
+          attribution notices from the Source form of the Work,
+          excluding those notices that do not pertain to any part of
+          the Derivative Works; and
+
+      (d) If the Work includes a "NOTICE" text file as part of its
+          distribution, then any Derivative Works that You distribute must
+          include a readable copy of the attribution notices contained
+          within such NOTICE file, excluding those notices that do not
+          pertain to any part of the Derivative Works, in at least one
+          of the following places: within a NOTICE text file distributed
+          as part of the Derivative Works; within the Source form or
+          documentation, if provided along with the Derivative Works; or,
+          within a display generated by the Derivative Works, if and
+          wherever such third-party notices normally appear. The contents
+          of the NOTICE file are for informational purposes only and
+          do not modify the License. You may add Your own attribution
+          notices within Derivative Works that You distribute, alongside
+          or as an addendum to the NOTICE text from the Work, provided
+          that such additional attribution notices cannot be construed
+          as modifying the License.
+
+      You may add Your own copyright statement to Your modifications and
+      may provide additional or different license terms and conditions
+      for use, reproduction, or distribution of Your modifications, or
+      for any such Derivative Works as a whole, provided Your use,
+      reproduction, and distribution of the Work otherwise complies with
+      the conditions stated in this License.
+
+   5. Submission of Contributions. Unless You explicitly state otherwise,
+      any Contribution intentionally submitted for inclusion in the Work
+      by You to the Licensor shall be under the terms and conditions of
+      this License, without any additional terms or conditions.
+      Notwithstanding the above, nothing herein shall supersede or modify
+      the terms of any separate license agreement you may have executed
+      with Licensor regarding such Contributions.
+
+   6. Trademarks. This License does not grant permission to use the trade
+      names, trademarks, service marks, or product names of the Licensor,
+      except as required for reasonable and customary use in describing the
+      origin of the Work and reproducing the content of the NOTICE file.
+
+   7. Disclaimer of Warranty. Unless required by applicable law or
+      agreed to in writing, Licensor provides the Work (and each
+      Contributor provides its Contributions) on an "AS IS" BASIS,
+      WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+      implied, including, without limitation, any warranties or conditions
+      of TITLE, NON-INFRINGEMENT, MERCHANTABILITY, or FITNESS FOR A
+      PARTICULAR PURPOSE. You are solely responsible for determining the
+      appropriateness of using or redistributing the Work and assume any
+      risks associated with Your exercise of permissions under this License.
+
+   8. Limitation of Liability. In no event and under no legal theory,
+      whether in tort (including negligence), contract, or otherwise,
+      unless required by applicable law (such as deliberate and grossly
+      negligent acts) or agreed to in writing, shall any Contributor be
+      liable to You for damages, including any direct, indirect, special,
+      incidental, or consequential damages of any character arising as a
+      result of this License or out of the use or inability to use the
+      Work (including but not limited to damages for loss of goodwill,
+      work stoppage, computer failure or malfunction, or any and all
+      other commercial damages or losses), even if such Contributor
+      has been advised of the possibility of such damages.
+
+   9. Accepting Warranty or Additional Liability. While redistributing
+      the Work or Derivative Works thereof, You may choose to offer,
+      and charge a fee for, acceptance of support, warranty, indemnity,
+      or other liability obligations and/or rights consistent with this
+      License. However, in accepting such obligations, You may act only
+      on Your own behalf and on Your sole responsibility, not on behalf
+      of any other Contributor, and only if You agree to indemnify,
+      defend, and hold each Contributor harmless for any liability
+      incurred by, or claims asserted against, such Contributor by reason
+      of your accepting any such warranty or additional liability.
+
+   END OF TERMS AND CONDITIONS
+~~~
+
+### BSL-1.0
+
+以下上游包未在 crate 源中附带独立许可证文件；适用 BSL-1.0（各包完整 SPDX 表达式见列表），版权归属见包元数据 authors/repository。
+
+- `clipboard-win` 5.4.3 — SPDX：`BSL-1.0` — repository：https://github.com/DoumanAsh/clipboard-win — authors：Douman (douman@gmx.se)
+
+~~~text
+Boost Software License - Version 1.0 - August 17th, 2003
+
+Permission is hereby granted, free of charge, to any person or organization
+obtaining a copy of the software and accompanying documentation covered by
+this license (the "Software") to use, reproduce, display, distribute,
+execute, and transmit the Software, and to prepare derivative works of the
+Software, and to permit third-parties to whom the Software is furnished to
+do so, all subject to the following:
+
+The copyright notices in the Software and this entire statement, including
+the above license grant, this restriction and the following disclaimer,
+must be included in all copies of the Software, in whole or in part, and
+all derivative works of the Software, unless such copies or derivative
+works are solely in the form of machine-executable object code generated by
+a source language processor.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE, TITLE AND NON-INFRINGEMENT. IN NO EVENT
+SHALL THE COPYRIGHT HOLDERS OR ANYONE DISTRIBUTING THE SOFTWARE BE LIABLE
+FOR ANY DAMAGES OR OTHER LIABILITY, WHETHER IN CONTRACT, TORT OR OTHERWISE,
+ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+~~~
+
+### MIT
+
+以下上游包未在 crate 源中附带独立许可证文件；适用 MIT（各包完整 SPDX 表达式见列表），版权归属见包元数据 authors/repository。
+
+- `block2` 0.5.1 — SPDX：`MIT` — repository：https://github.com/madsmtm/objc2 — authors：Steven Sheldon；Mads Marquart (mads@marquart.dk)
+- `dispatch` 0.2.0 — SPDX：`MIT` — repository：http://github.com/SSheldon/rust-dispatch — authors：Steven Sheldon
+- `dispatch2` 0.3.1 — SPDX：`Zlib OR Apache-2.0 OR MIT` — repository：https://github.com/madsmtm/objc2 — authors：Mads Marquart (mads@marquart.dk)；Mary (mary@mary.zone)
+- `drm-fourcc` 2.2.0 — SPDX：`MIT` — repository：https://github.com/danielzfranklin/drm-fourcc-rs — authors：Daniel Franklin (daniel@danielzfranklin.org)
+- `harfrust` 0.5.2 — SPDX：`MIT` — repository：https://github.com/harfbuzz/harfrust — authors：未声明
+- `jni` 0.22.4 — SPDX：`MIT OR Apache-2.0` — repository：https://github.com/jni-rs/jni-rs — authors：jni team
+- `jni-macros` 0.22.4 — SPDX：`MIT OR Apache-2.0` — repository：https://github.com/jni-rs/jni-rs — authors：未声明
+- `jni-sys-macros` 0.4.1 — SPDX：`MIT OR Apache-2.0` — repository：https://github.com/jni-rs/jni-sys — authors：Robert Bragg (robert@sixbynine.org)
+- `ndk` 0.9.0 — SPDX：`MIT OR Apache-2.0` — repository：https://github.com/rust-mobile/ndk — authors：The Rust Mobile contributors
+- `ndk-context` 0.1.1 — SPDX：`MIT OR Apache-2.0` — repository：https://github.com/rust-windowing/android-ndk-rs — authors：The Rust Windowing contributors
+- `ndk-sys` 0.6.0+11769913 — SPDX：`MIT OR Apache-2.0` — repository：https://github.com/rust-mobile/ndk — authors：The Rust Windowing contributors
+- `objc-sys` 0.3.5 — SPDX：`MIT` — repository：https://github.com/madsmtm/objc2 — authors：Mads Marquart (mads@marquart.dk)
+- `objc2` 0.5.3 — SPDX：`MIT` — repository：https://github.com/madsmtm/objc2 — authors：Steven Sheldon；Mads Marquart (mads@marquart.dk)
+- `objc2` 0.6.5 — SPDX：`MIT` — repository：https://github.com/madsmtm/objc2 — authors：Mads Marquart (mads@marquart.dk)
+- `objc2-app-kit` 0.2.2 — SPDX：`MIT` — repository：https://github.com/madsmtm/objc2 — authors：未声明
+- `objc2-app-kit` 0.3.2 — SPDX：`Zlib OR Apache-2.0 OR MIT` — repository：https://github.com/madsmtm/objc2 — authors：未声明
+- `objc2-cloud-kit` 0.2.2 — SPDX：`MIT` — repository：https://github.com/madsmtm/objc2 — authors：未声明
+- `objc2-contacts` 0.2.2 — SPDX：`MIT` — repository：https://github.com/madsmtm/objc2 — authors：未声明
+- `objc2-core-data` 0.2.2 — SPDX：`MIT` — repository：https://github.com/madsmtm/objc2 — authors：未声明
+- `objc2-core-foundation` 0.3.2 — SPDX：`Zlib OR Apache-2.0 OR MIT` — repository：https://github.com/madsmtm/objc2 — authors：未声明
+- `objc2-core-graphics` 0.3.2 — SPDX：`Zlib OR Apache-2.0 OR MIT` — repository：https://github.com/madsmtm/objc2 — authors：未声明
+- `objc2-core-image` 0.2.2 — SPDX：`MIT` — repository：https://github.com/madsmtm/objc2 — authors：未声明
+- `objc2-core-location` 0.2.2 — SPDX：`MIT` — repository：https://github.com/madsmtm/objc2 — authors：未声明
+- `objc2-core-services` 0.3.2 — SPDX：`Zlib OR Apache-2.0 OR MIT` — repository：https://github.com/madsmtm/objc2 — authors：未声明
+- `objc2-encode` 4.1.0 — SPDX：`MIT` — repository：https://github.com/madsmtm/objc2 — authors：Mads Marquart (mads@marquart.dk)
+- `objc2-foundation` 0.2.2 — SPDX：`MIT` — repository：https://github.com/madsmtm/objc2 — authors：未声明
+- `objc2-foundation` 0.3.2 — SPDX：`MIT` — repository：https://github.com/madsmtm/objc2 — authors：未声明
+- `objc2-io-surface` 0.3.2 — SPDX：`Zlib OR Apache-2.0 OR MIT` — repository：https://github.com/madsmtm/objc2 — authors：未声明
+- `objc2-link-presentation` 0.2.2 — SPDX：`MIT` — repository：https://github.com/madsmtm/objc2 — authors：未声明
+- `objc2-metal` 0.2.2 — SPDX：`MIT` — repository：https://github.com/madsmtm/objc2 — authors：未声明
+- `objc2-quartz-core` 0.2.2 — SPDX：`MIT` — repository：https://github.com/madsmtm/objc2 — authors：未声明
+- `objc2-quartz-core` 0.3.2 — SPDX：`Zlib OR Apache-2.0 OR MIT` — repository：https://github.com/madsmtm/objc2 — authors：未声明
+- `objc2-symbols` 0.2.2 — SPDX：`MIT` — repository：https://github.com/madsmtm/objc2 — authors：未声明
+- `objc2-ui-kit` 0.2.2 — SPDX：`MIT` — repository：https://github.com/madsmtm/objc2 — authors：未声明
+- `objc2-uniform-type-identifiers` 0.2.2 — SPDX：`MIT` — repository：https://github.com/madsmtm/objc2 — authors：未声明
+- `objc2-user-notifications` 0.2.2 — SPDX：`MIT` — repository：https://github.com/madsmtm/objc2 — authors：未声明
+- `r-efi` 5.3.0 — SPDX：`MIT OR Apache-2.0 OR LGPL-2.1-or-later` — repository：https://github.com/r-efi/r-efi — authors：未声明
+- `r-efi` 6.0.0 — SPDX：`MIT OR Apache-2.0 OR LGPL-2.1-or-later` — repository：https://github.com/r-efi/r-efi — authors：未声明
+- `rquickjs-core` 0.9.0 — SPDX：`MIT` — repository：https://github.com/DelSkayn/rquickjs.git — authors：Mees Delzenne (mees.delzenne@gmail.com)；K. (kayo@illumium.org)
+
+~~~text
+MIT License
+
+版权归属：见各包元数据 authors 与 repository。
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+~~~
 

@@ -34,6 +34,8 @@ if ($actual -ne $expected) { throw "SHA-256 mismatch: expected $expected, got $a
 
 Never compare the executable with a sidecar from another Release. Release automation supports Authenticode signing with an RFC3161 timestamp; builds made without a production certificate are explicitly recorded as **unsigned**. An unsigned build or a newly established certificate may trigger SmartScreen. A matching SHA-256 verifies file integrity, not publisher reputation. If Windows warns, check the official source, digest, and publisher details, and stop if anything differs. Do not disable SmartScreen or other Windows security features.
 
+Four external verifications are **NOT RUN** for this build: production signing, real SmartScreen behaviour on a downloaded Release, real network packet capture, and this commit's remote GitHub Actions. See [PRIVACY.md](PRIVACY.md) for what each item does and does not prove.
+
 1. Put `veil.exe` in a folder you intend to keep (for example `%LOCALAPPDATA%\Veil`). Windows stores file associations by path, so moving the exe later breaks them.
 2. Double-click it, or run `veil.exe path\to\note.md`.
 
@@ -227,7 +229,7 @@ Dependency blacklist: `tokio`, `wasmtime`, any webview crate (`webview2-com`/`wr
 
 ## Privacy, Security & Support
 
-Veil is distributed free of charge, under the MIT license. By design it contains **no telemetry and no background update checks**; network features run only after an explicit user action. Real-network capture verification remains **NOT RUN** — see [PRIVACY.md](PRIVACY.md) for what that does and does not mean.
+Veil is distributed free of charge, under the MIT license. By design it contains **no telemetry and no background update checks**; network features run only after an explicit user action. Production signing, real SmartScreen behaviour, real network packet capture and this commit's remote GitHub Actions all remain **NOT RUN** — see [PRIVACY.md](PRIVACY.md) for what that does and does not mean.
 
 - [PRIVACY.md](PRIVACY.md) — what is and is not collected, local data locations, network capabilities and defaults, remote images, diagnostic reports, how to delete data
 - [SECURITY.md](SECURITY.md) — supported versions (3.x), private vulnerability reporting, report contents and scope

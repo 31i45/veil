@@ -19,7 +19,20 @@ So I built my own. Pure Rust. No webview, no Chromium, no Electron, no external 
 
 ## Download & Run
 
-Grab `veil.exe` from [Releases](https://github.com/31i45/veil/releases). There is no installer, no runtime dependency, and no admin rights required.
+The **only official download source** is [github.com/31i45/veil/releases](https://github.com/31i45/veil/releases). There is no installer, no runtime dependency, and no admin rights required. Do not use mirrored or re-uploaded binaries.
+
+Download both `veil.exe` and `veil.exe.sha256` from the **same Release**, place them in the same folder, then verify the executable in PowerShell:
+
+```powershell
+$exe = Join-Path $PWD 'veil.exe'
+$sidecar = Join-Path $PWD 'veil.exe.sha256'
+$expected = ((Get-Content -LiteralPath $sidecar -Raw).Trim() -split '\s+')[0]
+$actual = (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash
+if ($actual -ne $expected) { throw "SHA-256 mismatch: expected $expected, got $actual" }
+"SHA-256 verified: $actual"
+```
+
+Never compare the executable with a sidecar from another Release. Release automation supports Authenticode signing with an RFC3161 timestamp; builds made without a production certificate are explicitly recorded as **unsigned**. An unsigned build or a newly established certificate may trigger SmartScreen. A matching SHA-256 verifies file integrity, not publisher reputation. If Windows warns, check the official source, digest, and publisher details, and stop if anything differs. Do not disable SmartScreen or other Windows security features.
 
 1. Put `veil.exe` in a folder you intend to keep (for example `%LOCALAPPDATA%\Veil`). Windows stores file associations by path, so moving the exe later breaks them.
 2. Double-click it, or run `veil.exe path\to\note.md`.
@@ -139,7 +152,7 @@ cargo test -p veil-mermaid-offline
 
 Final release gate: serial `cargo test --workspace --release -- --test-threads=1` passed at commit `0d229eb` (`evidence/release/release-record.json`, `tests.status=passed`); the re-runnable `veil-ui` lib breakdown is **1281 passed / 11 ignored**. Earlier, commit `97d3a60` recorded 1919 passed / 0 failed / 15 ignored (the remote-SVG mock uses a 20 ms wall-clock deadline, so parallel runs can produce false timeouts). `cargo test -p veil --lib` is 221 passed / 1 ignored with the default feature set, which now includes the offline engine. `cargo clippy --workspace --all-targets -- -D warnings` zero warnings.
 
-Release CI runs on `v*` tag pushes and through `workflow_dispatch`. Manual dispatch defaults to `dry_run=true` and runs Linux core check/test plus the Windows build, tests, clippy, artifact boundary, smoke and SHA-256 validation without creating or uploading a GitHub Release. Only a `v*` tag push can publish. Smoke failures are never hidden with `continue-on-error`.
+Release CI runs on `v*` tag pushes and through `workflow_dispatch`. Manual dispatch defaults to `dry_run=true` and runs Linux core check/test plus the Windows build, tests, clippy, artifact boundary, smoke, optional Authenticode/RFC3161 signing and post-signing SHA-256 validation without creating or uploading a GitHub Release. Only a `v*` tag push can publish. Smoke failures are never hidden with `continue-on-error`.
 
 ## Tier-0 Gate: Real Launch Smoke
 

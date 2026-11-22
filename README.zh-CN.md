@@ -19,7 +19,20 @@ Veil 的灵感来自 Typedown — Typedown 是我最喜欢的 Windows Markdown �
 
 ## 下载与使用
 
-从 [Releases](https://github.com/31i45/veil/releases) 下载 `veil.exe`。无需安装、无外部运行时依赖、不需要管理员权限。
+**唯一官方下载来源**是 [github.com/31i45/veil/releases](https://github.com/31i45/veil/releases)。无需安装、无外部运行时依赖、不需要管理员权限。请勿使用镜像站或他人重新上传的二进制。
+
+从**同一个 Release** 同时下载 `veil.exe` 与 `veil.exe.sha256`，放到同一目录，然后在 PowerShell 中核验：
+
+```powershell
+$exe = Join-Path $PWD 'veil.exe'
+$sidecar = Join-Path $PWD 'veil.exe.sha256'
+$expected = ((Get-Content -LiteralPath $sidecar -Raw).Trim() -split '\s+')[0]
+$actual = (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash
+if ($actual -ne $expected) { throw "SHA-256 不匹配：预期 $expected，实际 $actual" }
+"SHA-256 核验通过：$actual"
+```
+
+不得拿其他 Release 的侧车文件核验当前 exe。发布自动化支持 Authenticode 签名与 RFC3161 时间戳；没有生产证书的构建会明确记录为 **unsigned（未签名）**。未签名构建或新证书仍可能触发 SmartScreen。SHA-256 一致只能证明文件字节完整，不能代表发布者信誉。若 Windows 出现警告，请核对官方来源、摘要和发布者信息；有任何不一致就停止运行。不要关闭 SmartScreen 或其他 Windows 安全功能。
 
 1. 把 `veil.exe` 放到一个打算长期保留的目录（例如 `%LOCALAPPDATA%\Veil`）。Windows 按路径记录文件关联，之后移动 exe 会让关联失效。
 2. 双击运行，或执行 `veil.exe 某个文件.md`。
@@ -139,7 +152,7 @@ cargo test -p veil-mermaid-offline
 
 最终发布门禁：串行 `cargo test --workspace --release -- --test-threads=1` 在 commit `0d229eb` 通过（`evidence/release/release-record.json`，`tests.status=passed`）；可复核的 `veil-ui` lib 分项为 **1281 passed / 11 ignored**。此前 commit `97d3a60` 记录为 1919 passed / 0 failed / 15 ignored（远程 SVG mock 使用 20 ms 墙钟截止，并行执行可能假超时）；默认特性下 `cargo test -p veil --lib` 为 221 passed / 1 ignored（默认特性现已包含离线引擎）。`cargo clippy --workspace --all-targets -- -D warnings` 零警告。
 
-Release CI 在 `v*` tag push 与 `workflow_dispatch` 时运行。手动触发默认 `dry_run=true`，执行 Linux core check/test 以及 Windows 构建、测试、clippy、产物边界、冒烟与 SHA-256 校验，但不创建、不上传 GitHub Release；只有 `v*` tag push 可以发布。任何冒烟失败都不得用 `continue-on-error` 掩盖。
+Release CI 在 `v*` tag push 与 `workflow_dispatch` 时运行。手动触发默认 `dry_run=true`，执行 Linux core check/test 以及 Windows 构建、测试、clippy、产物边界、冒烟、可选 Authenticode/RFC3161 签名与签名后的 SHA-256 校验，但不创建、不上传 GitHub Release；只有 `v*` tag push 可以发布。任何冒烟失败都不得用 `continue-on-error` 掩盖。
 
 ## 零级门禁：真实启动冒烟
 

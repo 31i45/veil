@@ -2,6 +2,7 @@
 name = "veil-ui"
 edition.workspace = true
 version.workspace = true
+publish = false
 
 [dependencies]
 veil-core = { path = "../veil-core" }

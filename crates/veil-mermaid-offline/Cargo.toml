@@ -2,6 +2,7 @@
 name = "veil-mermaid-offline"
 edition.workspace = true
 version.workspace = true
+publish = false
 description = "veil 离线 Mermaid 渲染：QuickJS + 完整 mermaid.js + linkedom headless DOM"
 
 [dependencies]

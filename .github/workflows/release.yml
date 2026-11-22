@@ -75,6 +75,16 @@ jobs:
           cargo clippy --workspace --all-targets -- -D warnings
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      - name: 第三方许可清单新鲜度
+        shell: pwsh
+        run: pwsh -NoProfile -File tools/third_party_notices.ps1 -Check
+
+      # 与 tools/release.ps1 的审计口径一致：直接安装后执行 cargo deny check。
+      - name: 依赖审计（cargo-deny）
+        run: |
+          cargo install cargo-deny --locked
+          cargo deny check
+
       # 门禁必须放在测试之后：cargo test 会重建 bin，先门禁后测试可能放过
       # 被测试构建覆盖过的产物。这里校验的正是最终要上传的二进制。
       # 单一产物：≤14 MiB，且必须携带离线引擎特征串（默认 feature）。
@@ -163,6 +173,11 @@ jobs:
             Remove-Item -LiteralPath $certificate -Force -ErrorAction SilentlyContinue
           }
 
+      # SBOM 描述与发布字节相同的 Cargo.lock 依赖集合；必须在签名之后、SHA 之前生成。
+      - name: Generate CycloneDX SBOM
+        shell: pwsh
+        run: pwsh -NoProfile -File tools/sbom.ps1
+
       - name: Generate SHA-256 checksum
         run: |
           $exe = Get-Item target\release\veil.exe
@@ -211,3 +226,4 @@ jobs:
           files: |
             target/release/veil.exe
             target/release/veil.exe.sha256
+            target/release/veil-v*.cdx.json

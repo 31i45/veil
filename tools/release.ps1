@@ -66,6 +66,14 @@ $ReleaseRecord = [ordered]@{
     post_archive_sha256 = $null
     bundled_sha256 = $null
   }
+  supply_chain = [ordered]@{
+    notices = 'skipped'
+    sbom = 'NOT RUN'
+    audit = 'NOT RUN'
+    audit_reason = 'not reached'
+    audit_tool = 'cargo-deny'
+    docs_missing = @()
+  }
   archive = [ordered]@{ status = 'skipped'; reason = 'not reached'; path = $null }
 }
 
@@ -78,8 +86,8 @@ function Write-ReleaseRecord {
 
   try {
     $RequiredGates = @('build', 'size_gate', 'feature_gate', 'smoke', 'tests', 'clippy', 'checksum')
-    $Failed = @($RequiredGates | Where-Object { $ReleaseRecord[$_].status -eq 'failed' }).Count -gt 0
-    $Incomplete = @($RequiredGates | Where-Object { $ReleaseRecord[$_].status -ne 'passed' }).Count -gt 0
+    $Failed = @($RequiredGates | Where-Object { $ReleaseRecord[$_].status -eq 'failed' }).Count -gt 0 -or $ReleaseRecord.supply_chain.notices -eq 'fail'
+    $Incomplete = @($RequiredGates | Where-Object { $ReleaseRecord[$_].status -ne 'passed' }).Count -gt 0 -or $ReleaseRecord.supply_chain.notices -ne 'pass' -or $ReleaseRecord.supply_chain.sbom -eq 'NOT RUN'
     if (-not $SkipArchive -and $ReleaseRecord.checksum.post_archive_status -ne 'passed') { $Incomplete = $true }
 
     $ReleaseRecord.release_ready = -not $ReleaseRecord.error -and -not $Failed -and -not $Incomplete
@@ -139,9 +147,43 @@ if ($RustExit -ne 0) { Write-Fail "rustc --version failed with exit $RustExit" }
 $RustVer = ($RustVerLine -split ' ')[1]
 if ([version]$RustVer -ge [version]'1.75') { Write-OK "Rust $RustVer [ge] 1.75" } else { Write-Warn "Rust $RustVer older than 1.75" }
 
-# Step 2: cargo test（与 release workflow 同为 release + 串行口径）
+# Step 2: supply-chain inputs（许可清单是硬门禁；审计在工具/漏洞库缺失时记为 NOT RUN）
+Write-Step 2 'supply chain: third-party notices + dependency audit'
+$ReleaseRecord.supply_chain.notices = 'fail'
+pwsh -NoProfile -File (Join-Path $RepoRoot 'tools\third_party_notices.ps1') -Check
+$NoticesExit = $LASTEXITCODE
+if ($NoticesExit -ne 0) { Write-Fail "third-party notices are stale: run tools/third_party_notices.ps1 (exit $NoticesExit)" }
+$ReleaseRecord.supply_chain.notices = 'pass'
+Write-OK 'THIRD-PARTY-LICENSES.md is up to date'
+
+$DenyVersionOutput = & cargo deny --version 2>&1
+$DenyVersionExit = $LASTEXITCODE
+if ($DenyVersionExit -ne 0) {
+  $ReleaseRecord.supply_chain.audit = 'NOT RUN'
+  $ReleaseRecord.supply_chain.audit_reason = 'cargo-deny is not installed'
+  Write-Warn 'cargo-deny not installed; audit recorded as NOT RUN'
+} else {
+  $AuditOutput = & cargo deny check 2>&1 | Out-String
+  $AuditExit = $LASTEXITCODE
+  if ($AuditExit -eq 0) {
+    $ReleaseRecord.supply_chain.audit = 'PASS'
+    $ReleaseRecord.supply_chain.audit_reason = $null
+    Write-OK "cargo deny check passed ($($DenyVersionOutput -join ' '))"
+  } elseif ($AuditOutput -match '(?i)failed to (fetch|update|download)|network (error|is unreachable)|could not connect|unable to (fetch|update|download)|advisory database.*(unavailable|failed)') {
+    $ReleaseRecord.supply_chain.audit = 'NOT RUN'
+    $ReleaseRecord.supply_chain.audit_reason = 'advisory database or network unavailable'
+    Write-Warn 'cargo deny check could not complete (database/network); audit recorded as NOT RUN'
+  } else {
+    $AuditSummary = (($AuditOutput -split "`n" | Select-Object -First 5) -join ' / ')
+    $ReleaseRecord.supply_chain.audit = 'FAIL'
+    $ReleaseRecord.supply_chain.audit_reason = "cargo deny check exited $AuditExit"
+    Write-Fail "cargo deny check failed with exit ${AuditExit}: $AuditSummary"
+  }
+}
+
+# Step 3: cargo test（与 release workflow 同为 release + 串行口径）
 if (-not $SkipTest) {
-  Write-Step 2 'cargo test --workspace --release -- --test-threads=1'
+  Write-Step 3 'cargo test --workspace --release -- --test-threads=1'
   $ReleaseRecord.tests.status = 'failed'
   $ReleaseRecord.tests.reason = $null
   cargo test --workspace --release -- --test-threads=1 | Select-Object -Last 5
@@ -155,9 +197,9 @@ if (-not $SkipTest) {
   Write-Host '  SKIP cargo test (release record: skipped)'
 }
 
-# Step 3: cargo clippy
+# Step 4: cargo clippy
 if (-not $SkipClippy) {
-  Write-Step 3 'cargo clippy --workspace --all-targets -- -D warnings'
+  Write-Step 4 'cargo clippy --workspace --all-targets -- -D warnings'
   $ReleaseRecord.clippy.status = 'failed'
   $ReleaseRecord.clippy.reason = $null
   cargo clippy --workspace --all-targets -- -D warnings | Select-Object -Last 3
@@ -171,8 +213,8 @@ if (-not $SkipClippy) {
   Write-Host '  SKIP cargo clippy (release record: skipped)'
 }
 
-# Step 4: clean + release build
-Write-Step 4 'clean + release build'
+# Step 5: clean + release build
+Write-Step 5 'clean + release build'
 $ReleaseRecord.build.status = 'failed'
 cargo clean -p veil -p veil-ui -p veil-core -p veil-mermaid-offline | Select-Object -Last 3
 $CleanExit = $LASTEXITCODE
@@ -187,8 +229,8 @@ $ReleaseRecord.build.status = 'passed'
 $Exe = Get-Item -LiteralPath $ExePath -ErrorAction Stop
 Write-OK "Release build done: $($Exe.Length) bytes, build time $($Exe.LastWriteTime)"
 
-# Step 5: verify the single executable and its binary feature evidence
-Write-Step 5 'verify artifact'
+# Step 6: verify the single executable and its binary feature evidence
+Write-Step 6 'verify artifact'
 $vi = $Exe.VersionInfo
 $SizeMiB = [math]::Round($Exe.Length / 1MB, 2)
 $SizeBytes = [int64]$Exe.Length
@@ -228,8 +270,8 @@ foreach ($c in $Checks) {
 $AllOk = ($Checks | Where-Object { -not $_.ok }).Count -eq 0
 if (-not $AllOk) { Write-Fail 'artifact verification failed, see WARN above' }
 
-# Step 6: real launch smoke against the same single artifact
-Write-Step 6 'smoke launch veil.exe'
+# Step 7: real launch smoke against the same single artifact
+Write-Step 7 'smoke launch veil.exe'
 $ReleaseRecord.smoke.status = 'failed'
 pwsh -NoProfile -File (Join-Path $RepoRoot 'tools\smoke_launch.ps1') -ExePath $ExePath -ExpectedTitlePattern '^veil' -MaxLaunchMs 1000
 $SmokeExit = $LASTEXITCODE
@@ -238,8 +280,8 @@ if ($SmokeExit -ne 0) { Write-Fail "smoke launch failed with exit $SmokeExit" }
 $ReleaseRecord.smoke.status = 'passed'
 Write-OK 'smoke launch passed'
 
-# Step 7: optionally sign the exact bytes that will be hashed and archived.
-Write-Step 7 'optional Authenticode + RFC3161 signing'
+# Step 8: optionally sign the exact bytes that will be hashed and archived.
+Write-Step 8 'optional Authenticode + RFC3161 signing'
 if ([string]::IsNullOrWhiteSpace($CertificatePath)) {
   if ($PSBoundParameters.ContainsKey('CertificatePassword')) {
     Write-Fail 'CertificatePassword requires CertificatePath'
@@ -287,8 +329,17 @@ if ([string]::IsNullOrWhiteSpace($CertificatePath)) {
   Write-OK 'Authenticode signature and RFC3161 timestamp verified'
 }
 
-# Step 8: generate and validate the conventional SHA-256 sidecar after signing.
-Write-Step 8 'generate SHA-256'
+# Step 9: generate the CycloneDX SBOM for the locked dependency set.
+Write-Step 9 'generate CycloneDX SBOM'
+$SbomPath = Join-Path $RepoRoot "target\release\veil-v$Version.cdx.json"
+pwsh -NoProfile -File (Join-Path $RepoRoot 'tools\sbom.ps1') -OutFile $SbomPath
+$SbomExit = $LASTEXITCODE
+if ($SbomExit -ne 0) { Write-Fail "SBOM generation failed with exit $SbomExit" }
+$ReleaseRecord.supply_chain.sbom = Split-Path -Leaf $SbomPath
+Write-OK "SBOM written: $($ReleaseRecord.supply_chain.sbom)"
+
+# Step 10: generate and validate the conventional SHA-256 sidecar after signing.
+Write-Step 10 'generate SHA-256'
 $ReleaseRecord.checksum.status = 'failed'
 $Sha256 = (Get-FileHash -LiteralPath $ExePath -Algorithm SHA256).Hash.ToLowerInvariant()
 $ReleaseRecord.sha256 = $Sha256
@@ -300,9 +351,9 @@ if ($Expected -ne $Sha256 -or $Actual -ne $Expected) { Write-Fail 'SHA-256 sidec
 $ReleaseRecord.checksum.status = 'passed'
 Write-OK "veil.exe.sha256 = $ChecksumLine"
 
-# Step 9: archive release-bundle, including its checksum
+# Step 11: archive release-bundle, including its checksum
 if (-not $SkipArchive) {
-  Write-Step 9 'archive release-bundle'
+  Write-Step 11 'archive release-bundle'
   $ReleaseRecord.archive.status = 'failed'
   $ReleaseRecord.archive.reason = $null
   $BundleDir = Join-Path $RepoRoot "release-bundle\veil-v$Version"
@@ -318,6 +369,28 @@ if (-not $SkipArchive) {
   Copy-Item -LiteralPath (Join-Path $RepoRoot 'LICENSE') -Destination $BundleDir -Force
   Copy-Item -LiteralPath (Join-Path $RepoRoot 'CHANGELOG.md') -Destination $BundleDir -Force
   Copy-Item -LiteralPath (Join-Path $RepoRoot 'icons\veil.ico') -Destination (Join-Path $BundleDir 'icons') -Force
+
+  # 合规文档与 SBOM 必须随同一发布字节归档；缺失的合规文档只告警并记入发布记录。
+  $ComplianceDocs = @('THIRD-PARTY-LICENSES.md', 'PRIVACY.md', 'SECURITY.md', 'SUPPORT.md')
+  $MissingDocs = @()
+  foreach ($Doc in $ComplianceDocs) {
+    $DocSource = Join-Path $RepoRoot $Doc
+    if (Test-Path -LiteralPath $DocSource) {
+      Copy-Item -LiteralPath $DocSource -Destination $BundleDir -Force
+    } else {
+      $MissingDocs += $Doc
+      Write-Warn "compliance doc missing: $Doc (not copied into bundle)"
+    }
+  }
+  $ReleaseRecord.supply_chain.docs_missing = @($MissingDocs)
+  if ($MissingDocs.Count -eq 0) { Write-OK 'compliance docs bundled' }
+
+  if (Test-Path -LiteralPath $SbomPath) {
+    Copy-Item -LiteralPath $SbomPath -Destination $BundleDir -Force
+  } else {
+    Write-Warn "SBOM missing at $SbomPath; bundle does not include it"
+  }
+
   $ArchiveReady = $true
   $ReleaseRecord.archive.status = 'passed'
   $BundleFiles = Get-ChildItem -LiteralPath $BundleDir -Recurse -File
@@ -336,12 +409,12 @@ if (-not $SkipArchive) {
   $ReleaseRecord.checksum.post_archive_status = 'passed'
   Write-OK 'post-archive SHA-256 unchanged for target and bundled veil.exe'
 } else {
-  Write-Step 9 'archive release-bundle'
+  Write-Step 11 'archive release-bundle'
   $ReleaseRecord.archive.reason = '-SkipArchive specified; post-archive check not applicable'
   Write-Host '  SKIP archive (release record: skipped)'
 }
 
-# Step 10: machine-readable record + human summary
+# Step 12: machine-readable record + human summary
 $Stopwatch.Stop()
 Write-ReleaseRecord
 Write-OK "Release record written: $RecordPath"
@@ -362,6 +435,11 @@ Write-Host "  Smoke       : $($ReleaseRecord.smoke.status)"
 Write-Host "  Signing     : $($ReleaseRecord.signing.status); signature=$($ReleaseRecord.signing.signature_validation); timestamp=$($ReleaseRecord.signing.timestamp_validation)"
 Write-Host "  Tests       : $($ReleaseRecord.tests.status)"
 Write-Host "  Clippy      : $($ReleaseRecord.clippy.status)"
+Write-Host "  Notices     : $($ReleaseRecord.supply_chain.notices)"
+Write-Host "  SBOM        : $($ReleaseRecord.supply_chain.sbom)"
+$AuditLine = if ($ReleaseRecord.supply_chain.audit_reason) { "$($ReleaseRecord.supply_chain.audit) ($($ReleaseRecord.supply_chain.audit_reason))" } else { $ReleaseRecord.supply_chain.audit }
+Write-Host "  Audit       : $AuditLine"
+if ($ReleaseRecord.supply_chain.docs_missing.Count -gt 0) { Write-Host "  Docs missing: $($ReleaseRecord.supply_chain.docs_missing -join ', ')" }
 Write-Host "  Checksum    : $($ReleaseRecord.checksum.status); post-archive=$($ReleaseRecord.checksum.post_archive_status)"
 if (-not $SkipArchive) { Write-Host "  Bundle      : release-bundle\veil-v$Version\" }
 Write-Host "  Record      : target\release\release-record.json"

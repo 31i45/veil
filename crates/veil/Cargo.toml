@@ -2,6 +2,7 @@
 name = "veil"
 edition.workspace = true
 version.workspace = true
+publish = false
 
 [features]
 # 唯一发行产物 veil.exe 默认包含离线 Mermaid（QuickJS + 完整 mermaid.js，体积 +约 5 MiB）。

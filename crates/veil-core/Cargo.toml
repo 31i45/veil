@@ -2,6 +2,7 @@
 name = "veil-core"
 edition.workspace = true
 version.workspace = true
+publish = false
 
 [dependencies]
 # ADR-001：rope 实现，mark 语义在本 crate 内自封装，不向外暴露 rope 类型。

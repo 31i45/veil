@@ -30,6 +30,21 @@ jobs:
       - name: Clippy（零警告）
         run: cargo clippy --workspace --all-features --all-targets -- -D warnings
 
+      - name: 第三方许可清单新鲜度
+        shell: pwsh
+        run: pwsh -NoProfile -File tools/third_party_notices.ps1 -Check
+
+      - name: 生成 SBOM（CycloneDX）
+        shell: pwsh
+        run: pwsh -NoProfile -File tools/sbom.ps1
+
+      # 选用 cargo install 而不是 Docker 型 action：本仓库只在 windows-latest 上构建，
+      # 直接安装 cargo-deny 与 tools/release.ps1 的 `cargo deny check` 口径一致。
+      - name: 依赖审计（cargo-deny）
+        run: |
+          cargo install cargo-deny --locked
+          cargo deny check
+
       # 一致性基线只升不降：任一指标低于 conformance.rs 顶部常量即失败。
       # 单独跑一次以打印各套数字，便于在 CI 日志中定位退化来源。
       - name: CommonMark 一致性门禁

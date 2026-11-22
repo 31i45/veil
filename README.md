@@ -7,7 +7,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-stable%20%C2%B7%20edition%202021-orange.svg)](https://www.rust-lang.org/)
 [![Platform](https://img.shields.io/badge/platform-Windows%2011%20%C2%B7%20x64-0078d4.svg)](https://github.com/31i45/veil/releases)
-[![Portable](https://img.shields.io/badge/single%20exe%20%C2%B7%20no%20installer%20%C2%B7%20no%20bg%20networking-2ea44f.svg)](https://github.com/31i45/veil/releases)
+[![Portable / Installer](https://img.shields.io/badge/portable%20exe%20%C2%B7%20optional%20installer%20%C2%B7%20no%20bg%20networking-2ea44f.svg)](https://github.com/31i45/veil/releases)
 
 [中文](README.zh-CN.md)
 
@@ -19,9 +19,9 @@ So I built my own. Pure Rust. No webview, no Chromium, no Electron, no external 
 
 ## Download & Run
 
-The **only official download source** is [github.com/31i45/veil/releases](https://github.com/31i45/veil/releases). There is no installer, no runtime dependency, and no admin rights required. Do not use mirrored or re-uploaded binaries.
+The **only official download source** is [github.com/31i45/veil/releases](https://github.com/31i45/veil/releases). Choose either the portable `veil.exe` or the optional per-user Inno Setup installer `veil-setup-<version>.exe`. Neither form has a runtime dependency or requires administrator rights. Do not use mirrored or re-uploaded binaries.
 
-Download both `veil.exe` and `veil.exe.sha256` from the **same Release**, place them in the same folder, then verify the executable in PowerShell:
+Download your chosen artifact and its SHA-256 sidecar from the **same Release**: `veil.exe` with `veil.exe.sha256`, or `veil-setup-<version>.exe` with its matching sidecar. Place each pair in the same folder. The PowerShell example below verifies the portable exe; substitute the installer and sidecar names to verify the setup package:
 
 ```powershell
 $exe = Join-Path $PWD 'veil.exe'
@@ -32,12 +32,25 @@ if ($actual -ne $expected) { throw "SHA-256 mismatch: expected $expected, got $a
 "SHA-256 verified: $actual"
 ```
 
-Never compare the executable with a sidecar from another Release. Release automation supports Authenticode signing with an RFC3161 timestamp; builds made without a production certificate are explicitly recorded as **unsigned**. An unsigned build or a newly established certificate may trigger SmartScreen. A matching SHA-256 verifies file integrity, not publisher reputation. If Windows warns, check the official source, digest, and publisher details, and stop if anything differs. Do not disable SmartScreen or other Windows security features.
+Never compare an artifact with a sidecar from another Release. The current portable `veil.exe` and `veil-setup-<version>.exe` are both **unsigned**. Release automation supports Authenticode signing with an RFC3161 timestamp; builds made without a production certificate are explicitly recorded as **unsigned**. An unsigned build or a newly established certificate may trigger SmartScreen. A matching SHA-256 verifies file integrity, not publisher reputation. If Windows warns, check the official source, digest, and publisher details, and stop if anything differs. Do not disable SmartScreen or other Windows security features.
 
 Four external verifications are **NOT RUN** for this build: production signing, real SmartScreen behaviour on a downloaded Release, real network packet capture, and this commit's remote GitHub Actions. See [PRIVACY.md](PRIVACY.md) for what each item does and does not prove.
 
+### Portable exe
+
 1. Put `veil.exe` in a folder you intend to keep (for example `%LOCALAPPDATA%\Veil`). Windows stores file associations by path, so moving the exe later breaks them.
 2. Double-click it, or run `veil.exe path\to\note.md`.
+
+**Upgrade / removal:** replace the old `veil.exe` with the new one. To remove the portable app, run `veil.exe /unregister` first if you used `/register`, then delete the exe. Replacing or deleting the program does not remove configuration, sessions, version history or logs under `%APPDATA%\Veil`; back up or delete that folder yourself as needed.
+
+### Optional per-user installer
+
+Run `veil-setup-<version>.exe` to install Veil to `%LOCALAPPDATA%\Programs\Veil`, without administrator rights or a UAC prompt. A Start Menu shortcut is created by default; a desktop shortcut is optional and not selected by default.
+
+- **Upgrade:** run the same-version or newer setup directly over the existing installation; no prior uninstall is needed.
+- **Uninstall:** use the standard Windows **Settings → Apps → Installed apps** (**Apps & features**) entry. Program files and shortcuts are removed.
+- **Data:** both overwrite upgrades and uninstall preserve configuration, sessions, version history and logs under `%APPDATA%\Veil`. Back up or delete that folder yourself as needed.
+- **File associations:** the installer does not register or manage file associations. During uninstall, Veil attempts `veil.exe /unregister` once before program files are deleted, cleaning associations you may have registered manually with `/register`.
 
 ## Open .md Files with Veil
 
@@ -69,7 +82,7 @@ Four crates, one-way dependency (`veil` → `veil-ui` → `veil-core`; `veil-mer
 
 > Before v1.0, `veil-egui` was renamed `veil-ui`. The crate had already been egui-free since ADR-005; the old name no longer matched the facts. Boundaries and responsibilities unchanged.
 >
-> One release product: `veil.exe`. Mermaid renders in-process through `veil-mermaid-offline` (QuickJS + the full `mermaid.js`), so diagram source never leaves the machine. There is no second binary and no `veil-full.exe`: the engine is a default feature and is initialised lazily on the first diagram request, so a document without diagrams pays nothing for it.
+> One application binary: `veil.exe`; the optional installer packages this same exe. Mermaid renders in-process through `veil-mermaid-offline` (QuickJS + the full `mermaid.js`), so diagram source never leaves the machine. There is no second application binary and no `veil-full.exe`: the engine is a default feature and is initialised lazily on the first diagram request, so a document without diagrams pays nothing for it.
 
 ## What It Does
 
@@ -237,8 +250,6 @@ Veil is distributed free of charge, under the MIT license. By design it contains
 - [SECURITY.md](SECURITY.md) — supported versions (3.x), private vulnerability reporting, report contents and scope
 - [SUPPORT.md](SUPPORT.md) — official source, SHA-256 verification, troubleshooting, what to include in an issue
 - [THIRD-PARTY-LICENSES.md](THIRD-PARTY-LICENSES.md) — third-party components and license texts shipped with the release
-
-**Portable upgrade:** replace the old `veil.exe` with the new one. Your configuration, sessions and version history under `%APPDATA%\Veil` are kept — do not delete that folder.
 
 ## License
 

@@ -66,10 +66,21 @@ pub fn run() {
         .map(String::as_str)
         .and_then(platform::parse_command)
     {
+        let quiet = raw_args
+            .get(1)
+            .is_some_and(|arg| arg.trim().eq_ignore_ascii_case("/quiet"));
         match platform::run_assoc(cmd) {
-            Ok(text) => platform::show_info(t(Key::AssocTitle), &text),
+            Ok(text) => {
+                if !quiet {
+                    platform::show_info(t(Key::AssocTitle), &text);
+                }
+            }
             Err(e) => {
-                platform::show_error(t(Key::AssocFailedTitle), &e);
+                if quiet {
+                    eprintln!("veil: {e}");
+                } else {
+                    platform::show_error(t(Key::AssocFailedTitle), &e);
+                }
                 std::process::exit(1);
             }
         }

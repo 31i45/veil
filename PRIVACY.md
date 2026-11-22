@@ -20,10 +20,12 @@ Veil 是单机单用户、单文档的本地编辑器。**本版本设计上不�
 
 | 内容 | Windows 位置 |
 |---|---|
+| 可选安装包的程序文件 | `%LOCALAPPDATA%\Programs\Veil` |
 | 配置（含 `allow_remote_images` 等） | `%APPDATA%\Veil\config.toml` |
 | 数据目录（会话、版本历史、恢复文件） | `%APPDATA%\Veil` |
 | 崩溃与诊断日志 | `%APPDATA%\Veil\logs\` |
 
+- 可选 per-user Inno Setup 安装包将程序文件安装到上表目录；便携 exe 仍由你自行选择存放位置。程序文件与 `%APPDATA%\Veil` 用户数据分开。
 - 设置环境变量 `VEIL_HOME` 可把配置与数据整体改到该目录，用于测试与取证隔离。
 - 截图粘贴与 Mermaid 快照等图片写入**文档所在目录**下的 `<文档名>.assets\`，属于你的文档资产，不是隐藏数据。
 - 非 Windows 平台使用 `$XDG_CONFIG_HOME/veil` 或 `$HOME/.config/veil`，但 Veil 仅正式支持 Windows。
@@ -51,19 +53,27 @@ Veil 在崩溃时会把一份报告写入 `%APPDATA%\Veil\logs\`，并可通过*
 
 报告不会自动上传；是否把它交给支持渠道由你决定。导出时若取消保存对话框，不会落盘。
 
+## 安装、覆盖升级与卸载
+
+可选安装包安装到 `%LOCALAPPDATA%\Programs\Veil`，无需管理员权限或 UAC 提权。同版本或新版本可直接覆盖安装；通过 Windows「设置 → 应用 → 安装的应用」（应用和功能）可执行标准卸载。
+
+覆盖升级与标准卸载都会保留 `%APPDATA%\Veil`（或 `VEIL_HOME` 指向的目录）中的配置、会话、版本历史、恢复文件与日志。卸载只移除程序文件与快捷方式，不会清除这些用户数据；如需备份或彻底删除，请你自行处理该目录。
+
+安装器不注册或接管文件关联。卸载器会在删除程序文件前尝试执行一次 `veil.exe /unregister`，清理你可能通过 `/register` 手动注册的关联；未注册过关联时也可继续卸载。此清理不删除上述用户数据。
+
 ## 删除你的数据
 
 1. 关闭所有 Veil 窗口。
 2. 删除 `%APPDATA%\Veil`（或 `VEIL_HOME` 指向的目录）即可移除配置、会话、版本历史、恢复文件与崩溃日志。
 3. 如使用过截图 / Mermaid 快照，按需删除文档旁的 `<文档名>.assets\` 目录。
-4. 如执行过 `/register`，先运行 `veil.exe /unregister` 再删除 exe 与数据目录，避免留下「打开方式」残留项。
-5. 删除 exe 本身即可完成卸载；本版本设计上不写系统服务、不常驻后台。
+4. 便携版如执行过 `/register`，先运行 `veil.exe /unregister` 再删除 exe，避免留下「打开方式」残留项；安装包的标准卸载会在删除程序文件前尝试一次此清理。
+5. 便携版删除 exe 即可移除程序；安装包通过 Windows「应用和功能」标准卸载。两种方式都不会自动删除 `%APPDATA%\Veil`（或 `VEIL_HOME`）中的用户数据，需按第 2 步自行删除；本版本设计上不写系统服务、不常驻后台。
 
 ## 验证状态（NOT RUN）
 
 以下四项外部验证**尚未执行**，因此本文不对其作出「已实测」的结论：
 
-1. **生产签名**：当前构建流程支持 Authenticode + RFC3161 时间戳，但生产证书签发与签名产物验证为 NOT RUN。
+1. **生产签名**：当前便携 `veil.exe` 与 `veil-setup-<version>.exe` 均未签名。构建流程支持 Authenticode + RFC3161 时间戳，但生产证书签发与签名产物验证为 NOT RUN。
 2. **真实 SmartScreen**：需要在带 Mark-of-the-Web 的真实 Release 下载上验证，NOT RUN。
 3. **真实网络抓包**：对最终构建在提权环境下的出站流量抓包分析为 NOT RUN。因此本文只能声明「设计上不包含遥测、后台更新检查或后台请求」，不能声称已在真实网络中验证零出站。
 4. **本提交远端 GitHub Actions**：本提交尚未 push，远端 CI 结果 NOT RUN。

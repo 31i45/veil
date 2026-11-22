@@ -7,7 +7,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-stable%20%C2%B7%20edition%202021-orange.svg)](https://www.rust-lang.org/)
 [![Platform](https://img.shields.io/badge/platform-Windows%2011%20%C2%B7%20x64-0078d4.svg)](https://github.com/31i45/veil/releases)
-[![Portable](https://img.shields.io/badge/single%20exe%20%C2%B7%20no%20installer%20%C2%B7%20no%20bg%20networking-2ea44f.svg)](https://github.com/31i45/veil/releases)
+[![Portable / Installer](https://img.shields.io/badge/portable%20exe%20%C2%B7%20optional%20installer%20%C2%B7%20no%20bg%20networking-2ea44f.svg)](https://github.com/31i45/veil/releases)
 
 [English](README.md)
 
@@ -19,9 +19,9 @@ Veil 的灵感来自 Typedown — Typedown 是我最喜欢的 Windows Markdown �
 
 ## 下载与使用
 
-**唯一官方下载来源**是 [github.com/31i45/veil/releases](https://github.com/31i45/veil/releases)。无需安装、无外部运行时依赖、不需要管理员权限。请勿使用镜像站或他人重新上传的二进制。
+**唯一官方下载来源**是 [github.com/31i45/veil/releases](https://github.com/31i45/veil/releases)。可选择便携 `veil.exe` 或可选的 per-user Inno Setup 安装包 `veil-setup-<version>.exe`。两种形态都无外部运行时依赖，也不需要管理员权限。请勿使用镜像站或他人重新上传的二进制。
 
-从**同一个 Release** 同时下载 `veil.exe` 与 `veil.exe.sha256`，放到同一目录，然后在 PowerShell 中核验：
+从**同一个 Release** 下载所选产物及其 SHA-256 侧车文件：便携版为 `veil.exe` 与 `veil.exe.sha256`，安装包为 `veil-setup-<version>.exe` 及其对应侧车文件。把每对文件放到同一目录。以下 PowerShell 示例以便携 exe 为例；核验安装包时替换为相应的文件与侧车文件名：
 
 ```powershell
 $exe = Join-Path $PWD 'veil.exe'
@@ -32,12 +32,25 @@ if ($actual -ne $expected) { throw "SHA-256 不匹配：预期 $expected，实�
 "SHA-256 核验通过：$actual"
 ```
 
-不得拿其他 Release 的侧车文件核验当前 exe。发布自动化支持 Authenticode 签名与 RFC3161 时间戳；没有生产证书的构建会明确记录为 **unsigned（未签名）**。未签名构建或新证书仍可能触发 SmartScreen。SHA-256 一致只能证明文件字节完整，不能代表发布者信誉。若 Windows 出现警告，请核对官方来源、摘要和发布者信息；有任何不一致就停止运行。不要关闭 SmartScreen 或其他 Windows 安全功能。
+不得拿其他 Release 的侧车文件核验当前产物。当前便携 `veil.exe` 与 `veil-setup-<version>.exe` 均为 **unsigned（未签名）**。发布自动化支持 Authenticode 签名与 RFC3161 时间戳；没有生产证书的构建会明确记录为 **unsigned（未签名）**。未签名构建或新证书仍可能触发 SmartScreen。SHA-256 一致只能证明文件字节完整，不能代表发布者信誉。若 Windows 出现警告，请核对官方来源、摘要和发布者信息；有任何不一致就停止运行。不要关闭 SmartScreen 或其他 Windows 安全功能。
 
 本次构建的四项外部验证均未执行（**NOT RUN**）：生产签名、真实 SmartScreen、真实网络抓包、本提交远端 GitHub Actions。各项含义见 [PRIVACY.md](PRIVACY.md)。
 
+### 便携 exe
+
 1. 把 `veil.exe` 放到一个打算长期保留的目录（例如 `%LOCALAPPDATA%\Veil`）。Windows 按路径记录文件关联，之后移动 exe 会让关联失效。
 2. 双击运行，或执行 `veil.exe 某个文件.md`。
+
+**升级 / 移除**：用新版本 `veil.exe` 覆盖旧 exe。要移除便携版，若执行过 `/register`，先运行 `veil.exe /unregister`，再删除 exe。替换或删除程序均不会删除 `%APPDATA%\Veil` 下的配置、会话、版本历史与日志；如需备份或清除，请自行处理该目录。
+
+### 可选 per-user 安装包
+
+运行 `veil-setup-<version>.exe` 会把 Veil 安装到 `%LOCALAPPDATA%\Programs\Veil`，无需管理员权限，也不会触发 UAC 提权。开始菜单快捷方式默认创建；桌面快捷方式为可选项，默认不勾选。
+
+- **升级**：直接运行同版本或更新版本的安装包覆盖现有安装，无需先卸载。
+- **卸载**：使用 Windows「设置 → 应用 → 安装的应用」（应用和功能）中的标准卸载入口。程序文件与快捷方式会被移除。
+- **数据**：覆盖升级与卸载都会保留 `%APPDATA%\Veil` 下的配置、会话、版本历史与日志。如需备份或删除，请自行处理该目录。
+- **文件关联**：安装器不注册或接管文件关联。卸载器会在删除程序文件前尝试执行一次 `veil.exe /unregister`，清理你可能通过 `/register` 手动注册的关联。
 
 ## 把 .md 文件关联到 Veil
 
@@ -69,7 +82,7 @@ veil.exe /unregister   # 只撤销 /register 创建、且当前值仍属于自�
 
 > 2026-11-03 v1 发布前将 `veil-egui` 更名为 `veil-ui`：该 crate 自 ADR-005 起已零 egui 依赖，旧名与事实不符。crate 边界与职责未变。
 >
-> 只有一个发布产物 `veil.exe`。Mermaid 通过 `veil-mermaid-offline`（QuickJS + 完整 `mermaid.js`）在进程内渲染，图表源码永不离开本机。不再有第二个二进制，也没有 `veil-full.exe`：离线引擎是默认 feature，并在首次请求图表时才初始化，没有图表的文档不为它付出任何内存成本。
+> 只有一个应用二进制 `veil.exe`；可选安装包封装同一个 exe。Mermaid 通过 `veil-mermaid-offline`（QuickJS + 完整 `mermaid.js`）在进程内渲染，图表源码永不离开本机。不再有第二个应用二进制，也没有 `veil-full.exe`：离线引擎是默认 feature，并在首次请求图表时才初始化，没有图表的文档不为它付出任何内存成本。
 
 ## 已实现功能
 
@@ -238,8 +251,6 @@ Veil 以 MIT 许可证免费分发。**设计上不包含遥测，也没有后�
 - [SECURITY.md](SECURITY.md) — 支持版本（3.x）、私密漏洞报告渠道、报告内容与范围
 - [SUPPORT.md](SUPPORT.md) — 官方来源、SHA-256 核验、常见问题、提交问题需附的信息
 - [THIRD-PARTY-LICENSES.md](THIRD-PARTY-LICENSES.md) — 随发布包提供的第三方组件与许可证文本
-
-**便携升级**：用新版本 `veil.exe` 覆盖旧 exe 即可。`%APPDATA%\Veil` 下的配置、会话与版本历史会保留——不要删除该目录。
 
 ## 许可
 

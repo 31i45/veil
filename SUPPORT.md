@@ -2,15 +2,15 @@
 
 ## 唯一官方来源
 
-Veil 只从 GitHub Release 分发：
+Veil 只从 GitHub Release 分发便携 `veil.exe` 与可选的 per-user Inno Setup 安装包 `veil-setup-<version>.exe`：
 
 <https://github.com/31i45/veil/releases>
 
-不要使用镜像站或他人重新上传的 exe。若你拿到的文件不是来自上述页面，请先停止使用。
+不要使用镜像站或他人重新上传的 exe 或安装包。若你拿到的文件不是来自上述页面，请先停止使用。
 
 ## 下载后先核验 SHA-256
 
-从**同一个 Release** 下载 `veil.exe` 与 `veil.exe.sha256`，放到同一目录，然后在 PowerShell 中执行：
+从**同一个 Release** 下载便携 `veil.exe` 与 `veil.exe.sha256`；安装包则下载 `veil-setup-<version>.exe` 及其对应的 SHA-256 侧车文件。把每对文件放到同一目录。以下 PowerShell 示例以便携 exe 为例，核验安装包时替换为相应的文件与侧车文件名：
 
 ```powershell
 $exe = Join-Path $PWD 'veil.exe'
@@ -21,14 +21,22 @@ if ($actual -ne $expected) { throw "SHA-256 不匹配：预期 $expected，实�
 "SHA-256 核验通过：$actual"
 ```
 
-不要拿其他 Release 的侧车文件核验当前 exe。SHA-256 一致只证明字节完整，不代表发布者信誉。
+不要拿其他 Release 的侧车文件核验当前产物。当前便携 `veil.exe` 与 `veil-setup-<version>.exe` 均未签名，生产签名与真实 SmartScreen 验证仍为 **NOT RUN**。SHA-256 一致只证明字节完整，不代表发布者信誉。
 
-## 便携升级
+## 便携升级与移除
 
-- 直接用新版本的 `veil.exe` 覆盖旧 exe。**不要删除 `%APPDATA%\Veil`**：配置、会话与版本历史都在那里，会继续可用。
+- 直接用新版本的 `veil.exe` 覆盖旧 exe。**不要删除 `%APPDATA%\Veil`**：配置、会话、版本历史与日志都在那里，会继续可用。
 - 若设置过 `VEIL_HOME`，配置与数据位于该目录，升级同样不受影响。
 - 若移动或替换了 exe 路径，Windows 的文件关联会失效：必要时在旧路径 `/unregister`、新路径 `/register`。
+- 要移除便携版，若执行过 `/register`，先运行 `veil.exe /unregister`，再删除 exe。删除 exe 不会删除上述用户数据；如需备份或清除，请自行处理数据目录。
 - 未知的新配置键不会导致启动失败。
+
+## 安装包安装、覆盖升级与卸载
+
+- **安装**：运行 `veil-setup-<version>.exe`，程序安装到 `%LOCALAPPDATA%\Programs\Veil`，无需管理员权限或 UAC 提权。开始菜单快捷方式默认创建；桌面快捷方式可选，默认不勾选。
+- **覆盖升级**：直接运行同版本或更新版本的安装包，无需先卸载。程序文件会被替换，`%APPDATA%\Veil`（或 `VEIL_HOME` 指向的目录）中的配置、会话、版本历史与日志会保留。
+- **标准卸载**：通过 Windows「设置 → 应用 → 安装的应用」（应用和功能）卸载。程序文件与快捷方式会被移除，但上述用户数据仍会保留；如需备份或删除，请自行处理。
+- **文件关联清理**：安装器不注册或接管文件关联。卸载器会在删除程序文件前尝试执行一次 `veil.exe /unregister`，清理你可能通过 `/register` 手动注册的关联；未注册过关联时也可继续卸载。
 
 ## 常见问题入口
 

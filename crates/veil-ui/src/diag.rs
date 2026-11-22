@@ -289,8 +289,8 @@ fn starts_absolute_path(chars: &[char], i: usize) -> bool {
     {
         return true;
     }
-    // POSIX 绝对路径起点（含 rustc 标准库回溯与常见构建/容器目录）。
-    c == '/'
+    // POSIX 白名单根（快速路径，含 rustc 标准库回溯与常见构建/容器目录）。
+    if c == '/'
         && [
             "/home/",
             "/Users/",
@@ -308,6 +308,48 @@ fn starts_absolute_path(chars: &[char], i: usize) -> bool {
         ]
         .iter()
         .any(|prefix| starts_with_ignore_ascii_case(&chars[i..], prefix))
+    {
+        return true;
+    }
+    // 通用 POSIX 绝对路径：任意 `/a/b`，不只限于白名单根。
+    c == '/' && starts_generic_posix_path(chars, i)
+}
+
+/// 通用 POSIX 绝对路径起点判定（`/data/app/x`、`/custom/root/file`、`/a/b`）。
+///
+/// 排除三类误伤：
+/// - `scheme://` 与 `//` 中的斜杠（`https://`、`http://x/y`、`file:///`）；
+/// - `/` 后是空白的除法/分隔写法（`a / b`）；
+/// - 只有一个 `/` 的相对路径（`docs/readme.md`）。
+fn starts_generic_posix_path(chars: &[char], i: usize) -> bool {
+    // `://` 的首个斜杠、以及 `//` 的第二个斜杠都不是路径起点。
+    if i > 0 && matches!(chars[i - 1], ':' | '/') {
+        return false;
+    }
+    // 同一 token 内出现 `://` 说明这是 URL，后续斜杠属于 URL 路径。
+    if token_contains_url_scheme(chars, i) {
+        return false;
+    }
+    // `/` 后不能是空白（排除 `a / b`）。
+    match chars.get(i + 1) {
+        Some(next) if !next.is_whitespace() => {}
+        _ => return false,
+    }
+    // 到硬终止符前还必须再有一个 `/`，否则视为相对路径（`docs/readme.md`）。
+    chars[i + 1..]
+        .iter()
+        .take_while(|c| !is_hard_terminator(**c))
+        .any(|c| *c == '/')
+}
+
+/// 当前位置之前的同一 token（空白/硬终止符分隔）内是否含 `://`。
+fn token_contains_url_scheme(chars: &[char], i: usize) -> bool {
+    let start = (0..i)
+        .rev()
+        .take_while(|&k| !chars[k].is_whitespace() && !is_hard_terminator(chars[k]))
+        .last()
+        .unwrap_or(i);
+    chars[start..i].windows(3).any(|w| w == [':', '/', '/'])
 }
 
 /// `file:` URL 的结束下标；`file:` 后必须真的跟着本机路径，否则不替换。
@@ -498,6 +540,11 @@ mod tests {
             ("/build/x", "<path>"),
             ("/workspace/x", "<path>"),
             ("/github/x", "<path>"),
+            // 非白名单根的任意 POSIX 绝对路径。
+            ("/data/app/x", "<path>"),
+            ("/custom/root/file", "<path>"),
+            ("/a/b", "<path>"),
+            ("打开/data/app/x失败", "打开<path>失败"),
             // file: URL 的各种写法（含盘符、UNC 与 Unix 根）。
             ("file:///C:/Users/alice/a.md", "<path>"),
             (r"file://C:\Users\alice\a.md", "<path>"),
@@ -562,6 +609,7 @@ mod tests {
         );
         assert_eq!(redact("file: notes.txt"), "file: notes.txt");
         assert_eq!(redact("docs/readme.md"), "docs/readme.md");
+        assert_eq!(redact("a / b"), "a / b");
         assert_eq!(redact("src/main.rs:12:3"), "src/main.rs:12:3");
     }
 

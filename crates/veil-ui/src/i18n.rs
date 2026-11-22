@@ -84,6 +84,10 @@ keys! {
     MenuViewFocusMode => "menu.view.focus_mode", "专注模式";
     MenuViewAllowRemoteImages => "menu.view.allow_remote_images", "允许远程图片";
     MenuViewSettings => "menu.view.settings", "设置…";
+    MenuHelp => "menu.help", "帮助";
+    MenuHelpAbout => "menu.help.about", "关于 Veil";
+    MenuHelpExportDiagnostics => "menu.help.export_diagnostics", "导出诊断信息…";
+    MenuHelpCheckUpdate => "menu.help.check_update", "检查更新";
 
     // ---- 快捷键提示（菜单右侧列） ----
     ShortcutNew => "shortcut.new", "Ctrl+N";
@@ -337,6 +341,9 @@ keys! {
 
     // ---- 启动 / 配置 ----
     NoticeConfigIgnored => "notice.config_ignored", "配置有 {} 处无法识别，已忽略";
+    NoticeDiagnosticsSaved => "notice.diagnostics_saved", "已导出诊断信息：{}";
+    NoticeDiagnosticsFailed => "notice.diagnostics_failed", "导出诊断信息失败：{}";
+    NoticeUpdateOpenFailed => "notice.update_open_failed", "无法打开更新页面：{}";
     NoticeConfigInvalid => "notice.config_invalid",
         "配置文件无效，已用默认主题: {}；下一步：修正配置文件后重启应用，或删除配置文件以恢复默认设置";
     NoticeRecovered => "notice.recovered",
@@ -515,6 +522,13 @@ keys! {
     DialogFilterMarkdownPattern => "dialog.filter.markdown_pattern", "*.md;*.markdown";
     DialogFilterPdfPattern => "dialog.filter.pdf_pattern", "*.pdf";
     DialogFilterHtmlPattern => "dialog.filter.html_pattern", "*.html";
+    DialogExportDiagnostics => "dialog.title.export_diagnostics", "导出诊断信息";
+    DialogFilterText => "dialog.filter.text", "文本文件 (*.txt)";
+    DialogFilterTextPattern => "dialog.filter.text_pattern", "*.txt";
+
+    // ---- 关于 ----
+    AboutTitle => "about.title", "关于 Veil";
+    AboutOpenHomepage => "about.open_homepage", "打开项目主页";
 
     // ---- 打开失败说明 ----
     OpenFailNotUtf8 => "open_failure.not_utf8", "文件不是有效的 UTF-8 编码（{}）";

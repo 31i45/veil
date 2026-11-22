@@ -75,13 +75,15 @@ fn action_enabled_only_gates_known_noop_items() {
 fn menu_bar_hit_and_toggle_zones() {
     let rects = menu_bar_rects(1.0);
     assert_eq!(rects.len(), MENUS.len());
-    assert_eq!(rects.len(), 3, "文件/编辑/视图");
+    assert_eq!(rects.len(), 4, "文件/编辑/视图/帮助");
     let (_, x0, w0) = rects[0];
     let (_, x1, _) = rects[1];
     let (_, x2, _) = rects[2];
+    let (_, x3, _) = rects[3];
     assert_eq!(hit_menu_bar(x0 + 1.0, 10.0, 1.0), Some(0));
     assert_eq!(hit_menu_bar(x1 + 1.0, 10.0, 1.0), Some(1));
     assert_eq!(hit_menu_bar(x2 + 1.0, 10.0, 1.0), Some(2));
+    assert_eq!(hit_menu_bar(x3 + 1.0, 10.0, 1.0), Some(3));
     assert_eq!(
         hit_menu_bar(x0 + w0 - 0.1, 10.0, 1.0),
         Some(0),
@@ -93,6 +95,32 @@ fn menu_bar_hit_and_toggle_zones() {
         None,
         "菜单栏以下"
     );
+}
+
+#[test]
+fn help_menu_items_hit_map_to_help_actions() {
+    let (_, x, w) = menu_bar_rects(1.0)[3];
+    assert_eq!(hit_menu_bar(x + w / 2.0, 10.0, 1.0), Some(3));
+    assert_eq!(t(MENUS[3].title), "帮助");
+    let p = popup_layout(3, 1.0, &[], 1000.0);
+    for (item, expected) in [
+        (0, MenuAction::About),
+        (1, MenuAction::ExportDiagnostics),
+        (2, MenuAction::CheckUpdate),
+    ] {
+        let (idx, ix, iy, iw, ih) = p.items[item];
+        assert_eq!(
+            hit_popup_item(ix + iw / 2.0, iy + ih / 2.0, 3, 1.0, &[], 1000.0),
+            Some(idx)
+        );
+        assert_eq!(action_at(3, idx, &[]), Some(expected));
+        assert!(
+            action_enabled(expected, MenuFlags::default()),
+            "{expected:?} 应始终可用"
+        );
+        assert!(!action_checked(expected, MenuFlags::default()));
+        assert_eq!(disabled_reason(expected, MenuFlags::default()), None);
+    }
 }
 
 #[test]
@@ -300,6 +328,15 @@ fn menu_definitions_cover_shortcuts() {
             MenuAction::Settings,
         ]
     );
+    let help: Vec<_> = MENUS[3].items.iter().map(|(_, _, a)| *a).collect();
+    assert_eq!(
+        help,
+        vec![
+            MenuAction::About,
+            MenuAction::ExportDiagnostics,
+            MenuAction::CheckUpdate,
+        ]
+    );
 }
 
 fn expected_input_action(action: MenuAction) -> crate::input::Action {
@@ -393,6 +430,9 @@ fn menu_shortcuts_match_winit_mapping_and_real_dispatch() {
                         | MenuAction::ThemeDark
                         | MenuAction::ToggleFocus
                         | MenuAction::ToggleRemoteImages
+                        | MenuAction::About
+                        | MenuAction::ExportDiagnostics
+                        | MenuAction::CheckUpdate
                 ));
                 continue;
             }
@@ -449,6 +489,9 @@ fn menu_command_matrix_maps_each_action_to_its_real_shortcut() {
         (MenuAction::ThemeDark, Key::Empty),
         (MenuAction::ToggleFocus, Key::Empty),
         (MenuAction::ToggleRemoteImages, Key::Empty),
+        (MenuAction::About, Key::Empty),
+        (MenuAction::ExportDiagnostics, Key::Empty),
+        (MenuAction::CheckUpdate, Key::Empty),
     ];
 
     let mut seen = Vec::new();
@@ -485,7 +528,7 @@ fn menu_command_matrix_maps_each_action_to_its_real_shortcut() {
             }
         }
     }
-    assert_eq!(seen.len(), 35, "主菜单应覆盖 35 个静态动作");
+    assert_eq!(seen.len(), 38, "主菜单应覆盖 38 个静态动作");
     assert_eq!(shown, 29, "矩阵内显示快捷键的动作数与既有红线一致");
 
     // 最近文件是动态项：出现在菜单里但没有（也不应有）快捷键提示。
@@ -569,6 +612,7 @@ fn dialog_commands_use_ellipsis_consistently() {
                     | MenuAction::Print
                     | MenuAction::InsertImage
                     | MenuAction::Settings
+                    | MenuAction::ExportDiagnostics
             );
             assert_eq!(
                 t(*label).ends_with('…'),
@@ -1089,7 +1133,7 @@ fn paint_uses_dark_palette() {
 
 #[test]
 fn theme_menu_marks_current_mode() {
-    assert_eq!(MENUS.len(), 3);
+    assert_eq!(MENUS.len(), 4);
     // 分隔线不参与动作序：去掉后仍是「大纲 → 缩放组 → 全屏 → 主题组 → 模式组」
     let view: Vec<MenuAction> = MENUS[2]
         .items

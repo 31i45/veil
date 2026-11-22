@@ -1114,6 +1114,37 @@ mod tests {
         assert_eq!(p.ignored, 2, "未知键与内联表仍按既有口径计数");
     }
 
+    /// 配置兼容（Task 6.1）：未知键不崩溃且不影响已知键解析；保存时保留未知键与注释
+    /// 并更新已知键；保存后再次解析，已知键值不变（往返）。
+    #[test]
+    fn unknown_keys_ignored_then_preserved_on_save_roundtrip() {
+        let original = "# 顶部注释\nmode = \"light\" # 行尾注释\nfuture_flag = true\nfuture_table = { a = 1 }\n";
+        // 读取：未知键计 ignored，已知键照常解析。
+        let parsed = parse(original);
+        assert_eq!(parsed.config.mode, ThemeMode::Light);
+        assert_eq!(parsed.ignored, 2, "未知键只计数，不影响已知键");
+
+        // 保存：注释、未知键、键顺序保留，已知键被更新。
+        let updated = Config {
+            mode: ThemeMode::Dark,
+            tab_width: 2,
+            ..Config::default()
+        };
+        let saved = updated.to_toml_preserving(Some(original));
+        assert!(saved.contains("# 顶部注释"), "{saved}");
+        assert!(saved.contains("# 行尾注释"), "{saved}");
+        assert!(saved.contains("future_flag = true"), "{saved}");
+        assert!(saved.contains("future_table = { a = 1 }"), "{saved}");
+        assert!(saved.contains("mode = \"dark\""), "{saved}");
+
+        // 往返：再次解析得到更新后的已知键；再次保存不改变已知键值。
+        let reloaded = parse(&saved);
+        assert_eq!(reloaded.config.mode, ThemeMode::Dark);
+        assert_eq!(reloaded.config.tab_width, 2);
+        let saved_again = reloaded.config.to_toml_preserving(Some(&saved));
+        assert_eq!(parse(&saved_again).config, reloaded.config);
+    }
+
     #[test]
     fn save_falls_back_to_regeneration_for_non_strict_input() {
         let cfg = Config {

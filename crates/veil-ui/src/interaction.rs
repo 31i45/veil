@@ -388,6 +388,7 @@ impl App {
             I18nKey::NoticeZoom,
             &[&((zoom * 100.0).round() as u32).to_string()],
         );
+        crate::app::record_diag("zoom", format!("{}%", (zoom * 100.0).round() as u32));
         self.request_redraw();
     }
 

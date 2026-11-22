@@ -105,6 +105,12 @@ pub enum MenuAction {
     ToggleFullscreen,
     /// 打开设置模态（Ctrl+,）：所有配置项集中编辑，写 config.toml。
     Settings,
+    /// 关于 Veil：应用内模态展示版本/构建提交/许可/隐私与官方来源。
+    About,
+    /// 导出诊断信息：显式保存对话框写出白名单字段文本。
+    ExportDiagnostics,
+    /// 检查更新：只用默认浏览器打开官方 Release 页，不做进程内网络请求。
+    CheckUpdate,
     Quit,
     /// 打开最近文件（0b）：下标为最近列表位置（0 = 最近一次）。
     OpenRecent(usize),
@@ -116,7 +122,7 @@ pub struct MenuDef {
     pub items: &'static [(Key, Key, MenuAction)],
 }
 
-pub const MENUS: [MenuDef; 3] = [
+pub const MENUS: [MenuDef; 4] = [
     MenuDef {
         title: Key::MenuFile,
         items: &[
@@ -245,6 +251,22 @@ pub const MENUS: [MenuDef; 3] = [
                 Key::MenuViewSettings,
                 Key::ShortcutSettings,
                 MenuAction::Settings,
+            ),
+        ],
+    },
+    MenuDef {
+        title: Key::MenuHelp,
+        items: &[
+            (Key::MenuHelpAbout, Key::Empty, MenuAction::About),
+            (
+                Key::MenuHelpExportDiagnostics,
+                Key::Empty,
+                MenuAction::ExportDiagnostics,
+            ),
+            (
+                Key::MenuHelpCheckUpdate,
+                Key::Empty,
+                MenuAction::CheckUpdate,
             ),
         ],
     },

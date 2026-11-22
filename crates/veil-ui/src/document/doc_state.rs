@@ -163,6 +163,7 @@ impl App {
             Ok(()) => {
                 self.editor.mark_saved();
                 self.doc.baseline = data;
+                crate::app::record_diag("doc", "save ok");
                 // 本会话最近一次成功保存的时刻（自动/手工同源）：状态栏「已保存 HH:MM」
                 let hhmm = self.ports.clock.local_hhmm();
                 self.persist_state.last_saved_hhmm = Some(hhmm);
@@ -661,6 +662,7 @@ impl App {
             mermaid_ref,
         ) {
             Ok(p) => {
+                crate::app::record_diag("doc", "export ext=html");
                 self.ui_state.chrome.notice = tf(Key::NoticeExportedHtml, &[&path_label(Some(&p))]);
                 eprintln!("已导出 {}", p.display());
             }
@@ -723,6 +725,7 @@ impl App {
                 let old_path = self.doc.path.clone();
                 self.doc.path = Some(path.clone());
                 self.doc.baseline = data;
+                crate::app::record_diag("doc", "save ok");
                 // 未命名草稿首次保存：临时会话键的历史迁移到路径键。
                 // 迁移失败不得静默：旧历史保留在旧键（仍可在版本历史面板访问），
                 // 且明确告知用户「历史未迁移」，不能只报「已另存为」（DEF-T08-001）。
@@ -872,6 +875,122 @@ impl App {
         self.request_redraw();
     }
 
+    /// 关于弹窗：复用应用内模态。任何按钮都只关闭弹窗；主按钮（id=1）
+    /// 额外经注入的 UrlOpener 打开官方 Release 页，失败只写通知。
+    pub(crate) fn show_about_modal(&mut self) {
+        if self.ui_state.modal.is_some() {
+            return; // 已有模态未决：不叠加
+        }
+        self.close_lite_overlays();
+        let config_dir = crate::theme::config_path()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "不可用".to_string());
+        let log_dir = crate::theme::data_dir()
+            .map(|d| d.join("logs").display().to_string())
+            .unwrap_or_else(|| "不可用".to_string());
+        let message = format!(
+            "Veil {}（构建 {}）\n许可证：MIT\n\
+             隐私：无遥测、无后台更新检查、无后台网络请求；远程图片默认关闭。\n\
+             配置目录：{}\n诊断目录：{}\n官方来源：{}\n\
+             第三方组件：Mermaid、QuickJS、linkedom（及全部 Rust 依赖）；完整许可见随包 THIRD-PARTY-LICENSES.md。",
+            crate::diag::APP_VERSION,
+            crate::diag::BUILD_COMMIT,
+            config_dir,
+            log_dir,
+            crate::app::RELEASES_URL,
+        );
+        let spec = modal::ModalSpec::new(
+            t(Key::AboutTitle),
+            message,
+            vec![
+                modal::ModalButton::new(1, t(Key::AboutOpenHomepage), modal::ButtonRole::Primary),
+                modal::ModalButton::new(2, t(Key::BtnClose), modal::ButtonRole::Secondary),
+            ],
+        );
+        let state = modal::ModalState::new(&spec);
+        self.ui_state.modal = Some(ActiveModal {
+            spec,
+            state,
+            intent: None,
+            purpose: ModalPurpose::About,
+        });
+        self.sync_ime_for_modal();
+        self.request_redraw();
+    }
+
+    /// 关于弹窗结论：任何按钮都关闭（模态已被取出），id=1 额外打开官方主页。
+    fn resolve_about(&mut self, id: u16) {
+        if id == 1 {
+            if let Err(e) = self.ports.url_opener.open_url(crate::app::RELEASES_URL) {
+                self.ui_state
+                    .chrome
+                    .notify_error(tf(Key::NoticeLinkFailed, &[&e]));
+            }
+        }
+        self.request_redraw();
+    }
+
+    /// 「检查更新」：仅用默认浏览器打开官方 Release 页；不产生进程内网络请求。
+    pub(crate) fn check_update(&mut self) {
+        if let Err(e) = self.ports.url_opener.open_url(crate::app::RELEASES_URL) {
+            self.ui_state
+                .chrome
+                .notify_error(tf(Key::NoticeUpdateOpenFailed, &[&e]));
+        }
+        self.request_redraw();
+    }
+
+    /// 「导出诊断信息…」：显式保存对话框 → 白名单字段文本 → 原子写。
+    /// 取消无副作用；成功/失败都写状态栏通知，任何失败只通知不 panic。
+    pub(crate) fn export_diagnostics(&mut self) {
+        let suggested = format!("veil-diagnostics-{}.txt", crate::diag::APP_VERSION);
+        let Some(path) = self.ports.dialogs.save_text(&suggested, "txt") else {
+            return; // 用户取消：不落盘、不改文档状态
+        };
+        let extra = self.diagnostics_extra();
+        let text =
+            crate::diag::render_diagnostics(std::env::consts::OS, std::env::consts::ARCH, &extra);
+        match self.ports.store.save(&path, text.as_bytes()) {
+            Ok(()) => {
+                crate::app::record_diag("diag", "export ok");
+                self.ui_state.chrome.notify(
+                    tf(
+                        Key::NoticeDiagnosticsSaved,
+                        &[&path_label(Some(path.as_path()))],
+                    ),
+                    crate::chrome::NoticeKind::Success,
+                );
+            }
+            Err(e) => {
+                crate::app::record_diag("diag", "export err");
+                self.ui_state
+                    .chrome
+                    .notify_error(tf(Key::NoticeDiagnosticsFailed, &[&e]));
+            }
+        }
+        self.request_redraw();
+    }
+
+    /// 诊断补充信息白名单：只允许开关/计数/枚举，不含完整路径、文件名或正文。
+    fn diagnostics_extra(&self) -> Vec<(&'static str, String)> {
+        let yes_no = |v: bool| if v { "yes" } else { "no" }.to_string();
+        let config_exists = crate::theme::config_path().is_some_and(|p| p.exists());
+        let chars = self.editor.session().serialize().chars().count();
+        vec![
+            ("配置存在", yes_no(config_exists)),
+            ("文档已关联", yes_no(self.doc.path.is_some())),
+            ("未保存修改", yes_no(self.editor.is_dirty())),
+            ("文档字符数", chars.to_string()),
+            ("主题", self.input_state.theme.mode.as_str().to_string()),
+            ("允许远程图片", yes_no(self.config.allow_remote_images)),
+            (
+                "界面缩放",
+                format!("{:.0}%", self.input_state.scale * 100.0),
+            ),
+            ("崩溃报告数", count_crash_reports().to_string()),
+        ]
+    }
+
     /// 错误弹窗的唯一装配点：与确认弹窗共用卡片/按钮/间距令牌，只在语义上标记危险。
     /// 已有模态未决时不叠加（避免覆盖未保存确认而丢失用户意图），改为写入状态栏提示。
     pub(crate) fn show_error_modal(
@@ -995,6 +1114,7 @@ impl App {
         match active.purpose {
             ModalPurpose::Unsaved => self.resolve_unsaved(id, active.intent),
             ModalPurpose::External => self.resolve_external(id),
+            ModalPurpose::About => self.resolve_about(id),
             ModalPurpose::Error(purpose) => {
                 if !known {
                     self.ui_state.chrome.notice = t(Key::NoticeCancelled).into();
@@ -1187,6 +1307,9 @@ impl App {
         self.ensure_math_visible();
         self.ensure_tables_visible();
         self.recompute_geometry();
+        // 诊断事件：只记录扩展名与结果，不含完整路径/文件名/正文。
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("none");
+        crate::app::record_diag("doc", format!("open ext={ext}"));
         self.ui_state.chrome.notice = tf(Key::NoticeOpened, &[&path_label(Some(path.as_path()))]);
         self.watch_current(); // 失败提示覆盖「已打开」，避免隐藏降级原因
         self.update_title();
@@ -1283,6 +1406,25 @@ fn ensure_mermaid_for_print_blocks(
             print_imgs.insert(id, img);
         }
     }
+}
+
+/// 崩溃报告数：`data_dir()/logs` 下 `veil-crash-*.txt` 的数量。
+/// 只计数，不读取内容；目录不可访问时按 0 处理。
+fn count_crash_reports() -> usize {
+    let Some(dir) = crate::theme::data_dir().map(|d| d.join("logs")) else {
+        return 0;
+    };
+    let Ok(read_dir) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    read_dir
+        .flatten()
+        .filter(|entry| {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            name.starts_with("veil-crash-") && name.ends_with(".txt") && entry.path().is_file()
+        })
+        .count()
 }
 
 /// 保存失败的标准出口：重试（主）/ 另存为（次）/ 取消（次）。

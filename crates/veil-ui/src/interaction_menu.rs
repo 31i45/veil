@@ -231,6 +231,9 @@ impl App {
             MenuAction::Separator => {}
             MenuAction::Quit => self.confirm_close(),
             MenuAction::Settings => self.open_settings(),
+            MenuAction::About => self.show_about_modal(),
+            MenuAction::ExportDiagnostics => self.export_diagnostics(),
+            MenuAction::CheckUpdate => self.check_update(),
         }
         self.request_redraw();
         false

@@ -1437,3 +1437,254 @@ fn search_focus_ring_is_visible_against_popup() {
     let c = ring_contrast(ring, [popup[0], popup[1], popup[2]]);
     assert!(c >= 3.0, "焦点环与 popup 底对比不足: {c:.2}");
 }
+
+// ===== 帮助菜单 / 关于 / 导出诊断 / 检查更新（P0-1 / P0-2） =====
+
+/// 导出诊断文本专用对话框：只有 save_text 返回目标，其余一律取消。
+struct TextSaveDialog {
+    target: Option<PathBuf>,
+    calls: Rc<RefCell<Vec<String>>>,
+}
+
+impl FileDialog for TextSaveDialog {
+    fn open_markdown(&mut self) -> Option<PathBuf> {
+        None
+    }
+    fn save_markdown(&mut self, _suggested: &str) -> Option<PathBuf> {
+        None
+    }
+    fn save_text(&mut self, suggested: &str, ext: &str) -> Option<PathBuf> {
+        self.calls
+            .borrow_mut()
+            .push(format!("text:{ext}:{suggested}"));
+        self.target.clone()
+    }
+}
+
+#[test]
+fn about_modal_shows_identity_and_primary_opens_official_release_page() {
+    let calls = Rc::new(RefCell::new(Vec::new()));
+    let store = MemStore::default();
+    let mut a = app_with(
+        "正文",
+        None,
+        false,
+        &store,
+        Box::new(FakeUrl {
+            calls: calls.clone(),
+            result: Ok(()),
+        }),
+    );
+    a.perform_menu(MenuAction::About);
+    let modal = a.ui_state.modal.as_ref().expect("应弹出关于弹窗");
+    assert!(matches!(modal.purpose, ModalPurpose::About));
+    assert!(modal.spec.title.contains("关于 Veil"));
+    for needle in [
+        crate::diag::APP_VERSION,
+        crate::diag::BUILD_COMMIT,
+        "MIT",
+        "https://github.com/31i45/veil/releases",
+        "Mermaid",
+        "QuickJS",
+        "linkedom",
+        "THIRD-PARTY-LICENSES.md",
+    ] {
+        assert!(
+            modal.spec.message.contains(needle),
+            "关于正文缺少 `{needle}`: {}",
+            modal.spec.message
+        );
+    }
+    assert_eq!(modal.spec.buttons.len(), 2);
+    assert_eq!(modal.spec.buttons[0].id, 1);
+    assert_eq!(modal.spec.buttons[1].id, 2);
+
+    // 弹窗存在时输入不得泄露到编辑器。
+    let before = doc_text(&a);
+    a.route_key(Key::Text("x".into()));
+    assert_eq!(doc_text(&a), before, "关于弹窗必须吞掉正文输入");
+
+    a.resolve_modal(1);
+    assert!(a.ui_state.modal.is_none(), "主按钮关闭弹窗");
+    assert_eq!(
+        calls.borrow().as_slice(),
+        &[crate::app::RELEASES_URL.to_string()],
+        "主按钮只调用一次 URL 端口"
+    );
+}
+
+#[test]
+fn about_modal_close_button_does_not_open_url_and_failure_notifies() {
+    let store = MemStore::default();
+    let calls = Rc::new(RefCell::new(Vec::new()));
+    let mut a = app_with(
+        "正文",
+        None,
+        false,
+        &store,
+        Box::new(FakeUrl {
+            calls: calls.clone(),
+            result: Ok(()),
+        }),
+    );
+    a.perform_menu(MenuAction::About);
+    a.resolve_modal(2);
+    assert!(a.ui_state.modal.is_none());
+    assert!(calls.borrow().is_empty(), "关闭按钮不得打开 URL");
+
+    // 打开失败：写通知，不崩溃。
+    let mut b = app_with(
+        "正文",
+        None,
+        false,
+        &store,
+        Box::new(FakeUrl {
+            calls: Rc::new(RefCell::new(Vec::new())),
+            result: Err("未找到默认浏览器".into()),
+        }),
+    );
+    b.perform_menu(MenuAction::About);
+    b.resolve_modal(1);
+    assert!(
+        b.ui_state.chrome.notice.contains("无法打开链接"),
+        "失败必须通知: {}",
+        b.ui_state.chrome.notice
+    );
+    assert!(b.ui_state.modal.is_none());
+}
+
+#[test]
+fn export_diagnostics_writes_whitelisted_fields_without_paths() {
+    let store = MemStore::default();
+    let calls = Rc::new(RefCell::new(Vec::new()));
+    let d = TextSaveDialog {
+        target: Some(PathBuf::from("diag.txt")),
+        calls: calls.clone(),
+    };
+    let mut a = app_confirm(
+        "hello",
+        Some(r"C:\Users\alice\secret\a.md"),
+        &store,
+        FakeRecovery::default(),
+        &FakeSession::default(),
+        Box::new(d),
+    );
+    a.perform_menu(MenuAction::ExportDiagnostics);
+
+    assert_eq!(
+        calls.borrow().as_slice(),
+        &[format!(
+            "text:txt:veil-diagnostics-{}.txt",
+            crate::diag::APP_VERSION
+        )]
+    );
+    let files = store.files.borrow();
+    let raw = files.get(Path::new("diag.txt")).expect("应写出诊断文件");
+    let text = String::from_utf8(raw.clone()).expect("诊断文本为 UTF-8");
+    assert!(text.contains("=== Veil 诊断信息 ==="));
+    for needle in [
+        "版本",
+        "构建提交",
+        "配置存在",
+        "文档已关联",
+        "未保存修改",
+        "文档字符数",
+        "主题",
+        "允许远程图片",
+        "界面缩放",
+        "崩溃报告数",
+    ] {
+        assert!(text.contains(needle), "缺少白名单字段 `{needle}`: {text}");
+    }
+    assert!(!text.contains("C:\\"), "诊断文本不得含完整路径: {text}");
+    assert!(!text.contains("alice"), "诊断文本不得含路径片段: {text}");
+    assert!(
+        a.ui_state.chrome.notice.contains("已导出诊断信息"),
+        "成功必须写通知: {}",
+        a.ui_state.chrome.notice
+    );
+}
+
+#[test]
+fn export_diagnostics_cancel_and_failure_do_not_leave_files() {
+    // 取消：无副作用。
+    let store = MemStore::default();
+    let d = TextSaveDialog {
+        target: None,
+        calls: Rc::new(RefCell::new(Vec::new())),
+    };
+    let mut a = app_confirm(
+        "body",
+        None,
+        &store,
+        FakeRecovery::default(),
+        &FakeSession::default(),
+        Box::new(d),
+    );
+    a.perform_menu(MenuAction::ExportDiagnostics);
+    assert!(store.files.borrow().is_empty(), "取消不得落盘");
+
+    // 写失败：只通知。
+    let failing = MemStore {
+        fail_save: true,
+        ..Default::default()
+    };
+    let d = TextSaveDialog {
+        target: Some(PathBuf::from("diag.txt")),
+        calls: Rc::new(RefCell::new(Vec::new())),
+    };
+    let mut b = app_confirm(
+        "body",
+        None,
+        &failing,
+        FakeRecovery::default(),
+        &FakeSession::default(),
+        Box::new(d),
+    );
+    b.perform_menu(MenuAction::ExportDiagnostics);
+    assert!(failing.files.borrow().is_empty());
+    assert!(
+        b.ui_state.chrome.notice.contains("导出诊断信息失败"),
+        "失败必须通知: {}",
+        b.ui_state.chrome.notice
+    );
+}
+
+#[test]
+fn check_update_calls_url_port_once_and_failure_notifies() {
+    let store = MemStore::default();
+    let calls = Rc::new(RefCell::new(Vec::new()));
+    let mut a = app_with(
+        "body",
+        None,
+        false,
+        &store,
+        Box::new(FakeUrl {
+            calls: calls.clone(),
+            result: Ok(()),
+        }),
+    );
+    a.perform_menu(MenuAction::CheckUpdate);
+    assert_eq!(
+        calls.borrow().as_slice(),
+        &[crate::app::RELEASES_URL.to_string()],
+        "检查更新只应调用一次 URL 端口"
+    );
+
+    let mut b = app_with(
+        "body",
+        None,
+        false,
+        &store,
+        Box::new(FakeUrl {
+            calls: Rc::new(RefCell::new(Vec::new())),
+            result: Err("ShellExecuteW 返回 2".into()),
+        }),
+    );
+    b.perform_menu(MenuAction::CheckUpdate);
+    assert!(
+        b.ui_state.chrome.notice.contains("无法打开更新页面"),
+        "打开失败必须通知: {}",
+        b.ui_state.chrome.notice
+    );
+}

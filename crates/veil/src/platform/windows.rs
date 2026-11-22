@@ -448,4 +448,16 @@ impl FileDialog for WinDialogs {
         };
         com_save(title, &name, dir.as_deref(), label, pattern, ext)
     }
+
+    fn save_text(&mut self, suggested: &str, ext: &str) -> Option<PathBuf> {
+        let (name, dir) = split_suggestion(suggested);
+        com_save(
+            t(Key::DialogExportDiagnostics),
+            &name,
+            dir.as_deref(),
+            t(Key::DialogFilterText),
+            t(Key::DialogFilterTextPattern),
+            ext,
+        )
+    }
 }

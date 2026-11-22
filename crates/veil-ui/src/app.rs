@@ -143,6 +143,11 @@ pub trait FileDialog {
     fn save_export(&mut self, _suggested: &str, _ext: &str) -> Option<PathBuf> {
         None
     }
+    /// 导出纯文本（诊断信息）保存对话框：默认 None（视为取消）。
+    /// `ext` 为扩展名（如 `txt`），决定过滤器与默认后缀。
+    fn save_text(&mut self, _suggested: &str, _ext: &str) -> Option<PathBuf> {
+        None
+    }
 }
 
 /// 外部文件变更事件（切片 16）：只关心当前关联文件，不携带路径。
@@ -390,6 +395,20 @@ pub(crate) enum ModalPurpose {
     Unsaved,
     Error(ErrorPurpose),
     External,
+    /// 关于弹窗：任何按钮都只关闭；主按钮额外打开官方 Release 页。
+    About,
+}
+
+/// 官方唯一入口：关于弹窗「打开项目主页」与「检查更新」共用。
+pub(crate) const RELEASES_URL: &str = "https://github.com/31i45/veil/releases";
+
+/// 诊断事件薄封装：veil-ui 单元测试并行运行，直接写全局环形缓冲会干扰
+/// `diag` 模块自身的顺序断言；测试构建丢弃事件（生产构建行为不变）。
+pub(crate) fn record_diag(kind: &'static str, detail: impl AsRef<str>) {
+    #[cfg(not(test))]
+    crate::diag::record(kind, detail);
+    #[cfg(test)]
+    let _ = (kind, detail);
 }
 
 /// 应用内模态：规格 + 交互态 + 待执行意图（结论落地后整条替换）。
@@ -1213,6 +1232,7 @@ impl App {
         }
         self.input_state.theme = Theme::of(mode, self.input_state.system_dark);
         self.config.mode = mode;
+        crate::app::record_diag("theme", mode.as_str());
         self.input_state.last_theme_check = None;
         self.refresh_theme_visuals();
         // 先给成功提示再落盘：保存失败时错误提示更重要，覆盖为「配置未保存」
@@ -2000,6 +2020,7 @@ impl App {
         };
         window.set_ime_allowed(true);
         self.input_state.set_dpi(window.scale_factor() as f32);
+        crate::diag::set_dpi_scale(self.input_state.scale);
         let context = match Context::new(window.clone()) {
             Ok(c) => c,
             Err(e) => {
@@ -2159,6 +2180,7 @@ impl App {
                 if let Some(w) = &self.window_state.window {
                     self.input_state.set_dpi(w.scale_factor() as f32);
                 }
+                crate::diag::set_dpi_scale(self.input_state.scale);
                 // DPI 变化：键中的 scale 量化值变化使全部按 scale 生成的缓存失配；
                 // chrome 标签按旧 scale 光栅化，仍需显式作废
                 self.ui_state.chrome.clear_label_cache();

@@ -2,7 +2,10 @@
   [switch]$SkipTest,
   [switch]$SkipClippy,
   [switch]$SkipArchive,
-  [string]$Version
+  [string]$Version,
+  [string]$CertificatePath,
+  [string]$CertificatePassword,
+  [string]$TimestampUrl = 'http://timestamp.digicert.com'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -44,6 +47,14 @@ $ReleaseRecord = [ordered]@{
     status = 'skipped'
     command = "pwsh -NoProfile -File tools/smoke_launch.ps1 -ExePath target/release/veil.exe -ExpectedTitlePattern '^veil' -MaxLaunchMs 1000"
     exit_code = $null
+  }
+  signing = [ordered]@{
+    status = 'unsigned'
+    signature_validation = 'not_applicable'
+    timestamp_validation = 'not_applicable'
+    timestamp_url = $TimestampUrl
+    sign_tool = $null
+    reason = 'No signing certificate supplied; artifact is unsigned'
   }
   tests = [ordered]@{ status = 'skipped'; reason = 'not reached'; command = 'cargo test --workspace --release -- --test-threads=1'; exit_code = $null }
   clippy = [ordered]@{ status = 'skipped'; reason = 'not reached'; command = 'cargo clippy --workspace --all-targets -- -D warnings'; exit_code = $null }
@@ -227,8 +238,57 @@ if ($SmokeExit -ne 0) { Write-Fail "smoke launch failed with exit $SmokeExit" }
 $ReleaseRecord.smoke.status = 'passed'
 Write-OK 'smoke launch passed'
 
-# Step 7: generate and validate the conventional SHA-256 sidecar
-Write-Step 7 'generate SHA-256'
+# Step 7: optionally sign the exact bytes that will be hashed and archived.
+Write-Step 7 'optional Authenticode + RFC3161 signing'
+if ([string]::IsNullOrWhiteSpace($CertificatePath)) {
+  if ($PSBoundParameters.ContainsKey('CertificatePassword')) {
+    Write-Fail 'CertificatePassword requires CertificatePath'
+  }
+  Write-Warn 'UNSIGNED: no signing certificate supplied; continuing without Authenticode'
+} else {
+  $ReleaseRecord.signing.status = 'failed'
+  $ReleaseRecord.signing.signature_validation = 'failed'
+  $ReleaseRecord.signing.timestamp_validation = 'failed'
+  $ReleaseRecord.signing.reason = $null
+  if (-not $PSBoundParameters.ContainsKey('CertificatePassword')) {
+    Write-Fail 'CertificatePath requires CertificatePassword (pass an empty string only for a passwordless PFX)'
+  }
+  if ([string]::IsNullOrWhiteSpace($TimestampUrl)) { Write-Fail 'TimestampUrl must not be empty when signing' }
+
+  $SignTool = Get-Command signtool.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+  $SignToolExe = if ($SignTool) { $SignTool.Source } else { $null }
+  if (-not $SignToolExe) {
+    $SdkBin = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\10\bin'
+    $SignToolCandidate = Get-ChildItem -LiteralPath $SdkBin -Filter signtool.exe -File -Recurse -ErrorAction SilentlyContinue |
+      Where-Object { $_.FullName -match '\\x64\\' } |
+      Sort-Object FullName -Descending |
+      Select-Object -First 1
+    if ($SignToolCandidate) { $SignToolExe = $SignToolCandidate.FullName }
+  }
+  if (-not $SignToolExe) { Write-Fail 'Authenticode signing requested, but signtool.exe was not found' }
+  $ReleaseRecord.signing.sign_tool = $SignToolExe
+  $ResolvedCertificate = (Resolve-Path -LiteralPath $CertificatePath -ErrorAction Stop).Path
+
+  & $SignToolExe sign /fd SHA256 /f $ResolvedCertificate /p $CertificatePassword /tr $TimestampUrl /td SHA256 /v $ExePath | Out-Host
+  $SignExit = $LASTEXITCODE
+  if ($SignExit -ne 0) { Write-Fail "signtool sign failed with exit $SignExit" }
+
+  $VerifyOutput = @(& $SignToolExe verify /pa /all /v $ExePath 2>&1)
+  $VerifyExit = $LASTEXITCODE
+  $VerifyOutput | Out-Host
+  if ($VerifyExit -ne 0) { Write-Fail "Authenticode verification failed with exit ${VerifyExit}: $($VerifyOutput -join ' ')" }
+  $ReleaseRecord.signing.signature_validation = 'passed'
+  $VerifyText = $VerifyOutput -join "`n"
+  if ($VerifyText -notmatch 'The signature is timestamped:' -or $VerifyText -notmatch 'Timestamp Verified by:') {
+    Write-Fail 'RFC3161 timestamp evidence is missing or was not verified by signtool'
+  }
+  $ReleaseRecord.signing.timestamp_validation = 'passed'
+  $ReleaseRecord.signing.status = 'passed'
+  Write-OK 'Authenticode signature and RFC3161 timestamp verified'
+}
+
+# Step 8: generate and validate the conventional SHA-256 sidecar after signing.
+Write-Step 8 'generate SHA-256'
 $ReleaseRecord.checksum.status = 'failed'
 $Sha256 = (Get-FileHash -LiteralPath $ExePath -Algorithm SHA256).Hash.ToLowerInvariant()
 $ReleaseRecord.sha256 = $Sha256
@@ -240,9 +300,9 @@ if ($Expected -ne $Sha256 -or $Actual -ne $Expected) { Write-Fail 'SHA-256 sidec
 $ReleaseRecord.checksum.status = 'passed'
 Write-OK "veil.exe.sha256 = $ChecksumLine"
 
-# Step 8: archive release-bundle, including its checksum
+# Step 9: archive release-bundle, including its checksum
 if (-not $SkipArchive) {
-  Write-Step 8 'archive release-bundle'
+  Write-Step 9 'archive release-bundle'
   $ReleaseRecord.archive.status = 'failed'
   $ReleaseRecord.archive.reason = $null
   $BundleDir = Join-Path $RepoRoot "release-bundle\veil-v$Version"
@@ -276,12 +336,12 @@ if (-not $SkipArchive) {
   $ReleaseRecord.checksum.post_archive_status = 'passed'
   Write-OK 'post-archive SHA-256 unchanged for target and bundled veil.exe'
 } else {
-  Write-Step 8 'archive release-bundle'
+  Write-Step 9 'archive release-bundle'
   $ReleaseRecord.archive.reason = '-SkipArchive specified; post-archive check not applicable'
   Write-Host '  SKIP archive (release record: skipped)'
 }
 
-# Step 9: machine-readable record + human summary
+# Step 10: machine-readable record + human summary
 $Stopwatch.Stop()
 Write-ReleaseRecord
 Write-OK "Release record written: $RecordPath"
@@ -299,6 +359,7 @@ Write-Host "  Elapsed     : $([math]::Round($Stopwatch.Elapsed.TotalSeconds, 1))
 Write-Host "  Size gate   : $($ReleaseRecord.size_gate.status)"
 Write-Host "  Feature gate: $($ReleaseRecord.feature_gate.status) ($($FeatureNames -join '/'))"
 Write-Host "  Smoke       : $($ReleaseRecord.smoke.status)"
+Write-Host "  Signing     : $($ReleaseRecord.signing.status); signature=$($ReleaseRecord.signing.signature_validation); timestamp=$($ReleaseRecord.signing.timestamp_validation)"
 Write-Host "  Tests       : $($ReleaseRecord.tests.status)"
 Write-Host "  Clippy      : $($ReleaseRecord.clippy.status)"
 Write-Host "  Checksum    : $($ReleaseRecord.checksum.status); post-archive=$($ReleaseRecord.checksum.post_archive_status)"

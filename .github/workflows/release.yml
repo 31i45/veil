@@ -91,7 +91,7 @@ jobs:
           }
           $bytes = [System.IO.File]::ReadAllBytes((Resolve-Path $exe))
           $text = [System.Text.Encoding]::ASCII.GetString($bytes)
-          foreach ($n in @('QuickJS','linkedom')) {
+          foreach ($n in @('QuickJS','linkedom','mermaid')) {
             if (-not $text.Contains($n)) {
               Write-Host "FAIL: veil.exe missing offline engine string '$n'"
               exit 1
@@ -112,6 +112,56 @@ jobs:
           Write-Host "$($exe.Name): $([math]::Round($exe.Length/1MB, 2)) MiB ($($exe.Length) bytes)"
           $vi = $exe.VersionInfo
           Write-Host "  Version: $($vi.ProductVersion) / FileVersion: $($vi.FileVersion)"
+
+      # 可选生产签名：证书以 Base64 PFX 和密码分别存放在 secrets。
+      # 不配置证书时明确记录 UNSIGNED，但仍继续生成同一 exe 的 SHA 侧车。
+      - name: Sign veil.exe (optional Authenticode + RFC3161)
+        shell: pwsh
+        env:
+          VEIL_SIGNING_CERTIFICATE_BASE64: ${{ secrets.VEIL_SIGNING_CERTIFICATE_BASE64 }}
+          VEIL_SIGNING_CERTIFICATE_PASSWORD: ${{ secrets.VEIL_SIGNING_CERTIFICATE_PASSWORD }}
+          VEIL_SIGNING_TIMESTAMP_URL: ${{ vars.VEIL_SIGNING_TIMESTAMP_URL }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ([string]::IsNullOrWhiteSpace($env:VEIL_SIGNING_CERTIFICATE_BASE64)) {
+            Write-Host 'UNSIGNED: no production signing certificate configured; continuing without Authenticode.'
+            exit 0
+          }
+          if ([string]::IsNullOrWhiteSpace($env:VEIL_SIGNING_CERTIFICATE_PASSWORD)) {
+            throw 'VEIL_SIGNING_CERTIFICATE_PASSWORD is required when a certificate is configured.'
+          }
+          $timestamp = $env:VEIL_SIGNING_TIMESTAMP_URL
+          if ([string]::IsNullOrWhiteSpace($timestamp)) { $timestamp = 'http://timestamp.digicert.com' }
+          $exe = (Resolve-Path 'target\release\veil.exe').Path
+          $signTool = Get-Command signtool.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+          $signToolExe = if ($signTool) { $signTool.Source } else { $null }
+          if (-not $signToolExe) {
+            $sdkBin = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\10\bin'
+            $candidate = Get-ChildItem -LiteralPath $sdkBin -Filter signtool.exe -File -Recurse -ErrorAction SilentlyContinue |
+              Where-Object { $_.FullName -match '\\x64\\' } |
+              Sort-Object FullName -Descending |
+              Select-Object -First 1
+            if ($candidate) { $signToolExe = $candidate.FullName }
+          }
+          if (-not $signToolExe) { throw 'Authenticode signing requested, but signtool.exe was not found.' }
+
+          $certificate = Join-Path $env:RUNNER_TEMP 'veil-signing.pfx'
+          [System.IO.File]::WriteAllBytes($certificate, [Convert]::FromBase64String($env:VEIL_SIGNING_CERTIFICATE_BASE64))
+          try {
+            & $signToolExe sign /fd SHA256 /f $certificate /p $env:VEIL_SIGNING_CERTIFICATE_PASSWORD /tr $timestamp /td SHA256 /v $exe | Out-Host
+            if ($LASTEXITCODE -ne 0) { throw "signtool sign failed with exit $LASTEXITCODE" }
+            $verifyOutput = @(& $signToolExe verify /pa /all /v $exe 2>&1)
+            $verifyExit = $LASTEXITCODE
+            $verifyOutput | Out-Host
+            if ($verifyExit -ne 0) { throw "Authenticode verification failed with exit $verifyExit" }
+            $verifyText = $verifyOutput -join "`n"
+            if ($verifyText -notmatch 'The signature is timestamped:' -or $verifyText -notmatch 'Timestamp Verified by:') {
+              throw 'RFC3161 timestamp evidence is missing or was not verified by signtool.'
+            }
+            Write-Host 'PASS: Authenticode signature and RFC3161 timestamp verified.'
+          } finally {
+            Remove-Item -LiteralPath $certificate -Force -ErrorAction SilentlyContinue
+          }
 
       - name: Generate SHA-256 checksum
         run: |

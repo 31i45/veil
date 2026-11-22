@@ -1565,6 +1565,60 @@ fn recovery_skipped_during_ime_preedit() {
 }
 
 #[test]
+fn committed_ime_text_survives_crash_recovery() {
+    let store = MemStore::default();
+    let rec = FakeRecovery::default();
+    let ses = FakeSession::default();
+    let mut a = app_persist("ab", Some("a.md"), &store, &rec, &ses, false);
+    a.editor.apply(Intent::MoveDocEnd).unwrap();
+
+    // 组合期不写半成品快照
+    a.editor.set_preedit("zh".into(), None);
+    a.persist_state.persist.note_activity(Instant::now());
+    a.maybe_recovery_write(Instant::now() + Duration::from_secs(30));
+    assert!(rec.slot.borrow().is_none(), "组合期不得写恢复快照");
+
+    // 上屏后才允许写；快照必须包含已提交文本
+    a.ime_commit("中".into());
+    a.maybe_recovery_write(Instant::now() + Duration::from_secs(5));
+    let data = rec.slot.borrow().clone().expect("上屏后应写恢复快照");
+    let decoded = recovery::decode_recovery(&data).expect("恢复文件可解码");
+    assert_eq!(decoded.text, "ab中", "已提交文本必须进入快照");
+    assert_eq!(decoded.path, Some(PathBuf::from("a.md")));
+
+    // 重启：未保存的上屏内容完整恢复
+    let b = app_persist("默认样例", None, &store, &rec, &ses, true);
+    assert_eq!(doc_text(&b), "ab中");
+    assert!(b.editor.is_dirty(), "恢复内容相对磁盘未保存");
+}
+
+#[test]
+fn truncated_and_non_utf8_recovery_are_rejected() {
+    let encoded = recovery::encode_recovery(Some(Path::new("a.md")), false, "未保存正文");
+    let mut non_utf8 = recovery::encode_recovery(None, false, "");
+    non_utf8.extend_from_slice(&[0xff, 0xfe]);
+
+    for (name, bytes) in [
+        ("截断", encoded[..encoded.len() / 2].to_vec()),
+        ("非 UTF-8", non_utf8),
+        ("坏魔数", b"not-a-recovery-file".to_vec()),
+    ] {
+        let store = MemStore::default();
+        let rec = FakeRecovery::default();
+        *rec.slot.borrow_mut() = Some(bytes);
+        let ses = FakeSession::default();
+        let a = app_persist("默认样例", None, &store, &rec, &ses, true);
+        assert_eq!(
+            doc_text(&a),
+            "默认样例",
+            "{name} 恢复文件必须被拒绝，正常打开默认文档"
+        );
+        assert!(!a.editor.is_dirty(), "{name} 拒绝后不得凭空置脏");
+        assert!(rec.slot.borrow().is_none(), "{name} 恢复文件应被清除");
+    }
+}
+
+#[test]
 fn corrupted_recovery_ignored_and_cleared() {
     let store = MemStore::default();
     let rec = FakeRecovery::default();
@@ -1929,6 +1983,70 @@ fn quick_open_takes_ime_text_and_preempts_search() {
     a.ime_commit("m".into());
     assert_eq!(a.ui_state.quick.query, "m", "IME 提交进入过滤串");
     assert_eq!(doc_text(&a), "x", "文档内容不受输入影响");
+}
+
+/// 50 MB 中文长文探针（默认忽略）：打开 ≤5 s、连续键入 p95 ≤16 ms、保存字节一致。
+/// cargo test -p veil-ui --release --lib -- --ignored --nocapture perf_50mb_long_doc
+#[test]
+#[ignore = "50MB 性能探针，不参与常规门禁"]
+fn perf_50mb_long_doc() {
+    let sentence = "中文输入保真压力测试段落，包含普通文本、标点与数字 0123456789。";
+    let para = sentence.repeat(30);
+    let mut text = String::with_capacity(55 * 1024 * 1024);
+    for i in 0..20_000 {
+        text.push_str(&para);
+        text.push_str(" 第 ");
+        text.push_str(&i.to_string());
+        text.push_str(" 段\n\n");
+    }
+    assert!(text.len() >= 50 * 1024 * 1024, "探针文本应≥50MB");
+    let store = MemStore::default();
+
+    let t = Instant::now();
+    let mut a = app(&text, Some("big50.md"), false, &store);
+    a.paint();
+    let open_ms = t.elapsed().as_secs_f64() * 1e3;
+
+    a.editor.apply(Intent::MoveDocEnd).unwrap();
+    let mut samples = Vec::with_capacity(100);
+    for _ in 0..100 {
+        let t = Instant::now();
+        let dirty = a.editor.apply(Intent::InsertText("a".into())).unwrap();
+        a.after_edit(dirty);
+        a.paint();
+        samples.push(t.elapsed().as_secs_f64() * 1e3);
+    }
+    samples.sort_by(|x, y| x.partial_cmp(y).unwrap());
+    let pick = |q: f64| {
+        let i = ((samples.len() as f64 * q).ceil() as usize)
+            .saturating_sub(1)
+            .min(samples.len() - 1);
+        samples[i]
+    };
+
+    let t = Instant::now();
+    let expected = a.editor.session().serialize().into_bytes();
+    a.save_now();
+    let save_ms = t.elapsed().as_secs_f64() * 1e3;
+    assert_eq!(
+        store.files.borrow()[Path::new("big50.md")],
+        expected,
+        "50MB 保存字节必须与会话序列化一致"
+    );
+
+    println!("perf_50mb_bytes={}", text.len());
+    println!("perf_50mb_blocks={}", a.index.blocks.len());
+    println!("perf_50mb_open_ms={open_ms:.1}");
+    println!("perf_50mb_keystroke_ms_p50={:.3}", pick(0.5));
+    println!("perf_50mb_keystroke_ms_p95={:.3}", pick(0.95));
+    println!(
+        "perf_50mb_keystroke_ms_max={:.3}",
+        samples[samples.len() - 1]
+    );
+    println!("perf_50mb_save_ms={save_ms:.1}");
+
+    assert!(open_ms <= 5_000.0, "50MB 打开超过 5s: {open_ms:.1}ms");
+    assert!(pick(0.95) <= 16.0, "50MB 击键 p95 超过 16ms");
 }
 
 /// 20k+ 块大文档击键探针（默认忽略）：驱动真实 App 路径（editor apply + after_edit +

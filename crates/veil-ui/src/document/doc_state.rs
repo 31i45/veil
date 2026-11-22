@@ -892,7 +892,7 @@ impl App {
             "Veil {}（构建 {}）\n许可证：MIT\n\
              隐私：无遥测、无后台更新检查、无后台网络请求；远程图片默认关闭。\n\
              配置目录：{}\n诊断目录：{}\n官方来源：{}\n\
-             第三方组件：Mermaid、QuickJS、linkedom（及全部 Rust 依赖）；完整许可见随包 THIRD-PARTY-LICENSES.md。",
+             第三方组件：Mermaid（MIT）、QuickJS（MIT）、linkedom（MIT）以及全部 Rust 依赖；完整许可见随包 THIRD-PARTY-LICENSES.md。",
             crate::diag::APP_VERSION,
             crate::diag::BUILD_COMMIT,
             config_dir,
@@ -952,7 +952,7 @@ impl App {
             crate::diag::render_diagnostics(std::env::consts::OS, std::env::consts::ARCH, &extra);
         match self.ports.store.save(&path, text.as_bytes()) {
             Ok(()) => {
-                crate::app::record_diag("diag", "export ok");
+                // 不再写入「导出成功」事件：否则连续两次导出会因多出这条事件而不一致。
                 self.ui_state.chrome.notify(
                     tf(
                         Key::NoticeDiagnosticsSaved,
@@ -988,6 +988,8 @@ impl App {
                 format!("{:.0}%", self.input_state.scale * 100.0),
             ),
             ("崩溃报告数", count_crash_reports().to_string()),
+            ("崩溃报告目录", crash_report_dir_label().to_string()),
+            ("最近崩溃报告", recent_crash_reports()),
         ]
     }
 
@@ -1417,14 +1419,49 @@ fn count_crash_reports() -> usize {
     let Ok(read_dir) = std::fs::read_dir(dir) else {
         return 0;
     };
-    read_dir
+    read_dir.flatten().filter(is_crash_report).count()
+}
+
+/// 崩溃报告目录的环境变量形式（绝不输出展开后的用户绝对路径）。
+fn crash_report_dir_label() -> &'static str {
+    if std::env::var_os("VEIL_HOME")
+        .filter(|s| !s.is_empty())
+        .is_some()
+    {
+        r"%VEIL_HOME%\logs"
+    } else {
+        r"%APPDATA%\Veil\logs"
+    }
+}
+
+/// 最近崩溃报告的文件名（最多 3 个，逗号分隔；无则 `none`）。
+/// 只取文件名，绝不输出目录或绝对路径；文件名只含时间戳与 pid。
+fn recent_crash_reports() -> String {
+    let Some(dir) = crate::theme::data_dir().map(|d| d.join("logs")) else {
+        return "none".to_string();
+    };
+    let Ok(read_dir) = std::fs::read_dir(dir) else {
+        return "none".to_string();
+    };
+    let mut names: Vec<String> = read_dir
         .flatten()
-        .filter(|entry| {
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
-            name.starts_with("veil-crash-") && name.ends_with(".txt") && entry.path().is_file()
-        })
-        .count()
+        .filter(is_crash_report)
+        .filter_map(|entry| entry.file_name().to_str().map(str::to_string))
+        .collect();
+    names.sort();
+    let start = names.len().saturating_sub(3);
+    names.drain(..start);
+    if names.is_empty() {
+        "none".to_string()
+    } else {
+        names.join(",")
+    }
+}
+
+fn is_crash_report(entry: &std::fs::DirEntry) -> bool {
+    let name = entry.file_name();
+    let name = name.to_string_lossy();
+    name.starts_with("veil-crash-") && name.ends_with(".txt") && entry.path().is_file()
 }
 
 /// 保存失败的标准出口：重试（主）/ 另存为（次）/ 取消（次）。

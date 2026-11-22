@@ -73,6 +73,17 @@ pub fn events() -> Vec<Event> {
     state().events.iter().cloned().collect()
 }
 
+/// 单元测试串行锁（仅测试构建）：环形缓冲是进程级状态，`veil-ui` 的测试
+/// 并行执行时，任何依赖事件内容的断言都必须与 `record_diag` 共用这把锁。
+#[cfg(test)]
+pub(crate) static TEST_LOCK: Mutex<()> = Mutex::new(());
+
+/// 获取测试锁；锁中毒时恢复内部守卫，避免二次 panic。
+#[cfg(test)]
+pub(crate) fn test_lock() -> MutexGuard<'static, ()> {
+    TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// 线程安全的 DPI 缩放记录（默认 1.0），供崩溃报告使用。
 /// 非有限值或非正值回退为 1.0，避免报告出现 NaN/负缩放。
 pub fn set_dpi_scale(scale: f32) {
@@ -149,7 +160,8 @@ pub fn render_diagnostics(os: &str, arch: &str, extra: &[(&str, String)]) -> Str
     out
 }
 
-/// 脱敏：把 `C:\...`、`\\?\...`、`/home/...` 等绝对路径片段替换成 `<path>`；
+/// 脱敏：把 `file://` URL 与本机绝对路径片段（`C:\...`、`C:/...`、`\\?\...`、
+/// `/home/...`、`/Users/...`）替换成 `<path>`；路径中的空格若仍属于路径则一并吞掉；
 /// 去换行；截断到 256 字符（含省略号）。
 pub fn redact(text: &str) -> String {
     truncate_chars(replace_paths(&flatten(text)), MAX_DETAIL_CHARS)
@@ -213,18 +225,18 @@ fn sanitize_line(text: &str) -> String {
     replace_paths(&flatten(text))
 }
 
-/// 把绝对路径片段替换为 `<path>`（保留其余文本与换行）。
+/// 把 `file://` URL 与绝对路径片段替换为 `<path>`（保留其余文本与换行）。
 fn replace_paths(text: &str) -> String {
     let chars: Vec<char> = text.chars().collect();
     let mut out = String::with_capacity(text.len());
     let mut i = 0;
     while i < chars.len() {
         match path_end(&chars, i) {
-            Some(end) => {
+            Some(end) if end > i => {
                 out.push_str("<path>");
                 i = end;
             }
-            None => {
+            _ => {
                 out.push(chars[i]);
                 i += 1;
             }
@@ -233,12 +245,15 @@ fn replace_paths(text: &str) -> String {
     out
 }
 
-/// 若 `chars[i]` 是绝对路径起点，返回路径片段结束下标（不含）。
-/// 起点必须落在词边界上，避免把 URL scheme（`http://`）或相对路径误判为绝对路径。
+/// 若 `chars[i]` 是路径/`file:` URL 起点，返回片段结束下标（不含）。
+/// 起点必须落在词边界上，避免把普通 URL scheme（`http://`）或相对路径误判为绝对路径。
 fn path_end(chars: &[char], i: usize) -> Option<usize> {
     let boundary = i == 0 || is_delimiter(chars[i - 1]);
     if !boundary {
         return None;
+    }
+    if let Some(end) = file_url_end(chars, i) {
+        return Some(end);
     }
     let c = chars[i];
     let drive = c.is_ascii_alphabetic()
@@ -251,11 +266,103 @@ fn path_end(chars: &[char], i: usize) -> Option<usize> {
     if !(drive || unc || unix) {
         return None;
     }
-    let mut end = i;
-    while end < chars.len() && !is_delimiter(chars[end]) {
+    Some(scan_path_end(chars, i))
+}
+
+/// `file:` URL 的结束下标；`file:` 后必须真的跟着本机路径，否则不替换。
+/// 覆盖 `file:///C:/...`、`file://C:\...`、`file:C:\...`、`file:///home/...`。
+fn file_url_end(chars: &[char], i: usize) -> Option<usize> {
+    const PREFIX: [char; 5] = ['f', 'i', 'l', 'e', ':'];
+    if i + PREFIX.len() > chars.len() {
+        return None;
+    }
+    for (k, expected) in PREFIX.iter().enumerate() {
+        if chars[i + k].to_ascii_lowercase() != *expected {
+            return None;
+        }
+    }
+    let mut j = i + PREFIX.len();
+    let mut slashes = 0;
+    while slashes < 3 && chars.get(j) == Some(&'/') {
+        j += 1;
+        slashes += 1;
+    }
+    let rest = chars.get(j).copied();
+    let is_path = match rest {
+        Some(c) => {
+            let drive = c.is_ascii_alphabetic()
+                && chars.get(j + 1) == Some(&':')
+                && matches!(chars.get(j + 2), Some('\\') | Some('/'));
+            let unc = c == '\\' && chars.get(j + 1) == Some(&'\\');
+            let rooted = slashes > 0 && c != '/' && !is_delimiter(c);
+            drive || unc || rooted
+        }
+        None => false,
+    };
+    if !is_path {
+        return None;
+    }
+    Some(scan_path_end(chars, j))
+}
+
+/// 扫描路径体：空格默认是分隔符，但若空格后的 token 仍像路径（含分隔符或
+/// 形如 `name.ext`），则把空格并入路径，覆盖 `My Documents` 这类带空格路径。
+fn scan_path_end(chars: &[char], start: usize) -> usize {
+    let mut end = start;
+    while end < chars.len() {
+        let c = chars[end];
+        if c == '\n' || c == '\r' {
+            break;
+        }
+        if c == ' ' {
+            let mut next = end;
+            while next < chars.len() && chars[next] == ' ' {
+                next += 1;
+            }
+            if next < chars.len() && space_continues_path(chars, next) {
+                end = next;
+                continue;
+            }
+            break;
+        }
+        if is_delimiter(c) {
+            break;
+        }
         end += 1;
     }
-    Some(end)
+    end
+}
+
+/// 空格后的 token 是否仍属于路径：内部含分隔符，或末尾是形如 `.md` 的扩展名。
+fn space_continues_path(chars: &[char], start: usize) -> bool {
+    let mut k = start;
+    let mut has_separator = false;
+    while k < chars.len() {
+        let c = chars[k];
+        if c.is_whitespace() || is_delimiter(c) {
+            break;
+        }
+        if c == '\\' || c == '/' {
+            has_separator = true;
+        }
+        k += 1;
+    }
+    if k == start {
+        return false;
+    }
+    if has_separator {
+        return true;
+    }
+    let token: String = chars[start..k].iter().collect();
+    match token.rsplit_once('.') {
+        Some((stem, ext)) => {
+            !stem.is_empty()
+                && !ext.is_empty()
+                && ext.len() <= 8
+                && ext.chars().all(|c| c.is_ascii_alphanumeric())
+        }
+        None => false,
+    }
 }
 
 fn is_delimiter(c: char) -> bool {
@@ -304,10 +411,8 @@ mod tests {
     use super::*;
 
     /// 全局环形缓冲/DPI 是进程级状态：测试串行执行，避免相互踩踏。
-    static TEST_LOCK: Mutex<()> = Mutex::new(());
-
     fn guard() -> MutexGuard<'static, ()> {
-        TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+        test_lock()
     }
 
     #[test]
@@ -334,8 +439,23 @@ mod tests {
     fn redact_replaces_absolute_paths_and_limits_length() {
         let _guard = guard();
         assert_eq!(redact(r"C:\Users\alice\secret\a.md"), "<path>");
+        assert_eq!(redact("C:/Users/alice/secret/a.md"), "<path>");
         assert_eq!(redact(r"\\?\C:\x"), "<path>");
         assert_eq!(redact("/home/alice/a.md"), "<path>");
+        assert_eq!(redact("/Users/alice/a.md"), "<path>");
+        // file: URL 的各种写法（含盘符与 Unix 根）。
+        assert_eq!(redact("file:///C:/Users/alice/a.md"), "<path>");
+        assert_eq!(redact(r"file://C:\Users\alice\a.md"), "<path>");
+        assert_eq!(redact(r"file:C:\Users\alice\a.md"), "<path>");
+        assert_eq!(redact("file:///Users/alice/a.md"), "<path>");
+        // 带空格路径必须整体脱敏（不能只替换到第一个空格）。
+        assert_eq!(redact(r"C:\Users\Alice Smith\My Documents\a.md"), "<path>");
+        assert_eq!(redact("C:/Users/Alice Smith/My Documents/a.md"), "<path>");
+        assert_eq!(
+            redact("file:///C:/Users/Alice Smith/My Documents/a.md"),
+            "<path>"
+        );
+        assert_eq!(redact(r"\\server\share\Alice Smith\a.md"), "<path>");
         let mixed = redact("打开 C:\\Users\\alice\\secret\\a.md 失败\r\n下一行");
         assert!(mixed.contains("<path>"));
         assert!(!mixed.contains("alice") && !mixed.contains("secret"));
@@ -344,8 +464,39 @@ mod tests {
             "换行必须压平"
         );
         assert_eq!(redact(&"长".repeat(1000)).chars().count(), MAX_DETAIL_CHARS);
-        // URL 不应被误判为 Unix 绝对路径
+        // URL 不应被误判为 Unix 绝对路径；相对路径也保持原样。
         assert_eq!(redact("https://example.com/a"), "https://example.com/a");
+        assert_eq!(redact("file: notes.txt"), "file: notes.txt");
+        assert_eq!(redact("docs/readme.md"), "docs/readme.md");
+    }
+
+    #[test]
+    fn diagnostics_render_is_deterministic_and_hides_user_paths() {
+        let _guard = guard();
+        clear();
+        record("doc", "save ok");
+        let extra = vec![
+            ("崩溃报告数", "0".to_string()),
+            ("崩溃报告目录", r"%APPDATA%\Veil\logs".to_string()),
+            ("最近崩溃报告", "none".to_string()),
+        ];
+        let first = render_diagnostics("windows", "x86_64", &extra);
+        let second = render_diagnostics("windows", "x86_64", &extra);
+        let without_time = |text: &str| {
+            text.lines()
+                .filter(|line| !line.starts_with("时间: "))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        assert_eq!(
+            without_time(&first),
+            without_time(&second),
+            "同一状态连续两次导出除时间行外必须完全一致"
+        );
+        assert!(first.contains("崩溃报告目录"));
+        assert!(first.contains("%APPDATA%") || first.contains("%VEIL_HOME%"));
+        assert!(!first.contains("C:\\Users"), "不得出现用户绝对路径");
+        assert!(!first.contains("C:/Users"), "不得出现用户绝对路径");
     }
 
     #[test]

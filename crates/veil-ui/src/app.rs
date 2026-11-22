@@ -402,13 +402,16 @@ pub(crate) enum ModalPurpose {
 /// 官方唯一入口：关于弹窗「打开项目主页」与「检查更新」共用。
 pub(crate) const RELEASES_URL: &str = "https://github.com/31i45/veil/releases";
 
-/// 诊断事件薄封装：veil-ui 单元测试并行运行，直接写全局环形缓冲会干扰
-/// `diag` 模块自身的顺序断言；测试构建丢弃事件（生产构建行为不变）。
+/// 诊断事件薄封装：veil-ui 单元测试并行运行，测试构建与 `diag` 共用串行锁，
+/// 保证依赖事件内容的断言稳定；生产构建直接写入，不引入额外开销。
 pub(crate) fn record_diag(kind: &'static str, detail: impl AsRef<str>) {
+    #[cfg(test)]
+    {
+        let _guard = crate::diag::test_lock();
+        crate::diag::record(kind, detail);
+    }
     #[cfg(not(test))]
     crate::diag::record(kind, detail);
-    #[cfg(test)]
-    let _ = (kind, detail);
 }
 
 /// 应用内模态：规格 + 交互态 + 待执行意图（结论落地后整条替换）。

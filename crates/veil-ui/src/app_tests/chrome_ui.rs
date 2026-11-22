@@ -1485,6 +1485,7 @@ fn about_modal_shows_identity_and_primary_opens_official_release_page() {
         "MIT",
         "https://github.com/31i45/veil/releases",
         "Mermaid",
+        "Mermaid（MIT）",
         "QuickJS",
         "linkedom",
         "THIRD-PARTY-LICENSES.md",

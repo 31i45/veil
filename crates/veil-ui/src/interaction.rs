@@ -202,8 +202,12 @@ impl App {
     /// IME 组合串：唯一存储在 `Editor`，落点由 `TextSink` 决定绘制位置
     /// （文档行内 / 查找栏）。组合期按键由 `route` 让给 IME。
     pub(crate) fn ime_preedit(&mut self, text: String, cursor: Option<(usize, usize)>) {
-        if self.ui_state.modal.is_some() || matches!(self.mode(), Mode::Menu | Mode::History) {
-            // 模态独占输入；菜单/只读预览不挂组合串（避免切走后残留下划线）。
+        if self.ui_state.modal.is_some()
+            || self.ui_state.settings.is_some()
+            || self.ui_state.image_preview.is_some()
+            || matches!(self.mode(), Mode::Menu | Mode::History)
+        {
+            // 模态/设置/图片预览独占输入；菜单/只读预览不挂组合串（避免切走后残留下划线）。
             self.editor.clear_preedit();
             return;
         }
@@ -213,10 +217,18 @@ impl App {
 
     /// IME 提交：按落点分流——模态转键盘助记符，菜单吞掉，查找栏进查询串，否则进文档。
     pub(crate) fn ime_commit(&mut self, text: String) {
+        // 图片预览不接收文本：吞掉上屏，避免写到预览背后的正文。
+        if self.ui_state.image_preview.is_some() {
+            self.editor.clear_preedit();
+            return;
+        }
         // Windows 下普通字母也可能经 IME Commit 到达（例如中文输入法处于英文模式）。
-        // 必须复用模态键盘路由，不能绕过它直接写正文。
-        if self.ui_state.modal.is_some() {
-            self.route_key(Key::Text(text));
+        // 模态/设置独占输入：必须复用它们自己的键盘路由，不能绕过直接写正文。
+        if self.ui_state.modal.is_some() || self.ui_state.settings.is_some() {
+            self.editor.clear_preedit();
+            if !text.is_empty() {
+                self.route_key(Key::Text(text));
+            }
             return;
         }
         match self.text_sink() {
@@ -1633,6 +1645,7 @@ impl App {
             layout: None,
             buttons,
         });
+        self.sync_ime_for_modal();
         self.request_redraw();
     }
 
@@ -1669,6 +1682,7 @@ impl App {
                     self.ui_state.chrome.notice = t(I18nKey::NoticeSettingsSaved).into();
                 }
                 self.ui_state.settings = None;
+                self.sync_ime_for_modal();
                 self.request_redraw();
             }
             BTN_RESET_DEFAULTS => {
@@ -1680,6 +1694,7 @@ impl App {
             }
             BTN_CANCEL => {
                 self.ui_state.settings = None;
+                self.sync_ime_for_modal();
                 self.request_redraw();
             }
             _ => {}

@@ -1038,6 +1038,41 @@ fn ime_preedit_cleared_when_commit_lands_in_menu_or_history() {
 }
 
 #[test]
+fn ime_preedit_cleared_when_modal_opens() {
+    let store = MemStore::default();
+    let mut a = app("abc\n", None, false, &store);
+    a.editor.set_preedit("zh".into(), None);
+    assert!(a.editor.preedit().is_some());
+
+    let spec = crate::view::modal::ModalSpec::new("T", "M", Vec::new());
+    a.ui_state.modal = Some(crate::app::ActiveModal {
+        state: crate::view::modal::ModalState::new(&spec),
+        spec,
+        intent: None,
+        purpose: crate::app::ModalPurpose::Unsaved,
+    });
+    a.sync_ime_for_modal();
+
+    assert!(a.editor.preedit().is_none(), "模态打开必须清除组合态");
+    a.ime_commit("中".into());
+    assert_eq!(doc_text(&a), "abc\n", "模态吞掉上屏");
+}
+
+#[test]
+fn settings_excludes_ime_text_from_document() {
+    let store = MemStore::default();
+    let mut a = app("abc\n", None, false, &store);
+    a.editor.set_preedit("zh".into(), None);
+
+    a.open_settings();
+    assert!(a.editor.preedit().is_none(), "设置打开必须清除组合态");
+    a.ime_commit("2".into());
+
+    assert_eq!(doc_text(&a), "abc\n", "设置打开时 IME 上屏不得写入正文");
+    assert!(a.ui_state.settings.is_some());
+}
+
+#[test]
 fn search_bar_clicks_run_buttons_and_swallow_text_area() {
     let store = MemStore::default();
     let mut a = app("x x x\n", None, false, &store);

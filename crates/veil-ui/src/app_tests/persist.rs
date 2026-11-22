@@ -1593,6 +1593,35 @@ fn committed_ime_text_survives_crash_recovery() {
 }
 
 #[test]
+fn empty_ime_commit_does_not_touch_recovery_slot() {
+    let store = MemStore::default();
+    let rec = FakeRecovery::default();
+    let ses = FakeSession::default();
+    let mut a = app_persist("abc", Some("a.md"), &store, &rec, &ses, false);
+    a.editor.apply(Intent::MoveDocEnd).unwrap();
+    a.ime_commit("改".into());
+    a.maybe_recovery_write(Instant::now() + Duration::from_secs(5));
+    let before = rec.slot.borrow().clone().expect("非空提交后应写快照");
+
+    a.editor.apply(Intent::SelectAll).unwrap();
+    let calls_before = rec.calls.borrow().len();
+    a.ime_commit(String::new());
+    a.maybe_recovery_write(Instant::now() + Duration::from_secs(30));
+
+    assert_eq!(
+        rec.slot.borrow().clone(),
+        Some(before),
+        "空提交不得改写恢复槽"
+    );
+    assert_eq!(
+        rec.calls.borrow().len(),
+        calls_before,
+        "空提交不得触发恢复 IO"
+    );
+    assert!(a.editor.selection().is_some(), "空提交不得删除选区");
+}
+
+#[test]
 fn truncated_and_non_utf8_recovery_are_rejected() {
     let encoded = recovery::encode_recovery(Some(Path::new("a.md")), false, "未保存正文");
     let mut non_utf8 = recovery::encode_recovery(None, false, "");
@@ -2009,9 +2038,15 @@ fn perf_50mb_long_doc() {
 
     a.editor.apply(Intent::MoveDocEnd).unwrap();
     let mut samples = Vec::with_capacity(100);
-    for _ in 0..100 {
+    for i in 0..100 {
         let t = Instant::now();
-        let dirty = a.editor.apply(Intent::InsertText("a".into())).unwrap();
+        // 交替 ASCII 键入与 IME 中文上屏，覆盖两条真实输入路径。
+        let dirty = if i % 2 == 0 {
+            a.editor.apply(Intent::InsertText("a".into())).unwrap()
+        } else {
+            a.editor.set_preedit("zhong".into(), None);
+            a.editor.commit_ime("中".into())
+        };
         a.after_edit(dirty);
         a.paint();
         samples.push(t.elapsed().as_secs_f64() * 1e3);

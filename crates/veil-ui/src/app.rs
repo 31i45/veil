@@ -1594,7 +1594,7 @@ impl App {
     /// 打开/关闭模态时同步 IME：模态独占键盘，若 IME 仍启用，
     /// 中文输入法会先吞掉字母与 Esc，助记符和取消键都到不了弹窗。
     pub(crate) fn sync_ime_for_modal(&mut self) {
-        let allowed = self.ui_state.modal.is_none();
+        let allowed = self.ui_state.modal.is_none() && self.ui_state.settings.is_none();
         if let Some(w) = &self.window_state.window {
             w.set_ime_allowed(allowed);
         }

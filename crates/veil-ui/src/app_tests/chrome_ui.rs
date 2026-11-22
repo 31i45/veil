@@ -1487,7 +1487,9 @@ fn about_modal_shows_identity_and_primary_opens_official_release_page() {
         "Mermaid",
         "Mermaid（MIT）",
         "QuickJS",
+        "QuickJS（MIT）",
         "linkedom",
+        "linkedom（MIT）",
         "THIRD-PARTY-LICENSES.md",
     ] {
         assert!(

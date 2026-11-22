@@ -41,7 +41,11 @@ pub fn write_crash_report(dir: &Path, text: &str) -> Result<PathBuf, String> {
     let path = dir.join(&name);
     let tmp = dir.join(format!(".{name}.tmp-{}", std::process::id()));
     let body = clamp_report(text);
-    std::fs::write(&tmp, body.as_bytes()).map_err(|e| format!("{}: {e}", tmp.display()))?;
+    if let Err(e) = std::fs::write(&tmp, body.as_bytes()) {
+        // 写盘失败也可能留下半截临时文件，尽力清理。
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!("{}: {e}", tmp.display()));
+    }
     if let Err(e) = std::fs::rename(&tmp, &path) {
         let _ = std::fs::remove_file(&tmp);
         return Err(format!("{}: {e}", path.display()));
@@ -189,6 +193,21 @@ mod tests {
         assert!(got.is_err(), "目录位置是文件时必须返回 Err");
         assert!(file.is_file(), "既有文件不得被破坏");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn clamp_report_truncates_on_char_boundary_with_marker() {
+        // 4 字节单元让预算边界落在多字节字符内部，验证回退到字符边界。
+        let text = "a长".repeat(MAX_REPORT_BYTES / 4 + 16);
+        let out = clamp_report(&text);
+        assert!(out.len() <= MAX_REPORT_BYTES, "总量不得超过上限");
+        assert!(out.ends_with(TRUNCATED_MARKER), "超过上限必须追加截断标记");
+        let body = out.strip_suffix(TRUNCATED_MARKER).expect("标记必须在末尾");
+        assert!(text.starts_with(body), "只允许裁掉尾部");
+        assert!(text.is_char_boundary(body.len()), "必须停在字符边界");
+        let budget = MAX_REPORT_BYTES - TRUNCATED_MARKER.len();
+        assert!(body.len() <= budget);
+        assert!(budget - body.len() < 4, "只回退到最近的字符边界");
     }
 
     #[test]

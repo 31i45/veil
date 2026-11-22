@@ -5,6 +5,8 @@
 //!
 //! 隐私边界：事件 detail 与报告自由文本都经 `redact` 处理——换行压平、
 //! 绝对路径替换为 `<path>`、超长截断；报告从不读取文档正文、剪贴板或配置值。
+//! 路径识别不依赖前导分隔符：任何位置的 `file:`、盘符、UNC、用户目录与
+//! POSIX 根目录起点都会一直吞到硬终止符（含空格，宁可过度替换）。
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -160,9 +162,13 @@ pub fn render_diagnostics(os: &str, arch: &str, extra: &[(&str, String)]) -> Str
     out
 }
 
-/// 脱敏：把 `file://` URL 与本机绝对路径片段（`C:\...`、`C:/...`、`\\?\...`、
-/// `/home/...`、`/Users/...`）替换成 `<path>`；路径中的空格若仍属于路径则一并吞掉；
-/// 去换行；截断到 256 字符（含省略号）。
+/// 脱敏：把 `file:` URL 与本机绝对路径片段（`C:\...`、`C:/...`、`\\server\...`、
+/// `\Users\...`、`/home/...`、`/Users/...` 等）替换成 `<path>`。
+///
+/// 起点在文本任意位置都生效，不要求前一个字符是分隔符；替换一直持续到硬终止符
+/// （换行、引号、括号、中文标点或任意 CJK 字符）。ASCII 空格不是终止符，因此
+/// `Program Files`、`Alice Smith` 这类带空格路径会被整体吞掉（宁可过度替换）。
+/// 最后压平换行并截断到 256 字符（含省略号）。
 pub fn redact(text: &str) -> String {
     truncate_chars(replace_paths(&flatten(text)), MAX_DETAIL_CHARS)
 }
@@ -225,7 +231,7 @@ fn sanitize_line(text: &str) -> String {
     replace_paths(&flatten(text))
 }
 
-/// 把 `file://` URL 与绝对路径片段替换为 `<path>`（保留其余文本与换行）。
+/// 把 `file:` URL 与绝对路径片段替换为 `<path>`（保留其余文本与换行）。
 fn replace_paths(text: &str) -> String {
     let chars: Vec<char> = text.chars().collect();
     let mut out = String::with_capacity(text.len());
@@ -246,27 +252,48 @@ fn replace_paths(text: &str) -> String {
 }
 
 /// 若 `chars[i]` 是路径/`file:` URL 起点，返回片段结束下标（不含）。
-/// 起点必须落在词边界上，避免把普通 URL scheme（`http://`）或相对路径误判为绝对路径。
+///
+/// 不做词边界检查：中文前缀、冒号、全角括号之后同样识别。只有盘符与 `file:`
+/// 需要排除「前一个字符是 ASCII 字母数字」的情形，避免把 `https://` 的 `s:/`
+/// 或 `profile:` 之类的普通单词误判成路径。
 fn path_end(chars: &[char], i: usize) -> Option<usize> {
-    let boundary = i == 0 || is_delimiter(chars[i - 1]);
-    if !boundary {
-        return None;
-    }
     if let Some(end) = file_url_end(chars, i) {
         return Some(end);
     }
-    let c = chars[i];
-    let drive = c.is_ascii_alphabetic()
-        && chars.get(i + 1) == Some(&':')
-        && matches!(chars.get(i + 2), Some('\\') | Some('/'));
-    let unc = c == '\\' && chars.get(i + 1) == Some(&'\\');
-    let unix = c == '/'
-        && chars.get(i + 1).is_some_and(|next| *next != '/')
-        && !(i > 0 && chars[i - 1] == ':');
-    if !(drive || unc || unix) {
-        return None;
+    if starts_absolute_path(chars, i) {
+        return Some(scan_until_terminator(chars, i));
     }
-    Some(scan_path_end(chars, i))
+    None
+}
+
+/// 是否为本机绝对路径起点：盘符、UNC、裸用户目录或 POSIX 根目录。
+fn starts_absolute_path(chars: &[char], i: usize) -> bool {
+    let c = chars[i];
+    let at_word_start = i == 0 || !chars[i - 1].is_ascii_alphanumeric();
+    // 盘符：ASCII 字母 + ':' + '\\' 或 '/'（如 `C:\`、`d:/`）。
+    if at_word_start
+        && c.is_ascii_alphabetic()
+        && chars.get(i + 1) == Some(&':')
+        && matches!(chars.get(i + 2), Some('\\') | Some('/'))
+    {
+        return true;
+    }
+    // UNC：连续两个反斜杠（含 `\\?\C:\...` 与 `\\server\share\...`）。
+    if c == '\\' && chars.get(i + 1) == Some(&'\\') {
+        return true;
+    }
+    // 裸用户目录：`\Users\`、`\Documents and Settings\`（大小写不敏感）。
+    if c == '\\'
+        && (starts_with_ignore_ascii_case(&chars[i..], r"\Users\")
+            || starts_with_ignore_ascii_case(&chars[i..], r"\Documents and Settings\"))
+    {
+        return true;
+    }
+    // POSIX 绝对路径起点。
+    c == '/'
+        && ["/home/", "/Users/", "/root/", "/tmp/"]
+            .iter()
+            .any(|prefix| starts_with_ignore_ascii_case(&chars[i..], prefix))
 }
 
 /// `file:` URL 的结束下标；`file:` 后必须真的跟着本机路径，否则不替换。
@@ -274,6 +301,10 @@ fn path_end(chars: &[char], i: usize) -> Option<usize> {
 fn file_url_end(chars: &[char], i: usize) -> Option<usize> {
     const PREFIX: [char; 5] = ['f', 'i', 'l', 'e', ':'];
     if i + PREFIX.len() > chars.len() {
+        return None;
+    }
+    // `profile:` 之类的单词不得被当作 `file:` 起点。
+    if i > 0 && chars[i - 1].is_ascii_alphanumeric() {
         return None;
     }
     for (k, expected) in PREFIX.iter().enumerate() {
@@ -287,14 +318,13 @@ fn file_url_end(chars: &[char], i: usize) -> Option<usize> {
         j += 1;
         slashes += 1;
     }
-    let rest = chars.get(j).copied();
-    let is_path = match rest {
+    let is_path = match chars.get(j).copied() {
         Some(c) => {
             let drive = c.is_ascii_alphabetic()
                 && chars.get(j + 1) == Some(&':')
                 && matches!(chars.get(j + 2), Some('\\') | Some('/'));
             let unc = c == '\\' && chars.get(j + 1) == Some(&'\\');
-            let rooted = slashes > 0 && c != '/' && !is_delimiter(c);
+            let rooted = slashes > 0 && !c.is_whitespace() && !is_hard_terminator(c);
             drive || unc || rooted
         }
         None => false,
@@ -302,88 +332,73 @@ fn file_url_end(chars: &[char], i: usize) -> Option<usize> {
     if !is_path {
         return None;
     }
-    Some(scan_path_end(chars, j))
+    Some(scan_until_terminator(chars, j))
 }
 
-/// 扫描路径体：空格默认是分隔符，但若空格后的 token 仍像路径（含分隔符或
-/// 形如 `name.ext`），则把空格并入路径，覆盖 `My Documents` 这类带空格路径。
-fn scan_path_end(chars: &[char], start: usize) -> usize {
+/// 从起点一直吞到硬终止符（不含）；ASCII 空格不是终止符。
+fn scan_until_terminator(chars: &[char], start: usize) -> usize {
     let mut end = start;
-    while end < chars.len() {
-        let c = chars[end];
-        if c == '\n' || c == '\r' {
-            break;
-        }
-        if c == ' ' {
-            let mut next = end;
-            while next < chars.len() && chars[next] == ' ' {
-                next += 1;
-            }
-            if next < chars.len() && space_continues_path(chars, next) {
-                end = next;
-                continue;
-            }
-            break;
-        }
-        if is_delimiter(c) {
-            break;
-        }
+    while end < chars.len() && !is_hard_terminator(chars[end]) {
         end += 1;
     }
     end
 }
 
-/// 空格后的 token 是否仍属于路径：内部含分隔符，或末尾是形如 `.md` 的扩展名。
-fn space_continues_path(chars: &[char], start: usize) -> bool {
-    let mut k = start;
-    let mut has_separator = false;
-    while k < chars.len() {
-        let c = chars[k];
-        if c.is_whitespace() || is_delimiter(c) {
-            break;
-        }
-        if c == '\\' || c == '/' {
-            has_separator = true;
-        }
-        k += 1;
-    }
-    if k == start {
-        return false;
-    }
-    if has_separator {
-        return true;
-    }
-    let token: String = chars[start..k].iter().collect();
-    match token.rsplit_once('.') {
-        Some((stem, ext)) => {
-            !stem.is_empty()
-                && !ext.is_empty()
-                && ext.len() <= 8
-                && ext.chars().all(|c| c.is_ascii_alphanumeric())
-        }
-        None => false,
-    }
+/// 硬终止符：换行、引号、括号、中文标点与任意 CJK 字符。
+fn is_hard_terminator(c: char) -> bool {
+    matches!(
+        c,
+        '\n' | '\r'
+            | '"'
+            | '\''
+            | '<'
+            | '>'
+            | ')'
+            | ']'
+            | '}'
+            | '。'
+            | '，'
+            | '；'
+            | '：'
+            | '、'
+            | '（'
+            | '）'
+            | '！'
+            | '？'
+            | '《'
+            | '》'
+            | '…'
+    ) || is_cjk(c)
 }
 
-fn is_delimiter(c: char) -> bool {
-    c.is_whitespace()
-        || matches!(
-            c,
-            '"' | '\''
-                | '`'
-                | '('
-                | ')'
-                | '['
-                | ']'
-                | '{'
-                | '}'
-                | '<'
-                | '>'
-                | ','
-                | ';'
-                | '|'
-                | '='
-        )
+/// CJK 及全角字符范围（含标点），作为路径的硬终止符。
+fn is_cjk(c: char) -> bool {
+    matches!(
+        c as u32,
+        0x2E80..=0x2FFF
+            | 0x3000..=0x303F
+            | 0x3040..=0x30FF
+            | 0x3100..=0x312F
+            | 0x31A0..=0x31BF
+            | 0x3400..=0x4DBF
+            | 0x4E00..=0x9FFF
+            | 0xF900..=0xFAFF
+            | 0xFE30..=0xFE4F
+            | 0xFF00..=0xFFEF
+            | 0x20000..=0x3FFFF
+    )
+}
+
+/// 大小写不敏感的 ASCII 前缀匹配（用于 `\Users\`、`/home/` 等）。
+fn starts_with_ignore_ascii_case(chars: &[char], prefix: &str) -> bool {
+    let mut k = 0;
+    for expected in prefix.chars() {
+        match chars.get(k) {
+            Some(c) if c.eq_ignore_ascii_case(&expected) => k += 1,
+            _ => return false,
+        }
+    }
+    true
 }
 
 fn truncate_chars(s: String, max: usize) -> String {
@@ -436,26 +451,73 @@ mod tests {
     }
 
     #[test]
-    fn redact_replaces_absolute_paths_and_limits_length() {
+    fn redact_replaces_absolute_paths_at_any_position() {
         let _guard = guard();
-        assert_eq!(redact(r"C:\Users\alice\secret\a.md"), "<path>");
-        assert_eq!(redact("C:/Users/alice/secret/a.md"), "<path>");
-        assert_eq!(redact(r"\\?\C:\x"), "<path>");
-        assert_eq!(redact("/home/alice/a.md"), "<path>");
-        assert_eq!(redact("/Users/alice/a.md"), "<path>");
-        // file: URL 的各种写法（含盘符与 Unix 根）。
-        assert_eq!(redact("file:///C:/Users/alice/a.md"), "<path>");
-        assert_eq!(redact(r"file://C:\Users\alice\a.md"), "<path>");
-        assert_eq!(redact(r"file:C:\Users\alice\a.md"), "<path>");
-        assert_eq!(redact("file:///Users/alice/a.md"), "<path>");
-        // 带空格路径必须整体脱敏（不能只替换到第一个空格）。
-        assert_eq!(redact(r"C:\Users\Alice Smith\My Documents\a.md"), "<path>");
-        assert_eq!(redact("C:/Users/Alice Smith/My Documents/a.md"), "<path>");
-        assert_eq!(
-            redact("file:///C:/Users/Alice Smith/My Documents/a.md"),
-            "<path>"
-        );
-        assert_eq!(redact(r"\\server\share\Alice Smith\a.md"), "<path>");
+        // 审查给出的旁路反例：起点前面是中文、冒号、全角括号或行首反斜杠。
+        let cases = [
+            (
+                r"打开C:\Users\alice\Documents\secret.md失败",
+                "打开<path>失败",
+            ),
+            (r"路径:C:\Users\alice\a.md", "路径:<path>"),
+            ("打开file:///C:/Users/alice/a.md", "打开<path>"),
+            (r"（C:\Users\alice\a.md）", "（<path>）"),
+            (r"\Users\alice\a.md", "<path>"),
+            (r"\\server\share\x", "<path>"),
+            (r"\Documents and Settings\alice\a.md", "<path>"),
+            (r"C:\Users\Alice Smith\a.md", "<path>"),
+            (r"D:/work/a.md", "<path>"),
+            (r"\\server\share\a.txt", "<path>"),
+            (r"C:\Users\alice\secret\a.md", "<path>"),
+            ("C:/Users/alice/secret/a.md", "<path>"),
+            (r"\\?\C:\x", "<path>"),
+            ("/home/alice/a.md", "<path>"),
+            ("/Users/alice/a.md", "<path>"),
+            ("/root/.config/x", "<path>"),
+            ("/tmp/x", "<path>"),
+            // file: URL 的各种写法（含盘符、UNC 与 Unix 根）。
+            ("file:///C:/Users/alice/a.md", "<path>"),
+            (r"file://C:\Users\alice\a.md", "<path>"),
+            (r"file:C:\Users\alice\a.md", "<path>"),
+            ("file:///Users/alice/a.md", "<path>"),
+            ("FILE:///C:/Users/alice/a.md", "<path>"),
+            // 带空格路径必须整体脱敏（不能只替换到第一个空格）。
+            (r"C:\Users\Alice Smith\My Documents\a.md", "<path>"),
+            ("C:/Users/Alice Smith/My Documents/a.md", "<path>"),
+            ("file:///C:/Users/Alice Smith/My Documents/a.md", "<path>"),
+            (r"\\server\share\Alice Smith\a.md", "<path>"),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(redact(input), expected, "输入：{input}");
+        }
+
+        // 所有路径样例都不得残留用户名、服务器名或盘符前缀。
+        for input in [
+            r"打开C:\Users\alice\Documents\secret.md失败",
+            r"路径:C:\Users\alice\a.md",
+            "打开file:///C:/Users/alice/a.md",
+            r"（C:\Users\alice\a.md）",
+            r"\Users\alice\a.md",
+            r"\\server\share\x",
+            r"C:\Users\Alice Smith\a.md",
+            r"D:/work/a.md",
+            r"\\server\share\a.txt",
+        ] {
+            let out = redact(input);
+            assert!(
+                !out.contains("alice") && !out.contains("Smith") && !out.contains("server"),
+                "输出残留敏感片段：{out}（输入：{input}）"
+            );
+            assert!(
+                !out.contains(r"C:\") && !out.contains("C:/") && !out.contains("D:/"),
+                "输出残留盘符前缀：{out}（输入：{input}）"
+            );
+        }
+    }
+
+    #[test]
+    fn redact_flattens_newlines_and_limits_length() {
+        let _guard = guard();
         let mixed = redact("打开 C:\\Users\\alice\\secret\\a.md 失败\r\n下一行");
         assert!(mixed.contains("<path>"));
         assert!(!mixed.contains("alice") && !mixed.contains("secret"));
@@ -464,10 +526,20 @@ mod tests {
             "换行必须压平"
         );
         assert_eq!(redact(&"长".repeat(1000)).chars().count(), MAX_DETAIL_CHARS);
-        // URL 不应被误判为 Unix 绝对路径；相对路径也保持原样。
+    }
+
+    #[test]
+    fn redact_keeps_urls_and_relative_paths() {
+        let _guard = guard();
+        // 普通 URL scheme 与相对路径不得被误判为绝对路径。
         assert_eq!(redact("https://example.com/a"), "https://example.com/a");
+        assert_eq!(
+            redact("http://example.com/path/to/a.md"),
+            "http://example.com/path/to/a.md"
+        );
         assert_eq!(redact("file: notes.txt"), "file: notes.txt");
         assert_eq!(redact("docs/readme.md"), "docs/readme.md");
+        assert_eq!(redact("src/main.rs:12:3"), "src/main.rs:12:3");
     }
 
     #[test]

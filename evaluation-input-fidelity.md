@@ -14,7 +14,7 @@
 | 空提交置脏 / 删选区 | `InsertText("")` 返回 `Some`，选区分支执行替换 | `commit_ime("")` 直接返回空脏块 | `empty_ime_commit_is_noop_with_clean_document`、`empty_ime_commit_keeps_selection`、`empty_ime_commit_does_not_touch_recovery_slot` |
 | 菜单/历史组合态残留 | 提交分支提前 return 未清 preedit；preedit 只拦 History | Menu 下拒绝挂载；两条落点均清理 | `ime_preedit_cleared_when_commit_lands_in_menu_or_history` |
 | 设置/模态/图片预览下 IME 写入正文 | IME 提交只识别 `ui_state.modal`；设置与预览不在 `mode()` 分流 | 统一早退清理；设置/模态复用键盘路由；设置打开时禁用系统 IME | `ime_preedit_cleared_when_modal_opens`、`settings_excludes_ime_text_from_document` |
-| 恢复内容截断被当成短文本 | 恢复格式只有头部长度，没有内容长度/校验 | 恢复格式升级到 `VEIL-RECOVERY-2`：内容长度 + FNV-1a 校验；旧 v1 仅兼容读取 | `rejects_content_truncated_at_char_boundary`、`rejects_content_checksum_mismatch`、`legacy_v1_files_still_open` |
+| 恢复内容截断被当成短文本 | 恢复格式只有头部长度，没有内容长度/校验 | 恢复格式升级到 `VEIL-RECOVERY-2`：内容长度 + FNV-1a 校验；旧 v1 仅兼容读取（best-effort，无长度无法自证） | `rejects_content_truncated_at_char_boundary`、`rejects_content_checksum_mismatch`、`legacy_v1_files_still_open` |
 | 恢复头 `path_len` 溢出 | `path_len + 1` 在 release 回绕，`split_at` panic | v1/v2 均用 `checked_add` 返回 `Err` | `rejects_overflowing_path_len_without_panic`、App 级四类损坏拒绝 |
 | 打开预览/历史仍留组合态 | 打开入口只设 UI 状态，未清 preedit | 图片预览、右键菜单、菜单栏、版本历史打开时统一清理 | `opening_history_or_image_preview_clears_preedit` |
 | 首次打开菜单漏清组合态 | 菜单栏点击直接 `chrome.toggle`，未走清理；清理散在 7+ 入口 | 新增 `enter_exclusive_overlay()` 单点收口；菜单首次打开/切换、右键、历史、预览、模态统一调用 | `first_menu_open_clears_preedit`、真实图片点击路径断言 |
@@ -53,7 +53,7 @@
 | `veil.exe` 体积 | **14,015,488 B** ≤ 14,680,064 B |
 | SHA-256 | `81AA1DB74EA708F354F6141AEDD2378D049C2B47F4F98E4822BC9E3BD4259136` |
 | 离线特征串 | `QuickJS` / `linkedom` / `mermaid` 均命中 |
-| smoke | PASS：launch 594 ms；`VEIL_HOME` 隔离 PASS；**隔离树**内 config/session/recovery/APPDATA 哨兵未变 |
+| smoke | PASS：launch 594 ms（1500 ms 预算）；默认 1000 ms 独立复跑 606 ms PASS；`VEIL_HOME` 隔离 PASS；**隔离树**内哨兵未变，`read_audit=not-covered` |
 
 测试数较基线 +17，ignore +1（新增 50 MB 探针），无测试被删除。smoke 的哨兵位于临时隔离树；脚本明确不枚举真实 APPDATA（`read_audit=not-covered`），因此本报告只声明“隔离树未变”，不声明“真实 APPDATA 未被读取”。
 

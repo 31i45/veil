@@ -1073,6 +1073,29 @@ fn settings_excludes_ime_text_from_document() {
 }
 
 #[test]
+fn opening_history_or_image_preview_clears_preedit() {
+    let store = MemStore::default();
+    let mut a = app("abc\n", None, false, &store);
+    a.editor.set_preedit("zh".into(), None);
+    a.open_history();
+    assert!(a.editor.preedit().is_none(), "打开版本历史必须清除组合态");
+    assert!(a.ui_state.history.open);
+
+    let mut b = app("abc\n", None, false, &store);
+    b.editor.set_preedit("zh".into(), None);
+    b.ui_state.image_preview = Some(crate::app::ImagePreview {
+        key: "k".into(),
+        title: "t".into(),
+        zoom: 1.0,
+        pan: (0.0, 0.0),
+    });
+    b.ime_preedit("zh".into(), None);
+    assert!(b.editor.preedit().is_none(), "图片预览下不挂组合串");
+    b.ime_commit("中".into());
+    assert_eq!(doc_text(&b), "abc\n", "图片预览吞掉上屏");
+}
+
+#[test]
 fn search_bar_clicks_run_buttons_and_swallow_text_area() {
     let store = MemStore::default();
     let mut a = app("x x x\n", None, false, &store);

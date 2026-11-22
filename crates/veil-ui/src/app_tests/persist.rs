@@ -1631,6 +1631,10 @@ fn truncated_and_non_utf8_recovery_are_rejected() {
         ("截断", encoded[..encoded.len() / 2].to_vec()),
         ("非 UTF-8", non_utf8),
         ("坏魔数", b"not-a-recovery-file".to_vec()),
+        (
+            "path_len 溢出",
+            b"VEIL-RECOVERY-2\nbom=0\npath_len=18446744073709551615\ncontent_len=0\nchecksum=cbf29ce484222325\n\n".to_vec(),
+        ),
     ] {
         let store = MemStore::default();
         let rec = FakeRecovery::default();

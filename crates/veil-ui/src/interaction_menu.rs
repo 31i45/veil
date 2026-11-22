@@ -346,6 +346,7 @@ impl App {
             .file_name()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_else(|| key.clone());
+        self.editor.clear_preedit();
         self.ui_state.image_preview = Some(ImagePreview {
             key,
             title,
@@ -574,6 +575,7 @@ impl App {
                 },
             }
         };
+        self.editor.clear_preedit();
         self.ui_state.ctx.open_at(mx, my, kind, link, mermaid_body);
         self.ui_state.ctx.mermaid_insert_start = insert_start;
         self.ui_state.ctx.mermaid_occurrence = mermaid_occurrence;
@@ -699,6 +701,7 @@ impl App {
             self.input_state.mouse.x as f32,
             self.input_state.mouse.y as f32,
         );
+        self.editor.clear_preedit();
         self.ui_state
             .ctx
             .open_at(mx, my, CtxKind::MermaidEmptyBlock, None, Some(body));

@@ -61,6 +61,7 @@ impl App {
         self.ui_state.ctx.close();
         self.close_quick();
         self.close_search();
+        self.editor.clear_preedit();
         self.ui_state.history.open = true;
         self.ui_state.history.saved_editor = None;
         self.ui_state.history.selected = None;

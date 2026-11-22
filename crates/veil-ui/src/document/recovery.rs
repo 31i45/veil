@@ -71,7 +71,10 @@ fn decode_v2(mut rest: &[u8]) -> Result<Recovered, String> {
         .and_then(|s| u64::from_str_radix(s, 16).ok())
         .ok_or_else(|| "checksum 字段非法".to_string())?;
     rest = r;
-    if rest.len() < path_len + 1 {
+    let need = path_len
+        .checked_add(1)
+        .ok_or_else(|| "path_len 溢出".to_string())?;
+    if rest.len() < need {
         return Err("路径字节不完整".into());
     }
     let (path_bytes, rest) = rest.split_at(path_len);
@@ -107,7 +110,10 @@ fn decode_legacy(rest: &[u8]) -> Result<Recovered, String> {
     let bom = parse_bom(bom_line)?;
     let (len_line, rest) = parse_line(rest)?;
     let path_len = parse_field(len_line, b"path_len=", "path_len")?;
-    if rest.len() < path_len + 1 {
+    let need = path_len
+        .checked_add(1)
+        .ok_or_else(|| "path_len 溢出".to_string())?;
+    if rest.len() < need {
         return Err("路径字节不完整".into());
     }
     let (path_bytes, rest) = rest.split_at(path_len);
@@ -229,6 +235,14 @@ mod tests {
         let last = data.len() - 1;
         data[last] ^= 0x01; // 等长篡改：长度对但校验不符
         assert!(decode_recovery(&data).is_err(), "校验失败必须拒绝");
+    }
+
+    #[test]
+    fn rejects_overflowing_path_len_without_panic() {
+        let huge = "VEIL-RECOVERY-2\nbom=0\npath_len=18446744073709551615\ncontent_len=0\nchecksum=cbf29ce484222325\n\n";
+        assert!(decode_recovery(huge.as_bytes()).is_err());
+        let huge_v1 = "VEIL-RECOVERY-1\nbom=0\npath_len=18446744073709551615\n\n";
+        assert!(decode_recovery(huge_v1.as_bytes()).is_err());
     }
 
     #[test]

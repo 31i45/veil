@@ -1144,6 +1144,7 @@ impl App {
             self.ui_state.chrome.close();
             if let Some(m) = chrome::hit_menu_bar(mx, my, scale) {
                 if m != open {
+                    self.editor.clear_preedit();
                     self.ui_state.chrome.open = Some(m);
                 }
                 self.request_redraw();

@@ -8,13 +8,21 @@ use std::process::Command;
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
+    // 发布脚本显式传入的构建身份优先：避免「测试阶段已产出 exe，构建步骤直接复用」
+    // 导致产物内嵌的是上一次（可能为脏工作区）的提交。
+    println!("cargo:rerun-if-env-changed=VEIL_COMMIT_OVERRIDE");
 
     let manifest = PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").unwrap_or_default());
     let root = manifest.parent().and_then(Path::parent);
 
-    let commit = root
-        .and_then(build_commit)
-        .unwrap_or_else(|| "unknown".into());
+    let commit = std::env::var("VEIL_COMMIT_OVERRIDE")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| s.trim().to_string())
+        .unwrap_or_else(|| {
+            root.and_then(build_commit)
+                .unwrap_or_else(|| "unknown".into())
+        });
     println!("cargo:rustc-env=VEIL_BUILD_COMMIT={commit}");
 }
 

@@ -221,13 +221,34 @@ $CleanExit = $LASTEXITCODE
 $ReleaseRecord.build.exit_code = $CleanExit
 if ($CleanExit -ne 0) { Write-Fail "cargo clean failed with exit $CleanExit" }
 Write-Host '  Cleaned veil/veil-ui/veil-core/veil-mermaid-offline artifacts'
+
+# `cargo clean -p` 不保证移除顶层 bin 产物（实测会留下上一次构建的 exe）；
+# 测试阶段也会产出 veil.exe。这里显式删除并注入当前提交身份，确保最终字节
+# 确实由本次构建产生，而不是复用旧产物。
+$BuildCommit = (git rev-parse --short HEAD).Trim()
+if ($LASTEXITCODE -ne 0) { Write-Fail 'git rev-parse --short HEAD failed' }
+if (git status --porcelain) { $BuildCommit = "$BuildCommit-dirty" }
+$ReleaseRecord.build.commit = $BuildCommit
+$env:VEIL_COMMIT_OVERRIDE = $BuildCommit
+$ExePath = Join-Path $RepoRoot 'target\release\veil.exe'
+$PdbBuildPath = Join-Path $RepoRoot 'target\release\veil.pdb'
+Remove-Item -LiteralPath $ExePath -Force -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath $PdbBuildPath -Force -ErrorAction SilentlyContinue
+$BuildStarted = Get-Date
 cargo build --release --bin veil | Select-Object -Last 3
 $BuildExit = $LASTEXITCODE
 $ReleaseRecord.build.exit_code = $BuildExit
 if ($BuildExit -ne 0) { Write-Fail "cargo build --release --bin veil failed with exit $BuildExit" }
-$ReleaseRecord.build.status = 'passed'
 $Exe = Get-Item -LiteralPath $ExePath -ErrorAction Stop
-Write-OK "Release build done: $($Exe.Length) bytes, build time $($Exe.LastWriteTime)"
+if ($Exe.LastWriteTime -lt $BuildStarted.AddSeconds(-2)) {
+  Write-Fail "veil.exe was not rebuilt by this run (mtime $($Exe.LastWriteTime), build started $BuildStarted)"
+}
+$ExeText = [System.Text.Encoding]::ASCII.GetString([System.IO.File]::ReadAllBytes($ExePath))
+if (-not $ExeText.Contains($BuildCommit)) {
+  Write-Fail "veil.exe does not embed the current build commit '$BuildCommit'"
+}
+$ReleaseRecord.build.status = 'passed'
+Write-OK "Release build done: $($Exe.Length) bytes, commit $BuildCommit, build time $($Exe.LastWriteTime)"
 
 # Step 6: verify the single executable and its binary feature evidence
 Write-Step 6 'verify artifact'
@@ -423,6 +444,7 @@ Write-Host '=====================================================' -ForegroundCo
 Write-Host "  Veil v$Version Release Summary" -ForegroundColor Magenta
 Write-Host '=====================================================' -ForegroundColor Magenta
 Write-Host "  Version     : $($vi.ProductVersion)"
+Write-Host "  Build commit: $($ReleaseRecord.build.commit)"
 Write-Host "  Size        : $SizeMiB MiB ($SizeBytes bytes)"
 Write-Host "  Size Margin : $SizeMarginBytes bytes to 14 MiB"
 Write-Host "  SHA-256     : $Sha256"

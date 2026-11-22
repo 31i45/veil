@@ -694,6 +694,145 @@ fn geometry_index_is_monotonic_and_consistent() {
 }
 
 #[test]
+fn four_dpi_scales_layout_hit_and_paint_match() {
+    let store = MemStore::default();
+    let doc = "## 标题 **粗**\n\n段落 `code` 与 [链接](https://e.com)\n\n- 一\n- 二\n\n> 引用一\n> 引用二\n\n```rust\nfn f() {}\n```\n\n| a | b |\n|---|---|\n| 1 | 2 |\n";
+    for scale in [1.0_f32, 1.25, 1.5, 2.0] {
+        let mut a = app(doc, None, false, &store);
+        a.window_state.test_size = Some((
+            (1200.0 * scale).round() as u32,
+            (1000.0 * scale).round() as u32,
+        ));
+        a.input_state.set_dpi(scale);
+        a.refresh_index();
+        a.ensure_layouts_all();
+        a.ensure_tables();
+        a.recompute_geometry();
+
+        let vp = a.viewport();
+        let mut prev = f32::NEG_INFINITY;
+        for g in &a.index.blocks {
+            assert!(
+                g.height.is_finite() && g.height > 0.0,
+                "scale={scale} 块高须为正"
+            );
+            assert!(g.top >= prev, "scale={scale} 块顶须单调不减");
+            assert!(
+                vp.y + g.top + g.height <= vp.y + vp.h + 1.0,
+                "scale={scale} 混合文档须完整进入测试视口: {:?}",
+                g.kind
+            );
+            prev = g.top;
+        }
+        let want = expected_doc_height(&a);
+        assert!(
+            (a.index.total_h - want).abs() < 1e-3,
+            "scale={scale} total_h 应与块边界累计一致"
+        );
+
+        // 正文：用排版光标位置反推物理鼠标坐标，命中必须回到同一文档偏移。
+        let (paragraph_id, paragraph_top, paragraph_range) = a
+            .index
+            .blocks
+            .iter()
+            .find(|g| g.kind == BlockKind::Paragraph)
+            .map(|g| (g.id, g.top, g.range))
+            .expect("混合文档须含正文");
+        let (x, y, h) = {
+            let l = &a.cache.layouts[&paragraph_id];
+            a.engine.caret_xy(l, 0)
+        };
+        a.input_state.mouse = PhysicalPosition::new(
+            (a.content_x() + x + 0.25 * scale) as f64,
+            (vp.y + paragraph_top + y + h / 2.0) as f64,
+        );
+        assert_eq!(
+            a.hit_offset(),
+            Some(paragraph_range.start),
+            "scale={scale} 正文物理坐标命中须准确"
+        );
+
+        // 表格：走网格命中而非源码布局兜底，首格内容起点须逐档一致。
+        let (table_id, table_top) = a
+            .index
+            .blocks
+            .iter()
+            .find(|g| g.kind == BlockKind::Table)
+            .map(|g| (g.id, g.top))
+            .expect("混合文档须含表格");
+        let (x, y, want) = {
+            let t = a.cache.tables.get(&table_id).expect("表格须为网格态");
+            let cell = &t.cells[0];
+            (
+                a.content_x() + t.x + cell.x + 0.25 * scale,
+                vp.y + table_top + cell.y + cell.h / 2.0,
+                cell.doc_start,
+            )
+        };
+        a.input_state.mouse = PhysicalPosition::new(x as f64, y as f64);
+        assert_eq!(
+            a.hit_offset(),
+            Some(want),
+            "scale={scale} 表格物理坐标命中须准确"
+        );
+
+        let regions: Vec<(BlockKind, i32, i32)> = a
+            .index
+            .blocks
+            .iter()
+            .map(|g| {
+                (
+                    g.kind.clone(),
+                    (vp.y + g.top) as i32,
+                    (vp.y + g.top + g.height).ceil() as i32,
+                )
+            })
+            .collect();
+        let bg = a.input_state.theme.bg;
+        {
+            let frame = a.render();
+            for (kind, y0, y1) in regions {
+                assert!(
+                    first_non_bg(frame, y0, y1, bg).is_some(),
+                    "scale={scale} {kind:?} 区域须实际绘制非背景像素"
+                );
+            }
+        }
+
+        let code = a
+            .index
+            .blocks
+            .iter()
+            .find(|g| matches!(g.kind, BlockKind::FencedCode(_)))
+            .expect("混合文档须含代码块");
+        let key = a
+            .cache
+            .raster_key(
+                code.id,
+                &code.kind,
+                code.range,
+                a.base_key(),
+                a.editor.caret(),
+                a.toc_layout_epoch(code),
+            )
+            .expect("代码布局键须存在");
+        let raster = a.cache.raster(code.id, key).expect("代码须实际光栅化");
+        assert!(
+            raster.0.chunks_exact(4).any(|p| p[3] > 0),
+            "scale={scale} 代码光栅须含非透明文本像素"
+        );
+        let table = a.cache.tables.get(&table_id).expect("绘制后表格网格须保留");
+        assert!(
+            table
+                .cells
+                .iter()
+                .any(|c| c.pixels.chunks_exact(4).any(|p| p[3] > 0)),
+            "scale={scale} 表格单元格须含非透明文本像素"
+        );
+    }
+}
+
+#[test]
 fn ensure_block_lays_out_far_block_with_real_height() {
     let store = MemStore::default();
     let mut a = app(&stress_doc(), None, false, &store);

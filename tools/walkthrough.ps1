@@ -34,8 +34,10 @@ param(
     [int]$SettleMs = 700,
     [int]$WindowWaitMs = 15000,
     [string[]]$AuditFiles = @(),
-    [ValidateSet('', 'startup', 'input', 'd1')]
+    [ValidateSet('', 'startup', 'input', 'd1', 'dpi')]
     [string]$EvidenceMode = '',
+    [ValidateSet(0, 100, 125, 150, 200)]
+    [int]$ExpectedDpi = 0,
     [int]$ColdRuns = 10
 )
 
@@ -992,10 +994,35 @@ function Assert-Task6NoVeil {
 }
 
 function New-Task6Document {
-    param([string]$Root, [switch]$Typing)
-    $path = Join-Path $Root $(if ($Typing) { 'typing.md' } else { 'startup.md' })
+    param([string]$Root, [switch]$Typing, [switch]$Dpi)
+    $path = Join-Path $Root $(if ($Typing) { 'typing.md' } elseif ($Dpi) { 'dpi.md' } else { 'startup.md' })
     if ($Typing) {
         $text = "# Task 6 typing`n`nExport base.`n"
+    } elseif ($Dpi) {
+        $text = @'
+# DPI 工艺验证
+
+中文正文与 English prose 同段混排，**加粗**、*斜体*、`inline_code` 应保持基线与字距稳定。段落的第二句用于检查 100/125/150/200% 下的行高、换行和标点位置。
+
+第二段包含较长的中文句子，用来观察段落间距与多行正文是否清晰；数字 1234567890 和符号，。！？（）不得彼此重叠。
+
+| 名称 | 中文内容 | 数值 |
+|---|---|---:|
+| 正文 | 四档缩放清晰可读 | 100 |
+| 表格 | 边框与文字不裁切 | 125 |
+| 混排 | CJK / ASCII | 200 |
+
+```rust
+fn dpi_surface(scale: f32) -> f32 {
+    let logical_px = 16.0;
+    logical_px * scale // 中文注释：代码长行不重叠
+}
+```
+
+## 行高与段距
+
+这一屏用于检查代码块之后的标题、正文和段距。滚动到底部时，状态栏、滚动条与最后一行必须完整可见，不能出现空白块或裁切。
+'@
     } else {
         # 与基线默认启动使用同一份 SAMPLE；仅改为 CLI 显式临时文档，杜绝会话恢复碰用户文档。
         $source = [IO.File]::ReadAllText((Join-Path $repoRoot 'crates\veil\src\lib.rs'))
@@ -1008,13 +1035,20 @@ function New-Task6Document {
 }
 
 function Start-Task6Process {
-    param([string]$Root, [string]$Name, [string]$DocPath, [string]$OutputDir)
+    param(
+        [string]$Root, [string]$Name, [string]$DocPath, [string]$OutputDir,
+        [ValidateSet('', 'light', 'dark')][string]$Theme = ''
+    )
     Assert-Task6NoVeil
     $veilHome = Join-Path $Root $Name
     $appData = Join-Path $veilHome 'AppData\Roaming'
     $localAppData = Join-Path $veilHome 'AppData\Local'
     $temp = Join-Path $veilHome 'Temp'
     New-Item -ItemType Directory -Path $appData, $localAppData, $temp -Force | Out-Null
+    if ($Theme) {
+        # VEIL_HOME 非空时产品优先读取 <VEIL_HOME>/config.toml，而非 APPDATA。
+        [IO.File]::WriteAllText((Join-Path $veilHome 'config.toml'), "mode = `"$Theme`"`n", [Text.UTF8Encoding]::new($false))
+    }
     $stdout = Join-Path $OutputDir "$Name.stdout.log"
     $stderr = Join-Path $OutputDir "$Name.stderr.log"
     $clock = [Diagnostics.Stopwatch]::StartNew()
@@ -1336,6 +1370,155 @@ function Invoke-Task6Input {
     return $visible.FirstVisibleUtc
 }
 
+function Invoke-Task6Dpi {
+    param([string]$Root, [string]$OutputDir, [string]$DocPath, [int]$ExpectedDpi)
+    if ($ExpectedDpi -notin @(100, 125, 150, 200)) {
+        throw 'Task 6 DPI 必须显式传 -ExpectedDpi 100|125|150|200；脚本不会猜测或修改系统缩放'
+    }
+    $utf8 = [Text.UTF8Encoding]::new($false)
+    $originalBytes = [IO.File]::ReadAllBytes($DocPath)
+    $originalText = $utf8.GetString($originalBytes)
+    $markedBytes = $utf8.GetBytes($originalText + 'DPITESTOK')
+    $expectedNativeDpi = [int][Math]::Round($ExpectedDpi * 96 / 100)
+    $dir = $null
+    $shots = @()
+    $actionRows = @()
+    $lightClosed = $false
+    $darkReady = $null
+
+    foreach ($theme in @('light', 'dark')) {
+        $launch = Start-Task6Process -Root $Root -Name "dpi-$theme-home" -DocPath $DocPath -OutputDir $OutputDir -Theme $theme
+        $visible = Wait-Task6VisibleWindow -Launch $launch -TimeoutMs $WindowWaitMs
+        Start-Sleep -Milliseconds 800
+        $hwnd = $visible.Hwnd
+        $nativeDpi = [int][VeilWalkthrough.Win32]::GetDpiForWindow($hwnd)
+        $actualPercent = [int][Math]::Round($nativeDpi * 100 / 96)
+        if ($nativeDpi -ne $expectedNativeDpi -or $actualPercent -ne $ExpectedDpi) {
+            throw "Task 6 DPI FAIL：用户确认=$ExpectedDpi%，实际窗口 DPI=$nativeDpi ($actualPercent%)，期望=$expectedNativeDpi"
+        }
+        if ($null -eq $dir) {
+            $dir = Join-Path $OutputDir "dpi-$actualPercent"
+            New-Item -ItemType Directory -Path $dir -Force | Out-Null
+        }
+        Write-Log 'PASS' "真实窗口 DPI=$nativeDpi ($actualPercent%) theme=$theme PID=$($launch.Process.Id)"
+
+        foreach ($view in @('top', 'bottom')) {
+            if ($view -eq 'bottom') { Send-Task6Keys -Hwnd $hwnd -Keys '^{END}' }
+            $path = Join-Path $dir "$theme-$view.png"
+            Save-WindowScreenshot -Hwnd $hwnd -Path $path | Out-Null
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "Task 6 DPI 截图失败：$path" }
+            $shots += [pscustomobject]@{
+                theme = $theme; view = $view; dpi = $nativeDpi; dpi_percent = $actualPercent
+                path = $path; sha256 = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
+            }
+            if ($view -eq 'bottom') { Send-Task6Keys -Hwnd $hwnd -Keys '^{HOME}' }
+        }
+
+        if ($theme -eq 'light') {
+            # 与既有 input 取证一致：先真实点击正文建立编辑器焦点；这是准备步骤，不计入 40 动作。
+            Send-RealClick -Hwnd $hwnd -X ([int](320 * $nativeDpi / 96)) -Y ([int](260 * $nativeDpi / 96))
+            $actions = [Collections.Generic.List[object]]::new()
+            $actions.Add(@{ name = 'caret-end'; keys = '^{END}'; expect = '' })
+            foreach ($char in [char[]]'DPITESTOK') {
+                $actions.Add(@{ name = "type-$char"; keys = [string]$char; expect = '' })
+            }
+            $actions.Add(@{ name = 'ime-commit'; keys = '{ENTER}'; expect = '' })
+            $actions.Add(@{ name = 'save-marked'; keys = '^s'; expect = 'marked' })
+            $actions.Add(@{ name = 'undo-insert'; keys = '^z'; expect = '' })
+            $actions.Add(@{ name = 'save-original'; keys = '^s'; expect = 'original' })
+            $actions.Add(@{ name = 'redo-insert'; keys = '^+z'; expect = '' })
+            $actions.Add(@{ name = 'save-marked'; keys = '^s'; expect = 'marked' })
+            foreach ($n in 1..9) { $actions.Add(@{ name = "backspace-$n"; keys = '{BACKSPACE}'; expect = '' }) }
+            $actions.Add(@{ name = 'save-original'; keys = '^s'; expect = 'original' })
+            $actions.Add(@{ name = 'undo-delete'; keys = '^z'; expect = '' })
+            $actions.Add(@{ name = 'save-marked'; keys = '^s'; expect = 'marked' })
+            $actions.Add(@{ name = 'undo-insert'; keys = '^z'; expect = '' })
+            $actions.Add(@{ name = 'save-original'; keys = '^s'; expect = 'original' })
+            $actions.Add(@{ name = 'find-open'; keys = '^f'; expect = '' })
+            $actions.Add(@{ name = 'find-query'; keys = 'DPI'; expect = '' })
+            $actions.Add(@{ name = 'find-next'; keys = '{ENTER}'; expect = '' })
+            $actions.Add(@{ name = 'find-close'; keys = '{ESC}'; expect = '' })
+            $actions.Add(@{ name = 'quick-open'; keys = '^p'; expect = '' })
+            $actions.Add(@{ name = 'quick-close'; keys = '{ESC}'; expect = '' })
+            $actions.Add(@{ name = 'settings-open'; keys = '^,'; expect = '' })
+            $actions.Add(@{ name = 'settings-close'; keys = '{ESC}'; expect = '' })
+            $actions.Add(@{ name = 'zoom-reset'; keys = '^0'; expect = '' })
+            $actions.Add(@{ name = 'save-final'; keys = '^s'; expect = 'original' })
+            if ($actions.Count -ne 40) { throw "Task 6 脚本失败：DPI 动作定义=$($actions.Count)，必须恰好 40" }
+
+            for ($i = 0; $i -lt $actions.Count; $i++) {
+                $action = $actions[$i]
+                if ($action.name -like 'type-*') {
+                    Send-Task6Text -Hwnd $hwnd -Text $action.keys
+                } else {
+                    Send-Task6Keys -Hwnd $hwnd -Keys $action.keys
+                }
+                if ($i -eq 10) {
+                    Save-WindowScreenshot -Hwnd $hwnd -Path (Join-Path $dir 'light-marked.png') | Out-Null
+                }
+                $launch.Process.Refresh()
+                if ($launch.Process.HasExited -or -not $launch.Process.Responding) {
+                    throw "Task 6 DPI 产品 FAIL：动作 $($i + 1)/40 $($action.name) 后进程退出或无响应"
+                }
+                $row = [pscustomobject]@{
+                    index = $i + 1; name = $action.name; keys = $action.keys
+                    dpi = $nativeDpi; dpi_percent = $actualPercent; responding = $true
+                    byte_assertion = $action.expect; expected_sha256 = ''; actual_sha256 = ''; pass = $true
+                }
+                if ($action.expect) {
+                    $expected = if ($action.expect -eq 'marked') { $markedBytes } else { $originalBytes }
+                    $saved = Wait-Task6FileBytes -Path $DocPath -Expected $expected
+                    $row.expected_sha256 = $saved.ExpectedSHA256
+                    $row.actual_sha256 = $saved.SHA256
+                    Write-Log 'PASS' "DPI=$actualPercent 动作 $($i + 1)/40 字节断言=$($action.expect) SHA256=$($saved.SHA256)"
+                }
+                $actionRows += $row
+                Write-Log 'PASS' "DPI=$actualPercent 动作 $($i + 1)/40 $($action.name) responding=True"
+            }
+            $final = Wait-Task6FileBytes -Path $DocPath -Expected $originalBytes
+            $path = Join-Path $dir 'light-final.png'
+            Save-WindowScreenshot -Hwnd $hwnd -Path $path | Out-Null
+            $shots += [pscustomobject]@{
+                theme = 'light'; view = 'final'; dpi = $nativeDpi; dpi_percent = $actualPercent
+                path = $path; sha256 = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
+            }
+            $actionRows | Export-Csv -LiteralPath (Join-Path $dir 'actions-40.csv') -NoTypeInformation -Encoding utf8
+            Close-Task6Process -Process $launch.Process -ReadySince $visible.FirstVisibleUtc | Out-Null
+            $lightClosed = $true
+        } else {
+            $darkReady = $visible.FirstVisibleUtc
+        }
+    }
+
+    foreach ($view in @('top', 'bottom')) {
+        $light = @($shots | Where-Object { $_.theme -eq 'light' -and $_.view -eq $view })[0]
+        $dark = @($shots | Where-Object { $_.theme -eq 'dark' -and $_.view -eq $view })[0]
+        if ($null -eq $light -or $null -eq $dark -or $light.sha256 -eq $dark.sha256) {
+            throw "Task 6 DPI FAIL：theme=$view 双主题截图缺失或字节完全相同，主题夹具未生效"
+        }
+    }
+    if ($actionRows.Count -ne 40 -or @($actionRows | Where-Object { -not $_.pass }).Count -ne 0) {
+        throw "Task 6 DPI FAIL：动作证据不完整 count=$($actionRows.Count)"
+    }
+    $shots | Export-Csv -LiteralPath (Join-Path $dir 'screenshots.csv') -NoTypeInformation -Encoding utf8
+    $summary = [ordered]@{
+        status = 'PASS'; dpi = $expectedNativeDpi; dpi_percent = $ExpectedDpi
+        expected_dpi = $expectedNativeDpi; expected_dpi_percent = $ExpectedDpi
+        action_count = $actionRows.Count; all_actions_responding = $true
+        final_document_sha256 = (Get-FileHash -LiteralPath $DocPath -Algorithm SHA256).Hash
+        original_document_sha256 = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($originalBytes))
+        light_normal_close = $lightClosed; screenshots = $shots.Count; distinct_theme_screenshots = $true
+        actions_csv = (Join-Path $dir 'actions-40.csv'); screenshots_csv = (Join-Path $dir 'screenshots.csv')
+        visual_review = 'NOT RUN — 由截图分析另行填写'
+        normal_close = $false; temp_root_removed = $false
+    }
+    $summaryPath = Join-Path $dir 'summary.json'
+    $script:task6SummaryPaths += $summaryPath
+    $summary | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $summaryPath -Encoding utf8
+    Write-Log 'PASS' "DPI=$ExpectedDpi% 双主题截图=$($shots.Count)，40/40 动作响应且最终文档逐字节复原"
+    return $darkReady
+}
+
 function Get-Task6PercentileInc {
     param([double[]]$Values, [double]$Percent)
     $sorted = @($Values | Sort-Object)
@@ -1446,13 +1629,14 @@ if ($EvidenceMode) {
         New-Item -ItemType Directory -Path $script:task6Root -Force | Out-Null
         Write-Log 'INFO' "Task 6 mode=$EvidenceMode 临时根=$script:task6Root；真实用户配置和文档不作为输入"
         Write-Task6Artifact -Root $ShotDir
-        $task6Doc = New-Task6Document -Root $script:task6Root -Typing:($EvidenceMode -eq 'input')
+        $task6Doc = New-Task6Document -Root $script:task6Root -Typing:($EvidenceMode -eq 'input') -Dpi:($EvidenceMode -eq 'dpi')
         Write-FileDigest -Path $task6Doc -Phase 'Task 6 临时文档启动前'
         $readySince = $null
         switch ($EvidenceMode) {
             'startup' { $readySince = Invoke-Task6Startup -Root $script:task6Root -OutputDir $ShotDir -DocPath $task6Doc }
             'input' { $readySince = Invoke-Task6Input -Root $script:task6Root -OutputDir $ShotDir -DocPath $task6Doc }
             'd1' { Invoke-Task6D1 -Root $script:task6Root -OutputDir $ShotDir -DocPath $task6Doc -Runs $ColdRuns }
+            'dpi' { $readySince = Invoke-Task6Dpi -Root $script:task6Root -OutputDir $ShotDir -DocPath $task6Doc -ExpectedDpi $ExpectedDpi }
         }
         if ($null -ne $readySince) {
             Close-Task6Process -Process $script:task6Process -ReadySince $readySince | Out-Null

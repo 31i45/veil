@@ -253,9 +253,9 @@ fn replace_paths(text: &str) -> String {
 
 /// 若 `chars[i]` 是路径/`file:` URL 起点，返回片段结束下标（不含）。
 ///
-/// 不做词边界检查：中文前缀、冒号、全角括号之后同样识别。只有盘符与 `file:`
-/// 需要排除「前一个字符是 ASCII 字母数字」的情形，避免把 `https://` 的 `s:/`
-/// 或 `profile:` 之类的普通单词误判成路径。
+/// 不做词边界检查：中文前缀、冒号、全角括号之后同样识别。`X:\` 在任何位置
+/// 都识别；`X:/` 只排除已知 URL scheme（`https://`、`ftp://` 等）与
+/// `profile:` 之类的普通单词前缀，其余仍按盘符处理。
 fn path_end(chars: &[char], i: usize) -> Option<usize> {
     if let Some(end) = file_url_end(chars, i) {
         return Some(end);
@@ -269,13 +269,13 @@ fn path_end(chars: &[char], i: usize) -> Option<usize> {
 /// 是否为本机绝对路径起点：盘符、UNC、裸用户目录或 POSIX 根目录。
 fn starts_absolute_path(chars: &[char], i: usize) -> bool {
     let c = chars[i];
-    let at_word_start = i == 0 || !chars[i - 1].is_ascii_alphanumeric();
     // 盘符：ASCII 字母 + ':' + '\\' 或 '/'（如 `C:\`、`d:/`）。
-    if at_word_start
-        && c.is_ascii_alphabetic()
-        && chars.get(i + 1) == Some(&':')
-        && matches!(chars.get(i + 2), Some('\\') | Some('/'))
-    {
+    // 反斜杠形式不要求词边界（`openC:\Secret\a.md` 也要脱敏）。
+    if is_ascii_drive(chars, i, '\\') {
+        return true;
+    }
+    // 正斜杠形式同样不要求词边界，但要排除 URL scheme（`https://`、`ftp://`）。
+    if is_ascii_drive(chars, i, '/') && !word_ending_here_is_url_scheme(chars, i) {
         return true;
     }
     // UNC：连续两个反斜杠（含 `\\?\C:\...` 与 `\\server\share\...`）。
@@ -322,11 +322,11 @@ fn starts_absolute_path(chars: &[char], i: usize) -> bool {
 /// - `/` 后是空白的除法/分隔写法（`a / b`）；
 /// - 只有一个 `/` 的相对路径（`docs/readme.md`）。
 fn starts_generic_posix_path(chars: &[char], i: usize) -> bool {
-    // `://` 的首个斜杠、以及 `//` 的第二个斜杠都不是路径起点。
-    if i > 0 && matches!(chars[i - 1], ':' | '/') {
+    // `//` 的第二个斜杠不是路径起点；冒号后仍按路径处理（`路径:/a/b`）。
+    if i > 0 && chars[i - 1] == '/' {
         return false;
     }
-    // 同一 token 内出现 `://` 说明这是 URL，后续斜杠属于 URL 路径。
+    // 同一 token 内出现 `://` 说明这是 URL，其斜杠属于 URL 路径。
     if token_contains_url_scheme(chars, i) {
         return false;
     }
@@ -342,14 +342,44 @@ fn starts_generic_posix_path(chars: &[char], i: usize) -> bool {
         .any(|c| *c == '/')
 }
 
-/// 当前位置之前的同一 token（空白/硬终止符分隔）内是否含 `://`。
+/// 当前位置所在的同一 token（空白/硬终止符分隔）内是否含 `://`。
+/// 需要看 `/` 两侧，才能同时覆盖 `https://` 的首个与后续斜杠。
 fn token_contains_url_scheme(chars: &[char], i: usize) -> bool {
-    let start = (0..i)
-        .rev()
-        .take_while(|&k| !chars[k].is_whitespace() && !is_hard_terminator(chars[k]))
-        .last()
-        .unwrap_or(i);
-    chars[start..i].windows(3).any(|w| w == [':', '/', '/'])
+    let mut start = i;
+    while start > 0 && !chars[start - 1].is_whitespace() && !is_hard_terminator(chars[start - 1]) {
+        start -= 1;
+    }
+    let mut end = i;
+    while end + 1 < chars.len()
+        && !chars[end + 1].is_whitespace()
+        && !is_hard_terminator(chars[end + 1])
+    {
+        end += 1;
+    }
+    chars[start..=end].windows(3).any(|w| w == [':', '/', '/'])
+}
+
+/// 是否是 `X:` + 指定分隔符（`\` 或 `/`）的盘符前缀。
+fn is_ascii_drive(chars: &[char], i: usize, sep: char) -> bool {
+    chars[i].is_ascii_alphabetic()
+        && chars.get(i + 1) == Some(&':')
+        && chars.get(i + 2) == Some(&sep)
+}
+
+/// 以 `i` 结尾的连续 ASCII 字母单词是否属于已知 URL scheme。
+/// `i` 是盘符字母，因此 `https://` 检查的是 `https`、`ftp://` 是 `ftp`。
+fn word_ending_here_is_url_scheme(chars: &[char], i: usize) -> bool {
+    const SCHEMES: [&str; 10] = [
+        "http", "https", "ftp", "ftps", "ws", "wss", "file", "mailto", "tel", "data",
+    ];
+    let mut start = i;
+    while start > 0 && chars[start - 1].is_ascii_alphabetic() {
+        start -= 1;
+    }
+    let word: String = chars[start..=i].iter().collect();
+    SCHEMES
+        .iter()
+        .any(|scheme| word.eq_ignore_ascii_case(scheme))
 }
 
 /// `file:` URL 的结束下标；`file:` 后必须真的跟着本机路径，否则不替换。
@@ -545,6 +575,13 @@ mod tests {
             ("/custom/root/file", "<path>"),
             ("/a/b", "<path>"),
             ("打开/data/app/x失败", "打开<path>失败"),
+            // 冒号后仍是路径（不再因为前一字符是 `:` 而跳过）。
+            ("路径:/a/b", "路径:<path>"),
+            ("路径:/etc/passwd", "路径:<path>"),
+            ("路径:/data/app/x", "路径:<path>"),
+            // 无分隔的盘符路径：反斜杠与正斜杠都要识别。
+            (r"openC:\Secret\a.md", "open<path>"),
+            ("openC:/work/a.md", "open<path>"),
             // file: URL 的各种写法（含盘符、UNC 与 Unix 根）。
             ("file:///C:/Users/alice/a.md", "<path>"),
             (r"file://C:\Users\alice\a.md", "<path>"),
@@ -583,6 +620,19 @@ mod tests {
                 "输出残留盘符前缀：{out}（输入：{input}）"
             );
         }
+
+        // 冒号后 POSIX 路径与无分隔盘符路径不得残留路径片段。
+        for (input, forbidden) in [
+            ("路径:/etc/passwd", "etc"),
+            (r"openC:\Secret\a.md", "Secret"),
+            ("openC:/work/a.md", "work/a"),
+        ] {
+            let out = redact(input);
+            assert!(
+                !out.contains(forbidden),
+                "输出残留 `{forbidden}`：{out}（输入：{input}）"
+            );
+        }
     }
 
     #[test]
@@ -607,6 +657,7 @@ mod tests {
             redact("http://example.com/path/to/a.md"),
             "http://example.com/path/to/a.md"
         );
+        assert_eq!(redact("ftp://x/y"), "ftp://x/y");
         assert_eq!(redact("file: notes.txt"), "file: notes.txt");
         assert_eq!(redact("docs/readme.md"), "docs/readme.md");
         assert_eq!(redact("a / b"), "a / b");

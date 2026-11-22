@@ -1515,6 +1515,46 @@ mod tests {
         assert_eq!(e.apply(Intent::Undo), None);
     }
 
+    /// 输入保真审计：键击、换行、粘贴、选区替换、IME、光标移动交错后，
+    /// 全部撤销必须逐字节回到初始值，全部重做必须回到终态。
+    #[test]
+    fn mixed_edit_sequence_is_fully_reversible() {
+        let initial = "# 标题\r\n\r\n第一段 alpha beta\r\n\r\n- 项目一\r\n- 项目二\r\n";
+        let mut e = Editor::new(initial);
+        assert!(e.set_caret(initial.len()));
+
+        e.apply(Intent::InsertText("\r\n尾部".into())).unwrap();
+        e.apply(Intent::MoveDocStart).unwrap();
+        e.apply(Intent::SelectWordRight).unwrap();
+        e.apply(Intent::InsertText("替换".into())).unwrap();
+        e.apply(Intent::Newline).unwrap();
+        e.apply(Intent::InsertText("新行 a".into())).unwrap();
+        e.apply(Intent::MoveDocEnd).unwrap();
+        e.apply(Intent::InsertText(" 粘贴\t中文".into())).unwrap();
+        e.set_preedit("zhong".into(), Some((0, 5)));
+        e.commit_ime("中".into());
+        e.apply(Intent::MoveLeft).unwrap();
+        e.apply(Intent::DeleteBackward).unwrap();
+
+        let end = e.session().serialize();
+        assert_ne!(end, initial, "序列必须真的改变文档");
+        let mut undone = 0;
+        while e.apply(Intent::Undo).is_some() {
+            undone += 1;
+            assert!(undone <= 1000, "撤销不得无限循环");
+            assert!(e.caret() <= e.session().text_len());
+        }
+        assert_eq!(e.session().serialize(), initial, "全撤销逐字节回初始");
+
+        let mut redone = 0;
+        while e.apply(Intent::Redo).is_some() {
+            redone += 1;
+            assert!(redone <= 1000, "重做不得无限循环");
+            assert!(e.caret() <= e.session().text_len());
+        }
+        assert_eq!(e.session().serialize(), end, "全重做逐字节回终态");
+    }
+
     #[test]
     fn set_caret_rejects_non_boundary() {
         let mut e = Editor::new("中");

@@ -1199,13 +1199,26 @@ Add-Line ''
 Add-Line '- 许可证：MIT'
 Add-Line ('- 来源：' + $QuickJsNote + '；QuickJS 源码经 Rust 依赖 `rquickjs` 编译进 `veil.exe`')
 Add-Line '- 版本：bundled（由 rquickjs-sys 随 crate 固定，具体版本见 Cargo.lock）'
+if ($QuickJsPackage) {
+  $quickJsCrateLicense = if ([string]::IsNullOrWhiteSpace($QuickJsPackage.license)) { '未声明' } else { $QuickJsPackage.license }
+  $quickJsCrateRepository = if ([string]::IsNullOrWhiteSpace($QuickJsPackage.repository)) { '未声明' } else { $QuickJsPackage.repository }
+  Add-Line '- `rquickjs-sys` crate 元数据：'
+  Add-Line ("  - 版本：{0}" -f $QuickJsPackage.version)
+  Add-Line ("  - 许可证：{0}" -f $quickJsCrateLicense)
+  Add-Line ("  - repository：{0}" -f $quickJsCrateRepository)
+  Add-Line ("  - authors：{0}" -f (Format-Authors -Authors $QuickJsPackage.authors))
+}
 if ($QuickJsCopyright.Count -gt 0) {
   Add-Line ("- 版权行（原文引自 {0}）：" -f $QuickJsLicenseNote)
   Add-Line ''
   foreach ($line in $QuickJsCopyright) { Add-Line ('  ' + $line.Trim()) }
   Add-Line ''
+  Add-Line '- 该 crate 以 MIT 分发，捆绑 QuickJS；上述 QuickJS 版权行来自其内置 LICENSE。'
   Add-Line '- 上游项目：https://bellard.org/quickjs/'
 } else {
+  if ($QuickJsPackage) {
+    Add-Line '- 该 crate 以 MIT 分发，捆绑 QuickJS；其内置 LICENSE 未在本地 crate 源目录中找到。'
+  }
   Add-Line '- 版权行：上游未在随仓库产物中附带版权行；适用 MIT，版权归属以上游发布为准（https://bellard.org/quickjs/）。'
 }
 Add-Line ''

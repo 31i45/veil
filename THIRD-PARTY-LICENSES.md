@@ -454,6 +454,11 @@ cytoscape/dist/cytoscape.esm.mjs:
 - 许可证：MIT
 - 来源：经 rquickjs-sys 0.9.0 捆绑；QuickJS 源码经 Rust 依赖 `rquickjs` 编译进 `veil.exe`
 - 版本：bundled（由 rquickjs-sys 随 crate 固定，具体版本见 Cargo.lock）
+- `rquickjs-sys` crate 元数据：
+  - 版本：0.9.0
+  - 许可证：MIT
+  - repository：https://github.com/DelSkayn/rquickjs.git
+  - authors：Mees Delzenne (mees.delzenne@gmail.com)
 - 版权行（原文引自 `rquickjs-sys 0.9.0/quickjs/LICENSE`（cargo registry 源目录））：
 
   Copyright (c) 2017-2021 Fabrice Bellard
@@ -461,6 +466,7 @@ cytoscape/dist/cytoscape.esm.mjs:
   Copyright (c) 2023 Ben Noordhuis
   Copyright (c) 2023 Saúl Ibarra Corretgé
 
+- 该 crate 以 MIT 分发，捆绑 QuickJS；上述 QuickJS 版权行来自其内置 LICENSE。
 - 上游项目：https://bellard.org/quickjs/
 
 ## 许可证全文

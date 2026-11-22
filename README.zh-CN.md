@@ -170,7 +170,7 @@ pwsh -File tools/smoke_launch.ps1 -ExePath target/release/veil.exe -ExpectedTitl
 
 ## 数字红线（目标值与实测）
 
-发布构建、探针串行；最终性能/体积行绑定 2026-11-21 最终发布产物（commit `0d229eb`，`veil.exe` 14,012,928 B，SHA-256 `FF23C4D9…DD25D0`）；其余行保留原测量日期。命令：`cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo run --release -p veil --example bench_typing`、`cargo test -p veil-ui --release --lib -- --ignored --nocapture --test-threads=1 perf_20k_blocks`、`cargo build --release -p veil` + `(Get-Item target\release\veil.exe).Length`，依赖计数用 `cargo tree -p veil --edges normal --prefix none`。方法与明细见 `docs/review/keystroke-attribution.md`。
+发布构建、探针串行；最终性能行绑定最终发布产物（commit `0d229eb`），其余行保留原测量日期。当前产物大小与 SHA-256 以 Release 页和随包 `veil.exe.sha256` 为准，请勿用本表数字核验。命令：`cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo run --release -p veil --example bench_typing`、`cargo test -p veil-ui --release --lib -- --ignored --nocapture --test-threads=1 perf_20k_blocks`、`cargo build --release -p veil` + `(Get-Item target\release\veil.exe).Length`，依赖计数用 `cargo tree -p veil --edges normal --prefix none`。方法与明细见 `docs/review/keystroke-attribution.md`。
 
 | 指标 | 目标值 | 实测 |
 |---|---|---|
@@ -181,7 +181,7 @@ pwsh -File tools/smoke_launch.ps1 -ExePath target/release/veil.exe -ExpectedTitl
 | 冷启动（窗口句柄口径；P2 对比口径） | — | 30 ms（2026-10-30，`tools/bench/measure.ps1`） |
 | 10 万字文档击键→提交上屏延迟 p95 | ≤ 16 ms | p50 2.231–2.268 ms · p95 2.556–2.615 ms · max ≤3.468 ms（`perf_20k_blocks` 21,000 块 / 300 样本，2 次，最终 exe 2026-11-21 commit `0d229eb`；最差 p95 2.615 ms ≤ 16 ms。早期 10k 记录：0.973 / 1.566 ms）✅ |
 | 10 万字文档常驻内存（私有工作集） | ≤ 150 MB | 40.76 MB（20 页深滚动后 WorkingSet，2026-11-05 实测） |
-| 安装产物体积 — 合计单文件 `veil.exe` | ≤ 14 MiB = 14,680,064 B | 13.36 MiB = 14,012,928 B（2026-11-21 最终发布产物，commit `0d229eb`，SHA-256 `FF23C4D9…DD25D0`；单一产物：离线 Mermaid 引擎 + 完整 `mermaid.js` + resvg，引擎惰性初始化） |
+| 安装产物体积 — 合计单文件 `veil.exe` | ≤ 14 MiB = 14,680,064 B | 以 Release 页与随包 `veil.exe.sha256` 为准（每个构建单独发布，不在本表重复；单一产物：离线 Mermaid 引擎 + 完整 `mermaid.js` + resvg，引擎惰性初始化） |
 | `veil-core` 单元+属性测试数 | ≥ 80 | 347 |
 | e2e 断言数 | ≥ 20 | 41（3 个 e2e_ 场景测试：写作闭环打开→保存→重开、表格+图片粘贴落盘、查找替换→崩溃恢复→自清）✅ |
 | Markdown 往返一致率（无编辑时输出 == 输入字节；按字节比较） | 100% | 100% |
@@ -201,6 +201,8 @@ pwsh -File tools/smoke_launch.ps1 -ExePath target/release/veil.exe -ExpectedTitl
 | 常驻内存（进程树求和） | 21.51 MB | 365.01 MB | **17.0×** |
 | 安装产物体积 | 5.46 MB | 488.95 MB | **89.6×** |
 | 冷启动（窗口句柄口径） | 30 ms | 30 ms | 打平（该口径系统性偏袒 Electron，见报告 §3） |
+
+以上为 2026-10-30 的历史测量值；当前产物请以 Release 页与随包 `veil.exe.sha256` 为准。
 
 依赖黑名单：`tokio`、`wasmtime`、一切 webview crate（`webview2-com`/`wry` 等），引入即视为违规。
 

@@ -170,7 +170,7 @@ The window budget is **1 second**: `-MaxLaunchMs` (default 1000) measures proces
 
 ## Red Numbers (targets vs measured)
 
-Measured on release build, probe-serialized; final performance/size rows bound to the 2026-11-21 final release build (commit `0d229eb`, `veil.exe` 14,012,928 B, SHA-256 `FF23C4D9…DD25D0`); earlier rows retain their original measurement dates. Commands: `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo run --release -p veil --example bench_typing`, `cargo test -p veil-ui --release --lib -- --ignored --nocapture --test-threads=1 perf_20k_blocks`, `cargo build --release -p veil` + `(Get-Item target\release\veil.exe).Length`, and `cargo tree -p veil --edges normal --prefix none` for dependency counts. Keystroke attribution detail in `docs/review/keystroke-attribution.md`.
+Measured on release build, probe-serialized; final performance rows are bound to the final release build (commit `0d229eb`), and earlier rows retain their original measurement dates. The current artifact size and SHA-256 are published on the Release page and in the bundled `veil.exe.sha256`; verify against those rather than any figure quoted here. Commands: `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo run --release -p veil --example bench_typing`, `cargo test -p veil-ui --release --lib -- --ignored --nocapture --test-threads=1 perf_20k_blocks`, `cargo build --release -p veil` + `(Get-Item target\release\veil.exe).Length`, and `cargo tree -p veil --edges normal --prefix none` for dependency counts. Keystroke attribution detail in `docs/review/keystroke-attribution.md`.
 
 | Metric | Target | Measured |
 |---|---|---|
@@ -181,7 +181,7 @@ Measured on release build, probe-serialized; final performance/size rows bound t
 | Cold start (window handle; P2 comparison definition) | — | 30 ms (2026-10-30, `tools/bench/measure.ps1`) |
 | Keystroke→commit p95 on 100 K-word doc | ≤ 16 ms | p50 2.231–2.268 ms · p95 2.556–2.615 ms · max ≤3.468 ms (`perf_20k_blocks` 21,000 blocks / 300 samples, 2 runs, final exe 2026-11-21 commit `0d229eb`; worst p95 2.615 ms ≤ 16 ms. Earlier 10k record: 0.973 / 1.566 ms) ✅ |
 | Resident memory, 100 K-word doc (private working set) | ≤ 150 MB | 40.76 MB (2026-11-05) |
-| Installed size — total single-file `veil.exe` | ≤ 14 MiB = 14,680,064 B | 13.36 MiB = 14,012,928 B (2026-11-21 final release build, commit `0d229eb`, SHA-256 `FF23C4D9…DD25D0`; single product: offline Mermaid engine + full `mermaid.js` + resvg, lazy-initialised) |
+| Installed size — total single-file `veil.exe` | ≤ 14 MiB = 14,680,064 B | Published per build on the Release page and in the bundled `veil.exe.sha256`; not duplicated here (single product: offline Mermaid engine + full `mermaid.js` + resvg, lazy-initialised) |
 | `veil-core` unit + property tests | ≥ 80 | 347 |
 | E2E assertions | ≥ 20 | 41 (3 e2e scenarios: open→save→reopen, table+image paste, find/replace→crash recovery→self-clean) ✅ |
 | Markdown roundtrip (no edits: output == input bytes; byte comparison) | 100% | 100% |
@@ -201,6 +201,8 @@ Corpus & scripts reproducible: generate the corpus with `tools/bench/gen_corpus.
 | Resident memory (process tree sum) | 21.51 MB | 365.01 MB | **17.0×** |
 | Installed size | 5.46 MB | 488.95 MB | **89.6×** |
 | Cold start (window-handle definition) | 30 ms | 30 ms | Tie (this definition favors Electron; see §3 of the report) |
+
+These figures are historical measurements from 2026-10-30; for the current artifact, use the Release page and the bundled `veil.exe.sha256`.
 
 Dependency blacklist: `tokio`, `wasmtime`, any webview crate (`webview2-com`/`wry`, etc.). Introducing any of these is a violation.
 

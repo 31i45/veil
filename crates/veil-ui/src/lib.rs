@@ -17,6 +17,7 @@ mod anim;
 mod app;
 mod autosave;
 mod chrome;
+pub mod diag;
 mod docio;
 mod document;
 mod editor;

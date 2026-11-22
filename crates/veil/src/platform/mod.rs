@@ -4,6 +4,7 @@
 
 mod assoc;
 mod clock;
+pub mod diag; // 崩溃取证（P0-1）：panic hook + 报告原子落盘
 mod error;
 pub mod http; // 远程图片抓取（v1.4）：WinHTTP 手写 FFI
 pub mod ipc;

@@ -10,6 +10,7 @@ mod platform;
 // —— 机制层公开入口：供集成测试直接访问 ——
 // svg_to_bitmap 是离线渲染与导出的共同光栅化接缝，保持公开以便集成测试验证
 // SVG → 位图。
+pub use platform::diag;
 pub use platform::mermaid::svg_to_bitmap;
 
 use std::path::{Path, PathBuf};
@@ -54,6 +55,10 @@ fn load_document(path: &Path) -> Result<(String, bool), platform::OpenFailure> {
 }
 
 pub fn run() {
+    // 诊断内核必须最早初始化：早于 /register、CLI 解析与 UI 初始化。
+    // release 下 panic = "abort"，但 hook 仍先执行，任何早期崩溃都能取证。
+    diag::install();
+    veil_ui::diag::record("app", "run start");
     let raw_args: Vec<String> = std::env::args().skip(1).collect();
     // `/register`、`/unregister`（C2/D7②）：只有显式开关才碰注册表。
     if let Some(cmd) = raw_args

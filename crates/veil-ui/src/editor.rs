@@ -260,12 +260,16 @@ impl Editor {
     }
 
     /// 空串视为组合结束（部分 IME 以空 preedit 收尾）。
+    /// 组合开始处断开撤销分组：上屏不得并入上屏前的键入。
     pub fn set_preedit(&mut self, text: String, cursor: Option<(usize, usize)>) {
-        self.preedit = if text.is_empty() {
-            None
-        } else {
-            Some(Preedit { text, cursor })
-        };
+        if text.is_empty() {
+            self.preedit = None;
+            return;
+        }
+        if self.preedit.is_none() {
+            self.session.break_undo_group();
+        }
+        self.preedit = Some(Preedit { text, cursor });
     }
 
     pub fn clear_preedit(&mut self) {
@@ -294,8 +298,12 @@ impl Editor {
     }
 
     /// IME 提交：插文本 + 清 preedit，一次完成，保证 commit 永不落入组合态残留。
+    /// 空串是部分 IME 的合法收尾事件，必须严格无操作（不置脏、不替换选区）。
     pub fn commit_ime(&mut self, text: String) -> Vec<BlockId> {
         self.preedit = None;
+        if text.is_empty() {
+            return Vec::new();
+        }
         self.apply(Intent::InsertText(text)).unwrap_or_default()
     }
 

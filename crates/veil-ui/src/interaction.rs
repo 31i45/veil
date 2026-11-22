@@ -202,8 +202,10 @@ impl App {
     /// IME 组合串：唯一存储在 `Editor`，落点由 `TextSink` 决定绘制位置
     /// （文档行内 / 查找栏）。组合期按键由 `route` 让给 IME。
     pub(crate) fn ime_preedit(&mut self, text: String, cursor: Option<(usize, usize)>) {
-        if self.ui_state.modal.is_some() || self.mode() == Mode::History {
-            return; // 模态独占输入；只读预览不显示组合串
+        if self.ui_state.modal.is_some() || matches!(self.mode(), Mode::Menu | Mode::History) {
+            // 模态独占输入；菜单/只读预览不挂组合串（避免切走后残留下划线）。
+            self.editor.clear_preedit();
+            return;
         }
         self.editor.set_preedit(text, cursor);
         self.request_redraw();
@@ -228,7 +230,9 @@ impl App {
             }
             TextSink::Doc => {
                 if matches!(self.mode(), Mode::Menu | Mode::History) {
-                    return; // 菜单/版本历史：吞掉输入，预览保持只读
+                    // 菜单/版本历史：吞掉输入，预览保持只读；组合态一并收掉。
+                    self.editor.clear_preedit();
+                    return;
                 }
                 // IME 提交同样属于输入活跃：候选框落字后光标不应继续藏着。
                 self.note_caret_activity();

@@ -930,6 +930,114 @@ fn ime_commit_follows_text_sink() {
 }
 
 #[test]
+fn ime_commit_is_separate_undo_step_after_typing() {
+    let store = MemStore::default();
+    let mut a = app("", None, false, &store);
+    a.ensure_layouts_all();
+    for ch in ["a", "b", "c"] {
+        let dirty = a.editor.apply(Intent::InsertText(ch.into())).unwrap();
+        a.after_edit(dirty);
+    }
+    assert_eq!(a.editor.session().undo_depth(), 1, "连续键入合成一步");
+
+    a.ime_preedit("zhongzhong".into(), Some((0, 10)));
+    a.ime_commit("中".into());
+    assert_eq!(doc_text(&a), "abc中");
+    assert_eq!(
+        a.editor.session().undo_depth(),
+        2,
+        "上屏必须另起一步，不得并入键入"
+    );
+
+    let dirty = a.editor.apply(Intent::Undo).unwrap();
+    a.after_edit(dirty);
+    assert_eq!(doc_text(&a), "abc", "一次撤销精确回到上屏前");
+    let dirty = a.editor.apply(Intent::Undo).unwrap();
+    a.after_edit(dirty);
+    assert_eq!(doc_text(&a), "", "第二次撤销才回退键入");
+}
+
+#[test]
+fn ime_multichar_commit_is_single_undo_step() {
+    let store = MemStore::default();
+    let mut a = app("abc", None, false, &store);
+    a.ensure_layouts_all();
+    a.editor.apply(Intent::MoveDocEnd).unwrap();
+
+    a.ime_preedit("zhongwen".into(), Some((0, 8)));
+    a.ime_commit("中文".into());
+    assert_eq!(doc_text(&a), "abc中文");
+
+    let dirty = a.editor.apply(Intent::Undo).unwrap();
+    a.after_edit(dirty);
+    assert_eq!(doc_text(&a), "abc", "多字符上屏也是一步可撤销");
+}
+
+#[test]
+fn empty_ime_commit_is_noop_with_clean_document() {
+    let store = MemStore::default();
+    let mut a = app("abc\n", None, false, &store);
+    a.ensure_layouts_all();
+    a.editor.apply(Intent::MoveDocEnd).unwrap();
+    let depth = a.editor.session().undo_depth();
+
+    a.ime_commit(String::new());
+
+    assert_eq!(doc_text(&a), "abc\n");
+    assert!(!a.editor.is_dirty(), "空提交不得置脏");
+    assert_eq!(a.editor.session().undo_depth(), depth, "空提交不进撤销栈");
+    assert!(a.editor.preedit().is_none());
+}
+
+#[test]
+fn empty_ime_commit_keeps_selection() {
+    let store = MemStore::default();
+    let mut a = app("abc\n", None, false, &store);
+    a.ensure_layouts_all();
+    a.editor.apply(Intent::SelectAll).unwrap();
+    let sel = a.editor.selection().expect("全选后应有选区");
+
+    a.ime_commit(String::new());
+
+    assert_eq!(doc_text(&a), "abc\n", "空提交不得删除选区内容");
+    assert_eq!(a.editor.selection(), Some(sel), "选区保持");
+    assert!(!a.editor.is_dirty(), "空提交不得置脏");
+}
+
+#[test]
+fn ime_preedit_cleared_when_commit_lands_in_menu_or_history() {
+    let store = MemStore::default();
+    let mut a = app("abc\n", None, false, &store);
+    a.ensure_layouts_all();
+
+    // 菜单：preedit 不挂载，提交被吞掉
+    a.ui_state.chrome.open = Some(0);
+    a.ime_preedit("zh".into(), None);
+    assert!(a.editor.preedit().is_none(), "菜单打开时不挂组合串");
+    a.editor.set_preedit("zh".into(), None); // 模拟切菜单前已存在的组合串
+    a.ime_commit("中".into());
+    assert!(a.editor.preedit().is_none(), "提交落入菜单后清除组合态");
+    assert_eq!(doc_text(&a), "abc\n", "菜单吞掉上屏");
+
+    // 版本历史：同样不挂载、不留残影
+    a.ui_state.chrome.open = None;
+    a.ui_state.history.open = true;
+    a.ime_preedit("zh".into(), None);
+    assert!(a.editor.preedit().is_none(), "历史预览不挂组合串");
+    a.editor.set_preedit("zh".into(), None);
+    a.ime_commit("中".into());
+    assert!(a.editor.preedit().is_none(), "提交落入历史后清除组合态");
+    assert_eq!(doc_text(&a), "abc\n", "历史预览保持只读");
+
+    // IME Disabled 也必须收掉组合态
+    a.ui_state.history.open = false;
+    a.ime_preedit("zh".into(), None);
+    assert!(a.editor.preedit().is_some());
+    a.ime_disabled();
+    assert!(a.editor.preedit().is_none());
+}
+
+#[test]
 fn search_bar_clicks_run_buttons_and_swallow_text_area() {
     let store = MemStore::default();
     let mut a = app("x x x\n", None, false, &store);

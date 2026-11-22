@@ -289,11 +289,25 @@ fn starts_absolute_path(chars: &[char], i: usize) -> bool {
     {
         return true;
     }
-    // POSIX 绝对路径起点。
+    // POSIX 绝对路径起点（含 rustc 标准库回溯与常见构建/容器目录）。
     c == '/'
-        && ["/home/", "/Users/", "/root/", "/tmp/"]
-            .iter()
-            .any(|prefix| starts_with_ignore_ascii_case(&chars[i..], prefix))
+        && [
+            "/home/",
+            "/Users/",
+            "/root/",
+            "/tmp/",
+            "/rustc/",
+            "/usr/",
+            "/opt/",
+            "/var/",
+            "/mnt/",
+            "/srv/",
+            "/build/",
+            "/workspace/",
+            "/github/",
+        ]
+        .iter()
+        .any(|prefix| starts_with_ignore_ascii_case(&chars[i..], prefix))
 }
 
 /// `file:` URL 的结束下标；`file:` 后必须真的跟着本机路径，否则不替换。
@@ -475,6 +489,15 @@ mod tests {
             ("/Users/alice/a.md", "<path>"),
             ("/root/.config/x", "<path>"),
             ("/tmp/x", "<path>"),
+            ("/rustc/58cf.../library/std/src/backtrace.rs:85", "<path>"),
+            ("/usr/lib/x", "<path>"),
+            ("/opt/app/x", "<path>"),
+            ("/var/tmp/x", "<path>"),
+            ("/mnt/c/x", "<path>"),
+            ("/srv/x", "<path>"),
+            ("/build/x", "<path>"),
+            ("/workspace/x", "<path>"),
+            ("/github/x", "<path>"),
             // file: URL 的各种写法（含盘符、UNC 与 Unix 根）。
             ("file:///C:/Users/alice/a.md", "<path>"),
             (r"file://C:\Users\alice\a.md", "<path>"),

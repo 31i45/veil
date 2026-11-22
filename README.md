@@ -225,6 +225,17 @@ Dependency blacklist: `tokio`, `wasmtime`, any webview crate (`webview2-com`/`wr
 - `.trae/specs/release-and-roadmap/v1.2-roadmap.md` — v1.2 candidate pool (typography settings, PDF bookmarks, font subsetting)
 - `.trae/specs/release-and-roadmap/v2.0-roadmap.md` — v2.0 detailed plan (wgpu deferred — four trigger conditions must all trip)
 
+## Privacy, Security & Support
+
+Veil is distributed free of charge, under the MIT license. By design it contains **no telemetry and no background update checks**; network features run only after an explicit user action. Real-network capture verification remains **NOT RUN** — see [PRIVACY.md](PRIVACY.md) for what that does and does not mean.
+
+- [PRIVACY.md](PRIVACY.md) — what is and is not collected, local data locations, network capabilities and defaults, remote images, diagnostic reports, how to delete data
+- [SECURITY.md](SECURITY.md) — supported versions (3.x), private vulnerability reporting, report contents and scope
+- [SUPPORT.md](SUPPORT.md) — official source, SHA-256 verification, troubleshooting, what to include in an issue
+- [THIRD-PARTY-LICENSES.md](THIRD-PARTY-LICENSES.md) — third-party components and license texts shipped with the release
+
+**Portable upgrade:** replace the old `veil.exe` with the new one. Your configuration, sessions and version history under `%APPDATA%\Veil` are kept — do not delete that folder.
+
 ## License
 
 MIT License · see [LICENSE](LICENSE).

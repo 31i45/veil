@@ -226,6 +226,17 @@ pwsh -File tools/smoke_launch.ps1 -ExePath target/release/veil.exe -ExpectedTitl
 - `.trae/specs/release-and-roadmap/v1.2-roadmap.md` — v1.2 候选池（排版设置、PDF 书签、字体子集化）
 - `.trae/specs/release-and-roadmap/v2.0-roadmap.md` — v2.0 详细 roadmap（wgpu 后移四条触发条件同时满足才启动）
 
+## 隐私、安全与支持
+
+Veil 以 MIT 许可证免费分发。**设计上不包含遥测，也没有后台更新检查**；网络能力只在用户显式操作后发生。真实网络抓包验证仍为 **NOT RUN**——它说明什么、不说明什么，见 [PRIVACY.md](PRIVACY.md)。
+
+- [PRIVACY.md](PRIVACY.md) — 收集与不收集什么、本地文件位置、网络能力与默认值、远程图片、诊断报告、如何删除数据
+- [SECURITY.md](SECURITY.md) — 支持版本（3.x）、私密漏洞报告渠道、报告内容与范围
+- [SUPPORT.md](SUPPORT.md) — 官方来源、SHA-256 核验、常见问题、提交问题需附的信息
+- [THIRD-PARTY-LICENSES.md](THIRD-PARTY-LICENSES.md) — 随发布包提供的第三方组件与许可证文本
+
+**便携升级**：用新版本 `veil.exe` 覆盖旧 exe 即可。`%APPDATA%\Veil` 下的配置、会话与版本历史会保留——不要删除该目录。
+
 ## 许可
 
 MIT License · see [LICENSE](LICENSE)。

@@ -1599,8 +1599,14 @@ impl App {
             w.set_ime_allowed(allowed);
         }
         if !allowed {
-            self.editor.clear_preedit();
+            self.enter_exclusive_overlay();
         }
+    }
+
+    /// 独占覆盖层（菜单/右键/历史/预览/模态）打开的唯一收口：
+    /// 组合串属于正文，覆盖层接管输入前必须立即收掉，避免残留下划线或误上屏。
+    pub(crate) fn enter_exclusive_overlay(&mut self) {
+        self.editor.clear_preedit();
     }
 
     /// 模态独占覆盖层：弹窗出现前收掉菜单/右键菜单/快速打开/查找栏，

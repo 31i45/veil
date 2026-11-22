@@ -1144,7 +1144,7 @@ impl App {
             self.ui_state.chrome.close();
             if let Some(m) = chrome::hit_menu_bar(mx, my, scale) {
                 if m != open {
-                    self.editor.clear_preedit();
+                    self.enter_exclusive_overlay();
                     self.ui_state.chrome.open = Some(m);
                 }
                 self.request_redraw();
@@ -1157,6 +1157,7 @@ impl App {
             // 菜单与快速打开/查找栏互斥：开启菜单前先收掉轻量浮层
             self.close_quick();
             self.close_search();
+            self.enter_exclusive_overlay();
             self.ui_state.chrome.toggle(m);
             self.request_redraw();
             return false;

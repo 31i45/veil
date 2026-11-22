@@ -1628,7 +1628,11 @@ fn truncated_and_non_utf8_recovery_are_rejected() {
     non_utf8.extend_from_slice(&[0xff, 0xfe]);
 
     for (name, bytes) in [
-        ("截断", encoded[..encoded.len() / 2].to_vec()),
+        ("头部截断", encoded[..encoded.len() / 2].to_vec()),
+        (
+            "内容字符边界截断",
+            encoded[..encoded.len() - 3].to_vec(), // “未保存正文”末字 3 字节
+        ),
         ("非 UTF-8", non_utf8),
         ("坏魔数", b"not-a-recovery-file".to_vec()),
         (

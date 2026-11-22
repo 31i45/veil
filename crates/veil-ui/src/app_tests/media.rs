@@ -457,8 +457,10 @@ fn image_click_opens_preview_without_touching_document() {
         a.content_x() + ix + iw as f32 * 0.5,
         vp.y + top - a.window_state.scroll_y + iy + ih as f32 * 0.5,
     );
+    a.editor.set_preedit("zh".into(), None);
     click_at(&mut a, x, y);
     assert!(a.ui_state.image_preview.is_some(), "点击图片应打开放大预览");
+    assert!(a.editor.preedit().is_none(), "打开预览必须立即清除组合态");
     assert_eq!(a.editor.caret(), caret, "预览不移动光标");
     assert_eq!(doc_text(&a), before, "预览不改文档字节");
     // 点击图片本身保持打开；点击遮罩关闭。

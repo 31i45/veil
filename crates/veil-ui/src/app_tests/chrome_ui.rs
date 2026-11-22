@@ -457,6 +457,23 @@ fn status_bar_and_menu_bar_clicks_do_not_move_caret() {
 }
 
 #[test]
+fn first_menu_open_clears_preedit() {
+    let store = MemStore::default();
+    let (mut a, _) = app_dialogs("ab\ncd", Some("a.md"), false, &store, None, None);
+    a.editor.set_preedit("zh".into(), None);
+    assert!(a.editor.preedit().is_some());
+
+    let (tx, ty) = menu_title_center(0);
+    click_at(&mut a, tx, ty);
+
+    assert!(a.ui_state.chrome.is_open(), "点击菜单栏应打开菜单");
+    assert!(
+        a.editor.preedit().is_none(),
+        "首次打开菜单必须立即清除组合态"
+    );
+}
+
+#[test]
 fn viewport_click_is_offset_by_menu_height() {
     let store = MemStore::default();
     let (mut a, _) = app_dialogs("ab", None, false, &store, None, None);

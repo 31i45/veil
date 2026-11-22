@@ -4,7 +4,7 @@
 
 ## 0. 结论
 
-**`PASS`**（经 Review R1 / R2 两轮整改后）。七类真实输入缺陷已修复：IME 上屏并入先前键入的撤销组、空 IME 提交置脏并删除选区、菜单/历史组合态残留、设置/模态/图片预览下 IME 上屏写入正文、恢复文件内容截断无法识别、恢复头 `path_len` 溢出导致启动 panic、打开覆盖层未立即清组合态。新增 16 个确定性测试与 1 个 50 MB 探针；全门禁绿色，50 MB 长文打开 737.3 ms、击键 p95 2.513 ms。
+**`PASS`**（经 Review R1 / R2 / R3 三轮整改后）。八类真实输入缺陷已修复：IME 上屏并入先前键入的撤销组、空 IME 提交置脏并删除选区、菜单/历史组合态残留、设置/模态/图片预览下 IME 上屏写入正文、恢复文件内容截断无法识别、恢复头 `path_len` 溢出导致启动 panic、首次打开菜单未清组合态、覆盖层清理入口分散。新增 17 个确定性测试与 1 个 50 MB 探针；全门禁绿色，50 MB 长文打开 737.3 ms、击键 p95 2.513 ms。
 
 ## 1. 修复项
 
@@ -17,6 +17,7 @@
 | 恢复内容截断被当成短文本 | 恢复格式只有头部长度，没有内容长度/校验 | 恢复格式升级到 `VEIL-RECOVERY-2`：内容长度 + FNV-1a 校验；旧 v1 仅兼容读取 | `rejects_content_truncated_at_char_boundary`、`rejects_content_checksum_mismatch`、`legacy_v1_files_still_open` |
 | 恢复头 `path_len` 溢出 | `path_len + 1` 在 release 回绕，`split_at` panic | v1/v2 均用 `checked_add` 返回 `Err` | `rejects_overflowing_path_len_without_panic`、App 级四类损坏拒绝 |
 | 打开预览/历史仍留组合态 | 打开入口只设 UI 状态，未清 preedit | 图片预览、右键菜单、菜单栏、版本历史打开时统一清理 | `opening_history_or_image_preview_clears_preedit` |
+| 首次打开菜单漏清组合态 | 菜单栏点击直接 `chrome.toggle`，未走清理；清理散在 7+ 入口 | 新增 `enter_exclusive_overlay()` 单点收口；菜单首次打开/切换、右键、历史、预览、模态统一调用 | `first_menu_open_clears_preedit`、真实图片点击路径断言 |
 
 ## 2. 测试与证据
 
@@ -47,20 +48,20 @@
 |---|---|
 | `cargo fmt --all -- --check` | PASS |
 | `cargo clippy --workspace --all-targets -- -D warnings` | PASS（零警告） |
-| `cargo test --workspace --release` | PASS：**1,984 passed / 0 failed**；`veil-ui` **1297 passed / 0 failed / 12 ignored** |
+| `cargo test --workspace --release` | PASS：**1,985 passed / 0 failed**；`veil-ui` **1298 passed / 0 failed / 12 ignored** |
 | `cargo build --release -p veil` | PASS |
 | `veil.exe` 体积 | **14,015,488 B** ≤ 14,680,064 B |
-| SHA-256 | `D8CCDE08368C827A42C3D7B90FEB7816DB905C0DCC9A45147B247DB7C5DA394F` |
+| SHA-256 | `81AA1DB74EA708F354F6141AEDD2378D049C2B47F4F98E4822BC9E3BD4259136` |
 | 离线特征串 | `QuickJS` / `linkedom` / `mermaid` 均命中 |
-| smoke | PASS：launch 581 ms；`VEIL_HOME` 隔离 PASS；**隔离树**内 config/session/recovery/APPDATA 哨兵未变 |
+| smoke | PASS：launch 594 ms；`VEIL_HOME` 隔离 PASS；**隔离树**内 config/session/recovery/APPDATA 哨兵未变 |
 
-测试数较基线 +16，ignore +1（新增 50 MB 探针），无测试被删除。smoke 的哨兵位于临时隔离树；脚本明确不枚举真实 APPDATA（`read_audit=not-covered`），因此本报告只声明“隔离树未变”，不声明“真实 APPDATA 未被读取”。
+测试数较基线 +17，ignore +1（新增 50 MB 探针），无测试被删除。smoke 的哨兵位于临时隔离树；脚本明确不枚举真实 APPDATA（`read_audit=not-covered`），因此本报告只声明“隔离树未变”，不声明“真实 APPDATA 未被读取”。
 
 ## 5. Rubric
 
 | AC | 维度 | 分 | 理由 |
 |---|---|---:|---|
-| AC-10 输入保真质量 | 事务边界是否单点、可解释 | **4** | 撤销边界收在 `Editor::set_preedit`，空提交收在 `commit_ime`，落点清理收在 `App::ime_commit`/`ime_preedit`；测试直接对应协议。未到 5 是因为组合态仍由 Editor 与 App 两层共同维护。 |
+| AC-10 输入保真质量 | 事务边界是否单点、可解释 | **4** | 撤销边界收在 `Editor::set_preedit`，空提交收在 `commit_ime`，覆盖层清理收在 `App::enter_exclusive_overlay`，落点分流收在 `ime_commit`/`ime_preedit`；测试直接对应协议与真实点击入口。未到 5 是因为组合态仍由 Editor（状态）与 App（覆盖层策略）两层共同维护。 |
 
 ## 6. NOT RUN（不写成 PASS）
 
@@ -71,4 +72,4 @@
 ## 7. 下一步
 
 - `craft-four-dpi-and-distribution-trust`：四档 DPI、签名/SHA/SmartScreen/抓包/Actions。
-- 本地已领先 `origin/main` 10 个提交（含上一 spec 4 个），按要求未推送。
+- 本地已领先 `origin/main` 11 个提交（含上一 spec 4 个），按要求未推送。

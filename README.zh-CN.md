@@ -36,6 +36,8 @@ if ($actual -ne $expected) { throw "SHA-256 不匹配：预期 $expected，实�
 
 本次构建有三项外部验证未执行（**NOT RUN**）：使用可信证书的生产签名、真实 SmartScreen、本提交远端 GitHub Actions。已执行一次范围受限的本机抓包，结果见 [PRIVACY.md](PRIVACY.md)，它不构成全场景零出站已验证。依赖审计已通过 `cargo deny` 执行并通过。
 
+Let's Encrypt 这类免费 TLS 证书机构不能用于此处：它只签发域名验证的 TLS 证书，不签发代码签名证书。已评估的可信发布者路径为：**SignPath Foundation**（合格开源项目可免费获得 OV 级签名，需通过审核，证书签给 SignPath Foundation 而非 Veil 或维护者）、**Azure Artifact Signing**（付费，受身份与地区资格限制）、**商业 OV/EV** 证书。三者均尚未申请或购买；可信生产签名仍为 **NOT RUN**。
+
 ### 便携 exe
 
 1. 把 `veil.exe` 放到一个打算长期保留的目录（例如 `%LOCALAPPDATA%\Veil`）。Windows 按路径记录文件关联，之后移动 exe 会让关联失效。

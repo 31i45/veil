@@ -36,6 +36,8 @@ Never compare an artifact with a sidecar from another Release. The current porta
 
 Three external verifications are **NOT RUN** for this build: production signing with a trusted certificate, real SmartScreen behaviour on a downloaded Release, and this commit's remote GitHub Actions. A scoped local packet capture was executed and is recorded in [PRIVACY.md](PRIVACY.md); it does not establish zero egress for every path. Dependency auditing now runs through `cargo deny` and passes for this build.
 
+A free TLS certificate authority such as Let's Encrypt cannot be used here: it issues only domain-validated TLS certificates and does not issue code-signing certificates. The evaluated routes to a trusted publisher are **SignPath Foundation** (free OV-level signing for qualifying open-source projects, subject to review, with the certificate issued to SignPath Foundation rather than to Veil), **Azure Artifact Signing** (paid, subject to identity and region eligibility), and a **commercial OV/EV** certificate. None has been applied for or purchased; production signing remains **NOT RUN**.
+
 ### Portable exe
 
 1. Put `veil.exe` in a folder you intend to keep (for example `%LOCALAPPDATA%\Veil`). Windows stores file associations by path, so moving the exe later breaks them.

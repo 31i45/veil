@@ -32,7 +32,7 @@ if ($actual -ne $expected) { throw "SHA-256 不匹配：预期 $expected，实�
 "SHA-256 核验通过：$actual"
 ```
 
-不得拿其他 Release 的侧车文件核验当前产物。当前便携 `veil.exe` 与 `veil-setup-<version>.exe` 使用**自签名开发证书**签名并加 RFC3161 时间戳，仅用于验证签名流水线；该证书不是受信任发布者，其他机器仍会显示未知发布者，**可信生产签名仍为 NOT RUN**。未签名构建或新证书仍可能触发 SmartScreen。SHA-256 一致只能证明文件字节完整，不能代表发布者信誉。若 Windows 出现警告，请核对官方来源、摘要和发布者信息；有任何不一致就停止运行。不要关闭 SmartScreen 或其他 Windows 安全功能。
+不得拿其他 Release 的侧车文件核验当前产物。当前便携 `veil.exe` 与 `veil-setup-<version>.exe` 使用**自签名开发证书 `CN=Veil Development (Long-term)`**（SHA-1 指纹 `86C8793A44EF01EE1633BCF769244894326B4526`；NotAfter `2031-11-23T05:06:11Z`）签名并加 RFC3161 时间戳，仅用于验证签名流水线。该证书仅在本开发机的当前用户根证书存储中获得显式信任，**不构成跨机或生产信任锚**；其他机器不会继承此信任，仍可能显示未知发布者，**可信生产签名仍为 NOT RUN**。未签名构建或新证书仍可能触发 SmartScreen。SHA-256 一致只能证明文件字节完整，不能代表发布者信誉。若 Windows 出现警告，请核对官方来源、摘要和发布者信息；有任何不一致就停止运行。不要关闭 SmartScreen 或其他 Windows 安全功能。
 
 本次构建有三项外部验证未执行（**NOT RUN**）：使用可信证书的生产签名、真实 SmartScreen、本提交远端 GitHub Actions。已执行一次范围受限的本机抓包，结果见 [PRIVACY.md](PRIVACY.md)，它不构成全场景零出站已验证。依赖审计已通过 `cargo deny` 执行并通过。
 

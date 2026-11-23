@@ -48,6 +48,10 @@ const PROG_ID_KEY: &str = r"Software\Classes\Veil.Markdown";
 const MD_KEY: &str = r"Software\Classes\.md";
 #[cfg(windows)]
 const MD_OPEN_WITH_KEY: &str = r"Software\Classes\.md\OpenWithProgids";
+/// 资源管理器为 `.md` 单独维护的「打开方式」列表；旧版本注册可能只留下这里的项。
+#[cfg(windows)]
+const MD_EXPLORER_OPEN_WITH_KEY: &str =
+    r"Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts\.md\OpenWithProgids";
 #[cfg(windows)]
 const APP_ICON_KEY: &str = r"Software\Classes\Applications\veil.exe\DefaultIcon";
 
@@ -101,8 +105,8 @@ mod win {
     use std::ptr::{null, null_mut};
 
     use super::{
-        icon_ref, open_command, value_owned_by_us, value_vacant, APP_ICON_KEY, MD_KEY,
-        MD_OPEN_WITH_KEY, PROG_ID, PROG_ID_KEY, STATE_KEY,
+        icon_ref, open_command, value_owned_by_us, value_vacant, APP_ICON_KEY,
+        MD_EXPLORER_OPEN_WITH_KEY, MD_KEY, MD_OPEN_WITH_KEY, PROG_ID, PROG_ID_KEY, STATE_KEY,
     };
     use crate::platform::wide;
     use veil_ui::i18n::{t, tf, Key as I18nKey};
@@ -450,11 +454,11 @@ mod win {
             Some(_) => notes.push(t(I18nKey::AssocDefaultOther).to_owned()),
         }
 
-        // 3) 「打开方式」列表：只加 Veil；已存在的项（可能由他人创建）不重写、不记所有权
+        // 3) 「打开方式」列表：只加 Veil；已存在的项不重写。
+        //    撤销时按 ProgID 清理，无需所有权记录。
         let (open_with, _) = create_key(MD_OPEN_WITH_KEY)?;
         if read_raw(MD_OPEN_WITH_KEY, Some(PROG_ID))?.is_none() {
             set_empty(&open_with, PROG_ID)?;
-            set_state("OpenWith", "1")?;
         }
 
         // 4) 直接关联到 veil.exe 的旧关联（资源管理器里显示「V」的根因）：只补空位
@@ -493,12 +497,13 @@ mod win {
             kept.push(t(I18nKey::AssocAppIcon));
         }
 
-        // 2) 「打开方式」列表：只删本程序新建的那一项
-        let recorded_open_with = read_sz(STATE_KEY, Some("OpenWith"))?;
-        if recorded_open_with.as_deref() == Some("1") {
-            delete_value(MD_OPEN_WITH_KEY, Some(PROG_ID))?;
-        } else if read_raw(MD_OPEN_WITH_KEY, Some(PROG_ID))?.is_some() {
-            kept.push(t(I18nKey::AssocOpenWithEntry));
+        // 2) 「打开方式」列表：Veil.Markdown 是本程序独占的 ProgID，凡存在即清——
+        //    旧版本注册可能没留下所有权记录，但该项仍只属于 Veil；其他 ProgID 与
+        //    UserChoice（用户默认应用）一律不碰。两处列表并存，都需要清理。
+        for key in [MD_OPEN_WITH_KEY, MD_EXPLORER_OPEN_WITH_KEY] {
+            if read_raw(key, Some(PROG_ID))?.is_some() {
+                delete_value(key, Some(PROG_ID))?;
+            }
         }
 
         // 3) `.md` 默认值：只删本程序写入且仍指向本程序的值
@@ -633,6 +638,7 @@ mod tests {
             PROG_ID_KEY,
             MD_KEY,
             MD_OPEN_WITH_KEY,
+            MD_EXPLORER_OPEN_WITH_KEY,
             APP_ICON_KEY,
             STATE_KEY,
         ] {

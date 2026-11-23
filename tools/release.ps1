@@ -55,6 +55,10 @@ $ReleaseRecord = [ordered]@{
     timestamp_validation = 'not_applicable'
     timestamp_url = $TimestampUrl
     sign_tool = $null
+    signer_subject = $null
+    signer_thumbprint = $null
+    cert_not_after = $null
+    trust_note = 'No signing certificate supplied; artifact is unsigned'
     reason = 'No signing certificate supplied; artifact is unsigned'
   }
   tests = [ordered]@{ status = 'skipped'; reason = 'not reached'; command = 'cargo test --workspace --release -- --test-threads=1'; exit_code = $null }
@@ -362,7 +366,19 @@ if (-not $UseThumbprint -and [string]::IsNullOrWhiteSpace($CertificatePath)) {
   }
   $ReleaseRecord.signing.timestamp_validation = 'passed'
   $ReleaseRecord.signing.status = 'passed'
-  Write-OK 'Authenticode signature and RFC3161 timestamp verified'
+  # 记录签名者身份与信任边界，避免把“已签名”误读为“可信发布者”。
+  $SignedArtifact = Get-AuthenticodeSignature -LiteralPath $ExePath
+  $SignerCertificate = $SignedArtifact.SignerCertificate
+  if (-not $SignerCertificate) { Write-Fail 'signature verified but no signer certificate is available' }
+  $ReleaseRecord.signing.signer_subject = $SignerCertificate.Subject
+  $ReleaseRecord.signing.signer_thumbprint = $SignerCertificate.Thumbprint
+  $ReleaseRecord.signing.cert_not_after = $SignerCertificate.NotAfter.ToUniversalTime().ToString('o')
+  $ReleaseRecord.signing.trust_note = if ($SignerCertificate.Subject -eq $SignerCertificate.Issuer) {
+    'Self-signed certificate; trusted only where explicitly installed; not a production trust anchor'
+  } else {
+    'Certificate chain must be trusted on the target machine; verify publisher trust separately'
+  }
+  Write-OK "signer: $($ReleaseRecord.signing.signer_subject) (expires $($ReleaseRecord.signing.cert_not_after))"
 }
 
 # Step 8b: 最终体积门禁必须度量签名后的发布字节。

@@ -170,7 +170,7 @@ if ($DenyVersionExit -ne 0) {
     $ReleaseRecord.supply_chain.audit = 'PASS'
     $ReleaseRecord.supply_chain.audit_reason = $null
     Write-OK "cargo deny check passed ($($DenyVersionOutput -join ' '))"
-  } elseif ($AuditOutput -match '(?im)^\s*error:\s*failed to (fetch|update|download)|network (error|is unreachable)|could not connect|unable to (fetch|update|download)|advisory database.*(unavailable|failed)') {
+  } elseif ($AuditOutput -match '(?im)^\s*(?:error:\s*)?(?:failed to (?:fetch|update|download)|network (?:error|is unreachable)|could not connect|unable to (?:fetch|update|download)|advisory database.*(?:unavailable|failed))') {
     $ReleaseRecord.supply_chain.audit = 'NOT RUN'
     $ReleaseRecord.supply_chain.audit_reason = 'advisory database or network unavailable'
     Write-Warn 'cargo deny check could not complete (database/network); audit recorded as NOT RUN'
@@ -364,6 +364,24 @@ if (-not $UseThumbprint -and [string]::IsNullOrWhiteSpace($CertificatePath)) {
   $ReleaseRecord.signing.status = 'passed'
   Write-OK 'Authenticode signature and RFC3161 timestamp verified'
 }
+
+# Step 8b: 最终体积门禁必须度量签名后的发布字节。
+# Authenticode 签名与时间戳会在 PE 尾部追加不定长数据，Step 6 的字节数是签名前的
+# 中间值；若用它写发布记录或判 14 MiB 门禁，记录会与真实产物矛盾，未来也可能出现
+# “签名前合格、发布件超限”却被放行。
+Write-Step 8b 'final size gate on the exact release bytes'
+$Exe = Get-Item -LiteralPath $ExePath -ErrorAction Stop
+$SizeBytes = [int64]$Exe.Length
+$SizeMiB = [math]::Round($SizeBytes / 1MB, 2)
+$SizeMarginBytes = $SizeLimitBytes - $SizeBytes
+$SizeOk = $SizeBytes -le $SizeLimitBytes
+$ReleaseRecord.bytes = $SizeBytes
+$ReleaseRecord.size_gate.margin_bytes = $SizeMarginBytes
+$ReleaseRecord.size_gate.status = if ($SizeOk) { 'passed' } else { 'failed' }
+if (-not $SizeOk) {
+  Write-Fail "final artifact is $SizeBytes bytes ($SizeMiB MiB), above the $([math]::Round($SizeLimitBytes / 1MB, 0)) MiB limit"
+}
+Write-OK "final artifact size: $SizeBytes bytes ($SizeMiB MiB), margin $SizeMarginBytes bytes"
 
 # Step 9: generate the CycloneDX SBOM for the locked dependency set.
 Write-Step 9 'generate CycloneDX SBOM'

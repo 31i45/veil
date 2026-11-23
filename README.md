@@ -250,8 +250,8 @@ Dependency blacklist: `tokio`, `wasmtime`, any webview crate (`webview2-com`/`wr
 | `crates/` | Source code: `veil-core` (pure logic), `veil-ui` (rendering + interaction), `veil-mermaid-offline` (QuickJS + mermaid.js in-process), `veil` (product binary + platform seams) |
 | `tools/` | Release, smoke, installer, sbom, walkthrough scripts — all PowerShell except the Python bench helpers |
 | `icons/` | Application icon (`veil.ico`) and document-type icon (`veil-doc.ico`) |
-| `docs/` | ADRs (`adr/`), strategy docs, historical review baselines (`review/`) — retained as historical records, some describe superseded approaches |
-| `evidence/` | **Build artifact verification and audit trail** (~2100 files, ~360 MB): release records, SBOMs, signing verification, render screenshots, smoke logs. These are not runtime data and are not processed by Veil. Deleted only by explicit A-grade/B-grade cleanup; always retained for audits |
+| `docs/` | ADRs (`adr/`), strategy docs; `review/` baselines (G0/G1/G2/P0/P1/P2 + `evaluation/` subdirectory with 5 evaluation reports moved from root in final-polish) — retained as historical records, some describe superseded approaches |
+| `evidence/` | **~343 MB** (gitignored): build artifact verification + audit trail. `render/` (237 MB, historical PNG render captures) + `ux/` (70 MB, interaction probes) = 89% of volume. Only summary records (release-record, signing-verification, sbom) are committed; raw screenshots/logs are local-only. B-grade cleanup policy in place |
 | `.trae/specs/` | 40+ historical spec artifacts from v1 → v3 development. Only `.trae/specs/release-and-roadmap/` (v1.1/v1.2/v2.0 roadmaps) is current; the rest are retained as a development trail |
 | `.github/workflows/` | `ci.yml` (PR + main branch gates) and `release.yml` (`v*` tag publish + manual dry-run dispatch) |
 

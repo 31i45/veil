@@ -354,3 +354,16 @@ Mermaid L1 内嵌渲染（QuickJS-ng 内嵌官方 Tiny mermaid + resvg 栅格化
 - 10 万字 150% DPI 滚动峰值：28.83 MB
 - cargo test --workspace：910 passed / 0 failed / 12 ignored
 - cargo clippy：零警告
+
+### v3.0 final-polish 汇总（2026-11-23）
+
+上轮 cleanup-and-polish-v3 解决用户可见问题（badge 6→9、NOT RUN 集中归档、ci.yml core-linux job）；本轮 final-polish-steve-jobs 解决仓库健康度和自动化验证：
+
+- cargo fmt 零不一致；cargo audit 3 allowed warnings 带 rationale 记录；deny.toml 健康
+- walkthrough.ps1 typing→undo→save→export 自动化执行（见 evidence/not-run/automation/typing-verify/）
+- 根目录 5 个 evaluation*.md 归位 docs/review/evaluation/
+- 商业化物料 docs/commercial/LANDING.md + LICENSE-FAQ.md
+- release exe：13.40 MiB（含离线 Mermaid.js）
+- evidence/ ~343 MB（render/ 237MB + ux/ 70MB 历史取证包，gitignored）
+
+**v3.0 release readiness**: Yes. All automatable gates green. Remaining 6 items are explicitly needs-user (production signing, SmartScreen, GitHub push, cross-machine trust, DPI other scales, physical printer).

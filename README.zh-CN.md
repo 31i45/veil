@@ -250,8 +250,8 @@ pwsh -File tools/smoke_launch.ps1 -ExePath target/release/veil.exe -ExpectedTitl
 | `crates/` | 源码：`veil-core`（纯逻辑内核）、`veil-ui`（渲染 + 交互）、`veil-mermaid-offline`（QuickJS + mermaid.js 进程内）、`veil`（产品二进制 + 平台接缝） |
 | `tools/` | 发布、冒烟、安装包、SBOM、演练脚本 — 全部 PowerShell，Python 仅 bench 辅助 |
 | `icons/` | 应用图标（`veil.ico`）与文档类型图标（`veil-doc.ico`） |
-| `docs/` | ADR（`adr/`）、策略文档、历史评审基线（`review/`） — 作为历史记录保留，部分描述已被取代的方案 |
-| `evidence/` | **构建产物验证与审计踪迹**（约 2100 文件，约 360 MB）：发布记录、SBOM、签名校验、渲染截图、冒烟日志。不是运行时数据，Veil 不处理。仅显式 A 级/B 级清理才删除；审计时始终保留 |
+| `docs/` | ADR（`adr/`）、策略文档；`review/` 评审基线（G0/G1/G2/P0/P1/P2 + `evaluation/` 子目录含 5 份从根目录归位的评估报告，final-polish 完成）— 作为历史记录保留，部分描述已被取代的方案 |
+| `evidence/` | **~343 MB**（gitignored）：构建产物验证 + 审计踪迹。`render/`（237 MB，历史 PNG 渲染截图）+ `ux/`（70 MB，交互探针）= 占体积 89%。仅摘要记录（release-record、signing-verification、sbom）入库；原始截图/日志本地留存。B 级清理策略在位 |
 | `.trae/specs/` | v1 → v3 开发过程中 40+ 历史 spec 制品。只有 `.trae/specs/release-and-roadmap/`（v1.1/v1.2/v2.0 路线图）是当前有效的；其余作为开发轨迹保留 |
 | `.github/workflows/` | `ci.yml`（PR + main 分支门禁）和 `release.yml`（`v*` tag 发布 + 手动 dry-run 触发） |
 

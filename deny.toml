@@ -4,10 +4,21 @@
 # The license allow-list is intentionally narrow and derived from the actual
 # locked packages. Do not add a license here just to make a new dependency
 # pass: review the dependency instead.
+#
+# Run locally / in CI with: cargo deny check
+# Evidence of the last clean run: evidence/signing-and-audit/cargo-deny.txt
 
 [advisories]
 version = 2
-ignore = []
+# Each entry is an explicit, reviewed exception. Never add a bare wildcard.
+ignore = [
+  # ttf-parser 0.25.1 is still required transitively by fontdb 0.23 ->
+  # cosmic-text 0.19 (UI/mermaid text layout), by owned_ttf_parser ->
+  # ab_glyph -> sctk-adwaita -> winit 0.30 (window decorations) and directly
+  # by the PDF font-subsetting path. No safe upgrade exists: the fixed
+  # replacement (skrifa) needs new upstream releases of fontdb/cosmic-text.
+  { id = "RUSTSEC-2026-0192", reason = "unmaintained ttf-parser 0.25.1; no safe upgrade, migration tracked upstream (skrifa)" },
+]
 
 [licenses]
 version = 2
@@ -15,6 +26,11 @@ version = 2
 # covered by the repository-root LICENSE, so cargo-deny skips them here.
 private = { ignore = true }
 confidence-threshold = 0.93
+# Derived from the locked graph (cargo metadata) and kept minimal: every entry
+# below is the selected branch of at least one real dependency's SPDX
+# expression. OR-expressions such as "MIT OR Apache-2.0 OR LGPL-2.1-or-later",
+# "Apache-2.0 OR GPL-2.0-only" and "Unlicense OR MIT" are satisfied by the
+# allowed branch and therefore need no extra permission.
 allow = [
   "MIT",
   "Apache-2.0",
@@ -33,8 +49,14 @@ allow = [
 exceptions = []
 
 [bans]
-multiple-versions = "allow"
-wildcards = "allow"
+# Duplicate transitive versions are expected in this single-target Windows
+# graph (winit/cosmic-text/windows-*); surface new ones as warnings instead of
+# blocking the release, but never allow a new wildcard version requirement.
+multiple-versions = "warn"
+wildcards = "deny"
+# Versionless workspace path dependencies are normalized to "*" by cargo
+# metadata; they are intentional local crates, not registry wildcards.
+allow-wildcard-paths = true
 highlight = "all"
 workspace-default-features = "allow"
 external-default-features = "allow"

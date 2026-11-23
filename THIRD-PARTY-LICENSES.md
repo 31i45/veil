@@ -213,7 +213,7 @@
 | proc-macro-crate | 3.5.0 | MIT OR Apache-2.0 | https://github.com/bkchr/proc-macro-crate |
 | proc-macro2 | 1.0.107 | MIT OR Apache-2.0 | https://github.com/dtolnay/proc-macro2 |
 | proptest | 1.12.0 | MIT OR Apache-2.0 | https://github.com/proptest-rs/proptest |
-| pulldown-cmark | 0.13.5 | MIT | https://github.com/raphlinus/pulldown-cmark |
+| pulldown-cmark | 0.13.6 | MIT | https://github.com/raphlinus/pulldown-cmark |
 | pulldown-cmark-escape | 0.11.0 | MIT | https://github.com/raphlinus/pulldown-cmark |
 | pxfm | 0.1.30 | BSD-3-Clause OR Apache-2.0 | https://github.com/awxkee/pxfm |
 | quick-error | 1.2.3 | MIT/Apache-2.0 | http://github.com/tailhook/quick-error |
@@ -11779,7 +11779,7 @@ SOFTWARE.
 ### c4f10f55904bdb9f27d3fbf94c354926d6cfe8b982276e556238c258941b243b
 
 适用包：
-- `pulldown-cmark` 0.13.5 (`LICENSE`)
+- `pulldown-cmark` 0.13.6 (`LICENSE`)
 - `pulldown-cmark-escape` 0.11.0 (`LICENSE`)
 
 ~~~text

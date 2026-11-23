@@ -1,6 +1,6 @@
 # 第三方许可清单
 
-产品：Veil 3.0.0
+产品：Veil 3.0.1
 生成命令：`pwsh -NoProfile -File tools/third_party_notices.ps1`
 校验命令：`pwsh -NoProfile -File tools/third_party_notices.ps1 -Check`
 
@@ -326,10 +326,10 @@
 | unicode-vo | 0.1.0 | MIT/Apache-2.0 | https://github.com/RazrFalcon/unicode-vo |
 | unicode-width | 0.2.2 | MIT OR Apache-2.0 | https://github.com/unicode-rs/unicode-width |
 | usvg | 0.50.0 | Apache-2.0 OR MIT | https://github.com/linebender/resvg |
-| veil | 3.0.0 | MIT (workspace) | - |
-| veil-core | 3.0.0 | MIT (workspace) | - |
-| veil-mermaid-offline | 3.0.0 | MIT (workspace) | - |
-| veil-ui | 3.0.0 | MIT (workspace) | - |
+| veil | 3.0.1 | MIT (workspace) | - |
+| veil-core | 3.0.1 | MIT (workspace) | - |
+| veil-mermaid-offline | 3.0.1 | MIT (workspace) | - |
+| veil-ui | 3.0.1 | MIT (workspace) | - |
 | version_check | 0.9.5 | MIT/Apache-2.0 | https://github.com/SergioBenitez/version_check |
 | wait-timeout | 0.2.1 | MIT/Apache-2.0 | https://github.com/alexcrichton/wait-timeout |
 | walkdir | 2.5.0 | Unlicense/MIT | https://github.com/BurntSushi/walkdir |
@@ -3448,10 +3448,10 @@ SOFTWARE.
 ### 2cf6ff8b378634e65ac1e092f9c64aaa315a79b056dcbbc75a05a2c817c57fba
 
 适用包：
-- `veil` 3.0.0 (`LICENSE (workspace root)`)
-- `veil-core` 3.0.0 (`LICENSE (workspace root)`)
-- `veil-mermaid-offline` 3.0.0 (`LICENSE (workspace root)`)
-- `veil-ui` 3.0.0 (`LICENSE (workspace root)`)
+- `veil` 3.0.1 (`LICENSE (workspace root)`)
+- `veil-core` 3.0.1 (`LICENSE (workspace root)`)
+- `veil-mermaid-offline` 3.0.1 (`LICENSE (workspace root)`)
+- `veil-ui` 3.0.1 (`LICENSE (workspace root)`)
 
 ~~~text
 MIT License

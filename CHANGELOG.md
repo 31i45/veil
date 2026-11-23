@@ -2,6 +2,36 @@
 
 Veil 版本迭代记录。每个版本的详细修复清单见对应 git tag 的 commit log。
 
+## v3.0.1 — 2026-11-23
+
+**Patch release — 产品行为零变化，构建管道与仓库健康度全面清理**。所有改动为构建改进、文档更新、自动化验证落地、历史文件归档。
+
+### Build & Pipeline
+- `ci.yml` 新增 `core-linux` job（ubuntu-latest + cargo check/test veil-core），与 release.yml 中已有版本对齐
+- `deny.toml` 对 3 条 allowed RustSec（bincode RUSTSEC-2025-0141、ttf-parser RUSTSEC-2026-0192、rustix RUSTSEC-2026-0486）加 `reason` 字段说明风险等级、影响范围、当前无安全修复路径
+- `cargo fmt` 零不一致；`cargo clippy` 零警告；`cargo deny check` 全绿（advisories ok / bans ok / licenses ok / sources ok）
+
+### Docs
+- README badges 6 → 9（新增 Build/Stars/Forks/Downloads，删除过时 "no installer" 字样）
+- README 新增 Repository Structure 表格 + evidence/ ~343 MB 分级说明 + docs/ 子目录导航
+- README + README.zh-CN.md NOT RUN 声明集中到 `## Trust & Verification Status` 章节（中英文各一），下载段落精简
+- 中文 README ADR-012 重复条目删除
+- 5 个根目录 evaluation*.md 归位 `docs/review/evaluation/`（git mv 保留历史）
+- 新增 `docs/commercial/LANDING.md` + `LICENSE-FAQ.md`（中英各 2 份）
+- 新增 `EVALUATION-FINAL-v3.0.md` 最终发布评价报告
+
+### Test & Automation
+- **walkthrough.ps1 打字→撤销→保存自动化全链路 PASS**（exit_code=0，40 steps 全 OK，VEIL_HOME 快照 54B → 79B → 54B 精确验证）
+- evidence/not-run/automation/ 全量 4 个子目录（ci-static-verify / core-cross-platform-check / dpi-150-evidence / typing-verify）+ SUMMARY.md 汇总
+- git stash `cargo-fmt-noise-task04` drop（纯格式噪声）
+
+### Evidence Baseline（双 Review 全 PASS）
+- `cargo clippy --workspace --all-targets -- -D warnings`: 0 warnings ✅
+- `cargo test --workspace --lib`: 1313 passed / 0 failed / 12 ignored ✅
+- `cargo test -p veil-core --test conformance --test gfm_conformance`: 2 passed ✅
+- `cargo build --release --bin veil`: veil.exe = 13.40 MiB（≤14 MiB gate）✅
+- evidence/ 总量 2192 files / ~343 MB（gitignored，仅摘要提交）
+
 ## v3.0.0 — 2026-11-21
 
 **BREAKING**：只发布一个 `veil.exe`；Mermaid 改为进程内本地渲染。最终干净重建产物 2026-11-21（commit `0d229eb`，SHA 见 Notes）；UX 实测构建为同源码的 `8DF551F8…9B456763`，不是最终发布包；2026-11-20 为初版构建，其体积/SHA 仅作历史参照。

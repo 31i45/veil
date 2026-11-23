@@ -229,6 +229,22 @@ function Get-TreeFingerprint {
     return ConvertTo-Json -InputObject $rows -Compress -Depth 3
 }
 
+function Get-StableTreeFingerprint {
+    param([Parameter(Mandatory = $true)][string]$Path, [int]$SettleMs = 1500)
+
+    # NTFS 可能延迟更新目录时间戳：刚写完哨兵文件时立即取指纹会与延迟写竞争。
+    # 连续两次读取一致才视为稳定，避免把文件系统抖动误判为隔离失败。
+    $previous = Get-TreeFingerprint -Path $Path
+    $deadline = (Get-Date).AddMilliseconds($SettleMs)
+    while ((Get-Date) -lt $deadline) {
+        Start-Sleep -Milliseconds 150
+        $current = Get-TreeFingerprint -Path $Path
+        if ($current -ceq $previous) { return $current }
+        $previous = $current
+    }
+    return $previous
+}
+
 function Assert-TreeUnchanged {
     param(
         [Parameter(Mandatory = $true)][string]$Name,
@@ -304,9 +320,9 @@ $recoveryText = "VEIL-RECOVERY-1`nbom=0`npath_len=$($documentPathBytes.Length)`n
 $smokeRecovery = Join-Path $smokeHome 'recovery.dat'
 [System.IO.File]::WriteAllText($smokeRecovery, $recoveryText, $utf8NoBom)
 
-$appDataBefore = Get-TreeFingerprint -Path $smokeAppData
-$workBefore = Get-TreeFingerprint -Path $smokeWork
-$documentsBefore = Get-TreeFingerprint -Path $smokeDocuments
+$appDataBefore = Get-StableTreeFingerprint -Path $smokeAppData
+$workBefore = Get-StableTreeFingerprint -Path $smokeWork
+$documentsBefore = Get-StableTreeFingerprint -Path $smokeDocuments
 $previousVeilHome = $env:VEIL_HOME
 $previousAppData = $env:APPDATA
 $previousUserProfile = $env:USERPROFILE

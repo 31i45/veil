@@ -8,6 +8,7 @@ Veil 版本迭代记录。每个版本的详细修复清单见对应 git tag 的
 
 ### Build & Pipeline
 - `ci.yml` 新增 `core-linux` job（ubuntu-latest + cargo check/test veil-core），与 release.yml 中已有版本对齐
+- `release.yml` 补齐 per-user 安装包链路：tag 版本一致性门禁 → 组装已验证 bundle → Chocolatey 安装 Inno Setup 6 → `tools/installer.ps1` 产出 `veil-setup-<version>.exe` + sidecar；Release 资产固定为 `veil.exe`、`veil.exe.sha256`、`veil-setup-<version>.exe`、`veil-setup-<version>.exe.sha256` 四件，SBOM 仅作构建证据不上传
 - `deny.toml` 对 3 条 allowed RustSec（bincode RUSTSEC-2025-0141、ttf-parser RUSTSEC-2026-0192、rustix RUSTSEC-2026-0486）加 `reason` 字段说明风险等级、影响范围、当前无安全修复路径
 - `cargo fmt` 零不一致；`cargo clippy` 零警告；`cargo deny check` 全绿（advisories ok / bans ok / licenses ok / sources ok）
 

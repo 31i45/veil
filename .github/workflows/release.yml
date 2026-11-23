@@ -43,6 +43,25 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # 版本身份的唯一判定点：tag 名必须等于 Cargo.toml workspace version。
+      # 否则 veil.exe 的 VERSIONINFO、SBOM 文件名、安装包版本会互相漂移
+      # （v3.0.1 首轮发布即因此产出 ProductVersion=3.0.0 的 exe）。
+      - name: Resolve release version
+        id: version
+        shell: pwsh
+        run: |
+          $cargoVersion = (Select-String -Path Cargo.toml -Pattern '^version = "([^"]+)"' | Select-Object -First 1).Matches.Groups[1].Value
+          if ([string]::IsNullOrWhiteSpace($cargoVersion)) { throw 'could not read workspace version from Cargo.toml' }
+          if ('${{ github.ref }}' -like 'refs/tags/v*') {
+            $tagVersion = '${{ github.ref_name }}'.Substring(1)
+            if ($tagVersion -ne $cargoVersion) {
+              Write-Host "FAIL: tag v$tagVersion does not match Cargo.toml workspace version $cargoVersion; bump the version before tagging"
+              exit 1
+            }
+          }
+          "value=$cargoVersion" >> $env:GITHUB_OUTPUT
+          Write-Host "release version: $cargoVersion"
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
         with:
@@ -174,10 +193,10 @@ jobs:
           }
 
       # SBOM 描述与发布字节相同的 Cargo.lock 依赖集合；必须在签名之后、SHA 之前生成。
-      # 使用 git tag 而非 Cargo.toml version 命名，避免 version 未及时 bump 时文件名漂移。
+      # 该文件只作构建证据，不进 Release 资产。
       - name: Generate CycloneDX SBOM
         shell: pwsh
-        run: pwsh -NoProfile -File tools/sbom.ps1 -OutFile "target\release\veil-${{ github.ref_name }}.cdx.json"
+        run: pwsh -NoProfile -File tools/sbom.ps1 -OutFile "target\release\veil-v${{ steps.version.outputs.value }}.cdx.json"
 
       - name: Generate SHA-256 checksum
         run: |
@@ -200,6 +219,68 @@ jobs:
             exit 1
           }
           Write-Host "PASS: release artifacts validated ($($exe.Name), $($exe.Name).sha256, SHA-256 match)"
+
+      # installer.ps1 只接受"已验证 bundle"（veil.exe + sidecar + status=passed 记录），
+      # 因此这里复刻本地 release.ps1 的归档契约，而不让安装包直接吃 target/。
+      # 该步骤位于签名与校验之后，打进安装包的就是最终要上传的那份 exe。
+      - name: Assemble verified release bundle
+        shell: pwsh
+        run: |
+          $version = '${{ steps.version.outputs.value }}'
+          $bundle = Join-Path 'release-bundle' "veil-v$version"
+          if (Test-Path -LiteralPath $bundle) { Remove-Item -LiteralPath $bundle -Recurse -Force }
+          New-Item -ItemType Directory -Force -Path $bundle | Out-Null
+          Copy-Item -LiteralPath 'target\release\veil.exe' -Destination $bundle -Force
+          Copy-Item -LiteralPath 'target\release\veil.exe.sha256' -Destination $bundle -Force
+          $exe = Get-Item -LiteralPath 'target\release\veil.exe'
+          $hash = (Get-FileHash -LiteralPath $exe.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+          $record = [ordered]@{
+            schema_version = 1
+            version = $version
+            artifact = 'target/release/veil.exe'
+            bytes = $exe.Length
+            sha256 = $hash
+            timestamp = [DateTimeOffset]::UtcNow.ToString('o')
+            status = 'passed'
+            release_ready = $true
+            source = 'github-actions/.github/workflows/release.yml'
+            run_id = '${{ github.run_id }}'
+          }
+          $json = ($record | ConvertTo-Json -Depth 4) -replace "`r`n", "`n"
+          [System.IO.File]::WriteAllText((Join-Path $bundle 'release-record.json'), $json + "`n", [System.Text.UTF8Encoding]::new($false))
+          Write-Host "bundle ready: $bundle (veil.exe $hash)"
+
+      # 可选 per-user 安装包（Inno Setup 6）。未配置生产证书时 installer.ps1
+      # 自动构建 unsigned setup 并给出 NOT RUN 提示，与 exe 的签名策略一致。
+      - name: Build per-user installer
+        shell: pwsh
+        run: |
+          choco install innosetup --no-progress -y | Out-Host
+          if ($LASTEXITCODE -ne 0) { throw "choco install innosetup failed with exit $LASTEXITCODE" }
+          $iscc = Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6\ISCC.exe'
+          if (-not (Test-Path -LiteralPath $iscc)) { throw "ISCC not found at $iscc" }
+          $version = '${{ steps.version.outputs.value }}'
+          pwsh -NoProfile -File tools/installer.ps1 -Version $version -BundleRoot release-bundle -OutputDirectory release-bundle -ISCCPath $iscc
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Validate installer artifacts
+        shell: pwsh
+        run: |
+          $version = '${{ steps.version.outputs.value }}'
+          $setup = Get-Item -LiteralPath "release-bundle\veil-setup-$version.exe"
+          $sidecar = "release-bundle\veil-setup-$version.exe.sha256"
+          $expected = ((Get-Content -LiteralPath $sidecar -Raw).Trim() -split '\s+')[0]
+          $actual = (Get-FileHash -LiteralPath $setup.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($expected -ne $actual) {
+            Write-Host "FAIL: installer SHA-256 mismatch ($expected != $actual)"
+            exit 1
+          }
+          $productVersion = ([string]$setup.VersionInfo.ProductVersion).Trim()
+          if ($productVersion -cne $version) {
+            Write-Host "FAIL: setup ProductVersion '$productVersion' != '$version'"
+            exit 1
+          }
+          Write-Host "PASS: $($setup.Name) $([math]::Round($setup.Length / 1MB, 2)) MiB, ProductVersion $productVersion, SHA-256 match"
 
       - name: Extract release notes from CHANGELOG
         run: |
@@ -227,4 +308,24 @@ jobs:
           files: |
             target/release/veil.exe
             target/release/veil.exe.sha256
-            target/release/veil-v*.cdx.json
+            release-bundle/veil-setup-*.exe
+            release-bundle/veil-setup-*.exe.sha256
+
+      # 重发同一 tag 时，历史运行上传过、本次不再产出的资产会残留（例如旧 SBOM）。
+      # 按白名单清理，保证 Release 资产恰好是本次的四件产物。
+      - name: Prune stale release assets
+        if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && !inputs.dry_run }}
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $version = '${{ steps.version.outputs.value }}'
+          $allowed = @('veil.exe', 'veil.exe.sha256', "veil-setup-$version.exe", "veil-setup-$version.exe.sha256")
+          $assets = gh api "repos/${{ github.repository }}/releases/tags/${{ github.ref_name }}" --jq '.assets[] | [.id, .name] | @tsv'
+          foreach ($line in $assets) {
+            if ([string]::IsNullOrWhiteSpace($line)) { continue }
+            $id, $name = $line -split "`t", 2
+            if ($allowed -contains $name) { continue }
+            Write-Host "deleting stale asset: $name (id=$id)"
+            gh api -X DELETE "repos/${{ github.repository }}/releases/assets/$id"
+          }

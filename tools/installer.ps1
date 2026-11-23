@@ -1,8 +1,16 @@
+# Builds veil-setup-<version>.exe from a verified release bundle.
+# Authenticode signing is opt-in: pass -CertificatePath and -CertificatePassword to sign and
+# timestamp the final setup; otherwise the setup is built unsigned and reported as such.
+# A self-signed certificate is trusted only by machines that explicitly trust it and is not
+# a production trust anchor.
 param(
   [string]$Version,
   [string]$BundleRoot,
   [string]$OutputDirectory,
-  [string]$ISCCPath = "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe"
+  [string]$ISCCPath = "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe",
+  [string]$CertificatePath,
+  [string]$CertificatePassword,
+  [string]$TimestampUrl = 'http://timestamp.digicert.com'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -157,7 +165,93 @@ if ($SetupProductVersion -cne $Version) {
 }
 Write-OK "setup compiled with ProductVersion $SetupProductVersion ($($Setup.Length) bytes)"
 
-Write-Step 3 'generate and validate setup SHA-256'
+Write-Step 3 'optional Authenticode signing of setup'
+$SetupIsSigned = $false
+if ([string]::IsNullOrWhiteSpace($CertificatePath)) {
+  if ($PSBoundParameters.ContainsKey('CertificatePassword')) {
+    Write-Fail 'CertificatePassword requires CertificatePath'
+  }
+  Write-Warn 'Setup is unsigned; production Authenticode signing: NOT RUN'
+} else {
+  if ([string]::IsNullOrWhiteSpace($CertificatePassword)) {
+    Write-Fail 'CertificatePath requires a non-empty CertificatePassword'
+  }
+  if ([string]::IsNullOrWhiteSpace($TimestampUrl)) {
+    Write-Fail 'TimestampUrl must not be empty when signing'
+  }
+  if (-not (Test-Path -LiteralPath $CertificatePath -PathType Leaf)) {
+    Write-Fail "signing certificate PFX was not found: $CertificatePath"
+  }
+  $ResolvedCertificate = (Resolve-Path -LiteralPath $CertificatePath -ErrorAction Stop).Path
+
+  $SignTool = Get-Command signtool.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+  $SignToolExe = if ($SignTool) { $SignTool.Source } else { $null }
+  if (-not $SignToolExe) {
+    $SdkBin = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\10\bin'
+    $SignToolCandidate = Get-ChildItem -LiteralPath $SdkBin -Filter signtool.exe -File -Recurse -ErrorAction SilentlyContinue |
+      Where-Object { $_.FullName -match '\\x64\\' } |
+      Sort-Object FullName -Descending |
+      Select-Object -First 1
+    if ($SignToolCandidate) { $SignToolExe = $SignToolCandidate.FullName }
+  }
+  if (-not $SignToolExe) { Write-Fail 'Authenticode signing requested, but signtool.exe was not found' }
+  Write-OK "signtool: $SignToolExe"
+
+  # The setup must not wrap an unsigned payload; the bundle exe was already hash-verified above.
+  $PayloadSignature = Get-AuthenticodeSignature -LiteralPath $ExePath
+  if ($PayloadSignature.Status -ne 'Valid') {
+    Write-Fail "bundle payload veil.exe is not validly Authenticode-signed (status=$($PayloadSignature.Status)); refusing to wrap an unsigned payload in a signed setup"
+  }
+  $PayloadSignerSubject = if ($PayloadSignature.SignerCertificate) { $PayloadSignature.SignerCertificate.Subject } else { '<unknown>' }
+  Write-OK "payload veil.exe Authenticode status: Valid (signer: $PayloadSignerSubject)"
+
+  # Password is passed as an argument only and is never echoed or written to disk.
+  $SignArguments = @(
+    'sign',
+    '/fd', 'SHA256',
+    '/f', $ResolvedCertificate,
+    '/p', $CertificatePassword,
+    '/tr', $TimestampUrl,
+    '/td', 'SHA256',
+    '/v',
+    $SetupPath
+  )
+  & $SignToolExe @SignArguments | Out-Host
+  $SignExit = $LASTEXITCODE
+  if ($SignExit -ne 0) {
+    Write-Fail "signtool sign failed with exit $SignExit"
+  }
+
+  $VerifyOutput = @(& $SignToolExe verify /pa /all /v $SetupPath 2>&1)
+  $VerifyExit = $LASTEXITCODE
+  $VerifyOutput | Out-Host
+  if ($VerifyExit -ne 0) {
+    Write-Fail "Authenticode verification failed with exit ${VerifyExit}: $($VerifyOutput -join ' ')"
+  }
+  $VerifyText = $VerifyOutput -join "`n"
+  if ($VerifyText -notmatch 'The signature is timestamped:' -or $VerifyText -notmatch 'Timestamp Verified by:') {
+    Write-Fail 'RFC3161 timestamp evidence is missing or was not verified by signtool'
+  }
+
+  $SetupSignature = Get-AuthenticodeSignature -LiteralPath $SetupPath
+  if ($SetupSignature.Status -ne 'Valid') {
+    Write-Fail "setup Authenticode status is $($SetupSignature.Status) after signing; expected Valid"
+  }
+  $SetupSignerSubject = if ($SetupSignature.SignerCertificate) { $SetupSignature.SignerCertificate.Subject } else { '<unknown>' }
+  $SetupSignerThumbprint = if ($SetupSignature.SignerCertificate) { $SetupSignature.SignerCertificate.Thumbprint } else { '<unknown>' }
+  Write-OK "setup Authenticode status: Valid"
+  Write-OK "signer subject: $SetupSignerSubject"
+  Write-OK "signer thumbprint: $SetupSignerThumbprint"
+  if ($SetupSignature.TimeStamperCertificate) {
+    Write-OK "RFC3161 timestamp signer: $($SetupSignature.TimeStamperCertificate.Subject)"
+  } else {
+    Write-Warn 'Get-AuthenticodeSignature exposed no timestamper certificate; signtool verify did report a verified timestamp'
+  }
+  Write-Warn 'Signed setup is trusted only when the certificate chains to a trusted root; a self-signed certificate is not a production trust anchor'
+  $SetupIsSigned = $true
+}
+
+Write-Step 4 'generate and validate setup SHA-256'
 $SetupHash = (Get-FileHash -LiteralPath $SetupPath -Algorithm SHA256).Hash.ToLowerInvariant()
 $ChecksumLine = "$SetupHash  veil-setup-$Version.exe"
 Set-Content -LiteralPath $SetupChecksumPath -Value $ChecksumLine -Encoding ascii
@@ -167,7 +261,10 @@ if ($Expected -cne $SetupHash -or $Actual -cne $Expected) {
   Write-Fail 'setup SHA-256 sidecar validation failed'
 }
 Write-OK "veil-setup-$Version.exe.sha256 = $ChecksumLine"
-Write-Warn 'Setup is unsigned; production Authenticode signing: NOT RUN'
 Write-Host ''
-Write-OK "Installer ready: $SetupPath"
+if ($SetupIsSigned) {
+  Write-OK "Installer ready (Authenticode signed + timestamped): $SetupPath"
+} else {
+  Write-OK "Installer ready (unsigned): $SetupPath"
+}
 exit 0

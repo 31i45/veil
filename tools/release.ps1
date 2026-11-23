@@ -87,7 +87,7 @@ function Write-ReleaseRecord {
   try {
     $RequiredGates = @('build', 'size_gate', 'feature_gate', 'smoke', 'tests', 'clippy', 'checksum')
     $Failed = @($RequiredGates | Where-Object { $ReleaseRecord[$_].status -eq 'failed' }).Count -gt 0 -or $ReleaseRecord.supply_chain.notices -eq 'fail'
-    $Incomplete = @($RequiredGates | Where-Object { $ReleaseRecord[$_].status -ne 'passed' }).Count -gt 0 -or $ReleaseRecord.supply_chain.notices -ne 'pass' -or $ReleaseRecord.supply_chain.sbom -eq 'NOT RUN'
+    $Incomplete = @($RequiredGates | Where-Object { $ReleaseRecord[$_].status -ne 'passed' }).Count -gt 0 -or $ReleaseRecord.supply_chain.notices -ne 'pass' -or $ReleaseRecord.supply_chain.sbom -eq 'NOT RUN' -or $ReleaseRecord.supply_chain.audit -ne 'PASS'
     if (-not $SkipArchive -and $ReleaseRecord.checksum.post_archive_status -ne 'passed') { $Incomplete = $true }
 
     $ReleaseRecord.release_ready = -not $ReleaseRecord.error -and -not $Failed -and -not $Incomplete
@@ -169,7 +169,7 @@ if ($DenyVersionExit -ne 0) {
     $ReleaseRecord.supply_chain.audit = 'PASS'
     $ReleaseRecord.supply_chain.audit_reason = $null
     Write-OK "cargo deny check passed ($($DenyVersionOutput -join ' '))"
-  } elseif ($AuditOutput -match '(?i)failed to (fetch|update|download)|network (error|is unreachable)|could not connect|unable to (fetch|update|download)|advisory database.*(unavailable|failed)') {
+  } elseif ($AuditOutput -match '(?im)^\s*error:\s*failed to (fetch|update|download)|network (error|is unreachable)|could not connect|unable to (fetch|update|download)|advisory database.*(unavailable|failed)') {
     $ReleaseRecord.supply_chain.audit = 'NOT RUN'
     $ReleaseRecord.supply_chain.audit_reason = 'advisory database or network unavailable'
     Write-Warn 'cargo deny check could not complete (database/network); audit recorded as NOT RUN'

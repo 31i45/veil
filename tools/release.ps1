@@ -5,6 +5,7 @@
   [string]$Version,
   [string]$CertificatePath,
   [string]$CertificatePassword,
+  [string]$CertificateThumbprint,
   [string]$TimestampUrl = 'http://timestamp.digicert.com'
 )
 
@@ -303,17 +304,27 @@ Write-OK 'smoke launch passed'
 
 # Step 8: optionally sign the exact bytes that will be hashed and archived.
 Write-Step 8 'optional Authenticode + RFC3161 signing'
-if ([string]::IsNullOrWhiteSpace($CertificatePath)) {
+$UseThumbprint = -not [string]::IsNullOrWhiteSpace($CertificateThumbprint)
+if (-not $UseThumbprint -and [string]::IsNullOrWhiteSpace($CertificatePath)) {
   if ($PSBoundParameters.ContainsKey('CertificatePassword')) {
     Write-Fail 'CertificatePassword requires CertificatePath'
   }
   Write-Warn 'UNSIGNED: no signing certificate supplied; continuing without Authenticode'
+} elseif ($UseThumbprint -and -not [string]::IsNullOrWhiteSpace($CertificatePath)) {
+  Write-Fail 'Supply either CertificateThumbprint or CertificatePath, not both'
 } else {
   $ReleaseRecord.signing.status = 'failed'
   $ReleaseRecord.signing.signature_validation = 'failed'
   $ReleaseRecord.signing.timestamp_validation = 'failed'
   $ReleaseRecord.signing.reason = $null
-  if (-not $PSBoundParameters.ContainsKey('CertificatePassword')) {
+  if ($UseThumbprint) {
+    if ($PSBoundParameters.ContainsKey('CertificatePassword')) {
+      Write-Fail 'CertificatePassword is not used with CertificateThumbprint'
+    }
+    if ($CertificateThumbprint -notmatch '^[0-9A-Fa-f]{40}$') {
+      Write-Fail 'CertificateThumbprint must be a 40-character SHA-1 thumbprint'
+    }
+  } elseif (-not $PSBoundParameters.ContainsKey('CertificatePassword')) {
     Write-Fail 'CertificatePath requires CertificatePassword (pass an empty string only for a passwordless PFX)'
   }
   if ([string]::IsNullOrWhiteSpace($TimestampUrl)) { Write-Fail 'TimestampUrl must not be empty when signing' }
@@ -330,9 +341,13 @@ if ([string]::IsNullOrWhiteSpace($CertificatePath)) {
   }
   if (-not $SignToolExe) { Write-Fail 'Authenticode signing requested, but signtool.exe was not found' }
   $ReleaseRecord.signing.sign_tool = $SignToolExe
-  $ResolvedCertificate = (Resolve-Path -LiteralPath $CertificatePath -ErrorAction Stop).Path
 
-  & $SignToolExe sign /fd SHA256 /f $ResolvedCertificate /p $CertificatePassword /tr $TimestampUrl /td SHA256 /v $ExePath | Out-Host
+  if ($UseThumbprint) {
+    & $SignToolExe sign /sha1 $CertificateThumbprint /fd SHA256 /tr $TimestampUrl /td SHA256 /v $ExePath | Out-Host
+  } else {
+    $ResolvedCertificate = (Resolve-Path -LiteralPath $CertificatePath -ErrorAction Stop).Path
+    & $SignToolExe sign /fd SHA256 /f $ResolvedCertificate /p $CertificatePassword /tr $TimestampUrl /td SHA256 /v $ExePath | Out-Host
+  }
   $SignExit = $LASTEXITCODE
   if ($SignExit -ne 0) { Write-Fail "signtool sign failed with exit $SignExit" }
 

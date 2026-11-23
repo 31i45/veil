@@ -10,6 +10,7 @@ param(
   [string]$ISCCPath = "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe",
   [string]$CertificatePath,
   [string]$CertificatePassword,
+  [string]$CertificateThumbprint,
   [string]$TimestampUrl = 'http://timestamp.digicert.com'
 )
 
@@ -167,22 +168,36 @@ Write-OK "setup compiled with ProductVersion $SetupProductVersion ($($Setup.Leng
 
 Write-Step 3 'optional Authenticode signing of setup'
 $SetupIsSigned = $false
-if ([string]::IsNullOrWhiteSpace($CertificatePath)) {
+$UseThumbprint = -not [string]::IsNullOrWhiteSpace($CertificateThumbprint)
+if (-not $UseThumbprint -and [string]::IsNullOrWhiteSpace($CertificatePath)) {
   if ($PSBoundParameters.ContainsKey('CertificatePassword')) {
     Write-Fail 'CertificatePassword requires CertificatePath'
   }
   Write-Warn 'Setup is unsigned; production Authenticode signing: NOT RUN'
 } else {
-  if ([string]::IsNullOrWhiteSpace($CertificatePassword)) {
-    Write-Fail 'CertificatePath requires a non-empty CertificatePassword'
+  if ($UseThumbprint -and -not [string]::IsNullOrWhiteSpace($CertificatePath)) {
+    Write-Fail 'Supply either CertificateThumbprint or CertificatePath, not both'
   }
   if ([string]::IsNullOrWhiteSpace($TimestampUrl)) {
     Write-Fail 'TimestampUrl must not be empty when signing'
   }
-  if (-not (Test-Path -LiteralPath $CertificatePath -PathType Leaf)) {
-    Write-Fail "signing certificate PFX was not found: $CertificatePath"
+  if ($UseThumbprint) {
+    if ($PSBoundParameters.ContainsKey('CertificatePassword')) {
+      Write-Fail 'CertificatePassword is not used with CertificateThumbprint'
+    }
+    if ($CertificateThumbprint -notmatch '^[0-9A-Fa-f]{40}$') {
+      Write-Fail 'CertificateThumbprint must be a 40-character SHA-1 thumbprint'
+    }
+    $ResolvedCertificate = $null
+  } else {
+    if ([string]::IsNullOrWhiteSpace($CertificatePassword)) {
+      Write-Fail 'CertificatePath requires a non-empty CertificatePassword'
+    }
+    if (-not (Test-Path -LiteralPath $CertificatePath -PathType Leaf)) {
+      Write-Fail "signing certificate PFX was not found: $CertificatePath"
+    }
+    $ResolvedCertificate = (Resolve-Path -LiteralPath $CertificatePath -ErrorAction Stop).Path
   }
-  $ResolvedCertificate = (Resolve-Path -LiteralPath $CertificatePath -ErrorAction Stop).Path
 
   $SignTool = Get-Command signtool.exe -ErrorAction SilentlyContinue | Select-Object -First 1
   $SignToolExe = if ($SignTool) { $SignTool.Source } else { $null }
@@ -205,17 +220,14 @@ if ([string]::IsNullOrWhiteSpace($CertificatePath)) {
   $PayloadSignerSubject = if ($PayloadSignature.SignerCertificate) { $PayloadSignature.SignerCertificate.Subject } else { '<unknown>' }
   Write-OK "payload veil.exe Authenticode status: Valid (signer: $PayloadSignerSubject)"
 
-  # Password is passed as an argument only and is never echoed or written to disk.
-  $SignArguments = @(
-    'sign',
-    '/fd', 'SHA256',
-    '/f', $ResolvedCertificate,
-    '/p', $CertificatePassword,
-    '/tr', $TimestampUrl,
-    '/td', 'SHA256',
-    '/v',
-    $SetupPath
-  )
+  # A thumbprint signs from the user's certificate store; no password ever reaches the command line.
+  $SignArguments = @('sign', '/fd', 'SHA256')
+  if ($UseThumbprint) {
+    $SignArguments += @('/sha1', $CertificateThumbprint)
+  } else {
+    $SignArguments += @('/f', $ResolvedCertificate, '/p', $CertificatePassword)
+  }
+  $SignArguments += @('/tr', $TimestampUrl, '/td', 'SHA256', '/v', $SetupPath)
   & $SignToolExe @SignArguments | Out-Host
   $SignExit = $LASTEXITCODE
   if ($SignExit -ne 0) {

@@ -82,11 +82,11 @@ fn docs_policy_forbidden_claims_are_absent() {
 }
 
 #[test]
-fn docs_policy_privacy_lists_four_not_run_items() {
+fn docs_policy_privacy_lists_external_verification_items() {
     let root = workspace_root();
     let privacy = read_doc(&root, "PRIVACY.md");
 
-    // 四个外部验证关键词必须同时出现，且处于明确的 NOT RUN 语境。
+    // 外部验证项必须同时出现，且处于明确的 NOT RUN / 部分完成语境。
     let keywords = [
         ("生产签名", "生产签名"),
         ("SmartScreen", "SmartScreen"),
@@ -106,28 +106,30 @@ fn docs_policy_privacy_lists_four_not_run_items() {
 
     assert!(
         missing.is_empty(),
-        "隐私文档必须如实列出四项外部 NOT RUN（生产签名、真实 SmartScreen、真实抓包、本提交远端 Actions）：\n- {}",
+        "隐私文档必须如实覆盖外部验证项（生产签名、真实 SmartScreen、真实抓包、本提交远端 Actions）并保留 NOT RUN 标记：\n- {}",
         missing.join("\n- ")
     );
 }
 
 #[test]
-fn docs_policy_readmes_list_four_external_not_run_items() {
+fn docs_policy_readmes_list_external_not_run_items() {
     let root = workspace_root();
     let readme_en = read_doc(&root, "README.md");
     let readme_zh = read_doc(&root, "README.zh-CN.md");
 
+    // 自签名流水线与范围受限抓包已执行，因此只保留三项外部 NOT RUN，
+    // 同时要求 README 说明抓包范围，避免读者把局部证据当成全场景结论。
     let en_keywords = [
         "production signing",
         "real smartscreen",
-        "real network packet capture",
         "this commit's remote github actions",
+        "scoped local packet capture",
     ];
     let zh_keywords = [
         "生产签名",
         "真实 SmartScreen",
-        "真实网络抓包",
         "本提交远端 GitHub Actions",
+        "抓包",
     ];
 
     let mut missing = Vec::new();
@@ -150,7 +152,7 @@ fn docs_policy_readmes_list_four_external_not_run_items() {
 
     assert!(
         missing.is_empty(),
-        "双 README 必须列全四项外部 NOT RUN（生产签名、真实 SmartScreen、真实抓包、本提交远端 Actions）并链接隐私文档：\n- {}",
+        "双 README 必须列出外部 NOT RUN（生产签名、真实 SmartScreen、本提交远端 Actions）、说明抓包范围并链接隐私文档：\n- {}",
         missing.join("\n- ")
     );
 }

@@ -6,6 +6,26 @@ on:
   pull_request:
 
 jobs:
+  core-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.99.1
+
+      - name: Cache cargo builds
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check veil-core
+        run: cargo check -p veil-core
+
+      - name: Test veil-core
+        run: cargo test -p veil-core
+
   gate:
     runs-on: windows-latest
     steps:

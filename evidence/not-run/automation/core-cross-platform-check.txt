@@ -1,0 +1,55 @@
+=== cargo check -p veil-core (Windows) ===
+[started at 2026-11-23 16:11:02]
+[1m[92m    Checking[0m regex-automata v0.4.18
+[1m[92m    Checking[0m serde v1.0.229
+[1m[92m    Checking[0m regex v1.13.1
+[1m[92m    Checking[0m lapce-xi-rope v0.4.0
+[1m[92m    Checking[0m veil-core v3.0.0 (D:\VSCode\Veil\crates\veil-core)
+[1m[92m    Finished[0m ]8;;https://doc.rust-lang.org/cargo/reference/profiles.html#default-profiles\`dev` profile [unoptimized + debuginfo]]8;;\ target(s) in 3.32s
+cargo check exit_code=0
+[finished at 2026-11-23 16:11:05]
+
+=== cargo test -p veil-core (Windows) — last 5 lines ===
+[started at 2026-11-23 16:11:05]
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+cargo test exit_code=0
+[finished at 2026-11-23 16:11:13]
+
+=== veil-core Cargo.toml platform check ===
+(no platform-specific cfg / windows / unix gates found — purely cross-platform deps)
+
+=== All veil-core deps (last 30 lines) ===
+veil-core v3.0.0 (D:\VSCode\Veil\crates\veil-core)
+lapce-xi-rope v0.4.0
+bytecount v0.6.9
+memchr v2.8.3
+regex v1.13.1
+aho-corasick v1.1.5
+memchr v2.8.3
+memchr v2.8.3
+regex-automata v0.4.18
+aho-corasick v1.1.5 [33m[2m(*)[39m[22m
+memchr v2.8.3
+regex-syntax v0.8.11
+regex-syntax v0.8.11
+unicode-segmentation v1.13.3
+serde v1.0.229
+serde_core v1.0.229
+serde_derive v1.0.229 (proc-macro)
+proc-macro2 v1.0.107
+unicode-ident v1.0.27
+quote v1.0.47
+proc-macro2 v1.0.107 [33m[2m(*)[39m[22m
+syn v3.0.9
+proc-macro2 v1.0.107 [33m[2m(*)[39m[22m
+quote v1.0.47 [33m[2m(*)[39m[22m
+unicode-ident v1.0.27
+serde_json v1.0.154
+itoa v1.0.19
+memchr v2.8.3
+serde_core v1.0.229
+zmij v1.0.23

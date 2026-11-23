@@ -7,7 +7,10 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-stable%20%C2%B7%20edition%202021-orange.svg)](https://www.rust-lang.org/)
 [![Platform](https://img.shields.io/badge/platform-Windows%2011%20%C2%B7%20x64-0078d4.svg)](https://github.com/31i45/veil/releases)
-[![Portable / Installer](https://img.shields.io/badge/portable%20exe%20%C2%B7%20optional%20installer%20%C2%B7%20no%20bg%20networking-2ea44f.svg)](https://github.com/31i45/veil/releases)
+[![Build](https://img.shields.io/badge/build-portable%20exe%20%C2%B7%20optional%20installer%20%C2%B7%20offline%20mermaid%20%C2%B7%20zero%20bg%20networking-2ea44f.svg)](https://github.com/31i45/veil/releases)
+[![Stars](https://img.shields.io/github/stars/31i45/veil)](https://github.com/31i45/veil/stargazers)
+[![Forks](https://img.shields.io/github/forks/31i45/veil)](https://github.com/31i45/veil/network/members)
+[![Downloads](https://img.shields.io/github/downloads/31i45/veil/total)](https://github.com/31i45/veil/releases)
 
 [中文](README.zh-CN.md)
 
@@ -32,11 +35,7 @@ if ($actual -ne $expected) { throw "SHA-256 mismatch: expected $expected, got $a
 "SHA-256 verified: $actual"
 ```
 
-Never compare an artifact with a sidecar from another Release. The current portable `veil.exe` and `veil-setup-<version>.exe` are signed with the **self-signed development certificate `CN=Veil Development (Long-term)`** (SHA-1 thumbprint `86C8793A44EF01EE1633BCF769244894326B4526`; NotAfter `2031-11-23T05:06:11Z`) and an RFC3161 timestamp, strictly to exercise the signing pipeline. Its explicitly approved trust is limited to the current user's root store on this development machine; it is **not a cross-machine or production trust anchor**, so other machines do not inherit that trust and may report an unknown publisher. **Production signing remains NOT RUN**. An unsigned build or a newly established certificate may trigger SmartScreen. A matching SHA-256 verifies file integrity, not publisher reputation. If Windows warns, check the official source, digest, and publisher details, and stop if anything differs. Do not disable SmartScreen or other Windows security features.
-
-Three external verifications are **NOT RUN** for this build: production signing with a trusted certificate, real SmartScreen behaviour on a downloaded Release, and this commit's remote GitHub Actions. A scoped local packet capture was executed and is recorded in [PRIVACY.md](PRIVACY.md); it does not establish zero egress for every path. Dependency auditing now runs through `cargo deny` and passes for this build.
-
-A free TLS certificate authority such as Let's Encrypt cannot be used here: it issues only domain-validated TLS certificates and does not issue code-signing certificates. The evaluated routes to a trusted publisher are **SignPath Foundation** (free OV-level signing for qualifying open-source projects, subject to review, with the certificate issued to SignPath Foundation rather than to Veil), **Azure Artifact Signing** (paid, subject to identity and region eligibility), and a **commercial OV/EV** certificate. None has been applied for or purchased; production signing remains **NOT RUN**.
+Never compare an artifact with a sidecar from another Release. The current portable `veil.exe` and `veil-setup-<version>.exe` are signed with the **self-signed development certificate `CN=Veil Development (Long-term)`** (SHA-1 thumbprint `86C8793A44EF01EE1633BCF769244894326B4526`; NotAfter `2031-11-23T05:06:11Z`) and an RFC3161 timestamp, strictly to exercise the signing pipeline. Its explicitly approved trust is limited to the current user's root store on this development machine; it is **not a cross-machine or production trust anchor**, so other machines do not inherit that trust and may report an unknown publisher. An unsigned build or a newly established certificate may trigger SmartScreen. A matching SHA-256 verifies file integrity, not publisher reputation. If Windows warns, check the official source, digest, and publisher details, and stop if anything differs. Do not disable SmartScreen or other Windows security features.
 
 ### Portable exe
 
@@ -244,6 +243,18 @@ Dependency blacklist: `tokio`, `wasmtime`, any webview crate (`webview2-com`/`wr
 - `.trae/specs/release-and-roadmap/v1.2-roadmap.md` — v1.2 candidate pool (typography settings, PDF bookmarks, font subsetting)
 - `.trae/specs/release-and-roadmap/v2.0-roadmap.md` — v2.0 detailed plan (wgpu deferred — four trigger conditions must all trip)
 
+## Repository Structure
+
+| Path | Purpose |
+|---|---|
+| `crates/` | Source code: `veil-core` (pure logic), `veil-ui` (rendering + interaction), `veil-mermaid-offline` (QuickJS + mermaid.js in-process), `veil` (product binary + platform seams) |
+| `tools/` | Release, smoke, installer, sbom, walkthrough scripts — all PowerShell except the Python bench helpers |
+| `icons/` | Application icon (`veil.ico`) and document-type icon (`veil-doc.ico`) |
+| `docs/` | ADRs (`adr/`), strategy docs, historical review baselines (`review/`) — retained as historical records, some describe superseded approaches |
+| `evidence/` | **Build artifact verification and audit trail** (~2100 files, ~360 MB): release records, SBOMs, signing verification, render screenshots, smoke logs. These are not runtime data and are not processed by Veil. Deleted only by explicit A-grade/B-grade cleanup; always retained for audits |
+| `.trae/specs/` | 40+ historical spec artifacts from v1 → v3 development. Only `.trae/specs/release-and-roadmap/` (v1.1/v1.2/v2.0 roadmaps) is current; the rest are retained as a development trail |
+| `.github/workflows/` | `ci.yml` (PR + main branch gates) and `release.yml` (`v*` tag publish + manual dry-run dispatch) |
+
 ## Privacy, Security & Support
 
 Veil is distributed free of charge, under the MIT license. By design it contains **no telemetry and no background update checks**; network features run only after an explicit user action. Production signing with a trusted certificate, real SmartScreen behaviour and this commit's remote GitHub Actions remain **NOT RUN**; a scoped local packet capture is recorded in [PRIVACY.md](PRIVACY.md) and is not a blanket zero-egress claim.
@@ -252,6 +263,25 @@ Veil is distributed free of charge, under the MIT license. By design it contains
 - [SECURITY.md](SECURITY.md) — supported versions (3.x), private vulnerability reporting, report contents and scope
 - [SUPPORT.md](SUPPORT.md) — official source, SHA-256 verification, troubleshooting, what to include in an issue
 - [THIRD-PARTY-LICENSES.md](THIRD-PARTY-LICENSES.md) — third-party components and license texts shipped with the release
+
+## Trust & Verification Status
+
+Veil is currently signed with the self-signed development certificate `CN=Veil Development (Long-term)` (SHA-1 thumbprint `86C8793A44EF01EE1633BCF769244894326B4526`; NotAfter `2031-11-23T05:06:11Z`) with an RFC 3161 timestamp. This certificate is trusted only on the current development machine; other machines will show an unknown-publisher warning and SmartScreen may warn or block.
+
+The following external verifications remain **NOT RUN** — they require actions beyond this repository:
+
+- **Trusted production signing**: Three candidate paths have been evaluated and documented in detail in [evidence/renewal/production-signing-options.md](evidence/renewal/production-signing-options.md) (SignPath Foundation — free OV for qualifying open-source, Azure Artifact Signing — US$9.99/month, commercial OV/EV — US$129+/year). All require identity verification and/or payment that only you can complete personally. No production certificate has been applied for or purchased.
+- **Real SmartScreen with MotW downloads**: Requires a trusted production certificate above. Microsoft's SmartScreen reputation system accumulates over time; even with a trusted signature, the first release may still warn.
+- **This commit's remote GitHub Actions**: Pushing to GitHub requires your explicit authorization (per your constraints). The workflow files have been statically verified and include a `workflow_dispatch` entry with `dry_run=true` default.
+- **Cross-machine trust revocation drill**: Depends on having a real CRL/AIA infrastructure that comes only with a trusted public CA or enterprise PKI. Self-signed certificates have no public revocation mechanism.
+
+### Recommended next steps (when you are ready)
+
+1. Read the four-path comparison in [evidence/renewal/production-signing-options.md](evidence/renewal/production-signing-options.md) §7 ("Veil 推荐路线与下一步清单").
+2. Determine whether SignPath (OSS foundation, free), Azure Public Trust (US$9.99/month, US/CA identity), or a commercial OV certificate fits your constraints.
+3. Complete the identity verification / purchase yourself — the certificate and private key must never enter this repository or be accessible to any agent.
+4. Once you have a production certificate, add its Base64 PFX and password as GitHub Repository Secrets (`VEIL_SIGNING_CERTIFICATE_BASE64`, `VEIL_SIGNING_CERTIFICATE_PASSWORD`) and configure the timestamp URL as `VEIL_SIGNING_TIMESTAMP_URL`.
+5. Push a `v*` tag to publish a signed release, then download that release from a fresh Windows VM to verify publisher identity, SmartScreen behavior, and establish initial reputation.
 
 ## License
 

@@ -7,7 +7,10 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-stable%20%C2%B7%20edition%202021-orange.svg)](https://www.rust-lang.org/)
 [![Platform](https://img.shields.io/badge/platform-Windows%2011%20%C2%B7%20x64-0078d4.svg)](https://github.com/31i45/veil/releases)
-[![Portable / Installer](https://img.shields.io/badge/portable%20exe%20%C2%B7%20optional%20installer%20%C2%B7%20no%20bg%20networking-2ea44f.svg)](https://github.com/31i45/veil/releases)
+[![Build](https://img.shields.io/badge/build-portable%20exe%20%C2%B7%20optional%20installer%20%C2%B7%20offline%20mermaid%20%C2%B7%20zero%20bg%20networking-2ea44f.svg)](https://github.com/31i45/veil/releases)
+[![Stars](https://img.shields.io/github/stars/31i45/veil)](https://github.com/31i45/veil/stargazers)
+[![Forks](https://img.shields.io/github/forks/31i45/veil)](https://github.com/31i45/veil/network/members)
+[![Downloads](https://img.shields.io/github/downloads/31i45/veil/total)](https://github.com/31i45/veil/releases)
 
 [English](README.md)
 
@@ -32,11 +35,7 @@ if ($actual -ne $expected) { throw "SHA-256 不匹配：预期 $expected，实�
 "SHA-256 核验通过：$actual"
 ```
 
-不得拿其他 Release 的侧车文件核验当前产物。当前便携 `veil.exe` 与 `veil-setup-<version>.exe` 使用**自签名开发证书 `CN=Veil Development (Long-term)`**（SHA-1 指纹 `86C8793A44EF01EE1633BCF769244894326B4526`；NotAfter `2031-11-23T05:06:11Z`）签名并加 RFC3161 时间戳，仅用于验证签名流水线。该证书仅在本开发机的当前用户根证书存储中获得显式信任，**不构成跨机或生产信任锚**；其他机器不会继承此信任，仍可能显示未知发布者，**可信生产签名仍为 NOT RUN**。未签名构建或新证书仍可能触发 SmartScreen。SHA-256 一致只能证明文件字节完整，不能代表发布者信誉。若 Windows 出现警告，请核对官方来源、摘要和发布者信息；有任何不一致就停止运行。不要关闭 SmartScreen 或其他 Windows 安全功能。
-
-本次构建有三项外部验证未执行（**NOT RUN**）：使用可信证书的生产签名、真实 SmartScreen、本提交远端 GitHub Actions。已执行一次范围受限的本机抓包，结果见 [PRIVACY.md](PRIVACY.md)，它不构成全场景零出站已验证。依赖审计已通过 `cargo deny` 执行并通过。
-
-Let's Encrypt 这类免费 TLS 证书机构不能用于此处：它只签发域名验证的 TLS 证书，不签发代码签名证书。已评估的可信发布者路径为：**SignPath Foundation**（合格开源项目可免费获得 OV 级签名，需通过审核，证书签给 SignPath Foundation 而非 Veil 或维护者）、**Azure Artifact Signing**（付费，受身份与地区资格限制）、**商业 OV/EV** 证书。三者均尚未申请或购买；可信生产签名仍为 **NOT RUN**。
+不得拿其他 Release 的侧车文件核验当前产物。当前便携 `veil.exe` 与 `veil-setup-<version>.exe` 使用**自签名开发证书 `CN=Veil Development (Long-term)`**（SHA-1 指纹 `86C8793A44EF01EE1633BCF769244894326B4526`；NotAfter `2031-11-23T05:06:11Z`）签名并加 RFC3161 时间戳，仅用于验证签名流水线。该证书仅在本开发机的当前用户根证书存储中获得显式信任，**不构成跨机或生产信任锚**；其他机器不会继承此信任，仍可能显示未知发布者。未签名构建或新证书仍可能触发 SmartScreen。SHA-256 一致只能证明文件字节完整，不能代表发布者信誉。若 Windows 出现警告，请核对官方来源、摘要和发布者信息；有任何不一致就停止运行。不要关闭 SmartScreen 或其他 Windows 安全功能。
 
 ### 便携 exe
 
@@ -240,10 +239,21 @@ pwsh -File tools/smoke_launch.ps1 -ExePath target/release/veil.exe -ExpectedTitl
   - ADR-012 语法高亮从自研状态机迁移到 `syntect`（fancy-regex），按行增量缓存
   - ADR-013 表格布局保持自研（不引入 `comfy-table`）
   - ADR-014 Quick Open 模糊匹配保持手写（不引入 `fuzzy-matcher`/`nucleo`）
-  - ADR-012 代码块高亮迁移到 syntect（fancy-regex + 逐行增量缓存）
 - `.trae/specs/release-and-roadmap/v1.1-roadmap.md` — v1.1 详细 roadmap
 - `.trae/specs/release-and-roadmap/v1.2-roadmap.md` — v1.2 候选池（排版设置、PDF 书签、字体子集化）
 - `.trae/specs/release-and-roadmap/v2.0-roadmap.md` — v2.0 详细 roadmap（wgpu 后移四条触发条件同时满足才启动）
+
+## 仓库结构
+
+| 路径 | 用途 |
+|---|---|
+| `crates/` | 源码：`veil-core`（纯逻辑内核）、`veil-ui`（渲染 + 交互）、`veil-mermaid-offline`（QuickJS + mermaid.js 进程内）、`veil`（产品二进制 + 平台接缝） |
+| `tools/` | 发布、冒烟、安装包、SBOM、演练脚本 — 全部 PowerShell，Python 仅 bench 辅助 |
+| `icons/` | 应用图标（`veil.ico`）与文档类型图标（`veil-doc.ico`） |
+| `docs/` | ADR（`adr/`）、策略文档、历史评审基线（`review/`） — 作为历史记录保留，部分描述已被取代的方案 |
+| `evidence/` | **构建产物验证与审计踪迹**（约 2100 文件，约 360 MB）：发布记录、SBOM、签名校验、渲染截图、冒烟日志。不是运行时数据，Veil 不处理。仅显式 A 级/B 级清理才删除；审计时始终保留 |
+| `.trae/specs/` | v1 → v3 开发过程中 40+ 历史 spec 制品。只有 `.trae/specs/release-and-roadmap/`（v1.1/v1.2/v2.0 路线图）是当前有效的；其余作为开发轨迹保留 |
+| `.github/workflows/` | `ci.yml`（PR + main 分支门禁）和 `release.yml`（`v*` tag 发布 + 手动 dry-run 触发） |
 
 ## 隐私、安全与支持
 
@@ -253,6 +263,25 @@ Veil 以 MIT 许可证免费分发。**设计上不包含遥测，也没有后�
 - [SECURITY.md](SECURITY.md) — 支持版本（3.x）、私密漏洞报告渠道、报告内容与范围
 - [SUPPORT.md](SUPPORT.md) — 官方来源、SHA-256 核验、常见问题、提交问题需附的信息
 - [THIRD-PARTY-LICENSES.md](THIRD-PARTY-LICENSES.md) — 随发布包提供的第三方组件与许可证文本
+
+## 可信发布者与外部验证状态
+
+Veil 当前使用自签名开发证书 `CN=Veil Development (Long-term)`（SHA-1 指纹 `86C8793A44EF01EE1633BCF769244894326B4526`；NotAfter `2031-11-23T05:06:11Z`）加 RFC 3161 时间戳签名。此证书仅在当前开发机上被信任；其他机器会显示未知发布者警告，SmartScreen 也可能警告或拦截。
+
+以下外部验证均保持 **NOT RUN** — 它们需要超出本仓库的操作：
+
+- **可信生产签名**：三条候选路径已评估并在 [evidence/renewal/production-signing-options.md](evidence/renewal/production-signing-options.md) 中有详细文档（SignPath Foundation — 合格开源免费 OV、Azure Artifact Signing — US$9.99/月、商业 OV/EV — US$129+/年）。所有路径都需要只能由你亲自完成的身份验证和/或付费。尚未申请或购买任何生产证书。
+- **真实 SmartScreen + MotW 下载**：需要先有上面的可信生产证书。Microsoft SmartScreen 信誉系统随时间累积；即使有可信签名，首次发布仍可能警告。
+- **本提交的远端 GitHub Actions**：推送到 GitHub 需要你的显式授权（受你的约束）。工作流文件已静态验证，包含 `workflow_dispatch` 入口且默认 `dry_run=true`。
+- **跨机信任吊销演练**：依赖于真实 CRL/AIA 基础设施，这只有在可信公共 CA 或企业 PKI 下才有。自签名证书没有公共同名吊销机制。
+
+### 建议的下一步（当你准备好时）
+
+1. 阅读 [evidence/renewal/production-signing-options.md](evidence/renewal/production-signing-options.md) §7（"Veil 推荐路线与下一步清单"）中的四条路径对比。
+2. 判断 SignPath（OSS 基金会，免费）、Azure Public Trust（US$9.99/月，美/加身份）还是商业 OV 证书符合你的约束。
+3. 亲自完成身份验证/购买 — 证书和私钥不得进入本仓库，也不得被任何 agent 接触。
+4. 获得生产证书后，将其 Base64 PFX 和密码加入 GitHub Repository Secrets（`VEIL_SIGNING_CERTIFICATE_BASE64`、`VEIL_SIGNING_CERTIFICATE_PASSWORD`），并将时间戳 URL 配置为 `VEIL_SIGNING_TIMESTAMP_URL`。
+5. 推送 `v*` tag 发布签名 release，然后从一台全新 Windows VM 下载该 release，验证发布者身份、SmartScreen 行为，并建立初始信誉。
 
 ## 许可
 

@@ -1,0 +1,35 @@
+=== ci.yml core-linux job ===
+  core-linux:
+    runs-on: ubuntu-latest
+        run: cargo check -p veil-core
+        run: cargo test -p veil-core
+        run: cargo test -p veil-core --test conformance -- --nocapture
+        run: cargo test -p veil-core --test gfm_conformance -- --nocapture
+
+=== release.yml workflow_dispatch ===
+  workflow_dispatch:
+    inputs:
+      dry_run:
+      # workflow_dispatch 默认 dry_run=true；即使手动设为 false，也只有 v* tag push 能发布。
+        if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && !inputs.dry_run }}
+
+=== No continue-on-error in critical steps ===
+      # stage=pass-degraded 记录断言子集。两种结果都不使用 continue-on-error。
+
+=== Smoke script 1s budget ===
+    SMOKE PASS exe=... stage=pass launch_ms=... max_ms=1000 hwnd=0x... ...
+  1 秒预算：spec 要求双击后 1 秒内显示主窗口。MaxLaunchMs（默认 1000）是硬
+  上限，launch_ms 超限即判 FAIL（stage=launch-too-slow），与 TimeoutSeconds
+.PARAMETER MaxLaunchMs
+  主窗口出现耗时上限（毫秒），默认 1000。launch_ms 超过该值即判 FAIL
+  （stage=launch-too-slow），即使窗口最终出现、标题正确、退出码正常。
+    [int]$MaxLaunchMs = 1000,
+            $closeTimeoutMs = [int]([Math]::Max(3, $TimeoutSeconds) * 1000)
+            $closeTimeoutMs = [int]([Math]::Max(3, $TimeoutSeconds) * 1000)
+                elseif ($launchMs -gt $MaxLaunchMs) {
+                    $stage = 'launch-too-slow'
+                    $detail = "main window appeared after ${launchMs} ms, exceeding the ${MaxLaunchMs} ms budget"
+    $status, $exeFull, $stage, $launchMs, $MaxLaunchMs, $hwndText, $titleText, $exitText, $panicText, $TimeoutSeconds, `
+
+=== veil-core cross-platform deps check (default target) ===
+No windows-specific deps in veil-core tree — PASS (veil-core deps are purely cross-platform)

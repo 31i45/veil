@@ -21,7 +21,7 @@ if ($actual -ne $expected) { throw "SHA-256 不匹配：预期 $expected，实�
 "SHA-256 核验通过：$actual"
 ```
 
-不要拿其他 Release 的侧车文件核验当前产物。当前便携 `veil.exe` 与 `veil-setup-<version>.exe` 均未签名，生产签名与真实 SmartScreen 验证仍为 **NOT RUN**。SHA-256 一致只证明字节完整，不代表发布者信誉。
+不要拿其他 Release 的侧车文件核验当前产物。当前便携 `veil.exe` 与 `veil-setup-<version>.exe` 使用自签名开发证书签名并加 RFC3161 时间戳，仅用于验证签名流水线；该证书不是受信任发布者，可信生产签名与真实 SmartScreen 验证仍为 **NOT RUN**。SHA-256 一致只证明字节完整，不代表发布者信誉。
 
 ## 便携升级与移除
 

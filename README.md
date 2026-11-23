@@ -32,9 +32,9 @@ if ($actual -ne $expected) { throw "SHA-256 mismatch: expected $expected, got $a
 "SHA-256 verified: $actual"
 ```
 
-Never compare an artifact with a sidecar from another Release. The current portable `veil.exe` and `veil-setup-<version>.exe` are both **unsigned**. Release automation supports Authenticode signing with an RFC3161 timestamp; builds made without a production certificate are explicitly recorded as **unsigned**. An unsigned build or a newly established certificate may trigger SmartScreen. A matching SHA-256 verifies file integrity, not publisher reputation. If Windows warns, check the official source, digest, and publisher details, and stop if anything differs. Do not disable SmartScreen or other Windows security features.
+Never compare an artifact with a sidecar from another Release. The current portable `veil.exe` and `veil-setup-<version>.exe` are signed with a **self-signed development certificate** and an RFC3161 timestamp, strictly to exercise the signing pipeline; that certificate is not a trusted publisher, so other machines still report an unknown publisher and **production signing remains NOT RUN**. An unsigned build or a newly established certificate may trigger SmartScreen. A matching SHA-256 verifies file integrity, not publisher reputation. If Windows warns, check the official source, digest, and publisher details, and stop if anything differs. Do not disable SmartScreen or other Windows security features.
 
-Four external verifications are **NOT RUN** for this build: production signing, real SmartScreen behaviour on a downloaded Release, real network packet capture, and this commit's remote GitHub Actions. See [PRIVACY.md](PRIVACY.md) for what each item does and does not prove.
+Three external verifications are **NOT RUN** for this build: production signing with a trusted certificate, real SmartScreen behaviour on a downloaded Release, and this commit's remote GitHub Actions. A scoped local packet capture was executed and is recorded in [PRIVACY.md](PRIVACY.md); it does not establish zero egress for every path. Dependency auditing now runs through `cargo deny` and passes for this build.
 
 ### Portable exe
 
@@ -244,7 +244,7 @@ Dependency blacklist: `tokio`, `wasmtime`, any webview crate (`webview2-com`/`wr
 
 ## Privacy, Security & Support
 
-Veil is distributed free of charge, under the MIT license. By design it contains **no telemetry and no background update checks**; network features run only after an explicit user action. Production signing, real SmartScreen behaviour, real network packet capture and this commit's remote GitHub Actions all remain **NOT RUN** — see [PRIVACY.md](PRIVACY.md) for what that does and does not mean.
+Veil is distributed free of charge, under the MIT license. By design it contains **no telemetry and no background update checks**; network features run only after an explicit user action. Production signing with a trusted certificate, real SmartScreen behaviour and this commit's remote GitHub Actions remain **NOT RUN**; a scoped local packet capture is recorded in [PRIVACY.md](PRIVACY.md) and is not a blanket zero-egress claim.
 
 - [PRIVACY.md](PRIVACY.md) — what is and is not collected, local data locations, network capabilities and defaults, remote images, diagnostic reports, how to delete data
 - [SECURITY.md](SECURITY.md) — supported versions (3.x), private vulnerability reporting, report contents and scope

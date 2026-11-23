@@ -81,6 +81,17 @@ foreach ($RelativePath in $RequiredSourceFiles) {
     Write-Fail "required installer source file is missing: $RelativePath"
   }
 }
+# 合规文档随包取自仓库根目录；bundle 中已有同名副本时必须逐字节一致，
+# 避免仓库文档与已验证发布产物漂移后被静默打进安装包。
+foreach ($RelativePath in @('LICENSE', 'THIRD-PARTY-LICENSES.md', 'PRIVACY.md', 'SECURITY.md', 'SUPPORT.md')) {
+  $BundleDoc = Join-Path $BundleDir $RelativePath
+  if (-not (Test-Path -LiteralPath $BundleDoc -PathType Leaf)) { continue }
+  $RepoHash = (Get-FileHash -LiteralPath (Join-Path $RepoRoot $RelativePath) -Algorithm SHA256).Hash
+  $BundleHash = (Get-FileHash -LiteralPath $BundleDoc -Algorithm SHA256).Hash
+  if ($RepoHash -cne $BundleHash) {
+    Write-Fail "compliance document differs from verified bundle: $RelativePath"
+  }
+}
 
 $ReleaseRecord = Get-Content -LiteralPath $RecordPath -Raw | ConvertFrom-Json
 if ($ReleaseRecord.status -ne 'passed' -or $ReleaseRecord.release_ready -ne $true) {

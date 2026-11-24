@@ -2,15 +2,15 @@
 
 ![Veil](icons/veil.ico)
 
-[![CI](https://github.com/31i45/veil/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/31i45/veil/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/github/v/release/31i45/veil?label=release)](https://github.com/31i45/veil/releases)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Rust](https://img.shields.io/badge/rust-stable%20%C2%B7%20edition%202021-orange.svg)](https://www.rust-lang.org/)
-[![Platform](https://img.shields.io/badge/platform-Windows%2011%20%C2%B7%20x64-0078d4.svg)](https://github.com/31i45/veil/releases)
-[![Build](https://img.shields.io/badge/build-portable%20exe%20%C2%B7%20optional%20installer%20%C2%B7%20offline%20mermaid%20%C2%B7%20zero%20bg%20networking-2ea44f.svg)](https://github.com/31i45/veil/releases)
-[![Stars](https://img.shields.io/github/stars/31i45/veil)](https://github.com/31i45/veil/stargazers)
-[![Forks](https://img.shields.io/github/forks/31i45/veil)](https://github.com/31i45/veil/network/members)
-[![Downloads](https://img.shields.io/github/downloads/31i45/veil/total)](https://github.com/31i45/veil/releases)
+[![Release](https://img.shields.io/github/v/release/31i45/veil?label=release&style=flat-square)](https://github.com/31i45/veil/releases)
+[![CI](https://img.shields.io/github/actions/workflow/status/31i45/veil/ci.yml?branch=main&label=CI&style=flat-square)](https://github.com/31i45/veil/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=flat-square)](LICENSE)
+[![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11%20%C2%B7%20x64-0078d4.svg?style=flat-square)](https://github.com/31i45/veil/releases)
+[![Rust](https://img.shields.io/badge/rust-stable%20%C2%B7%20edition%202021-orange.svg?style=flat-square)](https://www.rust-lang.org/)
+[![Build](https://img.shields.io/badge/build-portable%20exe%20%C2%B7%20optional%20installer%20%C2%B7%20offline%20mermaid%20%C2%B7%20zero%20bg%20networking-2ea44f.svg?style=flat-square)](https://github.com/31i45/veil/releases)
+[![Stars](https://img.shields.io/github/stars/31i45/veil?style=flat-square)](https://github.com/31i45/veil/stargazers)
+[![Forks](https://img.shields.io/github/forks/31i45/veil?style=flat-square)](https://github.com/31i45/veil/network/members)
+[![Downloads](https://img.shields.io/github/downloads/31i45/veil/total?style=flat-square)](https://github.com/31i45/veil/releases)
 
 [English](README.md)
 
@@ -150,7 +150,7 @@ Veil 不宣称所有 Markdown / Mermaid 语法在编辑态、源码态、HTML、
 
 ## 构建 / 运行 / 测试
 
-前置：Rust stable（edition 2021）。验收环境：Windows 11 23H2+；Mica 亚克力在不可用时自动降级为纯色；Windows 10 未做真机记录，不宣称已验证。
+前置：Rust stable（edition 2021）。验收环境：Windows 11 23H2+；Windows 10 已有使用者实测可用，预期可正常运行，但不在正式验收矩阵内；Mica 亚克力在不可用时自动降级为纯色。
 
 **平台边界：Veil 是 Windows-only 桌面应用。** 不宣称 `veil.exe` 的界面、Windows 集成与发布产物可在 Linux 或 macOS 构建、运行。只有平台无关的 `veil-core` 纳入 Linux CI：release workflow 的 `core-linux` job 在 Ubuntu 执行 `cargo check -p veil-core` 与 `cargo test -p veil-core`。Linux job 变绿只证明 core 的跨平台编译与测试，不代表提供或支持 Linux 应用。
 

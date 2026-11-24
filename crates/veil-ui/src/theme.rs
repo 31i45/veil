@@ -210,6 +210,7 @@ pub struct Theme {
     pub chrome_border: [u8; 4],
     pub hover: [u8; 4],
     pub popup_bg: [u8; 4],
+    pub modal_bg: [u8; 4],
     pub thumb: [u8; 4],
     pub muted: [u8; 3],
     pub text: [u8; 3],
@@ -225,32 +226,37 @@ pub struct Theme {
     pub syntax: SyntaxColors,
 }
 
-/// Surface 底色三档语义（S5）：Theme 的底色字段按层级归为 Base / Card / Popup。
+/// Surface 底色四档语义（S5）：Theme 的底色字段按层级归为 Base / Card / Popup / Modal。
 ///
 /// | 档 | Theme 字段 | 含义 |
 /// |---|---|---|
 /// | Base | bg | 页面/窗口底层背景 |
 /// | Card | chrome_bg | chrome 区条带、表头（不弹起） |
-/// | Popup | popup_bg | 浮层、弹出、模态（带阴影弹起） |
+/// | Popup | popup_bg | 浮层、弹出（带 Low 档阴影弹起） |
+/// | Modal | modal_bg | 模态对话框（带 High 档阴影弹起，最深一层弹起） |
 ///
 /// 代码块底色（code_bg）与表头底色（table_head_bg）是 Card 档的特化，
 /// 不归本枚举直接映射——调用方按需经 `tokens::palette::code_bg` / `table_head_bg` 取。
+///
+/// 层级约束：modal_bg ≠ popup_bg ≠ chrome_bg，两两可被人眼区分（ΔE ≥ 2）。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-#[allow(dead_code)] // API 预留：paint 层仍经 palette 模块消费，SurfaceLevel 后续批次会有更多使用点（当前仅测试锁定映射）
+#[allow(dead_code)] // API 预留：paint 层仍经 palette 模块消费，SurfaceLevel 后续批次会有更多使用点（当前仅测试锁定四档映射）
 pub enum SurfaceLevel {
     Base,
     Card,
     Popup,
+    Modal,
 }
 
 impl Theme {
     /// 按档取 surface 底色。
-    #[allow(dead_code)] // 同 SurfaceLevel：后续批次消费（当前仅测试锁定三档映射）
+    #[allow(dead_code)] // 同 SurfaceLevel：后续批次消费（当前仅测试锁定四档映射）
     pub fn surface(&self, level: SurfaceLevel) -> [u8; 4] {
         match level {
             SurfaceLevel::Base => self.bg,
             SurfaceLevel::Card => self.chrome_bg,
             SurfaceLevel::Popup => self.popup_bg,
+            SurfaceLevel::Modal => self.modal_bg,
         }
     }
     /// 按模式与系统外观解析出最终调色板（System 跟随传入的系统态）。
@@ -279,6 +285,9 @@ impl Theme {
             chrome_border: [208, 213, 221, 255],
             hover: [228, 236, 246, 255],
             popup_bg: [255, 255, 255, 255],
+            // modal_bg 必须与 popup_bg 有可感知色差（ΔE ≥ 2）：冷调灰 [249,250,252] 提供明度差 +
+            // 蓝调偏移，靠色彩差异增强弹起层级，又不过度偏离低干扰基调。
+            modal_bg: [249, 250, 252, 255],
             thumb: [176, 184, 195, 255],
             muted: [110, 110, 110],
             text: [45, 45, 45],
@@ -304,6 +313,8 @@ impl Theme {
             chrome_border: [60, 64, 70, 255],
             hover: [55, 65, 80, 255],
             popup_bg: [45, 45, 45, 255],
+            // 深主题靠明度差：modal 比 popup 再亮 3 级，与 popup 有 ΔL ≈ 3.5。
+            modal_bg: [49, 49, 49, 255],
             thumb: [96, 102, 110, 255],
             muted: [160, 160, 160],
             text: [225, 225, 225],
@@ -1493,6 +1504,7 @@ mod tests {
         assert_eq!(t.chrome_border, [208, 213, 221, 255]);
         assert_eq!(t.hover, [228, 236, 246, 255]);
         assert_eq!(t.popup_bg, [255, 255, 255, 255]);
+        assert_eq!(t.modal_bg, [249, 250, 252, 255]);
         assert_eq!(t.thumb, [176, 184, 195, 255]);
         assert_eq!(t.muted, [110, 110, 110]);
         assert_eq!(t.text, [45, 45, 45]);
@@ -1662,13 +1674,16 @@ mod tests {
     fn surface_pairs_meet_contrast_targets() {
         // 浮层（surface）三组关键配色的 WCAG 对比度门禁：
         // 正文级文字（text / muted 在 popup_bg 上）≥ 4.5；
+        // 模态底色（text 在 modal_bg 上）≥ 4.5（模态弹起最深，前景必须可读）；
         // 悬停态（text 在 hover 上，短暂交互态，按大字级放宽）≥ 3.0。
-        // 若调整 muted / hover 取值，必须保持本断言成立。
+        // 若调整 muted / hover / modal_bg 取值，必须保持本断言成立。
         for t in [Theme::light(), Theme::dark()] {
             let popup = [t.popup_bg[0], t.popup_bg[1], t.popup_bg[2]];
+            let modal = [t.modal_bg[0], t.modal_bg[1], t.modal_bg[2]];
             let hover = [t.hover[0], t.hover[1], t.hover[2]];
             let c_text_popup = contrast(t.text, popup);
             let c_muted_popup = contrast(t.muted, popup);
+            let c_text_modal = contrast(t.text, modal);
             let c_text_hover = contrast(t.text, hover);
             assert!(
                 c_text_popup >= 4.5,
@@ -1681,8 +1696,19 @@ mod tests {
                 t.dark
             );
             assert!(
+                c_text_modal >= 4.5,
+                "text/modal_bg 对比度不足: dark={} {c_text_modal:.2}",
+                t.dark
+            );
+            assert!(
                 c_text_hover >= 3.0,
                 "text/hover 对比度不足: dark={} {c_text_hover:.2}",
+                t.dark
+            );
+            // modal ≠ popup：弹起层级必须分离
+            assert_ne!(
+                t.modal_bg, t.popup_bg,
+                "modal_bg 必须与 popup_bg 不同才能建立模态弹起层级（dark={}）",
                 t.dark
             );
         }
@@ -1690,11 +1716,12 @@ mod tests {
 
     #[test]
     fn surface_levels_map_to_correct_fields() {
-        // S5 语义层门禁：SurfaceLevel 三档必须精确映射到 Theme 字段。
+        // S5 语义层门禁：SurfaceLevel 四档必须精确映射到 Theme 字段。
         for t in [Theme::light(), Theme::dark()] {
             assert_eq!(t.surface(SurfaceLevel::Base), t.bg);
             assert_eq!(t.surface(SurfaceLevel::Card), t.chrome_bg);
             assert_eq!(t.surface(SurfaceLevel::Popup), t.popup_bg);
+            assert_eq!(t.surface(SurfaceLevel::Modal), t.modal_bg);
             // Card 档对比度门禁：text/muted 必须在 chrome_bg 上 ≥4.5
             let card = [t.chrome_bg[0], t.chrome_bg[1], t.chrome_bg[2]];
             let c_text = contrast(t.text, card);

@@ -205,6 +205,35 @@ impl Frame {
         }
     }
 
+    /// High 档柔和投影（模态专用）：7 层外扩、外扩更大、alpha 更浓，
+    /// 深色增益更强。叠加大致等效 10px 高斯模糊。观感上比 Low 档弹起更深一层，
+    /// 配合 `palette::surface_modal` 底色建立模态视觉独立层。
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn fill_shadow_high(
+        &mut self,
+        x: i32,
+        y: i32,
+        w: u32,
+        h: u32,
+        radius: f32,
+        scale: f32,
+        dark: bool,
+    ) {
+        let off = surface::shadow_offset_y(scale).round() as i32;
+        for &(spread, base_alpha) in surface::HIGH_SHADOW_LAYERS {
+            let e = (spread * scale).round() as i32;
+            let a = surface::high_shadow_alpha(base_alpha, dark);
+            self.fill_rounded_rect(
+                x - e,
+                y - e + off,
+                (w as i32 + 2 * e) as u32,
+                (h as i32 + 2 * e) as u32,
+                radius + spread * scale,
+                [0, 0, 0, a],
+            );
+        }
+    }
+
     /// 圆角描边矩形（kbd/abbr 等行内装饰）：外框 fill_rounded_rect + 内缩 stroke 宽度
     /// 的 fill_rounded_rect（透明底）叠出纯描边效果；内缩半径同步减 stroke 宽度，
     /// 保证四角曲率连续。stroke 宽为 0 或 ≥ 短边一半时退化为整框填充。

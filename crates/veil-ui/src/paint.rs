@@ -428,7 +428,7 @@ fn paint_code_header(
         b.w.max(1.0) as u32,
         b.h.max(1.0) as u32,
         (3.0 * scale).max(1.0),
-        theme.popup_bg,
+        crate::tokens::palette::surface_popup(theme),
     );
     // 1px 描边：四边各一条，避免引入新的绘制原语。
     let border = theme.chrome_border;

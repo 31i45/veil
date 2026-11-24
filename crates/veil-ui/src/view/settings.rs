@@ -15,9 +15,7 @@ use crate::i18n::{t, Key};
 use crate::input::Key as InputKey;
 use crate::theme::{surface, Config, DocFontFamily, ThemeMode};
 use crate::tokens::{palette, typography};
-use crate::view::modal::ButtonRole;
-use crate::view::modal::ModalButton;
-use crate::view::modal::Text;
+use crate::view::modal::{self, ButtonRole, ModalButton, Text};
 use crate::view::Frame;
 
 /// 字段种类：决定渲染和键盘/鼠标交互。
@@ -943,9 +941,11 @@ fn paint_field_control(
     };
     stroke_frame(frame, c, cr, border_color, palette::surface_popup(theme));
 
-    // 焦点环先画（在值文本下层），避免覆盖文本
+    // 焦点环先画（在值文本下层），避免覆盖文本；与模态/查找共用对比度与 DPI 策略。
     if is_focused {
-        focus_ring(frame, c, cr, theme.accent, palette::surface_popup(theme));
+        let inner = palette::surface_popup(theme);
+        let ring = modal::focus_ring_color(theme, [inner[0], inner[1], inner[2]]);
+        modal::focus_ring(frame, c, cr, ring, inner, scale);
     }
 
     // 控件值文本（在焦点环上层，始终可见）
@@ -1002,28 +1002,13 @@ fn stroke_frame(frame: &mut Frame, r: Rect, radius: f32, border: [u8; 3], bg: [u
     }
 }
 
-fn focus_ring(frame: &mut Frame, r: Rect, radius: f32, color: [u8; 3], inner: [u8; 4]) {
-    let x = r.x.round() as i32 + 1;
-    let y = r.y.round() as i32 + 1;
-    let w = r.w.round().max(0.0) as u32;
-    let h = r.h.round().max(0.0) as u32;
-    if w <= 2 || h <= 2 {
-        return;
-    }
-    let cr = (radius - 1.0).max(0.0);
-    frame.fill_rounded_rect(x, y, w - 2, h - 2, cr, [color[0], color[1], color[2], 255]);
-    if w > 4 && h > 4 {
-        frame.fill_rounded_rect(x + 1, y + 1, w - 4, h - 4, (cr - 1.0).max(0.0), inner);
-    }
-}
-
 fn paint_card(frame: &mut Frame, scale: f32, theme: &crate::theme::Theme, card: Rect) {
     let x = card.x.round() as i32;
     let y = card.y.round() as i32;
     let w = card.w.max(0.0).round() as u32;
     let h = card.h.max(0.0).round() as u32;
     let r = surface::dialog_radius(scale);
-    frame.fill_shadow(x, y, w, h, r, scale, theme.dark);
+    frame.fill_shadow_high(x, y, w, h, r, scale, theme.dark);
     frame.fill_rounded_rect(x, y, w, h, r, theme.chrome_border);
     if w > 2 && h > 2 {
         frame.fill_rounded_rect(
@@ -1074,7 +1059,7 @@ fn paint_buttons(
                 let fg = theme.accent_text;
                 if focused {
                     let inner = [theme.accent[0], theme.accent[1], theme.accent[2], 255];
-                    focus_ring(frame, rect, radius, fg, inner);
+                    modal::focus_ring(frame, rect, radius, fg, inner, scale);
                 }
                 draw_btn_text(frame, text, &button.display_label(), fg, rect, line_h);
             }
@@ -1103,8 +1088,13 @@ fn paint_buttons(
                     );
                 }
                 if focused {
-                    let inner = palette::surface_popup(theme);
-                    focus_ring(frame, rect, radius, theme.accent, inner);
+                    let inner = if hovered {
+                        theme.hover
+                    } else {
+                        palette::surface_popup(theme)
+                    };
+                    let ring = modal::focus_ring_color(theme, [inner[0], inner[1], inner[2]]);
+                    modal::focus_ring(frame, rect, radius, ring, inner, scale);
                 }
                 draw_btn_text(frame, text, &button.display_label(), fg, rect, line_h);
             }
@@ -1519,6 +1509,132 @@ mod tests {
                 .position(|&candidate| candidate == id)
                 .expect("测试按钮必须存在"),
         );
+    }
+
+    fn paint_for_test(
+        theme: &crate::theme::Theme,
+        scale: f32,
+        form: &SettingsForm,
+        state: &SettingsState,
+        layout: &SettingsLayout,
+    ) -> Frame {
+        let vp = viewport(1280.0, 800.0);
+        let mut frame = Frame::new(vp.w as u32, vp.h as u32, palette::surface_base(theme));
+        let mut text = FakeText;
+        paint(
+            &mut frame,
+            vp,
+            scale,
+            theme,
+            form,
+            state,
+            layout,
+            &buttons(),
+            &mut text,
+        );
+        frame
+    }
+
+    fn top_edge_pixel(frame: &Frame, rect: Rect, offset: u32) -> [u8; 3] {
+        let pixel = frame.get(
+            (rect.x + rect.w * 0.5).round() as u32,
+            rect.y.round() as u32 + offset,
+        );
+        [pixel[0], pixel[1], pixel[2]]
+    }
+
+    #[test]
+    fn focused_field_and_secondary_use_shared_contrast_policy() {
+        for theme in [crate::theme::Theme::light(), crate::theme::Theme::dark()] {
+            let form = default_form();
+            let layout = layout_scrolled(viewport(1280.0, 800.0), &form, 1.0, 0);
+            let popup = palette::surface_popup(&theme);
+
+            let field_state = SettingsState::new(&form);
+            let field = paint_for_test(&theme, 1.0, &form, &field_state, &layout);
+            let field_rect = layout.fields[field_state.focused_field].control;
+            let expected = modal::focus_ring_color(&theme, [popup[0], popup[1], popup[2]]);
+            assert_eq!(
+                top_edge_pixel(&field, field_rect, 1),
+                expected,
+                "字段焦点色必须共享模态策略: dark={}",
+                theme.dark
+            );
+
+            let mut button_state = SettingsState::new(&form);
+            focus_button(&mut button_state, &layout, BTN_CANCEL);
+            let button_index = button_state.focused_button.expect("Cancel 焦点必须存在");
+            let button_rect = layout.buttons[button_index];
+            for hovered in [false, true] {
+                button_state.hovered_button = hovered.then_some(button_index);
+                let frame = paint_for_test(&theme, 1.0, &form, &button_state, &layout);
+                let inner = if hovered { theme.hover } else { popup };
+                let expected = modal::focus_ring_color(&theme, [inner[0], inner[1], inner[2]]);
+                assert_eq!(
+                    top_edge_pixel(&frame, button_rect, 1),
+                    expected,
+                    "Secondary 焦点色必须匹配实际底色: dark={} hovered={hovered}",
+                    theme.dark
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn field_and_button_focus_rings_share_dpi_thickness() {
+        for theme in [crate::theme::Theme::light(), crate::theme::Theme::dark()] {
+            let form = default_form();
+            let scale = 1.5;
+            let layout = layout_scrolled(viewport(1280.0, 800.0), &form, scale, 0);
+            let popup = palette::surface_popup(&theme);
+            let popup_rgb = [popup[0], popup[1], popup[2]];
+
+            let field_state = SettingsState::new(&form);
+            let mut primary_state = SettingsState::new(&form);
+            focus_button(&mut primary_state, &layout, BTN_OK);
+            let primary_index = primary_state.focused_button.expect("OK 焦点必须存在");
+            let mut secondary_state = SettingsState::new(&form);
+            focus_button(&mut secondary_state, &layout, BTN_CANCEL);
+            let secondary_index = secondary_state.focused_button.expect("Cancel 焦点必须存在");
+
+            let cases = [
+                (
+                    field_state,
+                    layout.fields[field_state.focused_field].control,
+                    modal::focus_ring_color(&theme, popup_rgb),
+                    popup,
+                ),
+                (
+                    primary_state,
+                    layout.buttons[primary_index],
+                    theme.accent_text,
+                    [theme.accent[0], theme.accent[1], theme.accent[2], 255],
+                ),
+                (
+                    secondary_state,
+                    layout.buttons[secondary_index],
+                    modal::focus_ring_color(&theme, popup_rgb),
+                    popup,
+                ),
+            ];
+            for (state, rect, ring, inner) in cases {
+                let frame = paint_for_test(&theme, scale, &form, &state, &layout);
+                for offset in [1, 2] {
+                    assert_eq!(
+                        top_edge_pixel(&frame, rect, offset),
+                        ring,
+                        "150% DPI 焦点环必须为两个物理像素: dark={} offset={offset}",
+                        theme.dark
+                    );
+                }
+                assert_eq!(
+                    top_edge_pixel(&frame, rect, 3),
+                    [inner[0], inner[1], inner[2]],
+                    "焦点环内侧必须恢复实际底色: dark={}",
+                    theme.dark
+                );
+            }
+        }
     }
 
     #[test]

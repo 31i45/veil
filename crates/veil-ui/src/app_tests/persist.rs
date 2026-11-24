@@ -484,7 +484,7 @@ fn modal_paints_scrim_and_card() {
     disk(&store, "b.md", b"new");
     let mut a = app("old", Some("a.md"), false, &store);
     a.editor.apply(Intent::InsertText("改".into())).unwrap();
-    let popup_bg = a.input_state.theme.popup_bg;
+    let popup_bg = crate::tokens::palette::surface_modal(&a.input_state.theme);
     let (_, h) = a.win_size();
     let probe = (4u32, h / 2);
     let before = {

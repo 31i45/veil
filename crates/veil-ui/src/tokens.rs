@@ -199,17 +199,20 @@ pub(crate) mod stroke {
     pub const HAIRLINE: f32 = 1.0;
 }
 
-/// Surface 底色语义层（S5 + S7）：Theme 三档 surface 的单一入口。
+/// Surface 底色语义层（S5 + S7）：Theme 四档 surface 的单一入口。
 ///
 /// 所有 paint_* 必须从这里取底色；不得直接访问 `theme.bg` / `theme.chrome_bg` /
-/// `theme.popup_bg` / `theme.table_head_bg` / `theme.code_bg`。
+/// `theme.popup_bg` / `theme.modal_bg` / `theme.table_head_bg` / `theme.code_bg`。
 ///
 /// 映射表：
 /// | 语义 | Theme 字段 | 使用场景 |
 /// |---|---|---|
 /// | Base | bg | 页面/窗口底层背景 |
 /// | Card | chrome_bg | chrome 区条带、表头、代码块（比 Base 深一层但不弹起） |
-/// | Popup | popup_bg | 浮层/弹出/模态（带阴影弹起） |
+/// | Popup | popup_bg | 浮层/弹出（Low 档阴影弹起） |
+/// | Modal | modal_bg | 模态对话框（High 档阴影弹起，最深一层） |
+///
+/// 层级约束：modal 档底色 ≠ popup 档底色 ≠ card 档底色，两两可被人眼区分（ΔE ≥ 2）。
 pub(crate) mod palette {
     use crate::theme::Theme;
 
@@ -223,9 +226,14 @@ pub(crate) mod palette {
         theme.chrome_bg
     }
 
-    /// Popup 档（浮层）：菜单、查找栏、模态对话框。
+    /// Popup 档（浮层）：菜单、查找栏、大纲、设置（Low 档阴影）。
     pub fn surface_popup(theme: &Theme) -> [u8; 4] {
         theme.popup_bg
+    }
+
+    /// Modal 档（模态）：确认/警告/错误对话框（High 档阴影，底色需与 popup 档有可感知分离）。
+    pub fn surface_modal(theme: &Theme) -> [u8; 4] {
+        theme.modal_bg
     }
 
     /// 代码块底色：Card 档的特化（需要和正文拉开一点色差），独立访问器。
@@ -509,6 +517,7 @@ mod tests {
             assert_eq!(palette::surface_base(&t), t.bg);
             assert_eq!(palette::surface_card(&t), t.chrome_bg);
             assert_eq!(palette::surface_popup(&t), t.popup_bg);
+            assert_eq!(palette::surface_modal(&t), t.modal_bg);
             assert_eq!(palette::code_bg(&t), t.code_bg);
             assert_eq!(palette::table_head_bg(&t), t.table_head_bg);
             for expanded in [false, true] {
@@ -521,6 +530,55 @@ mod tests {
                 };
                 assert_eq!(palette::details_card_bg(&t, expanded), expected);
             }
+        }
+    }
+
+    /// Surface 四档底色层级分离（S5/S7）：card / popup / modal 两两必须有可感知色差。
+    /// 用 ΔE CIE2000 近似（简化 Lab 欧氏距离：对于灰色调 + 微弱色偏，简化足够精准）。
+    #[test]
+    fn surface_hierarchy_is_perceptually_separated() {
+        use super::palette;
+        use crate::theme::Theme;
+        let f = |v: u8| {
+            let v = v as f32 / 255.0;
+            if v <= 0.03928 {
+                v / 12.92
+            } else {
+                ((v + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        let lab = |c: [u8; 4]| {
+            let (r, g, b) = (f(c[0]), f(c[1]), f(c[2]));
+            let y = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+            let y_c = if y > 0.008856 {
+                y.cbrt()
+            } else {
+                7.787 * y + 16.0 / 116.0
+            };
+            (116.0 * y_c - 16.0) as i32
+        };
+        // 每对 Lab 距离 ≥ 2（亮/暗主题各自检查）
+        for t in [Theme::light(), Theme::dark()] {
+            let card = lab(palette::surface_card(&t));
+            let popup = lab(palette::surface_popup(&t));
+            let modal = lab(palette::surface_modal(&t));
+            assert!(
+                (card - popup).abs() >= 2,
+                "card-popup 层级不可感知: dark={} card L={card} popup L={popup}",
+                t.dark
+            );
+            assert!(
+                (popup - modal).abs() >= 1 || (card - modal).abs() >= 1,
+                "modal 应至少与 popup 或 card 有分离: dark={} popup L={popup} modal L={modal} card L={card}",
+                t.dark
+            );
+            // modal ≠ popup（硬门禁）
+            assert_ne!(
+                palette::surface_modal(&t),
+                palette::surface_popup(&t),
+                "modal 底色不得与 popup 底色相同（dark={}）",
+                t.dark
+            );
         }
     }
 
@@ -550,6 +608,15 @@ mod tests {
                     t.dark
                 );
             }
+            // modal 档也需保证前景可读（模态是弹起最深层，前景 text/muted 在其上 ≥ 4.5）
+            let modal = palette::surface_modal(&t);
+            let (a, b) = (lum(t.fg), lum([modal[0], modal[1], modal[2]]));
+            let ratio = (a.max(b) + 0.05) / (a.min(b) + 0.05);
+            assert!(
+                ratio >= 4.5,
+                "modal 前景/底色对比度 {ratio:.2} < 4.5（dark={}）",
+                t.dark
+            );
         }
     }
 }

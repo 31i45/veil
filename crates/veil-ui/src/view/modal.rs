@@ -421,14 +421,15 @@ fn paint_error_icon(frame: &mut Frame, icon: Rect, theme: &Theme) {
     frame.fill_rect(cx, dot_y, dot, dot, [mark[0], mark[1], mark[2], 255]);
 }
 
-/// 卡片：8px 圆角 + 投影 + 1px 边框；不复用固定 6px 的 `fill_surface_card`。
+/// 卡片：8px 圆角 + High 档投影（7 层，模态专用） + 1px 边框；不复用固定 6px 的 `fill_surface_card`。
+/// 底色走 `palette::surface_modal`（Modal 档，比 popup 档更深一层弹起）。
 fn paint_card(frame: &mut Frame, scale: f32, theme: &Theme, card: Rect) {
     let x = card.x.round() as i32;
     let y = card.y.round() as i32;
     let w = card.w.max(0.0).round() as u32;
     let h = card.h.max(0.0).round() as u32;
     let r = surface::dialog_radius(scale);
-    frame.fill_shadow(x, y, w, h, r, scale, theme.dark);
+    frame.fill_shadow_high(x, y, w, h, r, scale, theme.dark);
     frame.fill_rounded_rect(x, y, w, h, r, theme.chrome_border);
     if w > 2 && h > 2 {
         frame.fill_rounded_rect(
@@ -437,7 +438,7 @@ fn paint_card(frame: &mut Frame, scale: f32, theme: &Theme, card: Rect) {
             w - 2,
             h - 2,
             (r - 1.0).max(0.0),
-            palette::surface_popup(theme),
+            palette::surface_modal(theme),
         );
     }
 }
@@ -578,7 +579,7 @@ fn contrast_ratio(a: [u8; 3], b: [u8; 3]) -> f32 {
 
 /// 焦点环：按钮矩形内缩 1px 起画 `scale` 像素描边（150% DPI 下不因 1px 变细而隐形），
 /// 内层填回底色/悬停色。
-fn focus_ring(
+pub(crate) fn focus_ring(
     frame: &mut Frame,
     rect: Rect,
     radius: f32,
@@ -1234,15 +1235,15 @@ mod tests {
             assert!(corner[ch] < bg[ch], "遮罩应压暗底色");
         }
 
-        // 2) 卡片中心 = popup_bg（文字与按钮都不覆盖此点）
+        // 2) 卡片中心 = modal_bg（文字与按钮都不覆盖此点；按钮自身用 popup 档弹起在 modal 上）
         let cx = (l.card.x + l.card.w * 0.5).round() as u32;
         let cy = (l.card.y + l.card.h * 0.5).round() as u32;
         let card_px = frame.get(cx, cy);
-        let popup = palette::surface_popup(&theme);
+        let modal = palette::surface_modal(&theme);
         assert_eq!(
             [card_px[0], card_px[1], card_px[2]],
-            [popup[0], popup[1], popup[2]],
-            "卡片中心应为 popup_bg dark={}",
+            [modal[0], modal[1], modal[2]],
+            "卡片中心应为 modal_bg dark={}",
             theme.dark
         );
 
@@ -1252,7 +1253,7 @@ mod tests {
         let outside = frame.get(ox, oy);
         assert_ne!(
             [outside[0], outside[1], outside[2]],
-            [popup[0], popup[1], popup[2]],
+            [modal[0], modal[1], modal[2]],
             "圆角外侧不应是卡片色"
         );
         assert!(

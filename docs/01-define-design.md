@@ -126,3 +126,67 @@ session（facade：Session::apply(Edit) -> Events）
 | 外部文件变更 | Tampering | 监听通知与本地保存竞争，静默覆盖双方修改 | 内容哈希对比；冲突时写备份文件并提示，不静默覆盖 |
 
 （Spoofing/Repudiation/Elevation：v1 无网络、无账户、无权限提升路径，过一遍后确认无实际威胁，不填。）
+
+### B6 视觉令牌消费契约（S5/S7）
+
+> 视觉令牌收敛到 `crates/veil-ui/src/tokens.rs` 的 8 个子模块与 `theme.rs` 的 `Theme` 结构体。
+> 所有绘制/布局层（`paint.rs`、`chrome/paint.rs`、`paint_overlay.rs`、`view/*`）必须只从这些入口取值。
+> 数值真源是代码；本文不复制任何数值，数值变更以 `tokens.rs` / `theme.rs` 为准。
+
+#### 8 个唯一入口
+
+| 模块 | 职责 | 消费方 |
+|---|---|---|
+| `tokens::surface` | 浮层/模态几何（圆角、行高、内边距、阴影层） | chrome、outline、quick_open、search、modal、settings |
+| `tokens::palette` | 底色语义层（base / card / popup / modal / code / table_head / details） | 所有 paint_* |
+| `tokens::state` | 交互态（hover / pressed / focus / disabled / selected / empty） | 所有 paint_* |
+| `tokens::space` | chrome 间距刻度（4/8/12/16/24） | chrome、浮层布局 |
+| `tokens::stroke` | 线宽（仅 hairline） | chrome 边框、浮层边框 |
+| `tokens::typography` | 字阶与字体族 | 所有布局/绘制 |
+| `tokens::motion` | 过渡时长与缓动 | 过渡（S6）、chrome 悬停淡入 |
+| `tokens::doc` | 正文排版标尺（段距、列表缩进、代码块内边距、图片限高） | paint.rs、view/layout |
+
+颜色值定义另在 `theme::Theme`（`bg`、`fg`、`chrome_bg`、`popup_bg`、`chrome_border`、`hover`、`thumb`、`accent`、`danger` 等字段），由 `palette` / `state` 模块经访问器对外暴露；绘制层不得直接读取 `Theme` 字段。
+
+#### 关键依赖声明
+
+- `surface::DIALOG_RADIUS > surface::CORNER_RADIUS`（模态比浮层大一级圆角，几何分离）
+- `surface::HIGH_SHADOW_LAYERS` 层数 ≥ `SHADOW_LAYERS` 层数 + 1，且 alpha 浓于 Low 档（模态阴影更重）
+- `surface::SCRIM_ALPHA_DARK > SCRIM_ALPHA_LIGHT`（深底遮罩需更重）
+- `palette::surface_modal()` ≠ `palette::surface_popup()`（modal 底色比 popup 更突一层）
+- `palette::surface_popup()` ≠ `palette::surface_card()`（popup 靠弹起，card 不弹）
+- `typography::DIALOG_TITLE_SIZE > UI_SIZE` 且 `< BODY_SIZE`（模态标题层级居中）
+- `tokens::space` 所有值必须是 4 的倍数；`tokens::doc` 不受此约束（正文排版节奏有独立历史）
+
+#### 可覆盖 / 硬常量区分
+
+- **可覆盖**：`Theme` 的颜色字段（支持浅/深两套 + 可配置扩展）、`SyntaxColors`（可从 `.tmTheme` 加载）、`scrim_alpha()` / `shadow_alpha()` 的 dark 增益
+- **硬常量**：`surface` 模块所有几何（浮层形状是应用签名，不可随意改）、`space` / `stroke` / `typography` / `motion` / `doc` 模块、`palette` 的访问器（只暴露语义）
+- `Theme::SyntaxColors` 的 plist 解析失败时回退硬编码兜底值（`SYNTAX_FALLBACK`）——这是语义安全兜底，不是漂移常量
+
+#### 禁止条款（所有 paint_* / view/* 必须遵守）
+
+1. **不得自行计算 corner_radius**：一律消费 `surface::corner_radius(scale)` 或 `surface::dialog_radius(scale)`
+2. **不得直接访问 `theme.popup_bg` / `theme.chrome_bg`**：走 `palette::surface_popup(theme)` / `palette::surface_card(theme)`
+3. **不得自行判断 hover/sel 状态色**：走 `state::hover_bg(theme)` / `state::pressed_bg(theme)`
+4. **不得在绘制调用里内联 `[255, 255, 255, 255]` 等颜色字面量**（除 HTML `<span style>` 透传、纯测试夹具、模态徽标几何派生色）
+5. **不得在绘制层内联间距数值**（如 `8.0 * scale`）：走 `space::S * scale` 或 `surface::*_padding(scale)`
+6. **不得自行定义浮层阴影层**：浮层一律用 `SHADOW_LAYERS`，模态一律用 `HIGH_SHADOW_LAYERS`
+7. **不得绕过 `scrim_alpha(dark)`** 直接写遮罩 alpha 硬编码（图片预览例外：预览遮罩语义独立，不是模态遮罩）
+8. **不得新增不属于 4 倍数刻度的 chrome 间距**（正文排版 `doc::*` 不受此约束）
+
+#### 例外（有理由保留的硬编码）
+
+| 类别 | 位置 | 理由 |
+|---|---|---|
+| HTML `<span style>` 颜色透传 | `paint.rs::StyleBg` | 语义来自文档本身，必须透传 |
+| 图片预览遮罩 | `image_preview.rs` | 视觉效果独立于模态遮罩 |
+| 模态徽标感叹号几何 | `modal.rs::paint_error_icon` | 等比派生（`h*0.22`），非散落硬编码 |
+| Details 浅主题底色 | `tokens::palette::details_card_bg` | palette 模块内部的语义值，同层无对外漂移 |
+| chrome 顶层基准几何 | `chrome/mod.rs::MENU_H / STATUS_H / SCROLL_W` | 顶层基本量，不属于浮层/表面令牌家族 |
+| 测试夹具里的 Frame 初始化底色 | 所有 `Frame::new(_, _, [255,255,255,255])` | 测试代码 |
+
+#### 纪律执行
+
+- `cargo test -p veil-ui` 下的 `dialog_tokens_are_single_source_and_consistent` / `palette_module_maps_theme_fields_correctly` / `space_tokens_are_multiples_of_four` / `high_shadow_layers_are_seven_layers_and_have_stronger_dark_gain` 共同锁定令牌一致性
+- `docs/review/paint-hardcode-audit.md` 记录已知例外与待收敛项，每季度更新一次

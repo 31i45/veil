@@ -1,5 +1,7 @@
 # Veil v3.0 Final Evaluation — 2026-11-23
 
+> **历史评价快照（v3.0.1，2026-11-23）**：下列 PASS、测试数、体积和发布判断仅对应当时列出的提交与已执行工程门禁，不是当前 v3.0.2 的重新验收。外部事项仍为 NOT RUN；本报告不证明审美、品牌声望、采用度、营收或经典地位。
+
 > 上轮 cleanup-and-polish-v3 解决用户可见问题（badge 6→9、NOT RUN 集中归档、ci.yml core-linux job）。
 > 本轮 final-polish-steve-jobs 解决仓库健康度、自动化验证全量落地、证据链分级、历史清理和发布物料。
 > 两份 commit：`f82b919` + 本轮 commit。Review R1（cleanup）**PASS**，本轮 Review R2（final-polish）—— 见 `.trae/specs/final-polish-steve-jobs/review.md`。
@@ -89,10 +91,10 @@ disposition.md 原始 7 项 + 本轮 final-polish 新增 typing-verify 落地：
 
 ## 6. Release Readiness
 
-### YES ✅ — Veil v3.0 已可骄傲地发布
+### 当时结论：v3.0.1 已列工程门禁通过
 
-**依据**：
-1. 所有可自动化 NOT RUN 项全 PASS（disposition §2 四项）
+**依据（仅指当时已执行并记录的项目）**：
+1. disposition §2 所列四项可自动化验证在当时记录为 PASS
 2. cargo fmt / clippy / deny check / test 全绿
 3. 根目录零历史残留（evaluation 已归位）
 4. evidence/ 分级清晰（343 MB，gitignored，render/ux 历史标注）
@@ -126,14 +128,8 @@ f82b919 — 上轮后半: deny.toml + 商业化物料 + eval归位
 
 ---
 
-## 综合评价
+## 综合评价（历史工程结论）
 
-**Veil v3.0 已经达到乔布斯级别的发布标准**。这不是因为功能最多或代码最炫，而是因为：
+对 v3.0.1 当时快照，可支持的结论仅是：本报告列出的 fmt、clippy、deny、测试、指定交互链与仓库检查已按记录执行并通过；生产签名、真实 SmartScreen、远端 Actions 等外部事项仍未完成或需要单独核验。
 
-1. **一致性** — 中英 README 事实严格对齐；ci.yml / release.yml / deny.toml / CHANGELOG 数字一致；签名状态如实披露
-2. **透明度** — 所有 NOT RUN 项都公开列出，有证据链，有升级计划，不藏着掖着
-3. **完整性** — 可自动化验证全覆盖（typing、undo、save、跨平台编译、DPI 首帧、CI YAML）；商业化物料（LANDING + LICENSE FAQ）到位
-4. **整洁度** — 根目录零历史残留；evidence/ 分级清晰；git stash 空；fmt/clippy/deny/test 全绿
-5. **判断力** — 两项 NOT RUN 合理放弃（DPI 其他档位、物理打印），不拖后腿；三项 allowed warnings 带 rationale 而非假装不存在
-
-**下一步由用户决定**：push 或不 push。如果 push，47+ commits 推上去后 GitHub Actions 自动触发，生产签名等 needs-user 项逐步推进。如果不 push，仓库状态也已可以安心冻结。
+该结论不评价也不证明审美、品牌声望、采用度、营收、市场地位或经典程度，更不是当前 v3.0.2 的重新验收。后续发布与推送仍需依据当前证据和发布流程单独决定。

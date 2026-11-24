@@ -1,9 +1,10 @@
 //! 远程图片抓取（v1.4）：WinHTTP 手写 FFI（零新增依赖）+ 后台线程 + WIC 解码。
 //!
 //! 安全边界（与 shell 打开链接同一立场）：只允许 http/https 公网目标，拒绝用户信息、
-//! 本机/私网地址与数字型主机（防 `2130706433`、`0x7f000001` 绕过）；会话禁用 Cookie、
-//! 认证与自动重定向，跳转由本模块逐跳复核（最多 3 次，https→http 直接拒绝），
-//! 不发送 Referer。响应体上限 20 MiB。
+//! 本机/私网地址与数字型主机（防 `2130706433`、`0x7f000001` 绕过）；直连并核验
+//! WinHTTP 报告的实际远端地址，受限 peer 失败关闭。会话禁用 Cookie、认证与自动重定向，
+//! 跳转由本模块逐跳复核（最多 3 次，https→http 直接拒绝），不发送 Referer。
+//! WinHTTP 只能在响应阶段提供连接信息，因此 peer 校验不是连接前隔离。响应体上限 20 MiB。
 //!
 //! 线程模型：`HttpFetcher` 留在 UI 线程（不跨线程共享），`request` 只投递任务并立刻
 //! 返回，结果经 mpsc 回传，`poll` 非阻塞取走；网络/解码失败都变成可读 Err（视图降级
@@ -188,20 +189,12 @@ fn validate_host(host: &str, bracketed: bool) -> Result<(), String> {
         return Err(tf(Key::HttpIpv6Invalid, &[host]));
     }
     let lower = host.to_ascii_lowercase();
-    if lower == "localhost" || lower.ends_with(".localhost") {
+    let canonical = lower.strip_suffix('.').unwrap_or(&lower);
+    if canonical == "localhost" || canonical.ends_with(".localhost") {
         return Err(t(Key::HttpLocalhostBlocked).into());
     }
     match ip {
-        Some(std::net::IpAddr::V4(v4)) => {
-            if blocked_v4(v4) {
-                return Err(tf(Key::HttpPrivateAddressBlocked, &[host]));
-            }
-        }
-        Some(std::net::IpAddr::V6(v6)) => {
-            if blocked_v6(v6) {
-                return Err(tf(Key::HttpPrivateAddressBlocked, &[host]));
-            }
-        }
+        Some(ip) => validate_ip(ip)?,
         None => {
             // 浏览器会把 2130706433 / 0x7f000001 当 IPv4 解析：数字/十六进制主机一律拒绝
             if numeric_like_host(&lower) {
@@ -213,6 +206,18 @@ fn validate_host(host: &str, bracketed: bool) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+fn validate_ip(addr: std::net::IpAddr) -> Result<(), String> {
+    let blocked = match addr {
+        std::net::IpAddr::V4(v4) => blocked_v4(v4),
+        std::net::IpAddr::V6(v6) => blocked_v6(v6),
+    };
+    if blocked {
+        Err(tf(Key::HttpPrivateAddressBlocked, &[&addr.to_string()]))
+    } else {
+        Ok(())
+    }
 }
 
 fn blocked_v4(addr: std::net::Ipv4Addr) -> bool {
@@ -244,16 +249,21 @@ fn blocked_v6(addr: std::net::Ipv6Addr) -> bool {
     }
 }
 
-/// 数字/十六进制字面量主机（无字母，或 `0x` + 全十六进制）。
+/// 数字/十六进制字面量主机（含点分十/八/十六进制）。
 fn numeric_like_host(host: &str) -> bool {
     let h = host.strip_suffix('.').unwrap_or(host);
     if !h.bytes().any(|b| b.is_ascii_alphabetic()) {
         return true;
     }
-    if let Some(rest) = h.strip_prefix("0x").or_else(|| h.strip_prefix("0X")) {
-        return !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_hexdigit());
-    }
-    false
+    h.split('.').all(|label| {
+        let hex = label
+            .strip_prefix("0x")
+            .or_else(|| label.strip_prefix("0X"));
+        if let Some(rest) = hex {
+            return !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_hexdigit());
+        }
+        !label.is_empty() && label.bytes().all(|b| b.is_ascii_digit())
+    })
 }
 
 /// 域名形态：标签 1..=63，字母数字/连字符，不以连字符开头或结尾。
@@ -472,6 +482,12 @@ mod sys {
             to_read: u32,
             read: *mut u32,
         ) -> i32;
+        pub fn WinHttpQueryOption(
+            handle: Hinter,
+            option: u32,
+            buffer: *mut c_void,
+            buffer_len: *mut u32,
+        ) -> i32;
         pub fn WinHttpCloseHandle(handle: Hinter) -> i32;
     }
 
@@ -481,9 +497,9 @@ mod sys {
     }
 }
 
-/// WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY：沿用系统代理配置（Win8.1+）。
+/// WINHTTP_ACCESS_TYPE_NO_PROXY：实际 peer 必须是被校验的目标，不经代理转发。
 #[cfg(windows)]
-const WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY: u32 = 4;
+const WINHTTP_ACCESS_TYPE_NO_PROXY: u32 = 1;
 /// WINHTTP_OPTION_DISABLE_FEATURE。
 #[cfg(windows)]
 const WINHTTP_OPTION_DISABLE_FEATURE: u32 = 109;
@@ -506,6 +522,25 @@ const WINHTTP_QUERY_LOCATION: u32 = 33;
 /// WINHTTP_QUERY_FLAG_NUMBER：让 QueryHeaders 把值写入 DWORD 而不是字符串。
 #[cfg(windows)]
 const WINHTTP_QUERY_FLAG_NUMBER: u32 = 0x2000_0000;
+#[cfg(windows)]
+const WINHTTP_OPTION_CONNECTION_INFO: u32 = 93;
+
+#[cfg(windows)]
+#[repr(C)]
+struct SockAddrStorage {
+    family: u16,
+    pad1: [u8; 6],
+    align: u64,
+    pad2: [u8; 112],
+}
+
+#[cfg(windows)]
+#[repr(C)]
+struct ConnectionInfo {
+    size: u32,
+    local: SockAddrStorage,
+    remote: SockAddrStorage,
+}
 
 /// 一次请求的结果：200 带响应体，重定向带 Location，其余只有状态码。
 struct Hop {
@@ -611,6 +646,7 @@ fn fetch_once(url: &HttpUrl) -> Result<Hop, String> {
     if ok == 0 {
         return Err(code_error(Key::HttpOpReceiveResponse));
     }
+    verify_connected_peer(&request, url)?;
 
     let status = query_status(&request)?;
     if status == 200 {
@@ -640,7 +676,7 @@ fn open_session() -> Result<Internet, String> {
     let raw = unsafe {
         sys::WinHttpOpen(
             agent.as_ptr(),
-            WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
+            WINHTTP_ACCESS_TYPE_NO_PROXY,
             std::ptr::null(),
             std::ptr::null(),
             0,
@@ -703,6 +739,65 @@ fn open_request(connect: &Internet, url: &HttpUrl) -> Result<Internet, String> {
         return Err(code_error(Key::HttpOpConfigureRequest));
     }
     Ok(request)
+}
+
+#[cfg(windows)]
+fn verify_connected_peer(request: &Internet, url: &HttpUrl) -> Result<(), String> {
+    let mut info: ConnectionInfo = unsafe { std::mem::zeroed() };
+    info.size = std::mem::size_of::<ConnectionInfo>() as u32;
+    let mut len = info.size;
+    let ok = unsafe {
+        sys::WinHttpQueryOption(
+            request.raw(),
+            WINHTTP_OPTION_CONNECTION_INFO,
+            &mut info as *mut ConnectionInfo as *mut std::ffi::c_void,
+            &mut len,
+        )
+    };
+    if ok == 0 {
+        return Err(format!(
+            "failed to verify remote image peer: WinHTTP error {}",
+            last_error()
+        ));
+    }
+    let peer = socket_addr(&info.remote).ok_or_else(|| {
+        "failed to verify remote image peer: unsupported address family".to_string()
+    })?;
+    if peer.port() != url.port {
+        return Err(format!(
+            "remote image connected to unexpected port {} (expected {})",
+            peer.port(),
+            url.port
+        ));
+    }
+    validate_ip(peer.ip())
+}
+
+#[cfg(windows)]
+fn socket_addr(storage: &SockAddrStorage) -> Option<std::net::SocketAddr> {
+    // SAFETY: WinHTTP 已按 SOCKADDR_STORAGE 初始化整个定长缓冲区；这里只读其字节表示。
+    let bytes =
+        unsafe { std::slice::from_raw_parts(storage as *const SockAddrStorage as *const u8, 128) };
+    let family = u16::from_ne_bytes([bytes[0], bytes[1]]);
+    let port = u16::from_be_bytes([bytes[2], bytes[3]]);
+    match family {
+        2 => Some(std::net::SocketAddr::V4(std::net::SocketAddrV4::new(
+            std::net::Ipv4Addr::new(bytes[4], bytes[5], bytes[6], bytes[7]),
+            port,
+        ))),
+        23 => {
+            let mut octets = [0u8; 16];
+            octets.copy_from_slice(&bytes[8..24]);
+            let scope_id = u32::from_ne_bytes([bytes[24], bytes[25], bytes[26], bytes[27]]);
+            Some(std::net::SocketAddr::V6(std::net::SocketAddrV6::new(
+                std::net::Ipv6Addr::from(octets),
+                port,
+                0,
+                scope_id,
+            )))
+        }
+        _ => None,
+    }
 }
 
 #[cfg(windows)]
@@ -919,8 +1014,11 @@ mod tests {
             "http://user@example.com/a.png",
             "http://user:pass@example.com/a.png",
             "http://localhost/a.png",
+            "http://localhost./a.png",
+            "http://LOCALHOST.:8080/a.png",
             "http://localhost:8080/a.png",
             "http://a.localhost/a.png",
+            "http://a.localhost./a.png",
             "http://127.0.0.1/a.png",
             "http://10.1.2.3/a.png",
             "http://172.16.0.1/a.png",
@@ -935,6 +1033,9 @@ mod tests {
             "http://100.64.0.1/a.png",
             "http://2130706433/",
             "http://0x7f000001/",
+            "http://0x7f.0.0.1/",
+            "http://0x7f.0x0.0x0.0x1/",
+            "http://0177.0.0.1/",
             "http://127.1/",
             "http://exa mple.com/a.png",
             "http://example.com:0/a.png",
@@ -963,6 +1064,29 @@ mod tests {
         assert!(!exceeds_body_limit(MAX_BYTES - 1));
         assert!(!exceeds_body_limit(MAX_BYTES), "恰好 20 MiB 应可接受");
         assert!(exceeds_body_limit(MAX_BYTES + 1), "20 MiB + 1 字节应拒绝");
+    }
+
+    #[test]
+    fn resolved_restricted_addresses_are_rejected() {
+        for restricted in [
+            "127.0.0.1",
+            "10.1.2.3",
+            "172.16.0.1",
+            "192.168.1.1",
+            "169.254.1.1",
+            "100.64.0.1",
+            "::1",
+            "fe80::1",
+            "fd00::1",
+            "::ffff:127.0.0.1",
+        ] {
+            let addr = restricted.parse().expect("test IP address");
+            assert!(validate_ip(addr).is_err(), "应拒绝实际 peer：{restricted}");
+        }
+        for public in ["8.8.8.8", "2001:4860:4860::8888"] {
+            let addr = public.parse().expect("test IP address");
+            assert!(validate_ip(addr).is_ok(), "公网 peer：{public}");
+        }
     }
 
     #[test]
@@ -1017,6 +1141,76 @@ mod tests {
         // 每跳都走同一校验：降级目标或内网目标在 resolve 阶段即被拒绝
         assert!(resolve_redirect(&https, "http://127.0.0.1/x.png").is_err());
         assert!(resolve_redirect(&https, "http://example.com/x.png").is_ok());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn actual_loopback_peer_fails_closed() {
+        assert_actual_loopback_peer_fails_closed("localhost.");
+    }
+
+    #[cfg(windows)]
+    fn assert_actual_loopback_peer_fails_closed(host: &str) {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::time::{Duration, Instant};
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback fixture");
+        let port = listener.local_addr().unwrap().port();
+        listener.set_nonblocking(true).unwrap();
+        let (seen_tx, seen_rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(3);
+            while Instant::now() < deadline {
+                match listener.accept() {
+                    Ok((mut stream, peer)) => {
+                        let target = stream.local_addr().unwrap();
+                        seen_tx.send((target, peer)).unwrap();
+                        stream
+                            .set_read_timeout(Some(Duration::from_secs(1)))
+                            .unwrap();
+                        let mut request = [0u8; 4096];
+                        let _ = stream.read(&mut request);
+                        let body = include_bytes!("../../tests/fixtures/red.jpg");
+                        write!(
+                            stream,
+                            "HTTP/1.1 200 OK\r\nContent-Type: image/jpeg\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            body.len()
+                        )
+                        .unwrap();
+                        stream.write_all(body).unwrap();
+                        return;
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(error) => panic!("loopback fixture accept: {error}"),
+                }
+            }
+        });
+
+        // 直接给 WinHTTP 一个会解析到回环的名字，绕过入口字符串校验以实测 peer 门禁。
+        let url = HttpUrl {
+            secure: false,
+            host: host.to_string(),
+            port,
+            target: "/image.jpg".to_string(),
+        };
+        let result = fetch_once(&url);
+        let observed = seen_rx.recv_timeout(Duration::from_millis(500)).ok();
+        let error = match result {
+            Err(error) => error,
+            Ok(_) => panic!("loopback response must fail closed; observed {observed:?}"),
+        };
+        assert!(
+            error.contains("127.0.0.1"),
+            "WinHTTP must report and reject the actual loopback peer: {error}"
+        );
+        let Some((target, peer)) = observed else {
+            panic!("fixture must record the actual WinHTTP connection target");
+        };
+        assert!(target.ip().is_loopback(), "actual target was {target}");
+        assert!(peer.ip().is_loopback(), "actual client peer was {peer}");
     }
 
     #[cfg(windows)]

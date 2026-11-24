@@ -18,19 +18,19 @@ MIT 是最宽松、最广泛被理解的开源许可证。Veil 从一款个人�
 
 ### 源码在哪里？
 
-[github.com/31i45/veil](https://github.com/31i45/veil)。所有发布使用开发证书 `CN=Veil Development (Long-term)` 签名（SHA-1 指纹 `86C8793A44EF01EE1633BCF769244894326B4526`）。
+[github.com/31i45/veil](https://github.com/31i45/veil)。当前便携 `veil.exe` 与 per-user 安装包 `veil-setup-<version>.exe` 使用开发证书 `CN=Veil Development (Long-term)` 签名（SHA-1 指纹 `86C8793A44EF01EE1633BCF769244894326B4526`）。
 
 ### 签名 / 信任状态？
 
-当前发布使用**自签名开发证书**。其他机器会显示未知发布者警告。完整细节与规划中的生产签名路径（SignPath Foundation — 符合条件的开源项目免费 OV，Azure Artifact Signing — 每月 US$9.99，商业 OV/EV — 每年 US$129 起）见仓库的「信任与验证状态」章节。
+当前便携 exe 与安装包使用**自签名开发证书**，该证书仅在当前开发机上被信任。其他机器会显示未知发布者警告。可信生产签名与真实 SmartScreen 验证仍为 **NOT RUN**。候选生产签名路径（SignPath Foundation — 符合条件的开源项目免费 OV，Azure Artifact Signing — 每月 US$9.99，商业 OV/EV — 每年 US$129 起）见仓库的「信任与验证状态」章节。
 
 ### Veil 会回连服务器吗？
 
-**不会。** 零遥测。没有崩溃报告。没有分析。没有静默更新。没有后台网络请求。永远。见 [PRIVACY.md](../../PRIVACY.md)。
+Veil 不包含遥测或分析，也没有后台更新检查，但不能据此表述为永不联网。崩溃与诊断报告在本地生成，不会自动上传；只有你主动提交给支持渠道时，相关报告才会离开本机。**帮助 → 检查更新**只在系统浏览器中打开官方 Release 页。远程图片默认关闭；持久开启该设置后，之后打开含远程图片的文档会按需自动请求，不再逐次提示。见 [PRIVACY.md](../../PRIVACY.md)。
 
 ### Windows SmartScreen 警告？
 
-因为 Veil 当前使用自签名证书，SmartScreen 可能警告或拦截下载。受信任的生产证书会解决这个问题——相关流程正在积极评估中。
+因为 Veil 当前使用自签名证书，SmartScreen 可能警告或拦截下载。受信任的生产证书不保证 SmartScreen 不再警告：其信誉系统需要随时间积累，且真实 Mark-of-the-Web 下载验证仍为 **NOT RUN**。
 
 ### 谁在维护 Veil？
 

@@ -7,7 +7,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=flat-square)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11%20%C2%B7%20x64-0078d4.svg?style=flat-square)](https://github.com/31i45/veil/releases)
 [![Rust](https://img.shields.io/badge/rust-stable%20%C2%B7%20edition%202021-orange.svg?style=flat-square)](https://www.rust-lang.org/)
-[![Build](https://img.shields.io/badge/build-portable%20exe%20%C2%B7%20optional%20installer%20%C2%B7%20offline%20mermaid%20%C2%B7%20zero%20bg%20networking-2ea44f.svg?style=flat-square)](https://github.com/31i45/veil/releases)
+[![Build](https://img.shields.io/badge/build-portable%20exe%20%C2%B7%20optional%20installer%20%C2%B7%20offline%20mermaid%20%C2%B7%20no%20telemetry-2ea44f.svg?style=flat-square)](https://github.com/31i45/veil/releases)
 [![Stars](https://img.shields.io/github/stars/31i45/veil?style=flat-square)](https://github.com/31i45/veil/stargazers)
 [![Forks](https://img.shields.io/github/forks/31i45/veil?style=flat-square)](https://github.com/31i45/veil/network/members)
 [![Downloads](https://img.shields.io/github/downloads/31i45/veil/total?style=flat-square)](https://github.com/31i45/veil/releases)
@@ -18,11 +18,11 @@
 
 Veil was born because **Typedown** — my favorite Markdown editor on Windows, bar none — takes **tens of seconds to minutes** to launch, every single time. A WinUI app that starts cold faster than you finish sipping your coffee should not exist, yet here we are.
 
-So I built my own. Pure Rust. No webview, no Chromium, no Electron, no external runtime. Single-file exe. In-app cold start ≈190 ms (the first open-and-edit adds ≈220 ms; measurements, commands and dates are in [Red Numbers](#red-numbers-targets-vs-measured)). **Single-user, single-document, zero background networking — no collaboration, ever.**
+So I built my own. Pure Rust. No webview, no Chromium, no Electron, no separate application runtime. Single-file exe. Historical performance figures remain attached to their builds, dates and measurement definitions in [Historical Measurements](#historical-measurements-targets-vs-results); they are not current v3.0.2 measurements. **Single-user, single-document; no background sync, telemetry or update checks — no collaboration, ever.**
 
 ## Download & Run
 
-The **only official download source** is [github.com/31i45/veil/releases](https://github.com/31i45/veil/releases). Choose either the portable `veil.exe` or the optional per-user Inno Setup installer `veil-setup-<version>.exe`. Neither form has a runtime dependency or requires administrator rights. Do not use mirrored or re-uploaded binaries.
+The **only official download source** is [github.com/31i45/veil/releases](https://github.com/31i45/veil/releases). Choose either the portable `veil.exe` or the optional per-user Inno Setup installer `veil-setup-<version>.exe`. Neither form requires a separate application runtime or administrator rights; both use Windows system components and system DLLs. Do not use mirrored or re-uploaded binaries.
 
 Download your chosen artifact and its SHA-256 sidecar from the **same Release**: `veil.exe` with `veil.exe.sha256`, or `veil-setup-<version>.exe` with its matching sidecar. Place each pair in the same folder. The PowerShell example below verifies the portable exe; substitute the installer and sidecar names to verify the setup package:
 
@@ -92,7 +92,7 @@ Four crates, one-way dependency (`veil` → `veil-ui` → `veil-core`; `veil-mer
 3. Cursor & selection: grapheme-boundary navigation; markers like `**bold**` auto-expand / collapse on caret enter/leave, caret visual position never jumps; links use the theme link colour (light `#2B6CB0` / dark `#7FB4F5`), distinct from body text
 4. File open / save: auto-save, external-modification notice + pre-overwrite backup
 5. Clipboard: plain text, HTML→Markdown conversion, screenshot paste writes to `<doc>.assets/` (incremental names, no overwrite)
-6. Block-level rendering: tables (grid mode + active-cell inline edit; the active cell shows Markdown source, other cells render bold / italic / strikethrough / inline code / links with markers hidden), math (pure Rust via latex-rust), inline images (relative-path PNG; broken links degrade to alt text; remote http/https images are disabled by default and only load after you check **View → Allow Remote Images**; on failure they degrade to an alt placeholder with a one-time status-bar notice)
+6. Block-level rendering: tables (grid mode + active-cell inline edit; the active cell shows Markdown source, other cells render bold / italic / strikethrough / inline code / links with markers hidden), math (pure Rust via latex-rust), inline images (relative-path PNG; broken links degrade to alt text; remote http/https images are disabled by default; **View → Allow Remote Images** is a persistent opt-in, and once enabled, subsequently opened documents can fetch their remote images on demand without another prompt; on failure they degrade to an alt placeholder with a one-time status-bar notice)
 7. HTML export: a single self-contained file with no external assets; inline CSS follows the current light/dark theme (background, body text, muted text, link colour, code background, borders), and dark pages declare `color-scheme: dark`
 8. Config & themes: top-level `mode` single source (`system` / `light` / `dark`, backward-compat with old `[theme] mode`), follows system appearance, deep-titlebar / Mica, switch persistent
 9. In-house chrome: menu bar (↑/↓ move, Enter run, Esc close — main and context menus alike), status bar, scroll bar; system file dialogs (Open / Save As)
@@ -110,7 +110,7 @@ Four crates, one-way dependency (`veil` → `veil-ui` → `veil-core`; `veil-mer
 21. Visible trust: the status bar degrades by priority (file name > save state > external change > source mode) and shows the file name plus the last saved time or an unsaved marker; error notices stay until you act or a newer notice arrives; a failed CLI open raises a visible error box and exits with code 1
 22. Caret as focus: solid when the window is focused, hollow when it is not — no timers, no idle wake-ups
 23. State transitions: hover/press highlights in the menu bar, menus, outline, Quick Open, context menu, find bar and dialog buttons cross-fade over 120 ms (ease-out cubic); the fade advances only while it runs, so the idle path still schedules no timers and never wakes the process. Fades are skipped entirely when Windows "Show animations" is off
-24. Remote images (v1.4): http/https images are disabled by default; checking **View → Allow Remote Images** enables them globally; a failed fetch degrades to an alt placeholder with a one-time status-bar notice. Requests never carry cookies, `Referer` or credentials, the User-Agent is fixed at `Veil/<version>`, connect/read timeout is 10 s, the response body is capped at 20 MiB, at most 3 redirects are followed with https→http downgrades refused, and localhost / loopback / private / link-local addresses are rejected. Export and PDF never include remote resources
+24. Remote images (v1.4): http/https images are disabled by default; the persistent **View → Allow Remote Images** setting enables them globally, so later documents containing remote images can fetch them on demand without another prompt; a failed fetch degrades to an alt placeholder with a one-time status-bar notice. Requests never carry cookies, `Referer` or credentials, the User-Agent is fixed at `Veil/<version>`, connect/read timeout is 10 s, the response body is capped at 20 MiB, at most 3 redirects are followed with https→http downgrades refused, and localhost / loopback / private / link-local addresses are rejected. Export and PDF never include remote resources
 25. Editing feel (v1.5): auto-pairing for `()` `[]` `{}` `"` `'` with wrap-selection and paired backspace; the 600 ms caret blink pauses during IME preedit and printing; `Ctrl+,` opens a settings modal (9 items, applied immediately)
 26. Outline & TOC: a `[TOC]` line renders as a nested ordered list with heading anchors and refreshes as you edit
 27. Image workflow (v1.6 + this round): alt text is shown as a caption; standalone images support `<img align="left|center|right">` and explicit `width`/`height`; click a standalone image to open the zoom preview (wheel pans, `Ctrl+wheel` or `+`/`-` zooms, `0` fits, arrow keys / page keys pan, `Esc` or the mask closes; `Ctrl+click` still places the caret and reveals source)
@@ -133,7 +133,7 @@ Four crates, one-way dependency (`veil` → `veil-ui` → `veil-core`; `veil-mer
 - Table visual editing beyond the delivered subset (merge/split cells); content editing, row/column insert/delete, column alignment and column-width drag are supported
 - A browser engine or WebView for diagrams: Mermaid is rendered in-process by `veil-mermaid-offline` (QuickJS + the full `mermaid.js`); no Chromium ships, and `foreignObject` output is disabled so resvg can rasterise labels
 - A separate rich-text document model: the text stays Markdown, and Ctrl+/ is a view toggle over the same document
-- Background networking: no sync, no update check, no telemetry, and Mermaid never touches the network. Ordinary remote images remain an independent, opt-in capability under **View → Allow Remote Images**; blocking them never affects Mermaid. External links and `mermaid.live` are only reached through an explicit user action. Export and PDF never include remote resources.
+- Background networking: no sync, no update check, no telemetry, and Mermaid never touches the network. Ordinary remote images remain an independent capability under the persistent **View → Allow Remote Images** setting: once enabled, later documents containing them can make on-demand requests; blocking them never affects Mermaid. External links and `mermaid.live` are only reached through an explicit user action. Export and PDF never include remote resources.
 - Competitor-parity items deliberately declined: a separate whole-word toggle (the regex mode's `\b` covers it), `Ctrl+Shift+K` delete-line (`Alt+↑` / `Alt+↓` already covers line operations), and a separate H5/H6 type scale (indentation expresses level). Auto-pairing of brackets/quotes shipped in v1.5 and is no longer on this list
 
 ## Known Limitations (rendering & export)
@@ -166,7 +166,7 @@ cargo build --release --bin veil
 cargo test -p veil-mermaid-offline
 ```
 
-Final release gate: serial `cargo test --workspace --release -- --test-threads=1` passed at commit `0d229eb` (`evidence/release/release-record.json`, `tests.status=passed`); the re-runnable `veil-ui` lib breakdown is **1281 passed / 11 ignored**. Earlier, commit `97d3a60` recorded 1919 passed / 0 failed / 15 ignored (the remote-SVG mock uses a 20 ms wall-clock deadline, so parallel runs can produce false timeouts). `cargo test -p veil --lib` is 221 passed / 1 ignored with the default feature set, which now includes the offline engine. `cargo clippy --workspace --all-targets -- -D warnings` zero warnings.
+Historical release gate (v3.0.0-era records, **not current v3.0.2 acceptance**): serial `cargo test --workspace --release -- --test-threads=1` passed at commit `0d229eb` (`evidence/release/release-record.json`, `tests.status=passed`); the recorded `veil-ui` lib breakdown is **1281 passed / 11 ignored**. Earlier, commit `97d3a60` recorded 1919 passed / 0 failed / 15 ignored (the remote-SVG mock uses a 20 ms wall-clock deadline, so parallel runs can produce false timeouts). The same historical record lists `cargo test -p veil --lib` as 221 passed / 1 ignored with the default feature set and `cargo clippy --workspace --all-targets -- -D warnings` at zero warnings. Current v3.0.2 release evidence was not rebuilt or rerun in this wording review.
 
 Release CI runs on `v*` tag pushes and through `workflow_dispatch`. Manual dispatch defaults to `dry_run=true` and runs Linux core check/test plus the Windows build, tests, clippy, artifact boundary, smoke, optional Authenticode/RFC3161 signing and post-signing SHA-256 validation without creating or uploading a GitHub Release. Only a `v*` tag push can publish. Smoke failures are never hidden with `continue-on-error`.
 
@@ -182,43 +182,61 @@ The window budget is **1 second**: `-MaxLaunchMs` (default 1000) measures proces
 
 **A smoke failure blocks the release**, regardless of unit tests, clippy, size gates, or screenshots, and the full interactive smoke must be run locally against the final binary before publishing. The release workflow runs the same script after tests/boundary gates and before upload, never with `continue-on-error`. On Session 0 or when `UserInteractive=false`, the only acceptable reduced result is the explicit `stage=pass-degraded`: the process stays alive through the settle interval, stderr has no panic signature, its own top-level windows accept `WM_CLOSE`, and it exits with code 0. That result deliberately does **not** assert window visibility, title, or the 1 s budget; authoritative visual launch evidence remains local. A missing close target, close timeout, non-zero exit or panic still fails the job—forced cleanup is never counted as graceful termination.
 
-## Red Numbers (targets vs measured)
+## Historical Measurements (targets vs results)
 
-Measured on release build, probe-serialized; final performance rows are bound to the final release build (commit `0d229eb`), and earlier rows retain their original measurement dates. The current artifact size and SHA-256 are published on the Release page and in the bundled `veil.exe.sha256`; verify against those rather than any figure quoted here. Commands: `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo run --release -p veil --example bench_typing`, `cargo test -p veil-ui --release --lib -- --ignored --nocapture --test-threads=1 perf_20k_blocks`, `cargo build --release -p veil` + `(Get-Item target\release\veil.exe).Length`, and `cargo tree -p veil --edges normal --prefix none` for dependency counts. Keystroke attribution detail in `docs/review/keystroke-attribution.md`.
+**These are historical records, not a v3.0.2 release PASS.** This wording review did not rerun startup, keystroke, Working Set/RSS, Private Bytes, or artifact-size measurements for current v3.0.2; those current measurements are **NOT RUN**. Each result below belongs only to its stated date, build and commit. The current artifact size and SHA-256 must come from the matching Release and its bundled `veil.exe.sha256`, not from a historical figure quoted here. Reproduction commands: `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo run --release -p veil --example bench_typing`, `cargo test -p veil-ui --release --lib -- --ignored --nocapture --test-threads=1 perf_20k_blocks`, `cargo build --release -p veil` + `(Get-Item target\release\veil.exe).Length`, and `cargo tree -p veil --edges normal --prefix none` for dependency counts. Keystroke attribution detail is in `docs/review/keystroke-attribution.md`.
 
-| Metric | Target | Measured |
+Conformance dimensions are distinct: **A** compares the top-level Markdown-generated block sequence; **B_EXPORT_EXACT** compares exported HTML exactly; **B_CANON** compares canonicalized HTML; **C** compares inline-node counts with the reference; **D** compares preorder inline-forest signatures. A/C/D passage does not imply exact HTML compatibility. CommonMark's 652 official examples and GFM's separate 23 examples are different corpora and are never combined into one compatibility score.
+
+| Metric | Target | Historical result |
 |---|---|---|
-| Cold start (release, `main` → first frame; acceptance definition; 5 runs) | ≤ 300 ms | 145–190 ms (min–max; 2026-11-05, `VEIL_BOOT_LOG` segmented probe) ✅ |
+| Cold start (release, `main` → first frame; acceptance definition; 5 runs) | ≤ 300 ms | 145–190 ms (**5-run min–max, not median**; 2026-11-05, pre-v3 build; exact commit not preserved in the public summary; `VEIL_BOOT_LOG` segmented probe) |
 | Cold start (in-process open + first full layout + first edit; p50 / max over 5 runs) | observation only | 405.7 ms (app 188.9 ms + first edit 216.8 ms; 2026-11-18, `cargo test -p veil-ui --release --lib -- --ignored --nocapture --test-threads=1 perf_cold_first_edit`). Same machine only: repeats vary between 290 and 580 ms because of the OS file cache |
 | Cold start (bench harness, process create → open → first layout; p50 / max) | observation only | 576.46 / 599.98 ms (2026-11-09, `cargo run --release -p veil --example bench_typing`; baseline 520.87 / 533.85 → +10.7% / +12.4%, regression gate ≤ 20%) |
 | Cold start (wall clock, process create → first frame; observation only) | ≤ 300 ms | 450–529 ms (440–470 ms before `main`, process-create overhead on this machine; 2026-10-31) |
-| Cold start (window handle; P2 comparison definition) | — | 30 ms (2026-10-30, `tools/bench/measure.ps1`) |
-| Keystroke→commit p95 on 100 K-word doc | ≤ 16 ms | p50 2.231–2.268 ms · p95 2.556–2.615 ms · max ≤3.468 ms (`perf_20k_blocks` 21,000 blocks / 300 samples, 2 runs, final exe 2026-11-21 commit `0d229eb`; worst p95 2.615 ms ≤ 16 ms. Earlier 10k record: 0.973 / 1.566 ms) ✅ |
-| Resident memory, 100 K-word doc (private working set) | ≤ 150 MB | 40.76 MB (2026-11-05) |
-| Installed size — total single-file `veil.exe` | ≤ 14 MiB = 14,680,064 B | Published per build on the Release page and in the bundled `veil.exe.sha256`; not duplicated here (single product: offline Mermaid engine + full `mermaid.js` + resvg, lazy-initialised) |
-| `veil-core` unit + property tests | ≥ 80 | 347 |
-| E2E assertions | ≥ 20 | 41 (3 e2e scenarios: open→save→reopen, table+image paste, find/replace→crash recovery→self-clean) ✅ |
-| Markdown roundtrip (no edits: output == input bytes; byte comparison) | 100% | 100% |
-| CommonMark 0.31.2 conformance (by test cases; dimension A / C / D) | — | A 652/652 · C 652/652 · D 652/652 ✅ |
-| CommonMark 0.31.2 conformance (dimension B) | — | B_EXPORT_EXACT 629/652 · B_CANON 630/652 (not full) |
-| GFM extension conformance (Tables / TaskList / Strikethrough; by test cases; dimension A / C / D) | — | A 23/23 · C 23/23 · D 23/23 ✅; B_CANON 12/23 (11 autolink cases observed only) |
-| `veil-core` GUI/async runtime deps | 0 | 0 |
-| `veil-ui` + `veil` external direct deps (`cargo tree --depth 1`, distinct crate names) | ≤ 8 (pre-PDF baseline; superseded by the Wave 3 authorization for `pdf-writer` + `subsetter` + `ttf-parser`, and by v1.8's `regex`) | 17 (8 in `veil-ui` + 9 in `veil`) |
+| Cold start (window handle; P2 comparison definition) | — | 30 ms (2026-10-30, `tools/bench/measure.ps1`; a window-handle proxy, not first-frame or interactive latency) |
+| Keystroke→commit p95 on 100 K-word doc | ≤ 16 ms | p50 2.231–2.268 ms · p95 2.556–2.615 ms · max ≤3.468 ms (`perf_20k_blocks` 21,000 blocks / 300 samples, 2 runs, historical build 2026-11-21 commit `0d229eb`; worst p95 2.615 ms ≤ 16 ms. Earlier 10k record: 0.973 / 1.566 ms) |
+| Memory, 100 K-word doc (**Working Set / RSS**) | ≤ 150 MB | 40.76 MB (single observation after scrolling 20 pages; 2026-11-05, pre-v3 build; exact commit not preserved in the public summary; **not Private Bytes**) |
+| Private Bytes, current v3.0.2 | — | **NOT RUN** in this wording review; do not substitute the Working Set/RSS value above |
+| Single-file `veil.exe` size | ≤ 14 MiB = 14,680,064 B | Current v3.0.2 size **NOT RUN** here; use the matching Release and sidecar. Historical builds are not interchangeable (single product: offline Mermaid engine + full `mermaid.js` + resvg, lazy-initialised) |
+| `veil-core` unit + property tests | ≥ 80 | 347 (historical summary, not a v3.0.2 rerun) |
+| E2E assertions | ≥ 20 | 41 (historical summary: open→save→reopen, table+image paste, find/replace→crash recovery→self-clean) |
+| Markdown roundtrip (no edits: output == input bytes; byte comparison) | 100% | 100% (historical summary, not a v3.0.2 rerun) |
+| CommonMark 0.31.2 — 652 official examples, A / C / D | — | Historical public summary (2026-10-28, pre-v3): A 652/652 · C 652/652 · D 652/652 |
+| CommonMark 0.31.2 — same 652 examples, B | — | Historical public summary (2026-10-28, pre-v3): B_EXPORT_EXACT 629/652 · B_CANON 630/652 (**not full exact/canonical HTML compatibility**) |
+| GFM — separate 23-example corpus (Tables 8 / TaskList 2 / Strikethrough 2 / Autolinks 11) | — | Historical public summary (2026-10-28, pre-v3): A/C/D 23/23; B_CANON 12/23; the 11 autolink cases were observation-only in that summary. **Not a claim of full GFM compatibility** |
+| `veil-core` GUI/async runtime deps | 0 | 0 (historical summary) |
+| `veil-ui` + `veil` external direct deps (`cargo tree --depth 1`, distinct crate names) | ≤ 8 (pre-PDF baseline; superseded by the Wave 3 authorization for `pdf-writer` + `subsetter` + `ttf-parser`, and by v1.8's `regex`) | 17 (8 in `veil-ui` + 9 in `veil`; historical summary) |
 | Workspace transitive deps (distinct crate names, normal edges incl. the three workspace members) | ≤ 200 | 125 (2026-11-18, `cargo tree -p veil --edges normal --prefix none`) |
 
 ## Same-machine Comparison (P2 public baseline, 2026-10-30)
 
-Corpus & scripts reproducible: generate the corpus with `tools/bench/gen_corpus.py`, then measure with `tools/bench/measure.ps1`; the corpus and results stay out of the repository (the pathological 10 MB file is generated on demand). Methodology in [P2-benchmark.md](docs/review/P2-benchmark.md).
+Historical comparison of **Veil 0.1.0 and MarkText 0.23.0**, on the same machine, with the same generated P2 corpus and five-run medians. Generate the corpus with `tools/bench/gen_corpus.py`, then measure with `tools/bench/measure.ps1`; the corpus and results stay out of the repository (the pathological 10 MB file is generated on demand). Methodology and limitations are in [P2-benchmark.md](docs/review/P2-benchmark.md).
 
-| Metric | Veil | MarkText | Ratio |
+| Metric | Veil 0.1.0 | MarkText 0.23.0 | Comparison |
 |---|---|---|---|
-| Resident memory (process tree sum) | 21.51 MB | 365.01 MB | **17.0×** |
-| Installed size | 5.46 MB | 488.95 MB | **89.6×** |
-| Cold start (window-handle definition) | 30 ms | 30 ms | Tie (this definition favors Electron; see §3 of the report) |
+| **Private Bytes** (process-tree sum of `PrivateMemorySize64`; five-run median) | 21.51 MB | 365.01 MB | **17.0×** under this same metric and corpus |
+| Artifact / installation footprint (**different definitions**) | 5.46 MiB, one `veil.exe` | 488.95 MB, total installation directory | **No ratio**: a single exe and an installation directory are not the same artifact |
+| Cold start (process create → main window handle; five-run median) | 30 ms | 30 ms | Tie for this proxy only; **not first-frame or time-to-interactive equivalence** |
 
-These figures are historical measurements from 2026-10-30; for the current artifact, use the Release page and the bundled `veil.exe.sha256`.
+These are historical P2 measurements, not a current v3.0.2 comparison. In particular, the 40.76 MB Working Set/RSS observation above must not be compared with this table's Private Bytes values. For the current artifact, use its matching Release and `veil.exe.sha256`.
 
 Dependency blacklist: `tokio`, `wasmtime`, any webview crate (`webview2-com`/`wry`, etc.). Introducing any of these is a violation.
+
+## Document Status & Wording Register
+
+Status baseline for this wording review: **source version 3.0.2, 2026-11-24**. This register prevents historical evidence from being read as current acceptance.
+
+| Material | Status and permitted reading |
+|---|---|
+| `README.md` / `README.zh-CN.md` | Current feature and default documentation. Measurement and release figures above are historical; current v3.0.2 performance and release re-acceptance were not rerun in this review. |
+| `docs/commercial/LANDING.md` / `LANDING.zh-CN.md` | Current public summary without unverified size or performance numbers; capability limits link back to these READMEs. |
+| `docs/commercial/RELEASE-ARTICLE-3.0.zh-CN.md` | Historical v3.0.1 snapshot (2026-11-23), not current release evidence. |
+| `PRIVACY.md` / `SUPPORT.md` | Current data and support boundaries: local reports are not automatically uploaded, remote-image opt-in persists, and Check for Updates only opens the Release page. |
+| `SECURITY.md` | Security policy owned by separate security work; unchanged in this wording review. |
+| `docs/review/evaluation/EVALUATION-FINAL-v3.0.md` | Historical v3.0.1 engineering-gate evaluation only; not evidence of aesthetics, reputation, adoption, revenue, or market status. |
+| `evidence/release/v3-build.md` / `release-record.json` | Historical v3.0.0 build records; not valid for v3.0.2 size, SHA-256, or release PASS. The JSON remains unchanged. |
+| `docs/review/P2-benchmark.md` | Historical 2026-10-30 Veil 0.1.0 / MarkText 0.23.0 comparison; retain its machine, corpus, run-count, metric and artifact definitions. |
 
 ## Docs
 
@@ -257,7 +275,7 @@ Dependency blacklist: `tokio`, `wasmtime`, any webview crate (`webview2-com`/`wr
 
 ## Privacy, Security & Support
 
-Veil is distributed free of charge, under the MIT license. By design it contains **no telemetry and no background update checks**; network features run only after an explicit user action. Production signing with a trusted certificate, real SmartScreen behaviour and this commit's remote GitHub Actions remain **NOT RUN**; a scoped local packet capture is recorded in [PRIVACY.md](PRIVACY.md) and is not a blanket zero-egress claim.
+Veil is distributed free of charge, under the MIT license. By design it contains **no telemetry and no background update checks**. **Help → Check for Updates** only opens the official Release page in the system browser; it is not an in-process update request. Remote images are off by default under a persistent setting: once enabled, subsequently opened documents containing them can make on-demand requests without another prompt. External links and mermaid.live require explicit user actions. Crash and diagnostic reports are generated locally and are not automatically uploaded; they leave the machine only when you choose to submit them. Trusted production signing and real SmartScreen behaviour remain **NOT RUN**; current v3.0.2 remote GitHub Actions evidence was not inspected in this review. A scoped historical packet capture is recorded in [PRIVACY.md](PRIVACY.md) and is not a blanket zero-egress claim.
 
 - [PRIVACY.md](PRIVACY.md) — what is and is not collected, local data locations, network capabilities and defaults, remote images, diagnostic reports, how to delete data
 - [SECURITY.md](SECURITY.md) — supported versions (3.x), private vulnerability reporting, report contents and scope
@@ -272,7 +290,7 @@ The following external verifications remain **NOT RUN** — they require actions
 
 - **Trusted production signing**: Three candidate paths have been evaluated and documented in detail in the local-only file `evidence/renewal/production-signing-options.md` (not published in this repository): SignPath Foundation (free OV for qualifying open-source), Azure Artifact Signing (US$9.99/month), and commercial OV/EV (US$129+/year). All require identity verification and/or payment that only you can complete personally. No production certificate has been applied for or purchased.
 - **Real SmartScreen with MotW downloads**: Requires a trusted production certificate above. Microsoft's SmartScreen reputation system accumulates over time; even with a trusted signature, the first release may still warn.
-- **This commit's remote GitHub Actions**: Pushing to GitHub requires your explicit authorization (per your constraints). The workflow files have been statically verified and include a `workflow_dispatch` entry with `dry_run=true` default.
+- **Current v3.0.2 remote GitHub Actions evidence**: Not inspected in this wording review (**NOT RUN here**). The workflow files have been statically verified and include a `workflow_dispatch` entry with `dry_run=true` default; no current CI result is inferred from that static check.
 - **Cross-machine trust revocation drill**: Depends on having a real CRL/AIA infrastructure that comes only with a trusted public CA or enterprise PKI. Self-signed certificates have no public revocation mechanism.
 
 ### Recommended next steps (when you are ready)

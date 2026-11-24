@@ -18,19 +18,19 @@ Yes. MIT permits commercial use without restrictions. You can ship Veil as part 
 
 ### Where is the source code?
 
-[github.com/31i45/veil](https://github.com/31i45/veil). All releases are signed with the development certificate `CN=Veil Development (Long-term)` (SHA-1 thumbprint `86C8793A44EF01EE1633BCF769244894326B4526`).
+[github.com/31i45/veil](https://github.com/31i45/veil). The current portable `veil.exe` and per-user installer `veil-setup-<version>.exe` are signed with the development certificate `CN=Veil Development (Long-term)` (SHA-1 thumbprint `86C8793A44EF01EE1633BCF769244894326B4526`).
 
 ### Signed / Trust status?
 
-Current releases use a **self-signed development certificate**. Other machines will show an unknown-publisher warning. Full details and planned production signing path (SignPath Foundation — free OV for qualifying open-source, Azure Artifact Signing — US$9.99/month, commercial OV/EV — US$129+/year) are documented in the repository's Trust & Verification Status section.
+The current portable exe and installer use a **self-signed development certificate** trusted only on the current development machine. Other machines will show an unknown-publisher warning. Trusted production signing and real SmartScreen validation remain **NOT RUN**. Candidate production signing paths (SignPath Foundation — free OV for qualifying open-source, Azure Artifact Signing — US$9.99/month, commercial OV/EV — US$129+/year) are documented in the repository's Trust & Verification Status section.
 
 ### Does Veil phone home?
 
-**No.** Zero telemetry. No crash reports. No analytics. No silent updates. No background networking calls. Ever. See [PRIVACY.md](../../PRIVACY.md).
+Veil contains no telemetry or analytics and has no background update checks, but it is not accurate to say that it never makes network requests. Crash and diagnostic reports are generated locally and are not automatically uploaded; they leave the machine only when you choose to submit them. **Help → Check for Updates** only opens the official Release page in the system browser. Remote images are off by default; once the persistent setting is enabled, subsequently opened documents containing remote images are fetched on demand without another prompt. See [PRIVACY.md](../../PRIVACY.md).
 
 ### Windows SmartScreen warning?
 
-Because Veil currently uses a self-signed certificate, SmartScreen may warn or block downloads. A trusted production certificate will resolve this — the process is being actively evaluated.
+Because Veil currently uses a self-signed certificate, SmartScreen may warn or block downloads. A trusted production certificate does not guarantee that SmartScreen will stop warning: its reputation system accumulates over time, and real Mark-of-the-Web download validation remains **NOT RUN**.
 
 ### Who maintains Veil?
 

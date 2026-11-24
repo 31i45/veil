@@ -14,7 +14,7 @@
 
 #![allow(clippy::needless_return)]
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::time::{Duration, Instant};
@@ -106,6 +106,7 @@ struct Session {
     /// 仅用于维持 Runtime 生命周期（Context 内部只持有裸指针）。
     #[allow(dead_code)]
     rt: Runtime,
+    deadline: Rc<Cell<Option<Instant>>>,
     counter: u64,
 }
 
@@ -113,6 +114,13 @@ impl Session {
     fn new() -> Result<Self, String> {
         let rt = Runtime::new().map_err(|e| format!("QuickJS runtime: {e}"))?;
         rt.set_memory_limit(MEMORY_LIMIT);
+        let deadline = Rc::new(Cell::new(None));
+        let interrupt_deadline = deadline.clone();
+        rt.set_interrupt_handler(Some(Box::new(move || {
+            interrupt_deadline
+                .get()
+                .is_some_and(|deadline| Instant::now() >= deadline)
+        })));
         // Chevrotain 的 parser 在 gitGraph / treemap 等图型中递归较深；
         // QuickJS 默认栈上限会在合法小图上提前溢出。
         rt.set_max_stack_size(4 * 1024 * 1024);
@@ -151,6 +159,7 @@ impl Session {
         Ok(Self {
             ctx,
             rt,
+            deadline,
             counter: 0,
         })
     }
@@ -221,7 +230,8 @@ impl Session {
         );
 
         let started = Instant::now();
-        self.ctx.with(|ctx| -> Result<String, String> {
+        self.deadline.set(Some(started + RENDER_TIMEOUT));
+        let result = self.ctx.with(|ctx| -> Result<String, String> {
             run_script(&ctx, "init", &init)?;
             ctx.eval::<String, _>(call.as_str())
                 .map_err(|e| format!("mermaid.render call: {}", error_text(&ctx, e)))?;
@@ -263,7 +273,9 @@ impl Session {
                     return Err(format!("timeout after {:?}", RENDER_TIMEOUT));
                 }
             }
-        })
+        });
+        self.deadline.set(None);
+        result
     }
 
     /// 调试辅助：查询 JS 侧 canvas 方法调用 trace（格式化为字符串数组）。
@@ -748,20 +760,74 @@ mod tests {
         );
     }
 
-    /// 超时保护：死循环 JS 必须在 RENDER_TIMEOUT 后返回错误，且字符串可读。
-    /// 这里用 `while(true)` 注入一个永远不 resolve 的 Promise，期望超时触发。
+    /// 正常的环形依赖图不应误触发超时；语法错误仍须可读。
     #[test]
-    fn infinite_loop_source_returns_error() {
-        // 注意：mermaid 不会直接执行 while(true)，这里的策略是 submit 一个永远不 resolve 的
-        // 渲染（通过 mermaid.js 本身触发微任务死循环）。实际上 RENDER_TIMEOUT 是兜底，
-        // 正常图渲染都应远小于 1s。超时错误消息必须非空。
+    fn cyclic_graph_and_invalid_source_remain_recoverable() {
         let result = render_blocking("graph TD\n A-->B\n B-->C\n C-->A", false);
-        // 环形图也应正常渲染——不会死循环；这个测试只是验证正常路径不超时
         assert!(result.is_ok(), "正常的环形依赖图也应渲染成功");
 
         // 真正无法渲染的源码（语法错误或语义错误）应返回错误
         let err = render_blocking("graph TD\n A --> [B\n C -->", false).expect_err("broken");
         assert!(!err.is_empty(), "错误消息必须可读：{err}");
+    }
+
+    #[test]
+    #[ignore]
+    fn pathological_eval_child() {
+        let Ok(mode) = std::env::var("VEIL_PATHOLOGICAL_EVAL") else {
+            return;
+        };
+        let session = Session::new().expect("initialize Mermaid");
+        session
+            .deadline
+            .set(Some(Instant::now() + Duration::from_millis(200)));
+        session.ctx.with(|ctx| {
+            if mode == "loop" {
+                assert!(ctx.eval::<(), _>("while (true) {}").is_err());
+            } else {
+                ctx.eval::<(), _>(
+                    "Promise.resolve().then(function spin() { Promise.resolve().then(spin); });",
+                )
+                .expect("queue microtask loop");
+                while ctx.execute_pending_job() {}
+            }
+        });
+        session.deadline.set(None);
+        let answer: i32 = session
+            .ctx
+            .with(|ctx| ctx.eval("21 * 2"))
+            .expect("runtime remains usable after interruption");
+        assert_eq!(answer, 42);
+    }
+
+    #[test]
+    fn pathological_single_eval_has_a_real_deadline() {
+        for mode in ["loop", "microtask"] {
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "tests::pathological_eval_child",
+                    "--ignored",
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .env("VEIL_PATHOLOGICAL_EVAL", mode)
+                .spawn()
+                .expect("spawn pathological eval child");
+            let started = Instant::now();
+            loop {
+                if let Some(status) = child.try_wait().expect("poll pathological eval child") {
+                    assert!(status.success(), "{mode} child failed: {status}");
+                    break;
+                }
+                if started.elapsed() > Duration::from_secs(5) {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    panic!("{mode} eval did not terminate when the deadline elapsed");
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
     }
 
     #[derive(Debug)]

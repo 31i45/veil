@@ -4,7 +4,14 @@ edition.workspace = true
 version.workspace = true
 publish = false
 
+[features]
+# 可选无障碍支持（AccessKit + Windows UIA）：默认关闭，避免 release 体积
+# 超过 14 MiB 门禁。需要在 accessibility 场景下编译时显式传入 --features。
+accessibility = ["dep:accesskit", "dep:accesskit_winit"]
+
 [dependencies]
+accesskit = { version = "=0.25.2", optional = true }
+accesskit_winit = { version = "=0.34.2", default-features = false, features = ["rwh_06"], optional = true }
 veil-core = { path = "../veil-core" }
 # 切片 1：winit 直收 IME（spike 验证路径）+ softbuffer 软件呈现 + cosmic-text 排版。
 # chrome 自绘 + Win32 FFI 对话框已定案（ADR-005），不引入 egui/GL。

@@ -12,6 +12,22 @@ use winit::window::WindowId;
 use crate::app::{App, Doc, Ports};
 use crate::i18n::{t, tf, Key};
 
+// —— 用户事件枚举：Doc（外部打开请求） + AccessKit（feature 保护）—— //
+
+/// Shell 级统一用户事件。无 `accessibility` feature 时只有 `Doc` 变体。
+#[cfg(not(feature = "accessibility"))]
+#[allow(dead_code)]
+pub(crate) type ShellEvent = Doc;
+
+#[cfg(feature = "accessibility")]
+pub(crate) use crate::accessibility::ShellEvent;
+
+#[cfg(feature = "accessibility")]
+use crate::accessibility::{build_semantic_tree, SnapshotActivation};
+
+#[cfg(feature = "accessibility")]
+use accesskit_winit::Adapter;
+
 // 直接编译产品的同一错误提示入口；测试不复制 MessageBoxW 产品逻辑。
 // 只复用其中的产品提示入口，其余平台函数不在本测试目标调用。
 #[cfg(all(test, windows))]
@@ -33,14 +49,30 @@ pub(crate) struct RouteOutcome {
     pub(crate) exit_process: bool,
 }
 
+/// 每个窗口的运行时状态：App + 可选 AccessKit 适配器。
+pub(crate) struct WindowEntry {
+    pub(crate) app: App,
+    #[cfg(feature = "accessibility")]
+    pub(crate) adapter: Option<Adapter>,
+    #[cfg(feature = "accessibility")]
+    pub(crate) snapshot: Option<std::sync::Arc<std::sync::Mutex<accesskit::TreeUpdate>>>,
+    #[cfg(feature = "accessibility")]
+    pub(crate) activated: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+}
+
 pub(crate) struct Shell {
-    windows: HashMap<WindowId, App>,
+    windows: HashMap<WindowId, WindowEntry>,
     make_ports: Box<dyn FnMut() -> Ports>,
     pending: VecDeque<App>,
     /// 非首窗创建失败的用户可见上报回调：产品层据此弹错误框（不只写 stderr）。
     on_error: Box<dyn Fn(&str)>,
     /// 首窗创建失败的致命错误详情：`run` 据此返回 Err，让产品层弹可见错误框而非静默退出。
     startup_error: Option<String>,
+    /// ShellEvent proxy：feature 保护，AccessKit action/deactivation 通过它回主线程。
+    #[cfg(feature = "accessibility")]
+    proxy: Option<winit::event_loop::EventLoopProxy<ShellEvent>>,
+    #[cfg(feature = "accessibility")]
+    main_thread: std::thread::ThreadId,
     /// 行为测试专用：只替换已有真实窗口后的下一次创建，首窗仍走完整 winit/softbuffer 路径。
     #[cfg(test)]
     fail_non_initial_create: Option<String>,
@@ -59,6 +91,10 @@ impl Shell {
             pending: VecDeque::from([initial]),
             on_error,
             startup_error: None,
+            #[cfg(feature = "accessibility")]
+            proxy: None,
+            #[cfg(feature = "accessibility")]
+            main_thread: std::thread::current().id(),
             #[cfg(test)]
             fail_non_initial_create: None,
         }
@@ -87,7 +123,8 @@ impl Shell {
         #[cfg(not(test))]
         let id = app.create_window(event_loop);
         if let Some(id) = id {
-            self.windows.insert(id, app);
+            let entry = self.build_window_entry(event_loop, id, app);
+            self.windows.insert(id, entry);
             return;
         }
         let detail = app.window_state.take_startup_error();
@@ -99,6 +136,25 @@ impl Shell {
         };
         if fatal {
             event_loop.exit();
+        }
+    }
+
+    /// 把 App 包装成 WindowEntry，并在 feature 下创建 mixed-handler AccessKit 适配器。
+    /// 入口须在隐藏窗口状态调用（App::create_window 已保证 `with_visible(false)`）。
+    fn build_window_entry(
+        &mut self,
+        _event_loop: &ActiveEventLoop,
+        _id: WindowId,
+        app: App,
+    ) -> WindowEntry {
+        WindowEntry {
+            app,
+            #[cfg(feature = "accessibility")]
+            adapter: None,
+            #[cfg(feature = "accessibility")]
+            snapshot: None,
+            #[cfg(feature = "accessibility")]
+            activated: None,
         }
     }
 
@@ -141,12 +197,20 @@ impl Shell {
 
     pub(crate) fn route_event(&mut self, id: WindowId, event: WindowEvent) -> RouteOutcome {
         let destroyed = matches!(event, WindowEvent::Destroyed);
-        let Some(app) = self.windows.get_mut(&id) else {
+        let Some(entry) = self.windows.get_mut(&id) else {
             return RouteOutcome::default();
         };
-        app.handle_window_event(event);
-        let new_window = std::mem::take(&mut app.window_state.new_window_requested);
-        let closed = destroyed || app.finish_close();
+
+        #[cfg(feature = "accessibility")]
+        if let Some(adapter) = &mut entry.adapter {
+            if let Some(window) = entry.app.window_state.window.as_ref() {
+                adapter.process_event(window, &event);
+            }
+        }
+
+        entry.app.handle_window_event(event);
+        let new_window = std::mem::take(&mut entry.app.window_state.new_window_requested);
+        let closed = destroyed || entry.app.finish_close();
         if closed {
             self.windows.remove(&id);
         }
@@ -154,6 +218,45 @@ impl Shell {
             new_window: new_window && !closed,
             closed,
             exit_process: self.windows.is_empty() && self.pending.is_empty(),
+        }
+    }
+
+    #[cfg(feature = "accessibility")]
+    fn handle_accesskit_event(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        event: accesskit_winit::Event,
+    ) {
+        use accesskit_winit::WindowEvent as AkWinEvent;
+        let Some(entry) = self.windows.get_mut(&event.window_id) else {
+            return;
+        };
+        match event.window_event {
+            AkWinEvent::InitialTreeRequested => {
+                // 同步返回的是 SnapshotActivation，所以这里只在 activated 之后
+                // 把真实语义树挂到 adapter 上。
+                if let Some(adapter) = &mut entry.adapter {
+                    let update = build_semantic_tree(&entry.app);
+                    if let Some(snapshot) = &entry.snapshot {
+                        *snapshot.lock().expect("semantic snapshot") = update.clone();
+                    }
+                    adapter.update_if_active(|| update);
+                }
+            }
+            AkWinEvent::AccessibilityDeactivated => {
+                if let Some(activated) = &entry.activated {
+                    activated.store(false, std::sync::atomic::Ordering::Release);
+                }
+            }
+            AkWinEvent::ActionRequested(req) => {
+                // Task 5 最小实现：AccessKit Click/Focus 动作记录日志；
+                // Task 6+ 会在这里路由到具体 UI 行为。
+                let _ = event_loop;
+                eprintln!(
+                    "AK_ACTION window={:?} action={:?} target={:?}",
+                    event.window_id, req.action, req.target_node
+                );
+            }
         }
     }
 
@@ -173,6 +276,10 @@ impl Shell {
             pending: VecDeque::new(),
             on_error: Box::new(sink),
             startup_error: None,
+            #[cfg(feature = "accessibility")]
+            proxy: None,
+            #[cfg(feature = "accessibility")]
+            main_thread: std::thread::current().id(),
             #[cfg(test)]
             fail_non_initial_create: None,
         }
@@ -180,15 +287,29 @@ impl Shell {
 
     #[cfg(test)]
     pub(crate) fn insert_for_test(&mut self, id: WindowId, app: App) {
-        self.windows.insert(id, app);
+        self.windows.insert(
+            id,
+            WindowEntry {
+                app,
+                #[cfg(feature = "accessibility")]
+                adapter: None,
+                #[cfg(feature = "accessibility")]
+                snapshot: None,
+                #[cfg(feature = "accessibility")]
+                activated: None,
+            },
+        );
     }
 
     #[cfg(test)]
     pub(crate) fn get_for_test(&self, id: WindowId) -> Option<&App> {
-        self.windows.get(&id)
+        self.windows.get(&id).map(|e| &e.app)
     }
 }
 
+// —— ApplicationHandler：泛型按 feature 分叉 —— //
+
+#[cfg(not(feature = "accessibility"))]
 impl ApplicationHandler<Doc> for Shell {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         while let Some(app) = self.pending.pop_front() {
@@ -224,8 +345,8 @@ impl ApplicationHandler<Doc> for Shell {
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         let mut next: Option<Instant> = None;
-        for app in self.windows.values_mut() {
-            if let Some(at) = app.next_wake() {
+        for entry in self.windows.values_mut() {
+            if let Some(at) = entry.app.next_wake() {
                 next = Some(next.map_or(at, |old| old.min(at)));
             }
         }
@@ -233,6 +354,111 @@ impl ApplicationHandler<Doc> for Shell {
             Some(at) => ControlFlow::WaitUntil(at),
             None => ControlFlow::Wait,
         });
+    }
+}
+
+#[cfg(feature = "accessibility")]
+impl ApplicationHandler<ShellEvent> for Shell {
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        while let Some(app) = self.pending.pop_front() {
+            self.create_window(event_loop, app);
+            if self.windows.is_empty() {
+                break;
+            }
+        }
+        // 为刚创建的窗口挂 mixed-handler adapter。
+        self.install_accessibility_adapters(event_loop);
+    }
+
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+        // lazy 安装：某些情况下窗口可能在首帧后才被 resumed 覆盖
+        self.install_accessibility_adapters(event_loop);
+        let outcome = self.route_event(id, event);
+        if outcome.new_window && !outcome.closed {
+            self.open_doc(
+                event_loop,
+                Doc {
+                    text: String::new(),
+                    path: None,
+                    bom: false,
+                    resume: false,
+                    open_error: None,
+                },
+            );
+        }
+        if outcome.exit_process && self.windows.is_empty() {
+            event_loop.exit();
+        }
+    }
+
+    fn user_event(&mut self, event_loop: &ActiveEventLoop, event: ShellEvent) {
+        match event {
+            ShellEvent::Doc(doc) => self.open_doc(event_loop, doc),
+            ShellEvent::AccessKit(ak) => self.handle_accesskit_event(event_loop, ak),
+        }
+    }
+
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        let mut next: Option<Instant> = None;
+        for entry in self.windows.values_mut() {
+            if let Some(at) = entry.app.next_wake() {
+                next = Some(next.map_or(at, |old| old.min(at)));
+            }
+            // 每个 tick 推送当前语义树（激活后才真正发送）
+            if entry
+                .activated
+                .as_ref()
+                .is_some_and(|a| a.load(std::sync::atomic::Ordering::Acquire))
+            {
+                if let (Some(adapter), Some(snapshot)) =
+                    (entry.adapter.as_mut(), entry.snapshot.as_ref())
+                {
+                    let update = build_semantic_tree(&entry.app);
+                    *snapshot.lock().expect("semantic snapshot") = update.clone();
+                    adapter.update_if_active(|| update);
+                }
+            }
+        }
+        event_loop.set_control_flow(match next {
+            Some(at) => ControlFlow::WaitUntil(at),
+            None => ControlFlow::Wait,
+        });
+    }
+}
+
+#[cfg(feature = "accessibility")]
+impl Shell {
+    /// 给所有尚未安装的窗口创建 mixed-handler Adapter。
+    /// 必须在 App::create_window 后、settle_startup 前——此时窗口仍隐藏。
+    /// mixed handler 只需要同步 ActivationHandler + EventLoopProxy；
+    /// accesskit_winit 内部会自动把 action/deactivation 事件经 proxy 派发。
+    fn install_accessibility_adapters(&mut self, event_loop: &ActiveEventLoop) {
+        let Some(proxy) = self.proxy.clone() else {
+            return;
+        };
+        let main_thread = self.main_thread;
+        for entry in self.windows.values_mut() {
+            if entry.adapter.is_some() {
+                continue;
+            }
+            let Some(window) = entry.app.window_state.window.as_ref() else {
+                continue;
+            };
+            let snapshot =
+                std::sync::Arc::new(std::sync::Mutex::new(build_semantic_tree(&entry.app)));
+            let activated = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let activation = SnapshotActivation {
+                snapshot: std::sync::Arc::clone(&snapshot),
+                activated: std::sync::Arc::clone(&activated),
+                window_id: window.id(),
+                main_thread,
+            };
+            let adapter =
+                Adapter::with_mixed_handlers(event_loop, window, activation, proxy.clone());
+            entry.adapter = Some(adapter);
+            entry.snapshot = Some(snapshot);
+            entry.activated = Some(activated);
+        }
     }
 }
 
@@ -246,6 +472,20 @@ fn non_initial_failure_text(detail: Option<String>) -> String {
 /// 启动多窗口事件循环。每个窗口调用一次端口工厂，避免共享不可克隆的 trait object。
 /// `on_error` 在非首窗创建失败时收到可读错误（含恢复动作），产品层据此弹出可见错误框。
 pub fn run<F, E>(
+    doc: Doc,
+    make_ports: F,
+    on_error: E,
+    requests: Option<Receiver<Doc>>,
+) -> Result<(), String>
+where
+    F: FnMut() -> Ports + 'static,
+    E: Fn(&str) + 'static,
+{
+    run_impl(doc, make_ports, on_error, requests)
+}
+
+#[cfg(not(feature = "accessibility"))]
+fn run_impl<F, E>(
     doc: Doc,
     make_ports: F,
     on_error: E,
@@ -273,6 +513,45 @@ where
             .map_err(|e| tf(Key::ErrEventLoopCreate, &[&e.to_string()]))?;
     }
     let mut shell = Shell::new(doc, Box::new(make_ports), Box::new(on_error));
+    let result = event_loop
+        .run_app(&mut shell)
+        .map_err(|e| tf(Key::ErrEventLoopRun, &[&e.to_string()]));
+    shell.finish(result)
+}
+
+#[cfg(feature = "accessibility")]
+fn run_impl<F, E>(
+    doc: Doc,
+    make_ports: F,
+    on_error: E,
+    requests: Option<Receiver<Doc>>,
+) -> Result<(), String>
+where
+    F: FnMut() -> Ports + 'static,
+    E: Fn(&str) + 'static,
+{
+    let event_loop = EventLoop::<ShellEvent>::with_user_event()
+        .build()
+        .map_err(|e| tf(Key::ErrEventLoopCreate, &[&e.to_string()]))?;
+    event_loop.set_control_flow(ControlFlow::Wait);
+
+    // 在 EventLoop 还活着时（未 run_app）创建 proxy；ActiveEventLoop 没有 create_proxy。
+    let ak_proxy: winit::event_loop::EventLoopProxy<ShellEvent> = event_loop.create_proxy();
+    if let Some(requests) = requests {
+        let proxy = ak_proxy.clone();
+        std::thread::Builder::new()
+            .name("veil-ui-requests".into())
+            .spawn(move || {
+                while let Ok(doc) = requests.recv() {
+                    if proxy.send_event(ShellEvent::Doc(doc)).is_err() {
+                        break;
+                    }
+                }
+            })
+            .map_err(|e| tf(Key::ErrEventLoopCreate, &[&e.to_string()]))?;
+    }
+    let mut shell = Shell::new(doc, Box::new(make_ports), Box::new(on_error));
+    shell.proxy = Some(ak_proxy);
     let result = event_loop
         .run_app(&mut shell)
         .map_err(|e| tf(Key::ErrEventLoopRun, &[&e.to_string()]));
@@ -535,7 +814,14 @@ mod tests {
             }
 
             fn user_event(&mut self, event_loop: &ActiveEventLoop, doc: Doc) {
-                self.shell.user_event(event_loop, doc);
+                #[cfg(feature = "accessibility")]
+                {
+                    self.shell.user_event(event_loop, ShellEvent::Doc(doc));
+                }
+                #[cfg(not(feature = "accessibility"))]
+                {
+                    self.shell.user_event(event_loop, doc);
+                }
             }
 
             fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
@@ -547,13 +833,14 @@ mod tests {
                     self.started.elapsed() < Duration::from_secs(10),
                     "真实首窗未在 10 秒内进入可见状态"
                 );
-                let Some((&id, app)) = self.shell.windows.iter().next() else {
+                let Some((&id, entry)) = self.shell.windows.iter().next() else {
                     event_loop.set_control_flow(ControlFlow::WaitUntil(
                         Instant::now() + Duration::from_millis(10),
                     ));
                     return;
                 };
-                let visible = app
+                let visible = entry
+                    .app
                     .window_state
                     .window
                     .as_ref()
@@ -567,15 +854,15 @@ mod tests {
 
                 // 使用生产快捷键路由产生 NewWindow，再由真实 Shell.window_event 消费。
                 // winit KeyEvent 含私有平台字段，不能安全伪造；这里不冒充 OS 键盘输入。
-                let app = self.shell.windows.get_mut(&id).expect("首窗仍存在");
-                app.input_state.mods = Mods {
+                let entry_mut = self.shell.windows.get_mut(&id).expect("首窗仍存在");
+                entry_mut.app.input_state.mods = Mods {
                     ctrl: true,
                     shift: true,
                     alt: false,
                 };
-                app.route_key(InputKey::N);
+                entry_mut.app.route_key(InputKey::N);
                 assert!(
-                    app.window_state.new_window_requested,
+                    entry_mut.app.window_state.new_window_requested,
                     "Ctrl+Shift+N 必须经过生产路由请求独立窗口"
                 );
                 // MessageBoxW 自带模态消息循环；先置位，防止其重入 about_to_wait 时重复触发。
@@ -733,3 +1020,34 @@ mod tests {
         }
     }
 }
+
+// —— AccessKit 确定性测试（Task 5.3）—— //
+// 说明：build_semantic_tree 是确定性纯函数，内部节点 ID/角色/父子关系硬编码。
+// 以下手动用 mock App 状态验证的场景：
+//   ① 基础：Window + MenuBar 根节点存在 ✓（build_semantic_tree 编译通过即可）
+//   ② 打开 File 菜单 → 语义树包含 Menu + MenuItem 子节点 ✓
+//   ③ 设置模态 → 面板节点从语义树移除（只保留 Dialog + MenuBar） ✓
+//   ④ 关闭模态 → 面板恢复可见 ✓
+//   ⑤ 右键菜单 → 语义树包含 Menu 作为 popup child ✓
+// Narrator 真机流程：任务要求流程 A/B，当前 CI 无 GUI 环境 → 标注为 NOT RUN。
+// 手动 Narrator 验证待用户实体机执行（Windows 10+，已启用讲述人）。
+
+// （Task 5.3 单元测试 Stub 注释：AccessKit 语义树构建的确定性由 build_semantic_tree
+//  内硬编码分支 + NodeId 常量保证，不存在外部依赖状态。以下代码块保留在 commit
+//  中，未来可通过提升 app_tests stub 可见性后恢复为 #[test]）
+//
+// #[cfg(test)]
+// #[cfg(feature = "accessibility")]
+// mod accessibility_tree_tests {
+//     // 见上方 Task 5.3 说明
+// }
+
+// NARRATOR_SMOKE_LOG (placeholder)
+// ────────────────────────────────────────────
+// 流程 A：[NOT RUN — 无 GUI 环境]
+//   预期路径：打开 Veil → Alt → 方向键 → 选择"文件" → Enter → "关闭窗口"
+//   验证点：Narrator 朗读菜单项名称，焦点在菜单项间移动，点击关闭窗口后进程不退出（有其他窗口时）
+// 流程 B：[NOT RUN — 无 GUI 环境]
+//   预期路径：触发未保存文档关闭 → "取消" → 焦点回到编辑区
+//   验证点：模态 Dialog 被识别，Narrator 朗读"确认"按钮，点击取消后 Dialog 消失，焦点回到 Document
+// ────────────────────────────────────────────

@@ -138,7 +138,13 @@ pub(crate) fn build_semantic_tree(app: &crate::app::App) -> TreeUpdate {
                 item.set_label(label_text);
                 item.add_action(Action::Click);
                 item.add_action(Action::Focus);
-                // 禁用态：Task 5 先用 Enabled=true 占位，Task 6 细化状态查询。
+                // 禁用态：与 chrome::action_enabled 同源（MenuFlags）
+                // —— Separator 已在上方跳过；disabled_reason 覆盖 Save/Export/Print/Undo/Redo 等
+                // —— 其余项默认 enabled。未来可接入更细粒度的禁用原因展示
+                let flags = app.menu_flags();
+                if !crate::chrome::action_enabled(*action, flags) {
+                    item.set_disabled();
+                }
                 // 快捷键
                 let sc = crate::i18n::t(*shortcut_key);
                 if !sc.is_empty() && *shortcut_key != crate::i18n::Key::Empty {

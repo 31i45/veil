@@ -1,6 +1,6 @@
 # 第三方许可清单
 
-产品：Veil 3.0.1
+产品：Veil 3.0.2
 生成命令：`pwsh -NoProfile -File tools/third_party_notices.ps1`
 校验命令：`pwsh -NoProfile -File tools/third_party_notices.ps1 -Check`
 
@@ -8,14 +8,14 @@
 
 对于 SPDX OR 表达式，本项目选择白名单内的宽松许可；未选择的许可不构成适用条款。
 
-- Rust 包（含 workspace 成员）：368
+- Rust 包（含 workspace 成员）：364
 - 内嵌第三方资产：3（Mermaid、linkedom、QuickJS）
-- 包根目录找到许可证全文的包：322
+- 包根目录找到许可证全文的包：319
 - 仅在子目录（递归至 3 层）找到全文的包：1
 - 由 manifest license_file 指定的全文：0
 - 由 workspace 根 LICENSE 覆盖的包：4
-- 无独立许可证文件的包（按 SPDX 标准全文与元数据归属补全）：41
-- 许可证全文条目（本地文件按内容 SHA-256 去重）：204
+- 无独立许可证文件的包（按 SPDX 标准全文与元数据归属补全）：40
+- 许可证全文条目（本地文件按内容 SHA-256 去重）：203
 - 按 SPDX 标准全文补全的许可证组：3
 
 ## Rust 依赖组件
@@ -25,7 +25,7 @@
 | ab_glyph | 0.2.32 | Apache-2.0 | https://github.com/alexheretic/ab-glyph |
 | ab_glyph_rasterizer | 0.1.10 | Apache-2.0 | https://github.com/alexheretic/ab-glyph |
 | adler2 | 2.0.1 | 0BSD OR MIT OR Apache-2.0 | https://github.com/oyvindln/adler2 |
-| ahash | 0.8.12 | MIT OR Apache-2.0 | https://github.com/tkaitchuck/ahash |
+| ahash | 0.8.13 | MIT OR Apache-2.0 | https://github.com/tkaitchuck/ahash |
 | aho-corasick | 1.1.5 | Unlicense OR MIT | https://github.com/BurntSushi/aho-corasick |
 | android-activity | 0.6.1 | MIT OR Apache-2.0 | https://github.com/rust-mobile/android-activity |
 | android-properties | 0.2.2 | MIT | https://github.com/miklelappo/android-properties |
@@ -39,22 +39,22 @@
 | bincode | 1.3.3 | MIT | https://github.com/servo/bincode |
 | bit-set | 0.11.1 | Apache-2.0 OR MIT | https://github.com/contain-rs/bit-vec |
 | bit-set | 0.8.0 | Apache-2.0 OR MIT | https://github.com/contain-rs/bit-set |
-| bit-vec | 0.10.1 | Apache-2.0 OR MIT | https://github.com/contain-rs/bit-vec |
+| bit-vec | 0.10.2 | Apache-2.0 OR MIT | https://github.com/contain-rs/bit-vec |
 | bit-vec | 0.8.0 | Apache-2.0 OR MIT | https://github.com/contain-rs/bit-vec |
 | bitflags | 1.3.2 | MIT/Apache-2.0 | https://github.com/bitflags/bitflags |
 | bitflags | 2.13.2 | MIT OR Apache-2.0 | https://github.com/bitflags/bitflags |
 | block2 | 0.5.1 | MIT | https://github.com/madsmtm/objc2 |
 | borsh | 1.8.1 | MIT OR Apache-2.0 | https://github.com/near/borsh-rs |
 | borsh-derive | 1.8.1 | Apache-2.0 | https://github.com/near/borsh-rs |
-| bumpalo | 3.20.3 | MIT OR Apache-2.0 | https://github.com/fitzgen/bumpalo |
+| bumpalo | 3.20.4 | MIT OR Apache-2.0 | https://github.com/fitzgen/bumpalo |
 | bytecount | 0.6.9 | Apache-2.0/MIT | https://github.com/llogiq/bytecount |
 | bytemuck | 1.25.2 | Zlib OR Apache-2.0 OR MIT | https://github.com/Lokathor/bytemuck |
 | bytemuck_derive | 1.12.1 | Zlib OR Apache-2.0 OR MIT | https://github.com/Lokathor/bytemuck |
 | byteorder-lite | 0.1.0 | Unlicense OR MIT | https://github.com/image-rs/byteorder-lite |
-| bytes | 1.12.1 | MIT | https://github.com/tokio-rs/bytes |
+| bytes | 1.12.2 | MIT | https://github.com/tokio-rs/bytes |
 | calloop | 0.13.0 | MIT | https://github.com/Smithay/calloop |
 | calloop-wayland-source | 0.3.0 | MIT | https://github.com/smithay/calloop-wayland-source |
-| cc | 1.10.0 | MIT OR Apache-2.0 | https://github.com/rust-lang/cc-rs |
+| cc | 1.11.3 | MIT OR Apache-2.0 | https://github.com/rust-lang/cc-rs |
 | cfg-if | 1.0.5 | MIT OR Apache-2.0 | https://github.com/rust-lang/cfg-if |
 | cfg_aliases | 0.2.2 | MIT | https://github.com/katharostech/cfg_aliases |
 | chacha20 | 0.10.2 | MIT OR Apache-2.0 | https://github.com/RustCrypto/stream-ciphers |
@@ -70,7 +70,7 @@
 | core_maths | 0.1.1 | MIT | https://github.com/robertbastian/core_maths |
 | cosmic-text | 0.19.0 | MIT OR Apache-2.0 | https://github.com/pop-os/cosmic-text |
 | cpufeatures | 0.3.1 | MIT OR Apache-2.0 | https://github.com/RustCrypto/utils |
-| crc32fast | 1.5.3 | MIT OR Apache-2.0 | https://github.com/srijs/rust-crc32fast |
+| crc32fast | 1.5.5 | MIT OR Apache-2.0 | https://github.com/srijs/rust-crc32fast |
 | crossbeam-utils | 0.8.23 | MIT OR Apache-2.0 | https://github.com/crossbeam-rs/crossbeam |
 | crunchy | 0.2.4 | MIT | https://github.com/eira-fransham/crunchy |
 | ctor | 0.10.1 | Apache-2.0 OR MIT | https://github.com/mmastrac/rust-ctor |
@@ -88,7 +88,7 @@
 | drm-sys | 0.8.1 | MIT | https://github.com/Smithay/drm-rs |
 | dtor | 0.8.1 | Apache-2.0 OR MIT | https://github.com/mmastrac/rust-ctor |
 | equivalent | 1.0.3 | Apache-2.0 OR MIT | https://github.com/indexmap-rs/equivalent |
-| errno | 0.3.14 | MIT OR Apache-2.0 | https://github.com/lambda-fairy/rust-errno |
+| errno | 0.3.15 | MIT OR Apache-2.0 | https://github.com/lambda-fairy/rust-errno |
 | error-code | 3.4.0 | BSL-1.0 | https://github.com/DoumanAsh/error-code |
 | euclid | 0.22.14 | MIT OR Apache-2.0 | https://github.com/servo/euclid |
 | fancy-regex | 0.16.2 | MIT | https://github.com/fancy-regex/fancy-regex |
@@ -96,7 +96,7 @@
 | fax | 0.2.7 | MIT | https://github.com/pdf-rs/fax |
 | fdeflate | 0.3.7 | MIT OR Apache-2.0 | https://github.com/image-rs/fdeflate |
 | find-msvc-tools | 0.1.15 | MIT OR Apache-2.0 | https://github.com/rust-lang/cc-rs |
-| flate2 | 1.1.10 | MIT OR Apache-2.0 | https://github.com/rust-lang/flate2-rs |
+| flate2 | 1.1.11 | MIT OR Apache-2.0 | https://github.com/rust-lang/flate2-rs |
 | float-cmp | 0.9.0 | MIT | https://github.com/mikedilger/float-cmp |
 | fnv | 1.0.7 | Apache-2.0 / MIT | https://github.com/servo/rust-fnv |
 | foldhash | 0.2.0 | Zlib | https://github.com/orlp/foldhash |
@@ -114,13 +114,12 @@
 | futures-util | 0.3.34 | MIT OR Apache-2.0 | https://github.com/rust-lang/futures-rs |
 | gethostname | 1.1.0 | Apache-2.0 | https://codeberg.org/swsnr/gethostname.rs.git |
 | getopts | 0.2.24 | MIT OR Apache-2.0 | https://github.com/rust-lang/getopts |
-| getrandom | 0.3.4 | MIT OR Apache-2.0 | https://github.com/rust-random/getrandom |
 | getrandom | 0.4.3 | MIT OR Apache-2.0 | https://github.com/rust-random/getrandom |
 | gif | 0.14.2 | MIT OR Apache-2.0 | https://github.com/image-rs/image-gif |
 | half | 2.7.1 | MIT OR Apache-2.0 | https://github.com/VoidStarKat/half-rs |
 | harfrust | 0.15.0 | MIT | https://github.com/harfbuzz/harfrust |
 | harfrust | 0.5.2 | MIT | https://github.com/harfbuzz/harfrust |
-| hashbrown | 0.17.1 | MIT OR Apache-2.0 | https://github.com/rust-lang/hashbrown |
+| hashbrown | 0.17.2 | MIT OR Apache-2.0 | https://github.com/rust-lang/hashbrown |
 | hermit-abi | 0.5.3 | MIT OR Apache-2.0 | https://github.com/hermit-os/hermit-rs |
 | image | 0.25.10 | MIT OR Apache-2.0 | https://github.com/image-rs/image |
 | image-webp | 0.2.4 | MIT OR Apache-2.0 | https://github.com/image-rs/image-webp |
@@ -135,12 +134,12 @@
 | jni-sys | 0.4.1 | MIT OR Apache-2.0 | https://github.com/jni-rs/jni-sys |
 | jni-sys-macros | 0.4.1 | MIT OR Apache-2.0 | https://github.com/jni-rs/jni-sys |
 | jobserver | 0.1.35 | MIT OR Apache-2.0 | https://github.com/rust-lang/jobserver-rs |
-| js-sys | 0.3.106 | MIT OR Apache-2.0 | https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/js-sys |
+| js-sys | 0.3.107 | MIT OR Apache-2.0 | https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/js-sys |
 | kqueue | 1.2.1 | MIT | https://gitlab.com/rust-kqueue/rust-kqueue |
 | kqueue-sys | 1.1.2 | MIT | https://gitlab.com/rust-kqueue/rust-kqueue-sys |
 | kurbo | 0.13.1 | Apache-2.0 OR MIT | https://github.com/linebender/kurbo |
 | lapce-xi-rope | 0.4.0 | Apache-2.0 | https://github.com/lapce/xi-editor |
-| latex-rust | 3.0.1 | MIT OR Apache-2.0 | https://github.com/jscarr64/latex-rust |
+| latex-rust | 3.0.3 | MIT OR Apache-2.0 | https://github.com/jscarr64/latex-rust |
 | libc | 0.2.191 | MIT OR Apache-2.0 | https://github.com/rust-lang/libc |
 | libloading | 0.8.9 | ISC | https://github.com/nagisa/rust_libloading/ |
 | libm | 0.2.16 | MIT | https://github.com/rust-lang/compiler-builtins |
@@ -150,18 +149,18 @@
 | linux-raw-sys | 0.4.15 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | https://github.com/sunfishcode/linux-raw-sys |
 | linux-raw-sys | 0.9.4 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | https://github.com/sunfishcode/linux-raw-sys |
 | lock_api | 0.4.14 | MIT OR Apache-2.0 | https://github.com/Amanieu/parking_lot |
-| log | 0.4.34 | MIT OR Apache-2.0 | https://github.com/rust-lang/log |
+| log | 0.4.35 | MIT OR Apache-2.0 | https://github.com/rust-lang/log |
 | memchr | 2.8.3 | Unlicense OR MIT | https://github.com/BurntSushi/memchr |
 | memmap2 | 0.9.12 | MIT OR Apache-2.0 | https://github.com/RazrFalcon/memmap2-rs |
 | miniz_oxide | 0.8.9 | MIT OR Zlib OR Apache-2.0 | https://github.com/Frommi/miniz_oxide/tree/master/miniz_oxide |
 | miniz_oxide | 0.9.1 | MIT OR Zlib OR Apache-2.0 | https://github.com/Frommi/miniz_oxide/tree/master/miniz_oxide |
-| mio | 1.2.4 | MIT | https://github.com/tokio-rs/mio |
+| mio | 1.2.5 | MIT | https://github.com/tokio-rs/mio |
 | moxcms | 0.8.1 | BSD-3-Clause OR Apache-2.0 | https://github.com/awxkee/moxcms.git |
 | ndk | 0.9.0 | MIT OR Apache-2.0 | https://github.com/rust-mobile/ndk |
 | ndk-context | 0.1.1 | MIT OR Apache-2.0 | https://github.com/rust-windowing/android-ndk-rs |
 | ndk-sys | 0.6.0+11769913 | MIT OR Apache-2.0 | https://github.com/rust-mobile/ndk |
-| notify | 8.2.1 | CC0-1.0 | https://github.com/notify-rs/notify.git |
-| notify-types | 2.1.0 | MIT OR Apache-2.0 | https://github.com/notify-rs/notify.git |
+| notify | 8.2.2 | CC0-1.0 | https://github.com/notify-rs/notify.git |
+| notify-types | 2.3.1 | MIT OR Apache-2.0 | https://github.com/notify-rs/notify.git |
 | num-conv | 0.2.2 | MIT OR Apache-2.0 | https://github.com/jhpratt/num-conv |
 | num-traits | 0.2.19 | MIT OR Apache-2.0 | https://github.com/rust-num/num-traits |
 | num_enum | 0.7.6 | BSD-3-Clause OR MIT OR Apache-2.0 | https://github.com/illicitonion/num_enum |
@@ -199,12 +198,12 @@
 | pdf-writer | 0.15.0 | MIT OR Apache-2.0 | https://github.com/typst/pdf-writer |
 | percent-encoding | 2.3.2 | MIT OR Apache-2.0 | https://github.com/servo/rust-url/ |
 | pico-args | 0.5.0 | MIT | https://github.com/RazrFalcon/pico-args |
-| pin-project | 1.1.13 | Apache-2.0 OR MIT | https://github.com/taiki-e/pin-project |
-| pin-project-internal | 1.1.13 | Apache-2.0 OR MIT | https://github.com/taiki-e/pin-project |
-| pin-project-lite | 0.2.17 | Apache-2.0 OR MIT | https://github.com/taiki-e/pin-project-lite |
+| pin-project | 1.2.0 | Apache-2.0 OR MIT | https://github.com/taiki-e/pin-project |
+| pin-project-internal | 1.2.0 | Apache-2.0 OR MIT | https://github.com/taiki-e/pin-project |
+| pin-project-lite | 0.2.18 | Apache-2.0 OR MIT | https://github.com/taiki-e/pin-project-lite |
 | pkg-config | 0.3.34 | MIT OR Apache-2.0 | https://github.com/rust-lang/pkg-config-rs |
 | plain | 0.2.3 | MIT/Apache-2.0 | https://github.com/randomites/plain |
-| plist | 1.10.3 | MIT | https://github.com/ebarnard/rust-plist/ |
+| plist | 1.10.4 | MIT | https://github.com/ebarnard/rust-plist/ |
 | png | 0.17.16 | MIT OR Apache-2.0 | https://github.com/image-rs/image-png |
 | png | 0.18.1 | MIT OR Apache-2.0 | https://github.com/image-rs/image-png |
 | polling | 3.11.0 | Apache-2.0 OR MIT | https://github.com/smol-rs/polling |
@@ -221,9 +220,8 @@
 | quick-xml | 0.41.0 | MIT | https://github.com/tafia/quick-xml |
 | quick-xml | 0.42.0 | MIT | https://github.com/tafia/quick-xml |
 | quote | 1.0.47 | MIT OR Apache-2.0 | https://github.com/dtolnay/quote |
-| r-efi | 5.3.0 | MIT OR Apache-2.0 OR LGPL-2.1-or-later | https://github.com/r-efi/r-efi |
 | r-efi | 6.0.0 | MIT OR Apache-2.0 OR LGPL-2.1-or-later | https://github.com/r-efi/r-efi |
-| rand | 0.10.3 | MIT OR Apache-2.0 | https://github.com/rust-random/rand |
+| rand | 0.10.4 | MIT OR Apache-2.0 | https://github.com/rust-random/rand |
 | rand_core | 0.10.1 | MIT OR Apache-2.0 | https://github.com/rust-random/rand_core |
 | rand_xorshift | 0.5.0 | MIT OR Apache-2.0 | https://github.com/rust-random/rngs |
 | rangemap | 1.8.0 | MIT/Apache-2.0 | https://github.com/jeffparsons/rangemap |
@@ -236,9 +234,9 @@
 | redox_syscall | 0.4.1 | MIT | https://gitlab.redox-os.org/redox-os/syscall |
 | redox_syscall | 0.5.18 | MIT | https://gitlab.redox-os.org/redox-os/syscall |
 | redox_syscall | 0.9.5 | MIT | https://gitlab.redox-os.org/redox-os/kernel |
-| regex | 1.13.1 | MIT OR Apache-2.0 | https://github.com/rust-lang/regex |
-| regex-automata | 0.4.18 | MIT OR Apache-2.0 | https://github.com/rust-lang/regex |
-| regex-syntax | 0.8.11 | MIT OR Apache-2.0 | https://github.com/rust-lang/regex |
+| regex | 1.13.2 | MIT OR Apache-2.0 | https://github.com/rust-lang/regex |
+| regex-automata | 0.4.19 | MIT OR Apache-2.0 | https://github.com/rust-lang/regex |
+| regex-syntax | 0.8.12 | MIT OR Apache-2.0 | https://github.com/rust-lang/regex |
 | resvg | 0.50.0 | Apache-2.0 OR MIT | https://github.com/linebender/resvg |
 | rgb | 0.8.53 | MIT | https://github.com/kornelski/rust-rgb |
 | roxmltree | 0.20.0 | MIT OR Apache-2.0 | https://github.com/RazrFalcon/roxmltree |
@@ -249,7 +247,7 @@
 | rustc-hash | 2.1.3 | Apache-2.0 OR MIT | https://github.com/rust-lang/rustc-hash |
 | rustc_version | 0.4.1 | MIT OR Apache-2.0 | https://github.com/djc/rustc-version-rs |
 | rustix | 0.38.44 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | https://github.com/bytecodealliance/rustix |
-| rustix | 1.1.5 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | https://github.com/bytecodealliance/rustix |
+| rustix | 1.1.6 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | https://github.com/bytecodealliance/rustix |
 | rustversion | 1.0.23 | MIT OR Apache-2.0 | https://github.com/dtolnay/rustversion |
 | rusty-fork | 0.3.1 | MIT/Apache-2.0 | https://github.com/altsysrq/rusty-fork |
 | ryu | 1.0.23 | Apache-2.0 OR BSL-1.0 | https://github.com/dtolnay/ryu |
@@ -276,7 +274,7 @@
 | skrifa | 0.49.0 | MIT OR Apache-2.0 | https://github.com/googlefonts/fontations |
 | slab | 0.4.12 | MIT | https://github.com/tokio-rs/slab |
 | slotmap | 1.1.1 | Zlib | https://github.com/orlp/slotmap |
-| smallvec | 1.16.4 | MIT OR Apache-2.0 | https://github.com/servo/rust-smallvec |
+| smallvec | 1.16.6 | MIT OR Apache-2.0 | https://github.com/smallvec/smallvec |
 | smithay-client-toolkit | 0.19.2 | MIT | https://github.com/smithay/client-toolkit |
 | smol_str | 0.2.2 | MIT OR Apache-2.0 | https://github.com/rust-analyzer/smol_str |
 | smol_str | 0.3.7 | MIT OR Apache-2.0 | https://github.com/rust-lang/rust-analyzer/tree/master/lib/smol_str |
@@ -287,7 +285,7 @@
 | svgtypes | 0.16.2 | Apache-2.0 OR MIT | https://github.com/linebender/svgtypes |
 | swash | 0.2.10 | Apache-2.0 OR MIT | https://github.com/dfrg/swash |
 | syn | 2.0.119 | MIT OR Apache-2.0 | https://github.com/dtolnay/syn |
-| syn | 3.0.9 | MIT OR Apache-2.0 | https://github.com/dtolnay/syn |
+| syn | 3.0.10 | MIT OR Apache-2.0 | https://github.com/dtolnay/syn |
 | synstructure | 0.14.0 | MIT | https://github.com/mystor/synstructure |
 | syntect | 5.3.0 | MIT | https://github.com/trishume/syntect |
 | sys-locale | 0.3.2 | MIT OR Apache-2.0 | https://github.com/1Password/sys-locale |
@@ -308,10 +306,10 @@
 | tinyvec | 1.13.3 | Zlib OR Apache-2.0 OR MIT | https://github.com/Lokathor/tinyvec |
 | tokio | 1.54.1 | MIT | https://github.com/tokio-rs/tokio |
 | toml_datetime | 0.6.11 | MIT OR Apache-2.0 | https://github.com/toml-rs/toml |
-| toml_datetime | 1.1.2+spec-1.1.0 | MIT OR Apache-2.0 | https://github.com/toml-rs/toml |
+| toml_datetime | 1.1.3+spec-1.1.0 | MIT OR Apache-2.0 | https://github.com/toml-rs/toml |
 | toml_edit | 0.22.27 | MIT OR Apache-2.0 | https://github.com/toml-rs/toml |
-| toml_edit | 0.25.17+spec-1.1.0 | MIT OR Apache-2.0 | https://github.com/toml-rs/toml |
-| toml_parser | 1.1.5+spec-1.1.0 | MIT OR Apache-2.0 | https://github.com/toml-rs/toml |
+| toml_edit | 0.25.20+spec-1.1.0 | MIT OR Apache-2.0 | https://github.com/toml-rs/toml |
+| toml_parser | 1.1.6+spec-1.1.0 | MIT OR Apache-2.0 | https://github.com/toml-rs/toml |
 | toml_write | 0.1.2 | MIT OR Apache-2.0 | https://github.com/toml-rs/toml |
 | tracing | 0.1.44 | MIT | https://github.com/tokio-rs/tracing |
 | tracing-core | 0.1.36 | MIT | https://github.com/tokio-rs/tracing |
@@ -321,25 +319,24 @@
 | unicode-bidi | 0.3.18 | MIT OR Apache-2.0 | https://github.com/servo/unicode-bidi |
 | unicode-ident | 1.0.27 | (MIT OR Apache-2.0) AND Unicode-3.0 | https://github.com/dtolnay/unicode-ident |
 | unicode-linebreak | 0.1.5 | Apache-2.0 | https://github.com/axelf4/unicode-linebreak |
-| unicode-script | 0.5.8 | MIT OR Apache-2.0 | https://github.com/unicode-rs/unicode-script |
+| unicode-script | 0.5.9 | MIT OR Apache-2.0 | https://github.com/unicode-rs/unicode-script |
 | unicode-segmentation | 1.13.3 | MIT OR Apache-2.0 | https://github.com/unicode-rs/unicode-segmentation |
 | unicode-vo | 0.1.0 | MIT/Apache-2.0 | https://github.com/RazrFalcon/unicode-vo |
-| unicode-width | 0.2.2 | MIT OR Apache-2.0 | https://github.com/unicode-rs/unicode-width |
+| unicode-width | 0.2.3 | MIT OR Apache-2.0 | https://github.com/unicode-rs/unicode-width |
 | usvg | 0.50.0 | Apache-2.0 OR MIT | https://github.com/linebender/resvg |
-| veil | 3.0.1 | MIT (workspace) | - |
-| veil-core | 3.0.1 | MIT (workspace) | - |
-| veil-mermaid-offline | 3.0.1 | MIT (workspace) | - |
-| veil-ui | 3.0.1 | MIT (workspace) | - |
+| veil | 3.0.2 | MIT (workspace) | - |
+| veil-core | 3.0.2 | MIT (workspace) | - |
+| veil-mermaid-offline | 3.0.2 | MIT (workspace) | - |
+| veil-ui | 3.0.2 | MIT (workspace) | - |
 | version_check | 0.9.5 | MIT/Apache-2.0 | https://github.com/SergioBenitez/version_check |
 | wait-timeout | 0.2.1 | MIT/Apache-2.0 | https://github.com/alexcrichton/wait-timeout |
-| walkdir | 2.5.0 | Unlicense/MIT | https://github.com/BurntSushi/walkdir |
+| walkdir | 2.5.1 | Unlicense/MIT | https://github.com/BurntSushi/walkdir |
 | wasi | 0.11.1+wasi-snapshot-preview1 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | https://github.com/bytecodealliance/wasi |
-| wasip2 | 1.0.4+wasi-0.2.12 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | https://github.com/bytecodealliance/wasi-rs |
-| wasm-bindgen | 0.2.129 | MIT OR Apache-2.0 | https://github.com/wasm-bindgen/wasm-bindgen |
-| wasm-bindgen-futures | 0.4.79 | MIT OR Apache-2.0 | https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/futures |
-| wasm-bindgen-macro | 0.2.129 | MIT OR Apache-2.0 | https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/macro |
-| wasm-bindgen-macro-support | 0.2.129 | MIT OR Apache-2.0 | https://github.com/wasm-bindgen/wasm-bindgen/tree/main/crates/macro-support |
-| wasm-bindgen-shared | 0.2.129 | MIT OR Apache-2.0 | https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/shared |
+| wasm-bindgen | 0.2.130 | MIT OR Apache-2.0 | https://github.com/wasm-bindgen/wasm-bindgen |
+| wasm-bindgen-futures | 0.4.80 | MIT OR Apache-2.0 | https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/futures |
+| wasm-bindgen-macro | 0.2.130 | MIT OR Apache-2.0 | https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/macro |
+| wasm-bindgen-macro-support | 0.2.130 | MIT OR Apache-2.0 | https://github.com/wasm-bindgen/wasm-bindgen/tree/main/crates/macro-support |
+| wasm-bindgen-shared | 0.2.130 | MIT OR Apache-2.0 | https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/shared |
 | wayland-backend | 0.3.17 | MIT | https://github.com/smithay/wayland-rs |
 | wayland-client | 0.31.15 | MIT | https://github.com/smithay/wayland-rs |
 | wayland-csd-frame | 0.3.0 | MIT | https://github.com/rust-windowing/wayland-csd-frame |
@@ -349,7 +346,7 @@
 | wayland-protocols-wlr | 0.3.12 | MIT | https://github.com/smithay/wayland-rs |
 | wayland-scanner | 0.31.11 | MIT | https://github.com/smithay/wayland-rs |
 | wayland-sys | 0.31.11 | MIT | https://github.com/smithay/wayland-rs |
-| web-sys | 0.3.106 | MIT OR Apache-2.0 | https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/web-sys |
+| web-sys | 0.3.107 | MIT OR Apache-2.0 | https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/web-sys |
 | web-time | 1.1.0 | MIT OR Apache-2.0 | https://github.com/daxpedda/web-time |
 | weezl | 0.1.12 | MIT OR Apache-2.0 | https://github.com/image-rs/weezl |
 | winapi-util | 0.1.11 | Unlicense OR MIT | https://github.com/BurntSushi/winapi-util |
@@ -368,8 +365,7 @@
 | windows_x86_64_msvc | 0.52.6 | MIT OR Apache-2.0 | https://github.com/microsoft/windows-rs |
 | winit | 0.30.13 | Apache-2.0 | https://github.com/rust-windowing/winit |
 | winnow | 0.7.15 | MIT | https://github.com/winnow-rs/winnow |
-| winnow | 1.0.4 | MIT | https://github.com/winnow-rs/winnow |
-| wit-bindgen | 0.57.1 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | https://github.com/bytecodealliance/wit-bindgen |
+| winnow | 1.0.5 | MIT | https://github.com/winnow-rs/winnow |
 | write-fonts | 0.48.1 | MIT OR Apache-2.0 | https://github.com/googlefonts/fontations |
 | x11-dl | 2.21.0 | MIT | https://github.com/AltF02/x11-rs.git |
 | x11rb | 0.13.2 | MIT OR Apache-2.0 | https://github.com/psychon/x11rb |
@@ -378,12 +374,12 @@
 | xkbcommon-dl | 0.4.2 | MIT | https://github.com/rust-windowing/xkbcommon-dl |
 | xkeysym | 0.2.1 | MIT OR Apache-2.0 OR Zlib | https://github.com/notgull/xkeysym |
 | xmlwriter | 0.1.0 | MIT | https://github.com/RazrFalcon/xmlwriter |
-| yazi | 0.2.1 | Apache-2.0 OR MIT | https://github.com/dfrg/yazi |
+| yazi | 0.2.2 | Apache-2.0 OR MIT | https://github.com/dfrg/yazi |
 | yoke | 0.8.4 | Unicode-3.0 | https://github.com/unicode-org/icu4x |
 | yoke-derive | 0.8.4 | Unicode-3.0 | https://github.com/unicode-org/icu4x |
 | zeno | 0.3.3 | Apache-2.0 OR MIT | https://github.com/dfrg/zeno |
-| zerocopy | 0.8.63 | BSD-2-Clause OR Apache-2.0 OR MIT | https://github.com/google/zerocopy |
-| zerocopy-derive | 0.8.63 | BSD-2-Clause OR Apache-2.0 OR MIT | https://github.com/google/zerocopy |
+| zerocopy | 0.8.64 | BSD-2-Clause OR Apache-2.0 OR MIT | https://github.com/google/zerocopy |
+| zerocopy-derive | 0.8.64 | BSD-2-Clause OR Apache-2.0 OR MIT | https://github.com/google/zerocopy |
 | zerofrom | 0.1.8 | Unicode-3.0 | https://github.com/unicode-org/icu4x |
 | zerofrom-derive | 0.1.8 | Unicode-3.0 | https://github.com/unicode-org/icu4x |
 | zlib-rs | 0.6.8 | Zlib | https://github.com/trifectatechfoundation/zlib-rs |
@@ -717,7 +713,7 @@ SOFTWARE.
 - `aho-corasick` 1.1.5 (`COPYING`)
 - `memchr` 2.8.3 (`COPYING`)
 - `same-file` 1.0.6 (`COPYING`)
-- `walkdir` 2.5.0 (`COPYING`)
+- `walkdir` 2.5.1 (`COPYING`)
 - `winapi-util` 0.1.11 (`COPYING`)
 
 ~~~text
@@ -748,7 +744,7 @@ Permission is granted to anyone to use this software for any purpose, including 
 ### 025436edff4cfcdde17a5811fdea78892d8482efd1abdec5a17872d07a4f2112
 
 适用包：
-- `flate2` 1.1.10 (`LICENSE-MIT`)
+- `flate2` 1.1.11 (`LICENSE-MIT`)
 
 ~~~text
 Copyright (c) 2014-2026 Alex Crichton
@@ -800,7 +796,7 @@ Permission is granted to anyone to use this software for any purpose, including 
 ### 0444c6991eead6822f7b9102e654448d51624431119546492e8b231db42c48bb
 
 适用包：
-- `ahash` 0.8.12 (`LICENSE-MIT`)
+- `ahash` 0.8.13 (`LICENSE-MIT`)
 
 ~~~text
 Copyright (c) 2018 Tom Kaitchuck
@@ -1042,7 +1038,7 @@ limitations under the License.
 ### 0511b0565c65e2899fed9302a59eb5ba5dd26450df533ad1da8d6ac5fcce6620
 
 适用包：
-- `latex-rust` 3.0.1 (`LICENSE-APACHE`)
+- `latex-rust` 3.0.3 (`LICENSE-APACHE`)
 
 ~~~text
                                  Apache License
@@ -1247,9 +1243,9 @@ SOFTWARE.
 ### 05c58f1374a0ba16711c4f60552df215d72078d374bbd245ad438388c87c3573
 
 适用包：
-- `toml_datetime` 1.1.2+spec-1.1.0 (`LICENSE-APACHE`)
-- `toml_edit` 0.25.17+spec-1.1.0 (`LICENSE-APACHE`)
-- `toml_parser` 1.1.5+spec-1.1.0 (`LICENSE-APACHE`)
+- `toml_datetime` 1.1.3+spec-1.1.0 (`LICENSE-APACHE`)
+- `toml_edit` 0.25.20+spec-1.1.0 (`LICENSE-APACHE`)
+- `toml_parser` 1.1.6+spec-1.1.0 (`LICENSE-APACHE`)
 
 ~~~text
                                  Apache License
@@ -1485,7 +1481,7 @@ SOFTWARE.
 ### 07919255c7e04793d8ea760d6c2ce32d19f9ff02bdbdde3ce90b1e1880929a9b
 
 适用包：
-- `mio` 1.2.4 (`LICENSE`)
+- `mio` 1.2.5 (`LICENSE`)
 
 ~~~text
 Copyright (c) 2014 Carl Lerche and other MIO contributors
@@ -1591,7 +1587,7 @@ Permission is granted to anyone to use this software for any purpose, including 
 ### 0b28172679e0009b655da42797c03fd163a3379d5cfa67ba1f1655e974a2a1a9
 
 适用包：
-- `smallvec` 1.16.4 (`LICENSE-MIT`)
+- `smallvec` 1.16.6 (`LICENSE-MIT`)
 
 ~~~text
 Copyright (c) 2018 The Servo Project Developers
@@ -1731,9 +1727,9 @@ DEALINGS IN THE SOFTWARE.
 - `miniz_oxide` 0.8.9 (`LICENSE-APACHE.md`)
 - `miniz_oxide` 0.9.1 (`LICENSE-APACHE.md`)
 - `num-conv` 0.2.2 (`LICENSE-Apache`)
-- `pin-project` 1.1.13 (`LICENSE-APACHE`)
-- `pin-project-internal` 1.1.13 (`LICENSE-APACHE`)
-- `pin-project-lite` 0.2.17 (`LICENSE-APACHE`)
+- `pin-project` 1.2.0 (`LICENSE-APACHE`)
+- `pin-project-internal` 1.2.0 (`LICENSE-APACHE`)
+- `pin-project-lite` 0.2.18 (`LICENSE-APACHE`)
 - `raw-window-handle` 0.6.2 (`LICENSE-APACHE.md`)
 - `simdutf8` 0.1.5 (`LICENSE-Apache`)
 - `time` 0.3.55 (`LICENSE-Apache`)
@@ -1927,7 +1923,7 @@ DEALINGS IN THE SOFTWARE.
 - `aho-corasick` 1.1.5 (`LICENSE-MIT`)
 - `byteorder-lite` 0.1.0 (`LICENSE-MIT`)
 - `memchr` 2.8.3 (`LICENSE-MIT`)
-- `walkdir` 2.5.0 (`LICENSE-MIT`)
+- `walkdir` 2.5.1 (`LICENSE-MIT`)
 
 ~~~text
 The MIT License (MIT)
@@ -1989,8 +1985,8 @@ DEALINGS IN THE SOFTWARE.
 ### 1520f0253bb05bbfc841b827fe6440172f0513b4a890f720c9de1665a07c21e8
 
 适用包：
-- `zerocopy` 0.8.63 (`LICENSE-APACHE`)
-- `zerocopy-derive` 0.8.63 (`LICENSE-APACHE`)
+- `zerocopy` 0.8.64 (`LICENSE-APACHE`)
+- `zerocopy-derive` 0.8.64 (`LICENSE-APACHE`)
 
 ~~~text
                                  Apache License
@@ -2409,7 +2405,7 @@ DEALINGS IN THE SOFTWARE.
 ### 15656cc11a8331f28c0986b8ab97220d3e76f98e60ed388b5ffad37dfac4710c
 
 适用包：
-- `unicode-script` 0.5.8 (`LICENSE-MIT`)
+- `unicode-script` 0.5.9 (`LICENSE-MIT`)
 
 ~~~text
 MIT License
@@ -2766,7 +2762,7 @@ SOFTWARE.
 ### 209fbbe0ad52d9235e37badf9cadfe4dbdc87203179c0899e738b39ade42177b
 
 适用包：
-- `rand` 0.10.3 (`LICENSE-MIT`)
+- `rand` 0.10.4 (`LICENSE-MIT`)
 - `rand_xorshift` 0.5.0 (`LICENSE-MIT`)
 
 ~~~text
@@ -2923,16 +2919,16 @@ DEALINGS IN THE SOFTWARE.
 - `num_enum` 0.7.6 (`LICENSE-MIT`)
 - `num_enum_derive` 0.7.6 (`LICENSE-MIT`)
 - `once_cell` 1.21.4 (`LICENSE-MIT`)
-- `pin-project` 1.1.13 (`LICENSE-MIT`)
-- `pin-project-internal` 1.1.13 (`LICENSE-MIT`)
-- `pin-project-lite` 0.2.17 (`LICENSE-MIT`)
+- `pin-project` 1.2.0 (`LICENSE-MIT`)
+- `pin-project-internal` 1.2.0 (`LICENSE-MIT`)
+- `pin-project-lite` 0.2.18 (`LICENSE-MIT`)
 - `polling` 3.11.0 (`LICENSE-MIT`)
 - `proc-macro-crate` 3.5.0 (`LICENSE-MIT`)
 - `proc-macro2` 1.0.107 (`LICENSE-MIT`)
 - `quote` 1.0.47 (`LICENSE-MIT`)
 - `rustc-hash` 2.1.3 (`LICENSE-MIT`)
 - `rustix` 0.38.44 (`LICENSE-MIT`)
-- `rustix` 1.1.5 (`LICENSE-MIT`)
+- `rustix` 1.1.6 (`LICENSE-MIT`)
 - `rustversion` 1.0.23 (`LICENSE-MIT`)
 - `semver` 1.0.28 (`LICENSE-MIT`)
 - `serde` 1.0.229 (`LICENSE-MIT`)
@@ -2943,15 +2939,13 @@ DEALINGS IN THE SOFTWARE.
 - `smol_str` 0.2.2 (`LICENSE-MIT`)
 - `smol_str` 0.3.7 (`LICENSE-MIT`)
 - `syn` 2.0.119 (`LICENSE-MIT`)
-- `syn` 3.0.9 (`LICENSE-MIT`)
+- `syn` 3.0.10 (`LICENSE-MIT`)
 - `thiserror` 1.0.69 (`LICENSE-MIT`)
 - `thiserror` 2.0.21 (`LICENSE-MIT`)
 - `thiserror-impl` 1.0.69 (`LICENSE-MIT`)
 - `thiserror-impl` 2.0.21 (`LICENSE-MIT`)
 - `unicode-ident` 1.0.27 (`LICENSE-MIT`)
 - `wasi` 0.11.1+wasi-snapshot-preview1 (`LICENSE-MIT`)
-- `wasip2` 1.0.4+wasi-0.2.12 (`LICENSE-MIT`)
-- `wit-bindgen` 0.57.1 (`LICENSE-MIT`)
 - `x11-dl` 2.21.0 (`LICENSE-MIT`)
 - `zmij` 1.0.23 (`LICENSE-MIT`)
 
@@ -2984,8 +2978,8 @@ DEALINGS IN THE SOFTWARE.
 ### 24fa231567ace7e0cdd96e5b2e649b0445d280710f7018d01ba6411e06aa641e
 
 适用包：
-- `zerocopy` 0.8.63 (`LICENSE-MIT`)
-- `zerocopy-derive` 0.8.63 (`LICENSE-MIT`)
+- `zerocopy` 0.8.64 (`LICENSE-MIT`)
+- `zerocopy-derive` 0.8.64 (`LICENSE-MIT`)
 
 ~~~text
 Copyright 2023 The Fuchsia Authors
@@ -3333,44 +3327,10 @@ The above copyright notice and this permission notice shall be included in all c
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ~~~
 
-### 29e9fe5074bd27e0e5d5d110394fbbcd841baee2651a3c4b4560a632702cede4
-
-适用包：
-- `getrandom` 0.3.4 (`LICENSE-MIT`)
-
-~~~text
-Copyright (c) 2018-2025 The rust-random Project Developers
-Copyright (c) 2014 The Rust Project Developers
-
-Permission is hereby granted, free of charge, to any
-person obtaining a copy of this software and associated
-documentation files (the "Software"), to deal in the
-Software without restriction, including without
-limitation the rights to use, copy, modify, merge,
-publish, distribute, sublicense, and/or sell copies of
-the Software, and to permit persons to whom the Software
-is furnished to do so, subject to the following
-conditions:
-
-The above copyright notice and this permission notice
-shall be included in all copies or substantial portions
-of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
-ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
-TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
-PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
-SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
-CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
-OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
-IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
-DEALINGS IN THE SOFTWARE.
-~~~
-
 ### 29f359024dacaa3361dcddf5a9316e8458028ff062b63105a61e04a16566f968
 
 适用包：
-- `notify` 8.2.1 (`LICENSE-CC0`)
+- `notify` 8.2.2 (`LICENSE-CC0`)
 
 ~~~text
 Creative Commons CC0 1.0 Universal
@@ -3448,10 +3408,10 @@ SOFTWARE.
 ### 2cf6ff8b378634e65ac1e092f9c64aaa315a79b056dcbbc75a05a2c817c57fba
 
 适用包：
-- `veil` 3.0.1 (`LICENSE (workspace root)`)
-- `veil-core` 3.0.1 (`LICENSE (workspace root)`)
-- `veil-mermaid-offline` 3.0.1 (`LICENSE (workspace root)`)
-- `veil-ui` 3.0.1 (`LICENSE (workspace root)`)
+- `veil` 3.0.2 (`LICENSE (workspace root)`)
+- `veil-core` 3.0.2 (`LICENSE (workspace root)`)
+- `veil-mermaid-offline` 3.0.2 (`LICENSE (workspace root)`)
+- `veil-ui` 3.0.2 (`LICENSE (workspace root)`)
 
 ~~~text
 MIT License
@@ -3628,7 +3588,7 @@ SOFTWARE.
 ### 35242e7a83f69875e6edeff02291e688c97caafe2f8902e4e19b49d3e78b4cab
 
 适用包：
-- `rand` 0.10.3 (`LICENSE-APACHE`)
+- `rand` 0.10.4 (`LICENSE-APACHE`)
 - `rand_xorshift` 0.5.0 (`LICENSE-APACHE`)
 
 ~~~text
@@ -3813,20 +3773,20 @@ END OF TERMS AND CONDITIONS
 ### 378f5840b258e2779c39418f3f2d7b2ba96f1c7917dd6be0713f88305dbda397
 
 适用包：
-- `cc` 1.10.0 (`LICENSE-MIT`)
+- `cc` 1.11.3 (`LICENSE-MIT`)
 - `cfg-if` 1.0.5 (`LICENSE-MIT`)
 - `find-msvc-tools` 0.1.15 (`LICENSE-MIT`)
 - `jobserver` 0.1.35 (`LICENSE-MIT`)
-- `js-sys` 0.3.106 (`LICENSE-MIT`)
+- `js-sys` 0.3.107 (`LICENSE-MIT`)
 - `pkg-config` 0.3.34 (`LICENSE-MIT`)
 - `scoped-tls` 1.0.1 (`LICENSE-MIT`)
 - `wait-timeout` 0.2.1 (`LICENSE-MIT`)
-- `wasm-bindgen` 0.2.129 (`LICENSE-MIT`)
-- `wasm-bindgen-futures` 0.4.79 (`LICENSE-MIT`)
-- `wasm-bindgen-macro` 0.2.129 (`LICENSE-MIT`)
-- `wasm-bindgen-macro-support` 0.2.129 (`LICENSE-MIT`)
-- `wasm-bindgen-shared` 0.2.129 (`LICENSE-MIT`)
-- `web-sys` 0.3.106 (`LICENSE-MIT`)
+- `wasm-bindgen` 0.2.130 (`LICENSE-MIT`)
+- `wasm-bindgen-futures` 0.4.80 (`LICENSE-MIT`)
+- `wasm-bindgen-macro` 0.2.130 (`LICENSE-MIT`)
+- `wasm-bindgen-macro-support` 0.2.130 (`LICENSE-MIT`)
+- `wasm-bindgen-shared` 0.2.130 (`LICENSE-MIT`)
+- `web-sys` 0.3.107 (`LICENSE-MIT`)
 
 ~~~text
 Copyright (c) 2014 Alex Crichton
@@ -4423,7 +4383,7 @@ SOFTWARE.
 ### 45f522cacecb1023856e46df79ca625dfc550c94910078bd8aec6e02880b3d42
 
 适用包：
-- `bytes` 1.12.1 (`LICENSE`)
+- `bytes` 1.12.2 (`LICENSE`)
 
 ~~~text
 Copyright (c) 2018 Carl Lerche
@@ -4613,7 +4573,7 @@ SOFTWARE.
 ### 512a9e571c08a0fc9093dfffb56c27e960f216b7d7660d54c34dc87c596b993f
 
 适用包：
-- `unicode-script` 0.5.8 (`LICENSE-APACHE`)
+- `unicode-script` 0.5.9 (`LICENSE-APACHE`)
 
 ~~~text
                               Apache License
@@ -5180,7 +5140,7 @@ SOFTWARE.
 ### 59cb79856d3f4913cf42114c61b65a4322519c7e57988483f2171df7f0c20d00
 
 适用包：
-- `latex-rust` 3.0.1 (`LICENSE-MIT`)
+- `latex-rust` 3.0.3 (`LICENSE-MIT`)
 
 ~~~text
 MIT License
@@ -5238,7 +5198,7 @@ SOFTWARE.
 ### 61d383b05b87d78f94d2937e2580cce47226d17823c0430fbcad09596537efcf
 
 适用包：
-- `crc32fast` 1.5.3 (`LICENSE-MIT`)
+- `crc32fast` 1.5.5 (`LICENSE-MIT`)
 
 ~~~text
 MIT License
@@ -5403,7 +5363,7 @@ SOFTWARE.
 - `serde_json` 1.0.154 (`LICENSE-APACHE`)
 - `subsetter` 0.2.6 (`LICENSE-APACHE`)
 - `syn` 2.0.119 (`LICENSE-APACHE`)
-- `syn` 3.0.9 (`LICENSE-APACHE`)
+- `syn` 3.0.10 (`LICENSE-APACHE`)
 - `thiserror` 1.0.69 (`LICENSE-APACHE`)
 - `thiserror` 2.0.21 (`LICENSE-APACHE`)
 - `thiserror-impl` 1.0.69 (`LICENSE-APACHE`)
@@ -5595,11 +5555,11 @@ END OF TERMS AND CONDITIONS
 - `bitflags` 1.3.2 (`LICENSE-MIT`)
 - `bitflags` 2.13.2 (`LICENSE-MIT`)
 - `getopts` 0.2.24 (`LICENSE-MIT`)
-- `log` 0.4.34 (`LICENSE-MIT`)
+- `log` 0.4.35 (`LICENSE-MIT`)
 - `num-traits` 0.2.19 (`LICENSE-MIT`)
-- `regex` 1.13.1 (`LICENSE-MIT`)
-- `regex-automata` 0.4.18 (`LICENSE-MIT`)
-- `regex-syntax` 0.8.11 (`LICENSE-MIT`)
+- `regex` 1.13.2 (`LICENSE-MIT`)
+- `regex-automata` 0.4.19 (`LICENSE-MIT`)
+- `regex-syntax` 0.8.12 (`LICENSE-MIT`)
 
 ~~~text
 Copyright (c) 2014 The Rust Project Developers
@@ -5632,7 +5592,7 @@ DEALINGS IN THE SOFTWARE.
 ### 65f94e99ddaf4f5d1782a6dae23f35d4293a9a01444a13135a6887017d353cee
 
 适用包：
-- `bumpalo` 3.20.3 (`LICENSE-MIT`)
+- `bumpalo` 3.20.4 (`LICENSE-MIT`)
 
 ~~~text
 Copyright (c) 2019 Nick Fitzgerald
@@ -6027,10 +5987,10 @@ APPENDIX: How to apply the Apache License to your work.
 
 适用包：
 - `toml_datetime` 0.6.11 (`LICENSE-MIT`)
-- `toml_datetime` 1.1.2+spec-1.1.0 (`LICENSE-MIT`)
+- `toml_datetime` 1.1.3+spec-1.1.0 (`LICENSE-MIT`)
 - `toml_edit` 0.22.27 (`LICENSE-MIT`)
-- `toml_edit` 0.25.17+spec-1.1.0 (`LICENSE-MIT`)
-- `toml_parser` 1.1.5+spec-1.1.0 (`LICENSE-MIT`)
+- `toml_edit` 0.25.20+spec-1.1.0 (`LICENSE-MIT`)
+- `toml_parser` 1.1.6+spec-1.1.0 (`LICENSE-MIT`)
 - `toml_write` 0.1.2 (`LICENSE-MIT`)
 
 ~~~text
@@ -6870,7 +6830,7 @@ DEALINGS IN THE SOFTWARE.
 适用包：
 - `unicode-bidi` 0.3.18 (`LICENSE-MIT`)
 - `unicode-segmentation` 1.13.3 (`LICENSE-MIT`)
-- `unicode-width` 0.2.2 (`LICENSE-MIT`)
+- `unicode-width` 0.2.3 (`LICENSE-MIT`)
 
 ~~~text
 Copyright (c) 2015 The Rust Project Developers
@@ -7144,7 +7104,7 @@ THE SOFTWARE.
 - `byteorder-lite` 0.1.0 (`UNLICENSE`)
 - `memchr` 2.8.3 (`UNLICENSE`)
 - `same-file` 1.0.6 (`UNLICENSE`)
-- `walkdir` 2.5.0 (`UNLICENSE`)
+- `walkdir` 2.5.1 (`UNLICENSE`)
 - `winapi-util` 0.1.11 (`UNLICENSE`)
 
 ~~~text
@@ -7201,7 +7161,7 @@ THIS SOFTWARE.
 适用包：
 - `bit-set` 0.11.1 (`LICENSE-APACHE`)
 - `bit-set` 0.8.0 (`LICENSE-APACHE`)
-- `bit-vec` 0.10.1 (`LICENSE-APACHE`)
+- `bit-vec` 0.10.2 (`LICENSE-APACHE`)
 - `bit-vec` 0.8.0 (`LICENSE-APACHE`)
 - `downcast-rs` 1.2.1 (`LICENSE-APACHE`)
 
@@ -7759,8 +7719,8 @@ Public License instead of this License.
 ### 83c1763356e822adde0a2cae748d938a73fdc263849ccff6b27776dff213bd32
 
 适用包：
-- `zerocopy` 0.8.63 (`LICENSE-BSD`)
-- `zerocopy-derive` 0.8.63 (`LICENSE-BSD`)
+- `zerocopy` 0.8.64 (`LICENSE-BSD`)
+- `zerocopy-derive` 0.8.64 (`LICENSE-BSD`)
 
 ~~~text
 Copyright 2019 The Fuchsia Authors.
@@ -7893,7 +7853,7 @@ SOFTWARE.
 ### 8764a597675778ddfd4e25f81b08a05dbcf089ac05662df7613fe67f150e3aa2
 
 适用包：
-- `errno` 0.3.14 (`LICENSE-MIT`)
+- `errno` 0.3.15 (`LICENSE-MIT`)
 
 ~~~text
 Copyright (c) 2014 Chris Wong
@@ -7926,7 +7886,7 @@ DEALINGS IN THE SOFTWARE.
 ### 8811bcec8c5b5262bd309874eed9d865545fc8a7dfafcf538a18e6b30968db2e
 
 适用包：
-- `yazi` 0.2.1 (`LICENSE-MIT`)
+- `yazi` 0.2.2 (`LICENSE-MIT`)
 
 ~~~text
 Copyright (c) 2020 Chad Brokaw
@@ -9152,15 +9112,15 @@ SOFTWARE.
 ### a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2
 
 适用包：
-- `ahash` 0.8.12 (`LICENSE-APACHE`)
+- `ahash` 0.8.13 (`LICENSE-APACHE`)
 - `arrayvec` 0.7.8 (`LICENSE-APACHE`)
 - `atomic-waker` 1.1.2 (`LICENSE-APACHE`)
 - `autocfg` 1.5.1 (`LICENSE-APACHE`)
 - `base64` 0.23.1 (`LICENSE-APACHE`)
 - `bitflags` 1.3.2 (`LICENSE-APACHE`)
 - `bitflags` 2.13.2 (`LICENSE-APACHE`)
-- `bumpalo` 3.20.3 (`LICENSE-APACHE`)
-- `cc` 1.10.0 (`LICENSE-APACHE`)
+- `bumpalo` 3.20.4 (`LICENSE-APACHE`)
+- `cc` 1.11.3 (`LICENSE-APACHE`)
 - `cfg-if` 1.0.5 (`LICENSE-APACHE`)
 - `concurrent-queue` 2.5.0 (`LICENSE-APACHE`)
 - `core-foundation` 0.9.4 (`LICENSE-APACHE`)
@@ -9171,25 +9131,25 @@ SOFTWARE.
 - `crossbeam-utils` 0.8.23 (`LICENSE-APACHE`)
 - `data-url` 0.3.2 (`LICENSE-APACHE`)
 - `equivalent` 1.0.3 (`LICENSE-APACHE`)
-- `errno` 0.3.14 (`LICENSE-APACHE`)
+- `errno` 0.3.15 (`LICENSE-APACHE`)
 - `euclid` 0.22.14 (`LICENSE-APACHE`)
 - `fastrand` 2.5.0 (`LICENSE-APACHE`)
 - `find-msvc-tools` 0.1.15 (`LICENSE-APACHE`)
-- `flate2` 1.1.10 (`LICENSE-APACHE`)
+- `flate2` 1.1.11 (`LICENSE-APACHE`)
 - `fnv` 1.0.7 (`LICENSE-APACHE`)
 - `gethostname` 1.1.0 (`LICENSE`)
 - `getopts` 0.2.24 (`LICENSE-APACHE`)
 - `gif` 0.14.2 (`LICENSE-APACHE`)
-- `hashbrown` 0.17.1 (`LICENSE-APACHE`)
+- `hashbrown` 0.17.2 (`LICENSE-APACHE`)
 - `hermit-abi` 0.5.3 (`LICENSE-APACHE`)
 - `indexmap` 2.14.2 (`LICENSE-APACHE`)
 - `jobserver` 0.1.35 (`LICENSE-APACHE`)
-- `js-sys` 0.3.106 (`LICENSE-APACHE`)
+- `js-sys` 0.3.107 (`LICENSE-APACHE`)
 - `linux-raw-sys` 0.12.1 (`LICENSE-APACHE`)
 - `linux-raw-sys` 0.4.15 (`LICENSE-APACHE`)
 - `linux-raw-sys` 0.9.4 (`LICENSE-APACHE`)
 - `lock_api` 0.4.14 (`LICENSE-APACHE`)
-- `log` 0.4.34 (`LICENSE-APACHE`)
+- `log` 0.4.35 (`LICENSE-APACHE`)
 - `num-traits` 0.2.19 (`LICENSE-APACHE`)
 - `once_cell` 1.21.4 (`LICENSE-APACHE`)
 - `parking_lot` 0.12.5 (`LICENSE-APACHE`)
@@ -9201,20 +9161,20 @@ SOFTWARE.
 - `png` 0.18.1 (`LICENSE-APACHE`)
 - `polling` 3.11.0 (`LICENSE-APACHE`)
 - `proptest` 1.12.0 (`LICENSE-APACHE`)
-- `regex` 1.13.1 (`LICENSE-APACHE`)
-- `regex-automata` 0.4.18 (`LICENSE-APACHE`)
-- `regex-syntax` 0.8.11 (`LICENSE-APACHE`)
+- `regex` 1.13.2 (`LICENSE-APACHE`)
+- `regex-automata` 0.4.19 (`LICENSE-APACHE`)
+- `regex-syntax` 0.8.12 (`LICENSE-APACHE`)
 - `roxmltree` 0.20.0 (`LICENSE-APACHE`)
 - `roxmltree` 0.21.2 (`LICENSE-APACHE`)
 - `rustc_version` 0.4.1 (`LICENSE-APACHE`)
 - `rustix` 0.38.44 (`LICENSE-APACHE`)
-- `rustix` 1.1.5 (`LICENSE-APACHE`)
+- `rustix` 1.1.6 (`LICENSE-APACHE`)
 - `rusty-fork` 0.3.1 (`LICENSE-APACHE`)
 - `scoped-tls` 1.0.1 (`LICENSE-APACHE`)
 - `scopeguard` 1.2.0 (`LICENSE-APACHE`)
 - `simd_cesu8` 1.2.0 (`LICENSE-APACHE`)
 - `simplecss` 0.2.2 (`LICENSE-APACHE`)
-- `smallvec` 1.16.4 (`LICENSE-APACHE`)
+- `smallvec` 1.16.6 (`LICENSE-APACHE`)
 - `smol_str` 0.2.2 (`LICENSE-APACHE`)
 - `smol_str` 0.3.7 (`LICENSE-APACHE`)
 - `stable_deref_trait` 1.2.1 (`LICENSE-APACHE`)
@@ -9226,20 +9186,18 @@ SOFTWARE.
 - `unicode-bidi` 0.3.18 (`LICENSE-APACHE`)
 - `unicode-segmentation` 1.13.3 (`LICENSE-APACHE`)
 - `unicode-vo` 0.1.0 (`LICENSE-APACHE`)
-- `unicode-width` 0.2.2 (`LICENSE-APACHE`)
+- `unicode-width` 0.2.3 (`LICENSE-APACHE`)
 - `version_check` 0.9.5 (`LICENSE-APACHE`)
 - `wait-timeout` 0.2.1 (`LICENSE-APACHE`)
 - `wasi` 0.11.1+wasi-snapshot-preview1 (`LICENSE-APACHE`)
-- `wasip2` 1.0.4+wasi-0.2.12 (`LICENSE-APACHE`)
-- `wasm-bindgen` 0.2.129 (`LICENSE-APACHE`)
-- `wasm-bindgen-futures` 0.4.79 (`LICENSE-APACHE`)
-- `wasm-bindgen-macro` 0.2.129 (`LICENSE-APACHE`)
-- `wasm-bindgen-macro-support` 0.2.129 (`LICENSE-APACHE`)
-- `wasm-bindgen-shared` 0.2.129 (`LICENSE-APACHE`)
-- `web-sys` 0.3.106 (`LICENSE-APACHE`)
+- `wasm-bindgen` 0.2.130 (`LICENSE-APACHE`)
+- `wasm-bindgen-futures` 0.4.80 (`LICENSE-APACHE`)
+- `wasm-bindgen-macro` 0.2.130 (`LICENSE-APACHE`)
+- `wasm-bindgen-macro-support` 0.2.130 (`LICENSE-APACHE`)
+- `wasm-bindgen-shared` 0.2.130 (`LICENSE-APACHE`)
+- `web-sys` 0.3.107 (`LICENSE-APACHE`)
 - `weezl` 0.1.12 (`LICENSE-APACHE`)
-- `wit-bindgen` 0.57.1 (`LICENSE-APACHE`)
-- `yazi` 0.2.1 (`LICENSE-APACHE`)
+- `yazi` 0.2.2 (`LICENSE-APACHE`)
 - `zeno` 0.3.3 (`LICENSE-APACHE`)
 
 ~~~text
@@ -9453,10 +9411,8 @@ limitations under the License.
 - `linux-raw-sys` 0.4.15 (`LICENSE-Apache-2.0_WITH_LLVM-exception`)
 - `linux-raw-sys` 0.9.4 (`LICENSE-Apache-2.0_WITH_LLVM-exception`)
 - `rustix` 0.38.44 (`LICENSE-Apache-2.0_WITH_LLVM-exception`)
-- `rustix` 1.1.5 (`LICENSE-Apache-2.0_WITH_LLVM-exception`)
+- `rustix` 1.1.6 (`LICENSE-Apache-2.0_WITH_LLVM-exception`)
 - `wasi` 0.11.1+wasi-snapshot-preview1 (`LICENSE-Apache-2.0_WITH_LLVM-exception`)
-- `wasip2` 1.0.4+wasi-0.2.12 (`LICENSE-Apache-2.0_WITH_LLVM-exception`)
-- `wit-bindgen` 0.57.1 (`LICENSE-Apache-2.0_WITH_LLVM-exception`)
 
 ~~~text
 
@@ -10330,7 +10286,6 @@ limitations under the License.
 ### aaff376532ea30a0cd5330b9502ad4a4c8bf769c539c87ffe78819d188a18ebf
 
 适用包：
-- `getrandom` 0.3.4 (`LICENSE-APACHE`)
 - `getrandom` 0.4.3 (`LICENSE-APACHE`)
 
 ~~~text
@@ -10643,7 +10598,7 @@ DEALINGS IN THE SOFTWARE.
 
 适用包：
 - `bytecount` 0.6.9 (`LICENSE.Apache2`)
-- `crc32fast` 1.5.3 (`LICENSE-APACHE`)
+- `crc32fast` 1.5.5 (`LICENSE-APACHE`)
 - `foreign-types` 0.5.0 (`LICENSE-APACHE`)
 - `foreign-types-macros` 0.2.4 (`LICENSE-APACHE`)
 - `foreign-types-shared` 0.3.1 (`LICENSE-APACHE`)
@@ -11072,7 +11027,7 @@ DEALINGS IN THE SOFTWARE.
 ### b5b413d7421d728c14f33d78198d6e255a0018beef717d78c4c3f6188be3dfb4
 
 适用包：
-- `notify-types` 2.1.0 (`LICENSE-APACHE`)
+- `notify-types` 2.3.1 (`LICENSE-APACHE`)
 
 ~~~text
                               Apache License
@@ -11281,7 +11236,7 @@ limitations under the License.
 ### b61cf1a75b378860940eb420fd0fd1d8e747fd5dae5f5a2f2c9cd4454e1db78a
 
 适用包：
-- `plist` 1.10.3 (`LICENCE`)
+- `plist` 1.10.4 (`LICENCE`)
 
 ~~~text
 Copyright (c) 2015 Edward Barnard
@@ -11308,7 +11263,7 @@ SOFTWARE.
 ### b63e167d61ced1d872a588c5ac764b0dda477d62209dc4f6b6bfea5517d0a24c
 
 适用包：
-- `notify-types` 2.1.0 (`LICENSE-MIT`)
+- `notify-types` 2.3.1 (`LICENSE-MIT`)
 
 ~~~text
 Copyright (c) 2023 Notify Contributors
@@ -12201,7 +12156,7 @@ THE SOFTWARE.
 
 适用包：
 - `winnow` 0.7.15 (`LICENSE-MIT`)
-- `winnow` 1.0.4 (`LICENSE-MIT`)
+- `winnow` 1.0.5 (`LICENSE-MIT`)
 
 ~~~text
 Permission is hereby granted, free of charge, to any person obtaining
@@ -13493,7 +13448,7 @@ SOFTWARE.
 适用包：
 - `bit-set` 0.11.1 (`LICENSE-MIT`)
 - `bit-set` 0.8.0 (`LICENSE-MIT`)
-- `bit-vec` 0.10.1 (`LICENSE-MIT`)
+- `bit-vec` 0.10.2 (`LICENSE-MIT`)
 - `bit-vec` 0.8.0 (`LICENSE-MIT`)
 
 ~~~text
@@ -13561,7 +13516,7 @@ DEALINGS IN THE SOFTWARE.
 ### f7b20c3e6d0efbbb9318e7511ac682a9e73d6e2c17541c80cab2ad0627033ca7
 
 适用包：
-- `latex-rust` 3.0.1 (`NOTICE`)
+- `latex-rust` 3.0.3 (`NOTICE`)
 
 ~~~text
 LaTeX-Rust
@@ -13826,7 +13781,7 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 ### ff8f68cb076caf8cefe7a6430d4ac086ce6af2ca8ce2c4e5a2004d4552ef52a2
 
 适用包：
-- `hashbrown` 0.17.1 (`LICENSE-MIT`)
+- `hashbrown` 0.17.2 (`LICENSE-MIT`)
 
 ~~~text
 Copyright (c) 2016 Amanieu d'Antras
@@ -14147,7 +14102,6 @@ DEALINGS IN THE SOFTWARE.
 - `objc2-ui-kit` 0.2.2 — SPDX：`MIT` — repository：https://github.com/madsmtm/objc2 — authors：未声明
 - `objc2-uniform-type-identifiers` 0.2.2 — SPDX：`MIT` — repository：https://github.com/madsmtm/objc2 — authors：未声明
 - `objc2-user-notifications` 0.2.2 — SPDX：`MIT` — repository：https://github.com/madsmtm/objc2 — authors：未声明
-- `r-efi` 5.3.0 — SPDX：`MIT OR Apache-2.0 OR LGPL-2.1-or-later` — repository：https://github.com/r-efi/r-efi — authors：未声明
 - `r-efi` 6.0.0 — SPDX：`MIT OR Apache-2.0 OR LGPL-2.1-or-later` — repository：https://github.com/r-efi/r-efi — authors：未声明
 - `rquickjs-core` 0.9.0 — SPDX：`MIT` — repository：https://github.com/DelSkayn/rquickjs.git — authors：Mees Delzenne (mees.delzenne@gmail.com)；K. (kayo@illumium.org)
 

@@ -596,6 +596,8 @@ pub(crate) struct InputState {
     pub(crate) zoom_accum: f32,
     pub(crate) theme: Theme,
     pub(crate) system_dark: bool,
+    /// 系统高对比度模式（跟随系统时覆盖 light/dark 外观）。
+    pub(crate) high_contrast: bool,
     pub(crate) last_theme_check: Option<Instant>,
     /// 拖拽悬停文件（阶段 1）：仅驱动落点提示叠层；松开/离开窗口即清空。
     pub(crate) drop_file: Option<PathBuf>,
@@ -1008,6 +1010,7 @@ impl App {
         } = ports.persist_env;
         // 系统外观读不到（非 Windows/注册表异常）按浅色处理：不影响其它功能
         let system_dark = system.is_dark().unwrap_or(false);
+        let high_contrast = system.is_high_contrast();
         let (app_config, config_notice) = match config.load() {
             Ok(text) => match theme::decode_config(text.as_bytes()) {
                 Ok(p) if p.ignored == 0 => (p.config, String::new()),
@@ -1023,7 +1026,12 @@ impl App {
             // 文件不存在属正常状态（首次运行）：静默用默认配置
             Err(_) => (Config::default(), String::new()),
         };
-        let theme = Theme::of(app_config.mode, system_dark);
+        // 跟随系统且高对比度开启时，强制使用高对比度主题（覆盖 light/dark）
+        let theme = if app_config.mode == ThemeMode::System && high_contrast {
+            Theme::high_contrast()
+        } else {
+            Theme::of(app_config.mode, system_dark)
+        };
         // 导出样式随主题一起初始化：之后只在 refresh_theme_visuals 一处同步，避免两处漂移
         let export_style = ExportStyle::from_theme(&theme);
         let mut ports = AppPorts {
@@ -1093,6 +1101,7 @@ impl App {
                 zoom_accum: 0.0,
                 theme,
                 system_dark,
+                high_contrast,
                 last_theme_check: None,
                 drop_file: None,
                 source_mode: false,
@@ -1229,14 +1238,21 @@ impl App {
         self.input_state.source_mode && self.window_state.print.is_none()
     }
 
-    /// 切换主题模式并持久化。切到「跟随系统」时立即重读一次系统外观，避免沿用陈旧值。
+    /// 切换主题模式并持久化。切到「跟随系统」时立即重读一次系统外观与高对比度状态，
+    /// 避免沿用陈旧值。高对比度开启时覆盖 light/dark 外观。
     pub(crate) fn set_theme_mode(&mut self, mode: ThemeMode) {
         if mode == ThemeMode::System {
             if let Some(dark) = self.ports.system.is_dark() {
                 self.input_state.system_dark = dark;
             }
+            self.input_state.high_contrast = self.ports.system.is_high_contrast();
         }
-        self.input_state.theme = Theme::of(mode, self.input_state.system_dark);
+        let new_theme = if mode == ThemeMode::System && self.input_state.high_contrast {
+            Theme::high_contrast()
+        } else {
+            Theme::of(mode, self.input_state.system_dark)
+        };
+        self.input_state.theme = new_theme;
         self.config.mode = mode;
         crate::app::record_diag("theme", mode.as_str());
         self.input_state.last_theme_check = None;
@@ -1283,7 +1299,8 @@ impl App {
         true
     }
 
-    /// 跟随系统时轮询系统外观（限频）；外观切换则重建调色板并刷新颜色缓存。
+    /// 跟随系统时轮询系统外观（限频）；外观/高对比度切换则重建调色板并刷新颜色缓存。
+    /// WM_SYSCOLORCHANGE 不直接触发——winit 未暴露该消息；改为 1s 轮询检测。
     pub(crate) fn poll_system_theme(&mut self, now: Instant) {
         if self.input_state.theme.mode != ThemeMode::System {
             return;
@@ -1299,9 +1316,20 @@ impl App {
         let Some(dark) = self.ports.system.is_dark() else {
             return;
         };
-        if dark != self.input_state.system_dark {
-            self.input_state.system_dark = dark;
-            self.input_state.theme = Theme::of(ThemeMode::System, dark);
+        let hc = self.ports.system.is_high_contrast();
+        let old_dark = self.input_state.system_dark;
+        let old_hc = self.input_state.high_contrast;
+        self.input_state.system_dark = dark;
+        self.input_state.high_contrast = hc;
+
+        // 任何一项变化都需要重建主题
+        if hc != old_hc || dark != old_dark {
+            let new_theme = if hc {
+                Theme::high_contrast()
+            } else {
+                Theme::of(ThemeMode::System, dark)
+            };
+            self.input_state.theme = new_theme;
             self.refresh_theme_visuals();
         }
     }

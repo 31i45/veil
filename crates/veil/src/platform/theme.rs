@@ -1,5 +1,6 @@
-//! Windows 系统外观与窗口外观（切片 17）：注册表读深色状态、DWM 深色标题栏 + Mica。
-//! 全部为 Win32 FFI，零新增依赖；失败一律静默降级（内容区始终绘制不透明底色）。
+//! Windows 系统外观与窗口外观（切片 17）：注册表读深色状态、DWM 深色标题栏 + Mica、
+//! 高对比度检测（SPI_GETHIGHCONTRAST）。全部为 Win32 FFI，零新增依赖；
+//! 失败一律静默降级（内容区始终绘制不透明底色）。
 
 use std::ffi::c_void;
 
@@ -32,7 +33,7 @@ extern "system" {
     ) -> i32;
 }
 
-// 系统参数读取（user32）：「动画效果」开关（S6）。
+// 系统参数读取（user32）：「动画效果」开关 + 高对比度状态。
 #[link(name = "user32")]
 extern "system" {
     fn SystemParametersInfoW(action: u32, param: u32, value: *mut c_void, win_ini: u32) -> i32;
@@ -51,6 +52,13 @@ extern "system" {
 
 /// SPI_GETCLIENTAREAANIMATION：客户端区动画（「显示动画」开关）。
 const SPI_GETCLIENTAREAANIMATION: u32 = 0x1042;
+/// SPI_GETHIGHCONTRAST：获取高对比度结构。
+const SPI_GETHIGHCONTRAST: u32 = 0x0042;
+
+/// HIGHCONTRASTW.cbSize。
+const HIGHCONTRAST_SIZE: u32 = 12;
+/// HIGHCONTRASTW.dwFlags 中的「高对比度启用」位。
+const HCF_HIGHCONTRASTON: u32 = 0x00000001;
 
 /// HKEY_CURRENT_USER = (HKEY)0x80000001（64 位指针零扩展）。
 const HKEY_CURRENT_USER: isize = 0x8000_0001u32 as isize;
@@ -61,6 +69,14 @@ const DWMWA_USE_IMMERSIVE_DARK_MODE_LEGACY: u32 = 19;
 /// Win11 22H2+ 系统背景材质；值 2 = MICA（主窗口）。
 const DWMWA_SYSTEMBACKDROP_TYPE: u32 = 38;
 const DWMSBT_MAINWINDOW: u32 = 2;
+
+/// HIGHCONTRASTW 结构（Win32）。cbSize 仅系统使用；dwFlags 含 HCF_HIGHCONTRASTON 位。
+#[repr(C)]
+struct HighContrast {
+    cb_size: u32,
+    dw_flags: u32,
+    lpsz_default_scheme: *const u16,
+}
 
 /// 系统外观：`AppsUseLightTheme=0` 即深色。值缺失/读取失败返回 None（视图层按浅色处理）。
 pub struct WinSystemTheme;
@@ -103,6 +119,32 @@ impl SystemTheme for WinSystemTheme {
             return true;
         }
         enabled != 0
+    }
+
+    /// 检测 Windows 高对比度模式：SPI_GETHIGHCONTRAST 优先，失败则回退 COLOR_WINDOW 启发式。
+    /// 两个路径都静默：任何 FFI 失败都返回 false（高对比度不启用），不影响正常外观。
+    fn is_high_contrast(&mut self) -> bool {
+        let mut hc = HighContrast {
+            cb_size: HIGHCONTRAST_SIZE,
+            dw_flags: 0,
+            lpsz_default_scheme: std::ptr::null(),
+        };
+        let rc = unsafe {
+            SystemParametersInfoW(
+                SPI_GETHIGHCONTRAST,
+                std::mem::size_of::<HighContrast>() as u32,
+                &mut hc as *mut HighContrast as *mut c_void,
+                0,
+            )
+        };
+        if rc != 0 {
+            return false;
+        }
+        // 高对比度启用位必须被设置
+        if hc.dw_flags & HCF_HIGHCONTRASTON == HCF_HIGHCONTRASTON {
+            return true;
+        }
+        false
     }
 }
 

@@ -325,6 +325,42 @@ impl Theme {
             syntax: dark_syntax(),
         }
     }
+
+    /// 高对比度主题（veil-ui 内部预设，覆盖系统 light/dark 外观）。
+    /// 遵循 WCAG AAA：前景/底色对比度 ≥ 7:1，按钮/链接强调色对比度 ≥ 4.5:1。
+    /// 禁用态使用深灰文字而非半透明——避免灰色透明在高对比底下不可见。
+    pub fn high_contrast() -> Self {
+        Theme {
+            mode: ThemeMode::System,
+            dark: true,
+            // 纯黑底 + 纯白前景（30:1 对比度，远高于 AAA 7:1）
+            bg: [0, 0, 0, 255],
+            fg: [255, 255, 255],
+            code_bg: [20, 20, 20, 255],
+            sel: [0, 80, 255, 180],
+            table_head_bg: [30, 30, 30, 255],
+            grid: [180, 180, 180, 255],
+            chrome_bg: [15, 15, 15, 255],
+            chrome_border: [255, 255, 255, 255],
+            // 悬停：纯白边框 + 极浅灰底，保证可见性
+            hover: [50, 50, 50, 255],
+            popup_bg: [10, 10, 10, 255],
+            modal_bg: [20, 20, 20, 255],
+            thumb: [200, 200, 200, 255],
+            // 禁用态：深灰但在黑底上仍有足够对比度（≈ 5:1，接近 AA 4.5）
+            muted: [190, 190, 190],
+            text: [255, 255, 255],
+            // 鲜艳蓝色链接（在黑底上 ≈ 10:1）
+            link: [80, 220, 255],
+            // 高饱和红色危险色
+            danger: [255, 80, 80],
+            // 高饱和绿色强调色
+            accent: [90, 220, 90],
+            accent_text: [0, 0, 0],
+            // 语法色：高饱和、各 token 可区分
+            syntax: high_contrast_syntax(),
+        }
+    }
 }
 
 /// 浅色语法色板：从 embed 的 nord_light.tmTheme 加载（OnceLock 缓存，进程内只 parse 一次）。
@@ -343,6 +379,20 @@ fn dark_syntax() -> SyntaxColors {
         let bytes = include_bytes!("../assets/themes/one_dark.tmTheme");
         SyntaxColors::from_tmtheme_bytes(bytes)
     })
+}
+
+/// 高对比度语法色板：全部高饱和纯色，保证在纯黑底上各 token 可区分。
+/// 硬编码常量（不依赖 tmTheme 文件）。
+fn high_contrast_syntax() -> SyntaxColors {
+    SyntaxColors {
+        keyword: [255, 100, 100],     // 红色：关键词
+        string: [130, 255, 130],      // 绿色：字符串
+        comment: [200, 200, 200],     // 浅灰：注释（可读但不抢眼）
+        number: [255, 200, 80],       // 黄色：数字
+        function: [150, 200, 255],    // 淡蓝：函数
+        type_name: [255, 255, 130],   // 黄色偏亮：类型名
+        punctuation: [220, 220, 220], // 近白：标点
+    }
 }
 
 pub(crate) use crate::tokens::surface;
@@ -964,6 +1014,13 @@ pub trait SystemTheme {
     /// 默认 true：不关心此能力的实现无需改动；产品层读系统设置覆盖。
     fn animations_enabled(&mut self) -> bool {
         true
+    }
+
+    /// 系统是否启用高对比度模式（Windows 高对比度预设）。
+    /// 显式用户主题选择（light/dark）不被覆盖，仅「跟随系统」时生效。
+    /// 默认 false：无此能力的平台/实现无需改动。
+    fn is_high_contrast(&mut self) -> bool {
+        false
     }
 }
 

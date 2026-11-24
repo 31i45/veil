@@ -290,7 +290,7 @@ Veil 当前使用自签名开发证书 `CN=Veil Development (Long-term)`（SHA-1
 
 - **可信生产签名**：三条候选路径已评估，并在本地文件 `evidence/renewal/production-signing-options.md`（未随仓库发布）中有详细文档：SignPath Foundation（合格开源项目免费 OV）、Azure Artifact Signing（US$9.99/月）、商业 OV/EV（US$129+/年）。所有路径都需要只能由你亲自完成的身份验证和/或付费。尚未申请或购买任何生产证书。
 - **真实 SmartScreen + MotW 下载**：需要先有上面的可信生产证书。Microsoft SmartScreen 信誉系统随时间累积；即使有可信签名，首次发布仍可能警告。
-- **当前 v3.0.2 的远端 GitHub Actions 证据**：本轮文档纠偏未查看（此处 **NOT RUN**）。工作流文件已静态验证，包含 `workflow_dispatch` 入口且默认 `dry_run=true`；不得由静态检查推导当前 CI 结果。
+- **本提交远端 GitHub Actions 证据**：本轮文档纠偏未查看（此处 **NOT RUN**）。工作流文件已静态验证，包含 `workflow_dispatch` 入口且默认 `dry_run=true`；不得由静态检查推导当前 CI 结果。
 - **跨机信任吊销演练**：依赖于真实 CRL/AIA 基础设施，这只有在可信公共 CA 或企业 PKI 下才有。自签名证书没有公共同名吊销机制。
 
 ### 建议的下一步（当你准备好时）

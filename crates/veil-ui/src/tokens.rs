@@ -54,8 +54,8 @@ pub(crate) mod surface {
     pub const DIALOG_PADDING: f32 = 20.0;
     /// 模态卡片最小宽度（px）
     pub const DIALOG_MIN_WIDTH: f32 = 320.0;
-    /// 模态卡片最大宽度（px）
-    pub const DIALOG_MAX_WIDTH: f32 = 520.0;
+    /// 模态卡片最大宽度（px）：需容纳设置弹窗的最长英文标签列（320）+ 控件列（380）。
+    pub const DIALOG_MAX_WIDTH: f32 = 760.0;
     /// 模态按钮高（px）：与 ROW_HEIGHT 同值但语义独立，避免行高一改按钮跟着变。
     pub const DIALOG_BUTTON_HEIGHT: f32 = 28.0;
     /// 模态按钮最小宽（px）

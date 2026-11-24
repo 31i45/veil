@@ -8,6 +8,26 @@ use super::model::{
 use crate::buffer::Buffer;
 use crate::range::Range;
 
+// ---- 全局：<img> 无 alt 时的可见文本占位 ----
+//
+// veil-core 是纯策略层，不知道上层 UI 当前语言；默认占位为中文 `[图片]`
+// 以保持既有行为。上层（veil-ui）在启动时调用 [`set_image_alt_fallback`]
+// 传入 UI 语言对应的占位字符串（如 `[Image]`），OnceLock 保证只设一次。
+
+static IMG_ALT_FALLBACK: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// 设置 `<img alt="">` 无值时的降级占位文本。只生效一次，后续调用忽略。
+pub fn set_image_alt_fallback(s: String) {
+    IMG_ALT_FALLBACK.set(s).ok();
+}
+
+fn img_alt_fallback_str() -> &'static str {
+    IMG_ALT_FALLBACK
+        .get()
+        .map(String::as_str)
+        .unwrap_or("[图片]")
+}
+
 /// 扫描产物：块种类 + 行区间 + 容器上下文（仅容器内表格非默认）。
 #[derive(Debug)]
 pub(super) struct ScannedBlock {
@@ -2496,7 +2516,7 @@ fn push_visible(
                             .alt
                             .as_deref()
                             .filter(|a| !a.is_empty())
-                            .unwrap_or("[图片]"),
+                            .unwrap_or(img_alt_fallback_str()),
                     );
                 }
                 _ => {}

@@ -36,6 +36,7 @@ impl App {
         chrome::MenuFlags {
             fullscreen: self.window_state.fullscreen,
             focus: self.ui_state.writing.focus,
+            typewriter: self.ui_state.writing.typewriter,
             source: self.source_mode(),
             allow_remote_images: self.config.allow_remote_images,
             can_save: self.editor.is_dirty() || self.doc.path.is_none(),
@@ -213,6 +214,7 @@ impl App {
             MenuAction::ThemeLight => self.set_theme_mode(ThemeMode::Light),
             MenuAction::ThemeDark => self.set_theme_mode(ThemeMode::Dark),
             MenuAction::ToggleFocus => self.toggle_focus(),
+            MenuAction::ToggleTypewriter => self.toggle_typewriter(),
             MenuAction::ToggleSourceMode => self.toggle_source_mode(),
             MenuAction::ToggleRemoteImages => self.toggle_remote_images(),
             MenuAction::ZoomIn => self.zoom_step(1),

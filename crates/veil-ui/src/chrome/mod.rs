@@ -93,6 +93,8 @@ pub enum MenuAction {
     ThemeDark,
     /// 切换专注模式（阶段 1）。
     ToggleFocus,
+    /// 切换打字机模式：光标行中心锚定视口 42%。
+    ToggleTypewriter,
     /// 切换源码模式（Ctrl+/）：全文按 Markdown 源码排版。
     ToggleSourceMode,
     /// 全局阻止/允许远程图片（默认自动加载）。
@@ -240,6 +242,11 @@ pub const MENUS: [MenuDef; 4] = [
                 MenuAction::ToggleSourceMode,
             ),
             (Key::MenuViewFocusMode, Key::Empty, MenuAction::ToggleFocus),
+            (
+                Key::MenuViewTypewriter,
+                Key::Empty,
+                MenuAction::ToggleTypewriter,
+            ),
             (Key::Empty, Key::Empty, MenuAction::Separator),
             (
                 Key::MenuViewAllowRemoteImages,
@@ -785,6 +792,7 @@ pub(super) fn theme_action_matches(action: MenuAction, mode: ThemeMode) -> bool 
 pub(crate) struct MenuFlags {
     pub(crate) fullscreen: bool,
     pub(crate) focus: bool,
+    pub(crate) typewriter: bool,
     pub(crate) source: bool,
     /// 允许加载远程图片（与设置同一极性：勾选 = 允许）。
     pub(crate) allow_remote_images: bool,
@@ -801,6 +809,7 @@ pub(crate) fn action_checked(action: MenuAction, flags: MenuFlags) -> bool {
     match action {
         MenuAction::ToggleFullscreen => flags.fullscreen,
         MenuAction::ToggleFocus => flags.focus,
+        MenuAction::ToggleTypewriter => flags.typewriter,
         MenuAction::ToggleSourceMode => flags.source,
         MenuAction::ToggleRemoteImages => flags.allow_remote_images,
         _ => false,

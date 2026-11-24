@@ -11,6 +11,7 @@ use base64::Engine as _;
 use veil_core::{
     heading_slugs, percent_decode_path, BlockKind, HtmlTag, InlineKind, InlineNode, Range, Session,
 };
+use veil_ui::i18n::{tf, Key};
 use veil_ui::{ExportStyle, Exporter, FileStore};
 
 /// 文档外壳：最小自包含模板（无外部资源）。样式由当前主题快照生成，
@@ -189,10 +190,7 @@ pub fn html_of_doc(
             }
             // 缓存无 Mermaid 数据：降级为源码围栏 + 注释提示
             let source = session.text_slice(range).unwrap_or_default();
-            body.push_str(&format!(
-                "<!-- Mermaid 渲染数据不可用：导出时未预览过该块。可在浏览器中打开 https://mermaid.live 查看源码。 -->\n<pre><code class=\"language-mermaid\">{}</code></pre>\n",
-                escape_html(&source),
-            ));
+            body.push_str(&tf(Key::ExportMermaidUnavailable, &[&escape_html(&source)]));
             i += 1;
             continue;
         }

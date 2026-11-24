@@ -16,7 +16,7 @@ mod model;
 
 use std::hash::{Hash, Hasher};
 
-pub use block::{list_signature, split_row as split_table_row, task_span};
+pub use block::{list_signature, set_image_alt_fallback, split_row as split_table_row, task_span};
 pub(crate) use model::Block;
 pub use model::{
     sanitize_style, should_strip_html, AdmonitionType, BlockContainer, BlockId, BlockKind, Callout,

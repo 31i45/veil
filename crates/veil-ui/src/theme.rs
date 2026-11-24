@@ -30,6 +30,8 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::OnceLock;
 
+use crate::i18n::{t, Key};
+
 /// 主题模式：跟随系统 / 强制浅色 / 强制深色。
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum ThemeMode {
@@ -513,10 +515,11 @@ impl Config {
     /// 生成配置文件文本（写入即此格式；`parse_config(to_toml())` 恒等往返）。
     pub fn to_toml(self) -> String {
         let mut text = format!(
-            "# Veil 配置（自动生成）\n# mode: system（跟随系统）| light | dark\nmode = \"{}\"\n\
+            "{}\nmode = \"{}\"\n\
              export_margin_mm = {}\nexport_page_numbers = {}\nexport_toc = {}\n\
              doc_font_family = \"{}\"\ndoc_font_size = {}\ndoc_line_height = {}\n\
              allow_remote_images = {}\ntab_width = {}\n",
+            t(Key::ConfigHeader),
             self.mode.as_str(),
             self.export_margin_mm,
             self.export_page_numbers,

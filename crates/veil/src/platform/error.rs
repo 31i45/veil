@@ -92,7 +92,7 @@ pub fn show_window_create_error(message: &str) {
 
 /// 致命启动错误正文：原始诊断 + 可执行下一步（纯函数，便于不弹框地测试）。
 pub fn fatal_error_text(message: &str) -> String {
-    format!("{message}\n\n请检查图形环境后重试；文档内容未被修改。")
+    tf(Key::FatalErrorBody, &[message])
 }
 
 /// 致命启动错误（窗口/事件循环创建失败）：release 构建无控制台，

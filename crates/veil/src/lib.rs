@@ -21,32 +21,9 @@ use veil_ui::{decode, Doc, FileStore, ImageData, MathImage, StartupError};
 /// 无 CLI 参数时的首跑欢迎文档：安静、可读、可直接改写。
 /// 只给三条可发现性提示（打开文件 / 直接开始写 / 导出），不出现内部术语或迭代编号。
 /// 图片只以源码写法示例出现，避免首跑自动联网加载远程图片。
-const SAMPLE: &str = r#"# 欢迎使用 Veil
-
-这是你的第一页。文字会边写边排版，Markdown 源码始终是唯一的内容。
-
-## 现在可以做的三件事
-
-- 打开文件：按 Ctrl+O，选择电脑里已有的 Markdown 文档。
-- 直接开始写：把这段文字替换掉，或者接着往下写。
-- 导出：按 Ctrl+E 导出 HTML，按 Ctrl+Shift+E 导出 PDF。
-
-## 正文里的样式
-
-**加粗**、*斜体* 和 `行内代码` 都可以直接输入，链接写成 [站点名称](https://example.com)，图片写成 `![说明](图片路径.png)`。
-
-公式也可以写在句子里，例如 $x^2 + y^2 = z^2$；需要独立成行时：
-
-$$
-\frac{a + b}{\sqrt{c^2 + 1}} = \sum_{k=0}^{n} k^2
-$$
-
-```rust
-fn main() {
-    println!("Hello, Veil");
+fn sample_document() -> &'static str {
+    t(Key::SampleWelcome)
 }
-```
-"#;
 
 /// 读取并解码文档：IO 失败按种类归因（不存在/无权限/其他），解码失败归因非 UTF-8。
 fn load_document(path: &Path) -> Result<(String, bool), platform::OpenFailure> {
@@ -59,6 +36,14 @@ pub fn run() {
     // release 下 panic = "abort"，但 hook 仍先执行，任何早期崩溃都能取证。
     diag::install();
     veil_ui::diag::record("app", "run start");
+    // 运行时语言必须早于任何 t() 取词（/register 提示、CLI 错误对话框都用 t()）：
+    // VEIL_UI_LANG 严格等于受支持的语言码时优先，否则跟随系统 UI 语言。
+    let lang = match std::env::var("VEIL_UI_LANG").ok().as_deref() {
+        Some("zh-CN") => "zh-CN",
+        Some("en-US") => "en-US",
+        _ => platform::locale::detect_locale(),
+    };
+    veil_ui::i18n::init_locale(lang);
     let raw_args: Vec<String> = std::env::args().skip(1).collect();
     // `/register`、`/unregister`（C2/D7②）：只有显式开关才碰注册表。
     if let Some(cmd) = raw_args
@@ -166,7 +151,7 @@ pub fn run() {
     } else {
         Doc {
             text: if initial_sample {
-                SAMPLE.to_owned()
+                sample_document().to_owned()
             } else {
                 String::new()
             },
@@ -738,9 +723,10 @@ mod tests {
     use veil_ui::{AssetStore, ImageLoader};
 
     /// 首跑欢迎文档是产品文案：不含内部/QA 术语，只保留三条可发现性提示。
-    /// 两个发行版共用同一 `SAMPLE`（差异只在 Mermaid 能力）。
+    /// 两个发行版共用同一首跑文档（差异只在 Mermaid 能力）。
     #[test]
     fn sample_is_product_copy_without_internal_terms() {
+        let sample = sample_document();
         for banned in [
             "切片",
             "ADR",
@@ -755,15 +741,15 @@ mod tests {
             "仅对关联文件生效",
         ] {
             assert!(
-                !SAMPLE.contains(banned),
+                !sample.contains(banned),
                 "首跑示例不得出现内部术语：{banned}"
             );
         }
         for hint in ["打开文件", "直接开始写", "导出"] {
-            assert!(SAMPLE.contains(hint), "缺少可发现性提示：{hint}");
+            assert!(sample.contains(hint), "缺少可发现性提示：{hint}");
         }
-        assert!(SAMPLE.starts_with("# 欢迎使用 Veil"));
-        assert!(SAMPLE.len() > 200, "首跑示例应是一页可读内容");
+        assert!(sample.starts_with("# 欢迎使用 Veil"));
+        assert!(sample.len() > 200, "首跑示例应是一页可读内容");
     }
 
     /// 首跑示例不是静态展示页：能编辑、能一次撤销复原、能用与产品一致的导出函数产出 HTML。
@@ -771,7 +757,8 @@ mod tests {
     fn sample_is_editable_undoable_and_exportable() {
         use veil_core::{Edit, Session};
 
-        let mut session = Session::open(SAMPLE);
+        let sample = sample_document();
+        let mut session = Session::open(sample);
         let len = session.text_len();
         let events = session
             .apply(Edit::Insert {
@@ -782,7 +769,7 @@ mod tests {
         assert!(!events.dirty_blocks.is_empty());
         assert!(session.serialize().ends_with("补充一句。"));
         session.undo().expect("编辑后必须可撤销");
-        assert_eq!(session.serialize(), SAMPLE, "一次撤销应回到首跑原文");
+        assert_eq!(session.serialize(), sample, "一次撤销应回到首跑原文");
 
         let font = latex_rust::MathFont::stix_two_math().expect("STIX math font");
         let html = export::html_of(&session, &veil_ui::ExportStyle::default(), &font, None);

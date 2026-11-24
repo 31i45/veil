@@ -322,6 +322,7 @@ fn menu_definitions_cover_shortcuts() {
             MenuAction::Separator,
             MenuAction::ToggleSourceMode,
             MenuAction::ToggleFocus,
+            MenuAction::ToggleTypewriter,
             MenuAction::Separator,
             MenuAction::ToggleRemoteImages,
             MenuAction::Separator,
@@ -429,6 +430,7 @@ fn menu_shortcuts_match_winit_mapping_and_real_dispatch() {
                         | MenuAction::ThemeLight
                         | MenuAction::ThemeDark
                         | MenuAction::ToggleFocus
+                        | MenuAction::ToggleTypewriter
                         | MenuAction::ToggleRemoteImages
                         | MenuAction::About
                         | MenuAction::ExportDiagnostics
@@ -488,6 +490,7 @@ fn menu_command_matrix_maps_each_action_to_its_real_shortcut() {
         (MenuAction::ThemeLight, Key::Empty),
         (MenuAction::ThemeDark, Key::Empty),
         (MenuAction::ToggleFocus, Key::Empty),
+        (MenuAction::ToggleTypewriter, Key::Empty),
         (MenuAction::ToggleRemoteImages, Key::Empty),
         (MenuAction::About, Key::Empty),
         (MenuAction::ExportDiagnostics, Key::Empty),
@@ -528,7 +531,7 @@ fn menu_command_matrix_maps_each_action_to_its_real_shortcut() {
             }
         }
     }
-    assert_eq!(seen.len(), 38, "主菜单应覆盖 38 个静态动作");
+    assert_eq!(seen.len(), 39, "主菜单应覆盖 39 个静态动作");
     assert_eq!(shown, 29, "矩阵内显示快捷键的动作数与既有红线一致");
 
     // 最近文件是动态项：出现在菜单里但没有（也不应有）快捷键提示。
@@ -651,14 +654,15 @@ fn view_menu_exposes_source_mode_toggle() {
         .expect("视图菜单应含源码模式");
     assert_eq!(t(item.0), "源码模式");
     assert_eq!(t(item.1), "Ctrl+/");
-    // 紧随其后的是专注模式，再往后回到分隔线
+    // 紧随其后的是打字机模式与专注模式，再往后回到分隔线
     let idx = MENUS[2]
         .items
         .iter()
         .position(|(_, _, a)| *a == MenuAction::ToggleSourceMode)
         .unwrap();
     assert_eq!(MENUS[2].items[idx + 1].2, MenuAction::ToggleFocus);
-    assert_eq!(MENUS[2].items[idx + 2].2, MenuAction::Separator);
+    assert_eq!(MENUS[2].items[idx + 2].2, MenuAction::ToggleTypewriter);
+    assert_eq!(MENUS[2].items[idx + 3].2, MenuAction::Separator);
 }
 
 #[test]
@@ -1057,14 +1061,35 @@ fn toggle_rows_report_and_paint_checked_state() {
             ..Default::default()
         }
     ));
+    // 打字机模式同样只认自己的开关位，不与专注模式串扰
+    assert!(action_checked(
+        MenuAction::ToggleTypewriter,
+        MenuFlags {
+            typewriter: true,
+            ..Default::default()
+        }
+    ));
+    assert!(!action_checked(
+        MenuAction::ToggleTypewriter,
+        MenuFlags {
+            focus: true,
+            ..Default::default()
+        }
+    ));
+    assert!(!action_checked(
+        MenuAction::ToggleFocus,
+        MenuFlags {
+            typewriter: true,
+            ..Default::default()
+        }
+    ));
 
-    // 像素级：视图菜单「专注模式」行开启后多出右侧「当前」像素
-    // 帧高需容纳源码模式项后的整张弹窗（10 行）
+    // 像素级：视图菜单「专注模式/打字机模式」行开启后多出右侧「当前」像素
     let theme = Theme::light();
     let v = viewport(300, 400, 1.0);
     let p = popup_layout(2, 1.0, &[], 1000.0);
-    let (_, ix, iy, iw, ih) = p.items[9];
-    let shot = |on: bool| {
+    let shot = |row: usize, flags: MenuFlags| {
+        let (_, ix, iy, iw, ih) = p.items[row];
         let mut engine = LayoutEngine::new();
         let mut frame = Frame::new(300, 400, [255, 255, 255, 255]);
         let mut chrome = Chrome {
@@ -1087,10 +1112,7 @@ fn toggle_rows_report_and_paint_checked_state() {
             3000.0,
             0.0,
             &[],
-            MenuFlags {
-                focus: on,
-                ..Default::default()
-            },
+            flags,
         );
         let mut px = Vec::new();
         for y in iy as u32..(iy + ih) as u32 {
@@ -1100,7 +1122,28 @@ fn toggle_rows_report_and_paint_checked_state() {
         }
         px
     };
-    assert_ne!(shot(false), shot(true), "开启态须在行右侧画出「当前」提示");
+    assert_ne!(
+        shot(9, MenuFlags::default()),
+        shot(
+            9,
+            MenuFlags {
+                focus: true,
+                ..Default::default()
+            }
+        ),
+        "专注模式开启态须在行右侧画出「当前」提示"
+    );
+    assert_ne!(
+        shot(10, MenuFlags::default()),
+        shot(
+            10,
+            MenuFlags {
+                typewriter: true,
+                ..Default::default()
+            }
+        ),
+        "打字机模式开启态须在行右侧画出「当前」提示"
+    );
 }
 
 #[test]
@@ -1154,6 +1197,7 @@ fn theme_menu_marks_current_mode() {
             MenuAction::ThemeDark,
             MenuAction::ToggleSourceMode,
             MenuAction::ToggleFocus,
+            MenuAction::ToggleTypewriter,
             MenuAction::ToggleRemoteImages,
             MenuAction::Settings,
         ]

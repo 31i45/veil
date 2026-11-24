@@ -1731,11 +1731,33 @@ impl App {
     }
 
     /// 切换专注模式（阶段 1）：只改视觉开关，不动真值/派生缓存；重绘即生效。
+    /// 与打字机模式互斥：开启专注时关闭打字机。
     pub(crate) fn toggle_focus(&mut self) {
         let on = !self.ui_state.writing.focus;
         self.ui_state.writing.focus = on;
+        if on {
+            self.ui_state.writing.typewriter = false;
+        }
         self.ui_state.chrome.notice = tf(
             I18nKey::NoticeFocusMode,
+            &[if on {
+                t(I18nKey::ToggleOn)
+            } else {
+                t(I18nKey::ToggleOff)
+            }],
+        );
+        self.request_redraw();
+    }
+
+    /// 切换打字机模式：开启时关闭专注模式；滚动锚点只在 `scroll_to_caret` 生效。
+    pub(crate) fn toggle_typewriter(&mut self) {
+        let on = !self.ui_state.writing.typewriter;
+        self.ui_state.writing.typewriter = on;
+        if on {
+            self.ui_state.writing.focus = false;
+        }
+        self.ui_state.chrome.notice = tf(
+            I18nKey::NoticeTypewriterMode,
             &[if on {
                 t(I18nKey::ToggleOn)
             } else {

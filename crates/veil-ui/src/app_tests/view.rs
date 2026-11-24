@@ -1,6 +1,7 @@
 //! 视图与导航测试：主题配置 / 大纲 / 查找替换 / 链接跳转与悬停 / 字数 / 专注模式。
 
 use super::*;
+use crate::paint_overlay::typewriter_target_y;
 
 #[test]
 fn startup_applies_configured_mode() {
@@ -2230,6 +2231,147 @@ fn focus_mode_dims_only_non_caret_blocks() {
     assert!(lum(dimmed) > lum(p1.2), "压暗即向背景色靠拢");
     // 纯视觉开关：源码一个字节都不变
     assert_eq!(doc_text(&a), "第一段\n\n第二段\n");
+}
+
+// ---- 打字机模式（Task 3）：42% 锚点 / 与专注互斥 / 纯视图开关 ----
+
+#[test]
+fn app_starts_with_typewriter_off() {
+    let store = MemStore::default();
+    let a = app("正文\n", None, false, &store);
+    assert!(!a.ui_state.writing.typewriter, "打字机模式默认关闭");
+}
+
+#[test]
+fn typewriter_and_focus_are_mutually_exclusive() {
+    let store = MemStore::default();
+    let mut a = app("正文\n", None, false, &store);
+    a.toggle_focus();
+    assert!(a.ui_state.writing.focus);
+    a.toggle_typewriter();
+    assert!(a.ui_state.writing.typewriter);
+    assert!(!a.ui_state.writing.focus, "开启打字机须关闭专注");
+    assert!(a.ui_state.chrome.notice.contains("打字机模式"));
+    a.toggle_focus();
+    assert!(a.ui_state.writing.focus);
+    assert!(!a.ui_state.writing.typewriter, "开启专注须关闭打字机");
+}
+
+#[test]
+fn typewriter_target_centers_caret_at_42_percent() {
+    let viewport_h = 1000.0;
+    let max_scroll = 5000.0;
+    // 中段：光标行中心落在视口 42% 处
+    let caret_center = 3000.0;
+    let target = typewriter_target_y(caret_center, viewport_h, max_scroll);
+    assert!((target - (caret_center - viewport_h * 0.42)).abs() < 1e-3);
+    assert!((caret_center - target - viewport_h * 0.42).abs() < 1e-3);
+    // 文档首部：目标钳到 0
+    assert_eq!(typewriter_target_y(100.0, viewport_h, max_scroll), 0.0);
+    // 文档尾部：目标钳到 max_scroll
+    assert_eq!(
+        typewriter_target_y(9000.0, viewport_h, max_scroll),
+        max_scroll
+    );
+}
+
+#[test]
+fn typewriter_target_does_not_move_short_documents() {
+    assert_eq!(typewriter_target_y(120.0, 800.0, 0.0), 0.0);
+    assert_eq!(typewriter_target_y(0.0, 800.0, -1.0), 0.0);
+}
+
+#[test]
+fn typewriter_short_document_keeps_scroll_at_zero() {
+    let store = MemStore::default();
+    let mut a = app("只有一行\n", None, false, &store);
+    a.paint();
+    a.ensure_layouts_all();
+    assert_eq!(chrome::max_scroll(a.viewport(), a.doc_height()), 0.0);
+    a.ui_state.writing.typewriter = true;
+    a.scroll_to_caret();
+    assert_eq!(a.window_state.scroll_y, 0.0, "短文档不得发生位移");
+}
+
+#[test]
+fn typewriter_anchors_caret_line_and_clamps_at_document_edges() {
+    let store = MemStore::default();
+    let doc = (1..=200)
+        .map(|i| format!("第 {i:03} 段：打字机模式滚动测试。\n\n"))
+        .collect::<String>();
+    let mut a = app(&doc, None, false, &store);
+    a.paint();
+    a.ensure_layouts_all();
+    a.ui_state.writing.typewriter = true;
+
+    // 中段：光标行中心对齐视口 42%
+    a.editor.set_caret(doc.len() / 2);
+    a.ensure_layouts_all();
+    a.scroll_to_caret();
+    let vp = a.viewport();
+    let (_, cy, ch) = a.caret_screen();
+    let want = vp.y + vp.h * 0.42;
+    assert!(
+        ((cy + ch / 2.0) - want).abs() < 1.0,
+        "光标行中心应落在 42% 锚点: center={} want={want}",
+        cy + ch / 2.0
+    );
+
+    // 文档首部：不越界（滚动为 0）
+    a.editor.set_caret(0);
+    a.ensure_layouts_all();
+    a.scroll_to_caret();
+    assert_eq!(a.window_state.scroll_y, 0.0);
+
+    // 文档尾部：仍落在合法滚动范围内
+    a.perform_action(Action::Doc(Intent::MoveDocEnd));
+    a.ensure_layouts_all();
+    a.scroll_to_caret();
+    let max = chrome::max_scroll(a.viewport(), a.doc_height());
+    assert!(
+        (0.0..=max).contains(&a.window_state.scroll_y),
+        "尾部滚动不得越界: scroll={} max={max}",
+        a.window_state.scroll_y
+    );
+}
+
+#[test]
+fn typewriter_does_not_reanchor_on_mouse_click() {
+    let store = MemStore::default();
+    let doc = (1..=200)
+        .map(|i| format!("第 {i:03} 段：鼠标点选不应触发打字机重排。\n\n"))
+        .collect::<String>();
+    let mut a = app(&doc, None, false, &store);
+    a.paint();
+    a.ensure_layouts_all();
+    a.ui_state.writing.typewriter = true;
+    a.editor.set_caret(doc.len() / 2);
+    a.ensure_layouts_all();
+    a.scroll_to_caret();
+    let vp = a.viewport();
+    let idx = a
+        .index
+        .blocks
+        .iter()
+        .position(|g| {
+            let y = vp.y + g.top - a.window_state.scroll_y;
+            y >= vp.y && y + g.height <= vp.y + vp.h
+        })
+        .expect("中段应有完整可见块");
+    let off = a.index.blocks[idx].range.start + 1;
+    let (x, y) = point_at_doc(&mut a, off);
+    let before = a.window_state.scroll_y;
+    click_at(&mut a, x, y);
+    let block = a.index.blocks[idx].range;
+    assert!(
+        block.start <= a.editor.caret() && a.editor.caret() <= block.end,
+        "点选应正常落在目标块内: caret={} block={block:?}",
+        a.editor.caret()
+    );
+    assert_eq!(
+        a.window_state.scroll_y, before,
+        "鼠标点选路径不得触发打字机重排"
+    );
 }
 
 // ---- 2e 端到端场景：打开→编辑→表格→图片→查找→保存→重开→恢复（红线 e2e 断言 ≥20）----

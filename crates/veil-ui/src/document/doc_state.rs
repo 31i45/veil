@@ -861,9 +861,10 @@ impl App {
         let reason = message
             .lines()
             .find_map(|line| {
-                line.trim()
-                    .strip_prefix("原因：")
-                    .or_else(|| line.trim().strip_prefix("原因:"))
+                let line = line.trim();
+                line.strip_prefix("原因：")
+                    .or_else(|| line.strip_prefix("原因:"))
+                    .or_else(|| line.strip_prefix("Reason:"))
             })
             .map(str::trim)
             .filter(|s| !s.is_empty())
@@ -884,20 +885,19 @@ impl App {
         self.close_lite_overlays();
         let config_dir = crate::theme::config_path()
             .map(|p| p.display().to_string())
-            .unwrap_or_else(|| "不可用".to_string());
+            .unwrap_or_else(|| t(Key::AboutUnavailable).to_string());
         let log_dir = crate::theme::data_dir()
             .map(|d| d.join("logs").display().to_string())
-            .unwrap_or_else(|| "不可用".to_string());
-        let message = format!(
-            "Veil {}（构建 {}）\n许可证：MIT\n\
-             隐私：无遥测、无后台更新检查、无后台网络请求；远程图片默认关闭。\n\
-             配置目录：{}\n诊断目录：{}\n官方来源：{}\n\
-             第三方组件：Mermaid（MIT）、QuickJS（MIT）、linkedom（MIT）以及全部 Rust 依赖；完整许可见随包 THIRD-PARTY-LICENSES.md。",
-            crate::diag::APP_VERSION,
-            crate::diag::BUILD_COMMIT,
-            config_dir,
-            log_dir,
-            crate::app::RELEASES_URL,
+            .unwrap_or_else(|| t(Key::AboutUnavailable).to_string());
+        let message = tf(
+            Key::AboutBody,
+            &[
+                crate::diag::APP_VERSION,
+                crate::diag::BUILD_COMMIT,
+                &config_dir,
+                &log_dir,
+                crate::app::RELEASES_URL,
+            ],
         );
         let spec = modal::ModalSpec::new(
             t(Key::AboutTitle),

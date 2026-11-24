@@ -9,6 +9,19 @@ use crate::paint::{
 use crate::view::{ctx_menu, outline, quick_open, search, BlockLayout, Frame, LayoutEngine};
 use veil_core::Range;
 
+/// 打字机模式锚点：光标行中心固定在视口高度的 42% 处。
+pub(crate) const TYPEWRITER_ANCHOR: f32 = 0.42;
+
+/// 打字机模式滚动目标：`caret_center` 为光标行中心在文档坐标中的 y
+/// （相对视口顶部、含当前滚动量），返回 `scroll_y` 目标值。
+/// 短文档（`max_scroll <= 0`）不位移；首尾越界由 `0..=max_scroll` 钳位兜底。
+pub(crate) fn typewriter_target_y(caret_center: f32, viewport_h: f32, max_scroll: f32) -> f32 {
+    if max_scroll <= 0.0 {
+        return 0.0;
+    }
+    (caret_center - viewport_h * TYPEWRITER_ANCHOR).clamp(0.0, max_scroll)
+}
+
 /// 模态文本接缝：度量走 engine（不栅格化），绘制走 chrome 标签位图缓存。
 struct ModalText<'a> {
     labels: &'a mut crate::chrome::LabelCache,
@@ -1155,7 +1168,13 @@ impl App {
         let (_, cy, ch) = self.caret_screen();
         let max = chrome::max_scroll(vp, self.doc_height());
         let mut target = self.window_state.goal_y;
-        if cy < vp.y {
+        if self.ui_state.writing.typewriter {
+            // 打字机模式：光标行中心对齐视口 42% 锚点。
+            // cy 为屏幕坐标（已扣滚动量），换回文档坐标后再求目标滚动值；
+            // 文档首尾无法居中时由 typewriter_target_y 的钳位贴边。
+            let caret_center = cy + ch / 2.0 - vp.y + self.window_state.scroll_y;
+            target = typewriter_target_y(caret_center, vp.h, max);
+        } else if cy < vp.y {
             target += cy - vp.y - MARGIN * self.input_state.scale;
         } else if cy + ch > vp.y + vp.h {
             // B5：光标行下方至少保留 `BOTTOM_PAD_LINES` 行可点击空白，

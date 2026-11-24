@@ -240,7 +240,7 @@ impl ApplicationHandler<Doc> for Shell {
 /// 不新增 i18n key（`FatalWindowCreate` 已存在），恢复动作直接写给用户。
 fn non_initial_failure_text(detail: Option<String>) -> String {
     let base = detail.unwrap_or_else(|| t(Key::FatalWindowCreate).to_string());
-    format!("{base}\n\n请关闭一个窗口后重试；现有文档不会被关闭。")
+    format!("{base}\n\n{}", t(Key::FatalWindowBusyNext))
 }
 
 /// 启动多窗口事件循环。每个窗口调用一次端口工厂，避免共享不可克隆的 trait object。

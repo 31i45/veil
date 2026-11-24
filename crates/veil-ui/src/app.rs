@@ -570,6 +570,9 @@ impl TableView {
 pub(crate) struct WritingState {
     /// 专注模式：非光标所在块整体压暗，仅视觉，不改真值。
     pub(crate) focus: bool,
+    /// 打字机模式：光标行中心固定在视口高度 42% 处（仅 `scroll_to_caret` 生效）。
+    /// 纯视图开关，不进配置文件，重启后回到默认关闭。
+    pub(crate) typewriter: bool,
     /// 全文字数（中文口径），随 `refresh_index` 重算。
     pub(crate) words: usize,
 }
@@ -2016,8 +2019,9 @@ impl App {
         let window = match event_loop.create_window(attrs) {
             Ok(w) => Arc::new(w),
             Err(e) => {
-                eprintln!("创建窗口失败: {e}");
-                self.record_startup_error(format!("创建窗口失败: {e}"));
+                let msg = tf(Key::FatalWindowCreateDetail, &[&e.to_string()]);
+                eprintln!("{msg}");
+                self.record_startup_error(msg);
                 return None;
             }
         };
@@ -2027,8 +2031,9 @@ impl App {
         let context = match Context::new(window.clone()) {
             Ok(c) => c,
             Err(e) => {
-                eprintln!("创建呈现上下文失败: {e}");
-                self.record_startup_error(format!("创建呈现上下文失败: {e}"));
+                let msg = tf(Key::FatalWindowRenderDetail, &[&e.to_string()]);
+                eprintln!("{msg}");
+                self.record_startup_error(msg);
                 return None;
             }
         };

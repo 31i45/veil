@@ -154,7 +154,7 @@ Requires: Rust stable (edition 2021). Acceptance environment: Windows 11 23H2+. 
 
 **Platform boundary:** Veil is a **Windows-only desktop application**. The `veil.exe` UI, Windows integration and release artifact are not claimed to build or run on Linux or macOS. Only the platform-independent `veil-core` crate has Linux CI coverage: the release workflow's `core-linux` job runs `cargo check -p veil-core` and `cargo test -p veil-core` on Ubuntu. A green Linux job validates the core only; it is not a Linux application release or support claim.
 
-Interface text ships in Chinese (zh-CN) only: the i18n layer is a single-locale table with no English entries, so English labels quoted in this README are translations of the shipped Chinese strings. Veil does not detect the system display language and has no runtime language switch. Document text, exported content, and text inside diagrams are not translated with the interface.
+Interface language follows the Windows display language at launch: a Chinese system gets zh-CN, an English system gets en-US, and every other language falls back to en-US. Every interface string ships in both Chinese and English, so no label falls back to Chinese on an English system. There is no manual runtime switch; `VEIL_UI_LANG=zh-CN|en-US` exists only for QA. Document text, exported content, and text inside diagrams are not translated with the interface.
 
 ```powershell
 cargo build --workspace
@@ -239,9 +239,9 @@ Dependency blacklist: `tokio`, `wasmtime`, any webview crate (`webview2-com`/`wr
   - ADR-012 syntax highlighting migrates from the in-house state machine to `syntect` (fancy-regex) with a per-line incremental cache
   - ADR-013 table layout stays in-house (no `comfy-table`)
   - ADR-014 Quick Open fuzzy matching stays hand-written (no `fuzzy-matcher`/`nucleo`)
-- `.trae/specs/release-and-roadmap/v1.1-roadmap.md` — v1.1 detailed plan
-- `.trae/specs/release-and-roadmap/v1.2-roadmap.md` — v1.2 candidate pool (typography settings, PDF bookmarks, font subsetting)
-- `.trae/specs/release-and-roadmap/v2.0-roadmap.md` — v2.0 detailed plan (wgpu deferred — four trigger conditions must all trip)
+- `docs/roadmap/v1.1-roadmap.md` — v1.1 detailed plan
+- `docs/roadmap/v1.2-roadmap.md` — v1.2 candidate pool (typography settings, PDF bookmarks, font subsetting)
+- `docs/roadmap/v2.0-roadmap.md` — v2.0 detailed plan (wgpu deferred — four trigger conditions must all trip)
 
 ## Repository Structure
 
@@ -250,9 +250,9 @@ Dependency blacklist: `tokio`, `wasmtime`, any webview crate (`webview2-com`/`wr
 | `crates/` | Source code: `veil-core` (pure logic), `veil-ui` (rendering + interaction), `veil-mermaid-offline` (QuickJS + mermaid.js in-process), `veil` (product binary + platform seams) |
 | `tools/` | Release, smoke, installer, sbom, walkthrough scripts — all PowerShell except the Python bench helpers |
 | `icons/` | Application icon (`veil.ico`) and document-type icon (`veil-doc.ico`) |
-| `docs/` | ADRs (`adr/`), strategy docs; `review/` baselines (G0/G1/G2/P0/P1/P2 + `evaluation/` subdirectory with 5 evaluation reports moved from root in final-polish) — retained as historical records, some describe superseded approaches |
+| `docs/` | ADRs (`adr/`), public roadmaps (`roadmap/`: v1.1/v1.2/v2.0), strategy docs; `review/` baselines (G0/G1/G2/P0/P1/P2 + `evaluation/` subdirectory with 5 evaluation reports moved from root in final-polish) — retained as historical records, some describe superseded approaches |
 | `evidence/` | **~343 MB** (gitignored): build artifact verification + audit trail. `render/` (237 MB, historical PNG render captures) + `ux/` (70 MB, interaction probes) = 89% of volume. Only summary records (release-record, signing-verification, sbom) are committed; raw screenshots/logs are local-only. B-grade cleanup policy in place |
-| `.trae/specs/` | 40+ historical spec artifacts from v1 → v3 development. Only `.trae/specs/release-and-roadmap/` (v1.1/v1.2/v2.0 roadmaps) is current; the rest are retained as a development trail |
+| `.trae/` | Local-only development workspace (gitignored) — historical agent specs; never published |
 | `.github/workflows/` | `ci.yml` (PR + main branch gates) and `release.yml` (`v*` tag publish + manual dry-run dispatch) |
 
 ## Privacy, Security & Support

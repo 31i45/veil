@@ -24,11 +24,8 @@ Cargo.lock.bak
 spikes/
 
 # ─── Trae / AI agent intermediate artifacts ───
-# 整个 .trae/ 不入库，唯一例外是 release-and-roadmap（v1.1/v2.0 长期路线图）。
-.trae/*
-!.trae/specs/
-.trae/specs/*
-!.trae/specs/release-and-roadmap/
+# 整个 .trae/ 不入库（本地 agent 工作区）；公开文档已迁至 docs/roadmap/。
+.trae/
 
 # ─── ai-dev-skills local instantiation ───
 .skills/

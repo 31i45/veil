@@ -8,6 +8,7 @@ pub mod diag; // 崩溃取证（P0-1）：panic hook + 报告原子落盘
 mod error;
 pub mod http; // 远程图片抓取（v1.4）：WinHTTP 手写 FFI
 pub mod ipc;
+pub mod locale; // 运行时界面语言：系统 UI 语言探测 + VEIL_UI_LANG 覆盖
 pub mod mermaid; // SVG → resvg 光栅化（离线引擎出 SVG 后共用）
 #[cfg(feature = "mermaid-offline")]
 pub mod mermaid_offline; // 唯一发行产物的 Mermaid 渲染器：QuickJS + mermaid.js 进程内出 SVG（惰性初始化）

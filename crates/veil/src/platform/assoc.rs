@@ -433,7 +433,10 @@ mod win {
             kept.push(t(I18nKey::AssocOpenCommand));
         }
         if !kept.is_empty() {
-            notes.push(tf(I18nKey::AssocRegisterKept, &[&kept.join("、")]));
+            notes.push(tf(
+                I18nKey::AssocRegisterKept,
+                &[&kept.join(t(I18nKey::AssocListSeparator))],
+            ));
         }
 
         // 2) `.md` 的默认值：只填空位，绝不改写他人关联（不抢默认应用）
@@ -549,7 +552,10 @@ mod win {
         let mut text = t(I18nKey::AssocUnregisteredBody).to_owned();
         if !kept.is_empty() {
             text.push_str("\n\n");
-            text.push_str(&tf(I18nKey::AssocUnregisterKept, &[&kept.join("、")]));
+            text.push_str(&tf(
+                I18nKey::AssocUnregisterKept,
+                &[&kept.join(t(I18nKey::AssocListSeparator))],
+            ));
         }
         Ok(text)
     }

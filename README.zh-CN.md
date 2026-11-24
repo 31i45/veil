@@ -154,7 +154,7 @@ Veil 不宣称所有 Markdown / Mermaid 语法在编辑态、源码态、HTML、
 
 **平台边界：Veil 是 Windows-only 桌面应用。** 不宣称 `veil.exe` 的界面、Windows 集成与发布产物可在 Linux 或 macOS 构建、运行。只有平台无关的 `veil-core` 纳入 Linux CI：release workflow 的 `core-linux` job 在 Ubuntu 执行 `cargo check -p veil-core` 与 `cargo test -p veil-core`。Linux job 变绿只证明 core 的跨平台编译与测试，不代表提供或支持 Linux 应用。
 
-界面文案仅简体中文（zh-CN）：i18n 是单语词条表，没有英文条目，README 中引用的英文标签是对实际中文文案的翻译。Veil 不探测系统显示语言，也没有运行时语言切换。正文、导出内容与图内文字不随界面翻译。
+界面语言在启动时自动跟随 Windows 显示语言：中文系统使用 zh-CN，英文系统使用 en-US，其他语言统一回落 en-US。所有界面文案均有中英两份，英文系统上不存在回退到中文的缺口。不提供运行时手动切换；`VEIL_UI_LANG=zh-CN|en-US` 仅用于 QA。正文、导出内容与图内文字不随界面翻译。
 
 ```powershell
 cargo build --workspace
@@ -239,9 +239,9 @@ pwsh -File tools/smoke_launch.ps1 -ExePath target/release/veil.exe -ExpectedTitl
   - ADR-012 语法高亮从自研状态机迁移到 `syntect`（fancy-regex），按行增量缓存
   - ADR-013 表格布局保持自研（不引入 `comfy-table`）
   - ADR-014 Quick Open 模糊匹配保持手写（不引入 `fuzzy-matcher`/`nucleo`）
-- `.trae/specs/release-and-roadmap/v1.1-roadmap.md` — v1.1 详细 roadmap
-- `.trae/specs/release-and-roadmap/v1.2-roadmap.md` — v1.2 候选池（排版设置、PDF 书签、字体子集化）
-- `.trae/specs/release-and-roadmap/v2.0-roadmap.md` — v2.0 详细 roadmap（wgpu 后移四条触发条件同时满足才启动）
+- `docs/roadmap/v1.1-roadmap.md` — v1.1 详细 roadmap
+- `docs/roadmap/v1.2-roadmap.md` — v1.2 候选池（排版设置、PDF 书签、字体子集化）
+- `docs/roadmap/v2.0-roadmap.md` — v2.0 详细 roadmap（wgpu 后移四条触发条件同时满足才启动）
 
 ## 仓库结构
 
@@ -250,9 +250,9 @@ pwsh -File tools/smoke_launch.ps1 -ExePath target/release/veil.exe -ExpectedTitl
 | `crates/` | 源码：`veil-core`（纯逻辑内核）、`veil-ui`（渲染 + 交互）、`veil-mermaid-offline`（QuickJS + mermaid.js 进程内）、`veil`（产品二进制 + 平台接缝） |
 | `tools/` | 发布、冒烟、安装包、SBOM、演练脚本 — 全部 PowerShell，Python 仅 bench 辅助 |
 | `icons/` | 应用图标（`veil.ico`）与文档类型图标（`veil-doc.ico`） |
-| `docs/` | ADR（`adr/`）、策略文档；`review/` 评审基线（G0/G1/G2/P0/P1/P2 + `evaluation/` 子目录含 5 份从根目录归位的评估报告，final-polish 完成）— 作为历史记录保留，部分描述已被取代的方案 |
+| `docs/` | ADR（`adr/`）、公开路线图（`roadmap/`：v1.1/v1.2/v2.0）、策略文档；`review/` 评审基线（G0/G1/G2/P0/P1/P2 + `evaluation/` 子目录含 5 份从根目录归位的评估报告，final-polish 完成）— 作为历史记录保留，部分描述已被取代的方案 |
 | `evidence/` | **~343 MB**（gitignored）：构建产物验证 + 审计踪迹。`render/`（237 MB，历史 PNG 渲染截图）+ `ux/`（70 MB，交互探针）= 占体积 89%。仅摘要记录（release-record、signing-verification、sbom）入库；原始截图/日志本地留存。B 级清理策略在位 |
-| `.trae/specs/` | v1 → v3 开发过程中 40+ 历史 spec 制品。只有 `.trae/specs/release-and-roadmap/`（v1.1/v1.2/v2.0 路线图）是当前有效的；其余作为开发轨迹保留 |
+| `.trae/` | 本地开发工作区（gitignored）——历史 agent spec，不随仓库发布 |
 | `.github/workflows/` | `ci.yml`（PR + main 分支门禁）和 `release.yml`（`v*` tag 发布 + 手动 dry-run 触发） |
 
 ## 隐私、安全与支持

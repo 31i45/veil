@@ -853,7 +853,7 @@ impl<'a> Ctx<'a> {
                                 ..style
                             };
                             let fallback = if self.captioned_image == Some(node.range) {
-                                "[图片]"
+                                t(Key::ImageAltFallback)
                             } else {
                                 alt
                             };
@@ -1060,7 +1060,7 @@ impl<'a> Ctx<'a> {
                                     ..style
                                 };
                                 let fallback = if self.captioned_image == Some(node.range) {
-                                    "[图片]"
+                                    t(Key::ImageAltFallback)
                                 } else {
                                     alt
                                 };

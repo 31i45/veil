@@ -295,6 +295,16 @@ pub(crate) fn buttons() -> Vec<ModalButton> {
     ]
 }
 
+/// 卡片宽度 → (标签列宽, 控件列宽)。布局与回归测试共用，避免上限/比例常量两处漂移。
+fn label_and_control_widths(card_w: f32, scale: f32, label_col_w: f32) -> (f32, f32) {
+    let p = surface::dialog_padding(scale);
+    let field_gap_x = 10.0 * scale;
+    let inner_w = (card_w - 2.0 * p).max(0.0);
+    // 0.5 比例上限：760 宽卡片下 inner_w = 720，label_w 可达 320（≥ 最长英文标签）。
+    let label_w = label_col_w.min(inner_w * 0.5);
+    (label_w, (inner_w - label_w - field_gap_x).max(0.0))
+}
+
 /// 纯函数：根据视口 + scale + form + text，产出 SettingsLayout。
 /// 不在模块内持有任何状态，headless 可测。
 pub(crate) fn layout(
@@ -312,13 +322,15 @@ pub(crate) fn layout(
     let gap = surface::dialog_button_gap(scale);
     let row_gap = body_line_h * 0.7;
     let field_gap_x = 10.0 * scale;
-    let label_col_w_max = 220.0 * scale;
+    // 标签列上限：英文最长标签「Include Table of Contents in PDF Export」约 312px。
+    let label_col_w_max = 320.0 * scale;
     let control_h = body_line_h * 1.4;
 
     let title = t(Key::ModalSettingsTitle);
     let title_w = text.title_width(title);
 
-    // 标签列宽：实测所有标签最大宽，夹到 label_col_w_max
+    // 标签列宽：只测当前语言（语言在进程内启动后固定，不会运行时切换），
+    // 避免中文界面按英文长标签预留出大段空白。
     let label_col_w = form
         .fields
         .iter()
@@ -374,10 +386,8 @@ pub(crate) fn layout(
     };
 
     // 排版字段行（只排显示的那些；超出部分截断）
-    let inner_w_actual = (card.w - 2.0 * p).max(0.0);
-    let label_w = label_col_w.min(inner_w_actual * 0.45);
+    let (label_w, control_w) = label_and_control_widths(card.w, scale, label_col_w);
     let control_x = card.x + p + label_w + field_gap_x;
-    let control_w = (card.x + card.w - p - control_x).max(0.0);
 
     let mut field_rects = Vec::with_capacity(form.fields.len());
     let mut top_y = card.y + p + title_line_h + surface::dialog_title_gap(scale);
@@ -1221,6 +1231,7 @@ pub(crate) fn elide_with_ellipsis(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::i18n::{translate, LOCALES};
     use crate::input::Mods;
 
     const EPSILON: f32 = 0.001;
@@ -1409,6 +1420,75 @@ mod tests {
                 "字段值超出控件矩形: {key:?}"
             );
         }
+    }
+
+    /// 回归：英文长标签必须落在 320px 标签列上限内，且 760 宽卡片下控件列不被压缩。
+    /// 最长标签为 `SettingsExportToc`（"Include Table of Contents in PDF Export"，
+    /// FakeText 8px/char ≈ 312px）。语言在进程内固定，布局按当前语言取宽，
+    /// 因此这里直接对英文词条与容量上限做断言，不依赖 zh-CN 布局。
+    #[test]
+    fn english_labels_fit_inside_label_column() {
+        let form = default_form();
+        let mut text = FakeText;
+        let mut widest: Option<(Key, f32)> = None;
+        for field in &form.fields {
+            let en = translate(LOCALES, "en-US", field.label)
+                .unwrap_or_else(|| panic!("缺少英文词条: {:?}", field.label));
+            let w = text.width(en);
+            if widest.map_or(true, |(_, max)| w > max) {
+                widest = Some((field.label, w));
+            }
+        }
+        let (widest_key, widest_w) = widest.expect("表单至少有一个字段");
+
+        assert_eq!(
+            widest_key,
+            Key::SettingsExportToc,
+            "最长英文标签应覆盖「导出 PDF 时包含目录页」"
+        );
+        let label_cap = 320.0;
+        assert!(
+            widest_w <= label_cap + EPSILON,
+            "最长英文标签 {widest_w}px 超出标签列上限 {label_cap}px（{widest_key:?}）"
+        );
+
+        // 760 宽（DIALOG_MAX_WIDTH）卡片 + 320 标签上限：label_w 可达上限，控件列仍充足。
+        let (label_w, control_w) =
+            label_and_control_widths(surface::DIALOG_MAX_WIDTH, 1.0, label_cap);
+        assert!(
+            label_w >= widest_w - EPSILON,
+            "760 宽卡片下标签列 {label_w}px 不足以容纳最长英文标签 {widest_w}px"
+        );
+        assert!(
+            control_w >= 350.0,
+            "标签列变宽后控件列不得被压缩: {control_w}"
+        );
+    }
+
+    /// zh-CN：按当前语言取宽，标签不越界、控件列可用，且不按英文宽度预留空白。
+    #[test]
+    fn zh_labels_fit_and_control_column_stays_usable() {
+        let form = default_form();
+        let layout = layout_for(viewport(1280.0, 800.0), &form);
+        let mut text = FakeText;
+        let mut widest_zh = 0.0f32;
+        for (field, rects) in form.fields.iter().zip(&layout.fields) {
+            assert!(rects.control.w > 0.0, "控件列必须有宽度: {:?}", field.label);
+            let w = text.width(t(field.label));
+            widest_zh = widest_zh.max(w);
+            assert!(
+                w <= rects.label.w + EPSILON,
+                "zh 标签越界: {:?} {w}px > {}px",
+                field.label,
+                rects.label.w
+            );
+        }
+        assert!(widest_zh < 320.0, "zh 最长标签不应达到英文标签上限");
+        assert!(
+            layout.card.w < surface::DIALOG_MAX_WIDTH,
+            "zh 卡片不应按英文标签预留到最大宽度: {}",
+            layout.card.w
+        );
     }
 
     #[test]

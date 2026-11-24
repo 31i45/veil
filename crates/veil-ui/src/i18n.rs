@@ -2,12 +2,17 @@
 //!
 //! 设计取舍：
 //! - `Key` 枚举与 zh-CN 表由同一份宏生成，穷举性由构造保证（不会出现「有 key 无词条」）；
-//! - 词条按语言分表（`zh-CN` / `en-US`），`t()` 按 `LOCALES` 顺序回退；zh-CN 全量，
-//!   en-US 可按需补翻译（只需填表，不改调用点）；
+//! - 词条按语言分表（`zh-CN` / `en-US`），`t()` 按 `LOCALES` 顺序回退；两张表均全量，
+//!   新增 key 时需同时补齐英文（只需填表，不改调用点）；
+//! - 运行时语言由产品层在启动时经 `init_locale()` 确定（未初始化时默认 zh-CN）；
+//!   `t()` / `missing()` 读运行时语言，英文覆盖一律走纯函数 `translate()` 测试，
+//!   不在测试里改写全局语言（避免并发用例串扰）；
 //! - 缺失 key 回退显示 key 的稳定 id（如 `menu.file.new`），debug 构建断言提示；
 //!   测试构建跳过断言，保证「回退不 panic」可被单测覆盖。
 //!
 //! 显示等价是硬约束：所有 zh-CN 词条与 key 化前的字面量逐字一致，包括空格与全角标点。
+
+use std::sync::OnceLock;
 
 /// 界面文案 key。新增文案：在 `keys!` 中加一行（变体, 稳定 id, zh-CN 文本）。
 macro_rules! keys {
@@ -82,6 +87,7 @@ keys! {
     MenuViewThemeDark => "menu.view.theme_dark", "深色";
     MenuViewSourceMode => "menu.view.source_mode", "源码模式";
     MenuViewFocusMode => "menu.view.focus_mode", "专注模式";
+    MenuViewTypewriter => "menu.view.typewriter", "打字机模式";
     MenuViewAllowRemoteImages => "menu.view.allow_remote_images", "允许远程图片";
     MenuViewSettings => "menu.view.settings", "设置…";
     MenuHelp => "menu.help", "帮助";
@@ -360,6 +366,10 @@ keys! {
         "事件循环错误: {}；请重启应用；若仍失败，检查图形环境或重新安装";
     FatalWindowCreate => "error.window_create",
         "无法创建窗口：图形环境不可用；请重启应用；若仍失败，检查图形环境或重新安装";
+    FatalWindowCreateDetail => "error.window_create_detail", "创建窗口失败：{}";
+    FatalWindowRenderDetail => "error.window_render_detail", "创建呈现上下文失败：{}";
+    FatalWindowBusyNext => "error.window_busy_next",
+        "请关闭一个窗口后重试；现有文档不会被关闭。";
     CliUsage => "cli.usage", "用法: veil [--new-window] [路径]";
     CliUnknownOption => "cli.unknown_option",
         "未知参数：{}；{}；下一步：请检查参数拼写，或按上面的用法重新运行";
@@ -407,6 +417,7 @@ keys! {
     CodeCopiedButton => "code.copied_button", "已复制";
     FrontMatterCollapsed => "doc.frontmatter_collapsed", "Front Matter";
     NoticeFocusMode => "notice.focus_mode", "专注模式：{}";
+    NoticeTypewriterMode => "notice.typewriter_mode", "打字机模式：{}";
     NoticeRemoteImageFailed => "notice.remote_image_failed",
         "部分远程图片加载失败，已显示替代文本；下一步：检查链接是否有效，或右键重新加载图片";
     NoticeMermaidRenderFailed => "notice.mermaid_render_failed",
@@ -658,10 +669,63 @@ keys! {
     NoticeSettingsSaved => "notice.settings_saved", "设置已保存";
     NoticeSettingsSaveFailed => "notice.settings_save_failed",
         "设置保存失败：{}；下一步：可检查配置目录的写入权限或磁盘空间后重试";
+
+    // ---- 首跑欢迎文档 ----
+    SampleWelcome => "doc.sample_welcome", r#"# 欢迎使用 Veil
+
+这是你的第一页。文字会边写边排版，Markdown 源码始终是唯一的内容。
+
+## 现在可以做的三件事
+
+- 打开文件：按 Ctrl+O，选择电脑里已有的 Markdown 文档。
+- 直接开始写：把这段文字替换掉，或者接着往下写。
+- 导出：按 Ctrl+E 导出 HTML，按 Ctrl+Shift+E 导出 PDF。
+
+## 正文里的样式
+
+**加粗**、*斜体* 和 `行内代码` 都可以直接输入，链接写成 [站点名称](https://example.com)，图片写成 `![说明](图片路径.png)`。
+
+公式也可以写在句子里，例如 $x^2 + y^2 = z^2$；需要独立成行时：
+
+$$
+\frac{a + b}{\sqrt{c^2 + 1}} = \sum_{k=0}^{n} k^2
+$$
+
+```rust
+fn main() {
+    println!("Hello, Veil");
+}
+```
+"#;
+
+    // ---- 关于 ----
+    AboutBody => "about.body",
+        "Veil {}（构建 {}）\n许可证：MIT\n\
+         隐私：无遥测、无后台更新检查、无后台网络请求；远程图片默认关闭。\n\
+         配置目录：{}\n诊断目录：{}\n官方来源：{}\n\
+         第三方组件：Mermaid（MIT）、QuickJS（MIT）、linkedom（MIT）以及全部 Rust 依赖；完整许可见随包 THIRD-PARTY-LICENSES.md。";
+    AboutUnavailable => "about.unavailable", "不可用";
+
+    // ---- 配置文件 ----
+    ConfigHeader => "config.header",
+        "# Veil 配置（自动生成）\n# mode: system（跟随系统）| light | dark";
+
+    // ---- 导出兜底 ----
+    ExportMermaidUnavailable => "export.mermaid_unavailable",
+        "<!-- Mermaid 渲染数据不可用：导出时未预览过该块。可在浏览器中打开 https://mermaid.live 查看源码。 -->\n<pre><code class=\"language-mermaid\">{}</code></pre>\n";
+
+    // ---- 致命启动错误 ----
+    FatalErrorBody => "error.fatal_body",
+        "{}\n\n请检查图形环境后重试；文档内容未被修改。";
+
+    // ---- 文件关联列表分隔符 ----
+    AssocListSeparator => "assoc.list_separator", "、";
 }
 
-/// 已翻译的 en-US 词条；缺失项继续回退 zh-CN。
+/// en-US 词条（全量，与 `Key::ALL` 一一对应）。
 pub const EN_US: &[(Key, &str)] = &[
+    (Key::MenuViewTypewriter, "Typewriter Mode"),
+    (Key::NoticeTypewriterMode, "Typewriter mode: {}"),
     (
         Key::CtxMermaidPreview,
         "Open in mermaid.live (copies source)",
@@ -669,6 +733,1059 @@ pub const EN_US: &[(Key, &str)] = &[
     (
         Key::NoticeMermaidLiveOpenFailed,
         "Could not open mermaid.live: {}. Mermaid source copied; next: manually open https://mermaid.live/ and paste the source",
+    ),
+    (
+        Key::SampleWelcome,
+        r#"# Welcome to Veil
+
+This is your first page. Text is typeset as you write, and the Markdown source is always the single source of truth.
+
+## Three things you can do now
+
+- Open a file: press Ctrl+O and pick an existing Markdown document on your computer.
+- Just start writing: replace this text, or keep going below it.
+- Export: press Ctrl+E to export HTML, or Ctrl+Shift+E to export PDF.
+
+## Styling in the body
+
+You can type **bold**, *italic* and `inline code` directly; write links as [Site name](https://example.com) and images as `![Caption](image-path.png)`.
+
+Formulas can sit inside a sentence, e.g. $x^2 + y^2 = z^2$; for a standalone display:
+
+$$
+\frac{a + b}{\sqrt{c^2 + 1}} = \sum_{k=0}^{n} k^2
+$$
+
+```rust
+fn main() {
+    println!("Hello, Veil");
+}
+```
+"#,
+    ),
+    (
+        Key::AboutBody,
+        "Veil {} (build {})\nLicense: MIT\n\
+         Privacy: no telemetry, no background update checks, no background network requests; remote images are off by default.\n\
+         Config directory: {}\nDiagnostics directory: {}\nOfficial source: {}\n\
+         Third-party components: Mermaid (MIT), QuickJS (MIT), linkedom (MIT) and all Rust dependencies; see THIRD-PARTY-LICENSES.md bundled with the app for the full texts.",
+    ),
+    (Key::AboutUnavailable, "Unavailable"),
+    (
+        Key::ConfigHeader,
+        "# Veil configuration (auto-generated)\n# mode: system (follow OS) | light | dark",
+    ),
+    (
+        Key::ExportMermaidUnavailable,
+        "<!-- Mermaid render data unavailable: this block was not previewed before export. Open https://mermaid.live in a browser to view the source. -->\n<pre><code class=\"language-mermaid\">{}</code></pre>\n",
+    ),
+    (
+        Key::FatalErrorBody,
+        "{}\n\nCheck the graphics environment and try again; your document was not modified.",
+    ),
+    (Key::AssocListSeparator, ", "),
+    (Key::ImageAltFallback, "[Image]"),
+
+    // ---- 全量英文词条（按 zh-CN 表顺序；上排为早期先行词条） ----
+
+    // ---- 通用 ----
+    (Key::Empty, ""),
+    (Key::UntitledDraft, "Untitled Draft"),
+    (Key::MenuCurrent, "Current"),
+
+    // ---- 菜单 ----
+    (Key::MenuFile, "File"),
+    (Key::MenuEdit, "Edit"),
+    (Key::MenuView, "View"),
+    (Key::MenuFileNew, "New"),
+    (Key::MenuFileNewWindow, "New Window"),
+    (Key::MenuFileOpen, "Open…"),
+    (Key::MenuFileQuickOpen, "Quick Open"),
+    (Key::MenuFileSave, "Save"),
+    (Key::MenuFileSaveAs, "Save As…"),
+    (Key::MenuFileExportHtml, "Export HTML…"),
+    (Key::MenuFileExportPdf, "Export PDF…"),
+    (Key::MenuFilePrint, "Print…"),
+    (Key::MenuFileVersionHistory, "Version History"),
+    (Key::MenuFileQuit, "Close Window"),
+    (Key::MenuEditUndo, "Undo"),
+    (Key::MenuEditRedo, "Redo"),
+    (Key::MenuEditCut, "Cut"),
+    (Key::MenuEditCopy, "Copy"),
+    (Key::MenuEditPaste, "Paste"),
+    (Key::MenuEditSelectAll, "Select All"),
+    (Key::MenuEditBold, "Bold"),
+    (Key::MenuEditItalic, "Italic"),
+    (Key::MenuEditLink, "Link"),
+    (Key::MenuEditFind, "Find"),
+    (Key::MenuEditReplace, "Replace"),
+    (Key::MenuEditInsertImage, "Insert Image…"),
+    (Key::MenuViewOutline, "Outline Panel"),
+    (Key::MenuViewZoomIn, "Zoom In"),
+    (Key::MenuViewZoomOut, "Zoom Out"),
+    (Key::MenuViewZoomReset, "Reset Zoom"),
+    (Key::MenuViewFullscreen, "Fullscreen"),
+    (Key::MenuViewThemeSystem, "Follow System"),
+    (Key::MenuViewThemeLight, "Light"),
+    (Key::MenuViewThemeDark, "Dark"),
+    (Key::MenuViewSourceMode, "Source Mode"),
+    (Key::MenuViewFocusMode, "Focus Mode"),
+    (Key::MenuViewAllowRemoteImages, "Allow Remote Images"),
+    (Key::MenuViewSettings, "Settings…"),
+    (Key::MenuHelp, "Help"),
+    (Key::MenuHelpAbout, "About Veil"),
+    (Key::MenuHelpExportDiagnostics, "Export Diagnostics…"),
+    (Key::MenuHelpCheckUpdate, "Check for Updates"),
+
+    // ---- 快捷键提示 ----
+    (Key::ShortcutNew, "Ctrl+N"),
+    (Key::ShortcutNewWindow, "Ctrl+Shift+N"),
+    (Key::ShortcutOpen, "Ctrl+O"),
+    (Key::ShortcutQuickOpen, "Ctrl+P"),
+    (Key::ShortcutSave, "Ctrl+S"),
+    (Key::ShortcutSaveAs, "Ctrl+Shift+S"),
+    (Key::ShortcutExportHtml, "Ctrl+E"),
+    (Key::ShortcutExportPdf, "Ctrl+Shift+E"),
+    (Key::ShortcutPrint, "Ctrl+Shift+P"),
+    (Key::ShortcutVersionHistory, "Ctrl+Shift+H"),
+    (Key::ShortcutUndo, "Ctrl+Z"),
+    (Key::ShortcutRedo, "Ctrl+Shift+Z"),
+    (Key::ShortcutCut, "Ctrl+X"),
+    (Key::ShortcutCopy, "Ctrl+C"),
+    (Key::ShortcutCopyCode, "Ctrl+Shift+C"),
+    (Key::ShortcutPaste, "Ctrl+V"),
+    (Key::ShortcutSelectAll, "Ctrl+A"),
+    (Key::ShortcutBold, "Ctrl+B"),
+    (Key::ShortcutItalic, "Ctrl+I"),
+    (Key::ShortcutLink, "Ctrl+K"),
+    (Key::ShortcutFind, "Ctrl+F"),
+    (Key::ShortcutReplace, "Ctrl+H"),
+    (Key::ShortcutInsertImage, "Ctrl+Shift+I"),
+    (Key::ShortcutOutline, "Ctrl+Shift+O"),
+    (Key::ShortcutZoomIn, "Ctrl+="),
+    (Key::ShortcutZoomOut, "Ctrl+-"),
+    (Key::ShortcutZoomReset, "Ctrl+0"),
+    (Key::ShortcutFullscreen, "F11"),
+    (Key::ShortcutSourceMode, "Ctrl+/"),
+    (Key::ShortcutSettings, "Ctrl+,"),
+
+    // ---- 菜单禁用原因 ----
+    (Key::DisabledNoChanges, "No changes to save"),
+    (Key::DisabledEmptyDocument, "Nothing to export in an empty document"),
+    (Key::DisabledNothingToUndo, "Nothing to undo"),
+    (Key::DisabledNothingToRedo, "Nothing to redo"),
+
+    // ---- 窗口标题 / 状态栏 ----
+    (Key::WindowTitle, "veil — {}"),
+    (Key::AppTitle, "veil"),
+    (Key::TitleDirtyPrefix, "* "),
+    (Key::TitleExternalChanged, " (externally modified)"),
+    (Key::TitleExternalBackedUp, " (external change backed up)"),
+    (Key::TitleExternalMissing, " (file missing)"),
+    (Key::StatusExternalChanged, " (externally modified)"),
+    (Key::StatusExternalBackedUp, " (external change backed up)"),
+    (Key::StatusExternalMissing, " (file missing)"),
+    (Key::StatusSourceMode, " (source mode)"),
+    (Key::StatusUnsaved, " · Unsaved"),
+    (Key::StatusSaved, " · Saved {}"),
+    (Key::StatusStats, "{} words · line {}, col {}"),
+    (Key::StatusWords, "{} words"),
+
+    // ---- 快速打开 ----
+    (Key::QuickOpenPlaceholder, "Quick Open: type a file name and press Enter"),
+    (
+        Key::QuickOpenEmptyNoCandidates,
+        "No recent files or Markdown files in this folder",
+    ),
+    (Key::QuickOpenEmptyNoMatch, "No matching files"),
+    (Key::QuickOpenRecent, "Recent"),
+
+    // ---- 查找替换 ----
+    (Key::SearchPlaceholder, "Find"),
+    (Key::SearchReplacePlaceholder, "Replace with"),
+    (Key::SearchReplace, "Replace"),
+    (Key::SearchReplaceAll, "All"),
+    (Key::SearchCaseSensitive, "Aa"),
+    (Key::SearchRegex, ".*"),
+    (Key::SearchRegexError, "Invalid regex"),
+    (Key::SearchCount, "{}/{}"),
+
+    // ---- 版本历史 ----
+    (Key::HistoryTitle, "Version History"),
+    (Key::HistoryRestore, "Restore This Version"),
+    (Key::HistoryDelete, "Delete Snapshot"),
+    (Key::HistoryClear, "Clear History"),
+    (Key::HistoryClose, "Close"),
+    (Key::HistoryEmpty, "No version history yet"),
+    (
+        Key::HistoryEmptyHint,
+        "Old versions are archived automatically before each save",
+    ),
+    (Key::HistoryCurrentSuffix, " · Current"),
+    (Key::HistoryUndoHint, "Press Ctrl+Z to undo the restore"),
+    (Key::HistoryErrorHeadline, "Failed to read history: {}"),
+    (Key::HistoryErrorHint, "Close the panel and try again"),
+
+    // ---- 大纲 ----
+    (Key::OutlineTitle, "Outline"),
+    (Key::OutlineEmpty, "No headings"),
+
+    // ---- 右键菜单 ----
+    (Key::CtxCut, "Cut"),
+    (Key::CtxCopy, "Copy"),
+    (Key::CtxPaste, "Paste"),
+    (Key::CtxSelectAll, "Select All"),
+    (Key::CtxOpenInBrowser, "Open in Browser"),
+    (Key::CtxCopyLink, "Copy Link Address"),
+    (Key::CtxInsertImage, "Insert Image…"),
+    (Key::CtxCopyImagePath, "Copy Image Path"),
+    (Key::CtxCopyCode, "Copy Code Block"),
+    (Key::CtxReloadImage, "Reload Image"),
+    (Key::CtxImageMissing, "Image file missing (showing alt text)"),
+    (Key::CtxMermaidPreviewImage, "Preview Current Source Diagram"),
+    (
+        Key::CtxMermaidInsertImage,
+        "Insert Local Image Snapshot (Keeps Source)",
+    ),
+    (Key::CtxMermaidCopySource, "Copy Source"),
+    (Key::CtxMermaidInsertFlowchart, "Insert Flowchart Template"),
+    (
+        Key::CtxMermaidInsertSequence,
+        "Insert Sequence Diagram Template",
+    ),
+    (Key::CtxMermaidInsertClass, "Insert Class Diagram Template"),
+    (Key::CtxFold, "Fold"),
+    (Key::CtxUnfold, "Unfold"),
+    (Key::CtxTableInsertRowAbove, "Insert Row Above"),
+    (Key::CtxTableInsertRowBelow, "Insert Row Below"),
+    (Key::CtxTableDeleteRow, "Delete Row"),
+    (Key::CtxTableInsertColumnLeft, "Insert Column Left"),
+    (Key::CtxTableInsertColumnRight, "Insert Column Right"),
+    (Key::CtxTableDeleteColumn, "Delete Column"),
+    (Key::CtxTableAlignLeft, "Align Left"),
+    (Key::CtxTableAlignCenter, "Center"),
+    (Key::CtxTableAlignRight, "Align Right"),
+
+    // ---- Callout ----
+    (Key::CalloutNote, "Note"),
+    (Key::CalloutTip, "Tip"),
+    (Key::CalloutImportant, "Important"),
+    (Key::CalloutWarning, "Warning"),
+    (Key::CalloutCaution, "Caution"),
+
+    // ---- Mermaid 卡片 ----
+    (Key::MermaidFlowchart, "Flowchart"),
+    (Key::MermaidSequence, "Sequence Diagram"),
+    (Key::MermaidClass, "Class Diagram"),
+    (Key::MermaidState, "State Diagram"),
+    (Key::MermaidEr, "ER Diagram"),
+    (Key::MermaidGantt, "Gantt Chart"),
+    (Key::MermaidPie, "Pie Chart"),
+    (Key::MermaidUnknown, "mermaid"),
+    (Key::MermaidBadge, "◈ {}"),
+    (
+        Key::MermaidEmptyHint,
+        "Empty Mermaid block — click to insert a template",
+    ),
+    // ---- 正文降级提示 ----
+    (
+        Key::BlockOversizeNotice,
+        "This block is about {} MB, exceeding the per-block render limit; later content was not rendered. The source is preserved in full.",
+    ),
+
+    // ---- 通用按钮 ----
+    (Key::BtnSave, "Save"),
+    (Key::BtnDontSave, "Don't Save"),
+    (Key::BtnCancel, "Cancel"),
+    (Key::BtnRetry, "Retry"),
+    (Key::BtnOpenOther, "Open Another File"),
+    (Key::BtnClose, "Close"),
+    (Key::BtnSaveAs, "Save As"),
+    (Key::BtnChangeLocation, "Change Location"),
+    (Key::BtnReselect, "Choose Again"),
+    (Key::BtnDelete, "Delete"),
+    (Key::BtnClear, "Clear"),
+    (Key::BtnConfirm, "Confirm"),
+    (Key::BtnReload, "Reload"),
+    (Key::BtnKeepCurrent, "Keep Current"),
+    (Key::BtnRestoreDefaults, "Restore Defaults"),
+
+    // ---- 保存 / 打开 / 导出 失败与提示 ----
+    (
+        Key::NoticeWatchUnavailable,
+        "File watching unavailable: {}. Next: reopen the file to try again.",
+    ),
+    (
+        Key::NoticeConflictNameExhausted,
+        "Conflict copy names exhausted. Next: clean up conflict copies in the same folder, or use Save As to save elsewhere.",
+    ),
+    (
+        Key::NoticeExternalBackupFailed,
+        "External version backup failed: save cancelled for {}. Next: check disk space or permissions, then save again, or use Save As.",
+    ),
+    (Key::NoticeSaved, "Saved: {}"),
+    (
+        Key::NoticeSaveFailed,
+        "Save failed: {}. Next: press Ctrl+S to retry, or Ctrl+Shift+S to save as.",
+    ),
+    (Key::ModalSaveFailedTitle, "Save Failed"),
+    (
+        Key::ModalSaveFailedBody,
+        "{}\n\nReason: {}\n\nNext: retry this save, or use Save As to write elsewhere; your changes are still in the editor.",
+    ),
+    (
+        Key::ModalExternalBackupFailBody,
+        "{}\n\nReason: external version backup failed ({}).\n\nNext: to avoid overwriting the external change, this save was cancelled; retry or use Save As to write elsewhere.",
+    ),
+    (
+        Key::NoticeRecoveryWriteFailed,
+        "Crash recovery write failed: {}. Next: check disk space or permissions and try again.",
+    ),
+    (Key::NoticeFileRestored, "File restored: {}"),
+    (
+        Key::NoticeExternalChanged,
+        "External change detected: the disk version will be backed up before saving.",
+    ),
+    (
+        Key::NoticeExternalDeleted,
+        "The file was deleted externally; the content is still in the editor. Next: keep editing, or use Save As to save to a new location.",
+    ),
+    (
+        Key::NoticeExternalUnreadable,
+        "The file is temporarily unreadable (it may be locked by another program); the content is still in the editor. Next: keep editing or use Save As.",
+    ),
+    (
+        Key::ModalExternalChangedTitle,
+        "\"{}\" was changed externally",
+    ),
+    (
+        Key::ModalExternalChangedBody,
+        "The file on disk was modified by another program. Reloading discards unsaved changes; Keep Current lets you keep editing, and the disk version will be backed up before saving.",
+    ),
+    (Key::NoticeExternalReloaded, "Reloaded the external change: {}"),
+    (
+        Key::NoticeExternalKept,
+        "Kept the current content; the disk version will be backed up before saving.",
+    ),
+    (
+        Key::NoticeExternalDismissed,
+        "Cancelled: the external change is still pending.",
+    ),
+    (Key::NoticeExportCancelled, "Export cancelled"),
+    (
+        Key::NoticeOutputEmptyDocument,
+        "An empty document has nothing to export or print.",
+    ),
+    (Key::NoticeExportedHtml, "Exported HTML: {}"),
+    (
+        Key::NoticeExportFailed,
+        "Export failed: {}. Next: retry the export, or check that the target folder is writable and choose another location.",
+    ),
+    (
+        Key::NoticeErrorWhileModalOpen,
+        "{}: {}. Next: close the current dialog, then try again.",
+    ),
+    (Key::ModalExportFailedTitle, "Export Failed"),
+    (
+        Key::ModalExportFailedBody,
+        "{}\n\nReason: {}\n\nNext: retry the export, or cancel and check that the target folder is writable.",
+    ),
+    (Key::NoticeSaveAsCancelled, "Save As cancelled"),
+    (Key::NoticeSavedAs, "Saved as: {}"),
+    (
+        Key::NoticeHistoryMigrationFailed,
+        "Document saved to: {}; version history migration failed ({}), and the old history remains in the temporary session folder. Next: check disk space or permissions and save again.",
+    ),
+    (
+        Key::NoticeSnapshotFailed,
+        "Failed to write version history: {} (your content is preserved). Next: check disk space or write permissions and save again.",
+    ),
+    (
+        Key::NoticeAssetsMigrationIncomplete,
+        "Saved as: {}; {} relative image assets could not be migrated (source missing or copy failed), so broken images may appear in the new location. Next: check that the source images still exist and copy the missing images to the new location.",
+    ),
+    (
+        Key::NoticeSaveAsFailed,
+        "Save As failed: {}. Next: press Ctrl+Shift+S to retry, or choose another location.",
+    ),
+    (Key::ModalSaveAsFailedTitle, "Save As Failed"),
+    (
+        Key::ModalSaveAsFailedBody,
+        "{}\n\nReason: {}\n\nNext: retry writing to the same location, or choose another folder; your changes are still in the editor.",
+    ),
+    (Key::ModalOpenFailedTitle, "Open Failed"),
+    (
+        Key::ModalOpenFailedBody,
+        "{}\n\nReason: {}\n\nNext: retry reading the same file, or choose a different file; the current document is unchanged.",
+    ),
+    (Key::ModalUnsavedTitle, "Save changes to \"{}\"?"),
+    (
+        Key::ModalUnsavedBody,
+        "\"Save\": write these changes back to the original file.\n\"Don't Save\": discard these changes; they cannot be recovered after closing.\n\"Cancel\": return to the document and keep editing.",
+    ),
+    (Key::NoticeCancelled, "Cancelled"),
+    (Key::NoticeCancelledWhat, "Cancelled: {}"),
+    (Key::ActionOpen, "Open"),
+    (Key::ActionExportHtml, "Export HTML"),
+    (Key::ActionExportPdf, "Export PDF"),
+    (Key::ActionPrint, "Print"),
+    (
+        Key::NoticeSaveIncomplete,
+        "Save did not complete (failed or cancelled), so the action was cancelled. Next: retry the save, or check the failure reason and try again.",
+    ),
+    (
+        Key::NoticeCancelDirty,
+        "Cancelled: the document still has unsaved changes.",
+    ),
+    (
+        Key::NoticeOpenFailed,
+        "Open failed: {}. Next: confirm the file exists and is readable, then try again, or choose another file.",
+    ),
+    (Key::NoticeOpened, "Opened: {}"),
+    (Key::NoticeNewDraft, "Created a new blank document"),
+
+    // ---- 快照 ----
+    (
+        Key::NoticeSnapshotReadFailed,
+        "Failed to read snapshot: {}. Next: close Version History and try again, or check whether the snapshot file is in use.",
+    ),
+    (Key::NoticeSelectVersion, "Select a version first"),
+    (
+        Key::NoticeRestoredVersion,
+        "Version restored (press Ctrl+Z to undo)",
+    ),
+    (
+        Key::NoticeSelectVersionToDelete,
+        "Select a version to delete first",
+    ),
+    (Key::ModalDeleteSnapshotTitle, "Delete Version Snapshot"),
+    (
+        Key::ModalDeleteSnapshotBody,
+        "{} ({})\n\nThis version will be permanently deleted; this cannot be undone.\n\nNext: confirm the deletion, or cancel to keep it.",
+    ),
+    (Key::NoticeDeletedSnapshot, "Version snapshot deleted"),
+    (
+        Key::NoticeDeleteSnapshotFailed,
+        "Failed to delete snapshot: {}. Next: check disk space or whether the file is in use, then try again.",
+    ),
+    (Key::NoticeNoHistory, "No version history to clear"),
+    (Key::ModalClearHistoryTitle, "Clear Version History"),
+    (
+        Key::ModalClearHistoryBody,
+        "This will permanently delete all {} historical snapshots of this document.\n\nThis cannot be undone; the current document content is unaffected.\n\nNext: confirm clearing, or cancel to keep them.",
+    ),
+    (Key::NoticeHistoryCleared, "Version history cleared ({} snapshots)"),
+    (
+        Key::NoticeClearHistoryFailed,
+        "Failed to clear history: {}. Next: check disk space or whether files are in use, then try again.",
+    ),
+    // ---- 启动 / 配置 ----
+    (
+        Key::NoticeConfigIgnored,
+        "Ignored {} unrecognized configuration entries",
+    ),
+    (Key::NoticeDiagnosticsSaved, "Diagnostics exported: {}"),
+    (Key::NoticeDiagnosticsFailed, "Failed to export diagnostics: {}"),
+    (
+        Key::NoticeUpdateOpenFailed,
+        "Could not open the update page: {}",
+    ),
+    (
+        Key::NoticeConfigInvalid,
+        "The configuration file is invalid; using the default theme: {}. Next: fix the configuration file and restart the app, or delete it to restore defaults.",
+    ),
+    (
+        Key::NoticeRecovered,
+        "Recovered unsaved content for \"{}\" from a crash; recovery time {}. The current content is not saved yet: press Ctrl+S to save ({})",
+    ),
+    (
+        Key::RecoveredSaveToDir,
+        "write back to the original file's folder \"{}\"",
+    ),
+    (Key::RecoveredSaveToFile, "write back to the original file"),
+    (
+        Key::RecoveredSaveChooseLocation,
+        "choose a new save location",
+    ),
+    (Key::NoticeTheme, "Theme: {}"),
+    (
+        Key::NoticeConfigNotSaved,
+        "Configuration not saved: {}. Next: check write permissions or disk space for the config directory and try again.",
+    ),
+    (
+        Key::ErrEventLoopCreate,
+        "Failed to create the event loop: {}. Restart the app; if it still fails, check the graphics environment or reinstall.",
+    ),
+    (
+        Key::ErrEventLoopRun,
+        "Event loop error: {}. Restart the app; if it still fails, check the graphics environment or reinstall.",
+    ),
+    (
+        Key::FatalWindowCreate,
+        "Could not create a window: the graphics environment is unavailable. Restart the app; if it still fails, check the graphics environment or reinstall.",
+    ),
+    (Key::FatalWindowCreateDetail, "Failed to create window: {}"),
+    (
+        Key::FatalWindowRenderDetail,
+        "Failed to create rendering context: {}",
+    ),
+    (
+        Key::FatalWindowBusyNext,
+        "Close a window and try again; your open documents will stay open.",
+    ),
+    (Key::CliUsage, "Usage: veil [--new-window] [path]"),
+    (
+        Key::CliUnknownOption,
+        "Unknown option: {}; {}; Next: check the option spelling, or rerun with the usage above.",
+    ),
+    (
+        Key::CliInvalidPath,
+        "Invalid document path. Next: check that the path exists and is not empty, then rerun.",
+    ),
+    (
+        Key::CliCurrentDir,
+        "Could not determine the current directory: {}. Next: rerun with an absolute path.",
+    ),
+    (
+        Key::CliPathOutOfBounds,
+        "Document path is out of bounds. Next: check for \"..\" in the path and rerun with an absolute path.",
+    ),
+
+    // ---- 编辑交互提示 ----
+    (Key::NoticeFullscreenOn, "Fullscreen (press F11 to exit)"),
+    (Key::NoticeFullscreenOff, "Exited fullscreen"),
+    (Key::NoticeZoom, "Zoom {}%"),
+    (
+        Key::NoticeImagePasteNeedsFile,
+        "Save the document before inserting an image",
+    ),
+    (
+        Key::NoticeImageSaveFailed,
+        "Failed to save image: {}. Next: check that the target folder is writable, or save the document elsewhere and try again.",
+    ),
+    (
+        Key::NoticeMermaidSnapshotNeedsFile,
+        "Mermaid snapshot not inserted: save the document first, then write the local image.",
+    ),
+    (
+        Key::NoticeMermaidSnapshotSaveFailed,
+        "Failed to save the Mermaid snapshot; the source was not modified: {}. Next: check that the target folder is writable and insert the snapshot again.",
+    ),
+    (
+        Key::NoticeMermaidSnapshotStale,
+        "The Mermaid source changed or the document switched, so the snapshot was not inserted (content unchanged). Next: preview the diagram again and insert the snapshot once more.",
+    ),
+    (
+        Key::NoticeImageReadFailed,
+        "Failed to read image: {}. Next: check that the file exists and is readable, then reload the image.",
+    ),
+    (
+        Key::NoticeInsertImageNeedsFile,
+        "Save the document before inserting an image",
+    ),
+    (
+        Key::NoticeUnsupportedImage,
+        "The selected file is not a supported image format. Next: use a supported format such as PNG, JPEG, or WebP.",
+    ),
+    (
+        Key::NoticeFootnoteDefMissing,
+        "Footnote definition not found. Next: check that the footnote name matches its reference.",
+    ),
+    (
+        Key::NoticeFootnoteRefMissing,
+        "Footnote reference not found. Next: check that the footnote name matches its definition.",
+    ),
+    (
+        Key::NoticeAnchorMissing,
+        "Anchor not found. Next: check that the anchor name matches the heading.",
+    ),
+    (
+        Key::NoticeLinkUnsupported,
+        "Could not open link: unsupported link address {}. Next: use an http/https link, or copy it into a browser.",
+    ),
+    (
+        Key::NoticeLinkFailed,
+        "Could not open link: {}. Next: check the system default browser, or copy the link and open it manually.",
+    ),
+    (
+        Key::NoticeImageMissing,
+        "Image file missing; showing alt text: {}. Next: right-click to reload the image or copy the image path.",
+    ),
+    (Key::NoticeCodeCopied, "Code block copied"),
+    (Key::NoticeCodeBlockRequired, "Cursor is not inside a code block"),
+    (Key::CodeCopyButton, "Copy"),
+    (Key::CodeCopiedButton, "Copied"),
+    (Key::FrontMatterCollapsed, "Front Matter"),
+    (Key::NoticeFocusMode, "Focus mode: {}"),
+    (
+        Key::NoticeRemoteImageFailed,
+        "Some remote images failed to load; showing alt text. Next: check that the links are valid, or right-click to reload the images.",
+    ),
+    (
+        Key::NoticeMermaidRenderFailed,
+        "Diagram rendering failed: {}. Next: check the Mermaid syntax and preview again.",
+    ),
+    (
+        Key::NoticeMermaidImageInserted,
+        "Inserted a local image snapshot; the Mermaid source block above remains a live preview and the snapshot will not update with the source: {}",
+    ),
+    (Key::NoticeRemoteImagesBlocked, "Remote images blocked"),
+    (Key::NoticeRemoteImagesAllowed, "Remote images allowed"),
+    (
+        Key::NoticeMermaidSourceTooLarge,
+        "Mermaid source exceeds 128 KiB; rendering skipped",
+    ),
+    (Key::ToggleOn, "On"),
+    (Key::ToggleOff, "Off"),
+
+    // ---- 拖放 ----
+    (
+        Key::DropImageNeedsDir,
+        "\"{}\" cannot be inserted: save the document first",
+    ),
+    (Key::DropInsertImage, "Release to insert image: {}"),
+    (Key::DropOpenDocument, "Release to open document: {}"),
+
+    // ---- 打印 / 导出 ----
+    (
+        Key::PrintUnsupportedPdf,
+        "PDF export is not supported on this platform; use Export HTML instead, or retry on a platform that supports printing.",
+    ),
+    (
+        Key::PrintUnsupportedPrint,
+        "Printing is not supported on this platform; use Export PDF instead and print from a reader.",
+    ),
+    (Key::ImagePreviewTitle, "Image Preview · {} · {}"),
+    (
+        Key::ImagePreviewHint,
+        "Scroll wheel/arrow keys to pan · Ctrl+wheel or +/- to zoom · 0 to fit window · Esc or click the backdrop to close",
+    ),
+    (Key::PrintTocTitle, "Table of Contents"),
+    (Key::ExportUntitledPdf, "Untitled.pdf"),
+    (Key::ExportUntitledHtml, "Untitled.html"),
+    (Key::ExportUntitledMarkdown, "Untitled.md"),
+    (
+        Key::NoticePrintFailed,
+        "Print failed: {}. Next: retry printing, or check that the printer is online and its driver is working.",
+    ),
+    (Key::ModalPrintFailedTitle, "Print Failed"),
+    (
+        Key::ModalPrintFailedBody,
+        "Reason: {}\n\nNext: retry by reopening the print dialog, or check that the printer is online and its driver is working.",
+    ),
+    (
+        Key::NoticeExportPdfFailed,
+        "PDF export failed: {}. Next: retry the export, or check that the target folder is writable and the file is not in use.",
+    ),
+    (Key::ModalExportPdfFailedTitle, "PDF Export Failed"),
+    (
+        Key::ModalExportPdfFailedBody,
+        "Reason: {}\n\nNext: retry the export, or cancel and check that a usable CJK font is installed, the target folder is writable, and the file is not in use; existing PDFs will not be modified.",
+    ),
+
+    // ---- 平台层（打印 / PDF） ----
+    (
+        Key::PrintNoPrinterContext,
+        "Print failed: could not obtain a printer context. Check the printer connection and try again, or use Export PDF instead.",
+    ),
+    (
+        Key::PrintSentPagesUnified,
+        "Sent {} pages to the printer (same layout as PDF)",
+    ),
+    (
+        Key::PrintUnifiedFallback,
+        "Unified layout unavailable; falling back to screen-rendered printing: {}",
+    ),
+    (
+        Key::PrintSentPagesScreen,
+        "Sent {} pages to the printer (screen rendering)",
+    ),
+    (Key::PrintExportCancelled, "Export cancelled"),
+    (
+        Key::PrintErrStartJob,
+        "Print failed: could not start the print job",
+    ),
+    (
+        Key::PrintErrInterruptedPartial,
+        "Print interrupted: some pages were not output",
+    ),
+    (
+        Key::PrintErrInterruptedNewPage,
+        "Print interrupted: could not start a new page",
+    ),
+    (
+        Key::PrintErrInterruptedEnd,
+        "Print interrupted: could not end the print job",
+    ),
+    (Key::PrintErrBackupOld, "Could not back up the old file: {}"),
+    (Key::PrintErrWriteTarget, "Could not write the target file: {}"),
+    (Key::PrintErrNoCjkFont, "No usable CJK font on the system"),
+    (Key::PrintErrDocEmpty, "The document is empty"),
+    (Key::PrintErrNoPrintablePages, "No pages to print"),
+    (Key::PrintErrNoExportPages, "No pages to export"),
+    (Key::PrintErrPdfTooLarge, "PDF too large: {} MB"),
+    (Key::PrintErrWriteTemp, "Failed to write temporary file: {}"),
+    (
+        Key::PrintErrReplaceTarget,
+        "Failed to replace the target file: {}",
+    ),
+    (
+        Key::PrintExportedPdf,
+        "Exported PDF: {} ({} bytes, {} pages, {} bookmarks, {} images)",
+    ),
+    (Key::PrintDocumentName, "Veil Document"),
+
+    // ---- 文件关联 / 启动对话框 ----
+    (Key::AssocTitle, "Veil File Associations"),
+    (Key::AssocFailedTitle, "Veil File Association Failed"),
+    (
+        Key::MainOpenFailedTitle,
+        "Veil Could Not Open the File",
+    ),
+    (
+        Key::AssocLocateExe,
+        "Could not locate the current executable path: {}",
+    ),
+    (Key::AssocExeNotUtf8, "The executable path is not valid UTF-8"),
+    (
+        Key::AssocUnsupported,
+        "File associations are not supported on this platform (Windows only)",
+    ),
+    (Key::AssocErrWithCode, "{}: {} (error code {})"),
+    (Key::AssocOpenKeyFailed, "Failed to open the registry key"),
+    (Key::AssocCreateKeyFailed, "Failed to create the registry key"),
+    (Key::AssocWriteValueFailed, "Failed to write the registry value"),
+    (Key::AssocReadValueFailed, "Failed to read the registry value"),
+    (
+        Key::AssocDeleteValueFailed,
+        "Failed to delete the registry value",
+    ),
+    (Key::AssocDeleteKeyFailed, "Failed to delete the registry key"),
+    (Key::AssocMarkdownDescription, "Markdown Document"),
+    (
+        Key::AssocDefaultSet,
+        "Set Veil as the default app for .md",
+    ),
+    (
+        Key::AssocDefaultOther,
+        ".md already has another association, so it was left unchanged; to open .md files with Veil, choose it in Settings → Apps → Default apps",
+    ),
+    (
+        Key::AssocIconKept,
+        "A custom file icon already exists; it was left unchanged",
+    ),
+    (
+        Key::AssocRegisterKept,
+        "The following ProgID values were written by another program and were kept unchanged: {}",
+    ),
+    (
+        Key::AssocUnregisterKept,
+        "The following associations were not written by this app or have been modified, so they were kept: {}",
+    ),
+    (Key::AssocProgIdDescription, "ProgID Description"),
+    (Key::AssocOpenCommand, "Open Command"),
+    (Key::AssocAppIcon, "veil.exe Icon"),
+    (Key::AssocOpenWithEntry, "\"Open with\" Entry"),
+    (Key::AssocMarkdownDefault, ".md Default"),
+    (
+        Key::AssocManualDefault,
+        "\n\nTo make Veil the default app for double-clicking .md files, choose Veil in Settings → Apps → Default apps. Windows does not allow apps to change the default app themselves.",
+    ),
+    (
+        Key::AssocRegisteredBody,
+        "Registered Markdown file associations (current user only).\n\n- Document icon embedded: shown once Veil is the default .md app\n- Right-click a .md file → \"Open with\" lists Veil",
+    ),
+    (
+        Key::AssocUnregisteredBody,
+        "Removed Veil's Markdown file associations (current user only).\n\nIf Explorer still shows the old icon, sign out and back in to refresh it.",
+    ),
+    // ---- 系统对话框 ----
+    (
+        Key::DialogFilterMarkdown,
+        "Markdown (*.md;*.markdown)\0*.md;*.markdown\0All files (*.*)\0*.*\0\0",
+    ),
+    (
+        Key::DialogFilterImage,
+        "Images (*.png;*.jpg;*.jpeg;*.jfif;*.bmp;*.gif;*.webp;*.tif;*.tiff;*.ico)\0*.png;*.jpg;*.jpeg;*.jfif;*.bmp;*.gif;*.webp;*.tif;*.tiff;*.ico\0All files (*.*)\0*.*\0\0",
+    ),
+    (Key::DialogOpenMarkdown, "Open Markdown"),
+    (Key::DialogSaveMarkdown, "Save As Markdown"),
+    (Key::DialogInsertImage, "Insert Image"),
+    (Key::DialogExportPdf, "Export PDF"),
+    (Key::DialogExportHtml, "Export HTML"),
+    (Key::DialogFilterPdf, "PDF (*.pdf)"),
+    (Key::DialogFilterHtml, "HTML (*.html)"),
+    (Key::DialogFilterAllFiles, "All files (*.*)"),
+    (
+        Key::DialogFilterMarkdownLabel,
+        "Markdown (*.md;*.markdown)",
+    ),
+    (Key::DialogFilterMarkdownPattern, "*.md;*.markdown"),
+    (Key::DialogFilterPdfPattern, "*.pdf"),
+    (Key::DialogFilterHtmlPattern, "*.html"),
+    (Key::DialogExportDiagnostics, "Export Diagnostics"),
+    (Key::DialogFilterText, "Text files (*.txt)"),
+    (Key::DialogFilterTextPattern, "*.txt"),
+
+    // ---- 关于 ----
+    (Key::AboutTitle, "About Veil"),
+    (Key::AboutOpenHomepage, "Open Project Homepage"),
+
+    // ---- 打开失败说明 ----
+    (Key::OpenFailNotUtf8, "The file is not valid UTF-8 ({})"),
+    (
+        Key::OpenFailNotUtf8Next,
+        "Save the file as UTF-8 and try again.",
+    ),
+    (
+        Key::OpenFailNotFound,
+        "The file does not exist or has been moved ({})",
+    ),
+    (
+        Key::OpenFailNotFoundNext,
+        "Check the path and try again, or choose the file again via File → Open.",
+    ),
+    (Key::OpenFailDenied, "No permission to read this file ({})"),
+    (
+        Key::OpenFailDeniedNext,
+        "Make sure the file is not read-only or blocked by security software, then try again once you have permission.",
+    ),
+    (Key::OpenFailOther, "Read failed ({})"),
+    (
+        Key::OpenFailOtherNext,
+        "Make sure the file is accessible and try again.",
+    ),
+    (
+        Key::OpenFailBody,
+        "Could not open: {}\n\nReason: {}\n\nNext: {}",
+    ),
+
+    // ---- 错误明细 ----
+    (
+        Key::ErrBitmapSizeMismatch,
+        "Bitmap size mismatch: {} bytes ≠ {}×{}×4",
+    ),
+    (Key::ErrMathFontUnavailable, "Math font unavailable"),
+    (Key::ErrPngOutputOverflow, "PNG output size overflow"),
+    (Key::ErrPngBitDepth, "Unexpected PNG bit depth: {}"),
+    (Key::ErrIndexedPng, "Indexed PNG was not expanded"),
+    (Key::ErrIoCreateDir, "{} (creating {})"),
+    (Key::ErrIoWriteFile, "{} (writing {})"),
+    (Key::ErrNoConfigDir, "Could not locate the config directory"),
+    (
+        Key::ErrConfigNotUtf8,
+        "The configuration file is not valid UTF-8",
+    ),
+    (Key::ErrNotUtf8, "The file is not valid UTF-8"),
+    (Key::ErrNoDataDir, "Could not locate the data directory"),
+    (
+        Key::ErrUnsupportedImage,
+        "Only PNG images are supported on this platform",
+    ),
+    (
+        Key::ErrUrlUnsupported,
+        "Opening links is not supported on this platform",
+    ),
+    (
+        Key::ErrSnapshotDirCreate,
+        "Failed to create the snapshot directory: {}",
+    ),
+    (Key::ErrSnapshotWrite, "Failed to write snapshot: {}"),
+    (
+        Key::ErrSnapshotRead,
+        "Snapshot does not exist or is unreadable ({}): {}",
+    ),
+    (
+        Key::ErrSnapshotMeta,
+        "Snapshot metadata validation failed (the file is corrupted)",
+    ),
+    (Key::ErrSnapshotUtf8, "Snapshot is not valid UTF-8: {}"),
+    (Key::ErrSnapshotDelete, "Failed to delete snapshot ({}): {}"),
+    (Key::ErrHistoryClear, "Failed to clear history: {}"),
+    (Key::ErrSnapshotMigrate, "Failed to migrate snapshot: {}"),
+    (Key::ErrFontRead, "Failed to read font {}: {}"),
+    (Key::ErrFontParse, "Failed to parse font: {}"),
+    (
+        Key::ErrExportDraftNoPath,
+        "The document has no save location yet, so it cannot be exported",
+    ),
+    (Key::ErrFontSubset, "Font subsetting failed: {}"),
+    (Key::ErrShellProtocol, "Unsupported link protocol: {}"),
+    (Key::ErrShellExecute, "ShellExecuteW returned {}"),
+    (Key::ErrWatchInit, "Failed to initialize file watching"),
+    (Key::ErrWatchPath, "{} (watching {})"),
+    (Key::ErrHresult, "{} failed (HRESULT 0x{})"),
+    (Key::ErrImageSizeInvalid, "Invalid image size: {}×{}"),
+    (
+        Key::ErrImageTooLarge,
+        "Image too large: {}×{} (limit 100 million pixels)",
+    ),
+    (
+        Key::ErrPdfNoDocPath,
+        "The document is not saved, so relative image paths cannot be resolved",
+    ),
+    (Key::ErrPdfImageEmpty, "Image has zero size"),
+    (Key::ErrMathRendererUnavailable, "Math renderer unavailable"),
+    (Key::ErrMathRendererInternal, "Internal math renderer error"),
+    (Key::ErrMathRenderEmpty, "Math render is empty"),
+    // ---- 平台层（WIC 图片解码） ----
+    (Key::WicCreateFactory, "Create WIC factory"),
+    (Key::WicComInit, "COM initialization"),
+    (
+        Key::WicFactoryNull,
+        "Creating the WIC factory returned a null pointer",
+    ),
+    (
+        Key::WicDecoderNull,
+        "Image decoder returned a null pointer",
+    ),
+    (Key::WicOpenDecoder, "Open image decoder"),
+    (Key::WicReadFrame, "Read image frame"),
+    (Key::WicFrameNull, "Image frame returned a null pointer"),
+    (Key::WicCreateConverter, "Create format converter"),
+    (
+        Key::WicConverterNull,
+        "Format converter returned a null pointer",
+    ),
+    (Key::WicConvertPixels, "Convert pixel format"),
+    (Key::WicReadSize, "Read image size"),
+    (Key::WicReadPixels, "Read image pixels"),
+
+    // ---- 平台层（启动 / IPC / HTTP） ----
+    (
+        Key::IpcPathAbsolute,
+        "IPC document path must be absolute",
+    ),
+    (Key::IpcPathUtf8, "IPC document path is not valid UTF-8"),
+    (Key::IpcPathInvalid, "Invalid IPC document path"),
+    (Key::IpcPathTooLong, "IPC document path is too long"),
+    (
+        Key::IpcConnectPrimary,
+        "Could not connect to the main Veil process: {}",
+    ),
+    (Key::IpcUnknown, "Unknown error"),
+    (
+        Key::IpcUnsupported,
+        "Single-instance IPC is not supported on this platform; a separate process will be used",
+    ),
+    (Key::HttpUrlEmpty, "URL is empty"),
+    (
+        Key::HttpUrlTooLong,
+        "URL is too long (limit {} characters)",
+    ),
+    (Key::HttpUrlControl, "URL contains control characters"),
+    (
+        Key::HttpUrlMissingScheme,
+        "URL is missing a scheme (only http/https are supported)",
+    ),
+    (Key::HttpUnsupportedScheme, "Unsupported scheme: {}"),
+    (Key::HttpUrlMissingHost, "URL is missing a host name"),
+    (
+        Key::HttpUrlUserInfo,
+        "URL must not contain user information",
+    ),
+    (
+        Key::HttpIpv6MissingBracket,
+        "IPv6 host is missing the closing bracket",
+    ),
+    (
+        Key::HttpHostTrailingChars,
+        "Invalid characters after the host name",
+    ),
+    (
+        Key::HttpIpv6NeedsBrackets,
+        "IPv6 hosts must be wrapped in brackets",
+    ),
+    (Key::HttpPortEmpty, "Port is empty"),
+    (Key::HttpPortInvalid, "Invalid port: {}"),
+    (Key::HttpPortOutOfRange, "Port out of range: {}"),
+    (
+        Key::HttpHostInvalidChars,
+        "Host name contains invalid characters",
+    ),
+    (Key::HttpIpv6Invalid, "Invalid IPv6 address: {}"),
+    (
+        Key::HttpLocalhostBlocked,
+        "Access to localhost is not allowed",
+    ),
+    (
+        Key::HttpPrivateAddressBlocked,
+        "Access to private/reserved addresses is not allowed: {}",
+    ),
+    (
+        Key::HttpNumericHostBlocked,
+        "Numeric/hexadecimal host names are not allowed: {}",
+    ),
+    (Key::HttpHostInvalid, "Invalid host name: {}"),
+    (Key::HttpRedirectEmpty, "Redirect location is empty"),
+    (
+        Key::HttpRedirectTooMany,
+        "Too many redirects (more than {})",
+    ),
+    (
+        Key::HttpRedirectMissingLocation,
+        "Redirect response is missing Location",
+    ),
+    (
+        Key::HttpRedirectDowngrade,
+        "Refused redirect from https to http",
+    ),
+    (Key::HttpErrWithCode, "{} failed (error code {})"),
+    (Key::HttpOpOpenSession, "Open WinHTTP session"),
+    (Key::HttpOpConnect, "Connect to remote host"),
+    (Key::HttpOpCreateRequest, "Create HTTP request"),
+    (Key::HttpOpSetTimeouts, "Set WinHTTP timeouts"),
+    (Key::HttpOpConfigureRequest, "Configure HTTP request"),
+    (Key::HttpOpSendRequest, "Send request"),
+    (Key::HttpOpReceiveResponse, "Receive response"),
+    (Key::HttpOpReadStatus, "Read response status"),
+    (Key::HttpOpReadBody, "Read response body"),
+    (
+        Key::HttpResponseTooLarge,
+        "Remote image exceeds the {} MiB limit ({} bytes)",
+    ),
+    (Key::HttpResponseEmpty, "Remote image response is empty"),
+    (
+        Key::HttpTempWriteFailed,
+        "Failed to write the remote image temporary file: {}",
+    ),
+
+    // ---- 设置模态 ----
+    (Key::ModalSettingsTitle, "Settings"),
+    (Key::SettingsThemeMode, "Theme Mode"),
+    (Key::SettingsFollowSystem, "Follow System"),
+    (Key::SettingsLight, "Light"),
+    (Key::SettingsDark, "Dark"),
+    (Key::SettingsDocFontSize, "Body Font Size (10–32)"),
+    (Key::SettingsDocFontFamily, "Body Font Family"),
+    (Key::SettingsFontSystem, "System Default"),
+    (Key::SettingsFontSans, "Sans Serif"),
+    (Key::SettingsFontSerif, "Serif"),
+    (Key::SettingsFontMono, "Monospace"),
+    (Key::SettingsAllowRemoteImages, "Allow Remote Images"),
+    (Key::SettingsWindowGeom, "Last Window Geometry"),
+    (Key::SettingsWindowGeomNone, "(Not Recorded)"),
+    (
+        Key::SettingsResetWindowGeom,
+        "Clear (Resets on Next Launch)",
+    ),
+    (
+        Key::SettingsExportPageNumbers,
+        "Show Page Numbers in PDF Export",
+    ),
+    (
+        Key::SettingsExportToc,
+        "Include Table of Contents in PDF Export",
+    ),
+    (
+        Key::SettingsExportMarginMm,
+        "PDF Export Margin (mm, 0–50)",
+    ),
+    (Key::SettingsTabWidth, "Tab Width (2 or 4)"),
+    (Key::NoticeSettingsSaved, "Settings saved"),
+    (
+        Key::NoticeSettingsSaveFailed,
+        "Failed to save settings: {}. Next: check write permissions or disk space for the config directory and try again.",
     ),
 ];
 
@@ -690,8 +1807,29 @@ pub const LOCALES: &[Locale] = &[
     },
 ];
 
-/// 当前语言（固定 zh-CN；多语言支持时改为可注入）。
-pub const CURRENT_LOCALE: &str = "zh-CN";
+/// 未初始化时的默认语言。
+const DEFAULT_LOCALE: &str = "zh-CN";
+
+/// 进程级运行时语言；只在启动时初始化一次（`init_locale`），之后只读。
+static CURRENT_LOCALE: OnceLock<&'static str> = OnceLock::new();
+
+/// 当前运行时语言：未初始化（库调用方/单测）时默认 zh-CN。
+pub fn current_locale() -> &'static str {
+    CURRENT_LOCALE.get().copied().unwrap_or(DEFAULT_LOCALE)
+}
+
+/// 初始化运行时语言。只接受已支持的语言码（`zh-CN` / `en-US`），其他值忽略；
+/// 重复调用不生效（首次成功者胜），保证启动后语言稳定。
+///
+/// 成功后同步设置 veil-core 层 `<img>` 无 alt 时的降级占位文本——这是 UI 层
+/// 唯一的「反向注入」：core 是纯策略层，不持有语言状态，需要上层在启动时
+/// 把和当前 UI 语言对应的占位字符串（如 `[Image]`）传进去。OnceLock 保证两边
+/// 都只设一次，不会因重试而错乱。
+pub fn init_locale(code: &'static str) {
+    if matches!(code, "zh-CN" | "en-US") && CURRENT_LOCALE.set(code).is_ok() {
+        veil_core::set_image_alt_fallback(t(Key::ImageAltFallback).to_string());
+    }
+}
 
 /// 词条查找：命中返回词条，缺失返回 None（纯函数，便于单测缺失回退）。
 pub fn lookup(entries: &'static [(Key, &'static str)], key: Key) -> Option<&'static str> {
@@ -704,12 +1842,12 @@ pub fn lookup(entries: &'static [(Key, &'static str)], key: Key) -> Option<&'sta
 /// 缺失 key 的 debug 断言：测试构建跳过，保证「回退不 panic」可被单测覆盖。
 fn missing(key: Key) -> &'static str {
     #[cfg(not(test))]
-    debug_assert!(false, "i18n 缺失词条: {} ({})", key.id(), CURRENT_LOCALE);
+    debug_assert!(false, "i18n 缺失词条: {} ({})", key.id(), current_locale());
     key.id()
 }
 
 /// 当前语言优先；当前语言缺失词条或未配置时，按语言表顺序回退。
-fn translate(locales: &[Locale], current: &str, key: Key) -> Option<&'static str> {
+pub(crate) fn translate(locales: &[Locale], current: &str, key: Key) -> Option<&'static str> {
     if let Some(text) = locales
         .iter()
         .find(|locale| locale.code == current)
@@ -725,7 +1863,7 @@ fn translate(locales: &[Locale], current: &str, key: Key) -> Option<&'static str
 
 /// 取当前语言词条；所有语言均缺失时回退显示 key id（不 panic）。
 pub fn t(key: Key) -> &'static str {
-    translate(LOCALES, CURRENT_LOCALE, key).unwrap_or_else(|| missing(key))
+    translate(LOCALES, current_locale(), key).unwrap_or_else(|| missing(key))
 }
 
 /// 按 `{}` 占位符顺序填充参数；参数不足时返回词条原文（占位符原样保留），
@@ -880,6 +2018,106 @@ mod tests {
         assert_eq!(t(Key::CalloutNote), "Note");
     }
 
+    /// en-US 覆盖项必须非空（`Empty` 本身即空串），且 `{}` 占位符数量与 zh-CN 一致
+    /// （`tf` 才能同参填充）。
+    #[test]
+    fn en_us_entries_keep_placeholder_parity() {
+        for &(key, text) in EN_US {
+            let zh = lookup(ZH_CN, key).unwrap_or_else(|| panic!("en-US 词条无 zh 对应: {key:?}"));
+            if key != Key::Empty {
+                assert!(!text.is_empty(), "en-US 词条不得为空: {:?}", key);
+            }
+            assert_eq!(
+                text.matches("{}").count(),
+                zh.matches("{}").count(),
+                "en-US 与 zh-CN 占位符数量不一致: {}",
+                key.id()
+            );
+        }
+    }
+
+    /// 穷举：每个 Key 都有非空 en-US 词条，占位符数量一致，且无重复/多余词条。
+    #[test]
+    fn every_key_has_en_us_entry_with_placeholder_parity() {
+        assert_eq!(EN_US.len(), Key::ALL.len(), "en-US 词条数与 key 数不一致");
+        for &key in Key::ALL {
+            let en = lookup(EN_US, key)
+                .unwrap_or_else(|| panic!("缺少 en-US 词条: {:?} ({})", key, key.id()));
+            let zh = lookup(ZH_CN, key).expect("zh-CN 全量词条");
+            if key != Key::Empty {
+                assert!(!en.is_empty(), "en-US 词条不得为空: {:?}", key);
+            }
+            assert_eq!(
+                en.matches("{}").count(),
+                zh.matches("{}").count(),
+                "en-US 与 zh-CN 占位符数量不一致: {}",
+                key.id()
+            );
+            // 占位符相对位置的结构特征：首尾是否为占位符必须与 zh 一致，避免参数语义错位。
+            assert_eq!(
+                en.starts_with("{}"),
+                zh.starts_with("{}"),
+                "首部占位符位置与 zh-CN 不一致: {}",
+                key.id()
+            );
+            assert_eq!(
+                en.ends_with("{}"),
+                zh.ends_with("{}"),
+                "尾部占位符位置与 zh-CN 不一致: {}",
+                key.id()
+            );
+        }
+        for (i, &(key, _)) in EN_US.iter().enumerate() {
+            assert!(
+                !EN_US[..i].iter().any(|(other, _)| *other == key),
+                "en-US 词条重复: {:?}",
+                key
+            );
+        }
+    }
+
+    /// 英文词条不得混入中文或全角标点（`Veil` / `Markdown` 等专名不受影响）。
+    #[test]
+    fn en_us_entries_use_halfwidth_punctuation_only() {
+        for &(key, text) in EN_US {
+            for ch in text.chars() {
+                let code = ch as u32;
+                let is_cjk = (0x3000..=0x303F).contains(&code)
+                    || (0x4E00..=0x9FFF).contains(&code)
+                    || (0xFF00..=0xFFEF).contains(&code);
+                assert!(!is_cjk, "en-US 词条含中文/全角字符 {ch:?}: {}", key.id());
+            }
+        }
+    }
+
+    /// 代表性词条抽查：菜单 / notice / dialog / settings / history / search / outline。
+    #[test]
+    fn representative_en_us_entries_are_translated() {
+        let en = |key| translate(LOCALES, "en-US", key);
+        assert_eq!(en(Key::MenuFile), Some("File"));
+        assert_eq!(en(Key::MenuViewTypewriter), Some("Typewriter Mode"));
+        assert_eq!(en(Key::NoticeSaved), Some("Saved: {}"));
+        assert_eq!(en(Key::ModalOpenFailedTitle), Some("Open Failed"));
+        assert_eq!(en(Key::SettingsThemeMode), Some("Theme Mode"));
+        assert_eq!(en(Key::HistoryTitle), Some("Version History"));
+        assert_eq!(en(Key::SearchPlaceholder), Some("Find"));
+        assert_eq!(en(Key::OutlineTitle), Some("Outline"));
+    }
+
+    #[test]
+    fn typewriter_mode_entries_are_localized() {
+        assert_eq!(t(Key::MenuViewTypewriter), "打字机模式");
+        assert_eq!(t(Key::NoticeTypewriterMode), "打字机模式：{}");
+        assert_eq!(
+            translate(LOCALES, "en-US", Key::MenuViewTypewriter),
+            Some("Typewriter Mode")
+        );
+        assert_eq!(
+            translate(LOCALES, "en-US", Key::NoticeTypewriterMode),
+            Some("Typewriter mode: {}")
+        );
+    }
+
     #[test]
     fn mermaid_live_wording_is_consistent_in_zh_and_en() {
         assert_eq!(
@@ -890,6 +2128,23 @@ mod tests {
             .expect("英文失败提示已翻译");
         assert!(en_error.contains("Mermaid source copied"));
         assert!(en_error.contains("manually open https://mermaid.live/ and paste the source"));
+    }
+
+    /// 运行时语言默认 zh-CN；英文覆盖只经纯函数 translate 验证，不改写全局语言
+    /// （改写会让并发用例互相串扰）。
+    #[test]
+    fn default_runtime_locale_is_zh_cn_and_english_uses_pure_translate() {
+        assert_eq!(current_locale(), "zh-CN");
+        assert_eq!(t(Key::MenuFile), "文件");
+        // en-US 已翻译条目：纯函数路径可见英文
+        assert_eq!(
+            translate(LOCALES, "en-US", Key::CtxMermaidPreview),
+            Some("Open in mermaid.live (copies source)")
+        );
+        // en-US 全量覆盖后不再回退中文
+        assert_eq!(translate(LOCALES, "en-US", Key::MenuFile), Some("File"));
+        // 未知语言仍按表顺序回退 zh-CN
+        assert_eq!(translate(LOCALES, "fr-FR", Key::MenuFile), Some("文件"));
     }
 
     /// 参数化模板：顺序填充、缺参不 panic、无占位符原样返回。

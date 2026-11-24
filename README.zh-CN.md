@@ -270,14 +270,14 @@ Veil 当前使用自签名开发证书 `CN=Veil Development (Long-term)`（SHA-1
 
 以下外部验证均保持 **NOT RUN** — 它们需要超出本仓库的操作：
 
-- **可信生产签名**：三条候选路径已评估并在 [evidence/renewal/production-signing-options.md](evidence/renewal/production-signing-options.md) 中有详细文档（SignPath Foundation — 合格开源免费 OV、Azure Artifact Signing — US$9.99/月、商业 OV/EV — US$129+/年）。所有路径都需要只能由你亲自完成的身份验证和/或付费。尚未申请或购买任何生产证书。
+- **可信生产签名**：三条候选路径已评估，并在本地文件 `evidence/renewal/production-signing-options.md`（未随仓库发布）中有详细文档：SignPath Foundation（合格开源项目免费 OV）、Azure Artifact Signing（US$9.99/月）、商业 OV/EV（US$129+/年）。所有路径都需要只能由你亲自完成的身份验证和/或付费。尚未申请或购买任何生产证书。
 - **真实 SmartScreen + MotW 下载**：需要先有上面的可信生产证书。Microsoft SmartScreen 信誉系统随时间累积；即使有可信签名，首次发布仍可能警告。
 - **本提交的远端 GitHub Actions**：推送到 GitHub 需要你的显式授权（受你的约束）。工作流文件已静态验证，包含 `workflow_dispatch` 入口且默认 `dry_run=true`。
 - **跨机信任吊销演练**：依赖于真实 CRL/AIA 基础设施，这只有在可信公共 CA 或企业 PKI 下才有。自签名证书没有公共同名吊销机制。
 
 ### 建议的下一步（当你准备好时）
 
-1. 阅读 [evidence/renewal/production-signing-options.md](evidence/renewal/production-signing-options.md) §7（"Veil 推荐路线与下一步清单"）中的四条路径对比。
+1. 阅读本地文件 `evidence/renewal/production-signing-options.md` §7（"Veil 推荐路线与下一步清单"）中的四条路径对比。
 2. 判断 SignPath（OSS 基金会，免费）、Azure Public Trust（US$9.99/月，美/加身份）还是商业 OV 证书符合你的约束。
 3. 亲自完成身份验证/购买 — 证书和私钥不得进入本仓库，也不得被任何 agent 接触。
 4. 获得生产证书后，将其 Base64 PFX 和密码加入 GitHub Repository Secrets（`VEIL_SIGNING_CERTIFICATE_BASE64`、`VEIL_SIGNING_CERTIFICATE_PASSWORD`），并将时间戳 URL 配置为 `VEIL_SIGNING_TIMESTAMP_URL`。

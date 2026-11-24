@@ -22,7 +22,7 @@ MIT 是最宽松、最广泛被理解的开源许可证。Veil 从一款个人�
 
 ### 签名 / 信任状态？
 
-当前发布使用**自签名开发证书**。其他机器会显示未知发布者警告。完整细节与规划中的生产签名路径（SignPath Foundation — 符合条件的开源项目免费 OV，Azure Artifact Signing — 每月 US$9.99，商业 OV/EV — 每年 US$129 起）见仓库的「信任与验证状态」章节与 [evidence/renewal/production-signing-options.md](../../evidence/renewal/production-signing-options.md)。
+当前发布使用**自签名开发证书**。其他机器会显示未知发布者警告。完整细节与规划中的生产签名路径（SignPath Foundation — 符合条件的开源项目免费 OV，Azure Artifact Signing — 每月 US$9.99，商业 OV/EV — 每年 US$129 起）见仓库的「信任与验证状态」章节。
 
 ### Veil 会回连服务器吗？
 

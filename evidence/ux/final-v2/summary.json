@@ -522,12 +522,12 @@
   "cleanup": {
     "leftover_veil_or_edge_processes": 0,
     "temp_roots": [
-      "C:\\Users\\31i45\\AppData\\Local\\Temp\\veil-uxfinalv2-3e464a293ece4d43b49ae33a5bd50745",
-      "C:\\Users\\31i45\\AppData\\Local\\Temp\\veil-uxfinalv2-ef8c3b6be0fa4ad0be5da261b9cf341a",
-      "C:\\Users\\31i45\\AppData\\Local\\Temp\\veil-v2-edge-light-html",
-      "C:\\Users\\31i45\\AppData\\Local\\Temp\\veil-v2-edge-light-pdf",
-      "C:\\Users\\31i45\\AppData\\Local\\Temp\\veil-v2-edge-dark-html",
-      "C:\\Users\\31i45\\AppData\\Local\\Temp\\veil-v2-edge-dark-pdf"
+      "<TEMP>\\veil-uxfinalv2-3e464a293ece4d43b49ae33a5bd50745",
+      "<TEMP>\\veil-uxfinalv2-ef8c3b6be0fa4ad0be5da261b9cf341a",
+      "<TEMP>\\veil-v2-edge-light-html",
+      "<TEMP>\\veil-v2-edge-light-pdf",
+      "<TEMP>\\veil-v2-edge-dark-html",
+      "<TEMP>\\veil-v2-edge-dark-pdf"
     ],
     "temp_roots_removed": true,
     "verified_at_end": "2026-11-21T14:25:12"

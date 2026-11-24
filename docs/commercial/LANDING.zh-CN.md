@@ -18,7 +18,7 @@ Veil 为作家、思考者、研究者和工程师而生——想要无干扰写
 ## 技术
 
 - Rust 1.99.1 · Edition 2021
-- 纯 Windows 11 x64 · winit + softbuffer 软件渲染 · QuickJS 嵌入式运行时
+- 纯 Windows 10/11 x64 · winit + softbuffer 软件渲染 · QuickJS 嵌入式运行时
 - veil-core（跨平台逻辑）· veil-ui（渲染）· veil-mermaid-offline（QuickJS + mermaid.js）· veil（产品二进制）
 
 ## 获取

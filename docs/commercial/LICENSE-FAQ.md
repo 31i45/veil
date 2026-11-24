@@ -22,7 +22,7 @@ Yes. MIT permits commercial use without restrictions. You can ship Veil as part 
 
 ### Signed / Trust status?
 
-Current releases use a **self-signed development certificate**. Other machines will show an unknown-publisher warning. Full details and planned production signing path (SignPath Foundation — free OV for qualifying open-source, Azure Artifact Signing — US$9.99/month, commercial OV/EV — US$129+/year) are documented in the repository's Trust & Verification Status section and [evidence/renewal/production-signing-options.md](../../evidence/renewal/production-signing-options.md).
+Current releases use a **self-signed development certificate**. Other machines will show an unknown-publisher warning. Full details and planned production signing path (SignPath Foundation — free OV for qualifying open-source, Azure Artifact Signing — US$9.99/month, commercial OV/EV — US$129+/year) are documented in the repository's Trust & Verification Status section.
 
 ### Does Veil phone home?
 

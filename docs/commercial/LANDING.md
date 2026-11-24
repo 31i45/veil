@@ -18,7 +18,7 @@ Veil is for writers, thinkers, researchers, and engineers who want distraction-f
 ## Tech
 
 - Rust 1.99.1 · Edition 2021
-- Pure Windows 11 x64 · winit + softbuffer software rendering · QuickJS embedded runtime
+- Pure Windows 10/11 x64 · winit + softbuffer software rendering · QuickJS embedded runtime
 - veil-core (cross-platform logic) · veil-ui (rendering) · veil-mermaid-offline (QuickJS + mermaid.js) · veil (product binary)
 
 ## Get it

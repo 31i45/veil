@@ -270,14 +270,14 @@ Veil is currently signed with the self-signed development certificate `CN=Veil D
 
 The following external verifications remain **NOT RUN** — they require actions beyond this repository:
 
-- **Trusted production signing**: Three candidate paths have been evaluated and documented in detail in [evidence/renewal/production-signing-options.md](evidence/renewal/production-signing-options.md) (SignPath Foundation — free OV for qualifying open-source, Azure Artifact Signing — US$9.99/month, commercial OV/EV — US$129+/year). All require identity verification and/or payment that only you can complete personally. No production certificate has been applied for or purchased.
+- **Trusted production signing**: Three candidate paths have been evaluated and documented in detail in the local-only file `evidence/renewal/production-signing-options.md` (not published in this repository): SignPath Foundation (free OV for qualifying open-source), Azure Artifact Signing (US$9.99/month), and commercial OV/EV (US$129+/year). All require identity verification and/or payment that only you can complete personally. No production certificate has been applied for or purchased.
 - **Real SmartScreen with MotW downloads**: Requires a trusted production certificate above. Microsoft's SmartScreen reputation system accumulates over time; even with a trusted signature, the first release may still warn.
 - **This commit's remote GitHub Actions**: Pushing to GitHub requires your explicit authorization (per your constraints). The workflow files have been statically verified and include a `workflow_dispatch` entry with `dry_run=true` default.
 - **Cross-machine trust revocation drill**: Depends on having a real CRL/AIA infrastructure that comes only with a trusted public CA or enterprise PKI. Self-signed certificates have no public revocation mechanism.
 
 ### Recommended next steps (when you are ready)
 
-1. Read the four-path comparison in [evidence/renewal/production-signing-options.md](evidence/renewal/production-signing-options.md) §7 ("Veil 推荐路线与下一步清单").
+1. Read the four-path comparison in the local-only `evidence/renewal/production-signing-options.md` §7 ("Veil 推荐路线与下一步清单").
 2. Determine whether SignPath (OSS foundation, free), Azure Public Trust (US$9.99/month, US/CA identity), or a commercial OV certificate fits your constraints.
 3. Complete the identity verification / purchase yourself — the certificate and private key must never enter this repository or be accessible to any agent.
 4. Once you have a production certificate, add its Base64 PFX and password as GitHub Repository Secrets (`VEIL_SIGNING_CERTIFICATE_BASE64`, `VEIL_SIGNING_CERTIFICATE_PASSWORD`) and configure the timestamp URL as `VEIL_SIGNING_TIMESTAMP_URL`.

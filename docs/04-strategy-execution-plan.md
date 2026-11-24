@@ -1,5 +1,7 @@
 # 阶段 04：B 战略 + A 质量门槛执行计划
 
+> 状态：v1 时期规划快照（历史文档，保留原貌）。其中「不做什么」里的 Mermaid 等条目已被后续版本推翻；现行能力与边界以 README 为准。
+
 > 依据：[P0 功能对标](review/P0-feature-parity.md)、[P1 一致性报告](review/P1-commonmark-conformance.md)、[G0 基线报告](review/G0-baseline.md)
 > 状态：**G0 ✅ → 0a ✅ → 0b ✅ → 0c ✅ → 0d ✅ → G1 ✅ → 阶段 1 ✅ → G2 ✅ → 阶段 2 ✅ → G3 ✅（自动化口径，真机人工项转阶段 3 走查）→ 阶段 3（Windows 完美化，已放弃 macOS）🟡（3a 冷启动 ✅ / 3b 打印·PDF ✅ / 3c UX 打磨 ✅ / 3d 原生单文件分发 ✅，剩 3e 人工项）**
 > 节奏：一个门禁一次交付，每步都有可复现命令与退出条件

@@ -522,8 +522,8 @@
   "cleanup": {
     "leftover_veil_or_edge_processes": 0,
     "temp_roots": [
-      "C:\\Users\\31i45\\AppData\\Local\\Temp\\veil-uxfinalv2-1660c45f002a4df69441f5e7329d9443",
-      "C:\\Users\\31i45\\AppData\\Local\\Temp\\veil-uxfinalv2-1e2c578ce1cb4d1fb580a64c8708f349"
+      "<TEMP>\\veil-uxfinalv2-1660c45f002a4df69441f5e7329d9443",
+      "<TEMP>\\veil-uxfinalv2-1e2c578ce1cb4d1fb580a64c8708f349"
     ],
     "temp_roots_removed": true,
     "verified_at_end": "2026-11-21T17:58:47"

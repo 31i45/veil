@@ -590,7 +590,7 @@ D2（触控板捏合，D1 通过即覆盖）、D6（200% DPI 硬件依赖）、D
 
 > 前置：交互桌面可用（无锁屏），release 构建 5,992,448 B（含本轮 3 项修复，见下）。
 > 取证方式：`tools/walkthrough.ps1 -Steps` 前台注入（`SetForegroundWindow` + `SetCursorPos` + `mouse_event` + `SendKeys`）+ 窗口截图，全部为真实输入事件，不再是进程内直调。
-> 原始证据：`%TEMP%\veil-walkthrough\evidence\run-20261106-HHMMSS\`；关键截图归档至 [evidence/ux-walkthrough-20261106](evidence/ux-walkthrough-20261106)。
+> 原始证据：`%TEMP%\veil-walkthrough\evidence\run-20261106-HHMMSS\`；关键截图归档至本地 `evidence/ux-walkthrough-20261106`（未入库）。
 
 ### 前置排障：状态栏「消失」是 DPI 取证假象，不是产品缺陷
 
@@ -674,12 +674,12 @@ D2（触控板捏合，D1 通过即覆盖）、D6（200% DPI 硬件依赖）、D
 
 | # | 场景 | 实测 | 证据 |
 |---|---|---|---|
-| 1 | 有路径文档 Ctrl+E | 「导出 HTML」标题；地址栏 `…\Temp\veil-ux\exp`；文件名 `a.html`；过滤器 `HTML (*.html)` | [export-html-dialog.png](evidence/export-dialog-20261107/export-html-dialog.png)（run-002855） |
-| 2 | 有路径文档 Ctrl+Shift+E | 「导出 PDF」；同一目录；`b.pdf`；过滤器 `PDF (*.pdf)`；Enter 后 `b.pdf` 1,075,399 B，头 `%PDF-1.7` | [export-pdf-dialog.png](evidence/export-dialog-20261107/export-pdf-dialog.png)（run-003312） |
-| 3 | 草稿 Ctrl+S | 「另存为 Markdown」；地址栏「文档」；`未命名.md` | [draft-save-dialog.png](evidence/export-dialog-20261107/draft-save-dialog.png)（run-003427） |
-| 4 | 草稿 Ctrl+E | 「导出 HTML」；「文档」；`未命名.html` | [draft-export-dialog.png](evidence/export-dialog-20261107/draft-export-dialog.png)（run-003427） |
-| 5 | 有路径文档 Ctrl+Shift+S | 「另存为 Markdown」；`…\exp`；`b.md` | [save-as-dialog.png](evidence/export-dialog-20261107/save-as-dialog.png)（run-003549） |
-| 6 | 覆盖已有 HTML | 「确认另存为：a.html 已存在。要替换它吗？」；默认焦点在「否(N)」；按 Enter（否）不写盘；按 `y` 后原地覆盖为 1,737 B，无第二份文件 | [overwrite-confirm.png](evidence/export-dialog-20261107/overwrite-confirm.png)（run-003102） |
+| 1 | 有路径文档 Ctrl+E | 「导出 HTML」标题；地址栏 `…\Temp\veil-ux\exp`；文件名 `a.html`；过滤器 `HTML (*.html)` | `evidence/export-dialog-20261107/export-html-dialog.png`（本地，未入库；run-002855） |
+| 2 | 有路径文档 Ctrl+Shift+E | 「导出 PDF」；同一目录；`b.pdf`；过滤器 `PDF (*.pdf)`；Enter 后 `b.pdf` 1,075,399 B，头 `%PDF-1.7` | `evidence/export-dialog-20261107/export-pdf-dialog.png`（本地，未入库；run-003312） |
+| 3 | 草稿 Ctrl+S | 「另存为 Markdown」；地址栏「文档」；`未命名.md` | `evidence/export-dialog-20261107/draft-save-dialog.png`（本地，未入库；run-003427） |
+| 4 | 草稿 Ctrl+E | 「导出 HTML」；「文档」；`未命名.html` | `evidence/export-dialog-20261107/draft-export-dialog.png`（本地，未入库；run-003427） |
+| 5 | 有路径文档 Ctrl+Shift+S | 「另存为 Markdown」；`…\exp`；`b.md` | `evidence/export-dialog-20261107/save-as-dialog.png`（本地，未入库；run-003549） |
+| 6 | 覆盖已有 HTML | 「确认另存为：a.html 已存在。要替换它吗？」；默认焦点在「否(N)」；按 Enter（否）不写盘；按 `y` 后原地覆盖为 1,737 B，无第二份文件 | `evidence/export-dialog-20261107/overwrite-confirm.png`（本地，未入库；run-003102） |
 | 7 | 覆盖已有 PDF | 确认后 `b.pdf` 原地更新（mtime 00:36:15），大小仍 1,075,399 B，目录内无 `.tmp.pdf` / `.bak` 残留 | run-003559 + `Get-ChildItem -Force` |
 | 8 | 取消导出 | ESC 后 notice `导出已取消`，目录内文件集合与时间戳均未变化 | 同 #1 / #2 两次 ESC 运行 |
 | 9 | 无文件早写 | 只按 ESC 的运行中，确认前后目录无任何新文件 | run-000757（三轮遗留，本轮复验） |

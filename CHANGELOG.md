@@ -259,7 +259,7 @@ Mermaid L1 内嵌渲染（QuickJS-ng 内嵌官方 Tiny mermaid + resvg 栅格化
 ### 战略级推翻（2026-11-12）
 - 推翻 D10⑤「HTML 白名单不做」裁决，改立项 Wave 7 N10-C 顶流行内 HTML 白名单（零脚本、零外链、纯行内 + 块级折叠）。根因：用户定调所有细节必须完美，要求对齐 Typedown / Obsidian / Notion 行为
 - 处理规范：**不得静默改写已勾选项**，必须新建推翻 SubTask 与主台账 D10 子条目，保留历史 + 明确新范围 + 交叉引用
-- 实现入口：`.trae/specs/extend-n10-top-tier-html/spec.md`
+- 实现入口：`.trae/specs/extend-n10-top-tier-html/spec.md`（本地 spec，未入库）
 
 ## v1.2.0
 

@@ -84,4 +84,41 @@ mod tests {
     fn default_idle_is_two_seconds() {
         assert_eq!(Autosave::default().idle(), Duration::from_secs(2));
     }
+
+    /// 大文件往返：10 万字量级文档（含单行约 1 MiB 段落与 1000 个围栏代码块）
+    /// 编码后再解码，文本与字节都必须完全一致。只走编解码，不触发排版。
+    #[test]
+    fn large_document_roundtrip_is_byte_identical() {
+        use crate::docio::{decode, encode};
+
+        let mut text = String::with_capacity(2 * 1024 * 1024);
+        text.push_str("# 大文档往返\n\n");
+        for i in 0..1000 {
+            text.push_str("```rust\nfn f");
+            text.push_str(&i.to_string());
+            text.push_str("() {}\n```\n\n");
+        }
+        // 单行约 1 MiB（UTF-8 三字节/字）：连同上面的围栏块，总字符数远超 10 万。
+        text.push_str(&"长".repeat(350_000));
+        text.push('\n');
+
+        let start = Instant::now();
+        for bom in [false, true] {
+            let bytes = encode(&text, bom);
+            let (decoded, has_bom) = decode(&bytes).expect("合法 UTF-8 必须可解码");
+            assert_eq!(has_bom, bom);
+            assert_eq!(decoded, text, "文本往返必须一致");
+            assert_eq!(encode(&decoded, has_bom), bytes, "字节往返必须一致");
+        }
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "往返耗时异常（可能误触发排版）：{elapsed:?}"
+        );
+        eprintln!(
+            "大文件往返：{} 字符 / {} 字节，耗时 {elapsed:?}",
+            text.chars().count(),
+            text.len()
+        );
+    }
 }

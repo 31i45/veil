@@ -202,6 +202,15 @@ pub fn callouts() -> veil_core::CalloutRegistry {
         .unwrap_or_default()
 }
 
+/// 清理写入失败留下的同目录临时文件。清理失败不覆盖原始错误，但要留可诊断日志。
+fn remove_leftover_tmp(tmp: &std::path::Path) {
+    if let Err(e) = std::fs::remove_file(tmp) {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            eprintln!("清理临时文件失败 {}: {e}", tmp.display());
+        }
+    }
+}
+
 /// 原子写小助手：同目录 tmp + rename，并按需创建父目录（config/recovery/session 共用）。
 fn atomic_write(path: &std::path::Path, data: &[u8]) -> Result<(), String> {
     if let Some(dir) = path.parent() {
@@ -215,14 +224,41 @@ fn atomic_write(path: &std::path::Path, data: &[u8]) -> Result<(), String> {
     let mut tmp = path.as_os_str().to_owned();
     tmp.push(".veil-tmp");
     let tmp = PathBuf::from(tmp);
-    std::fs::write(&tmp, data)
-        .and_then(|()| std::fs::rename(&tmp, path))
-        .map_err(|e| {
-            tf(
-                Key::ErrIoWriteFile,
-                &[&e.to_string(), &path.display().to_string()],
-            )
-        })
+    let result = std::fs::write(&tmp, data).and_then(|()| std::fs::rename(&tmp, path));
+    if let Err(e) = result {
+        remove_leftover_tmp(&tmp);
+        return Err(tf(
+            Key::ErrIoWriteFile,
+            &[&e.to_string(), &path.display().to_string()],
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod atomic_write_tests {
+    use super::*;
+
+    #[test]
+    fn atomic_write_removes_tmp_when_rename_fails() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir =
+            std::env::temp_dir().join(format!("veil-atomic-write-{}-{nanos}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // 目标为非空目录：rename(文件 → 目录) 在 Windows/Unix 上都必然失败
+        let target = dir.join("recovery.dat");
+        std::fs::create_dir_all(target.join("keep")).unwrap();
+        let err = atomic_write(&target, b"data").expect_err("rename 必然失败");
+        assert!(!err.is_empty(), "须返回可诊断错误");
+        assert!(
+            !dir.join("recovery.dat.veil-tmp").exists(),
+            "rename 失败后不得残留临时文件"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 /// 崩溃恢复草稿（0b）：`<数据目录>/recovery.dat` 单槽，原子写；清除时文件不存在视为成功。

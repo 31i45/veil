@@ -186,8 +186,8 @@ mod tests {
     }
 
     /// 真实文件系统 store：语义与产品层 `Fs::save` 对齐（同目录 `<path>.veil-tmp`
-    /// 再 rename；失败不清理临时文件）。`CrashBeforeRename` 模拟「临时文件已写、
-    /// rename 前进程被杀」。
+    /// 再 rename；失败清理临时文件）。`CrashBeforeRename` 模拟「临时文件已写、
+    /// rename 前进程被杀」，此时不清理（进程已死，清理代码不会执行）。
     #[derive(Clone, Copy)]
     enum FsMode {
         Normal,
@@ -206,12 +206,18 @@ mod tests {
             let mut tmp_os = path.as_os_str().to_owned();
             tmp_os.push(".veil-tmp");
             let tmp = PathBuf::from(tmp_os);
-            std::fs::write(&tmp, data).map_err(|e| format!("写入失败: {e}"))?;
+            if let Err(e) = std::fs::write(&tmp, data) {
+                let _ = std::fs::remove_file(&tmp);
+                return Err(format!("写入失败: {e}"));
+            }
             if matches!(self.mode, FsMode::CrashBeforeRename) {
                 // 目标保持原样：等价于 rename 前进程被强行终止。
                 return Err("模拟：rename 前进程终止".into());
             }
-            std::fs::rename(&tmp, path).map_err(|e| format!("写入失败: {e}"))
+            std::fs::rename(&tmp, path).map_err(|e| {
+                let _ = std::fs::remove_file(&tmp);
+                format!("写入失败: {e}")
+            })
         }
     }
 
@@ -251,12 +257,26 @@ mod tests {
             } else {
                 let mut perms = entry.metadata()?.permissions();
                 if perms.readonly() {
-                    perms.set_readonly(false);
+                    make_writable(&mut perms);
                     std::fs::set_permissions(entry.path(), perms)?;
                 }
             }
         }
         Ok(())
+    }
+
+    /// Windows：`set_readonly(false)` 就是清除只读属性的正确语义。
+    #[cfg(windows)]
+    #[allow(clippy::permissions_set_readonly_false)] // 仅 Windows，语义正确
+    fn make_writable(perms: &mut std::fs::Permissions) {
+        perms.set_readonly(false);
+    }
+
+    /// Unix：只读由 mode 位表达，加回属主写位（0o200）。
+    #[cfg(unix)]
+    fn make_writable(perms: &mut std::fs::Permissions) {
+        use std::os::unix::fs::PermissionsExt;
+        perms.set_mode(perms.mode() | 0o200);
     }
 
     /// 写入中断：临时文件已落盘、rename 前失败 → 原文件不被覆盖，临时文件不成为目标。
@@ -328,11 +348,8 @@ mod tests {
         );
     }
 
-    /// 只读目标：rename 覆盖失败必须返回可读错误，原文件完好、脏态保留。
-    ///
-    /// 说明：当前生产实现 `veil/src/lib.rs` 的 `Fs::save` 在 rename 失败后**不清理**
-    /// `.veil-tmp`（见 `evidence/verify/qq-task3/findings.md`）。本测试锁定数据安全
-    /// 不变量（目标未被破坏），不把该残留行为当作期望值。
+    /// 只读目标：rename 覆盖失败必须返回可读错误，原文件完好、脏态保留、
+    /// 不留下半成品 `.veil-tmp`。
     #[test]
     fn recovery_read_only_target_fails_without_clobbering() {
         let dir = TempDir::new("readonly");
@@ -358,6 +375,10 @@ mod tests {
             "只读目标不得被破坏"
         );
         assert!(a.editor.is_dirty(), "失败后必须保持脏态");
+        assert!(
+            !dir.join("a.md.veil-tmp").exists(),
+            "rename 失败后不得残留临时文件"
+        );
         let modal = a.ui_state.modal.as_ref().expect("须弹错误弹窗");
         assert!(
             modal.spec.message.contains("a.md"),

@@ -640,6 +640,15 @@ fn encode_png_rgba(image: &ImageData) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
+/// 清理写入失败留下的同目录临时文件。清理失败不覆盖原始错误，但要留可诊断日志。
+fn remove_leftover_tmp(tmp: &Path) {
+    if let Err(e) = std::fs::remove_file(tmp) {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            eprintln!("清理临时文件失败 {}: {e}", tmp.display());
+        }
+    }
+}
+
 /// 文件系统实现：保存为原子写（同目录 tmp + rename），任何失败不留半截文件
 /// （INSTANCE §9：Defender 受控文件夹拦截时给可读错误而非崩溃）。
 struct Fs;
@@ -651,15 +660,17 @@ impl FileStore for Fs {
         let mut tmp = path.as_os_str().to_owned();
         tmp.push(".veil-tmp");
         let tmp = PathBuf::from(tmp);
-        // std::fs::rename 在 Windows 覆盖既有目标（MoveFileEx REPLACE_EXISTING），同目录 rename 原子
-        std::fs::write(&tmp, data)
-            .and_then(|()| std::fs::rename(&tmp, path))
-            .map_err(|e| {
-                tf(
-                    Key::ErrIoWriteFile,
-                    &[&e.to_string(), &path.display().to_string()],
-                )
-            })
+        // std::fs::rename 在 Windows 覆盖既有目标（MoveFileEx REPLACE_EXISTING），同目录 rename 原子。
+        // 写/rename 任一步失败都清理临时文件，避免只读目标等场景留下孤儿 `.veil-tmp`。
+        let result = std::fs::write(&tmp, data).and_then(|()| std::fs::rename(&tmp, path));
+        if let Err(e) = result {
+            remove_leftover_tmp(&tmp);
+            return Err(tf(
+                Key::ErrIoWriteFile,
+                &[&e.to_string(), &path.display().to_string()],
+            ));
+        }
+        Ok(())
     }
     fn list_files(&mut self, dir: &Path) -> Result<Vec<PathBuf>, String> {
         let mut out = Vec::new();
@@ -962,6 +973,22 @@ mod tests {
             std::env::temp_dir().join(format!("veil-assets-{}-{tag}-{nanos}", std::process::id()));
         std::fs::create_dir_all(&p).unwrap();
         p
+    }
+
+    #[test]
+    fn fs_save_removes_tmp_when_rename_fails() {
+        let dir = temp_dir("fs-save-fail");
+        let target = dir.join("a.md");
+        // 目标为非空目录：rename(文件 → 目录) 在 Windows/Unix 上都必然失败
+        std::fs::create_dir_all(target.join("keep")).unwrap();
+        let mut store = Fs;
+        let err = store.save(&target, b"data").expect_err("rename 必然失败");
+        assert!(!err.is_empty(), "须返回可诊断错误");
+        assert!(
+            !dir.join("a.md.veil-tmp").exists(),
+            "rename 失败后不得残留临时文件"
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

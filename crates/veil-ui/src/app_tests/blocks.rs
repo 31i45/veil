@@ -1364,3 +1364,90 @@ fn abbr_hover_exposes_title_tooltip() {
 }
 
 // ---- B5：排版留白与输入空间（底部留白 / 空行行高 / 末尾空块 / 点击落末尾） ----
+
+// ---- 首帧优化回归锁（P1b / geometry_stale） ----
+
+/// refresh_index 在窗口创建前只做估算累计：必须让 geometry_stale = true，
+/// 告诉首次 render 走真实重算路径。此前它会在 App::build 里调用完整
+/// recompute_geometry（全量 cache.layout 查表 + cosmic-text 首次排版）——
+/// 改后 refresh_index 走 estimate_geometry（只用 est_h），省掉 cosmic-text 开销。
+#[test]
+fn refresh_index_sets_geometry_stale_before_render() {
+    let store = MemStore::default();
+    // 多块文档，确保 estimate_geometry 的累计路径被覆盖
+    let text = "# H1\n\np1\n\np2\n\n# H2\n\np3\n\n```\ncode\n```\n";
+    let a = app(text, None, false, &store);
+    // App::new 内部已调 refresh_index → estimate_geometry
+    assert!(
+        a.index.geometry_stale,
+        "refresh_index 应设 geometry_stale=true，等首次 render 真实重算"
+    );
+    assert!(
+        !a.index.blocks.is_empty(),
+        "estimate_geometry 后块清单不应为空"
+    );
+    assert!(
+        a.index.total_h > 0.0,
+        "estimate_geometry 应给出正的文档总高（用于滚动条初值）"
+    );
+    // 所有块的 height/top 已被估算累计填充（非零非 NaN）
+    for g in &a.index.blocks {
+        assert!(g.height.is_finite(), "块 height 应为有限值");
+        assert!(g.top.is_finite(), "块 top 应为有限值");
+        assert!(g.height >= 0.0, "块 height 不应为负");
+        assert!(g.top >= 0.0, "块 top 不应为负");
+    }
+    // 估算高度本身应合理：首块高度 ≥ 1 行
+    let first = &a.index.blocks[0];
+    assert!(
+        first.est_h >= a.engine.doc_line_height() * a.input_state.scale,
+        "est_h 应至少一行高"
+    );
+}
+
+/// 首次 render 必须把 geometry_stale 拉回 false——这是 paint.rs 的核心分支：
+/// geometry_stale 为 true 时调 recompute_geometry()（真实排版），之后设为 false。
+/// 如果 render 没清 stale，后续击键帧会反复重算整篇几何（P1b 被击穿）。
+#[test]
+fn render_clears_geometry_stale_after_recompute() {
+    let store = MemStore::default();
+    let text = "# H1\n\np1\n\np2\n\n# H2\n\np3\n";
+    let mut a = app(text, None, false, &store);
+    assert!(a.index.geometry_stale, "precondition: stale 应为 true");
+
+    let _ = a.render();
+
+    assert!(
+        !a.index.geometry_stale,
+        "render 后 geometry_stale 应为 false（真实 recompute_geometry 覆盖了估算）"
+    );
+    // render 后块高度应该是真实排版结果（与 est_h 可能不同，但至少合理）
+    let first = &a.index.blocks[0];
+    assert!(first.height > 0.0, "render 后首块高度应为正");
+    assert!(first.top >= 0.0, "render 后首块 top 应非负");
+}
+
+/// 首次 render 后 doc_height 必须大于 0——滚动条、滚轮钳位、底部留白
+/// 都依赖这个值。如果 estimate_geometry 累计给了有效初值，render 再覆盖一次
+/// 应该更大或相等（真实排版不会比估算更矮太多）。
+#[test]
+fn first_frame_has_valid_total_height_for_scrollbar() {
+    let store = MemStore::default();
+    let text = format!("{}\n", "p1\np2\np3\n".repeat(200));
+    let mut a = app(&text, None, false, &store);
+
+    let est_total = a.index.total_h;
+    assert!(est_total > 0.0, "估算阶段 doc 总高应已有效");
+
+    let _ = a.render();
+
+    let real_total = a.doc_height();
+    assert!(real_total > 0.0, "render 后 doc_height 必须为正");
+    // 真实总高和估算总高应在同一量级（估算误差不超过 ±50% 为异常）
+    let ratio = real_total / est_total.max(1.0);
+    assert!(
+        ratio > 0.5 && ratio < 2.0,
+        "真实/估算 doc 总高应在 0.5x–2.0x 内，实际 ratio={ratio:.3} \
+         (est={est_total:.1}, real={real_total:.1})——估算偏差过大可能导致首帧跳变"
+    );
+}

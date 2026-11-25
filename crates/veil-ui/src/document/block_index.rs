@@ -110,9 +110,11 @@ impl App {
         // expanded_details 同步：移除已消失的 id + 尊重 HTML <details open>。
         // 必须早于几何重算——open_default 展开会改变子块可见性/高度。
         self.sync_expanded_details();
-        // 索引重建后 top/height 归零：立即按估算高度累计一次，可见区间/滚动条
-        // 才有有效几何；排版后用 recompute_geometry 以真实高度覆盖。
-        self.recompute_geometry();
+        // 索引重建后 top/height 归零：先用估算高度累计一次（不做真实排版），
+        // 让可见区间/滚动条有有效几何；设 geometry_stale = true，首次 render
+        // 走真实 `recompute_geometry()` 覆盖。窗口创建前 cosmic-text 还没建
+        // 视口，提前排版只会浪费——真实重算自然推迟到 paint.rs 的 geometry_stale 分支。
+        self.estimate_geometry();
         // 全文统计与块结构同源重建：状态栏字数不可能落后于真值
         self.refresh_stats();
     }
@@ -648,6 +650,103 @@ impl App {
         self.index.blocks = blocks;
         self.index.incremental_pos = None;
         self.index.geometry_stale = false;
+    }
+
+    /// 估算几何累计：用 `est_h`（廉价估算高度）累计 top，不做真实排版
+    ///（不调用 cosmic-text / 不查 layout 缓存）。用于 `app.build()` 窗口创建前
+    /// 的轻量初始化——此时视口不存在，首次 render 还会重新排版，
+    /// 直接跳过全量 `cache.layout()` 查表省掉每次键构造与 miss 判定的开销。
+    /// 设置 `geometry_stale = true`，告诉首次 render 走真实重算路径（当前 paint.rs
+    /// 已有 `geometry_stale` → `recompute_geometry` 的分支，含二次收敛）。
+    pub(crate) fn estimate_geometry(&mut self) {
+        let scale = self.input_state.scale;
+        let line_h = self.engine.doc_line_height();
+        // details 归属/可见性按块序列一次推导：折叠头块的整组后继高度为 0。
+        self.refresh_details_visibility();
+        let caret = self.effective_caret();
+        let mut blocks = std::mem::take(&mut self.index.blocks);
+        let margin = self.engine.doc_margin_px() * scale;
+        let mut y = margin;
+        #[allow(clippy::type_complexity)]
+        let mut prev: Option<(f32, bool, bool, Range, BlockContainer, usize, bool)> = None;
+        let mut hidden_since_prev = false;
+        for g in &mut blocks {
+            g.height = if g.details_hidden { 0.0 } else { g.est_h };
+            g.top = y;
+            if g.details_hidden {
+                hidden_since_prev = true;
+                continue;
+            }
+            // REN-SWEEP-001：Front Matter 非活动态折叠（与 recompute_geometry 同口径）。
+            let hidden_fm = self.frontmatter_hidden(g, caret);
+            if hidden_fm {
+                g.height = if self.window_state.print.is_some() {
+                    0.0
+                } else {
+                    (crate::tokens::doc::FM_COLLAPSED_H * scale).round()
+                };
+            }
+            if let Some((
+                prev_gap,
+                prev_quote,
+                prev_details,
+                pr,
+                pc,
+                prev_end_line,
+                prev_hidden_fm,
+            )) = prev
+            {
+                let blank = if hidden_since_prev {
+                    self.blank_lines_directly_before(g.start_line)
+                } else {
+                    g.start_line.saturating_sub(prev_end_line) as u32
+                };
+                if !prev_hidden_fm {
+                    y += gap_between_parts(
+                        prev_gap,
+                        prev_quote,
+                        prev_details,
+                        pr,
+                        pc,
+                        &g.kind,
+                        g.range,
+                        g.container,
+                        blank,
+                        line_h,
+                    ) * scale;
+                }
+                g.top = y;
+            }
+            y += g.height;
+            prev = Some((
+                gap_after(&g.kind),
+                matches!(g.kind, BlockKind::BlockQuote),
+                matches!(g.kind, BlockKind::Details { .. }),
+                g.range,
+                g.container,
+                g.end_line,
+                hidden_fm,
+            ));
+            hidden_since_prev = false;
+        }
+        self.index.total_h = match blocks.last() {
+            Some(last) => {
+                let tail_blank = self.blank_lines_in_gap(
+                    last.range,
+                    Range::new(
+                        self.editor.session().text_len(),
+                        self.editor.session().text_len(),
+                    ),
+                );
+                let pad = gap_after(&last.kind)
+                    + (tail_blank as f32 + doc::BLANK_LINE_LINES + doc::BOTTOM_PAD_LINES) * line_h;
+                y + pad * scale
+            }
+            None => 2.0 * margin,
+        };
+        self.index.blocks = blocks;
+        self.index.incremental_pos = None;
+        self.index.geometry_stale = true;
     }
 
     /// 编辑路径的几何刷新：单块原位编辑只更新脏块邻域（高度可能变）并平移后缀 top；

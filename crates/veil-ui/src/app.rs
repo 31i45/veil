@@ -1144,7 +1144,10 @@ impl App {
             .set_doc_margin(app.config.doc_margin, app.config.doc_margin_px);
         app.doc.export_style.font_family = app.engine.doc_face();
         app.refresh_index();
-        app.recompute_geometry();
+        // 真实 `recompute_geometry()` 推迟到首次 render 的 `geometry_stale` 分支。
+        // 窗口尚未创建时 cosmic-text 无 viewport，提前重算只会在 cache.layout()
+        // 上做全量 miss 判定（每块构造 BaseKey + 哈希 + 查表），算完首次 render 还会
+        // 重跑一次——直接删掉，让 estimate_geometry 用 est_h 先顶一下。
         // 启动即登记最近文件（CLI 打开/会话恢复/崩溃恢复路径统一入口）
         if let Some(p) = app.doc.path.clone() {
             app.note_opened(p);

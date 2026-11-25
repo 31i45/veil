@@ -393,11 +393,20 @@ pub(crate) fn paint_under_decor(
 ) {
     let radius = (2.0 * scale).max(1.0);
     match kind {
-        UnderKind::MarkBg => frame.fill_rect(x, y, w, h, [255u8, 247, 153, 180]),
+        UnderKind::MarkBg => frame.fill_rect(x, y, w, h, theme.mark_bg),
         UnderKind::KbdFrame => {
             // 边框用「外框边框色 + 内缩 1px 底色」叠出（stroke 的透明挖空
-            // 在 src-over 下无效，会把整块涂成边框色）。
-            frame.fill_rounded_rect(x, y, w.max(2), h.max(2), radius, [160u8, 160, 160, 255]);
+            // 在 src-over 下无效，会把整块涂成边框色）。颜色必须取自主题：
+            // 深色下若用浅色底，浅色字坐在近白块上会形成眩光、整段不可读。
+            let border = theme.kbd_border;
+            frame.fill_rounded_rect(
+                x,
+                y,
+                w.max(2),
+                h.max(2),
+                radius,
+                [border[0], border[1], border[2], 255],
+            );
             if w > 2 && h > 2 {
                 frame.fill_rounded_rect(
                     x + 1,
@@ -405,12 +414,13 @@ pub(crate) fn paint_under_decor(
                     w - 2,
                     h - 2,
                     (radius - 1.0).max(0.0),
-                    [245u8, 245, 245, 255],
+                    theme.kbd_bg,
                 );
             }
         }
         UnderKind::ImagePlaceholder => {
-            frame.fill_rounded_rect(x, y, w.max(2), h.max(2), radius, [190u8, 190, 190, 255]);
+            // 占位块也必须是主题色：深色下浅灰块等同于一块亮斑。
+            frame.fill_rounded_rect(x, y, w.max(2), h.max(2), radius, theme.chrome_border);
             if w > 2 && h > 2 {
                 frame.fill_rounded_rect(
                     x + 1,
@@ -418,7 +428,7 @@ pub(crate) fn paint_under_decor(
                     w - 2,
                     h - 2,
                     (radius - 1.0).max(0.0),
-                    [235u8, 235, 235, 255],
+                    theme.code_bg,
                 );
             }
         }

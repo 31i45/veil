@@ -821,6 +821,46 @@ fn inline_html_kbd_mark_abbr_pixels_visible() {
     assert_dotted_row(f, ux, uy, a_rect.2 as i32, bg);
 }
 
+/// 深色回归：`<kbd>` 必须用暗底 + 中灰描边。曾在深色下渲染成近白块，
+/// 浅色字（fg）坐在 [245,245,245] 上几乎不可见（截图事故）。
+#[test]
+fn dark_kbd_renders_on_dark_surface() {
+    let store = MemStore::default();
+    let text = "段落 <kbd>Ctrl</kbd> 结束\n";
+    let mut a = app(text, None, false, &store);
+    a.set_theme_mode(ThemeMode::Dark);
+    a.editor.set_caret(text.len() - 1);
+    a.ensure_layouts_all();
+    a.recompute_geometry();
+    let theme = a.input_state.theme;
+    assert!(theme.dark, "本用例前提是深色主题");
+    let id = a.index.blocks[0].id;
+    let serialized = a.editor.session().serialize();
+    let ck = rel_offset(&a, id, serialized.find("Ctrl").unwrap());
+    let vp = a.viewport();
+    let g = a.index.blocks.iter().find(|g| g.id == id).unwrap();
+    let sy = (vp.y + g.top - a.window_state.scroll_y) as i32;
+    let cx = a.content_x() as i32;
+    let l = &a.cache.layouts[&id];
+    let k_rect = a.engine.selection_rects(l, ck, ck + "Ctrl".len())[0];
+    let kx = (cx + (k_rect.0 - 1.0) as i32).max(0) as u32;
+    let ky = sy + (k_rect.1 + k_rect.3 / 2.0) as i32;
+    let f = a.render();
+    let border = [theme.kbd_border[0], theme.kbd_border[1], theme.kbd_border[2], 255];
+    assert_eq!(
+        f.get(kx, ky as u32),
+        border,
+        "深色下 kbd 左缘应为主题描边色（非浅色硬编码）"
+    );
+    // 内缩 1px 后应是暗底：亮度必须明显低于正文前景，否则就是眩光块
+    let inner = f.get(kx + 1, ky as u32);
+    assert_eq!(inner, theme.kbd_bg, "深色下 kbd 内部应为主题暗底");
+    assert!(
+        inner[0] < 120 && inner[1] < 120 && inner[2] < 120,
+        "深色 kbd 底色亮度必须低（实际 {inner:?}）"
+    );
+}
+
 #[test]
 fn inline_html_sub_sup_pixels_smaller_and_shifted() {
     let store = MemStore::default();
@@ -904,6 +944,7 @@ fn html_img_missing_or_remote_placeholder_and_alt_visible() {
     let dh = (rect.3 + 2.0) as u32;
     let px = dx + dw as i32 - 3;
     let py = dy + dh as i32 / 2;
+    let placeholder_fill = a.input_state.theme.code_bg;
     let f = a.render();
     assert!(
         any_pixel(
@@ -912,9 +953,9 @@ fn html_img_missing_or_remote_placeholder_and_alt_visible() {
             dy + 1,
             dw.saturating_sub(2),
             dh.saturating_sub(2),
-            |p| { p == [235, 235, 235, 255] }
+            |p| p == placeholder_fill
         ),
-        "占位框内应有浅灰底色，实际: {:?}",
+        "占位框内应有主题代码底色（浅色 = 浅灰），实际: {:?}",
         f.get(px as u32, py as u32)
     );
 }

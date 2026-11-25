@@ -2139,10 +2139,15 @@ impl App {
         let Some(gate) = self.window_state.startup.as_mut() else {
             return;
         };
-        if !(gate.on_present(presented) || gate.on_timeout(now)) {
+        // 只有「首次 present 成功」才算真实首帧；超时兜底显示不打印首帧埋点。
+        let first_present = gate.on_present(presented);
+        if !(first_present || gate.on_timeout(now)) {
             return;
         }
         self.window_state.startup = None;
+        if first_present {
+            crate::diag::perf_trace_first_frame();
+        }
         if let Some(window) = &self.window_state.window {
             window.set_visible(true);
             window.request_redraw();

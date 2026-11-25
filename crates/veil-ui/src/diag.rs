@@ -9,7 +9,7 @@
 //! POSIX 根目录起点都会一直吞到硬终止符（含空格，宁可过度替换）。
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::Instant;
 
@@ -50,6 +50,44 @@ static STATE: Mutex<State> = Mutex::new(State {
 static START: OnceLock<Instant> = OnceLock::new();
 /// DPI 缩放以 f32 位模式存放，读取路径无锁、不会 panic，可在 panic hook 内安全调用。
 static DPI_BITS: AtomicU32 = AtomicU32::new(0x3f80_0000); // 1.0f32 的位模式
+/// 性能埋点计时原点（仅 `VEIL_PERF_TRACE=1` 时设置，避免常态路径任何额外开销）。
+static PERF_START: OnceLock<Instant> = OnceLock::new();
+/// 首帧埋点只打印一次。
+static PERF_FIRST_FRAME_TRACED: AtomicBool = AtomicBool::new(false);
+
+/// 性能埋点开关：只读环境变量，不做 IO；未开启时两个埋点函数都是空操作。
+fn perf_trace_enabled() -> bool {
+    std::env::var_os("VEIL_PERF_TRACE").is_some_and(|v| v == "1")
+}
+
+/// 记录「进程启动」计时原点；应在产品层 `run()` 最早期调用。
+/// 仅在 `VEIL_PERF_TRACE=1` 时生效（只读一次时钟；常态不进入计时）。
+pub fn perf_mark_start() {
+    if perf_trace_enabled() {
+        let _ = PERF_START.set(Instant::now());
+    }
+}
+
+/// 首次 `present` 成功时调用：向 stderr 打印固定格式的
+/// `veil-first-frame-ms: <毫秒>`（一位小数），供外部脚本解析。
+///
+/// 口径：`perf_mark_start()`（进程入口）→ 首次 present 成功。
+/// 仅在 `VEIL_PERF_TRACE=1` 时输出，且每进程至多一次；未开启时不做任何事。
+pub fn perf_trace_first_frame() {
+    if !perf_trace_enabled() {
+        return;
+    }
+    let Some(start) = PERF_START.get() else {
+        return;
+    };
+    if PERF_FIRST_FRAME_TRACED.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    eprintln!(
+        "veil-first-frame-ms: {:.1}",
+        start.elapsed().as_secs_f64() * 1000.0
+    );
+}
 
 /// 记录结构化事件；detail 会经过脱敏与截断（禁止换行、绝对路径替换为 `<path>`、
 /// 上限 256 字符）。锁中毒时恢复内部数据，绝不 panic。

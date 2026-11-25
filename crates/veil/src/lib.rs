@@ -32,6 +32,8 @@ fn load_document(path: &Path) -> Result<(String, bool), platform::OpenFailure> {
 }
 
 pub fn run() {
+    // 性能埋点计时原点：必须是进程入口最早期语句（仅 VEIL_PERF_TRACE=1 时读一次时钟）。
+    veil_ui::diag::perf_mark_start();
     // 诊断内核必须最早初始化：早于 /register、CLI 解析与 UI 初始化。
     // release 下 panic = "abort"，但 hook 仍先执行，任何早期崩溃都能取证。
     diag::install();

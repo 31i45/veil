@@ -941,7 +941,7 @@ impl LayoutEngine {
                     if st.code_bg {
                         out.push((s, e, UnderKind::InlineCodeBg));
                     }
-                    if st.mark_bg.is_some() {
+                    if st.mark_bg {
                         out.push((s, e, UnderKind::MarkBg));
                     }
                     if st.kbd_frame {

@@ -218,7 +218,7 @@ fn cell_decor(
         if st.code_bg {
             under_ranges.push((s, e, UnderKind::InlineCodeBg));
         }
-        if st.mark_bg.is_some() {
+        if st.mark_bg {
             under_ranges.push((s, e, UnderKind::MarkBg));
         }
         if st.kbd_frame {

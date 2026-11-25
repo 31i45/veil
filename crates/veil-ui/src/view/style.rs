@@ -25,9 +25,10 @@ pub struct Style {
     /// Sub/Sup 基线偏移方向（em 的符号倍率）：-1 下沉（sub）、+1 上浮（sup）。
     /// layout 层转成物理像素偏移，paint 光栅化时按字形区间施加。
     pub baseline_shift: Option<f32>,
-    /// Mark 底色（HTML `<mark>`）。None 表示不画底色。
-    /// paint 层在 draw_text 前按 glyph 矩形填色。
-    pub mark_bg: Option<[u8; 3]>,
+    /// Mark 底色启用位（Markdown `==x==` 与 HTML `<mark>`）。`false` 表示不画底色。
+    /// 实际色值由绘制层取 `Theme::mark_bg`（浅色柔黄 / 深色暗琥珀 / 高对比度暗黄），
+    /// 样式层不携带色值——否则深色主题会沿用写死的浅色。
+    pub mark_bg: bool,
     /// Abbr 虚线下划线（HTML `<abbr>`）。paint 层绘制。
     pub dotted_underline: bool,
     /// Kbd 边框标记（HTML `<kbd>`）。paint 层绘制圆角矩形。
@@ -76,6 +77,7 @@ pub fn style_spans(
                 st.kbd_frame |= mst.kbd_frame;
                 st.dotted_underline |= mst.dotted_underline;
                 st.code_bg |= mst.code_bg;
+                st.mark_bg |= mst.mark_bg;
                 st.underline |= mst.underline;
                 st.overline |= mst.overline;
                 if st.bg.is_none() {
@@ -88,9 +90,6 @@ pub fn style_spans(
                 }
                 if st.baseline_shift.is_none() {
                     st.baseline_shift = mst.baseline_shift;
-                }
-                if st.mark_bg.is_none() {
-                    st.mark_bg = mst.mark_bg;
                 }
                 if st.color.is_none() {
                     st.color = mst.color;
@@ -129,9 +128,9 @@ fn collect(nodes: &[InlineNode], block: Range, out: &mut Vec<(usize, usize, Styl
                 strikethrough: true,
                 ..Default::default()
             },
-            // N3c：`==x==` 与 `<mark>` 同一底色 token（柔和黄）。
+            // N3c：`==x==` 与 `<mark>` 同一底色 token；色值由绘制层取 `Theme::mark_bg`。
             InlineKind::Highlight => Style {
-                mark_bg: Some([255, 247, 153]),
+                mark_bg: true,
                 ..Default::default()
             },
             // Image 非激活时整段被占位图替换（layout），无可见文本需要样式；
@@ -204,9 +203,9 @@ fn collect(nodes: &[InlineNode], block: Range, out: &mut Vec<(usize, usize, Styl
                         baseline_shift: Some(-1.0),
                         ..Default::default()
                     },
-                    // Mark：HTML5 语义高亮色，柔和黄（类似 GitHub mark）。
+                    // Mark：HTML5 语义高亮；色值由绘制层取 `Theme::mark_bg`。
                     veil_core::HtmlTag::Mark => Style {
-                        mark_bg: Some([255, 247, 153]),
+                        mark_bg: true,
                         ..Default::default()
                     },
                     // Abbr：虚线下划线提示可展开缩写；tooltip 由 shell 层负责，此处只绘下划线。
@@ -393,15 +392,17 @@ mod tests {
 
     #[test]
     fn highlight_uses_mark_bg_token() {
-        // `==hi==` 整节点（含标记）与 `<mark>` 同一底色，正文色不变
+        // `==hi==` 整节点（含标记）与 `<mark>` 同一底色标记，正文色不变；
+        // 色值由绘制层取 Theme::mark_bg，样式层只置位。
         let sp = spans("a ==hi== b");
-        assert_eq!(find(&sp, 3).mark_bg, Some([255, 247, 153]));
-        assert_eq!(find(&sp, 5).mark_bg, Some([255, 247, 153]));
+        assert!(find(&sp, 3).mark_bg);
+        assert!(find(&sp, 5).mark_bg);
         assert_eq!(find(&sp, 0), Style::default());
         // 与 `<mark>` 标签输出完全同式
         assert_eq!(
-            find(&sp, 3).mark_bg,
-            find(&spans("<mark>hi</mark>"), 7).mark_bg
+            find(&sp, 3),
+            find(&spans("<mark>hi</mark>"), 7),
+            "==x== 与 <mark> 应产出同一样式"
         );
     }
 
@@ -409,6 +410,6 @@ mod tests {
     fn highlight_nests_with_strong() {
         let sp = spans("==**x**==");
         let mid = find(&sp, 4);
-        assert!(mid.mark_bg.is_some() && mid.bold);
+        assert!(mid.mark_bg && mid.bold);
     }
 }

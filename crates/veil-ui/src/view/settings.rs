@@ -25,13 +25,13 @@ pub(crate) enum FieldKind {
     ThemeMode,
     /// 界面语言：三选一（自动/中文/English），改动重启后生效。
     UiLanguage,
-    /// 数字输入（字号 10..=32 / 边距 0..=50 / tab 宽 2/4）。
+    /// 数字输入（字号 10..=32 / 页边距 0..=50 / tab 宽 2/4）。
     Number(NumberRange),
     /// 开关：布尔 toggle。
     Toggle,
     /// 字体族下拉：四档预置 + 任意已安装字族（逐个切换）。
     FontFamily,
-    /// 版心/页边距：五选一（紧凑/标准/宽松/全宽/自定义）。
+    /// 版心：五选一（紧凑/标准/宽松/全宽/自定义）。
     DocMargin,
     /// 窗口几何：只读展示当前 width×height / x,y + "清除" 按钮。
     WindowGeom,
@@ -2008,7 +2008,7 @@ mod tests {
             let en = translate(LOCALES, "en-US", field.label)
                 .unwrap_or_else(|| panic!("缺少英文词条: {:?}", field.label));
             let w = text.width(en);
-            if widest.map_or(true, |(_, max)| w > max) {
+            if widest.map_or(true, |(_, max)| w >= max) {
                 widest = Some((field.label, w));
             }
         }
@@ -2666,7 +2666,7 @@ mod tests {
             .fields
             .iter()
             .position(|f| f.label == Key::SettingsDocMarginPx)
-            .expect("自定义边距字段存在");
+            .expect("自定义版心边距字段存在");
         form.fields[px_idx].value = FieldValue::Number(500.0);
         assert_eq!(form.apply(&config).doc_margin_px, 200.0);
         form.fields[px_idx].value = FieldValue::Number(0.0);

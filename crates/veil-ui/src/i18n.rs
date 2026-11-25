@@ -658,13 +658,13 @@ keys! {
     SettingsLangEnUs => "settings.lang_en_us", "English";
     SettingsDocFontSize => "settings.doc_font_size", "正文字号（10–32）";
     SettingsDocFontFamily => "settings.doc_font_family", "正文字体族";
-    SettingsDocMargin => "settings.doc_margin", "版心/页边距";
+    SettingsDocMargin => "settings.doc_margin", "版心";
     SettingsMarginCompact => "settings.margin_compact", "紧凑";
     SettingsMarginStandard => "settings.margin_standard", "标准";
     SettingsMarginRelaxed => "settings.margin_relaxed", "宽松";
     SettingsMarginFull => "settings.margin_full", "全宽";
     SettingsMarginCustom => "settings.margin_custom", "自定义";
-    SettingsDocMarginPx => "settings.doc_margin_px", "自定义边距（4–200，仅自定义生效）";
+    SettingsDocMarginPx => "settings.doc_margin_px", "自定义版心边距（4–200，仅自定义生效）";
     SettingsFontSystem => "settings.font_system", "系统默认";
     SettingsFontSans => "settings.font_sans", "无衬线";
     SettingsFontSerif => "settings.font_serif", "衬线";
@@ -1787,7 +1787,7 @@ fn main() {
     (Key::SettingsLangEnUs, "English"),
     (Key::SettingsDocFontSize, "Body Font Size (10–32)"),
     (Key::SettingsDocFontFamily, "Body Font Family"),
-    (Key::SettingsDocMargin, "Body Margin"),
+    (Key::SettingsDocMargin, "Body Column"),
     (Key::SettingsMarginCompact, "Compact"),
     (Key::SettingsMarginStandard, "Standard"),
     (Key::SettingsMarginRelaxed, "Relaxed"),
@@ -1795,7 +1795,7 @@ fn main() {
     (Key::SettingsMarginCustom, "Custom"),
     (
         Key::SettingsDocMarginPx,
-        "Custom Margin (4–200, Custom Only)",
+        "Custom Body Margin (4–200, Custom Only)",
     ),
     (Key::SettingsFontSystem, "System Default"),
     (Key::SettingsFontSans, "Sans Serif"),

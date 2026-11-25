@@ -99,10 +99,10 @@ Four crates, one-way dependency (`veil` → `veil-ui` → `veil-core`; `veil-mer
 10. Writing loop: CJK-calibrated word count, Focus Mode (a view toggle, not persisted, reset on launch), Ctrl+P Quick Open (recent + current-dir candidates), Ctrl+Shift+P print, image paste / drag-drop insertion
 11. Table editing: Tab / Shift+Tab navigate cells (Tab in the last cell appends a row and moves to the new row's first cell); Ctrl+Enter appends an empty row at the table tail; the right-click menu inserts/deletes rows and columns and sets column alignment (left / center / right, separator row only); each structural change is one undo step
 12. Fenced code blocks: syntax highlighting via `syntect` (fancy-regex, pure Rust) over its default grammar set (75 syntaxes); 17 of the 19 legacy canonical labels are covered (`toml` / `dockerfile` fall back to plain text). The syntax set loads lazily on the first code block, and per-line `ParseState` caching means a one-character edit reparses only the affected line. Each block's top-right corner shows its language label (canonical name for supported languages, raw info string for unknown ones, hidden when absent) and a copy button that copies the code verbatim (no fence or language marker; the document, undo stack and dirty flag stay untouched). Keyboard/menu: `Ctrl+Shift+C` copies the code block at the caret, and the block's right-click menu starts with "Copy Code Block"
-13. Source mode: Ctrl+/ shows the full Markdown source (tables and math blocks included); toggling keeps caret and scroll position; print and export always use the rendered view
-14. PDF export: Ctrl+Shift+E or File → Export PDF writes `<stem>.pdf` to a location you confirm (name collisions become ` (2)`, ` (3)`); optional TOC page, page numbers and margin (default 20 mm) via `config.toml`. This is the only PDF output path: native vector output (multi-level bookmarks, CJK font subsetting, heading/table/image/math layout), searchable and copyable. If native export fails (missing CJK fonts, unwritable target, locked file, oversized output), Veil keeps any existing target untouched and shows an actionable error — it never opens the print dialog and never writes a bitmap PDF. To preview the final layout, open the exported PDF in your system PDF viewer. Unsaved drafts first ask for an output location (cancelling aborts).
+13. Source mode: Ctrl+/ shows the full Markdown source (tables and math blocks included); toggling keeps caret and scroll position; print and export always use Rendered mode
+14. PDF export: Ctrl+Shift+E or File → Export PDF writes `<stem>.pdf` to a location you confirm (name collisions become ` (2)`, ` (3)`); optional TOC page, page numbers and page margin (default 20 mm) via `config.toml`. This is the only PDF output path: native vector output (multi-level bookmarks, CJK font subsetting, heading/table/image/math layout), searchable and copyable. If native export fails (missing CJK fonts, unwritable target, locked file, oversized output), Veil keeps any existing target untouched and shows an actionable error — it never opens the print dialog and never writes a bitmap PDF. To preview the final layout, open the exported PDF in your system PDF viewer. Unsaved drafts first ask for an output location (cancelling aborts).
 15. Opening links: `Ctrl+click` an http/https/mailto link (a mouse gesture, not a new shortcut) to hand it to the system default browser or mail client; the caret does not move. The link context menu starts with "Open in Browser", followed by "Copy Link Address". Protocols outside the allowlist only show a notice; aside from on-demand remote-image fetches, Veil itself makes no network requests
-16. GFM footnotes: `[^id]` references and `[^id]: content` definitions. In rendered view, references show as a link-coloured `[n]`, while definition blocks hide the marker and show "number + content + ↩"; numbers follow first-reference order in the document. `Ctrl+click` a reference to jump to its definition, and `Ctrl+click` the trailing `↩` to jump back to the first reference. Source mode (`Ctrl+/`) shows the raw markup. HTML export emits `<sup>` references and a footnote list at the end (with backlinks)
+16. GFM footnotes: `[^id]` references and `[^id]: content` definitions. In Rendered mode, references show as a link-coloured `[n]`, while definition blocks hide the marker and show "number + content + ↩"; numbers follow first-reference order in the document. `Ctrl+click` a reference to jump to its definition, and `Ctrl+click` the trailing `↩` to jump back to the first reference. Source mode (`Ctrl+/`) shows the raw markup. HTML export emits `<sup>` references and a footnote list at the end (with backlinks)
 17. In-document anchors: `Ctrl+click` `[text](#slug)` to jump to the matching heading; exported headings carry `id="<slug>"`; duplicate headings are de-duplicated as `name`, `name-1` (the same `heading_slug` / `heading_slugs` rules used by export)
 18. Line navigation: `Alt+↑` / `Alt+↓` move the current line (one undo step); `PgUp` / `PgDn` page the viewport while keeping the target column; `Ctrl+Backspace` / `Ctrl+Delete` delete by word and never cross a line break
 19. Find & replace: a "Match case" toggle (off by default, kept for the session); a regex mode (`.*` button or `Alt+R`, kept for the session) with line-anchored `^`/`$`, capture-group replacement (`$1` / `${name}`) and an inline "invalid regex" state; `Enter` replaces the current match and advances, `Ctrl+Enter` replaces all
@@ -111,7 +111,7 @@ Four crates, one-way dependency (`veil` → `veil-ui` → `veil-core`; `veil-mer
 22. Caret as focus: solid when the window is focused, hollow when it is not — no timers, no idle wake-ups
 23. State transitions: hover/press highlights in the menu bar, menus, outline, Quick Open, context menu, find bar and dialog buttons cross-fade over 120 ms (ease-out cubic); the fade advances only while it runs, so the idle path still schedules no timers and never wakes the process. Fades are skipped entirely when Windows "Show animations" is off
 24. Remote images (v1.4): http/https images are disabled by default; the persistent **View → Allow Remote Images** setting enables them globally, so later documents containing remote images can fetch them on demand without another prompt; a failed fetch degrades to an alt placeholder with a one-time status-bar notice. Requests never carry cookies, `Referer` or credentials, the User-Agent is fixed at `Veil/<version>`, connect/read timeout is 10 s, the response body is capped at 20 MiB, at most 3 redirects are followed with https→http downgrades refused, and localhost / loopback / private / link-local addresses are rejected. Export and PDF never include remote resources
-25. Editing feel (v1.5): auto-pairing for `()` `[]` `{}` `"` `'` with wrap-selection and paired backspace; the 600 ms caret blink pauses during IME preedit and printing; `Ctrl+,` opens a settings modal (9 items, applied immediately)
+25. Editing feel (v1.5): auto-pairing for `()` `[]` `{}` `"` `'` with wrap-selection and paired backspace; the 600 ms caret blink pauses during IME preedit and printing; `Ctrl+,` opens the settings panel (13 rows: 12 editable settings plus the read-only window geometry, applied immediately)
 26. Outline & TOC: a `[TOC]` line renders as a nested ordered list with heading anchors and refreshes as you edit
 27. Image workflow (v1.6 + this round): alt text is shown as a caption; standalone images support `<img align="left|center|right">` and explicit `width`/`height`; click a standalone image to open the zoom preview (wheel pans, `Ctrl+wheel` or `+`/`-` zooms, `0` fits, arrow keys / page keys pan, `Esc` or the mask closes; `Ctrl+click` still places the caret and reveals source)
 28. Reading & navigation: a collapsed Front Matter card expands on click; heading/TOC anchors jump; interactive chrome shows a pointer cursor
@@ -138,22 +138,22 @@ Four crates, one-way dependency (`veil` → `veil-ui` → `veil-core`; `veil-mer
 
 ## Known Limitations (rendering & export)
 
-Veil does not claim that every Markdown or Mermaid construct renders identically on all five surfaces (editing, source, HTML, PDF, print). The following are known limits, not "coming soon" promises:
+Veil does not claim that every Markdown or Mermaid construct renders identically on all five surfaces (Rendered mode, Source mode, HTML, PDF, print). The following are known limits, not "coming soon" promises:
 
 - **Mermaid readability**: `gantt` task and section labels are raised from Mermaid's 11 px default to 14 px through the public `gantt.fontSize` / `sectionFontSize` options, set by the in-process renderer. Axis tick labels and internal layout metrics stay as Mermaid produces them. **Limit:** `c4context` stereotype text is fixed at about 12 px by the upstream c4 renderer; there is no safe knob to enlarge it without overflowing boxes measured at that size, so it is recorded as a **known degradation**, not silently restyled.
 - **Dark Mermaid contrast**: automated WCAG-AA contrast assertions cover `mindmap`, `kanban`, `journey`, `gantt` and `c4context` (node text vs. node background). Other diagram types are checked for geometry, visible text and successful rasterisation only; per-type human visual review of dark themes remains **NOT RUN**. In `c4context`, relation labels inherit Mermaid's fixed `#444444` on dark themes, which can be low-contrast; overriding it with global CSS would leak into other diagram types, so that case stays unasserted and **NOT RUN**.
 - **PDF / print tables**: cell text now carries bold, italic, inline-code background, link colour/underline and link annotations, and long cells paginate instead of being truncated. Row splitting uses a fixed line-height estimate, so exceptionally tall cells may spill onto more pages than a browser would use.
-- **Chinese line breaking in PDF / print**: a simplified kinsoku pass keeps closing punctuation off line starts and opening brackets off line ends. It is not full UAX #14 line breaking with punctuation squeezing, so line breaks can still differ from the editing surface (cosmic-text).
-- **Remote images**: the editing surface may display them on demand, but HTML export drops remote `src` values (self-contained output) and PDF/print degrade them to alt text or `[图片]`; export and PDF never download remote resources.
-- **Image sampling**: Mermaid bitmaps are restored to CSS size and clamped to the text column before drawing, but scaled with nearest-neighbour sampling; very large diagrams are limited by the column width rather than re-rasterised per zoom level.
-- **Details**: collapsed in the editing view by design; HTML, PDF and print always expand them. This is intentional, not a cross-surface defect.
+- **Chinese line breaking in PDF / print**: a simplified kinsoku pass keeps closing punctuation off line starts and opening brackets off line ends. It is not full UAX #14 line breaking with punctuation squeezing, so line breaks can still differ from Rendered mode (cosmic-text).
+- **Remote images**: Rendered mode may display them on demand, but HTML export drops remote `src` values (self-contained output) and PDF/print degrade them to alt text or `[图片]`; export and PDF never download remote resources.
+- **Image sampling**: Mermaid bitmaps are restored to CSS size and clamped to the body column before drawing, but scaled with nearest-neighbour sampling; very large diagrams are limited by the body column width rather than re-rasterised per zoom level.
+- **Details**: collapsed in Rendered mode by design; HTML, PDF and print always expand them. This is intentional, not a cross-surface defect.
 
 Beyond rendering and export, this section also records verification gaps and standing product decisions:
 
 - **Verification gaps (carried over from the previous spec's Task 6; every item is NOT RUN)**: real Chinese IME composition and the candidate window; 100% / 125% / 200% DPI (150% has an automated first-frame check only); physical printing on a real printer (print output is verified only through the shared PDF pagination path, and the app has no separate print preview); remote GitHub Actions and a Linux desktop; a real network-capture run for offline attribution; and systems without any CJK font together with read-only export targets. None of these has been executed, so none is a pass. High-contrast handling exists in the code (`SPI_GETHIGHCONTRAST`; FFI failures silently mean "not enabled"), but neither its trigger on a real high-contrast theme nor the look under extreme themes has been verified — both remain **NOT RUN**.
 - **Line-breaking dependency: `unicode-linebreak` is a NO-GO (recorded decision, not a to-do)**: the existing line-breaking pass already covers 99%+ of real text, so pulling in `unicode-linebreak` was evaluated and rejected — the gain did not justify the dependency. This is a decision record; it is not an upcoming feature.
 - **Fonts come from the system; nothing is bundled**: body text is laid out with the installed fonts enumerated via `fontdb`; no font file ships in the repository or inside the binary, so font choice never affects the `veil.exe` size. Any installed family can be selected under **Settings → Body Font Family**; when the chosen face lacks a glyph (for example a Latin-only face used for Chinese), it falls back to a system CJK font instead of showing tofu.
-- **Source mode: blank lines between blocks**: source mode is "block layout + visible markers", not a plain-text line view. A blank line between blocks cannot hold the caret — Up/Down jumps straight to the neighbouring block. It can still be deleted: Backspace at the start of the next paragraph removes one line break, and `Ctrl+Z` restores it. Blank lines already count towards block spacing at one line height each. This is a disclosed structural limit, not a fixed bug.
+- **Source mode layouts**: Source mode has two layouts over the same bytes. By default it is "block layout + visible markers": a blank line between blocks is not independently addressable, and Up/Down jumps straight to the neighbouring block (the blank line can still be deleted with Backspace at the start of the next paragraph, and `Ctrl+Z` restores it). Enable **Settings → Source mode: plain-text line view** (off by default) to lay every physical line, blank lines included, on its own addressable row; Up/Down then stops on blank lines. Saving bytes are identical in both layouts.
 
 ## Build / Run / Test
 
@@ -229,6 +229,44 @@ Historical comparison of **Veil 0.1.0 and MarkText 0.23.0**, on the same machine
 These are historical P2 measurements, not a current v3.0.2 comparison. In particular, the 40.76 MB Working Set/RSS observation above must not be compared with this table's Private Bytes values. For the current artifact, use its matching Release and `veil.exe.sha256`.
 
 Dependency blacklist: `tokio`, `wasmtime`, any webview crate (`webview2-com`/`wry`, etc.). Introducing any of these is a violation.
+
+## Terminology
+
+One term per concept in the UI, in `config.toml` documentation and in this README. UI labels use Title Case; running prose uses lower case.
+
+| Term | Meaning | Where it appears |
+|---|---|---|
+| **Rendered mode** | The default styled view of the Markdown document. | View → theme entries; the mode you return to with `Ctrl+/` |
+| **Source mode** | The raw Markdown view of the same document (`Ctrl+/`); a view toggle, not a second document model. | View → Source Mode; status bar |
+| **Body column** | The on-screen text column capped at a readable width and centred. Its presets and custom margin are screen-only. | Settings → Body Column; Settings → Custom Body Margin |
+| **Page margin** | The physical margin of PDF/print output, in millimetres. Independent of the body column. | Settings → PDF Export Margin |
+| **Interface language** | The language of menus, dialogs and notices; choosing a new one takes effect after a restart. Document text is never translated. | Settings → Interface Language |
+
+## Settings Surface (audit)
+
+Baseline: 2026-11-25, source version 3.0.2. The 17 independent top-level keys are listed once each. `doc_font_face` is folded into `doc_font_family`: it is the "explicit installed family" representation of the same single settings row, not an extra user-facing option.
+
+| # | Key | UI label | Overlap? | Decision | Reason |
+|---:|---|---|---|---|---|
+| 1 | `mode` | Theme Mode | No | Keep | `system` / `light` / `dark` are three independent appearance choices; none is derivable from another. |
+| 2 | `ui_language` | Interface Language | No | Keep | Independent of document content; restart-only by design. |
+| 3 | `doc_font_family` (+ `doc_font_face`) | Body Font Family | Two representations of one row | Keep | A preset enum and an explicit installed family are mutually exclusive; dropping either loses installed-font selection. The panel already exposes one row. |
+| 4 | `doc_font_size` | Body Font Size (10–32) | No | Keep | Independent typography value with its own clamp. |
+| 5 | `doc_line_height` | (config file only) | No | Keep | Independent typography value; not exposed in the panel and not derived from the font size at read time. |
+| 6 | `doc_margin` | Body Column | No | Keep | Screen body-column preset; unrelated to the PDF page margin. |
+| 7 | `doc_margin_px` | Custom Body Margin | Parameter of `doc_margin = custom` | Keep | Only read in the Custom preset, but it is an independent number, not derivable from the four fixed presets. |
+| 8 | `allow_remote_images` | Allow Remote Images | Same key also appears in the View menu | Keep | One persisted state with two entry points; not a duplicate key. |
+| 9 | `source_plain_lines` | Source mode: plain-text line view | Modifies Source mode only | Keep | Optional line geometry inside Source mode; keeping it preserves the default block-layout source view. |
+| 10 | `tab_width` | Tab Width (2 or 4) | No | Keep | Independent editing preference. |
+| 11 | `export_margin_mm` | PDF Export Margin (mm, 0–50) | Not the same as `doc_margin` | Keep | Page margin vs. on-screen body column: different unit, surface and purpose. |
+| 12 | `export_page_numbers` | Show Page Numbers in PDF | No | Keep | Independent PDF option. |
+| 13 | `export_toc` | Include TOC Page in PDF | No | Keep | Independent PDF option. |
+| 14 | `window_width` | Last Window Geometry (read-only) | One atomic geometry record | Keep | Four keys are read and written together; a partial record is rejected. |
+| 15 | `window_height` | Last Window Geometry (read-only) | One atomic geometry record | Keep | Same record as row 14. |
+| 16 | `window_x` | Last Window Geometry (read-only) | One atomic geometry record | Keep | Same record as row 14. |
+| 17 | `window_y` | Last Window Geometry (read-only) | One atomic geometry record | Keep | Same record as row 14. |
+
+**Result: 17 keep / 0 merge / 0 delete.** No semantically duplicated or strictly derivable key was found this round, so no capability was removed. The only true duplication (`doc_font_face` vs. `doc_font_family`) is already collapsed into one settings row at the UI layer while both representations remain necessary on disk.
 
 ## Document Status & Wording Register
 

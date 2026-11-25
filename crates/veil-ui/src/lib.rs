@@ -46,6 +46,12 @@ mod view;
 
 #[cfg(test)]
 mod app_tests;
+#[cfg(test)]
+mod color_lint_tests;
+#[cfg(test)]
+mod security_tests;
+#[cfg(test)]
+mod theme_matrix_tests;
 // 测试内按原路径加载产品平台错误框实现时，保持其 veil_ui 引用不变。
 #[cfg(test)]
 extern crate self as veil_ui;

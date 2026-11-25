@@ -8,7 +8,7 @@
 //! （`veil_core::should_strip_html` / `sanitize_style` / `link_url_is_safe` 与
 //! `veil-ui::url_is_openable`），它们是导出成品净化的实际执行者。
 
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 use veil_core::{link_url_is_safe, sanitize_style, should_strip_html, HTML_INLINE_WHITELIST};
 
@@ -141,24 +141,93 @@ fn file_scheme_images_are_never_loaded() {
     );
 }
 
-// ---- 3. 路径穿越：图片引用侧缺口（写入侧由产品层负责） ----
+// ---- 3. 路径穿越：图片引用侧目录包含校验 ----
 
-/// 已知缺口：`local_image_path` 不消解/不拒绝 `..`，文档里的相对图片引用可以读到
-/// 文档目录以外的本地图片。影响仅限「渲染端显示」，没有外传通道，故不阻断发布，
-/// 但按威胁模型要求以 `#[ignore]` 锁定，避免误当成已防护。
-/// 最小复现与建议修法见 `evidence/verify/qq-task6/findings.md`。
+/// 基础穿越：`../` 直接跳到文档目录父级以上 → 必须返回 None。
 #[test]
-#[ignore = "已知缺口：图片相对路径未做目录包含校验（见 findings.md）"]
 fn image_reference_dotdot_is_contained_to_document_dir() {
     let doc = Path::new("C:/docs/notes.md");
-    let resolved = crate::paint::local_image_path("../../Users/secret.png", Some(doc))
-        .expect("当前实现会把它解析成文档目录外的路径");
+    assert_eq!(
+        crate::paint::local_image_path("../secret.png", Some(doc)),
+        None,
+        "直接 `../` 应被拒绝"
+    );
+    assert_eq!(
+        crate::paint::local_image_path("../../secret.png", Some(doc)),
+        None,
+        "多级 `../../` 应被拒绝"
+    );
+    assert_eq!(
+        crate::paint::local_image_path("img/../../secret.png", Some(doc)),
+        None,
+        "先下后上的 `img/../../` 应被拒绝"
+    );
+}
+
+/// 百分号编码穿越：`%2E%2E` 解码后即 `..`，应同一条校验命中。
+#[test]
+fn image_reference_percent_encoded_dotdot_is_rejected() {
+    let doc = Path::new("C:/docs/notes.md");
+    assert_eq!(
+        crate::paint::local_image_path("%2E%2E/secret.png", Some(doc)),
+        None,
+        "`%2E%2E` 应解码为 `..` 并越出目录"
+    );
+    assert_eq!(
+        crate::paint::local_image_path("img/%2E%2E/%2E%2E/secret.png", Some(doc)),
+        None,
+        "混合编码应被拒绝"
+    );
+}
+
+/// 绝对路径越界：文档在 `D:\docs\notes.md`，绝对路径 `C:\Users\x.png` 跨驱动器 → None。
+#[test]
+fn image_reference_absolute_outside_document_dir_is_rejected() {
+    let doc = Path::new("D:/docs/notes.md");
+    let outside = if cfg!(windows) {
+        "C:\\Users\\x.png"
+    } else {
+        "/etc/passwd"
+    };
+    assert_eq!(
+        crate::paint::local_image_path(outside, Some(doc)),
+        None,
+        "文档目录外的绝对路径应被拒绝：{outside}"
+    );
+}
+
+/// 合法路径白名单：文档目录内的相对引用与同驱动器绝对引用应正常返回。
+#[test]
+fn image_reference_legitimate_paths_still_work() {
+    let doc = Path::new("C:/docs/notes.md");
+    // 相对路径
+    let resolved = crate::paint::local_image_path("img/photo.png", Some(doc))
+        .expect("文档内相对路径应返回 Some");
+    assert_eq!(
+        resolved.components().count(),
+        Path::new("C:/docs/img/photo.png").components().count(),
+        "长度与目标一致"
+    );
     assert!(
-        !resolved
-            .components()
-            .any(|c| matches!(c, Component::ParentDir)),
-        "图片引用 `..` 不应越出文档目录：{}",
-        resolved.display()
+        resolved.ends_with("img/photo.png") || resolved.ends_with("img\\photo.png"),
+        "目标文件名应保留"
+    );
+
+    // `./` 前缀
+    assert!(
+        crate::paint::local_image_path("./photo.png", Some(doc)).is_some(),
+        "`./` 前缀不应被误拒绝"
+    );
+
+    // 同驱动器、文档目录内的绝对路径
+    let inside_abs = if cfg!(windows) {
+        "C:\\docs\\assets\\cover.png"
+    } else {
+        "/docs/assets/cover.png"
+    };
+    assert_eq!(
+        crate::paint::local_image_path(inside_abs, Some(doc)),
+        Some(PathBuf::from(inside_abs))
     );
 }
 

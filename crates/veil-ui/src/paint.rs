@@ -14,7 +14,7 @@ use crate::view::{
 use softbuffer::Surface;
 use std::collections::HashSet;
 use std::num::NonZeroU32;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use veil_core::{BlockId, BlockKind, HtmlTag, InlineKind, InlineNode, Range};
 use winit::window::Window;
@@ -1833,9 +1833,90 @@ pub(crate) fn is_remote_image_url(url: &str) -> bool {
         || (b.len() >= 7 && b[..7].eq_ignore_ascii_case(b"http://"))
 }
 
+/// 消除路径中的 `.` / `..` 而不访问文件系统（不 `canonicalize`，不存在的文件也能安全解析）。
+/// 规则：
+/// - `Component::CurDir` 跳过
+/// - `Component::ParentDir` 弹出上一个非根组件；若输入就是 `..` 或会越过根，返回 `None`
+/// - 保留 Windows 前缀（`C:` / `\\server\share`）与根目录
+///
+/// 返回 `None` 意味着路径无法在当前语义根下收敛（典型即路径穿越 `/outside-of-root`）。
+fn normalize_no_fs(p: &Path) -> Option<PathBuf> {
+    let mut out: Vec<Component<'_>> = Vec::new();
+    for c in p.components() {
+        match c {
+            Component::Prefix(_) | Component::RootDir => {
+                out.push(c);
+            }
+            Component::CurDir => {}
+            Component::ParentDir => match out.last() {
+                Some(Component::Prefix(_)) | Some(Component::RootDir) | None => return None,
+                _ => {
+                    out.pop();
+                }
+            },
+            Component::Normal(_) => out.push(c),
+        }
+    }
+    if out.is_empty() {
+        Some(PathBuf::from("."))
+    } else {
+        Some(out.iter().collect::<PathBuf>())
+    }
+}
+
+/// 大小写不敏感（Windows 友好）的 `Component` 相等比较，用于前缀校验。
+/// 只对 `Prefix`（Windows 盘符/UNC 服务器）与 `Normal` 组件做 ASCII 小写归一。
+///
+/// 注：`Component::Normal(&OsStr)` —— `x` 已是 `&OsStr`，直接 `.to_string_lossy()`。
+/// `PrefixComponent` 暴露原始前缀串的稳定方式是 `as_os_str`；若该 API 不稳定，
+/// 编译阶段会给出明确提示，届时降级为组件级精确相等比较（Windows 盘符大小写
+/// 差异场景下误拒绝概率极低，安全优先）。
+fn component_eq_ci<'a, 'b>(a: &Component<'a>, b: &Component<'b>) -> bool {
+    match (a, b) {
+        (Component::CurDir, Component::CurDir)
+        | (Component::ParentDir, Component::ParentDir)
+        | (Component::RootDir, Component::RootDir) => true,
+        (Component::Normal(x), Component::Normal(y)) => {
+            x.to_string_lossy().eq_ignore_ascii_case(&y.to_string_lossy())
+        }
+        // PrefixComponent::as_os_str 在 stable 可用；它返回内部原始前缀字节。
+        (Component::Prefix(px), Component::Prefix(py)) => {
+            let ax = px.as_os_str().to_string_lossy().to_ascii_lowercase();
+            let ay = py.as_os_str().to_string_lossy().to_ascii_lowercase();
+            ax == ay
+        }
+        _ => false,
+    }
+}
+
+/// 检查 `candidate` 是否位于 `root` 目录下（前缀语义、大小写不敏感、已归一）。
+/// 要求 `root` 至少包含一个 `Normal` 组件（即不能直接以根目录作为文档目录）。
+fn is_contained_within(root: &Path, candidate: &Path) -> bool {
+    let mut rc = root.components();
+    let mut cc = candidate.components();
+    loop {
+        let a = rc.next();
+        let b = cc.next();
+        match (a, b) {
+            (None, None) => return true,   // 等长且完全一致
+            (None, Some(_)) => return true, // root 已耗尽 → candidate 以前缀 root 开头，是后代 ✓
+            (Some(_), None) => return false, // candidate 更短，不可能是 root 的后代
+            (Some(x), Some(y)) => {
+                if !component_eq_ci(&x, &y) {
+                    return false;
+                }
+            }
+        }
+    }
+}
+
 /// 图片 URL → 本地路径（切片 13）。相对 URL 相对文档所在目录；草稿（无路径）的
 /// 相对 URL 无法解析；`http:`/`https:`/`data:`/`file:` 等带 scheme 的 URL v0 不加载。
 /// Windows 盘符（`C:`）只 1 个字母，不误判为 scheme。
+///
+/// 安全：返回的路径必须落在文档目录内。实现上先对 `doc_parent` 与拼接后路径做
+/// 无文件系统访问的 `.` / `..` 消除（见 `normalize_no_fs`），再做前缀匹配。百分号
+/// 编码穿越（`%2E%2E`）在百分号解码后自然触发同一条校验。
 pub(crate) fn local_image_path(url: &str, doc: Option<&Path>) -> Option<PathBuf> {
     let url = url.trim();
     if url.is_empty() {
@@ -1850,10 +1931,31 @@ pub(crate) fn local_image_path(url: &str, doc: Option<&Path>) -> Option<PathBuf>
     // 与 HTML 导出的资产路径口径一致（veil_core::percent_decode_path）。
     let decoded = veil_core::percent_decode_path(url);
     let p = Path::new(&decoded);
-    if p.is_absolute() {
-        return Some(p.to_path_buf());
+
+    // 无文档上下文时，仅绝对路径且自归一后不越界（不含 `..`）才放行。
+    let (base_dir, raw_candidate) = match (doc, p.is_absolute()) {
+        (None, false) => return None,
+        (None, true) => (None, p.to_path_buf()),
+        (Some(d), false) => {
+            let parent = d.parent()?;
+            (Some(parent.to_path_buf()), parent.join(p))
+        }
+        (Some(d), true) => (Some(d.parent()?.to_path_buf()), p.to_path_buf()),
+    };
+
+    let candidate = normalize_no_fs(&raw_candidate)?;
+
+    if let Some(base) = base_dir {
+        let base_norm = normalize_no_fs(&base)?;
+        if !is_contained_within(&base_norm, &candidate) {
+            return None;
+        }
+    } else {
+        // 草稿无文档：拒绝任何会越出自身根的绝对路径（等价于 `normalize_no_fs` 已做过
+        // 根穿越检查）。这里不再额外约束，避免引入不必要的误伤。
     }
-    Some(doc?.parent()?.join(p))
+
+    Some(candidate)
 }
 
 /// 图片显示尺寸（仅宽度上限；测试与历史调用口径）。生产路径统一走

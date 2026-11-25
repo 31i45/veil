@@ -16,12 +16,11 @@
 #   - 每行：缩进 + ControlType.ProgrammaticName | Name | IsEnabled | IsOffscreen | BoundingRectangle。
 #
 # 场景限制（诚实优先）：
-#   - menu：只 dump「窗口出现后稳定等待 -WaitMs」时的初始树。Veil 的语义树始终包含
-#     MenuBar/Menu/MenuItem，无需脚本展开菜单；脚本不会模拟点击。
-#   - modal：脚本无法自己制造「未保存文档」状态。它只负责启动并 dump 初始树；如需模态节点，
-#     请在 -WaitMs 等待期间人工在窗口中制造未保存状态（例如输入字符后按 Ctrl+W），
-#     等待结束后脚本再 dump。能否捕获到模态节点取决于产品 UIA 树实现，脚本不做保证，
-#     也不假装 modal 截图成功。为便于人工操作，modal 场景会尝试打开 README.zh-CN.md 的临时副本。
+#   - menu：先稳定等待，再做可复现的合成输入（-ClickMenu 点击菜单栏首项；-SendKeys 按键），
+#     然后 dump。注意：产品未实现 Alt+F 助记键（实测 Alt+F 只会向文档插入 "f"），且主菜单
+#     只在展开时才把 Menu/MenuItem 暴露到语义树，所以菜单取证必须 -ClickMenu。
+#   - modal：配合 -SendKeys "^," 可复现地打开「设置」模态，再 dump 模态打开时的树；
+#     不提供合成输入时只 dump 初始树。
 #   - 结束时关闭进程并删除临时 VEIL_HOME，不污染用户配置。
 #
 # 失败（找不到 exe / 窗口超时 / 进程在 UIA 调用前退出 / UIA 树为空）一律 exit 1，并给出可读原因。
@@ -35,6 +34,9 @@ param(
     [string]$Scenario = 'menu',
     [string]$OutFile = '',
     [int]$WaitMs = 2000,
+    [string]$SendKeys = '',
+    [int]$SettleMs = 800,
+    [switch]$ClickMenu,
     [switch]$Help
 )
 
@@ -53,6 +55,9 @@ AC11 屏幕阅读器取证：dump Veil 主窗口的 UIA 无障碍树
   -Scenario <name> menu | modal，默认 menu
   -OutFile <path>  输出文本路径（默认：<repo>\evidence\verify\ac11\uia-tree-<scenario>.txt）
   -WaitMs <int>    窗口出现后的稳定等待毫秒数，默认 2000
+  -SendKeys <s>    稳定等待后发送的合成按键串（SendKeys 语法），例如 "^," = Ctrl+, 打开设置模态
+  -SettleMs <int>  合成输入后的稳定等待毫秒数，默认 800
+  -ClickMenu       合成鼠标点击菜单栏首项（「文件」）以展开主菜单
   -Help            打印本帮助并 exit 0
 
 输出：
@@ -61,10 +66,11 @@ AC11 屏幕阅读器取证：dump Veil 主窗口的 UIA 无障碍树
 
 说明：
   - 需要产品以 --features accessibility 构建，否则 UIA 树为空，脚本 exit 1 并提示构建命令。
-  - menu 只 dump 初始树（Veil 语义树始终含 MenuBar/Menu/MenuItem），不模拟点击。
-  - modal 只启动并 dump 初始树；脚本无法自己制造未保存文档状态。若需模态节点，
-    请用较大的 -WaitMs，并在等待期间人工输入字符后按 Ctrl+W，再让脚本继续 dump。
-    是否包含模态节点取决于产品 UIA 树实现，脚本不做保证。
+  - -SendKeys / -ClickMenu 是脚本化合成输入，用于可复现地打开菜单/模态。发送前显式
+    SetForegroundWindow；置前失败则 WARN 并 exit 1，不产出错误证据。header 如实记录。
+  - 产品未实现 Alt+F 菜单助记键（实测 Alt+F 向文档插入 "f" 并标脏，UIA 树不变）；
+    主菜单只在展开时才把 Menu/MenuItem 暴露到语义树，故菜单取证需 -ClickMenu。
+  - modal 场景配合 -SendKeys "^," 打开设置模态；未提供时只 dump 初始树。
   - 使用临时 VEIL_HOME 隔离启动，结束时关闭进程并清理临时目录。
 '@ | Write-Host
 }
@@ -78,6 +84,7 @@ $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 if (-not $Exe) { $Exe = Join-Path $repoRoot 'target\release\veil.exe' }
 if (-not $OutFile) { $OutFile = Join-Path $repoRoot ("evidence\verify\ac11\uia-tree-{0}.txt" -f $Scenario) }
 if ($WaitMs -lt 0) { throw "-WaitMs 不能为负数：$WaitMs" }
+if ($SettleMs -lt 0) { throw "-SettleMs 不能为负数：$SettleMs" }
 
 $script:proc = $null
 $script:tempRoot = ''
@@ -145,6 +152,11 @@ namespace VeilVerifyUia {
         public int Bottom;
     }
 
+    public struct POINT {
+        public int X;
+        public int Y;
+    }
+
     public static class Win32 {
         public delegate bool EnumProc(IntPtr hWnd, IntPtr param);
 
@@ -155,6 +167,19 @@ namespace VeilVerifyUia {
         [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hWnd, out RECT rect);
         [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetWindowText(IntPtr hWnd, System.Text.StringBuilder text, int count);
         [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
+        [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
+        [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+        [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+        [DllImport("user32.dll")] public static extern bool ClientToScreen(IntPtr hWnd, ref POINT p);
+        [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
+        [DllImport("user32.dll")] public static extern void mouse_event(uint flags, uint dx, uint dy, uint data, UIntPtr extra);
+        [DllImport("user32.dll")] public static extern uint GetDpiForWindow(IntPtr hWnd);
+    }
+
+    public static class K {
+        public const uint MOUSEEVENTF_LEFTDOWN = 0x0002;
+        public const uint MOUSEEVENTF_LEFTUP = 0x0004;
+        public const int SW_RESTORE = 9;
     }
 }
 '@
@@ -199,6 +224,53 @@ function Wait-MainWindow {
         Start-Sleep -Milliseconds 100
     } while ((Get-Date) -lt $deadline)
     throw "等待主窗口超时（${TimeoutMs}ms）：PID=$($Process.Id) 没有可见顶层窗口（>200x300）"
+}
+
+function Invoke-SyntheticInput {
+    # 可复现合成输入：先显式置前（失败即非零退出），再发送按键 / 点击菜单栏首项。
+    param([IntPtr]$Hwnd, [string]$Keys, [int]$Settle, [switch]$ClickMenu)
+    [VeilVerifyUia.Win32]::ShowWindow($Hwnd, [VeilVerifyUia.K]::SW_RESTORE) | Out-Null
+    $foreground = $false
+    $fg = [IntPtr]::Zero
+    for ($i = 0; $i -lt 3 -and -not $foreground; $i++) {
+        [VeilVerifyUia.Win32]::SetForegroundWindow($Hwnd) | Out-Null
+        Start-Sleep -Milliseconds 150
+        $fg = [VeilVerifyUia.Win32]::GetForegroundWindow()
+        $foreground = ($fg -eq $Hwnd)
+    }
+    if (-not $foreground) {
+        Write-Log 'WARN' "置前失败：GetForegroundWindow=$fg 不是目标 HWND=$Hwnd；按键会打到别的窗口，拒绝对此取证"
+        throw "SetForegroundWindow 失败（目标 HWND=$Hwnd，实际前台=$fg）"
+    }
+    Write-Log 'INFO' "窗口已置前：HWND=$Hwnd"
+
+    if ($ClickMenu) {
+        $dpi = [uint32][VeilVerifyUia.Win32]::GetDpiForWindow($Hwnd)
+        if ($dpi -eq 0) { $dpi = 96 }
+        $scale = $dpi / 96.0
+        # 菜单栏首项「文件」内部坐标：x 约 20 逻辑像素、y 约 15 逻辑像素（MENU_H=30）。
+        $pt = New-Object VeilVerifyUia.POINT
+        $pt.X = [int][Math]::Round(20 * $scale)
+        $pt.Y = [int][Math]::Round(15 * $scale)
+        [VeilVerifyUia.Win32]::ClientToScreen($Hwnd, [ref]$pt) | Out-Null
+        [VeilVerifyUia.Win32]::SetCursorPos($pt.X, $pt.Y) | Out-Null
+        Start-Sleep -Milliseconds 120
+        [VeilVerifyUia.Win32]::mouse_event([VeilVerifyUia.K]::MOUSEEVENTF_LEFTDOWN, 0, 0, 0, [UIntPtr]::Zero)
+        Start-Sleep -Milliseconds 60
+        [VeilVerifyUia.Win32]::mouse_event([VeilVerifyUia.K]::MOUSEEVENTF_LEFTUP, 0, 0, 0, [UIntPtr]::Zero)
+        Write-Log 'INFO' "已合成点击菜单栏首项：屏幕坐标 $($pt.X),$($pt.Y)（DPI=$dpi）"
+    }
+
+    if ($Keys) {
+        Add-Type -AssemblyName System.Windows.Forms
+        [System.Windows.Forms.SendKeys]::SendWait($Keys)
+        Write-Log 'INFO' "已合成按键：SendKeys '$Keys'"
+    }
+
+    if ($Settle -gt 0) {
+        Write-Log 'INFO' "等待合成输入稳定 ${Settle}ms"
+        Start-Sleep -Milliseconds $Settle
+    }
 }
 
 # ---------- UIA 遍历 ----------
@@ -336,8 +408,14 @@ try {
     Write-Log 'INFO' "主窗口出现：HWND=$hwnd 标题=$($window.Title)"
 
     if ($WaitMs -gt 0) {
-        Write-Log 'INFO' "稳定等待 ${WaitMs}ms（modal 场景可在此期间人工触发未保存提示）"
+        Write-Log 'INFO' "稳定等待 ${WaitMs}ms"
         Start-Sleep -Milliseconds $WaitMs
+    }
+
+    # 合成输入：可复现地打开菜单/模态，必须在窗口就绪之后、dump 之前。
+    if ($SendKeys -or $ClickMenu) {
+        Write-Log 'INFO' '合成输入：脚本化合成输入（SendKeys / 菜单点击），证据由此可复现；非人工操作'
+        Invoke-SyntheticInput -Hwnd $hwnd -Keys $SendKeys -Settle $SettleMs -ClickMenu:$ClickMenu
     }
 
     # 无障碍构建曾在启动时 panic（AccessKit adapter 必须在窗口首次显示前创建），
@@ -377,6 +455,8 @@ try {
     } while ($attempt -lt 3)
 
     $generated = (Get-Date).ToString('o')
+    $sendKeysHeader = if ($SendKeys) { "$SendKeys (synthetic input)" } else { '(none)' }
+    $clickMenuHeader = if ($ClickMenu) { 'yes (synthetic mouse click on menu bar item 0)' } else { '(none)' }
     $header = @(
         '# Veil UIA tree dump',
         "# scenario = $Scenario",
@@ -385,11 +465,14 @@ try {
         "# window_title = $($window.Title)",
         "# generated = $generated",
         "# wait_ms = $WaitMs",
+        "# send_keys = $sendKeysHeader",
+        "# click_menu = $clickMenuHeader",
+        "# settle_ms = $SettleMs",
         "# nodes = $($script:nodes) (excluding_root = $nonRoot)",
         "# menu_items = $($script:menuItems)",
         "# depth_limit = $($script:maxDepth), node_limit = $($script:maxNodes)",
         "# traversal = TreeWalker.ControlViewWalker, 2 spaces per level",
-        '# scope_note = menu 场景为初始树；modal 场景不保证包含模态节点（脚本不制造未保存状态）'
+        '# scope_note = dump 于合成输入（若有）之后；未使用合成输入时为初始树'
     )
     if ($script:truncated) { $header += '# truncated = true（达到节点上限）' }
     if ($script:depthLimited) { $header += '# depth_limited = true（达到深度上限）' }

@@ -19,8 +19,9 @@
 #     chrome = 非客户区标题栏 + 30 逻辑像素菜单栏；menu = 客户端顶部 30 逻辑像素；
 #     scrollbar = 右侧约 20 逻辑像素竖条。菜单栏/滚动条尺寸取自 chrome 模块常量，
 #     布局若变化不会自动跟随，日志会标注为近似。
-#   - `-Region modal` 无法由脚本自己制造「未保存文档」状态：本选项只截整窗基线，
-#     并在日志中 WARN 说明，绝不假装截到了模态对话框。
+#   - `-Region modal` 本身不会制造模态；配合 `-SendKeys "^,"` 才能截到设置模态。
+#   - `-SendKeys` / `-ClickMenu` 是脚本化合成输入（证据 header/日志如实记录）。产品未实现
+#     Alt+F 助记键（实测 Alt+F 会向文档插入 "f"），故主菜单下拉需 `-ClickMenu` 的合成鼠标点击。
 #   - PrintWindow 全黑时降级为「临时置顶 + CopyFromScreen」，并 WARN；若降级后仍全黑则
 #     保留 `<name>.blank.png` 供诊断并以 exit 1 结束，不把空白图冒充证据。
 #
@@ -36,6 +37,9 @@ param(
     [string]$OutDir = '',
     [ValidateSet('chrome', 'menu', 'modal', 'scrollbar', 'full')]
     [string]$Region = 'full',
+    [string]$SendKeys = '',
+    [int]$SettleMs = 800,
+    [switch]$ClickMenu,
     [switch]$Help
 )
 
@@ -55,18 +59,29 @@ AC9 视觉签名取证：按主题截取 Veil 窗口
   -Doc <path>        要打开的 Markdown 文件（默认：README.zh-CN.md 的临时副本）
   -OutDir <dir>      输出目录（默认：<repo>\evidence\verify\ac9）
   -Region <name>     chrome | menu | modal | scrollbar | full，默认 full
+  -SendKeys <s>      合成按键串（System.Windows.Forms.SendKeys 语法），例如 "^," = Ctrl+,
+  -SettleMs <int>    合成输入后的稳定等待毫秒数，默认 800
+  -ClickMenu         合成鼠标点击菜单栏首项（「文件」）以展开主菜单
   -Help              打印本帮助并 exit 0
 
 输出：
   <OutDir>\<YYYYMMDD>-<light|dark>-<region>.png
+  <OutDir>\<YYYYMMDD>-<light|dark>-<region>-masked.png（仅 menu / modal：裁掉标题栏）
   <OutDir>\ac9-capture.log
 
 说明：
   - 用隔离的临时 VEIL_HOME 启动，不读写用户真实配置；结束时关闭进程并删除临时目录。
   - light/dark 通过 <VEIL_HOME>\config.toml 的 mode 键预置；auto 用 mode="system"，
     实际主题读 HKCU AppsUseLightTheme（缺失时按产品行为回退浅色），并用像素亮度交叉校验。
+  - -SendKeys / -ClickMenu 是脚本化合成输入，用于可复现地打开菜单/模态：
+    发送前显式 SetForegroundWindow（置前失败则 WARN 并 exit 1，绝不静默产出错误证据），
+    发送后等待 -SettleMs 再截图。证据日志会如实记录实际使用的合成输入。
+  - 产品未实现 Alt+F 菜单助记键（实测 Alt+F 会向文档插入 "f" 并标脏），
+    因此主菜单下拉需用 -ClickMenu 的可复现鼠标点击；-SendKeys "%f" 不会展开菜单。
+  - Region=menu 且使用了合成输入时，裁剪扩展为整窗（以便包含菜单下拉面板）。
   - 除 full 外的区域是固定几何近似裁剪，不是元素级定位。
-  - modal 不会自动打开模态对话框，本选项只截整窗基线并在日志中说明。
+  - modal 本身不会自动打开模态对话框；请配合 -SendKeys "^," 使用。
+  - menu / modal 额外产出去标题栏的 -masked.png（供人工盲评，裁剪像素数写入日志）。
   - 失败一律 exit 1，并打印原因（不会留下冒充证据的空白图）。
 '@ | Write-Host
 }
@@ -75,6 +90,8 @@ if ($Help) {
     Show-Usage
     exit 0
 }
+
+if ($SettleMs -lt 0) { throw "-SettleMs 不能为负数：$SettleMs" }
 
 # ---------- 路径与运行期状态 ----------
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
@@ -130,6 +147,11 @@ namespace VeilVerify {
         [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetWindowText(IntPtr hWnd, System.Text.StringBuilder text, int count);
         [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
         [DllImport("user32.dll")] public static extern uint GetDpiForWindow(IntPtr hWnd);
+        [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
+        [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+        [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+        [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
+        [DllImport("user32.dll")] public static extern void mouse_event(uint flags, uint dx, uint dy, uint data, UIntPtr extra);
     }
 
     public static class K {
@@ -137,6 +159,9 @@ namespace VeilVerify {
         public const uint SWP_NOSIZE = 0x0001;
         public const uint SWP_NOMOVE = 0x0002;
         public const uint SWP_NOACTIVATE = 0x0010;
+        public const uint MOUSEEVENTF_LEFTDOWN = 0x0002;
+        public const uint MOUSEEVENTF_LEFTUP = 0x0004;
+        public const int SW_RESTORE = 9;
         public static readonly IntPtr HWND_TOPMOST = new IntPtr(-1);
         public static readonly IntPtr HWND_NOTOPMOST = new IntPtr(-2);
     }
@@ -217,6 +242,59 @@ function Wait-MainWindow {
         Start-Sleep -Milliseconds 100
     } while ((Get-Date) -lt $deadline)
     throw "等待主窗口超时（${TimeoutMs}ms）：PID=$($Process.Id) 没有可见顶层窗口（>200x300）"
+}
+
+function Add-LogRaw {
+    # 证据头行：不经 Write-Log 的时间戳前缀，保持 `# key = value` 原样可读。
+    param([string]$Line)
+    if ($script:logPath) {
+        Add-Content -LiteralPath $script:logPath -Value $Line -Encoding utf8
+    }
+    Write-Host $Line
+}
+
+function Invoke-SyntheticInput {
+    # 可复现合成输入：先把目标窗口置前（失败即非零退出），再发送按键/点击菜单栏首项。
+    param([IntPtr]$Hwnd, [string]$Keys, [int]$Settle, [double]$Scale, [switch]$ClickMenu)
+    [VeilVerify.Win32]::ShowWindow($Hwnd, [VeilVerify.K]::SW_RESTORE) | Out-Null
+    $foreground = $false
+    $fg = [IntPtr]::Zero
+    for ($i = 0; $i -lt 3 -and -not $foreground; $i++) {
+        [VeilVerify.Win32]::SetForegroundWindow($Hwnd) | Out-Null
+        Start-Sleep -Milliseconds 150
+        $fg = [VeilVerify.Win32]::GetForegroundWindow()
+        $foreground = ($fg -eq $Hwnd)
+    }
+    if (-not $foreground) {
+        Write-Log 'WARN' "置前失败：GetForegroundWindow=$fg 不是目标 HWND=$Hwnd；按键会打到别的窗口，拒绝对此取证"
+        throw "SetForegroundWindow 失败（目标 HWND=$Hwnd，实际前台=$fg）"
+    }
+    Write-Log 'INFO' "窗口已置前：HWND=$Hwnd"
+
+    if ($ClickMenu) {
+        # 菜单栏首项「文件」内部坐标：x 约 20 逻辑像素、y 约 15 逻辑像素（MENU_H=30）。
+        $pt = New-Object VeilVerify.POINT
+        $pt.X = [int][Math]::Round(20 * $Scale)
+        $pt.Y = [int][Math]::Round(15 * $Scale)
+        [VeilVerify.Win32]::ClientToScreen($Hwnd, [ref]$pt) | Out-Null
+        [VeilVerify.Win32]::SetCursorPos($pt.X, $pt.Y) | Out-Null
+        Start-Sleep -Milliseconds 120
+        [VeilVerify.Win32]::mouse_event([VeilVerify.K]::MOUSEEVENTF_LEFTDOWN, 0, 0, 0, [UIntPtr]::Zero)
+        Start-Sleep -Milliseconds 60
+        [VeilVerify.Win32]::mouse_event([VeilVerify.K]::MOUSEEVENTF_LEFTUP, 0, 0, 0, [UIntPtr]::Zero)
+        Write-Log 'INFO' "已合成点击菜单栏首项：屏幕坐标 $($pt.X),$($pt.Y)"
+    }
+
+    if ($Keys) {
+        Add-Type -AssemblyName System.Windows.Forms
+        [System.Windows.Forms.SendKeys]::SendWait($Keys)
+        Write-Log 'INFO' "已合成按键：SendKeys '$Keys'"
+    }
+
+    if ($Settle -gt 0) {
+        Write-Log 'INFO' "等待合成输入稳定 ${Settle}ms"
+        Start-Sleep -Milliseconds $Settle
+    }
 }
 
 function Get-SystemThemeName {
@@ -457,12 +535,35 @@ try {
     $scale = $dpi / 96.0
     Write-Log 'INFO' "窗口几何：${winW}x${winH}，客户区 ${clientW}x${clientH}，客户区偏移 ${clientLeft},${clientTop}，DPI=$dpi（scale=$([Math]::Round($scale, 3))）"
 
+    # 证据头：如实记录合成输入（未使用写 (none)）。
+    $syntheticUsed = [bool]($SendKeys -or $ClickMenu)
+    Add-LogRaw ("# send_keys = " + $(if ($SendKeys) { "$SendKeys (synthetic input)" } else { '(none)' }))
+    Add-LogRaw ("# click_menu = " + $(if ($ClickMenu) { 'yes (synthetic mouse click on menu bar item 0)' } else { '(none)' }))
+    Add-LogRaw "# settle_ms = $SettleMs"
+
+    if ($syntheticUsed) {
+        Write-Log 'INFO' '合成输入：脚本化合成输入（SendKeys / 菜单点击），证据由此可复现；非人工操作'
+        Invoke-SyntheticInput -Hwnd $hwnd -Keys $SendKeys -Settle $SettleMs -Scale $scale -ClickMenu:$ClickMenu
+    }
+
     switch ($Region) {
         'full' { Write-Log 'INFO' '区域=full：整窗' }
         'chrome' { Write-Log 'INFO' '区域=chrome：近似裁剪（非客户区标题栏 + 30 逻辑像素菜单栏），非元素级定位' }
-        'menu' { Write-Log 'INFO' '区域=menu：近似裁剪（客户端顶部 30 逻辑像素菜单栏），非元素级定位' }
+        'menu' {
+            if ($syntheticUsed) {
+                Write-Log 'INFO' '区域=menu：合成输入可能展开下拉，裁剪扩展为整窗（含菜单栏 + 下拉面板），非元素级定位'
+            } else {
+                Write-Log 'INFO' '区域=menu：近似裁剪（客户端顶部 30 逻辑像素菜单栏），非元素级定位'
+            }
+        }
         'scrollbar' { Write-Log 'INFO' '区域=scrollbar：近似裁剪（右侧约 20 逻辑像素竖条），非元素级定位' }
-        'modal' { Write-Log 'WARN' '区域=modal：脚本不会自动制造未保存状态，本图为整窗基线（近似），不是模态对话框截图' }
+        'modal' {
+            if ($SendKeys) {
+                Write-Log 'INFO' "区域=modal：已用合成按键 '$SendKeys' 打开模态；整窗截图（含标题栏）"
+            } else {
+                Write-Log 'WARN' '区域=modal：脚本不会自动制造未保存状态，本图为整窗基线（近似），不是模态对话框截图'
+            }
+        }
     }
 
     $capture = Invoke-WindowCapture -Hwnd $hwnd
@@ -495,6 +596,10 @@ try {
 
     $regionRect = Get-RegionRect -WinW $winW -WinH $winH -ClientLeft $clientLeft -ClientTop $clientTop `
         -ClientW $clientW -ClientH $clientH -Scale $scale -Region $Region
+    if ($Region -eq 'menu' -and $syntheticUsed) {
+        # 展开的菜单下拉在客户区内、但远低于菜单栏条带：整窗裁剪才包含下拉面板。
+        $regionRect = [System.Drawing.Rectangle]::new(0, 0, $winW, $winH)
+    }
 
     $final = $null
     if ($regionRect.X -eq 0 -and $regionRect.Y -eq 0 -and $regionRect.Width -eq $winW -and $regionRect.Height -eq $winH) {
@@ -518,6 +623,38 @@ try {
     }
     try {
         $final.Save($outPath, [System.Drawing.Imaging.ImageFormat]::Png)
+
+        # 去标题栏遮罩版（仅 menu / modal，人工盲评用）：按实测非客户区顶部高度裁剪。
+        if (($Region -eq 'menu' -or $Region -eq 'modal') -and $final.Height -gt 200) {
+            $maskTop = [int]$clientTop
+            if ($maskTop -le 0 -or $maskTop -ge [int]($final.Height / 3)) {
+                $maskTop = [int][Math]::Round(50 * $scale)
+                Write-Log 'WARN' "非客户区顶部高度异常，遮罩裁剪改用保守值 ${maskTop}px"
+            }
+            if ($maskTop -gt 0 -and ($final.Height - $maskTop) -gt 100) {
+                $masked = New-Object System.Drawing.Bitmap($final.Width, ($final.Height - $maskTop))
+                $gm = [System.Drawing.Graphics]::FromImage($masked)
+                try {
+                    $srcRect = [System.Drawing.Rectangle]::new(0, $maskTop, $final.Width, ($final.Height - $maskTop))
+                    $dstRect = [System.Drawing.Rectangle]::new(0, 0, $masked.Width, $masked.Height)
+                    $gm.DrawImage($final, $dstRect, $srcRect, [System.Drawing.GraphicsUnit]::Pixel)
+                } finally {
+                    $gm.Dispose()
+                }
+                $maskedName = [IO.Path]::GetFileNameWithoutExtension($fileName) + '-masked.png'
+                $maskedPath = Join-Path $OutDir $maskedName
+                try {
+                    $masked.Save($maskedPath, [System.Drawing.Imaging.ImageFormat]::Png)
+                } finally {
+                    $masked.Dispose()
+                }
+                Add-LogRaw "# mask_crop_top = ${maskTop}px (measured non-client top at scale=$([Math]::Round($scale, 3)))"
+                Write-Log 'PASS' "去标题栏遮罩版已保存：$maskedPath（顶部裁剪 ${maskTop}px，尺寸 $($final.Width)x$($final.Height - $maskTop)）"
+                Write-Host "输出（遮罩）：$maskedPath"
+            } else {
+                Write-Log 'WARN' '遮罩版跳过：裁剪后高度不足'
+            }
+        }
     } finally {
         $final.Dispose()
     }

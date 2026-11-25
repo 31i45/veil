@@ -715,6 +715,9 @@ pub struct Config {
     pub doc_margin_px: f32,
     /// 普通远程图片自动加载（默认关）；true = 用户显式允许，false = 全局阻止，只显示 alt 文本。
     pub allow_remote_images: bool,
+    /// 源码模式「纯文本行视图」（灰度，默认关）：开启后空行成为可寻址行。
+    /// 仅影响源码模式的排版/光标几何，不改变保存字节。
+    pub source_plain_lines: bool,
     /// 制表符宽度（2 或 4，默认 4）；其它值夹到 4。
     pub tab_width: u8,
     /// 上次退出时的窗口几何；首次运行或配置缺失时为 `None`。
@@ -736,6 +739,7 @@ impl Default for Config {
             doc_margin: DocMargin::Standard,
             doc_margin_px: DEFAULT_DOC_MARGIN_PX,
             allow_remote_images: false,
+            source_plain_lines: false,
             tab_width: DEFAULT_TAB_WIDTH,
             window: None,
         }
@@ -750,7 +754,7 @@ impl Config {
              export_margin_mm = {}\nexport_page_numbers = {}\nexport_toc = {}\n\
              doc_font_family = \"{}\"\ndoc_font_size = {}\ndoc_line_height = {}\n\
              doc_margin = \"{}\"\ndoc_margin_px = {}\n\
-             allow_remote_images = {}\ntab_width = {}\n",
+             allow_remote_images = {}\nsource_plain_lines = {}\ntab_width = {}\n",
             t(Key::ConfigHeader),
             self.mode.as_str(),
             self.ui_language.as_str(),
@@ -763,6 +767,7 @@ impl Config {
             self.doc_margin.as_str(),
             self.doc_margin_px,
             self.allow_remote_images,
+            self.source_plain_lines,
             self.tab_width,
         );
         if let Some(face) = &self.doc_font_face {
@@ -787,6 +792,18 @@ impl Config {
             .and_then(|text| edit_existing_toml(text, self))
             .unwrap_or_else(|| self.to_toml())
     }
+
+    /// 源码模式纯文本行视图是否启用：环境变量 `VEIL_SOURCE_PLAIN=1` 仅用于灰度，
+    /// 值为 `1` 时强制开启；其他值（含 `0`/空串/未设置）不覆盖配置。
+    pub fn source_plain_lines_enabled(&self) -> bool {
+        env_force_source_plain(std::env::var("VEIL_SOURCE_PLAIN").ok().as_deref())
+            || self.source_plain_lines
+    }
+}
+
+/// 环境变量灰度开关的纯函数形态（便于单测，不触碰进程环境）。
+fn env_force_source_plain(raw: Option<&str>) -> bool {
+    raw == Some("1")
 }
 
 /// 原地编辑已存在的严格 TOML 配置；返回 `None` 表示必须回退整文件重生成。
@@ -856,6 +873,11 @@ fn edit_existing_toml(text: &str, cfg: &Config) -> Option<String> {
     );
     set_item(
         &mut doc,
+        "source_plain_lines",
+        toml_edit::value(cfg.source_plain_lines),
+    );
+    set_item(
+        &mut doc,
         "tab_width",
         toml_edit::value(i64::from(cfg.tab_width)),
     );
@@ -908,7 +930,7 @@ pub struct ConfigParse {
 
 /// 极简配置解析：识别顶层 `mode`/`export_*`、正文排版键
 /// `doc_font_family`/`doc_font_face`/`doc_font_size`/`doc_line_height`/
-/// `doc_margin`/`doc_margin_px`/`allow_remote_images`
+/// `doc_margin`/`doc_margin_px`/`allow_remote_images`/`source_plain_lines`
 /// 与成组的窗口键 `window_width`/`window_height`/`window_x`/`window_y`，其余条目计数忽略。
 /// 排版数值越界按夹取处理（不计数），类型/字面量非法才计入 ignored；
 /// 字号先夹 10..=32，行高再按「字号..=字号×3」夹取（与键出现顺序无关）。
@@ -1009,6 +1031,10 @@ pub fn parse_config(text: &str) -> ConfigParse {
             "smooth_scroll" => {}
             "allow_remote_images" => match value.as_bool() {
                 Some(v) => out.config.allow_remote_images = v,
+                None => out.ignored += 1,
+            },
+            "source_plain_lines" => match value.as_bool() {
+                Some(v) => out.config.source_plain_lines = v,
                 None => out.ignored += 1,
             },
             // 已移除的旧键（Mermaid 插入策略）：静默忽略，快照动作永远落盘本地资产。
@@ -1955,6 +1981,64 @@ mod tests {
             let p = parse(&text);
             assert_eq!(p.config, cfg, "往返恒等");
             assert_eq!(p.ignored, 0);
+        }
+    }
+
+    #[test]
+    fn source_plain_lines_defaults_false_and_parses_bool() {
+        assert!(!Config::default().source_plain_lines);
+        assert!(!parse("mode = \"dark\"\n").config.source_plain_lines);
+        assert!(
+            !parse("source_plain_lines = \"true\"")
+                .config
+                .source_plain_lines,
+            "非法类型回退 false"
+        );
+        assert!(
+            !parse("source_plain_lines = false")
+                .config
+                .source_plain_lines
+        );
+        assert!(parse("source_plain_lines = true").config.source_plain_lines);
+        let p = parse("source_plain_lines = \"yes\"");
+        assert!(!p.config.source_plain_lines);
+        assert_eq!(p.ignored, 1, "非法字面量计入忽略");
+    }
+
+    #[test]
+    fn source_plain_lines_round_trips_through_toml() {
+        for enabled in [true, false] {
+            let cfg = Config {
+                source_plain_lines: enabled,
+                ..Config::default()
+            };
+            let text = cfg.to_toml();
+            assert!(
+                text.contains(&format!("source_plain_lines = {enabled}")),
+                "序列化必须写 {enabled}: {text}"
+            );
+            let p = parse(&text);
+            assert_eq!(p.config, cfg, "往返恒等");
+            assert_eq!(p.ignored, 0);
+        }
+    }
+
+    #[test]
+    fn source_plain_env_override_only_accepts_one() {
+        assert!(env_force_source_plain(Some("1")));
+        for other in [Some("0"), Some(""), Some("true"), Some("yes"), None] {
+            assert!(!env_force_source_plain(other), "只认 1: {other:?}");
+        }
+        // 配置为 true 时即便环境变量非 1 也保持开启。
+        let cfg = Config {
+            source_plain_lines: true,
+            ..Config::default()
+        };
+        assert!(cfg.source_plain_lines_enabled());
+        let off = Config::default();
+        // 测试环境默认不设置 VEIL_SOURCE_PLAIN；若被外部设置也不应与 false 配置冲突。
+        if std::env::var("VEIL_SOURCE_PLAIN").ok().as_deref() != Some("1") {
+            assert!(!off.source_plain_lines_enabled());
         }
     }
 

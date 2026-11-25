@@ -2964,7 +2964,14 @@ impl App {
             // Enter 后新行尚未成块：布局里没有对应视觉行，钳回末字形会让光标/preedit/
             // IME 候选框贴在上一段末尾（真机缺陷 ①③）。改为锚到文本将出现的位置：
             // 1 个尾换行 = 同段下一视觉行；≥2 = 新段顶边（块底 + 段距）。
-            if caret == end && caret > start && self.trailing_newlines(caret) > 0 {
+            //
+            // 纯文本行视图（source_plain_lines）：每一行都是独立块、行尾就是真实
+            // 行尾，换行由下一行块承载；此锚定会把光标画到下一行，故跳过。
+            if !self.source_plain_active()
+                && caret == end
+                && caret > start
+                && self.trailing_newlines(caret) > 0
+            {
                 let nl = self.trailing_newlines(caret);
                 let kind = self.index.blocks[i].kind.clone();
                 self.ensure_block(id);

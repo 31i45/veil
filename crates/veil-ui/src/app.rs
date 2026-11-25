@@ -32,14 +32,15 @@ use crate::theme::{
     WindowGeom,
 };
 use crate::view::{
-    quick_open, search, Cache, Frame, History, LayoutEngine, Outline, QuickOpen, Revs, Search,
+    quick_open, search, source_layout::SourceLayout, Cache, Frame, History, LayoutEngine, Outline,
+    QuickOpen, Revs, Search,
 };
 
 // 各域 impl App 的注册由 lib.rs 的模块声明承担（同 crate 内 impl 自动链接）。
 
 use crate::document::block_index::BlockIndex;
 use crate::document::Persist;
-use veil_core::{BlockId, Range};
+use veil_core::{BlockContainer, BlockId, BlockKind, Range};
 
 /// 外部文件监听轮询间隔（切片 16）：事件在实现侧入队，主线程按此节奏非阻塞取走。
 /// 仅在有路径时设置唤醒，草稿空转不产生周期性唤醒。
@@ -2602,5 +2603,82 @@ impl App {
             next = Some(next.map_or(at, |t| t.min(at)));
         }
         next
+    }
+}
+
+/// 源码模式纯文本行视图的合成块 id 起点：与文档真实 BlockId（自 0 递增）隔离，
+/// 保证模式切换时布局缓存不会串键。
+const SOURCE_PLAIN_ID_BASE: u64 = 1 << 40;
+
+impl App {
+    /// 源码模式纯文本行视图是否生效：源码模式 && （配置开 或 灰度环境变量强制）。
+    pub(crate) fn source_plain_active(&self) -> bool {
+        self.source_mode() && self.config.source_plain_lines_enabled()
+    }
+
+    /// 当前块索引是否已替换为逐行合成块。
+    fn index_is_source_plain(&self) -> bool {
+        self.index
+            .blocks
+            .first()
+            .is_some_and(|g| g.id.0 >= SOURCE_PLAIN_ID_BASE)
+    }
+
+    /// 让块索引与当前视图模型一致（每次排版前调用）：
+    /// - 开关生效且索引还不是逐行块 → 按 `SourceLayout` 重建；
+    /// - 开关不生效但索引仍是逐行块（打印恢复/运行时关开关）→ 恢复真实块索引。
+    pub(crate) fn sync_source_plain_index(&mut self) {
+        if self.source_plain_active() {
+            if !self.index_is_source_plain() {
+                self.rebuild_source_plain_index();
+            }
+        } else if self.index_is_source_plain() {
+            self.refresh_index();
+        }
+    }
+
+    /// 用 `SourceLayout` 的每行内容区间生成「一行一块」的合成块几何。
+    ///
+    /// 块种类取 `Paragraph`（源码模式 `reveal_all` 下不做任何块级替换），行尾换行
+    /// 不会进入行块区间；空行区块区间为零长，但仍按正文行高占位，因而可停光标、
+    /// 可选中、可删除。块间段距沿用段落间距，整个视图保持等距行节奏。
+    fn rebuild_source_plain_index(&mut self) {
+        let text = self.editor.session().serialize();
+        let layout = SourceLayout::new(&text);
+        let scale = self.input_state.scale;
+        let line_h = (self.engine.doc_line_height() * scale).max(1.0);
+        let mut blocks = Vec::with_capacity(layout.line_count());
+        for line in 0..layout.line_count() {
+            let (start, end) = layout.line_range(line).unwrap_or((0, 0));
+            blocks.push(crate::document::block_index::BlockGeom {
+                id: BlockId(SOURCE_PLAIN_ID_BASE + line as u64),
+                kind: BlockKind::Paragraph,
+                range: Range::new(start, end),
+                // 行号恒为 0：几何累计不会把真实行号差当成空行再补一遍高度。
+                start_line: 0,
+                end_line: 0,
+                top: 0.0,
+                height: 0.0,
+                est_h: line_h,
+                words: 0,
+                container: BlockContainer::default(),
+                details_parent: None,
+                details_hidden: false,
+                toc_marker: false,
+                toc_list: false,
+                frontmatter_like: false,
+            });
+        }
+        let count = blocks.len();
+        self.index.blocks = blocks;
+        self.index.incremental_pos = None;
+        // 行数变少时回收越界合成 id 的布局/光栅（其余键不变，正确性不依赖回收）。
+        self.cache.layouts.retain(|id, _| {
+            id.0 < SOURCE_PLAIN_ID_BASE || id.0 - SOURCE_PLAIN_ID_BASE < count as u64
+        });
+        self.cache.rasters.retain(|id, _| {
+            id.0 < SOURCE_PLAIN_ID_BASE || id.0 - SOURCE_PLAIN_ID_BASE < count as u64
+        });
+        self.recompute_geometry();
     }
 }

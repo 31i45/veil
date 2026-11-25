@@ -738,6 +738,8 @@ impl App {
         let caret = self.effective_caret();
         let base = self.base_key();
         let reveal_all = self.source_mode();
+        // 纯文本行视图：等宽、不折行、统一行高（合成行块已在 ensure_layouts_visible 建好）。
+        self.engine.set_plain_lines(self.source_plain_active());
         // 脚注编号表：每轮构建一次（O(引用数)），块内查询 O(1)，不逐块回查会话。
         let footnotes = self.footnote_ctx();
         self.engine.set_scale(self.input_state.scale);
@@ -1089,6 +1091,9 @@ impl App {
         // 先 drain 后台 parse 结果：回填 Highlighter 缓存、递增 highlight_epoch，
         // 让 LayoutKey 自然失配 → 重排时命中缓存同步产出颜色。
         self.engine.drain_background();
+        // 源码模式纯文本行视图：先把块索引切换为（或恢复出）逐行几何，
+        // 后续视口区间/几何累计/排版全部基于同一模型。
+        self.sync_source_plain_index();
         let range = self.visible_index_range();
         self.ensure_layouts_range(range);
     }
@@ -1096,6 +1101,7 @@ impl App {
     /// 测试专用：等价全量排版；不参与非测试构建，避免 dead_code。
     #[cfg(test)]
     pub(crate) fn ensure_layouts_all(&mut self) {
+        self.sync_source_plain_index();
         self.ensure_layouts_range(0..self.index.blocks.len());
     }
 

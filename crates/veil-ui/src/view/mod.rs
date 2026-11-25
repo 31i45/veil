@@ -18,6 +18,7 @@ pub(crate) mod search;
 mod search_strategy;
 mod search_view;
 pub(crate) mod settings;
+pub(crate) mod source_layout;
 mod style;
 pub(crate) mod table;
 mod table_strategy;

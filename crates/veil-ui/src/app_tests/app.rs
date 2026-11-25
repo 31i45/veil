@@ -2653,4 +2653,255 @@ fn image_preview_renders_overlay_frame() {
     assert!(sum(after) < sum(before), "预览覆盖层应压暗背景");
 }
 
-// ===== 光标闪烁状态机（无 GUI，直接驱动 tick） =====
+// ===== 源码模式纯文本行视图（source_plain_lines 灰度开关） =====
+
+/// 灰度开启：段间 1 个空行成为可停光标的一行；上下移按行推进。
+#[test]
+fn source_plain_single_blank_line_holds_caret() {
+    let store = MemStore::default();
+    let mut a = app("aaa\n\nbbb", None, false, &store);
+    a.config.source_plain_lines = true;
+    a.perform_action(Action::OpenSourceMode);
+    a.paint();
+    assert!(a.source_plain_active(), "灰度开关 + 源码模式应生效");
+    // 行区间：aaa[0,3]、空行[4,4]、bbb[5,8]。
+    assert!(a.editor.set_caret(0));
+    a.window_state.goal_x = None;
+    a.route_key(Key::Down);
+    assert_eq!(a.editor.caret(), 4, "下移应停在段间空行");
+    a.route_key(Key::Down);
+    assert_eq!(a.editor.caret(), 5, "再下移到下一段首行");
+    a.route_key(Key::Up);
+    assert_eq!(a.editor.caret(), 4, "上移应回到空行");
+}
+
+/// 灰度开启：连续 3 个空行逐行可停，且行距恒定（索引几何单调等距）。
+#[test]
+fn source_plain_three_consecutive_blank_lines_hold_caret() {
+    let store = MemStore::default();
+    let mut a = app("a\n\n\n\nb", None, false, &store);
+    a.config.source_plain_lines = true;
+    a.perform_action(Action::OpenSourceMode);
+    a.paint();
+    assert!(a.editor.set_caret(0));
+    a.window_state.goal_x = None;
+    for expect in [2, 3, 4, 5] {
+        a.route_key(Key::Down);
+        assert_eq!(a.editor.caret(), expect, "连续空行逐行可停");
+    }
+    let scale = a.input_state.scale;
+    let pitch = {
+        let (b0, b1) = (&a.index.blocks[0], &a.index.blocks[1]);
+        b1.top - b0.top
+    };
+    for w in a.index.blocks.windows(2) {
+        let d = w[1].top - w[0].top;
+        assert!((d - pitch).abs() < 1e-3, "所有行距应一致: {d} vs {pitch}");
+        assert!(d > BASE_LINE_HEIGHT * scale, "行块间还需段落间距");
+    }
+}
+
+/// 灰度开启：文末 2 个空行也可停光标，Ctrl+End 落到文末。
+#[test]
+fn source_plain_trailing_blank_lines_hold_caret() {
+    let store = MemStore::default();
+    let mut a = app("a\n\n", None, false, &store);
+    a.config.source_plain_lines = true;
+    a.perform_action(Action::OpenSourceMode);
+    a.paint();
+    assert!(a.editor.set_caret(0));
+    a.window_state.goal_x = None;
+    a.route_key(Key::Down);
+    assert_eq!(a.editor.caret(), 2, "第一个文末空行");
+    a.route_key(Key::Down);
+    assert_eq!(a.editor.caret(), 3, "第二个文末空行（末行）");
+    a.route_key(Key::Down);
+    assert_eq!(a.editor.caret(), 3, "末行下移不变");
+    a.input_state.mods = Mods {
+        ctrl: true,
+        ..Mods::default()
+    };
+    a.route_key(Key::End);
+    assert_eq!(a.editor.caret(), 3, "Ctrl+End 到文档尾");
+    a.route_key(Key::Home);
+    assert_eq!(a.editor.caret(), 0, "Ctrl+Home 到文档首");
+}
+
+/// 灰度开启：空行可选中，Backspace 删除后文档字节恰少一个换行。
+#[test]
+fn source_plain_blank_line_selectable_and_backspace_deletes_one_newline() {
+    let store = MemStore::default();
+    let original = "a\n\nb";
+    let mut a = app(original, None, false, &store);
+    a.config.source_plain_lines = true;
+    a.perform_action(Action::OpenSourceMode);
+    a.paint();
+    assert!(a.editor.set_caret(2), "空行起点");
+    a.window_state.goal_x = None;
+    a.input_state.mods = Mods {
+        shift: true,
+        ..Mods::default()
+    };
+    a.route_key(Key::Down); // 选中空行 [2,3)
+    a.input_state.mods = Mods::default();
+    a.route_key(Key::Backspace);
+    assert_eq!(doc_text(&a), "a\nb", "删除空行只去掉一个换行");
+    assert_eq!(
+        doc_text(&a).as_bytes(),
+        original
+            .as_bytes()
+            .iter()
+            .copied()
+            .enumerate()
+            .filter(|(i, _)| *i != 2)
+            .map(|(_, b)| b)
+            .collect::<Vec<_>>(),
+        "其余字节保持不变"
+    );
+}
+
+/// 灰度开启：10 万字文档连续上下移动，落点严格逐行、无跳行/回退。
+#[test]
+fn source_plain_large_doc_vertical_moves_are_monotonic() {
+    let store = MemStore::default();
+    // 10000 行 × 10 字节 = 10 万字节（末行是换行后的空行）。
+    let mut text = String::with_capacity(100_001);
+    for i in 0..10_000 {
+        text.push_str(&format!("{i:09}\n"));
+    }
+    assert_eq!(text.len(), 100_000);
+    let mut a = app(&text, None, false, &store);
+    a.config.source_plain_lines = true;
+    a.perform_action(Action::OpenSourceMode);
+    a.paint();
+    assert_eq!(a.index.blocks.len(), 10_001, "每行一块（含文末空行）");
+
+    assert!(a.editor.set_caret(0));
+    a.window_state.goal_x = None;
+    let mut last = 0usize;
+    for step in 1..=60usize {
+        a.route_key(Key::Down);
+        let caret = a.editor.caret();
+        assert_eq!(caret, step * 10, "第 {step} 次下移应逐行推进");
+        assert!(caret > last);
+        last = caret;
+    }
+    for step in (0..60).rev() {
+        a.route_key(Key::Up);
+        assert_eq!(a.editor.caret(), step * 10, "上移应严格回退");
+    }
+    // 全量重排后所有行顶边仍等距单调。
+    a.paint();
+    assert!(a.index.blocks.windows(2).all(|w| w[1].top > w[0].top));
+}
+
+/// 灰度开启：Home/End 到当前行首尾，Ctrl+Home/End 到文档首尾。
+#[test]
+fn source_plain_home_end_and_ctrl_home_end_use_document_offsets() {
+    let store = MemStore::default();
+    let text = "one\ntwo\n\nfour";
+    let mut a = app(text, None, false, &store);
+    a.config.source_plain_lines = true;
+    a.perform_action(Action::OpenSourceMode);
+    a.paint();
+    assert!(a.editor.set_caret(5), "位于 two 第 1 列");
+    a.input_state.mods = Mods::default();
+    a.route_key(Key::Home);
+    assert_eq!(a.editor.caret(), 4, "Home 到本行行首");
+    a.route_key(Key::End);
+    assert_eq!(a.editor.caret(), 7, "End 到本行行尾");
+    assert!(a.editor.set_caret(8), "空行");
+    a.route_key(Key::Home);
+    assert_eq!(a.editor.caret(), 8);
+    a.route_key(Key::End);
+    assert_eq!(a.editor.caret(), 8, "空行首尾同为该偏移");
+    a.input_state.mods = Mods {
+        ctrl: true,
+        ..Mods::default()
+    };
+    a.route_key(Key::Home);
+    assert_eq!(a.editor.caret(), 0, "Ctrl+Home 到文首");
+    a.route_key(Key::End);
+    assert_eq!(a.editor.caret(), text.len(), "Ctrl+End 到文末");
+}
+
+/// 灰度开启：源码模式往返切换后 caret 与滚动位置保持。
+#[test]
+fn source_plain_toggle_round_trip_keeps_caret_and_scroll() {
+    let store = MemStore::default();
+    let mut a = app("a\n\nb", None, false, &store);
+    a.config.source_plain_lines = true;
+    a.perform_action(Action::OpenSourceMode);
+    a.paint();
+    assert!(a.editor.set_caret(2), "停在空行");
+    a.window_state.scroll_y = 0.0;
+    a.paint();
+    let caret = a.editor.caret();
+    let scroll = a.window_state.scroll_y;
+
+    a.perform_action(Action::OpenSourceMode); // 退出源码模式
+    a.paint();
+    assert!(!a.source_mode());
+    assert_eq!(a.editor.caret(), caret, "退出后 caret 偏移不变");
+    assert!((a.window_state.scroll_y - scroll).abs() < 0.5);
+
+    a.perform_action(Action::OpenSourceMode); // 重新进入
+    a.paint();
+    assert!(a.source_mode());
+    assert_eq!(a.editor.caret(), caret, "往返后 caret 偏移不变");
+    assert!((a.window_state.scroll_y - scroll).abs() < 0.5);
+    // 重新进入后空行仍可停：Down 到 b 首行。
+    a.route_key(Key::Down);
+    assert_eq!(a.editor.caret(), 3);
+}
+
+/// 开关关闭：仍然走既有块布局路径（空行不可停、块数等于真实段落数、画面逐像素一致）。
+#[test]
+fn source_plain_flag_off_matches_legacy_path() {
+    let store = MemStore::default();
+    let text = "a\n\n\nb";
+    let mut a = app(text, None, false, &store);
+    assert!(!a.config.source_plain_lines);
+    a.perform_action(Action::OpenSourceMode);
+    a.paint();
+    assert!(!a.source_plain_active());
+    assert_eq!(a.index.blocks.len(), 2, "旧路径按真实段落成块");
+    let second_start = text.find('b').unwrap();
+    assert!(a.editor.set_caret(0));
+    a.window_state.goal_x = None;
+    a.route_key(Key::Down);
+    assert_eq!(a.editor.caret(), second_start, "旧路径跳过空行");
+
+    // 与显式关闭的基线逐像素一致（先对齐 caret/滚动，排除光标本身差异）。
+    let store2 = MemStore::default();
+    let mut b = app(text, None, false, &store2);
+    b.config.source_plain_lines = false;
+    b.perform_action(Action::OpenSourceMode);
+    assert!(a.editor.set_caret(0));
+    a.window_state.scroll_y = 0.0;
+    b.window_state.scroll_y = 0.0;
+    assert_eq!(
+        a.render().pixels,
+        b.render().pixels,
+        "开关关闭不产生行为差异"
+    );
+}
+
+/// 开关开启：源码模式保存写盘字节 == 缓冲区字节（不做任何文本转换）。
+#[test]
+fn source_plain_save_writes_buffer_bytes_unchanged() {
+    let store = MemStore::default();
+    let original = "标题\r\n\r\n正文\n";
+    let mut a = app(original, Some("plain.md"), false, &store);
+    a.config.source_plain_lines = true;
+    a.perform_action(Action::OpenSourceMode);
+    a.paint();
+    a.save_now();
+    let saved = store
+        .files
+        .borrow()
+        .get(Path::new("plain.md"))
+        .cloned()
+        .expect("保存应写盘");
+    assert_eq!(saved, original.as_bytes(), "写盘字节必须等于缓冲区字节");
+}

@@ -741,6 +741,10 @@ pub struct LayoutEngine {
     doc_margin_px: f32,
     /// 可读列宽上限（全角当量）：`None` = 全宽档（不封顶）。
     doc_readable_cols: Option<f32>,
+    /// 源码模式纯文本行视图：按行排版原文（等宽、不折行、统一行高）。
+    /// 仅由 `ensure_layouts_range` 在每次排版前按运行时开关设置，不参与缓存键
+    /// （合成行块使用独立 id 空间，切换时自然换键）。
+    plain_lines: bool,
     /// 启动时探测到的等宽族名：代码/行内代码显式指定，避免 generic Monospace 的
     /// 等宽候选链截走 Han（N9）。
     mono_family: Option<&'static str>,
@@ -2588,6 +2592,32 @@ pub(super) fn attrs_of(
         a
     };
     a
+}
+
+/// 源码模式纯文本行视图的文本属性：恒等宽、常规字重/字形，忽略块级标题放大与
+/// 加粗/斜体标记，只保留语法高亮色与链接色。用于逐行排版原文时保证列对齐一致。
+pub(super) fn attrs_of_plain(
+    st: Style,
+    link_color: [u8; 3],
+    mono_family: Option<&'static str>,
+    pt: f32,
+) -> Attrs<'static> {
+    let a = Attrs::new();
+    let a = match mono_family {
+        Some(name) => a.family(Family::Name(name)),
+        None => a.family(Family::Monospace),
+    };
+    let color = st.color.or_else(|| st.link.then_some(link_color));
+    let a = if let Some([r, g, b]) = color {
+        a.color(Color::rgb(r, g, b))
+    } else {
+        a
+    };
+    if let Some(factor) = st.size_factor {
+        a.metrics(Metrics::new(pt * factor, pt * 1.5 * factor))
+    } else {
+        a
+    }
 }
 
 #[cfg(test)]

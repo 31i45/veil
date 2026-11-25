@@ -14,6 +14,7 @@ impl LayoutEngine {
             doc_face: None,
             doc_margin_px: crate::geometry::MARGIN,
             doc_readable_cols: crate::geometry::readable_cols(DocMargin::Standard),
+            plain_lines: false,
             mono_family,
             syntax: SyntaxColors::default_light(),
             highlighter: Highlighter::default(),
@@ -74,6 +75,11 @@ impl LayoutEngine {
     /// 正文行高基准（物理像素，未乘 scale）。
     pub(crate) fn doc_line_height(&self) -> f32 {
         self.doc_line_height
+    }
+
+    /// 源码模式纯文本行视图开关：按行排版时强制等宽族、不折行、统一行高。
+    pub(crate) fn set_plain_lines(&mut self, on: bool) {
+        self.plain_lines = on;
     }
 
     /// 当前正文字体族（表格单元格排版复用）。
@@ -398,21 +404,34 @@ impl LayoutEngine {
         toc_list: bool,
         captions: &[ImageCaption],
     ) -> BlockLayout {
+        let plain = self.plain_lines;
         let full = text.strip_suffix('\n').unwrap_or(text);
+        // 纯文本行视图：行块区间可能含行尾 `\r\n`，`\r` 不参与成形。
+        let full = if plain {
+            full.strip_suffix('\r').unwrap_or(full)
+        } else {
+            full
+        };
         // 单块上限（v0）：只排前缀，超出部分不参与成形/光栅，避免内存放大
         let (body, mut truncated) = cap_body(full);
         // 标题/代码块字号按既有比例从正文字号派生。
         let scale = kind_scale(&kind) * block_scale(kind.clone()) * self.scale;
         let metrics = Metrics::new(self.doc_font_size * scale, self.doc_line_height * scale);
-        let default_attrs = attrs_of(
-            kind.clone(),
-            Style::default(),
+        // 纯文本行视图：统一等宽、常规字形（列对齐稳定），其余路径沿用既有属性。
+        let (link_color, doc_font, doc_face, mono_family) = (
             self.link_color,
             self.doc_font,
             self.doc_face,
             self.mono_family,
-            metrics.font_size,
         );
+        let make_attrs = move |kind: BlockKind, st: Style, pt: f32| {
+            if plain {
+                attrs_of_plain(st, link_color, mono_family, pt)
+            } else {
+                attrs_of(kind, st, link_color, doc_font, doc_face, mono_family, pt)
+            }
+        };
+        let default_attrs = make_attrs(kind.clone(), Style::default(), metrics.font_size);
         // NBSP 占位段：测量字体必须与实际占位 span 一致，尤其 Mermaid 使用等宽族。
         let nbsp_w = if imgs.is_empty() {
             1.0
@@ -655,15 +674,7 @@ impl LayoutEngine {
             if ls < le {
                 spans.push((
                     &layout_text[ls..le],
-                    attrs_of(
-                        kind.clone(),
-                        st,
-                        self.link_color,
-                        self.doc_font,
-                        self.doc_face,
-                        self.mono_family,
-                        metrics.font_size,
-                    ),
+                    make_attrs(kind.clone(), st, metrics.font_size),
                 ));
             }
         }
@@ -679,15 +690,7 @@ impl LayoutEngine {
                 };
                 spans.push((
                     &layout_text[ls..le],
-                    attrs_of(
-                        kind.clone(),
-                        st,
-                        self.link_color,
-                        self.doc_font,
-                        self.doc_face,
-                        self.mono_family,
-                        metrics.font_size,
-                    ),
+                    make_attrs(kind.clone(), st, metrics.font_size),
                 ));
             }
         }
@@ -701,15 +704,7 @@ impl LayoutEngine {
                 };
                 spans.push((
                     &layout_text[ls..le],
-                    attrs_of(
-                        kind.clone(),
-                        st,
-                        self.link_color,
-                        self.doc_font,
-                        self.doc_face,
-                        self.mono_family,
-                        metrics.font_size,
-                    ),
+                    make_attrs(kind.clone(), st, metrics.font_size),
                 ));
             }
         }
@@ -790,15 +785,7 @@ impl LayoutEngine {
             };
             spans.push((
                 &layout_text[cs..ce],
-                attrs_of(
-                    kind.clone(),
-                    st,
-                    self.link_color,
-                    self.doc_font,
-                    self.doc_face,
-                    self.mono_family,
-                    metrics.font_size,
-                ),
+                make_attrs(kind.clone(), st, metrics.font_size),
             ));
         }
         if spans.is_empty() {
@@ -806,10 +793,16 @@ impl LayoutEngine {
         }
         spans.sort_by_key(|(s, _)| s.as_ptr() as usize);
         buffer.set_rich_text(spans, &default_attrs, Shaping::Advanced, None);
-        // WordOrGlyph：按 UAX #14 断行机会折行（CJK 逐字可断 + 行首/行尾禁则
-        // 由 CL/OP 类天然生效），单个超宽词（长 URL 等）回退逐字形断行。
-        buffer.set_wrap(Wrap::WordOrGlyph);
-        buffer.set_size(Some(width), None);
+        if plain {
+            // 纯文本行视图：不折行（超长行水平溢出由帧裁剪），行高恒等于正文行高。
+            buffer.set_wrap(Wrap::None);
+            buffer.set_size(None, None);
+        } else {
+            // WordOrGlyph：按 UAX #14 断行机会折行（CJK 逐字可断 + 行首/行尾禁则
+            // 由 CL/OP 类天然生效），单个超宽词（长 URL 等）回退逐字形断行。
+            buffer.set_wrap(Wrap::WordOrGlyph);
+            buffer.set_size(Some(width), None);
+        }
         buffer.shape_until_scroll(&mut self.font_system, false);
         let mut height = buffer
             .layout_runs()

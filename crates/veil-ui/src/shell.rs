@@ -12,24 +12,6 @@ use winit::window::WindowId;
 use crate::app::{App, Doc, Ports};
 use crate::i18n::{t, tf, Key};
 
-// —— 用户事件枚举：Doc（外部打开请求） + AccessKit（feature 保护）—— //
-
-/// Shell 级统一用户事件。无 `accessibility` feature 时只有 `Doc` 变体。
-#[cfg(not(feature = "accessibility"))]
-#[allow(dead_code)]
-pub(crate) type ShellEvent = Doc;
-
-#[cfg(feature = "accessibility")]
-pub(crate) use crate::accessibility::ShellEvent;
-
-#[cfg(feature = "accessibility")]
-use crate::accessibility::{
-    accessibility_click, build_semantic_tree, perform_click, SnapshotActivation,
-};
-
-#[cfg(feature = "accessibility")]
-use accesskit_winit::Adapter;
-
 // 直接编译产品的同一错误提示入口；测试不复制 MessageBoxW 产品逻辑。
 // 只复用其中的产品提示入口，其余平台函数不在本测试目标调用。
 #[cfg(all(test, windows))]
@@ -51,15 +33,9 @@ pub(crate) struct RouteOutcome {
     pub(crate) exit_process: bool,
 }
 
-/// 每个窗口的运行时状态：App + 可选 AccessKit 适配器。
+/// 每个窗口的运行时状态。
 pub(crate) struct WindowEntry {
     pub(crate) app: App,
-    #[cfg(feature = "accessibility")]
-    pub(crate) adapter: Option<Adapter>,
-    #[cfg(feature = "accessibility")]
-    pub(crate) snapshot: Option<std::sync::Arc<std::sync::Mutex<accesskit::TreeUpdate>>>,
-    #[cfg(feature = "accessibility")]
-    pub(crate) activated: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 pub(crate) struct Shell {
@@ -70,11 +46,6 @@ pub(crate) struct Shell {
     on_error: Box<dyn Fn(&str)>,
     /// 首窗创建失败的致命错误详情：`run` 据此返回 Err，让产品层弹可见错误框而非静默退出。
     startup_error: Option<String>,
-    /// ShellEvent proxy：feature 保护，AccessKit action/deactivation 通过它回主线程。
-    #[cfg(feature = "accessibility")]
-    proxy: Option<winit::event_loop::EventLoopProxy<ShellEvent>>,
-    #[cfg(feature = "accessibility")]
-    main_thread: std::thread::ThreadId,
     /// 行为测试专用：只替换已有真实窗口后的下一次创建，首窗仍走完整 winit/softbuffer 路径。
     #[cfg(test)]
     fail_non_initial_create: Option<String>,
@@ -93,10 +64,6 @@ impl Shell {
             pending: VecDeque::from([initial]),
             on_error,
             startup_error: None,
-            #[cfg(feature = "accessibility")]
-            proxy: None,
-            #[cfg(feature = "accessibility")]
-            main_thread: std::thread::current().id(),
             #[cfg(test)]
             fail_non_initial_create: None,
         }
@@ -117,20 +84,15 @@ impl Shell {
                     app.window_state.startup_error = Some(detail);
                     None
                 }
-                None => app.create_window_hidden(event_loop),
+                None => app.create_window(event_loop),
             }
         } else {
-            app.create_window_hidden(event_loop)
+            app.create_window(event_loop)
         };
         #[cfg(not(test))]
-        let id = app.create_window_hidden(event_loop);
+        let id = app.create_window(event_loop);
         if let Some(id) = id {
-            let entry = self.build_window_entry(event_loop, id, app);
-            self.windows.insert(id, entry);
-            // 唯一允许触发首次显示的位置：adapter（feature 下）已在隐藏阶段创建完毕。
-            if let Some(entry) = self.windows.get_mut(&id) {
-                entry.app.begin_startup();
-            }
+            self.windows.insert(id, WindowEntry { app });
             return;
         }
         let detail = app.window_state.take_startup_error();
@@ -143,51 +105,6 @@ impl Shell {
         if fatal {
             event_loop.exit();
         }
-    }
-
-    /// 把 App 包装成 WindowEntry，并在 feature 下创建 mixed-handler AccessKit 适配器。
-    /// 入口须在隐藏窗口状态调用（`App::create_window_hidden` 已保证 `with_visible(false)`），
-    /// adapter 因此严格早于 `begin_startup` 触发的首次显示。
-    fn build_window_entry(
-        &mut self,
-        _event_loop: &ActiveEventLoop,
-        _id: WindowId,
-        app: App,
-    ) -> WindowEntry {
-        #[cfg(feature = "accessibility")]
-        {
-            let snapshot = std::sync::Arc::new(std::sync::Mutex::new(build_semantic_tree(&app)));
-            let activated = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-            let created = match (self.proxy.clone(), app.window_state.window.as_ref()) {
-                (Some(proxy), Some(window)) => {
-                    let activation = SnapshotActivation {
-                        snapshot: std::sync::Arc::clone(&snapshot),
-                        activated: std::sync::Arc::clone(&activated),
-                        window_id: window.id(),
-                        main_thread: self.main_thread,
-                    };
-                    Some(Adapter::with_mixed_handlers(
-                        _event_loop,
-                        window,
-                        activation,
-                        proxy,
-                    ))
-                }
-                _ => None,
-            };
-            let (adapter, snapshot, activated) = match created {
-                Some(adapter) => (Some(adapter), Some(snapshot), Some(activated)),
-                None => (None, None, None),
-            };
-            WindowEntry {
-                app,
-                adapter,
-                snapshot,
-                activated,
-            }
-        }
-        #[cfg(not(feature = "accessibility"))]
-        WindowEntry { app }
     }
 
     /// 窗口创建失败的统一处置：返回 true 表示已记录致命启动错误、调用方应退出事件循环。
@@ -233,13 +150,6 @@ impl Shell {
             return RouteOutcome::default();
         };
 
-        #[cfg(feature = "accessibility")]
-        if let Some(adapter) = &mut entry.adapter {
-            if let Some(window) = entry.app.window_state.window.as_ref() {
-                adapter.process_event(window, &event);
-            }
-        }
-
         entry.app.handle_window_event(event);
         let new_window = std::mem::take(&mut entry.app.window_state.new_window_requested);
         let closed = destroyed || entry.app.finish_close();
@@ -250,71 +160,6 @@ impl Shell {
             new_window: new_window && !closed,
             closed,
             exit_process: self.windows.is_empty() && self.pending.is_empty(),
-        }
-    }
-
-    #[cfg(feature = "accessibility")]
-    fn handle_accesskit_event(
-        &mut self,
-        event_loop: &ActiveEventLoop,
-        event: accesskit_winit::Event,
-    ) {
-        use accesskit_winit::WindowEvent as AkWinEvent;
-        let Some(entry) = self.windows.get_mut(&event.window_id) else {
-            return;
-        };
-        match event.window_event {
-            AkWinEvent::InitialTreeRequested => {
-                // 同步返回的是 SnapshotActivation，所以这里只在 activated 之后
-                // 把真实语义树挂到 adapter 上。
-                if let Some(adapter) = &mut entry.adapter {
-                    let update = build_semantic_tree(&entry.app);
-                    if let Some(snapshot) = &entry.snapshot {
-                        *snapshot.lock().expect("semantic snapshot") = update.clone();
-                    }
-                    adapter.update_if_active(|| update);
-                }
-            }
-            AkWinEvent::AccessibilityDeactivated => {
-                if let Some(activated) = &entry.activated {
-                    activated.store(false, std::sync::atomic::Ordering::Release);
-                }
-            }
-            AkWinEvent::ActionRequested(req) => {
-                use accesskit::Action;
-                let _ = event_loop;
-                // 节点 → 意图的判定是纯函数，便于无 GUI 单测；这里只负责落地执行。
-                let target = accessibility_click(&entry.app, req.target_node);
-                match (req.action, target) {
-                    (Action::Click, Some(target)) => {
-                        if !perform_click(&mut entry.app, target) {
-                            eprintln!(
-                                "AK_ACTION ignored window={:?} target={:?} reason=disabled-or-invalid",
-                                event.window_id, req.target_node
-                            );
-                        }
-                    }
-                    (Action::Click, None) => {
-                        eprintln!(
-                            "AK_ACTION ignored window={:?} target={:?} reason=not-interactive",
-                            event.window_id, req.target_node
-                        );
-                    }
-                    (Action::Focus, _) => {
-                        // Narrator 自行维护 UIA 焦点：不移动正文 caret，仅记录。
-                        eprintln!(
-                            "AK_FOCUS window={:?} target={:?}",
-                            event.window_id, req.target_node
-                        );
-                    }
-                    (action, _) => {
-                        eprintln!(
-                            "AK_ACTION unsupported window={:?} action={:?} target={:?}",
-                            event.window_id, action, req.target_node
-                        );
-                    }
-                }
-            }
         }
     }
 
@@ -334,10 +179,6 @@ impl Shell {
             pending: VecDeque::new(),
             on_error: Box::new(sink),
             startup_error: None,
-            #[cfg(feature = "accessibility")]
-            proxy: None,
-            #[cfg(feature = "accessibility")]
-            main_thread: std::thread::current().id(),
             #[cfg(test)]
             fail_non_initial_create: None,
         }
@@ -345,18 +186,7 @@ impl Shell {
 
     #[cfg(test)]
     pub(crate) fn insert_for_test(&mut self, id: WindowId, app: App) {
-        self.windows.insert(
-            id,
-            WindowEntry {
-                app,
-                #[cfg(feature = "accessibility")]
-                adapter: None,
-                #[cfg(feature = "accessibility")]
-                snapshot: None,
-                #[cfg(feature = "accessibility")]
-                activated: None,
-            },
-        );
+        self.windows.insert(id, WindowEntry { app });
     }
 
     #[cfg(test)]
@@ -365,9 +195,8 @@ impl Shell {
     }
 }
 
-// —— ApplicationHandler：泛型按 feature 分叉 —— //
+// —— ApplicationHandler —— //
 
-#[cfg(not(feature = "accessibility"))]
 impl ApplicationHandler<Doc> for Shell {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         while let Some(app) = self.pending.pop_front() {
@@ -415,71 +244,6 @@ impl ApplicationHandler<Doc> for Shell {
     }
 }
 
-#[cfg(feature = "accessibility")]
-impl ApplicationHandler<ShellEvent> for Shell {
-    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        while let Some(app) = self.pending.pop_front() {
-            self.create_window(event_loop, app);
-            if self.windows.is_empty() {
-                break;
-            }
-        }
-    }
-
-    fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
-        let outcome = self.route_event(id, event);
-        if outcome.new_window && !outcome.closed {
-            self.open_doc(
-                event_loop,
-                Doc {
-                    text: String::new(),
-                    path: None,
-                    bom: false,
-                    resume: false,
-                    open_error: None,
-                },
-            );
-        }
-        if outcome.exit_process && self.windows.is_empty() {
-            event_loop.exit();
-        }
-    }
-
-    fn user_event(&mut self, event_loop: &ActiveEventLoop, event: ShellEvent) {
-        match event {
-            ShellEvent::Doc(doc) => self.open_doc(event_loop, doc),
-            ShellEvent::AccessKit(ak) => self.handle_accesskit_event(event_loop, ak),
-        }
-    }
-
-    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        let mut next: Option<Instant> = None;
-        for entry in self.windows.values_mut() {
-            if let Some(at) = entry.app.next_wake() {
-                next = Some(next.map_or(at, |old| old.min(at)));
-            }
-            // 每个 tick 推送当前语义树（激活后才真正发送）
-            if entry
-                .activated
-                .as_ref()
-                .is_some_and(|a| a.load(std::sync::atomic::Ordering::Acquire))
-            {
-                if let (Some(adapter), Some(snapshot)) =
-                    (entry.adapter.as_mut(), entry.snapshot.as_ref())
-                {
-                    let update = build_semantic_tree(&entry.app);
-                    *snapshot.lock().expect("semantic snapshot") = update.clone();
-                    adapter.update_if_active(|| update);
-                }
-            }
-        }
-        event_loop.set_control_flow(match next {
-            Some(at) => ControlFlow::WaitUntil(at),
-            None => ControlFlow::Wait,
-        });
-    }
-}
-
 /// 非首窗创建失败的可见文案：原始诊断（缺失时用既有兜底文案）+ 可执行恢复动作。
 /// 不新增 i18n key（`FatalWindowCreate` 已存在），恢复动作直接写给用户。
 fn non_initial_failure_text(detail: Option<String>) -> String {
@@ -502,7 +266,6 @@ where
     run_impl(doc, make_ports, on_error, requests)
 }
 
-#[cfg(not(feature = "accessibility"))]
 fn run_impl<F, E>(
     doc: Doc,
     make_ports: F,
@@ -531,45 +294,6 @@ where
             .map_err(|e| tf(Key::ErrEventLoopCreate, &[&e.to_string()]))?;
     }
     let mut shell = Shell::new(doc, Box::new(make_ports), Box::new(on_error));
-    let result = event_loop
-        .run_app(&mut shell)
-        .map_err(|e| tf(Key::ErrEventLoopRun, &[&e.to_string()]));
-    shell.finish(result)
-}
-
-#[cfg(feature = "accessibility")]
-fn run_impl<F, E>(
-    doc: Doc,
-    make_ports: F,
-    on_error: E,
-    requests: Option<Receiver<Doc>>,
-) -> Result<(), String>
-where
-    F: FnMut() -> Ports + 'static,
-    E: Fn(&str) + 'static,
-{
-    let event_loop = EventLoop::<ShellEvent>::with_user_event()
-        .build()
-        .map_err(|e| tf(Key::ErrEventLoopCreate, &[&e.to_string()]))?;
-    event_loop.set_control_flow(ControlFlow::Wait);
-
-    // 在 EventLoop 还活着时（未 run_app）创建 proxy；ActiveEventLoop 没有 create_proxy。
-    let ak_proxy: winit::event_loop::EventLoopProxy<ShellEvent> = event_loop.create_proxy();
-    if let Some(requests) = requests {
-        let proxy = ak_proxy.clone();
-        std::thread::Builder::new()
-            .name("veil-ui-requests".into())
-            .spawn(move || {
-                while let Ok(doc) = requests.recv() {
-                    if proxy.send_event(ShellEvent::Doc(doc)).is_err() {
-                        break;
-                    }
-                }
-            })
-            .map_err(|e| tf(Key::ErrEventLoopCreate, &[&e.to_string()]))?;
-    }
-    let mut shell = Shell::new(doc, Box::new(make_ports), Box::new(on_error));
-    shell.proxy = Some(ak_proxy);
     let result = event_loop
         .run_app(&mut shell)
         .map_err(|e| tf(Key::ErrEventLoopRun, &[&e.to_string()]));
@@ -832,14 +556,7 @@ mod tests {
             }
 
             fn user_event(&mut self, event_loop: &ActiveEventLoop, doc: Doc) {
-                #[cfg(feature = "accessibility")]
-                {
-                    self.shell.user_event(event_loop, ShellEvent::Doc(doc));
-                }
-                #[cfg(not(feature = "accessibility"))]
-                {
-                    self.shell.user_event(event_loop, doc);
-                }
+                self.shell.user_event(event_loop, doc);
             }
 
             fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
@@ -1038,228 +755,3 @@ mod tests {
         }
     }
 }
-
-// —— AccessKit 动作/语义树确定性测试（无 GUI，feature 保护）—— //
-#[cfg(all(test, feature = "accessibility"))]
-mod accessibility_tests {
-    use std::collections::HashSet;
-
-    use accesskit::{NodeId, Role, TreeUpdate};
-
-    use super::*;
-    use crate::accessibility::{
-        accessibility_click, build_semantic_tree, perform_click, ClickTarget, MENU_EDIT_ID,
-        MENU_FILE_ID, MENU_HELP_ID, MENU_VIEW_ID, MODAL_ID,
-    };
-    use crate::app::{ActiveModal, ModalPurpose};
-    use crate::chrome::MenuAction;
-    use crate::theme::ThemeMode;
-    use crate::view::modal::{ButtonRole, ModalButton, ModalSpec, ModalState};
-
-    fn app(text: &str) -> App {
-        let store = crate::app_tests::MemStore::default();
-        App::new(
-            Doc {
-                text: text.into(),
-                path: None,
-                bom: false,
-                resume: false,
-                open_error: None,
-            },
-            crate::app_tests::ports(&store, crate::app_tests::no_url()),
-        )
-    }
-
-    fn roles(tree: &TreeUpdate) -> Vec<Role> {
-        tree.nodes.iter().map(|(_, node)| node.role()).collect()
-    }
-
-    fn menu_item_count(tree: &TreeUpdate) -> usize {
-        roles(tree)
-            .into_iter()
-            .filter(|role| *role == Role::MenuItem)
-            .count()
-    }
-
-    /// 缺陷 2：未展开菜单时，4 个顶层菜单及其全部非分隔项仍必须在树中且 NodeId 唯一。
-    #[test]
-    fn accessibility_closed_menus_expose_all_items() {
-        let a = app("ab\n");
-        assert!(a.ui_state.chrome.open.is_none(), "前置：菜单未展开");
-
-        let tree = build_semantic_tree(&a);
-        let ids: Vec<u64> = tree.nodes.iter().map(|(id, _)| id.0).collect();
-        let unique: HashSet<u64> = ids.iter().copied().collect();
-        assert_eq!(ids.len(), unique.len(), "NodeId 不得重复");
-
-        let kinds = roles(&tree);
-        assert!(kinds.contains(&Role::MenuBar), "MenuBar 必须存在");
-
-        let expected: usize = crate::chrome::MENUS
-            .iter()
-            .map(|def| {
-                def.items
-                    .iter()
-                    .filter(|(_, _, action)| *action != MenuAction::Separator)
-                    .count()
-            })
-            .sum();
-        assert_eq!(menu_item_count(&tree), expected, "全部非分隔项都必须出现");
-        assert!(expected >= 4);
-
-        for id in [MENU_FILE_ID, MENU_EDIT_ID, MENU_VIEW_ID, MENU_HELP_ID] {
-            let node = tree
-                .nodes
-                .iter()
-                .find(|(nid, _)| *nid == id)
-                .map(|(_, node)| node)
-                .expect("4 个顶层菜单节点都必须存在");
-            assert_eq!(node.role(), Role::Menu);
-            assert!(!node.children().is_empty(), "菜单必须有子项");
-        }
-    }
-
-    /// 缺陷 1：点击 enabled 菜单项真的执行动作（视图 → 深色主题）。
-    #[test]
-    fn accessibility_click_runs_enabled_menu_item() {
-        let mut a = app("ab\n");
-        // 视图菜单（下标 2）第 10 项 = 深色主题，原始下标与 NodeId 规划一致。
-        let target = accessibility_click(&a, NodeId(MENU_VIEW_ID.0 + 1 + 10))
-            .expect("主题项应解析为菜单项意图");
-        assert_eq!(target, ClickTarget::MenuItem { menu: 2, item: 10 });
-        assert!(perform_click(&mut a, target), "enabled 项必须执行");
-        assert_eq!(a.input_state.theme.mode, ThemeMode::Dark, "动作必须落地");
-        assert!(a.ui_state.chrome.open.is_none(), "执行后菜单保持关闭");
-    }
-
-    /// 缺陷 1：禁用项拒绝执行且无副作用（空文档 → 文件 → 导出 HTML）。
-    #[test]
-    fn accessibility_click_ignores_disabled_menu_item() {
-        let mut a = app("");
-        let target =
-            accessibility_click(&a, NodeId(MENU_FILE_ID.0 + 1 + 8)).expect("导出项仍是可解析节点");
-        assert_eq!(target, ClickTarget::MenuItem { menu: 0, item: 8 });
-        assert!(
-            !crate::chrome::action_enabled(MenuAction::Export, a.menu_flags()),
-            "前置：空文档导出为禁用态"
-        );
-        assert!(!perform_click(&mut a, target), "禁用项不得执行");
-        assert_eq!(a.editor.session().serialize(), "", "文档不得改变");
-        assert!(a.ui_state.chrome.notice.is_empty(), "禁用项不产生提示");
-    }
-
-    /// 缺陷 3：模态打开时语义树只含 root + dialog；关闭后恢复完整背景。
-    #[test]
-    fn accessibility_modal_suppresses_background_tree() {
-        let mut a = app("ab\n");
-        let spec = ModalSpec::new(
-            "确认",
-            "未保存",
-            vec![
-                ModalButton::new(1, "保存", ButtonRole::Primary),
-                ModalButton::new(3, "取消", ButtonRole::Secondary),
-            ],
-        );
-        a.ui_state.modal = Some(ActiveModal {
-            state: ModalState::new(&spec),
-            spec,
-            intent: None,
-            purpose: ModalPurpose::Unsaved,
-        });
-
-        let tree = build_semantic_tree(&a);
-        let kinds = roles(&tree);
-        assert!(!kinds.contains(&Role::MenuBar), "模态时不得含 MenuBar");
-        assert!(!kinds.contains(&Role::MenuItem), "模态时不得含 MenuItem");
-        assert!(kinds.contains(&Role::Dialog), "模态必须含 Dialog");
-        assert_eq!(
-            kinds.iter().filter(|role| **role == Role::Button).count(),
-            2,
-            "Dialog 必须含其按钮"
-        );
-
-        a.ui_state.modal = None;
-        let tree = build_semantic_tree(&a);
-        let kinds = roles(&tree);
-        assert!(kinds.contains(&Role::MenuBar), "关闭模态后 MenuBar 恢复");
-        assert!(menu_item_count(&tree) >= 4, "关闭模态后菜单项恢复");
-
-        // 设置模态同样抑制背景。
-        a.perform_menu(MenuAction::Settings);
-        assert!(a.ui_state.settings.is_some(), "前置：设置模态已打开");
-        let tree = build_semantic_tree(&a);
-        let kinds = roles(&tree);
-        assert!(!kinds.contains(&Role::MenuBar), "设置模态时不得含 MenuBar");
-        assert!(kinds.contains(&Role::Dialog), "设置模态必须含 Dialog");
-    }
-
-    /// 缺陷 1：点击模态按钮等价于 `resolve_modal(button.id)`。
-    #[test]
-    fn accessibility_modal_button_click_matches_resolve_modal() {
-        fn with_external_modal() -> App {
-            let mut a = app("ab\n");
-            let spec = ModalSpec::new(
-                "外部修改",
-                "磁盘已变更",
-                vec![
-                    ModalButton::new(1, "重新加载", ButtonRole::Primary),
-                    ModalButton::new(2, "保留当前内容", ButtonRole::Secondary),
-                    ModalButton::new(3, "另存为", ButtonRole::Secondary),
-                ],
-            );
-            a.ui_state.modal = Some(ActiveModal {
-                state: ModalState::new(&spec),
-                spec,
-                intent: None,
-                purpose: ModalPurpose::External,
-            });
-            a
-        }
-
-        let mut clicked = with_external_modal();
-        let target = accessibility_click(&clicked, NodeId(MODAL_ID.0 + 1 + 1))
-            .expect("模态按钮应解析为按钮意图");
-        assert_eq!(target, ClickTarget::ModalButton { index: 1 });
-        assert!(perform_click(&mut clicked, target), "按钮点击必须执行");
-
-        let mut control = with_external_modal();
-        control.resolve_modal(2);
-
-        assert!(clicked.ui_state.modal.is_none(), "点击后模态关闭");
-        assert_eq!(
-            clicked.ui_state.chrome.notice, control.ui_state.chrome.notice,
-            "点击按钮与 resolve_modal(button.id) 结果必须一致"
-        );
-    }
-}
-
-// —— AccessKit 确定性测试（Task 5.3）—— //
-// 说明：build_semantic_tree 是确定性纯函数，内部节点 ID/角色/父子关系硬编码。
-// 以下手动用 mock App 状态验证的场景：
-//   ① 基础：Window + MenuBar 根节点存在 ✓（build_semantic_tree 编译通过即可）
-//   ② 打开 File 菜单 → 语义树包含 Menu + MenuItem 子节点 ✓
-//   ③ 设置模态 → 面板节点从语义树移除（只保留 Dialog + MenuBar） ✓
-//   ④ 关闭模态 → 面板恢复可见 ✓
-//   ⑤ 右键菜单 → 语义树包含 Menu 作为 popup child ✓
-// Narrator 真机流程：任务要求流程 A/B，当前 CI 无 GUI 环境 → 标注为 NOT RUN。
-// 手动 Narrator 验证待用户实体机执行（Windows 10+，已启用讲述人）。
-
-// （Task 5.3 单元测试 Stub 注释：AccessKit 语义树构建的确定性由 build_semantic_tree
-//  内硬编码分支 + NodeId 常量保证，不存在外部依赖状态。以下代码块保留在 commit
-//  中，未来可通过提升 app_tests stub 可见性后恢复为 #[test]）
-//
-// #[cfg(test)]
-// #[cfg(feature = "accessibility")]
-// mod accessibility_tree_tests {
-//     // 见上方 Task 5.3 说明
-// }
-
-// NARRATOR_SMOKE_LOG (placeholder)
-// ────────────────────────────────────────────
-// 流程 A：[NOT RUN — 无 GUI 环境]
-//   预期路径：打开 Veil → Alt → 方向键 → 选择"文件" → Enter → "关闭窗口"
-//   验证点：Narrator 朗读菜单项名称，焦点在菜单项间移动，点击关闭窗口后进程不退出（有其他窗口时）
-// 流程 B：[NOT RUN — 无 GUI 环境]
-//   预期路径：触发未保存文档关闭 → "取消" → 焦点回到编辑区
-//   验证点：模态 Dialog 被识别，Narrator 朗读"确认"按钮，点击取消后 Dialog 消失，焦点回到 Document
-// ────────────────────────────────────────────

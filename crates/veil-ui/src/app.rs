@@ -1989,12 +1989,8 @@ impl App {
         });
     }
 
-    /// 以隐藏状态创建窗口并完成 surface 准备；首次显示由调用方在其后调用
-    /// `begin_startup` 触发（AccessKit adapter 必须插在这两步之间创建）。
-    pub(crate) fn create_window_hidden(
-        &mut self,
-        event_loop: &ActiveEventLoop,
-    ) -> Option<WindowId> {
+    /// 以隐藏状态创建窗口并完成 surface 准备，随后立即进入启动首帧（`begin_startup`）。
+    pub(crate) fn create_window(&mut self, event_loop: &ActiveEventLoop) -> Option<WindowId> {
         if self.window_state.window.is_some() {
             return None;
         }
@@ -2081,7 +2077,11 @@ impl App {
         // 隐藏窗口不会收到首次 Resized：必须在首次 paint 前显式设置 surface 尺寸，
         // 否则 softbuffer 的 buffer_mut() 会 panic（Must set size of surface...）。
         self.sync_surface_to_client();
-        self.window_state.window.as_ref().map(|w| w.id())
+        let id = self.window_state.window.as_ref().map(|w| w.id());
+        if id.is_some() {
+            self.begin_startup();
+        }
+        id
     }
 
     /// 把 surface 尺寸显式同步到当前客户区（隐藏窗口收不到首次 Resized）。
@@ -2109,7 +2109,7 @@ impl App {
 
     /// 在当前客户区尺寸上完成一次同步首帧：先合并待处理尺寸变化，再 render + present。
     /// 呈现成功即显示；`present` 失败时保持隐藏，等 Resized/DPI 事件重试，超时兜底。
-    /// surface 尺寸已在 `create_window_hidden` 中显式同步；`present` 仍会在 buffer_mut 前
+    /// surface 尺寸已在 `create_window` 中显式同步；`present` 仍会在 buffer_mut 前
     /// 复核尺寸（隐藏窗口/DPI 变化后不依赖 Resized 一定到达）。
     pub(crate) fn try_show_first_frame(&mut self) {
         if self.window_state.startup.is_none() {

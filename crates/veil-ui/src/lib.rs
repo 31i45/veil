@@ -63,8 +63,8 @@ pub use mermaid_renderer::{MermaidImage, MermaidRenderer};
 pub use print::{ExportOptions, NoPrint, Print, PrintSession};
 pub use shell::run;
 pub use theme::{
-    config_path, data_dir, ConfigStore, ExportStyle, NativeWindow, SystemTheme, ThemeEnv,
-    WindowEffects,
+    config_path, data_dir, ui_language_from_config_bytes, ConfigStore, ExportStyle, NativeWindow,
+    SystemTheme, ThemeEnv, WindowEffects,
 };
 // bench_typing（产品层纯度量 example）需要 LayoutEngine / Frame 做纯排版与帧分配基准
 pub use view::{BlockLayout, Frame, LayoutEngine, BASE_FONT_SIZE, BASE_LINE_HEIGHT};

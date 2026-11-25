@@ -18,6 +18,23 @@ use veil_ui::{ExportStyle, Exporter, FileStore};
 /// 使导出产物与编辑器屏幕配色一致（深色主题导出深色页面）。
 /// 为什么用 format! 而非固定常量：只有 6 个色值参与拼接，成本可忽略；
 /// 这样无需维护第二份调色板，也避免「改了主题忘了改导出」的漂移。
+/// 导出的正文字族栈：显式族名在前、浏览器默认兜底。
+/// 族名来自系统字体库，仍按 CSS 字符串白名单过滤，避免引号/分号破坏样式表。
+fn css_font_stack(name: Option<&str>) -> String {
+    let Some(name) = name else {
+        return "system-ui,sans-serif".to_string();
+    };
+    let clean: String = name
+        .chars()
+        .filter(|c| c.is_alphanumeric() || matches!(c, ' ' | '-' | '_' | '.'))
+        .collect();
+    let clean = clean.trim();
+    if clean.is_empty() {
+        return "system-ui,sans-serif".to_string();
+    }
+    format!("'{clean}',system-ui,sans-serif")
+}
+
 fn head(style: &ExportStyle) -> String {
     let bg = hex(style.bg);
     let text = hex(style.text);
@@ -25,6 +42,7 @@ fn head(style: &ExportStyle) -> String {
     let link = hex(style.link);
     let code_bg = hex(style.code_bg);
     let border = hex(style.border);
+    let body_font = css_font_stack(style.font_family);
     // 深色页面须声明 color-scheme：否则浏览器默认的滚动条/表单控件仍是浅色，观感割裂
     let scheme = if style.dark {
         ":root{color-scheme:dark}\n"
@@ -36,7 +54,7 @@ fn head(style: &ExportStyle) -> String {
          <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\
          <title>veil</title>\n<style>\n{scheme}\
          body{{max-width:44em;margin:2em auto;padding:0 1em;\
-         font:16px/1.6 system-ui,sans-serif;background:{bg};color:{text};\
+         font:16px/1.6 {body_font};background:{bg};color:{text};\
          overflow-wrap:anywhere;word-break:break-word}}\n\
          a{{color:{link}}}\n\
          code,pre{{background:{code_bg};border:1px solid {border};\
@@ -2632,6 +2650,7 @@ mod tests {
             link: [127, 180, 245],
             code_bg: [40, 40, 40],
             border: [60, 64, 70],
+            font_family: None,
         }
     }
 
@@ -2666,6 +2685,31 @@ mod tests {
             "深色代码背景与边框必须有效: {dark}"
         );
         assert!(!dark.contains("<style>\ncolor-scheme"));
+    }
+
+    #[test]
+    fn body_font_follows_explicit_family_and_sanitizes_name() {
+        let s = Session::open("x\n");
+        let style = ExportStyle {
+            font_family: Some("SimSun"),
+            ..ExportStyle::default()
+        };
+        let html = html_of(&s, &style, &font(), None);
+        assert!(
+            html.contains("font:16px/1.6 'SimSun',system-ui,sans-serif"),
+            "显式字族必须进入导出样式: {html}"
+        );
+        // 引号/分号等会被过滤，无法逃出 CSS 字符串
+        let style = ExportStyle {
+            font_family: Some("Bad';}body{display:none"),
+            ..ExportStyle::default()
+        };
+        let html = html_of(&s, &style, &font(), None);
+        assert!(
+            html.contains("font:16px/1.6 'Badbodydisplaynone',system-ui,sans-serif"),
+            "族名必须白名单过滤: {html}"
+        );
+        assert!(!html.contains("display:none"), "不得注入额外规则: {html}");
     }
 
     #[test]

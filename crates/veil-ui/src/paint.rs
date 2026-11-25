@@ -281,6 +281,102 @@ fn draw_arrow_right(frame: &mut Frame, cx: i32, cy: i32, size: i32, color: [u8; 
     }
 }
 
+/// 任务列表自绘方框（Task 5）：外接矩形恒为 `(x, y, side, side)`（排版期按行高定死），
+/// 描边一律沿内缘绘制，勾选态只叠底色与对勾 —— 方框位置/边长/圆角/描边宽度不因
+/// 勾选或正文字族变化，彻底摆脱 `☐`/`☑` 字形宽窄差异。
+#[allow(clippy::too_many_arguments)] // 方框绘制参数天然多（同 frame 的位图原语）
+fn draw_task_box(
+    frame: &mut Frame,
+    x: i32,
+    y: i32,
+    side: i32,
+    done: bool,
+    theme: &crate::theme::Theme,
+    scale: f32,
+    bg: [u8; 4],
+) {
+    let side = side.max(3);
+    let stroke = (scale.round() as i32).max(1).min(side / 2);
+    let radius = (2.0 * scale).max(1.0).min(side as f32 * 0.35);
+    // 描边：外框实色 + 内缩 stroke 的底色/强调色覆盖（src-over 下 stroke 挖空无效）。
+    let border = if done { theme.accent } else { theme.muted };
+    frame.fill_rounded_rect(
+        x,
+        y,
+        side as u32,
+        side as u32,
+        radius,
+        [border[0], border[1], border[2], 255],
+    );
+    let inner = side - 2 * stroke;
+    if inner > 0 {
+        let fill = if done {
+            [theme.accent[0], theme.accent[1], theme.accent[2], 255]
+        } else {
+            // 未勾选内部必须用所在块的底色（Callout 浅底 / Details 卡片底），
+            // 否则会在带底色的块里留下页面底色的小方块。
+            bg
+        };
+        frame.fill_rounded_rect(
+            x + stroke,
+            y + stroke,
+            inner as u32,
+            inner as u32,
+            (radius - stroke as f32).max(0.0),
+            fill,
+        );
+    }
+    if done {
+        // 对勾：两条斜线（粗细 = stroke），端点按方框比例取，不新增依赖也不用字形。
+        let c = [
+            theme.accent_text[0],
+            theme.accent_text[1],
+            theme.accent_text[2],
+            255,
+        ];
+        let (x0, y0) = (x as f32, y as f32);
+        let s = side as f32;
+        let p = |fx: f32, fy: f32| (x0 + s * fx, y0 + s * fy);
+        let (ax, ay) = p(0.27, 0.53);
+        let (bx, by) = p(0.44, 0.70);
+        let (cx, cy) = p(0.76, 0.33);
+        fill_line(frame, ax as i32, ay as i32, bx as i32, by as i32, stroke, c);
+        fill_line(frame, bx as i32, by as i32, cx as i32, cy as i32, stroke, c);
+    }
+}
+
+/// 斜线段（Bresenham，每步画 `thickness` 见方的小块）：用于任务框对勾。
+fn fill_line(
+    frame: &mut Frame,
+    x0: i32,
+    y0: i32,
+    x1: i32,
+    y1: i32,
+    thickness: i32,
+    color: [u8; 4],
+) {
+    let t = thickness.max(1) as u32;
+    let (dx, dy) = ((x1 - x0).abs(), -(y1 - y0).abs());
+    let (sx, sy) = (if x0 < x1 { 1 } else { -1 }, if y0 < y1 { 1 } else { -1 });
+    let (mut x, mut y) = (x0, y0);
+    let mut err = dx + dy;
+    loop {
+        frame.fill_rect(x, y, t, t, color);
+        if x == x1 && y == y1 {
+            break;
+        }
+        let e2 = 2 * err;
+        if e2 >= dy {
+            err += dy;
+            x += sx;
+        }
+        if e2 <= dx {
+            err += dx;
+            y += sy;
+        }
+    }
+}
+
 /// 行内前置装饰（块与表格共用同一套颜色/圆角规则）：`x/y/w/h` 为目标矩形，
 /// 调用方已按像素对齐并外扩 1px（装饰比字形框略大，观感更完整）。
 /// 顺序语义：code 底色在最先，mark 其次，kbd 最后（重叠时后者覆盖前者）。
@@ -508,6 +604,27 @@ fn paint_frontmatter_collapsed(
                 [theme.muted[0], theme.muted[1], theme.muted[2], 64],
             );
         }
+    }
+}
+
+/// 空文档首行引导：仅当文档没有任何内容时画一行弱化提示，不参与命中与排版。
+fn paint_empty_hint(
+    frame: &mut Frame,
+    engine: &mut LayoutEngine,
+    labels: &mut crate::chrome::LabelCache,
+    theme: &crate::theme::Theme,
+    scale: f32,
+    x: f32,
+    y: f32,
+) {
+    if let Some(lab) = labels.get_or_insert(engine, t(Key::DocEmptyHint), theme.muted, scale) {
+        frame.blit(
+            &lab.pixels,
+            lab.w,
+            lab.h,
+            x.round() as i32,
+            y.round() as i32,
+        );
     }
 }
 
@@ -1121,6 +1238,20 @@ impl App {
             self.window_state.scroll_y = self.window_state.scroll_y.clamp(0.0, max);
             self.window_state.goal_y = self.window_state.goal_y.clamp(0.0, max);
         }
+        // 空文档首行引导：正文没有任何内容时补一句可开始写作的提示（打印不出现）。
+        if self.window_state.print.is_none() && self.editor.session().text_len() == 0 {
+            let hint_x = self.content_x();
+            let hint_y = vp.y + self.engine.doc_margin_px() * scale;
+            paint_empty_hint(
+                &mut frame,
+                &mut self.engine,
+                &mut self.ui_state.chrome.labels,
+                &theme,
+                scale,
+                hint_x,
+                hint_y,
+            );
+        }
         // 打印中不画选区：输出为文档最终形态，不含任何交互态
         let sel = if self.window_state.print.is_none() {
             self.editor.selection()
@@ -1333,6 +1464,31 @@ impl App {
             } else {
                 *rh
             };
+            // 任务列表自绘方框（Task 5）：几何在排版期由行高定死（勾选前后同一矩形），
+            // 勾选态只叠底色与对勾，不再依赖 `☐`/`☑` 字形，故换字族也不变。
+            // 未勾选方框内部用所在块底色（Callout 浅底 / Details 卡片底），避免页面底色露出。
+            let task_box_bg = if let Some(accent) = callout_accent(&kind) {
+                tint(accent, crate::tokens::palette::surface_base(&theme), 0.10)
+            } else if details_card.is_some() {
+                crate::tokens::palette::details_card_bg(
+                    &theme,
+                    self.ui_state.expanded_details.contains(&id),
+                )
+            } else {
+                crate::tokens::palette::surface_base(&theme)
+            };
+            for b in &l.task_boxes {
+                draw_task_box(
+                    &mut frame,
+                    (self.content_x() + b.x) as i32,
+                    sy + b.y as i32,
+                    b.side.round() as i32,
+                    b.done,
+                    &theme,
+                    scale,
+                    task_box_bg,
+                );
+            }
             frame.blit(px, *rw, blit_h, self.content_x() as i32, sy);
             // 删除线（P3-4）：叠加在字形之上；cosmic-text 无原生支持，
             // 按可视行矩形在文本中线画横线（粗细随 DPI 缩放）

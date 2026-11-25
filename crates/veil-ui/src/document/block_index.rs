@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 use veil_core::{BlockContainer, BlockId, BlockKind, InlineKind, Range, Session};
 
 use crate::app::App;
-use crate::geometry::{MARGIN, PARA_GAP};
+use crate::geometry::PARA_GAP;
 use crate::stats::count_words;
 use crate::tokens::doc;
 use crate::view::{
@@ -565,7 +565,9 @@ impl App {
         let base = self.base_key();
         let caret = self.effective_caret();
         let mut blocks = std::mem::take(&mut self.index.blocks);
-        let mut y = MARGIN * scale;
+        // 版心边距是运行时配置（档位/自定义值），不再直引常量。
+        let margin = self.engine.doc_margin_px() * scale;
+        let mut y = margin;
         // 前块只保留间距判定所需的轻量信息（不克隆 BlockKind，也不重扫块间文本）。
         #[allow(clippy::type_complexity)]
         let mut prev: Option<(f32, bool, bool, Range, BlockContainer, usize, bool)> = None;
@@ -641,7 +643,7 @@ impl App {
                     + (tail_blank as f32 + doc::BLANK_LINE_LINES + doc::BOTTOM_PAD_LINES) * line_h;
                 y + pad * scale
             }
-            None => 2.0 * MARGIN * scale,
+            None => 2.0 * margin,
         };
         self.index.blocks = blocks;
         self.index.incremental_pos = None;

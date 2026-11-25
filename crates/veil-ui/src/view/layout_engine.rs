@@ -11,6 +11,9 @@ impl LayoutEngine {
             doc_font_size: BASE_FONT_SIZE,
             doc_line_height: BASE_LINE_HEIGHT,
             doc_font: DocFontFamily::System,
+            doc_face: None,
+            doc_margin_px: crate::geometry::MARGIN,
+            doc_readable_cols: crate::geometry::readable_cols(DocMargin::Standard),
             mono_family,
             syntax: SyntaxColors::default_light(),
             highlighter: Highlighter::default(),
@@ -23,14 +26,44 @@ impl LayoutEngine {
         }
     }
 
-    /// 设置正文排版参数（字号/行高为物理像素基准，字体族）。
+    /// 设置正文排版参数（字号/行高为物理像素基准，字体族与显式字族名）。
     ///
-    /// 启动读配置后调用一次，必须在任何排版之前完成；派生缓存键只含版心宽/DPI/主题等，
-    /// 本参数在会话内固定，故无需额外失效（详见 view::cache 的键说明）。
-    pub fn set_doc_typography(&mut self, font_size: f32, line_height: f32, font: DocFontFamily) {
+    /// 启动读配置与设置面板确认时调用；排版输入进入 `BaseKey`，随后的主题代次
+    /// 递增会按新输入整体重排（详见 view::cache 的键说明）。
+    /// `face` 为 `Some` 时优先于 `font`；族名驻留为 `&'static str` 供 `Attrs` 借用
+    /// （仅在名字实际变化时驻留一次，人工切换频率下开销可忽略）。
+    pub fn set_doc_typography(
+        &mut self,
+        font_size: f32,
+        line_height: f32,
+        font: DocFontFamily,
+        face: Option<&str>,
+    ) {
         self.doc_font_size = font_size.max(1.0);
         self.doc_line_height = line_height.max(1.0);
         self.doc_font = font;
+        if self.doc_face != face {
+            self.doc_face = face.map(|name| &*Box::leak(name.to_string().into_boxed_str()));
+        }
+    }
+
+    /// 设置屏幕版心边距档位（逻辑像素解析值 + 是否启用可读列宽上限）。
+    ///
+    /// 版心参数进入 `BaseKey` 与 `App::content_width`，设置变更后随主题/会话
+    /// 代次一起触发重排（缓存键失配，见 view::cache）。
+    pub fn set_doc_margin(&mut self, mode: DocMargin, custom_px: f32) {
+        self.doc_margin_px = crate::geometry::content_margin(mode, custom_px);
+        self.doc_readable_cols = crate::geometry::readable_cols(mode);
+    }
+
+    /// 屏幕版心边距（逻辑像素，未乘 scale）。
+    pub(crate) fn doc_margin_px(&self) -> f32 {
+        self.doc_margin_px
+    }
+
+    /// 可读列宽上限（全角当量）：`None` = 全宽档，不封顶。
+    pub(crate) fn doc_readable_cols(&self) -> Option<f32> {
+        self.doc_readable_cols
     }
 
     /// 正文字号基准（物理像素，未乘 scale）。
@@ -46,6 +79,48 @@ impl LayoutEngine {
     /// 当前正文字体族（表格单元格排版复用）。
     pub(crate) fn doc_font(&self) -> DocFontFamily {
         self.doc_font
+    }
+
+    /// 当前显式正文字族名（表格单元格排版与 HTML 导出复用）。
+    pub(crate) fn doc_face(&self) -> Option<&'static str> {
+        self.doc_face
+    }
+
+    /// 已安装字族（去重排序）+ 是否含中文字形。
+    ///
+    /// 中文判定见 [`Self::family_has_cjk`]；结果在设置面板打开时计算一次。
+    pub(crate) fn installed_families(&self) -> Vec<(String, bool)> {
+        let mut names: Vec<String> = self
+            .font_system
+            .db()
+            .faces()
+            .flat_map(|f| f.families.iter().map(|(name, _)| name.clone()))
+            .collect();
+        names.sort_unstable();
+        names.dedup();
+        names
+            .into_iter()
+            // 超长名无法写入配置（见 DOC_FONT_FACE_MAX_LEN），不作为可选项。
+            .filter(|name| name.len() <= crate::theme::DOC_FONT_FACE_MAX_LEN)
+            .map(|name| {
+                let cjk = self.family_has_cjk(&name);
+                (name, cjk)
+            })
+            .collect()
+    }
+
+    /// 该字族是否自带中文字形。
+    ///
+    /// 直接读字体 cmap 表（格式 4/12），避免对每个族各排一次版——后者会触发
+    /// cosmic-text 的全库回退扫描，在系统字体较多的机器上要数分钟。
+    fn family_has_cjk(&self, name: &str) -> bool {
+        let db = self.font_system.db();
+        db.faces()
+            .filter(|f| f.families.iter().any(|(fam, _)| fam == name))
+            .any(|f| {
+                db.with_face_data(f.id, |data, index| cmap_has_char(data, index, '中' as u32))
+                    .unwrap_or(false)
+            })
     }
 
     /// 启动时探测到的等宽族名（代码块/行内代码排版复用；N9）。
@@ -109,7 +184,7 @@ impl LayoutEngine {
             text,
             self.doc_font_size * self.scale,
             self.doc_line_height * self.scale,
-            doc_family(self.doc_font),
+            doc_family(self.doc_font, self.doc_face),
             Weight::NORMAL,
         )
     }
@@ -174,6 +249,7 @@ impl LayoutEngine {
             strikes: Vec::new(),
             decorations_under: Vec::new(),
             decorations_over: Vec::new(),
+            task_boxes: Vec::new(),
             script_ranges: Vec::new(),
             node_ranges: Vec::new(),
             img_ranges: Vec::new(),
@@ -333,6 +409,7 @@ impl LayoutEngine {
             Style::default(),
             self.link_color,
             self.doc_font,
+            self.doc_face,
             self.mono_family,
             metrics.font_size,
         );
@@ -356,18 +433,27 @@ impl LayoutEngine {
         };
         // 块级替换（切片 12）先入表；行内公式占位段随后按起点排序归并。
         // 源码模式：不做任何块级替换，标记原样显示。
+        let mut tasks: Vec<TaskMark> = Vec::new();
         let mut subs: Vec<Sub> = if reveal_all {
             Vec::new()
         } else if is_footnote_def {
             decor.subs.clone()
         } else {
-            block_subs(kind.clone(), body, block, caret, ordinal, toc_list)
+            block_subs(
+                kind.clone(),
+                body,
+                block,
+                caret,
+                ordinal,
+                toc_list,
+                &mut tasks,
+            )
         };
         // 容器内嵌套块标记（REN-SWEEP-002）：引用/提示/列表项里再出现的
         // 列表、任务框、围栏代码、details 标签按块类型递归渲染。
         let mut container_code: Vec<(usize, usize)> = Vec::new();
         if !reveal_all {
-            let (nested, code) = container_nested_subs(&kind, body, block, caret);
+            let (nested, code) = container_nested_subs(&kind, body, block, caret, &mut tasks);
             subs.extend(nested);
             container_code = code;
         }
@@ -474,6 +560,18 @@ impl LayoutEngine {
                 &container_code,
             ));
         }
+        // 任务列表方框占位（Task 5）：源码标记整段替换为定宽 NBSP（不参与断行），
+        // 宽度只留「方框 + 间距」，末尾补一个空格保证与后续文本的间隔；
+        // 方框由绘制层按 `task_boxes` 自绘。占位与勾选态无关。
+        if !tasks.is_empty() {
+            let slot = task_box_slot(metrics.line_height);
+            let nbsp_w = self.measure_nbsp_with_attrs(metrics, &default_attrs);
+            let count = ((slot / nbsp_w).ceil() as usize).max(1);
+            let fill = format!("{} ", "\u{A0}".repeat(count));
+            for mk in &tasks {
+                subs.push(Sub::fill(mk.start, mk.end, fill.clone()));
+            }
+        }
         let (layout_text, map, line_bases, source_newlines, caption_layout_spans) =
             build_layout_text(body, block, inlines, caret, &subs, apply_cjk, reveal_all);
         let mut node_ranges = Vec::new();
@@ -562,6 +660,7 @@ impl LayoutEngine {
                         st,
                         self.link_color,
                         self.doc_font,
+                        self.doc_face,
                         self.mono_family,
                         metrics.font_size,
                     ),
@@ -585,6 +684,7 @@ impl LayoutEngine {
                         st,
                         self.link_color,
                         self.doc_font,
+                        self.doc_face,
                         self.mono_family,
                         metrics.font_size,
                     ),
@@ -606,6 +706,7 @@ impl LayoutEngine {
                         st,
                         self.link_color,
                         self.doc_font,
+                        self.doc_face,
                         self.mono_family,
                         metrics.font_size,
                     ),
@@ -694,6 +795,7 @@ impl LayoutEngine {
                     st,
                     self.link_color,
                     self.doc_font,
+                    self.doc_face,
                     self.mono_family,
                     metrics.font_size,
                 ),
@@ -783,6 +885,39 @@ impl LayoutEngine {
             });
         }
         probe_break_violations(&buffer, false);
+        // 任务方框定位：占位段首字形的 x + 该视觉行的行顶/行高（与 PlacedImg 同一查找口径）。
+        // 边长只由行高推导，故 4 预置字族/任意自定义族下完全一致；勾选态不参与。
+        let mut task_boxes: Vec<TaskBox> = Vec::new();
+        for mk in &tasks {
+            let ls = map.doc_to_layout(mk.start);
+            let line_i = line_bases.partition_point(|&b| b <= ls).saturating_sub(1);
+            let index = ls - line_bases.get(line_i).copied().unwrap_or(0);
+            let mut at = None;
+            for run in buffer.layout_runs() {
+                if run.line_i != line_i {
+                    continue;
+                }
+                for g in run.glyphs {
+                    if index <= g.start {
+                        at = Some((g.x, run.line_top, run.line_height));
+                        break;
+                    }
+                }
+                if at.is_some() {
+                    break;
+                }
+            }
+            let Some((x, line_top, line_height)) = at else {
+                continue; // 防御：占位段必有字形
+            };
+            let side = task_box_side(line_height);
+            task_boxes.push(TaskBox {
+                x,
+                y: line_top + ((line_height - side) * 0.5).round(),
+                side,
+                done: mk.done,
+            });
+        }
         // Sub/Sup 基线偏移：doc 坐标经 OffsetMap 转 layout 坐标（光栅按字形起点命中）。
         let script_ranges: Vec<(usize, usize, f32)> = style_segments
             .iter()
@@ -849,6 +984,7 @@ impl LayoutEngine {
                 .collect(),
             // Sub/Sup 基线偏移区间（layout 坐标），供光栅化施加 y 偏移。
             script_ranges,
+            task_boxes,
             node_ranges,
             img_ranges,
             source_newlines,
@@ -870,6 +1006,7 @@ impl LayoutEngine {
             Style::default(),
             self.link_color,
             self.doc_font,
+            self.doc_face,
             self.mono_family,
             metrics.font_size,
         );
@@ -907,6 +1044,7 @@ impl LayoutEngine {
             strikes: Vec::new(),
             decorations_under: Vec::new(),
             decorations_over: Vec::new(),
+            task_boxes: Vec::new(),
             script_ranges: Vec::new(),
             node_ranges: Vec::new(),
             img_ranges: Vec::new(),
@@ -1113,4 +1251,165 @@ impl LayoutEngine {
         }
         (px, w as u32, h as u32)
     }
+}
+
+/// 字体文件（含 TTC 子面）的 cmap 是否把 `ch` 映射到非 0 字形。
+///
+/// 仅解析 `cmap` 的格式 4/12（覆盖 BMP 与增补平面），不解析字形轮廓，
+/// 因此开销远小于真正排版；格式不支持时保守返回 `false`（只影响「缺中文」提示）。
+fn cmap_has_char(data: &[u8], face_index: u32, ch: u32) -> bool {
+    let Some(base) = sfnt_face_offset(data, face_index) else {
+        return false;
+    };
+    let Some(num_tables) = read_u16(data, base + 4) else {
+        return false;
+    };
+    for i in 0..num_tables as usize {
+        let rec = base + 12 + i * 16;
+        let Some(tag) = data.get(rec..rec + 4) else {
+            return false;
+        };
+        if tag != b"cmap" {
+            continue;
+        }
+        let Some(offset) = read_u32(data, rec + 8) else {
+            return false;
+        };
+        return cmap_table_has_char(data, offset as usize, ch);
+    }
+    false
+}
+
+/// TTC 中第 `face_index` 个子面的 SFNT 表目录偏移。
+fn sfnt_face_offset(data: &[u8], face_index: u32) -> Option<usize> {
+    if data.get(0..4)? == b"ttcf" {
+        let count = read_u32(data, 8)?;
+        if face_index >= count {
+            return None;
+        }
+        read_u32(data, 12 + face_index as usize * 4).map(|v| v as usize)
+    } else if face_index == 0 {
+        Some(0)
+    } else {
+        None
+    }
+}
+
+fn cmap_table_has_char(data: &[u8], table: usize, ch: u32) -> bool {
+    let Some(subtables) = read_u16(data, table + 2) else {
+        return false;
+    };
+    for i in 0..subtables as usize {
+        let rec = table + 4 + i * 8;
+        let Some(offset) = read_u32(data, rec + 4) else {
+            return false;
+        };
+        if cmap_subtable_has_char(data, table + offset as usize, ch) {
+            return true;
+        }
+    }
+    false
+}
+
+fn cmap_subtable_has_char(data: &[u8], sub: usize, ch: u32) -> bool {
+    match read_u16(data, sub) {
+        Some(4) => cmap_format4_has_char(data, sub, ch),
+        Some(12) => cmap_format12_has_char(data, sub, ch),
+        _ => false,
+    }
+}
+
+/// cmap 格式 4（BMP；idRangeOffset 链式查表）。
+fn cmap_format4_has_char(data: &[u8], sub: usize, ch: u32) -> bool {
+    let c = u16::try_from(ch).ok();
+    let Some(c) = c else {
+        return false;
+    };
+    let Some(seg_x2) = read_u16(data, sub + 6) else {
+        return false;
+    };
+    let segs = seg_x2 as usize / 2;
+    if segs == 0 {
+        return false;
+    }
+    let end_codes = sub + 14;
+    let start_codes = end_codes + seg_x2 as usize + 2;
+    let id_deltas = start_codes + seg_x2 as usize;
+    let id_range_offsets = id_deltas + seg_x2 as usize;
+    for i in 0..segs {
+        let (Some(end), Some(start), Some(delta), Some(range_off)) = (
+            read_u16(data, end_codes + i * 2),
+            read_u16(data, start_codes + i * 2),
+            read_i16(data, id_deltas + i * 2),
+            read_u16(data, id_range_offsets + i * 2),
+        ) else {
+            return false;
+        };
+        if c < start || c > end {
+            continue;
+        }
+        let glyph = if range_off == 0 {
+            c.wrapping_add(delta as u16)
+        } else {
+            let pos = id_range_offsets + i * 2 + range_off as usize + (c - start) as usize * 2;
+            let Some(g) = read_u16(data, pos) else {
+                return false;
+            };
+            if g == 0 {
+                return false;
+            }
+            g.wrapping_add(delta as u16)
+        };
+        return glyph != 0;
+    }
+    false
+}
+
+/// cmap 格式 12（分组覆盖，支持增补平面）。
+fn cmap_format12_has_char(data: &[u8], sub: usize, ch: u32) -> bool {
+    let Some(groups) = read_u32(data, sub + 12) else {
+        return false;
+    };
+    let first = sub + 16;
+    let available = data.len().saturating_sub(first) / 12;
+    for i in 0..(groups as usize).min(available) {
+        let g = first + i * 12;
+        let (Some(start), Some(end), Some(start_glyph)) = (
+            read_u32(data, g),
+            read_u32(data, g + 4),
+            read_u32(data, g + 8),
+        ) else {
+            return false;
+        };
+        if ch < start {
+            break;
+        }
+        if ch <= end {
+            return start_glyph.wrapping_add(ch - start) != 0;
+        }
+    }
+    false
+}
+
+fn read_u16(data: &[u8], offset: usize) -> Option<u16> {
+    Some(u16::from_be_bytes([
+        *data.get(offset)?,
+        *data.get(offset + 1)?,
+    ]))
+}
+
+fn read_i16(data: &[u8], offset: usize) -> Option<i16> {
+    Some(i16::from_be_bytes([
+        *data.get(offset)?,
+        *data.get(offset + 1)?,
+    ]))
+}
+
+fn read_u32(data: &[u8], offset: usize) -> Option<u32> {
+    Some(u32::from_be_bytes([
+        *data.get(offset)?,
+        *data.get(offset + 1)?,
+        *data.get(offset + 2)?,
+        *data.get(offset + 3)?,
+    ]))
 }

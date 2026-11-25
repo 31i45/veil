@@ -1,4 +1,4 @@
-//! 运行时界面语言（Task 2）：系统 UI 语言探测 + `VEIL_UI_LANG` 覆盖。
+//! 运行时界面语言（Task 2 / Task 6）：启动优先级 config 手动选择 > `VEIL_UI_LANG` > 系统 UI 语言。
 //!
 //! 只映射当前已支持的两种语言：中文（任意地区变体）→ zh-CN，其余非零主语言 → en-US。
 //! 探测失败（Win32 返回 0 / 非 Windows 平台）一律回退 zh-CN，保证界面始终有词条。
@@ -32,21 +32,32 @@ pub fn resolve_locale(env_value: Option<&str>, langid: u16) -> &'static str {
     }
 }
 
+/// 完整启动优先级（纯函数）：配置里的手动选择 > 环境变量 > 系统 UI 语言。
+///
+/// `config_value` 为配置文件里的 `ui_language` 原始字符串：`"zh-CN"`/`"en-US"` 直接生效；
+/// `"auto"`、缺失或非法值都按自动处理（不阻断启动），继续看环境变量与系统语言。
+pub fn resolve_startup_language(
+    config_value: Option<&str>,
+    env_value: Option<&str>,
+    langid: u16,
+) -> &'static str {
+    match config_value {
+        Some("zh-CN") => "zh-CN",
+        Some("en-US") => "en-US",
+        _ => resolve_locale(env_value, langid),
+    }
+}
+
 /// 系统默认 UI 语言的 LANGID（失败返回 0，由 `resolve_langid` 归为 zh-CN）。
 #[cfg(windows)]
-fn system_langid() -> u16 {
+pub(crate) fn system_langid() -> u16 {
     // SAFETY: GetUserDefaultUILanguage 无参数，只返回 LANGID；无指针/所有权约定。
     unsafe { GetUserDefaultUILanguage() }
 }
 
 #[cfg(not(windows))]
-fn system_langid() -> u16 {
+pub(crate) fn system_langid() -> u16 {
     0
-}
-
-/// 系统 UI 语言 → 语言码；非 Windows 平台固定回退 zh-CN。
-pub fn detect_locale() -> &'static str {
-    resolve_locale(None, system_langid())
 }
 
 #[cfg(windows)]
@@ -54,7 +65,6 @@ pub fn detect_locale() -> &'static str {
 extern "system" {
     fn GetUserDefaultUILanguage() -> u16;
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -93,7 +103,49 @@ mod tests {
     /// 真实探测路径只产出受支持的语言码（失败也回退 zh-CN）。
     #[cfg(windows)]
     #[test]
-    fn detect_locale_yields_supported_code() {
-        assert!(matches!(detect_locale(), "zh-CN" | "en-US"));
+    fn system_langid_yields_supported_code() {
+        assert!(matches!(resolve_langid(system_langid()), "zh-CN" | "en-US"));
+    }
+
+    /// 启动优先级：配置手动值 > 环境变量 > 系统语言；auto/非法/缺失都回落到后两者。
+    #[test]
+    fn startup_language_prefers_config_then_env_then_system() {
+        // 1) 配置手动选择压过环境变量与系统语言。
+        assert_eq!(
+            resolve_startup_language(Some("zh-CN"), Some("en-US"), 0x0409),
+            "zh-CN"
+        );
+        assert_eq!(
+            resolve_startup_language(Some("en-US"), Some("zh-CN"), 0x0804),
+            "en-US"
+        );
+        // 2) auto / 缺失 / 非法 → 环境变量（仍严格匹配）。
+        for auto in [Some("auto"), None, Some("fr-FR"), Some("ZH-cn"), Some("")] {
+            assert_eq!(
+                resolve_startup_language(auto, Some("zh-CN"), 0x0409),
+                "zh-CN",
+                "非手动值时环境变量优先: {auto:?}"
+            );
+            assert_eq!(
+                resolve_startup_language(auto, Some("en-US"), 0x0804),
+                "en-US",
+                "非手动值时环境变量优先: {auto:?}"
+            );
+        }
+        // 3) 无有效环境变量 → 系统 UI 语言。
+        assert_eq!(
+            resolve_startup_language(Some("auto"), None, 0x0804),
+            "zh-CN"
+        );
+        assert_eq!(
+            resolve_startup_language(None, Some("en-us"), 0x0409),
+            "en-US",
+            "非法环境变量不生效，回落系统语言"
+        );
+        assert_eq!(
+            resolve_startup_language(None, None, 0x0411),
+            "en-US",
+            "其他系统语言兜底英文"
+        );
     }
 }

@@ -652,12 +652,24 @@ keys! {
     SettingsFollowSystem => "settings.follow_system", "跟随系统";
     SettingsLight => "settings.light", "浅色";
     SettingsDark => "settings.dark", "深色";
+    SettingsUiLanguage => "settings.ui_language", "界面语言（重启生效）";
+    SettingsLangAuto => "settings.lang_auto", "自动（跟随系统）";
+    SettingsLangZhCn => "settings.lang_zh_cn", "中文";
+    SettingsLangEnUs => "settings.lang_en_us", "English";
     SettingsDocFontSize => "settings.doc_font_size", "正文字号（10–32）";
     SettingsDocFontFamily => "settings.doc_font_family", "正文字体族";
+    SettingsDocMargin => "settings.doc_margin", "版心/页边距";
+    SettingsMarginCompact => "settings.margin_compact", "紧凑";
+    SettingsMarginStandard => "settings.margin_standard", "标准";
+    SettingsMarginRelaxed => "settings.margin_relaxed", "宽松";
+    SettingsMarginFull => "settings.margin_full", "全宽";
+    SettingsMarginCustom => "settings.margin_custom", "自定义";
+    SettingsDocMarginPx => "settings.doc_margin_px", "自定义边距（4–200，仅自定义生效）";
     SettingsFontSystem => "settings.font_system", "系统默认";
     SettingsFontSans => "settings.font_sans", "无衬线";
     SettingsFontSerif => "settings.font_serif", "衬线";
     SettingsFontMono => "settings.font_mono", "等宽";
+    SettingsFontMissingCjk => "settings.font_missing_cjk", "该字族缺少中文字形，正文将回退到系统字体";
     SettingsAllowRemoteImages => "settings.allow_remote_images", "允许远程图片";
     SettingsWindowGeom => "settings.window_geom", "上次窗口几何";
     SettingsWindowGeomNone => "settings.window_geom_none", "（未记录）";
@@ -667,13 +679,17 @@ keys! {
     SettingsExportMarginMm => "settings.export_margin_mm", "导出 PDF 页边距（毫米，0–50）";
     SettingsTabWidth => "settings.tab_width", "制表符宽度（2 或 4）";
     NoticeSettingsSaved => "notice.settings_saved", "设置已保存";
+    NoticeUiLanguageRestart => "notice.ui_language_restart", "界面语言已更改，重启后生效";
     NoticeSettingsSaveFailed => "notice.settings_save_failed",
         "设置保存失败：{}；下一步：可检查配置目录的写入权限或磁盘空间后重试";
 
     // ---- 首跑欢迎文档 ----
+    DocEmptyHint => "doc.empty_hint", "从这里开始写，或按 Ctrl+O 打开已有的 Markdown 文件";
     SampleWelcome => "doc.sample_welcome", r#"# 欢迎使用 Veil
 
-这是你的第一页。文字会边写边排版，Markdown 源码始终是唯一的内容。
+Veil：专注写作的 Markdown 编辑器，边写边排版。
+
+这是你的第一页。Markdown 源码始终是唯一的内容。
 
 ## 现在可以做的三件事
 
@@ -735,10 +751,16 @@ pub const EN_US: &[(Key, &str)] = &[
         "Could not open mermaid.live: {}. Mermaid source copied; next: manually open https://mermaid.live/ and paste the source",
     ),
     (
+        Key::DocEmptyHint,
+        "Start writing here, or press Ctrl+O to open an existing Markdown file",
+    ),
+    (
         Key::SampleWelcome,
         r#"# Welcome to Veil
 
-This is your first page. Text is typeset as you write, and the Markdown source is always the single source of truth.
+Veil: a Markdown editor built for focused writing, typesetting as you type.
+
+This is your first page. The Markdown source is always the single source of truth.
 
 ## Three things you can do now
 
@@ -1756,12 +1778,30 @@ fn main() {
     (Key::SettingsFollowSystem, "Follow System"),
     (Key::SettingsLight, "Light"),
     (Key::SettingsDark, "Dark"),
+    (Key::SettingsUiLanguage, "Interface Language"),
+    (Key::SettingsLangAuto, "Automatic (Follow System)"),
+    (Key::SettingsLangZhCn, "Chinese"),
+    (Key::SettingsLangEnUs, "English"),
     (Key::SettingsDocFontSize, "Body Font Size (10–32)"),
     (Key::SettingsDocFontFamily, "Body Font Family"),
+    (Key::SettingsDocMargin, "Body Margin"),
+    (Key::SettingsMarginCompact, "Compact"),
+    (Key::SettingsMarginStandard, "Standard"),
+    (Key::SettingsMarginRelaxed, "Relaxed"),
+    (Key::SettingsMarginFull, "Full Width"),
+    (Key::SettingsMarginCustom, "Custom"),
+    (
+        Key::SettingsDocMarginPx,
+        "Custom Margin (4–200, Custom Only)",
+    ),
     (Key::SettingsFontSystem, "System Default"),
     (Key::SettingsFontSans, "Sans Serif"),
     (Key::SettingsFontSerif, "Serif"),
     (Key::SettingsFontMono, "Monospace"),
+    (
+        Key::SettingsFontMissingCjk,
+        "This family lacks Chinese glyphs; body text falls back to a system font",
+    ),
     (Key::SettingsAllowRemoteImages, "Allow Remote Images"),
     (Key::SettingsWindowGeom, "Last Window Geometry"),
     (Key::SettingsWindowGeomNone, "(Not Recorded)"),
@@ -1783,6 +1823,10 @@ fn main() {
     ),
     (Key::SettingsTabWidth, "Tab Width (2 or 4)"),
     (Key::NoticeSettingsSaved, "Settings saved"),
+    (
+        Key::NoticeUiLanguageRestart,
+        "Interface language changed; restart to apply",
+    ),
     (
         Key::NoticeSettingsSaveFailed,
         "Failed to save settings: {}. Next: check write permissions or disk space for the config directory and try again.",

@@ -450,6 +450,93 @@ mod tests {
         assert_eq!(f.get(0, 0), BLACK, "半径 ≤0.5 退化为直角");
     }
 
+    /// sRGB 8bit → WCAG 相对亮度（0..=1）。测试用：只在几十个采样点上调用，不复刻生产路径。
+    fn rel_luminance(px: [u8; 4]) -> f32 {
+        fn channel(v: u8) -> f32 {
+            let c = v as f32 / 255.0;
+            if c <= 0.04045 {
+                c / 12.92
+            } else {
+                ((c + 0.055) / 1.055).powf(2.4)
+            }
+        }
+        0.2126 * channel(px[0]) + 0.7152 * channel(px[1]) + 0.0722 * channel(px[2])
+    }
+
+    /// 扫描线上第一个跨过 `target` 的亚像素位置（像素中心坐标系，段内线性插值）。
+    fn crossing(samples: &[f32], target: f32, rising: bool) -> Option<f32> {
+        for (i, w) in samples.windows(2).enumerate() {
+            let (a, b) = (w[0], w[1]);
+            let hit = if rising {
+                a < target && b >= target
+            } else {
+                a > target && b <= target
+            };
+            if hit {
+                let t = (target - a) / (b - a);
+                return Some(i as f32 + t + 0.5);
+            }
+        }
+        None
+    }
+
+    /// 把覆盖率掩码按真实 `blit`（`over` straight-alpha sRGB 直混）合成到 `bg` 上，
+    /// 返回沿扫描线的相对亮度、背景亮度、峰值亮度，以及 20%↔80% 过渡宽度（像素）。
+    fn measure_edge(mask: &[f32], bg: [u8; 4], fg: [u8; 3]) -> (Vec<f32>, f32, f32, f32) {
+        let mut bitmap = Vec::with_capacity(mask.len() * 4);
+        for &c in mask {
+            let a = (c * 255.0).round() as u8;
+            bitmap.extend_from_slice(&[fg[0], fg[1], fg[2], a]);
+        }
+        let mut f = Frame::new(mask.len() as u32, 1, bg);
+        f.blit(&bitmap, mask.len() as u32, 1, 0, 0);
+        let lum: Vec<f32> = (0..mask.len() as u32)
+            .map(|x| rel_luminance(f.get(x, 0)))
+            .collect();
+        let (bg_l, peak_l) = (lum[0], lum[lum.len() - 1]);
+        let rising = peak_l > bg_l;
+        let lo = bg_l + 0.2 * (peak_l - bg_l);
+        let hi = bg_l + 0.8 * (peak_l - bg_l);
+        let p_lo = crossing(&lum, lo, rising)
+            .unwrap_or_else(|| panic!("掩码未覆盖 20% 阈值：bg={bg_l} peak={peak_l}"));
+        let p_hi = crossing(&lum, hi, rising)
+            .unwrap_or_else(|| panic!("掩码未覆盖 80% 阈值：bg={bg_l} peak={peak_l}"));
+        (lum, bg_l, peak_l, (p_hi - p_lo).abs())
+    }
+
+    /// Task 1 实测（ppq）：同一合成覆盖率掩码分别混到「浅底深字」与「深底浅字」上，
+    /// 比较 20%↔80% 感知亮度过渡宽度，判断 sRGB 直混是否让深色正文显著更虚；
+    /// 同时锁定「深色不比浅色宽 1px 以上」，防止后续改动回退。
+    #[test]
+    fn aa_edge_transition_width_light_vs_dark() {
+        // 颜色取真实主题 token，不在此处另设数值。
+        let light = crate::theme::Theme::light();
+        let dark = crate::theme::Theme::dark();
+        // 掩码 A：需求点名的三列斜坡（0.25 / 0.6 / 0.9），两侧为全背景/全笔画。
+        let profile_a = [0.0f32, 0.0, 0.25, 0.6, 0.9, 1.0, 1.0, 1.0];
+        // 掩码 B：0.1 步长长斜坡（20%↔80% 跨 6 像素），放大差异便于判读。
+        let profile_b = [
+            0.0f32, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.0,
+        ];
+        for (name, mask) in [
+            ("A(0.25/0.6/0.9)", &profile_a[..]),
+            ("B(0.1 步长)", &profile_b[..]),
+        ] {
+            let (_, l_bg, l_peak, l_w) = measure_edge(mask, light.bg, light.fg);
+            let (_, d_bg, d_peak, d_w) = measure_edge(mask, dark.bg, dark.fg);
+            println!(
+                "{name} 浅底深字 width={l_w:.2}px bg_Y={l_bg:.4} peak_Y={l_peak:.4} | \
+                 深底浅字 width={d_w:.2}px bg_Y={d_bg:.4} peak_Y={d_peak:.4} | 差={:.2}px",
+                d_w - l_w
+            );
+            assert!(l_w.is_finite() && d_w.is_finite());
+            assert!(
+                d_w <= l_w + 1.0,
+                "深色过渡不得比浅色宽 >1px：{d_w} vs {l_w}"
+            );
+        }
+    }
+
     #[test]
     fn shadow_darkens_below_and_fades_with_distance() {
         let mut f = Frame::new(64, 64, WHITE);

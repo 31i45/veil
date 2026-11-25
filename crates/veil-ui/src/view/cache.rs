@@ -93,6 +93,8 @@ impl Revs {
             font_size_q: 0,
             line_height_q: 0,
             font_family: 0,
+            font_face: 0,
+            doc_margin_q: 0,
             fold_epoch: 0,
             list_epoch: 0,
         }
@@ -116,6 +118,11 @@ pub(crate) struct BaseKey {
     font_size_q: u32,
     line_height_q: u32,
     font_family: u8,
+    /// 显式字族名指纹（0 = 沿用四档预置）：切换具体字族时换键重排。
+    font_face: u64,
+    /// 屏幕版心边距（逻辑像素 ×100）：宽屏封顶/全宽切换时版心宽可能相同，
+    /// 但画布锚点不同，必须换键重排。
+    doc_margin_q: u32,
     /// 远程图片到达/开关切换代次：远程图占位转为实图时换键重排；
     /// 本地图片缓存键仍只用 `image_base`，不因远程图重读磁盘。
     remote_images: u32,
@@ -189,6 +196,17 @@ fn quantize(v: f32, factor: f32) -> u32 {
 /// DPI 量化值：公式渲染器与缓存键共用同一取整口径。
 pub(crate) fn scale_q(scale: f32) -> u32 {
     quantize(scale, 1000.0)
+}
+
+/// 显式字族名的稳定指纹（FNV-1a；`None` → 0）。仅用于缓存键，不参与展示。
+fn face_key(face: Option<&str>) -> u64 {
+    let Some(face) = face else { return 0 };
+    let mut h = 0xcbf2_9ce4_8422_2325u64;
+    for b in face.as_bytes() {
+        h ^= u64::from(*b);
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h | 1
 }
 
 /// 五类派生缓存的统一存放。字段对 crate 内可见；读取一律经本文件的带键查询方法，
@@ -553,6 +571,8 @@ impl App {
         key.font_size_q = quantize(cfg.doc_font_size, 1000.0);
         key.line_height_q = quantize(cfg.doc_line_height, 1000.0);
         key.font_family = cfg.doc_font_family.key();
+        key.font_face = face_key(cfg.doc_font_face.as_deref());
+        key.doc_margin_q = quantize(self.engine.doc_margin_px(), 100.0);
         key.fold_epoch = self.inline_details_epoch();
         key.list_epoch = self.index.list_epoch;
         key

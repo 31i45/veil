@@ -16,7 +16,7 @@ Start-Process .\release-bundle\veil-v3.0.0\veil.exe   # 结束后 Remove-Item En
 
 **状态**：`自动`＝脚本可判 PASS/FAIL；`部分自动`＝脚本操作/采集，仍需人眼或改系统设置；`必须人工`＝不得以脚本代替。
 
-**诚实边界**：已自动覆盖启动出窗、英文键入与撤销、保存、HTML 导出、20k 击键 p95、150% 首帧。IME 候选窗、四档 DPI、实体打印、抓包结论**未自动验证**；未做的项写 `NOT RUN`，不写 PASS。
+**诚实边界**：已自动覆盖启动出窗、英文键入与撤销、保存、HTML 导出、20k 击键 p95、150% 首帧。中文 IME 候选窗、四档 DPI、实体打印、抓包、无 CJK 字体与只读目标等未验证项的统一定义与状态以 README「已知限制」为准，本文不重复维护；本记录中未做的项写 `NOT RUN`，不写 PASS。
 
 **失败记录**：整窗截图（含时间）、`walkthrough.log`、产物 SHA、DPI/主题/输入法/路径、复现步骤。
 
@@ -135,7 +135,7 @@ dumpcap -i 5 -f "not host 127.0.0.1 and not port 53 and not port 5353 and not po
 
 ## H 范围
 
-只验 Windows 11 x64 的单个 `veil.exe`。**Linux 版不在本轮范围**：Linux CI 仅对 `veil-core` 做 `cargo check`/`test`，不代表存在或支持 Linux 应用；macOS 同样不提供。相关缺陷另开条目，不计入本轮门禁。
+只验 Windows 11 x64 的单个 `veil.exe`。**Linux 版不在本轮范围**；macOS 同样不提供。平台边界与「Linux CI 仅覆盖 `veil-core`」的口径以 README 的「平台边界」说明为准，本文不重复。相关缺陷另开条目，不计入本轮门禁。
 
 ## 30 分钟核心冒烟清单
 

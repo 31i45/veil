@@ -337,6 +337,7 @@ fn link_span_attrs_follow_theme_link_color() {
             theme.link,
             DocFontFamily::System,
             None,
+            None,
             12.0,
         );
         assert_eq!(
@@ -350,6 +351,7 @@ fn link_span_attrs_follow_theme_link_color() {
             style_at(body_at),
             theme.link,
             DocFontFamily::System,
+            None,
             None,
             12.0,
         );
@@ -390,7 +392,7 @@ fn doc_typography_scales_body_but_leaves_ui_untouched() {
     let def_h = layout(&mut def);
     let ui_def = def.measure("菜单");
     let mut big = LayoutEngine::new();
-    big.set_doc_typography(18.0, 27.0, DocFontFamily::Serif);
+    big.set_doc_typography(18.0, 27.0, DocFontFamily::Serif, None);
     let big_h = layout(&mut big);
     let ui_big = big.measure("菜单");
     assert!(
@@ -1211,6 +1213,7 @@ fn mermaid_placeholder_uses_mono_attrs_without_inflating_block_height() {
         Style::default(),
         eng.link_color,
         eng.doc_font,
+        eng.doc_face,
         eng.mono_family,
         metrics.font_size,
     );
@@ -1474,4 +1477,114 @@ fn tall_image_top_clamped_to_line_top_and_extends_block() {
         p.y
     );
     assert!(l.height > BASE_LINE_HEIGHT);
+}
+
+/// 已安装字族名的 CJK 字形归属（用于验证自由字族与回退链）。
+fn cjk_family_names(l: &BlockLayout, db: &cosmic_text::fontdb::Database) -> Vec<String> {
+    let mut out = Vec::new();
+    for run in l.buffer.layout_runs() {
+        for g in run.glyphs.iter() {
+            let cluster = &run.text[g.start..g.end];
+            let is_cjk = cluster
+                .chars()
+                .any(|c| ('\u{4E00}'..='\u{9FFF}').contains(&c));
+            if !is_cjk {
+                continue;
+            }
+            if let Some(face) = db.face(g.font_id) {
+                out.extend(face.families.iter().map(|(name, _)| name.clone()));
+            }
+        }
+    }
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
+/// 自由字族：显式选一个无中文字形的西文族时，汉字必须走回退链（不出现 tofu）。
+#[test]
+fn explicit_latin_family_falls_back_for_chinese_glyphs() {
+    let mut eng = LayoutEngine::new();
+    let families = eng.installed_families();
+    assert!(
+        families.iter().any(|(_, cjk)| *cjk),
+        "测试机应至少有一个含中文字形的族"
+    );
+    // cmap 判定校验：常见中文字族必须为真，常见纯西文族不得误判。
+    if let Some((_, cjk)) = families.iter().find(|(n, _)| n == "SimSun") {
+        assert!(*cjk, "SimSun 应判定为含中文字形");
+    }
+    if let Some((_, cjk)) = families.iter().find(|(n, _)| n == "Arial") {
+        assert!(!*cjk, "Arial 应判定为不含中文字形");
+    }
+    let Some(latin) = families
+        .iter()
+        .find(|(n, cjk)| !*cjk && n.eq_ignore_ascii_case("Consolas"))
+        .or_else(|| families.iter().find(|(_, cjk)| !*cjk))
+        .map(|(n, _)| n.clone())
+    else {
+        return; // 极端环境无西文族：本用例无意义
+    };
+    eng.set_doc_typography(16.0, 24.0, DocFontFamily::System, Some(&latin));
+
+    let src = "中文\n";
+    let s = Session::open(src);
+    let (id, kind, range) = s.blocks()[0].clone();
+    let inlines = s.block_inlines(id).unwrap();
+    let text = &src[range.start..range.end];
+    let l = eng.layout_block(kind, text, range, &inlines, 400.0, usize::MAX, &[], false);
+
+    let names = cjk_family_names(&l, eng.font_system.db());
+    assert!(
+        !names.iter().any(|n| n == &latin),
+        "汉字不得由无中文字形的族 {latin} 渲染（tofu）: {names:?}"
+    );
+    let glyph_count: usize = l
+        .buffer
+        .layout_runs()
+        .map(|r| {
+            r.glyphs
+                .iter()
+                .filter(|g| {
+                    r.text[g.start..g.end]
+                        .chars()
+                        .any(|c| ('\u{4E00}'..='\u{9FFF}').contains(&c))
+                })
+                .count()
+        })
+        .sum();
+    assert!(glyph_count >= 2, "应排到两个汉字字形，实际 {glyph_count}");
+}
+
+/// 源码模式与预览模式共用同一正文族（同一引擎、同一次配置生效）。
+#[test]
+fn source_mode_and_preview_use_same_custom_family() {
+    let mut eng = LayoutEngine::new();
+    let Some((family, _)) = eng.installed_families().into_iter().find(|(_, cjk)| *cjk) else {
+        return;
+    };
+    eng.set_doc_typography(16.0, 24.0, DocFontFamily::Serif, Some(&family));
+
+    let src = "**中文**\n";
+    let s = Session::open(src);
+    let (id, kind, range) = s.blocks()[0].clone();
+    let inlines = s.block_inlines(id).unwrap();
+    let text = &src[range.start..range.end];
+    let preview = eng.layout_block(
+        kind.clone(),
+        text,
+        range,
+        &inlines,
+        400.0,
+        usize::MAX,
+        &[],
+        false,
+    );
+    let source = eng.layout_block(kind, text, range, &inlines, 400.0, usize::MAX, &[], true);
+    let db = eng.font_system.db();
+    assert_eq!(
+        cjk_family_names(&preview, db),
+        cjk_family_names(&source, db)
+    );
+    assert!(cjk_family_names(&preview, db).contains(&family));
 }

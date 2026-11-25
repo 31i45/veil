@@ -4,9 +4,10 @@
 //! 平台能力（注册表系统外观、DWM 深色标题栏/Mica、配置落盘）以 trait 声明，由产品层注入。
 
 //!
-//! 配置格式（极简，共 14 个顶层键）：
+//! 配置格式（极简，共 17 个顶层键）：
 //! ```toml
 //! mode = "system"        # system | light | dark
+//! ui_language = "auto"   # auto | zh-CN | en-US（重启生效）
 //! export_margin_mm = 20  # PDF 页边距（毫米）
 //! export_page_numbers = true
 //! export_toc = true
@@ -67,6 +68,46 @@ impl ThemeMode {
             ThemeMode::Light => crate::i18n::Key::MenuViewThemeLight,
             ThemeMode::Dark => crate::i18n::Key::MenuViewThemeDark,
         })
+    }
+}
+
+/// 界面语言选择：自动（跟随系统）/ 中文 / English。
+///
+/// 只在启动时决定 `i18n::init_locale`，会话内不热切换；改动写盘后重启生效。
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum UiLanguage {
+    #[default]
+    Auto,
+    ZhCn,
+    EnUs,
+}
+
+impl UiLanguage {
+    /// 配置值解析（严格大小写，与 `as_str` 严格互逆）。
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "auto" => Some(UiLanguage::Auto),
+            "zh-CN" => Some(UiLanguage::ZhCn),
+            "en-US" => Some(UiLanguage::EnUs),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            UiLanguage::Auto => "auto",
+            UiLanguage::ZhCn => "zh-CN",
+            UiLanguage::EnUs => "en-US",
+        }
+    }
+
+    /// 手动选择时的启动语言码；`Auto` 返回 None（交给环境变量/系统语言决定）。
+    pub fn code(self) -> Option<&'static str> {
+        match self {
+            UiLanguage::Auto => None,
+            UiLanguage::ZhCn => Some("zh-CN"),
+            UiLanguage::EnUs => Some("en-US"),
+        }
     }
 }
 
@@ -397,9 +438,10 @@ fn high_contrast_syntax() -> SyntaxColors {
 
 pub(crate) use crate::tokens::surface;
 
-/// 正文字体族（保持 `Copy`：只存枚举，排版时映射到 `&'static str` / 通用族）。
+/// 正文字体族预置（保持 `Copy`：只存枚举，排版时映射到 `&'static str` / 通用族）。
 ///
 /// `System` 不显式设置 family，沿用既有字体回退链（视觉不变）。
+/// 具体已安装字族由 [`Config::doc_font_face`] 单独承载（`None` = 沿用这里四档）。
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum DocFontFamily {
     #[default]
@@ -441,6 +483,64 @@ impl DocFontFamily {
     }
 }
 
+/// 屏幕版心边距档位（与 PDF 导出边距 `export_margin_mm` 完全无关）。
+///
+/// 只描述「屏幕阅读时的左右留白」；宽屏（窗口 ≥ `doc::WIDE_WINDOW`）下
+/// 除 `Full` 外仍受可读列宽上限约束并居中。
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum DocMargin {
+    /// 紧凑：8 逻辑像素。
+    Compact,
+    /// 标准（默认）：16 逻辑像素，与改造前 `tokens::doc::MARGIN` 一致。
+    #[default]
+    Standard,
+    /// 宽松：32 逻辑像素。
+    Relaxed,
+    /// 全宽：16 逻辑像素，且不启用可读列宽上限（按窗口铺满）。
+    Full,
+    /// 自定义：取 `Config::doc_margin_px`（夹取 4..=200 逻辑像素）。
+    Custom,
+}
+
+impl DocMargin {
+    /// 配置值解析（严格小写，与 `as_str` 严格互逆）。
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "compact" => Some(DocMargin::Compact),
+            "standard" => Some(DocMargin::Standard),
+            "relaxed" => Some(DocMargin::Relaxed),
+            "full" => Some(DocMargin::Full),
+            "custom" => Some(DocMargin::Custom),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DocMargin::Compact => "compact",
+            DocMargin::Standard => "standard",
+            DocMargin::Relaxed => "relaxed",
+            DocMargin::Full => "full",
+            DocMargin::Custom => "custom",
+        }
+    }
+
+    /// 屏幕版心边距（逻辑像素，未乘 scale）；`Custom` 用用户值并夹取。
+    pub fn margin_px(self, custom_px: f32) -> f32 {
+        match self {
+            DocMargin::Compact => 8.0,
+            DocMargin::Standard | DocMargin::Full => DEFAULT_DOC_MARGIN_PX,
+            DocMargin::Relaxed => 32.0,
+            DocMargin::Custom => clamp_doc_margin_px(custom_px),
+        }
+    }
+
+    /// 是否启用可读列宽上限（只有 `Full` 关闭）。
+    pub(crate) fn readable_cap(self) -> bool {
+        !matches!(self, DocMargin::Full)
+    }
+}
+
 /// HTML 导出样式快照：把「当前主题」压缩为导出所需的最小颜色集合。
 ///
 /// 为什么单独一个结构：`Theme` 是渲染内部细节（含 chrome/选区/滚动条等导出用不到的色），
@@ -455,6 +555,9 @@ pub struct ExportStyle {
     pub link: [u8; 3],
     pub code_bg: [u8; 3],
     pub border: [u8; 3],
+    /// 正文字族名（`None` = 导出沿用浏览器默认 `system-ui`）。
+    /// 指向排版引擎内驻留的 `'static` 名字，避免导出端口持有所有权或复制。
+    pub font_family: Option<&'static str>,
 }
 
 impl Default for ExportStyle {
@@ -468,6 +571,7 @@ impl Default for ExportStyle {
             link: [0x2b, 0x6c, 0xb0],
             code_bg: [0xf5, 0xf5, 0xf5],
             border: [0xdd, 0xdd, 0xdd],
+            font_family: None,
         }
     }
 }
@@ -493,6 +597,7 @@ impl ExportStyle {
             link: t.link,
             code_bg: rgb(t.code_bg),
             border: rgb(t.chrome_border),
+            font_family: None,
         }
     }
 }
@@ -510,11 +615,23 @@ pub struct WindowGeom {
 const DEFAULT_DOC_FONT_SIZE: f32 = crate::tokens::typography::BODY_SIZE;
 /// 正文行高默认值（物理像素基准）：单一来源 `tokens::typography::BODY_LINE_HEIGHT`。
 const DEFAULT_DOC_LINE_HEIGHT: f32 = crate::tokens::typography::BODY_LINE_HEIGHT;
+/// 屏幕版心边距默认值（逻辑像素）：单一来源 `tokens::doc::MARGIN`（Standard 档）。
+const DEFAULT_DOC_MARGIN_PX: f32 = crate::tokens::doc::MARGIN;
+/// 自定义版心边距允许范围（逻辑像素）。
+pub(crate) const DOC_MARGIN_PX_MIN: f32 = 4.0;
+pub(crate) const DOC_MARGIN_PX_MAX: f32 = 200.0;
+
+/// 自定义版心边距夹取：4..=200 逻辑像素。
+pub(crate) fn clamp_doc_margin_px(v: f32) -> f32 {
+    v.clamp(DOC_MARGIN_PX_MIN, DOC_MARGIN_PX_MAX)
+}
 /// 正文字号允许范围（物理像素基准）。
 const DOC_FONT_SIZE_MIN: f32 = 10.0;
 const DOC_FONT_SIZE_MAX: f32 = 32.0;
 /// 字体族值最大长度：超长视为无法识别（防止恶意/损坏配置）。
 const DOC_FONT_FAMILY_MAX_LEN: usize = 64;
+/// 显式字族名最大长度（字节）：超长/空串视为无法识别。
+pub(crate) const DOC_FONT_FACE_MAX_LEN: usize = 64;
 /// 制表符宽度默认值（兼容 2 与 4，Task D 新增）。
 const DEFAULT_TAB_WIDTH: u8 = 4;
 /// 图片缓存字节上限默认值（MiB）：容纳一屏图文混排的若干张大图，超出后按 LRU 逐出。
@@ -526,15 +643,38 @@ fn clamp_font_size(v: f32) -> f32 {
     v.clamp(DOC_FONT_SIZE_MIN, DOC_FONT_SIZE_MAX)
 }
 
+/// 字符串 → TOML 基本字符串字面量（全量转义，保证与 `toml_edit` 解析严格互逆）。
+fn toml_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c.is_control() => out.push_str(&format!("\\u{:04X}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
 /// 正文行高夹取：字号..=字号×3（保证行高不小于字号、又不至于过分稀疏）。
 fn clamp_line_height(v: f32, size: f32) -> f32 {
     v.clamp(size, size * 3.0)
 }
 
 /// 配置内容：主题模式 + PDF 导出设置 + 正文排版 + 窗口几何。
-#[derive(Clone, Copy, PartialEq, Debug)]
+///
+/// 因 `doc_font_face` 承载任意字族名，本结构不再 `Copy`（改为 `Clone`）。
+#[derive(Clone, PartialEq, Debug)]
 pub struct Config {
     pub mode: ThemeMode,
+    /// 界面语言（默认自动跟随系统）；仅启动时生效，改动需重启。
+    pub ui_language: UiLanguage,
     /// PDF 页边距（毫米）。
     pub export_margin_mm: f32,
     /// PDF 页脚页码 `n / total`。
@@ -543,10 +683,17 @@ pub struct Config {
     pub export_toc: bool,
     /// 正文字体族（仅作用于正文/表格文本，UI chrome 不变）。
     pub doc_font_family: DocFontFamily,
+    /// 显式字族名（已安装系统字体）；`None` = 沿用 `doc_font_family` 四档预置，
+    /// `Some(name)` = 正文优先使用该族（缺字仍走既有 CJK 回退链）。
+    pub doc_font_face: Option<String>,
     /// 正文字号（物理像素基准，夹取 10..=32）。
     pub doc_font_size: f32,
     /// 正文行高（物理像素基准，夹取 字号..=字号×3）。
     pub doc_line_height: f32,
+    /// 屏幕版心/页边距档位（与 PDF 页边距 `export_margin_mm` 无关）。
+    pub doc_margin: DocMargin,
+    /// 自定义版心边距（逻辑像素，仅 `doc_margin = custom` 生效，夹取 4..=200）。
+    pub doc_margin_px: f32,
     /// 普通远程图片自动加载（默认关）；true = 用户显式允许，false = 全局阻止，只显示 alt 文本。
     pub allow_remote_images: bool,
     /// 制表符宽度（2 或 4，默认 4）；其它值夹到 4。
@@ -559,12 +706,16 @@ impl Default for Config {
     fn default() -> Self {
         Config {
             mode: ThemeMode::System,
+            ui_language: UiLanguage::Auto,
             export_margin_mm: 20.0,
             export_page_numbers: true,
             export_toc: true,
             doc_font_family: DocFontFamily::System,
+            doc_font_face: None,
             doc_font_size: DEFAULT_DOC_FONT_SIZE,
             doc_line_height: DEFAULT_DOC_LINE_HEIGHT,
+            doc_margin: DocMargin::Standard,
+            doc_margin_px: DEFAULT_DOC_MARGIN_PX,
             allow_remote_images: false,
             tab_width: DEFAULT_TAB_WIDTH,
             window: None,
@@ -574,23 +725,30 @@ impl Default for Config {
 
 impl Config {
     /// 生成配置文件文本（写入即此格式；`parse_config(to_toml())` 恒等往返）。
-    pub fn to_toml(self) -> String {
+    pub fn to_toml(&self) -> String {
         let mut text = format!(
-            "{}\nmode = \"{}\"\n\
+            "{}\nmode = \"{}\"\nui_language = \"{}\"\n\
              export_margin_mm = {}\nexport_page_numbers = {}\nexport_toc = {}\n\
              doc_font_family = \"{}\"\ndoc_font_size = {}\ndoc_line_height = {}\n\
+             doc_margin = \"{}\"\ndoc_margin_px = {}\n\
              allow_remote_images = {}\ntab_width = {}\n",
             t(Key::ConfigHeader),
             self.mode.as_str(),
+            self.ui_language.as_str(),
             self.export_margin_mm,
             self.export_page_numbers,
             self.export_toc,
             self.doc_font_family.as_str(),
             self.doc_font_size,
             self.doc_line_height,
+            self.doc_margin.as_str(),
+            self.doc_margin_px,
             self.allow_remote_images,
             self.tab_width,
         );
+        if let Some(face) = &self.doc_font_face {
+            text.push_str(&format!("doc_font_face = {}\n", toml_string(face)));
+        }
         if let Some(w) = self.window {
             text.push_str(&format!(
                 "window_width = {}\nwindow_height = {}\nwindow_x = {}\nwindow_y = {}\n",
@@ -605,7 +763,7 @@ impl Config {
     ///
     /// 「表段」一律回退：历史 `[theme]` 段的键在旧行解析里按顶层生效，保留嵌套表会改变
     /// 下次加载的语义（ADR-012 / S2）。
-    pub fn to_toml_preserving(self, original: Option<&str>) -> String {
+    pub fn to_toml_preserving(&self, original: Option<&str>) -> String {
         original
             .and_then(|text| edit_existing_toml(text, self))
             .unwrap_or_else(|| self.to_toml())
@@ -615,7 +773,7 @@ impl Config {
 /// 原地编辑已存在的严格 TOML 配置；返回 `None` 表示必须回退整文件重生成。
 ///
 /// 仅当整文档可被 TOML 解析且不含任何表段时启用：关键字值逐项覆盖，未知键与注释原样保留。
-fn edit_existing_toml(text: &str, cfg: Config) -> Option<String> {
+fn edit_existing_toml(text: &str, cfg: &Config) -> Option<String> {
     let mut doc: toml_edit::DocumentMut = text.parse().ok()?;
     if doc
         .iter()
@@ -624,6 +782,11 @@ fn edit_existing_toml(text: &str, cfg: Config) -> Option<String> {
         return None;
     }
     set_item(&mut doc, "mode", toml_edit::value(cfg.mode.as_str()));
+    set_item(
+        &mut doc,
+        "ui_language",
+        toml_edit::value(cfg.ui_language.as_str()),
+    );
     set_item(
         &mut doc,
         "export_margin_mm",
@@ -640,6 +803,13 @@ fn edit_existing_toml(text: &str, cfg: Config) -> Option<String> {
         "doc_font_family",
         toml_edit::value(cfg.doc_font_family.as_str()),
     );
+    // 显式字族：None 时主动移除旧键，避免「改回四档预置」后重启仍读回旧字族。
+    match &cfg.doc_font_face {
+        Some(face) => set_item(&mut doc, "doc_font_face", toml_edit::value(face.as_str())),
+        None => {
+            doc.remove("doc_font_face");
+        }
+    }
     set_item(
         &mut doc,
         "doc_font_size",
@@ -649,6 +819,16 @@ fn edit_existing_toml(text: &str, cfg: Config) -> Option<String> {
         &mut doc,
         "doc_line_height",
         toml_edit::value(f64::from(cfg.doc_line_height)),
+    );
+    set_item(
+        &mut doc,
+        "doc_margin",
+        toml_edit::value(cfg.doc_margin.as_str()),
+    );
+    set_item(
+        &mut doc,
+        "doc_margin_px",
+        toml_edit::value(f64::from(cfg.doc_margin_px)),
     );
     set_item(
         &mut doc,
@@ -708,7 +888,8 @@ pub struct ConfigParse {
 }
 
 /// 极简配置解析：识别顶层 `mode`/`export_*`、正文排版键
-/// `doc_font_family`/`doc_font_size`/`doc_line_height`/`allow_remote_images`
+/// `doc_font_family`/`doc_font_face`/`doc_font_size`/`doc_line_height`/
+/// `doc_margin`/`doc_margin_px`/`allow_remote_images`
 /// 与成组的窗口键 `window_width`/`window_height`/`window_x`/`window_y`，其余条目计数忽略。
 /// 排版数值越界按夹取处理（不计数），类型/字面量非法才计入 ignored；
 /// 字号先夹 10..=32，行高再按「字号..=字号×3」夹取（与键出现顺序无关）。
@@ -733,6 +914,11 @@ pub fn parse_config(text: &str) -> ConfigParse {
         match key.as_str() {
             "mode" => match value.as_str().and_then(ThemeMode::parse) {
                 Some(m) => out.config.mode = m,
+                None => out.ignored += 1,
+            },
+            // 界面语言：旧配置无此键 → Auto（跟随系统，行为与改造前一致）。
+            "ui_language" => match value.as_str().and_then(UiLanguage::parse) {
+                Some(l) => out.config.ui_language = l,
                 None => out.ignored += 1,
             },
             "export_margin_mm" => {
@@ -760,6 +946,12 @@ pub fn parse_config(text: &str) -> ConfigParse {
                 Some(f) => out.config.doc_font_family = f,
                 None => out.ignored += 1,
             },
+            "doc_font_face" => match value.as_str() {
+                Some(s) if !s.is_empty() && s.len() <= DOC_FONT_FACE_MAX_LEN => {
+                    out.config.doc_font_face = Some(s.to_string());
+                }
+                _ => out.ignored += 1,
+            },
             "doc_font_size" => {
                 let v = value
                     .as_float()
@@ -775,6 +967,22 @@ pub fn parse_config(text: &str) -> ConfigParse {
                     .or_else(|| value.as_integer().map(|i| i as f64));
                 match v {
                     Some(v) if v.is_finite() => line_height = Some(v as f32),
+                    _ => out.ignored += 1,
+                }
+            }
+            // 屏幕版心档位：旧配置无此键时保持 Standard（16px，行为不变）。
+            "doc_margin" => match value.as_str().and_then(DocMargin::parse) {
+                Some(m) => out.config.doc_margin = m,
+                None => out.ignored += 1,
+            },
+            "doc_margin_px" => {
+                let v = value
+                    .as_float()
+                    .or_else(|| value.as_integer().map(|i| i as f64));
+                match v {
+                    Some(v) if v.is_finite() => {
+                        out.config.doc_margin_px = clamp_doc_margin_px(v as f32)
+                    }
                     _ => out.ignored += 1,
                 }
             }
@@ -899,6 +1107,16 @@ fn strip_comment_fallback(line: &str) -> &str {
 }
 
 /// 配置文件字节 → 解析结果：剥 BOM、要求合法 UTF-8（非法编码整体拒绝，用默认主题）。
+/// 启动前读取配置里的界面语言（供产品层在 `i18n::init_locale` 之前决策）。
+///
+/// 只关心 `ui_language` 这一个键，故对非 UTF-8/缺失/非法值一律返回 `None`
+/// （等同 `auto`：交给 `VEIL_UI_LANG` 或系统 UI 语言），不因配置损坏而拒绝启动。
+pub fn ui_language_from_config_bytes(bytes: &[u8]) -> Option<&'static str> {
+    let text = std::str::from_utf8(bytes).ok()?;
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+    parse_config(text).config.ui_language.code()
+}
+
 pub fn decode_config(bytes: &[u8]) -> Result<ConfigParse, String> {
     let text = std::str::from_utf8(bytes)
         .map_err(|_| crate::i18n::t(crate::i18n::Key::ErrConfigNotUtf8).to_string())?;
@@ -1164,6 +1382,202 @@ mod tests {
             assert_eq!(p.config, cfg);
             assert_eq!(p.ignored, 0, "自产配置不得含无法识别条目");
         }
+    }
+
+    #[test]
+    fn doc_font_face_round_trips_and_old_config_keeps_presets() {
+        // 自定义字族（含需转义字符）必须严格往返；四档预置语义不受影响。
+        let cfg = Config {
+            doc_font_family: DocFontFamily::Serif,
+            doc_font_face: Some("Noto Serif CJK SC".to_string()),
+            ..Config::default()
+        };
+        let p = parse(&cfg.to_toml());
+        assert_eq!(p.config, cfg);
+        assert_eq!(p.ignored, 0);
+        assert!(cfg
+            .to_toml()
+            .contains("doc_font_face = \"Noto Serif CJK SC\""));
+
+        let escaped = Config {
+            doc_font_face: Some("Quote\"Back\\slash".to_string()),
+            ..Config::default()
+        };
+        assert_eq!(parse(&escaped.to_toml()).config, escaped);
+
+        // 旧配置没有该键 → None，其余字段照旧（视觉行为完全不变）。
+        let legacy = parse("mode = \"dark\"\ndoc_font_family = \"serif\"\n");
+        assert_eq!(legacy.config.doc_font_face, None);
+        assert_eq!(legacy.config.doc_font_family, DocFontFamily::Serif);
+        assert_eq!(legacy.config.mode, ThemeMode::Dark);
+        assert_eq!(legacy.ignored, 0);
+    }
+
+    /// 版心档位：TOML 往返严格互逆；旧配置无键 → Standard + 16（行为不变）。
+    #[test]
+    fn doc_margin_round_trips_and_legacy_defaults_to_standard() {
+        for mode in [
+            DocMargin::Compact,
+            DocMargin::Standard,
+            DocMargin::Relaxed,
+            DocMargin::Full,
+            DocMargin::Custom,
+        ] {
+            let cfg = Config {
+                doc_margin: mode,
+                doc_margin_px: 28.5,
+                ..Config::default()
+            };
+            let text = cfg.to_toml();
+            assert!(
+                text.contains(&format!("doc_margin = \"{}\"", mode.as_str())),
+                "{text}"
+            );
+            assert!(text.contains("doc_margin_px = 28.5"), "{text}");
+            let p = parse(&text);
+            assert_eq!(p.config, cfg, "往返必须恒等：{mode:?}");
+            assert_eq!(p.ignored, 0);
+        }
+        let legacy = parse("mode = \"dark\"\n");
+        assert_eq!(legacy.config.doc_margin, DocMargin::Standard);
+        assert_eq!(legacy.config.doc_margin_px, 16.0);
+        assert_eq!(legacy.config.doc_margin.margin_px(16.0), 16.0);
+        assert_eq!(legacy.ignored, 0);
+    }
+
+    /// 档位字符串严格小写互逆；自定义像素值夹取 4..=200，非法字面量计数忽略。
+    #[test]
+    fn doc_margin_values_are_strict_and_clamped() {
+        for mode in [
+            DocMargin::Compact,
+            DocMargin::Standard,
+            DocMargin::Relaxed,
+            DocMargin::Full,
+            DocMargin::Custom,
+        ] {
+            assert_eq!(DocMargin::parse(mode.as_str()), Some(mode));
+        }
+        assert_eq!(DocMargin::parse("Wide"), None, "严格小写");
+        assert_eq!(parse("doc_margin = \"wide\"").ignored, 1);
+        assert_eq!(
+            parse("doc_margin = \"full\"").config.doc_margin,
+            DocMargin::Full
+        );
+
+        assert_eq!(parse("doc_margin_px = 1").config.doc_margin_px, 4.0);
+        assert_eq!(parse("doc_margin_px = 999").config.doc_margin_px, 200.0);
+        assert_eq!(parse("doc_margin_px = 32.5").config.doc_margin_px, 32.5);
+        assert_eq!(parse("doc_margin_px = abc").ignored, 1);
+        assert_eq!(parse("doc_margin_px = inf").ignored, 1);
+
+        // 档位解析出的实际边距：Full 忽略自定义值，Custom 用夹取后的值。
+        assert_eq!(DocMargin::Full.margin_px(120.0), 16.0);
+        assert_eq!(DocMargin::Custom.margin_px(0.0), 4.0);
+        assert_eq!(DocMargin::Custom.margin_px(999.0), 200.0);
+    }
+
+    /// 界面语言：三值 TOML 严格互逆；旧配置无键 → auto（行为与改造前一致）。
+    #[test]
+    fn ui_language_round_trips_and_legacy_defaults_to_auto() {
+        for lang in [UiLanguage::Auto, UiLanguage::ZhCn, UiLanguage::EnUs] {
+            assert_eq!(UiLanguage::parse(lang.as_str()), Some(lang));
+            let cfg = Config {
+                ui_language: lang,
+                ..Config::default()
+            };
+            let text = cfg.to_toml();
+            assert!(
+                text.contains(&format!("ui_language = \"{}\"", lang.as_str())),
+                "{text}"
+            );
+            let p = parse(&text);
+            assert_eq!(p.config, cfg, "往返必须恒等：{lang:?}");
+            assert_eq!(p.ignored, 0);
+        }
+        assert_eq!(UiLanguage::parse("Auto"), None, "严格大小写");
+
+        let legacy = parse("mode = \"dark\"\n");
+        assert_eq!(legacy.config.ui_language, UiLanguage::Auto);
+        assert_eq!(legacy.ignored, 0);
+        // 非法值：按 auto 处理并计入 ignored，不影响启动。
+        let bad = parse("ui_language = \"fr-FR\"\n");
+        assert_eq!(bad.config.ui_language, UiLanguage::Auto);
+        assert_eq!(bad.ignored, 1);
+
+        // 启动前读取：BOM/非法 UTF-8/auto 都返回 None（交给环境变量/系统语言）。
+        assert_eq!(
+            ui_language_from_config_bytes("\u{feff}ui_language = \"en-US\"\n".as_bytes()),
+            Some("en-US")
+        );
+        assert_eq!(
+            ui_language_from_config_bytes(b"ui_language = \"zh-CN\"\n"),
+            Some("zh-CN")
+        );
+        assert_eq!(
+            ui_language_from_config_bytes(b"ui_language = \"auto\"\n"),
+            None
+        );
+        assert_eq!(ui_language_from_config_bytes(b"mode = \"dark\"\n"), None);
+        assert_eq!(ui_language_from_config_bytes(&[0xff, 0xfe]), None);
+    }
+
+    /// PDF 页边距（`export_margin_mm`）与屏幕版心互不影响：解析、序列化、取值都独立。
+    #[test]
+    fn pdf_margin_is_independent_of_doc_margin() {
+        let cfg = Config {
+            doc_margin: DocMargin::Full,
+            doc_margin_px: 120.0,
+            export_margin_mm: 12.5,
+            ..Config::default()
+        };
+        let p = parse(&cfg.to_toml());
+        assert_eq!(p.config.export_margin_mm, 12.5, "PDF 边距必须原样保留");
+        assert_eq!(p.config.doc_margin, DocMargin::Full);
+        assert_eq!(p.config.doc_margin_px, 120.0);
+
+        // 只给 PDF 边距：屏幕版心保持默认 Standard + 16。
+        let p = parse("export_margin_mm = 30\n");
+        assert_eq!(p.config.export_margin_mm, 30.0);
+        assert_eq!(p.config.doc_margin, DocMargin::Standard);
+        assert_eq!(p.config.doc_margin_px, 16.0);
+
+        // 只给屏幕版心：PDF 边距保持默认 20mm，运行时边距只读档位。
+        let p = parse("doc_margin = \"relaxed\"\ndoc_margin_px = 48\n");
+        assert_eq!(p.config.export_margin_mm, 20.0);
+        assert_eq!(p.config.doc_margin.margin_px(p.config.doc_margin_px), 32.0);
+    }
+
+    #[test]
+    fn doc_font_face_rejects_overlong_and_empty_values() {
+        let long = "字".repeat(22); // 66 字节 > 64
+        let p = parse(&format!("doc_font_face = \"{long}\"\n"));
+        assert_eq!(p.config.doc_font_face, None);
+        assert_eq!(p.ignored, 1, "超长字族视为无法识别");
+
+        let p = parse("doc_font_face = \"\"\n");
+        assert_eq!(p.config.doc_font_face, None);
+        assert_eq!(p.ignored, 1, "空字族视为无法识别");
+    }
+
+    #[test]
+    fn preserving_save_writes_and_removes_doc_font_face() {
+        let original = "# 顶部注释\nmode = \"light\"\n";
+        let with_face = Config {
+            doc_font_face: Some("SimSun".to_string()),
+            ..Config::default()
+        };
+        let saved = with_face.to_toml_preserving(Some(original));
+        assert!(saved.contains("doc_font_face = \"SimSun\""), "{saved}");
+        assert_eq!(parse(&saved).config, with_face);
+
+        // 改回四档预置：旧键必须移除，重启后不得读回旧字族。
+        let back_to_preset = Config {
+            doc_font_family: DocFontFamily::Sans,
+            ..Config::default()
+        };
+        let saved_again = back_to_preset.to_toml_preserving(Some(&saved));
+        assert!(!saved_again.contains("doc_font_face"), "{saved_again}");
+        assert_eq!(parse(&saved_again).config, back_to_preset);
     }
 
     #[test]

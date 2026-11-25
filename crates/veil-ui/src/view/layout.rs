@@ -19,7 +19,7 @@ use super::linebreak;
 use super::style::{style_spans, Style};
 use crate::geometry::{BASE_FONT_SIZE, BASE_LINE_HEIGHT};
 use crate::i18n::{t, tf, Key};
-use crate::theme::{DocFontFamily, SyntaxColors, Theme};
+use crate::theme::{DocFontFamily, DocMargin, SyntaxColors, Theme};
 use crate::tokens::typography;
 
 /// 行内资源键：占位图与位图缓存之间的寻址键（切片 8/13 共用占位机制）。
@@ -56,6 +56,38 @@ pub struct PlacedImg {
     pub y: f32,
     pub width: u32,
     pub height: u32,
+}
+
+/// 任务列表自绘方框（块内物理像素）：`(x, y)` 为方框左上角，`side` 为边长（正方形）。
+/// 几何只由行高推导（`side` = 0.9 × 行高），不取字形宽度、不随正文字族变化；
+/// 勾选态只影响绘制内容（填充/对勾），不改变外接矩形。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TaskBox {
+    pub x: f32,
+    pub y: f32,
+    pub side: f32,
+    pub done: bool,
+}
+
+/// 任务列表标记（块相对 doc 区间 + 勾选态）：排版期用于生成固定宽度占位，
+/// 并在成形后换算成 [`TaskBox`] 供绘制层自绘。
+#[derive(Clone, Copy, Debug)]
+struct TaskMark {
+    start: usize,
+    end: usize,
+    done: bool,
+}
+
+/// 任务框侧边（物理像素）：0.9 × 行高，最少 3px。行高来自排版度量（与字族无关），
+/// 勾选态不参与计算，保证勾选前后几何完全一致。
+pub(crate) fn task_box_side(line_height: f32) -> f32 {
+    (line_height * 0.9).round().max(3.0)
+}
+
+/// 任务框占位槽宽（物理像素）= 方框侧边 + 间距（0.35 × 行高）。
+/// 排版期换算成等宽 NBSP 个数预留横向空间；占位宽度与勾选态无关。
+pub(crate) fn task_box_slot(line_height: f32) -> f32 {
+    task_box_side(line_height) + (line_height * 0.35).round().max(1.0)
 }
 
 /// 图片题注输入：仅**独立成行**的图片、且 alt 非空。
@@ -525,6 +557,8 @@ pub struct BlockLayout {
     /// 后置装饰（文本光栅之上绘制）：块相对 doc 坐标 + 装饰类别。
     /// 含 abbr 虚线下划线；strikethrough 沿用 strikes 字段。
     pub decorations_over: Vec<(usize, usize, OverKind)>,
+    /// 任务列表自绘方框（块内物理像素）：几何由行高推导，勾选前后完全一致。
+    pub task_boxes: Vec<TaskBox>,
     /// Sub/Sup 基线偏移区间（**layout 坐标**，(start, end, 物理像素 dy)）：
     /// 光栅化时按字形起点命中，正数下移（sub）、负数上移（sup）。
     pub script_ranges: Vec<(usize, usize, f32)>,
@@ -637,9 +671,16 @@ fn pick_family<'a>(candidates: &'a [&'a str], available: impl Fn(&str) -> bool) 
 }
 
 /// 正文字体族 → cosmic family：
-/// `system` 不设 family（沿用既有回退链）；`sans`/`serif` 显式指定中文字族；
-/// `mono` 用通用等宽族。仅正文/表格文本走这里，UI chrome 不受影响。
-pub(super) fn doc_family(font: DocFontFamily) -> Option<Family<'static>> {
+/// `doc_face` 有值时优先使用该已安装字族；否则 `system` 不设 family（沿用既有回退链）、
+/// `sans`/`serif` 显式指定中文字族、`mono` 用通用等宽族。
+/// 仅正文/表格文本走这里，UI chrome 不受影响。
+pub(super) fn doc_family(
+    font: DocFontFamily,
+    doc_face: Option<&'static str>,
+) -> Option<Family<'static>> {
+    if let Some(face) = doc_face {
+        return Some(Family::Name(face));
+    }
     match font {
         DocFontFamily::System => None,
         DocFontFamily::Sans => Some(Family::Name("Microsoft YaHei")),
@@ -691,6 +732,15 @@ pub struct LayoutEngine {
     doc_line_height: f32,
     /// 正文字体族（仅正文/表格文本生效，UI chrome 恒用既有字阶）。
     doc_font: DocFontFamily,
+    /// 显式正文字族名（`None` = 沿用 `doc_font` 四档预置）。
+    ///
+    /// 驻留为 `'static`：`cosmic-text` 的 `Attrs` 借用族名，且布局缓存/导出样式
+    /// 都要求跨调用存活。设置项变更频率极低（人工操作），每次至多驻留 64 字节。
+    doc_face: Option<&'static str>,
+    /// 屏幕版心边距（逻辑像素，未乘 scale）：配置档位的运行时解析值。
+    doc_margin_px: f32,
+    /// 可读列宽上限（全角当量）：`None` = 全宽档（不封顶）。
+    doc_readable_cols: Option<f32>,
     /// 启动时探测到的等宽族名：代码/行内代码显式指定，避免 generic Monospace 的
     /// 等宽候选链截走 Han（N9）。
     mono_family: Option<&'static str>,
@@ -1643,7 +1693,7 @@ fn hard_break_subs(
     out
 }
 
-/// 块级替换（切片 12）：任务列表复选框 `☐`/`☑`、无序列表符号 `•`、
+/// 块级替换（切片 12）：任务列表复选框（自绘方框占位）、无序列表符号 `•`、
 /// 引用行首 `>` → 空格、分隔线整行消隐；标题 `#` 与围栏 ` ``` ` 同规则消隐（B7）。
 /// 激活判据沿用块区间闭区间；引用块逐行判定（光标所在行显源码，其余行隐标记）。
 fn block_subs(
@@ -1653,21 +1703,19 @@ fn block_subs(
     caret: usize,
     ordinal: Option<u32>,
     toc_list: bool,
+    tasks: &mut Vec<TaskMark>,
 ) -> Vec<Sub> {
     match kind {
-        BlockKind::ListItem {
-            task: Some(done), ..
-        } => {
+        BlockKind::ListItem { task: Some(_), .. } => {
             if node_active(block, caret) {
                 return Vec::new();
             }
-            // 列表标记 + `[ ]`（含尾空格）整体折叠为 ☐/☑（与 `•` 字形替换同机制）
-            match task_span(body) {
-                Some((start, _, end, _)) => {
-                    vec![Sub::fill(start, end, if done { "☑ " } else { "☐ " })]
-                }
-                None => Vec::new(),
+            // 任务框不再用 `☐`/`☑` 字形（两者字面宽窄不同，勾选/换字族都会改几何）：
+            // 标记段登记为 `TaskMark`，由调用方替换成定宽占位，方框在绘制层自绘。
+            if let Some((start, _, end, done)) = task_span(body) {
+                tasks.push(TaskMark { start, end, done });
             }
+            Vec::new()
         }
         BlockKind::ListItem {
             ordered: true,
@@ -2159,7 +2207,7 @@ fn line_active(body: &str, block: Range, caret: usize, line_idx: usize) -> bool 
 ///
 /// 引用/提示/自定义 Callout/列表项在块解析里仍是「一个容器块」，这里按行剥掉
 /// 容器前缀后**递归识别嵌套块语法**，把标记替换成对应块类型的视觉形式：
-/// - 无序列表 → `•`；任务列表 → `☐`/`☑`（原缩进保留为层级）
+/// - 无序列表 → `•`；任务列表 → 自绘方框占位（原缩进保留为层级）
 /// - 围栏代码 → 消隐围栏行（含换行），内容行登记为等宽代码区间
 /// - `<details>`/`<summary>` 裸标签 → 消隐，正文按普通段落行内语法排版
 /// - 独立 `<hr>` 行 → 整行消隐（与块级分隔线一致）
@@ -2171,6 +2219,7 @@ fn container_nested_subs(
     body: &str,
     block: Range,
     caret: usize,
+    tasks: &mut Vec<TaskMark>,
 ) -> (Vec<Sub>, Vec<(usize, usize)>) {
     let quote_like = matches!(
         kind,
@@ -2239,7 +2288,7 @@ fn container_nested_subs(
                 subs.push(Sub::elide(off, off + line.len()));
             } else {
                 elide_nested_details_tags(line, off, &mut subs);
-                nested_list_marker_subs(content, off + content_off, &mut subs);
+                nested_list_marker_subs(content, off + content_off, &mut subs, tasks);
             }
         }
         off += line.len();
@@ -2296,14 +2345,19 @@ fn elide_nested_details_tags(line: &str, off: usize, out: &mut Vec<Sub>) {
     }
 }
 
-/// 容器内嵌套列表标记：任务框 → ☐/☑，无序 → `•`；有序保留源码编号。
-fn nested_list_marker_subs(content: &str, base: usize, out: &mut Vec<Sub>) {
+/// 容器内嵌套列表标记：任务框 → 登记自绘方框，无序 → `•`；有序保留源码编号。
+fn nested_list_marker_subs(
+    content: &str,
+    base: usize,
+    out: &mut Vec<Sub>,
+    tasks: &mut Vec<TaskMark>,
+) {
     if let Some((start, _, end, done)) = task_span(content) {
-        out.push(Sub::fill(
-            base + start,
-            base + end,
-            if done { "☑ " } else { "☐ " },
-        ));
+        tasks.push(TaskMark {
+            start: base + start,
+            end: base + end,
+            done,
+        });
         return;
     }
     if let Some(p) = bullet_pos(content) {
@@ -2479,6 +2533,7 @@ pub(super) fn attrs_of(
     st: Style,
     link_color: [u8; 3],
     doc_font: DocFontFamily,
+    doc_face: Option<&'static str>,
     mono_family: Option<&'static str>,
     pt: f32,
 ) -> Attrs<'static> {
@@ -2509,7 +2564,7 @@ pub(super) fn attrs_of(
             Some(name) => a.family(Family::Name(name)),
             None => a.family(Family::Monospace),
         }
-    } else if let Some(family) = doc_family(doc_font) {
+    } else if let Some(family) = doc_family(doc_font, doc_face) {
         a.family(family)
     } else {
         a

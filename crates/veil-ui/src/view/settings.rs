@@ -13,7 +13,7 @@
 use crate::geometry::Rect;
 use crate::i18n::{t, Key};
 use crate::input::Key as InputKey;
-use crate::theme::{surface, Config, DocFontFamily, ThemeMode};
+use crate::theme::{surface, Config, DocFontFamily, DocMargin, ThemeMode, UiLanguage};
 use crate::tokens::{palette, typography};
 use crate::view::modal::{self, ButtonRole, ModalButton, Text};
 use crate::view::Frame;
@@ -23,12 +23,16 @@ use crate::view::Frame;
 pub(crate) enum FieldKind {
     /// 主题模式：三选一 radio（跟随系统/浅色/深色）。
     ThemeMode,
+    /// 界面语言：三选一（自动/中文/English），改动重启后生效。
+    UiLanguage,
     /// 数字输入（字号 10..=32 / 边距 0..=50 / tab 宽 2/4）。
     Number(NumberRange),
     /// 开关：布尔 toggle。
     Toggle,
-    /// 字体族下拉：四选一（系统默认/无衬线/衬线/等宽）。
+    /// 字体族下拉：四档预置 + 任意已安装字族（逐个切换）。
     FontFamily,
+    /// 版心/页边距：五选一（紧凑/标准/宽松/全宽/自定义）。
+    DocMargin,
     /// 窗口几何：只读展示当前 width×height / x,y + "清除" 按钮。
     WindowGeom,
 }
@@ -59,11 +63,35 @@ pub(crate) struct SettingsField {
 #[derive(Clone, Debug)]
 pub(crate) enum FieldValue {
     ThemeMode(ThemeMode),
+    UiLanguage(UiLanguage),
     Number(f32),
     Toggle(bool),
-    FontFamily(DocFontFamily),
+    FontFamily(FontSelection),
+    DocMargin(DocMargin),
     /// 窗口几何：Option<(w,h,x,y)>；None = 未记录。
     Geom(Option<(u32, u32, i32, i32)>),
+}
+
+/// 字体选择：四档预置，或某个具体已安装字族（`cjk` = 是否自带中文字形）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum FontSelection {
+    Preset(DocFontFamily),
+    Installed { name: String, cjk: bool },
+}
+
+impl FontSelection {
+    /// 在表单可选列表中的展示名。
+    fn display(&self) -> String {
+        match self {
+            FontSelection::Preset(fam) => match fam {
+                DocFontFamily::System => t(Key::SettingsFontSystem).into(),
+                DocFontFamily::Sans => t(Key::SettingsFontSans).into(),
+                DocFontFamily::Serif => t(Key::SettingsFontSerif).into(),
+                DocFontFamily::Mono => t(Key::SettingsFontMono).into(),
+            },
+            FontSelection::Installed { name, .. } => name.clone(),
+        }
+    }
 }
 
 impl SettingsField {
@@ -79,15 +107,68 @@ impl SettingsField {
 #[derive(Clone, Debug)]
 pub(crate) struct SettingsForm {
     pub(crate) fields: Vec<SettingsField>,
+    /// 字体字段的可选值：四档预置 + 打开设置时探测到的已安装字族。
+    /// 仅在表单生命周期内使用（不落盘）；字体探测较贵，因此随表单快照一次。
+    pub(crate) font_options: Vec<FontSelection>,
 }
+
+/// 四档预置（顺序固定：系统默认 → 无衬线 → 衬线 → 等宽）。
+const FONT_PRESETS: [DocFontFamily; 4] = [
+    DocFontFamily::System,
+    DocFontFamily::Sans,
+    DocFontFamily::Serif,
+    DocFontFamily::Mono,
+];
 
 impl SettingsForm {
     pub(crate) fn from_config(cfg: &Config) -> Self {
+        Self::from_config_with_families(cfg, &[])
+    }
+
+    /// 构造表单并纳入已安装字族（`(族名, 是否含中文字形)`，已去重排序）。
+    pub(crate) fn from_config_with_families(cfg: &Config, installed: &[(String, bool)]) -> Self {
+        let mut font_options: Vec<FontSelection> = FONT_PRESETS
+            .iter()
+            .copied()
+            .map(FontSelection::Preset)
+            .collect();
+        // 含中文的族排在前面：最常见的选择（中文正文）无需穿过一长串西文族。
+        for want_cjk in [true, false] {
+            for (name, cjk) in installed.iter().filter(|(_, c)| *c == want_cjk) {
+                font_options.push(FontSelection::Installed {
+                    name: name.clone(),
+                    cjk: *cjk,
+                });
+            }
+        }
+        let selected = match &cfg.doc_font_face {
+            Some(name) => FieldValue::FontFamily(FontSelection::Installed {
+                name: name.clone(),
+                cjk: installed
+                    .iter()
+                    .find(|(n, _)| n == name)
+                    .map_or(false, |(_, c)| *c),
+            }),
+            None => FieldValue::FontFamily(FontSelection::Preset(cfg.doc_font_family)),
+        };
+        // 配置里的族名可能已卸载：仍纳入列表，保证展示与「切走再切回」可用。
+        if let FieldValue::FontFamily(sel @ FontSelection::Installed { .. }) = &selected {
+            if !font_options.contains(sel) {
+                font_options.push(sel.clone());
+            }
+        }
         let fields = vec![
             SettingsField {
                 label: Key::SettingsThemeMode,
                 kind: FieldKind::ThemeMode,
                 value: FieldValue::ThemeMode(cfg.mode),
+                buffer: None,
+                read_only: false,
+            },
+            SettingsField {
+                label: Key::SettingsUiLanguage,
+                kind: FieldKind::UiLanguage,
+                value: FieldValue::UiLanguage(cfg.ui_language),
                 buffer: None,
                 read_only: false,
             },
@@ -106,7 +187,26 @@ impl SettingsForm {
             SettingsField {
                 label: Key::SettingsDocFontFamily,
                 kind: FieldKind::FontFamily,
-                value: FieldValue::FontFamily(cfg.doc_font_family),
+                value: selected.clone(),
+                buffer: None,
+                read_only: false,
+            },
+            SettingsField {
+                label: Key::SettingsDocMargin,
+                kind: FieldKind::DocMargin,
+                value: FieldValue::DocMargin(cfg.doc_margin),
+                buffer: None,
+                read_only: false,
+            },
+            SettingsField {
+                label: Key::SettingsDocMarginPx,
+                kind: FieldKind::Number(NumberRange {
+                    min: crate::theme::DOC_MARGIN_PX_MIN,
+                    max: crate::theme::DOC_MARGIN_PX_MAX,
+                    step: 1.0,
+                    integers_only: true,
+                }),
+                value: FieldValue::Number(cfg.doc_margin_px),
                 buffer: None,
                 read_only: false,
             },
@@ -163,7 +263,81 @@ impl SettingsForm {
                 read_only: false,
             },
         ];
-        Self { fields }
+        Self {
+            fields,
+            font_options,
+        }
+    }
+
+    /// 重置为默认配置，但保留本次打开设置时探测到的字族列表。
+    pub(crate) fn reset_defaults(&self) -> Self {
+        let mut form = Self::from_config(&Config::default());
+        form.font_options = self.font_options.clone();
+        form
+    }
+
+    /// 当前字体字段的选择（缺字段时为 None）。
+    pub(crate) fn font_selection(&self) -> Option<&FontSelection> {
+        self.fields.iter().find_map(|f| match &f.value {
+            FieldValue::FontFamily(sel) if matches!(f.kind, FieldKind::FontFamily) => Some(sel),
+            _ => None,
+        })
+    }
+
+    /// 所选具体字族是否缺少中文字形（预置档位走系统回退链，恒视为可用）。
+    pub(crate) fn font_missing_cjk(&self) -> bool {
+        matches!(
+            self.font_selection(),
+            Some(FontSelection::Installed { cjk: false, .. })
+        )
+    }
+
+    /// 在可选字族列表中前后切换（`delta` 为 ±1，越界循环）。
+    pub(crate) fn cycle_font(&mut self, delta: i32) {
+        let Some(idx) = self
+            .fields
+            .iter()
+            .position(|f| matches!(f.kind, FieldKind::FontFamily))
+        else {
+            return;
+        };
+        let current = match self.fields.get(idx).map(|f| &f.value) {
+            Some(FieldValue::FontFamily(sel)) => sel.clone(),
+            _ => return,
+        };
+        let Some(pos) = self.font_options.iter().position(|o| *o == current) else {
+            return;
+        };
+        let n = self.font_options.len() as i32;
+        if n == 0 {
+            return;
+        }
+        let next = (pos as i32 + delta).rem_euclid(n) as usize;
+        self.fields[idx].value = FieldValue::FontFamily(self.font_options[next].clone());
+    }
+
+    /// 版心档位循环（紧凑 → 标准 → 宽松 → 全宽 → 自定义，越界循环）。
+    pub(crate) fn cycle_doc_margin(&mut self, delta: i32) {
+        const ORDER: [DocMargin; 5] = [
+            DocMargin::Compact,
+            DocMargin::Standard,
+            DocMargin::Relaxed,
+            DocMargin::Full,
+            DocMargin::Custom,
+        ];
+        let Some(f) = self
+            .fields
+            .iter_mut()
+            .find(|f| matches!(f.kind, FieldKind::DocMargin))
+        else {
+            return;
+        };
+        let FieldValue::DocMargin(m) = &mut f.value else {
+            return;
+        };
+        let pos = ORDER.iter().position(|x| x == m).unwrap_or(1);
+        let next = (pos as i32 + delta).rem_euclid(ORDER.len() as i32) as usize;
+        *m = ORDER[next];
     }
 
     pub(crate) fn all_valid(&self) -> bool {
@@ -172,12 +346,27 @@ impl SettingsForm {
 
     /// 将表单值应用到 Config（clone 后返回新 Config）。
     pub(crate) fn apply(&self, cfg: &Config) -> Config {
-        let mut out = *cfg;
+        let mut out = cfg.clone();
         for f in &self.fields {
             match &f.label {
                 Key::SettingsThemeMode => {
                     if let FieldValue::ThemeMode(m) = f.value {
                         out.mode = m;
+                    }
+                }
+                Key::SettingsUiLanguage => {
+                    if let FieldValue::UiLanguage(l) = f.value {
+                        out.ui_language = l;
+                    }
+                }
+                Key::SettingsDocMargin => {
+                    if let FieldValue::DocMargin(m) = f.value {
+                        out.doc_margin = m;
+                    }
+                }
+                Key::SettingsDocMarginPx => {
+                    if let FieldValue::Number(v) = f.value {
+                        out.doc_margin_px = crate::theme::clamp_doc_margin_px(v);
                     }
                 }
                 Key::SettingsDocFontSize => {
@@ -186,8 +375,19 @@ impl SettingsForm {
                     }
                 }
                 Key::SettingsDocFontFamily => {
-                    if let FieldValue::FontFamily(v) = f.value {
-                        out.doc_font_family = v;
+                    if let FieldValue::FontFamily(sel) = &f.value {
+                        match sel {
+                            FontSelection::Preset(fam) => {
+                                out.doc_font_family = *fam;
+                                out.doc_font_face = None;
+                            }
+                            FontSelection::Installed { name, .. }
+                                if name.len() <= crate::theme::DOC_FONT_FACE_MAX_LEN =>
+                            {
+                                out.doc_font_face = Some(name.clone());
+                            }
+                            FontSelection::Installed { .. } => {}
+                        }
                     }
                 }
                 Key::SettingsAllowRemoteImages => {
@@ -275,6 +475,8 @@ pub(crate) struct SettingsLayout {
     pub(crate) shown_rows: usize,
     /// 最大滚动行数；0 表示所有字段都能同时显示。
     pub(crate) max_scroll: usize,
+    /// 字族缺中文提示行（仅当字体行可见且所选族无中文字形时存在）。
+    pub(crate) font_hint: Option<Rect>,
 }
 
 pub(crate) fn buttons() -> Vec<ModalButton> {
@@ -369,11 +571,17 @@ pub(crate) fn layout(
     let fixed_top = 2.0 * p + title_line_h + surface::dialog_title_gap(scale);
     let fixed_bottom = bh + surface::dialog_body_gap(scale);
     let avail_h = (max_vp_h - fixed_top - fixed_bottom).max(0.0);
-    let max_rows_avail = (avail_h / (control_h + row_gap)).floor();
+    let hint_h = if form.font_missing_cjk() {
+        body_line_h
+    } else {
+        0.0
+    };
+    let max_rows_avail = ((avail_h - hint_h).max(0.0) / (control_h + row_gap)).floor();
     let shown_rows = (n_fields.min(max_rows_avail).max(1.0)) as usize;
     let max_scroll = (form.fields.len().saturating_sub(shown_rows)).min(form.fields.len());
     let scroll = scroll_rows.min(max_scroll);
-    let body_h = shown_rows as f32 * control_h + (shown_rows as f32 - 1.0).max(0.0) * row_gap;
+    let body_h =
+        shown_rows as f32 * control_h + (shown_rows as f32 - 1.0).max(0.0) * row_gap + hint_h;
     let card_h = (fixed_top + body_h + fixed_bottom).min(max_vp_h);
 
     let card = Rect {
@@ -388,10 +596,11 @@ pub(crate) fn layout(
     let control_x = card.x + p + label_w + field_gap_x;
 
     let mut field_rects = Vec::with_capacity(form.fields.len());
+    let mut font_hint = None;
     let mut top_y = card.y + p + title_line_h + surface::dialog_title_gap(scale);
     let visible_end = (scroll + shown_rows).min(form.fields.len());
 
-    for (idx, _f) in form.fields.iter().enumerate() {
+    for (idx, f) in form.fields.iter().enumerate() {
         // 超出可视区的行给零矩形：命中/绘制都按空矩形跳过，绝不越出卡片
         // 覆盖到按钮区域（DEF-T07-E1-001）。
         if idx < scroll || idx >= visible_end {
@@ -414,7 +623,15 @@ pub(crate) fn layout(
             h: control_h,
         };
         field_rects.push(FieldRects { label, control });
-        top_y += control_h + row_gap;
+        if matches!(f.kind, FieldKind::FontFamily) && hint_h > 0.0 {
+            font_hint = Some(Rect {
+                x: control_x,
+                y: top_y + control_h + 2.0 * scale,
+                w: control_w,
+                h: body_line_h,
+            });
+        }
+        top_y += control_h + hint_h + row_gap;
     }
 
     // 按钮排布（自右向左）
@@ -495,6 +712,7 @@ pub(crate) fn layout(
         scroll,
         shown_rows,
         max_scroll,
+        font_hint,
     }
 }
 
@@ -582,6 +800,21 @@ impl SettingsState {
         if self.focused_button.is_some() {
             return;
         }
+        // 字体字段：循环可选字族（预置四档 → 含中文族 → 其它族）。
+        if matches!(
+            form.fields.get(self.focused_field).map(|f| &f.kind),
+            Some(FieldKind::FontFamily)
+        ) {
+            form.cycle_font(1);
+            return;
+        }
+        if matches!(
+            form.fields.get(self.focused_field).map(|f| &f.kind),
+            Some(FieldKind::DocMargin)
+        ) {
+            form.cycle_doc_margin(1);
+            return;
+        }
         let Some(f) = form.fields.get_mut(self.focused_field) else {
             return;
         };
@@ -597,12 +830,11 @@ impl SettingsState {
                     ThemeMode::Dark => ThemeMode::System,
                 };
             }
-            (FieldKind::FontFamily, FieldValue::FontFamily(fam)) => {
-                *fam = match *fam {
-                    DocFontFamily::System => DocFontFamily::Sans,
-                    DocFontFamily::Sans => DocFontFamily::Serif,
-                    DocFontFamily::Serif => DocFontFamily::Mono,
-                    DocFontFamily::Mono => DocFontFamily::System,
+            (FieldKind::UiLanguage, FieldValue::UiLanguage(l)) => {
+                *l = match *l {
+                    UiLanguage::Auto => UiLanguage::ZhCn,
+                    UiLanguage::ZhCn => UiLanguage::EnUs,
+                    UiLanguage::EnUs => UiLanguage::Auto,
                 };
             }
             (FieldKind::Number(range), FieldValue::Number(v)) => {
@@ -757,6 +989,24 @@ impl SettingsState {
                 if form
                     .fields
                     .get(self.focused_field)
+                    .map_or(false, |f| matches!(f.kind, FieldKind::FontFamily)) =>
+            {
+                form.cycle_font(-1);
+                None
+            }
+            InputKey::Right
+                if form
+                    .fields
+                    .get(self.focused_field)
+                    .map_or(false, |f| matches!(f.kind, FieldKind::FontFamily)) =>
+            {
+                form.cycle_font(1);
+                None
+            }
+            InputKey::Left
+                if form
+                    .fields
+                    .get(self.focused_field)
                     .map_or(false, |f| matches!(f.kind, FieldKind::Number(_))) =>
             {
                 self.adjust_number(form, -1.0);
@@ -836,6 +1086,12 @@ pub(crate) fn paint(
         let is_focused = state.focused_button.is_none() && state.focused_field == i;
         paint_field_label(frame, text, f, fr, theme);
         paint_field_control(frame, text, f, fr, theme, scale, is_focused);
+    }
+
+    // 字族缺中文提示：不阻塞选择，仅说明正文会回退到系统字体。
+    if let Some(r) = layout.font_hint {
+        let line = elide_with_ellipsis(t(Key::SettingsFontMissingCjk), r.w, |s| text.width(s));
+        text.draw(frame, &line, theme.muted, r.x as i32, r.y as i32);
     }
 
     // 窗口几何行：值文本先按可用宽度截断，再画按钮。两者共用 layout 的矩形，
@@ -952,10 +1208,14 @@ fn paint_field_control(
     let inner_x = c.x + 6.0 * scale;
     let inner_y = c.y + (c.h - typography::UI_LINE_HEIGHT * scale) * 0.5;
     let value_text = field_value_display(f);
+    // 字族名可达 64 字节，按控件可用宽度截断，避免压到卡片边缘。
+    let fitted = elide_with_ellipsis(&value_text, (c.w - 12.0 * scale).max(0.0), |s| {
+        text.width(s)
+    });
 
     text.draw(
         frame,
-        &value_text,
+        &fitted,
         if is_focused { theme.text } else { theme.muted },
         inner_x as i32,
         inner_y as i32,
@@ -969,6 +1229,11 @@ fn field_value_display(f: &SettingsField) -> String {
             ThemeMode::Light => t(Key::SettingsLight).into(),
             ThemeMode::Dark => t(Key::SettingsDark).into(),
         },
+        FieldValue::UiLanguage(l) => match l {
+            UiLanguage::Auto => t(Key::SettingsLangAuto).into(),
+            UiLanguage::ZhCn => t(Key::SettingsLangZhCn).into(),
+            UiLanguage::EnUs => t(Key::SettingsLangEnUs).into(),
+        },
         FieldValue::Number(v) => {
             if let FieldKind::Number(range) = &f.kind {
                 if range.integers_only {
@@ -981,11 +1246,13 @@ fn field_value_display(f: &SettingsField) -> String {
             }
         }
         FieldValue::Toggle(b) => t(if *b { Key::ToggleOn } else { Key::ToggleOff }).into(),
-        FieldValue::FontFamily(fam) => match fam {
-            DocFontFamily::System => t(Key::SettingsFontSystem).into(),
-            DocFontFamily::Sans => t(Key::SettingsFontSans).into(),
-            DocFontFamily::Serif => t(Key::SettingsFontSerif).into(),
-            DocFontFamily::Mono => t(Key::SettingsFontMono).into(),
+        FieldValue::FontFamily(sel) => sel.display(),
+        FieldValue::DocMargin(m) => match m {
+            DocMargin::Compact => t(Key::SettingsMarginCompact).into(),
+            DocMargin::Standard => t(Key::SettingsMarginStandard).into(),
+            DocMargin::Relaxed => t(Key::SettingsMarginRelaxed).into(),
+            DocMargin::Full => t(Key::SettingsMarginFull).into(),
+            DocMargin::Custom => t(Key::SettingsMarginCustom).into(),
         },
         FieldValue::Geom(_) => String::new(), // 只读路径处理
     }
@@ -1863,5 +2130,216 @@ mod tests {
         // 模拟「恢复默认」：默认 Config 无几何记录。
         let defaults = SettingsForm::from_config(&Config::default());
         assert_eq!(defaults.apply(&config).window, None);
+    }
+
+    /// 版心档位：五档循环；apply 写回 Config，自定义像素值夹取 4..=200。
+    #[test]
+    fn doc_margin_field_cycles_and_applies() {
+        let config = Config::default();
+        let mut form = SettingsForm::from_config(&config);
+        let idx = form
+            .fields
+            .iter()
+            .position(|f| matches!(f.kind, FieldKind::DocMargin))
+            .expect("版心字段存在");
+        assert_eq!(
+            field_value_display(&form.fields[idx]),
+            t(Key::SettingsMarginStandard)
+        );
+
+        // 循环顺序：标准 → 宽松 → 全宽 → 自定义 → 紧凑。
+        for want in [
+            DocMargin::Relaxed,
+            DocMargin::Full,
+            DocMargin::Custom,
+            DocMargin::Compact,
+        ] {
+            form.cycle_doc_margin(1);
+            assert!(matches!(
+                form.fields[idx].value,
+                FieldValue::DocMargin(m) if m == want
+            ));
+        }
+        let out = form.apply(&config);
+        assert_eq!(out.doc_margin, DocMargin::Compact);
+
+        // 自定义像素字段：越界值在 apply 时夹取。
+        let px_idx = form
+            .fields
+            .iter()
+            .position(|f| f.label == Key::SettingsDocMarginPx)
+            .expect("自定义边距字段存在");
+        form.fields[px_idx].value = FieldValue::Number(500.0);
+        assert_eq!(form.apply(&config).doc_margin_px, 200.0);
+        form.fields[px_idx].value = FieldValue::Number(0.0);
+        assert_eq!(form.apply(&config).doc_margin_px, 4.0);
+        form.fields[px_idx].value = FieldValue::Number(48.0);
+        assert_eq!(form.apply(&config).doc_margin_px, 48.0);
+    }
+
+    /// 界面语言：三档循环；apply 写回 Config（会话内不热切换，重启后生效）。
+    #[test]
+    fn ui_language_field_cycles_and_applies() {
+        let config = Config::default();
+        let mut form = SettingsForm::from_config(&config);
+        let idx = form
+            .fields
+            .iter()
+            .position(|f| matches!(f.kind, FieldKind::UiLanguage))
+            .expect("界面语言字段存在");
+        assert_eq!(
+            field_value_display(&form.fields[idx]),
+            t(Key::SettingsLangAuto)
+        );
+
+        // 循环顺序：自动 → 中文 → English → 自动。
+        let mut state = SettingsState::new(&form);
+        state.focused_field = idx;
+        state.focused_button = None;
+        for (want, display) in [
+            (UiLanguage::ZhCn, t(Key::SettingsLangZhCn)),
+            (UiLanguage::EnUs, t(Key::SettingsLangEnUs)),
+            (UiLanguage::Auto, t(Key::SettingsLangAuto)),
+        ] {
+            state.toggle_field(&mut form);
+            assert!(matches!(
+                form.fields[idx].value,
+                FieldValue::UiLanguage(l) if l == want
+            ));
+            assert_eq!(field_value_display(&form.fields[idx]), display);
+        }
+
+        form.fields[idx].value = FieldValue::UiLanguage(UiLanguage::EnUs);
+        assert_eq!(form.apply(&config).ui_language, UiLanguage::EnUs);
+        // 恢复默认：回到自动跟随系统。
+        assert_eq!(
+            form.reset_defaults().apply(&config).ui_language,
+            UiLanguage::Auto
+        );
+    }
+
+    fn font_field_index(form: &SettingsForm) -> usize {
+        form.fields
+            .iter()
+            .position(|f| matches!(f.kind, FieldKind::FontFamily))
+            .expect("字体字段存在")
+    }
+
+    /// 自由字族：可选任意已安装族；apply 写入 `doc_font_face`，切回预置则清空。
+    #[test]
+    fn font_field_cycles_installed_families_and_applies_choice() {
+        let config = Config {
+            doc_font_family: DocFontFamily::Serif,
+            ..Config::default()
+        };
+        // 含中文族应排在其它族之前。
+        let installed = vec![
+            ("Arial".to_string(), false),
+            ("Consolas".to_string(), false),
+            ("SimSun".to_string(), true),
+        ];
+        let mut form = SettingsForm::from_config_with_families(&config, &installed);
+        let cjk_pos = form
+            .font_options
+            .iter()
+            .position(|o| matches!(o, FontSelection::Installed { name, .. } if name == "SimSun"))
+            .expect("SimSun 应可选");
+        let latin_pos = form
+            .font_options
+            .iter()
+            .position(|o| matches!(o, FontSelection::Installed { name, .. } if name == "Arial"))
+            .expect("Arial 应可选");
+        assert!(cjk_pos < latin_pos, "含中文字族应排在其它族之前");
+
+        let target = FontSelection::Installed {
+            name: "SimSun".to_string(),
+            cjk: true,
+        };
+        let mut steps = 0;
+        while form.font_selection() != Some(&target) {
+            form.cycle_font(1);
+            steps += 1;
+            assert!(
+                steps <= form.font_options.len(),
+                "循环切换应能在列表长度内到达任意字族"
+            );
+        }
+        let out = form.apply(&config);
+        assert_eq!(out.doc_font_face.as_deref(), Some("SimSun"));
+        assert_eq!(out.doc_font_family, DocFontFamily::Serif, "预置档位保留");
+
+        // 切回预置：显式族名必须清空，避免预置被覆盖。
+        let idx = font_field_index(&form);
+        form.fields[idx].value = FieldValue::FontFamily(FontSelection::Preset(DocFontFamily::Sans));
+        let out = form.apply(&config);
+        assert_eq!(out.doc_font_face, None);
+        assert_eq!(out.doc_font_family, DocFontFamily::Sans);
+        assert_eq!(font_field_index(&form), idx);
+    }
+
+    /// 缺中文提示：仅具体西文字族触发，并排在该字段下方；预置/含中文族不触发。
+    #[test]
+    fn font_missing_cjk_hint_only_for_latin_installed_family() {
+        let installed = vec![
+            ("Consolas".to_string(), false),
+            ("SimSun".to_string(), true),
+        ];
+        let vp = viewport(1280.0, 800.0);
+
+        let latin = Config {
+            doc_font_face: Some("Consolas".to_string()),
+            ..Config::default()
+        };
+        let form = SettingsForm::from_config_with_families(&latin, &installed);
+        assert!(form.font_missing_cjk(), "西文字族应提示缺中文");
+        let layout = layout_for(vp, &form);
+        let hint = layout.font_hint.expect("缺中文时必须给出提示行");
+        let idx = font_field_index(&form);
+        assert!(
+            hint.y >= layout.fields[idx].control.y + layout.fields[idx].control.h,
+            "提示行必须在字体字段下方"
+        );
+        if let Some(next) = layout.fields.get(idx + 1).filter(|fr| fr.control.w > 0.0) {
+            assert!(
+                hint.y + hint.h <= next.control.y + EPSILON,
+                "提示行不得与下一字段重叠: {hint:?} next={next:?}"
+            );
+        }
+
+        let cjk = Config {
+            doc_font_face: Some("SimSun".to_string()),
+            ..Config::default()
+        };
+        let form = SettingsForm::from_config_with_families(&cjk, &installed);
+        assert!(!form.font_missing_cjk());
+        assert!(layout_for(vp, &form).font_hint.is_none());
+
+        let preset = SettingsForm::from_config(&Config::default());
+        assert!(!preset.font_missing_cjk());
+        assert!(layout_for(vp, &preset).font_hint.is_none());
+    }
+
+    /// 配置里的字族已被卸载：仍显示并保留在列表中，提示缺中文但不阻塞选择。
+    #[test]
+    fn configured_face_missing_from_system_stays_selectable() {
+        let cfg = Config {
+            doc_font_face: Some("Ghost Font".to_string()),
+            ..Config::default()
+        };
+        let form = SettingsForm::from_config_with_families(&cfg, &[]);
+        assert_eq!(
+            form.font_selection(),
+            Some(&FontSelection::Installed {
+                name: "Ghost Font".to_string(),
+                cjk: false
+            })
+        );
+        assert!(form
+            .font_options
+            .iter()
+            .any(|o| matches!(o, FontSelection::Installed { name, .. } if name == "Ghost Font")));
+        assert!(form.font_missing_cjk());
+        let out = form.apply(&cfg);
+        assert_eq!(out.doc_font_face.as_deref(), Some("Ghost Font"));
     }
 }

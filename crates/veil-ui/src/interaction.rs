@@ -5,12 +5,12 @@ use crate::app::{App, ConfigSave};
 use crate::chrome;
 use crate::document::block_index::{gap_after, gap_between, BlockGeom};
 use crate::editor::Intent;
-use crate::geometry::{Rect, BASE_FONT_SIZE, BASE_LINE_HEIGHT, MARGIN, READABLE_COLS, WIDE_WINDOW};
+use crate::geometry::{Rect, BASE_FONT_SIZE, BASE_LINE_HEIGHT, MARGIN};
 use crate::html::html_to_markdown;
 use crate::i18n::{clip_error, t, tf, Key as I18nKey};
 use crate::input::{Action, Key, Mods};
 use crate::mode::{route, Cmd, Mode, TextSink};
-use crate::theme::{Config, Theme, ThemeMode};
+use crate::theme::{Theme, ThemeMode};
 use crate::view::{ctx_menu, history, outline, quick_open, search};
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -1640,7 +1640,10 @@ impl App {
         self.ui_state.search.open = false;
         self.ui_state.quick.open = false;
         let buttons = crate::view::settings::buttons();
-        let form = crate::view::settings::SettingsForm::from_config(&self.config);
+        // 探测已安装字族（含是否含中文字形）：打开设置时快照一次，供字体字段循环选择。
+        let families = self.engine.installed_families();
+        let form =
+            crate::view::settings::SettingsForm::from_config_with_families(&self.config, &families);
         let state = crate::view::settings::SettingsState::new(&form);
         self.ui_state.settings = Some(crate::app::SettingsModal {
             form,
@@ -1665,6 +1668,7 @@ impl App {
             BTN_OK => {
                 // 应用表单值到 Config
                 let previous_window = self.config.window;
+                let previous_language = self.config.ui_language;
                 self.config = s.form.apply(&self.config);
                 // 清除/恢复默认几何（DEF-T07-002）：本次 apply 明确移除了窗口几何时，
                 // 必须一并丢弃本会话的几何脏位，否则关闭时 finish_close 会把此前
@@ -1682,15 +1686,20 @@ impl App {
                 // 立即刷新所有受影响的 UI（主题模式、字体等）
                 self.refresh_settings_effects();
                 if saved {
-                    self.ui_state.chrome.notice = t(I18nKey::NoticeSettingsSaved).into();
+                    // 界面语言只在启动时读取，改动后必须提示重启；其余设置立即生效。
+                    self.ui_state.chrome.notice = if self.config.ui_language != previous_language {
+                        t(I18nKey::NoticeUiLanguageRestart).into()
+                    } else {
+                        t(I18nKey::NoticeSettingsSaved).into()
+                    };
                 }
                 self.ui_state.settings = None;
                 self.sync_ime_for_modal();
                 self.request_redraw();
             }
             BTN_RESET_DEFAULTS => {
-                // 表单内恢复默认（不改 Config）：用户还可以 OK 或 Cancel
-                s.form = crate::view::settings::SettingsForm::from_config(&Config::default());
+                // 表单内恢复默认（不改 Config）：用户还可以 OK 或 Cancel；保留本次字族列表。
+                s.form = s.form.reset_defaults();
                 s.state = crate::view::settings::SettingsState::new(&s.form);
                 s.layout = None; // 强制在下次 paint 时重算
                 self.request_redraw();
@@ -1722,7 +1731,11 @@ impl App {
             self.config.doc_font_size,
             self.config.doc_line_height,
             self.config.doc_font_family,
+            self.config.doc_font_face.as_deref(),
         );
+        // 3) 版心边距：屏幕档位同步到排版引擎；进入 BaseKey 后重排。
+        self.engine
+            .set_doc_margin(self.config.doc_margin, self.config.doc_margin_px);
         // 4) 文档字体族/字号/行高/制表符 + 主题配色：统一由主题刷新入口
         //    递增代次、重排可见块并重算几何（base_key 同时含 typography/theme）。
         self.refresh_theme_visuals();
@@ -1851,7 +1864,8 @@ impl App {
         if let Some(top) = top {
             let vp = self.viewport();
             let max = chrome::max_scroll(vp, self.doc_height());
-            let target = (top - MARGIN * self.input_state.scale).clamp(0.0, max);
+            let target =
+                (top - self.engine.doc_margin_px() * self.input_state.scale).clamp(0.0, max);
             self.window_state.goal_y = target;
             self.window_state.scroll_y = self.window_state.goal_y;
         }
@@ -2609,53 +2623,50 @@ pub(crate) fn map_key_parts(text: Option<&str>, wom: WKey, mods: Mods) -> Option
 // ── 几何编排（原 geometry.rs）：视口区间/块高/光标坐标/Reveal 指纹 ────────────
 
 impl App {
-    /// 版心可用宽（非打印路径）：窗口宽扣除两侧边距、滚动条、大纲与版本历史面板。
-    fn available_width(&self) -> f32 {
+    /// 屏幕版心 `(x, width)`（物理像素）：运行时边距 + 可读列宽上限 + 居中。
+    ///
+    /// 边距与上限都从 `LayoutEngine` 读取（配置档位在启动/设置确认时落进去）；
+    /// 打印路径不经过这里，仍用固定 `MARGIN`（PDF 语义不受设置影响）。
+    fn doc_content_span(&self) -> (f32, f32) {
         let (w, _) = self.win_size();
         let scale = self.input_state.scale;
-        let panel = if self.ui_state.outline.open {
-            outline::PANEL_W * scale
-        } else {
-            0.0
-        };
-        let left = if self.ui_state.history.open {
+        let reserved_right = chrome::SCROLL_W * scale
+            + if self.ui_state.outline.open {
+                outline::PANEL_W * scale
+            } else {
+                0.0
+            };
+        let reserved_left = if self.ui_state.history.open {
             history::PANEL_W * scale
         } else {
             0.0
         };
-        (w as f32 - 2.0 * MARGIN * scale - chrome::SCROLL_W * scale - panel - left).max(32.0)
+        crate::geometry::content_span(
+            w as f32,
+            scale,
+            self.engine.doc_margin_px(),
+            self.engine.doc_readable_cols(),
+            reserved_right,
+            reserved_left,
+        )
     }
 
     pub(crate) fn content_width(&self) -> f32 {
-        let (w, _) = self.win_size();
-        let scale = self.input_state.scale;
-        // 打印：无滚动条/大纲面板，版心 = 页宽 - 两侧页边距（3b），不受可读列宽上限影响
+        // 打印：无滚动条/大纲面板，版心 = 页宽 - 两侧页边距（3b），不受屏幕档位影响
         if self.window_state.print.is_some() {
-            return (w as f32 - 2.0 * MARGIN * scale).max(32.0);
+            let (w, _) = self.win_size();
+            return (w as f32 - 2.0 * MARGIN * self.input_state.scale).max(32.0);
         }
-        let available = self.available_width();
-        // 可读列宽上限只在超宽窗口启用；窄窗口与改动前逐字节一致
-        if w as f32 > WIDE_WINDOW * scale {
-            available.min(READABLE_COLS * BASE_FONT_SIZE * scale)
-        } else {
-            available
-        }
+        self.doc_content_span().1
     }
 
     /// 文档内容坐标系横向原点（物理像素）：打印为左边距；
     /// 屏幕语义下超宽窗口把版心居中，窄窗口等于左边距。
     pub(crate) fn content_x(&self) -> f32 {
-        let scale = self.input_state.scale;
         if self.window_state.print.is_some() {
-            return MARGIN * scale;
+            return MARGIN * self.input_state.scale;
         }
-        MARGIN * scale
-            + ((self.available_width() - self.content_width()) / 2.0).max(0.0)
-            + if self.ui_state.history.open {
-                history::PANEL_W * scale
-            } else {
-                0.0
-            }
+        self.doc_content_span().0
     }
 
     /// 容器内表格的水平缩进（物理像素）：引用每层一级、列表按内容列。
@@ -2787,7 +2798,7 @@ impl App {
     /// 文档总高（含首尾外边距），滚动条与滚轮钳位依据。
     pub(crate) fn doc_height(&self) -> f32 {
         if self.index.blocks.is_empty() {
-            2.0 * MARGIN * self.input_state.scale
+            2.0 * self.engine.doc_margin_px() * self.input_state.scale
         } else {
             self.index.total_h
         }

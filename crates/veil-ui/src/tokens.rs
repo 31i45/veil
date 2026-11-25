@@ -329,7 +329,8 @@ pub(crate) mod typography {
 /// 与 `space` 的区别：`space` 是 UI chrome 的 4 倍数刻度，这里是正文排版语义标尺，
 /// 保留既有排版节奏（`PARA_GAP=10` 不是 4 的倍数，改它会整体改变文档观感）。
 pub(crate) mod doc {
-    /// 内容区左右边距（物理像素）。
+    /// 内容区左右边距的 Standard 档基准（逻辑像素）：屏幕实际边距由设置档位
+    /// 在运行时解析（见 `theme::DocMargin`），打印路径仍取此常量基准。
     pub const MARGIN: f32 = 16.0;
     /// 相邻块（无空行分隔）的垂直间距。
     pub const PARA_GAP: f32 = 10.0;

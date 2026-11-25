@@ -1,6 +1,6 @@
-//! Windows 系统外观与窗口外观（切片 17）：注册表读深色状态、DWM 深色标题栏 + Mica、
-//! 高对比度检测（SPI_GETHIGHCONTRAST）。全部为 Win32 FFI，零新增依赖；
-//! 失败一律静默降级（内容区始终绘制不透明底色）。
+//! Windows 系统外观与窗口外观（切片 17）：注册表读深色状态、DWM 深色标题栏
+//! （深色不启用 Mica 材质，浅色保持 Mica）、高对比度检测（SPI_GETHIGHCONTRAST）。
+//! 全部为 Win32 FFI，零新增依赖；失败一律静默降级（内容区始终绘制不透明底色）。
 
 use std::ffi::c_void;
 
@@ -66,8 +66,9 @@ const RRF_RT_REG_DWORD: u32 = 0x0000_0010;
 /// 20H1 起为 20，更早版本为 19；两者都试，成功任一即可。
 const DWMWA_USE_IMMERSIVE_DARK_MODE: u32 = 20;
 const DWMWA_USE_IMMERSIVE_DARK_MODE_LEGACY: u32 = 19;
-/// Win11 22H2+ 系统背景材质；值 2 = MICA（主窗口）。
+/// Win11 22H2+ 系统背景材质；值 1 = NONE（纯色），2 = MICA（主窗口）。
 const DWMWA_SYSTEMBACKDROP_TYPE: u32 = 38;
+const DWMSBT_NONE: u32 = 1;
 const DWMSBT_MAINWINDOW: u32 = 2;
 
 /// HIGHCONTRASTW 结构（Win32）。cbSize 仅系统使用；dwFlags 含 HCF_HIGHCONTRASTON 位。
@@ -137,7 +138,7 @@ impl SystemTheme for WinSystemTheme {
                 0,
             )
         };
-        if rc != 0 {
+        if rc == 0 {
             return false;
         }
         // 高对比度启用位必须被设置
@@ -148,7 +149,8 @@ impl SystemTheme for WinSystemTheme {
     }
 }
 
-/// 窗口外观：深色标题栏 + Mica 背景材质 + 窗口类背景画刷。HWND 无效或系统不支持时静默跳过。
+/// 窗口外观：深色标题栏（深色不使用材质）+ 浅色 Mica 背景 + 窗口类背景画刷。
+/// HWND 无效或系统不支持时静默跳过。
 #[derive(Default)]
 pub struct WinEffects {
     /// 进程内画刷缓存：COLORREF → HBRUSH。窗口类会一直引用已设置的句柄，
@@ -169,8 +171,11 @@ impl WindowEffects for WinEffects {
         if set_dwm_attr(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, flag) != 0 {
             let _ = set_dwm_attr(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE_LEGACY, flag);
         }
-        // Mica 只在 Win11 22H2+ 生效；失败即退化为纯色（内容区不依赖该效果）
-        let _ = set_dwm_attr(hwnd, DWMWA_SYSTEMBACKDROP_TYPE, DWMSBT_MAINWINDOW);
+        // Mica 只在 Win11 22H2+ 生效；失败即退化为纯色（内容区不依赖该效果）。
+        // 深色路径显式关闭材质：Mica 会在非客户区铺一层桌面壁纸的模糊采样，
+        // 深色正文（#1E1E1E）上方于是多出一条比正文明显更亮的磨砂带（浅色下与白底接近、
+        // 几乎不可见），即「深色发虚」的来源；换取锐利的纯色深色标题栏。浅色路径保持原样。
+        let _ = set_dwm_attr(hwnd, DWMWA_SYSTEMBACKDROP_TYPE, backdrop_type(dark));
     }
 
     /// 未绘制区域改用主题底色擦除：winit 注册窗口类时 hbrBackground=0（黑色），
@@ -209,5 +214,28 @@ fn set_dwm_attr(hwnd: *mut c_void, attribute: u32, value: u32) -> i32 {
             &value as *const u32 as *const c_void,
             std::mem::size_of::<u32>() as u32,
         )
+    }
+}
+
+/// 背景材质选择：深色用纯色（无材质），浅色保持 Mica。
+/// 深色下 Mica 会在标题栏铺一层壁纸模糊采样，比深色正文明显更亮且带模糊结构，
+/// 即「深色发虚」的来源（详见 evidence/verify/ppq-task1/findings.md）。
+fn backdrop_type(dark: bool) -> u32 {
+    if dark {
+        DWMSBT_NONE
+    } else {
+        DWMSBT_MAINWINDOW
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 深色路径不得使用任何模糊材质；浅色路径保持 Mica 不变。
+    #[test]
+    fn dark_never_uses_blurring_backdrop() {
+        assert_eq!(backdrop_type(true), DWMSBT_NONE);
+        assert_eq!(backdrop_type(false), DWMSBT_MAINWINDOW);
     }
 }

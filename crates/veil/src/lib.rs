@@ -37,12 +37,16 @@ pub fn run() {
     diag::install();
     veil_ui::diag::record("app", "run start");
     // 运行时语言必须早于任何 t() 取词（/register 提示、CLI 错误对话框都用 t()）：
-    // VEIL_UI_LANG 严格等于受支持的语言码时优先，否则跟随系统 UI 语言。
-    let lang = match std::env::var("VEIL_UI_LANG").ok().as_deref() {
-        Some("zh-CN") => "zh-CN",
-        Some("en-US") => "en-US",
-        _ => platform::locale::detect_locale(),
-    };
+    // 优先级为 配置手动选择 > VEIL_UI_LANG（仅 QA） > 系统 UI 语言。
+    // UI 层稍后才会加载配置，这里提前只读 `ui_language` 一个键，避免语言决策被推迟。
+    let config_bytes = veil_ui::config_path().and_then(|path| std::fs::read(path).ok());
+    let lang = platform::locale::resolve_startup_language(
+        config_bytes
+            .as_deref()
+            .and_then(veil_ui::ui_language_from_config_bytes),
+        std::env::var("VEIL_UI_LANG").ok().as_deref(),
+        platform::locale::system_langid(),
+    );
     veil_ui::i18n::init_locale(lang);
     let raw_args: Vec<String> = std::env::args().skip(1).collect();
     // `/register`、`/unregister`（C2/D7②）：只有显式开关才碰注册表。

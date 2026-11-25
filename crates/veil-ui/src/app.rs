@@ -1137,7 +1137,11 @@ impl App {
             app.config.doc_font_size,
             app.config.doc_line_height,
             app.config.doc_font_family,
+            app.config.doc_font_face.as_deref(),
         );
+        app.engine
+            .set_doc_margin(app.config.doc_margin, app.config.doc_margin_px);
+        app.doc.export_style.font_family = app.engine.doc_face();
         app.refresh_index();
         app.recompute_geometry();
         // 启动即登记最近文件（CLI 打开/会话恢复/崩溃恢复路径统一入口）
@@ -1214,6 +1218,8 @@ impl App {
         self.engine.set_muted_color(self.input_state.theme.muted);
         // 导出样式与渲染样式同点更新：主题切换后立即导出也应拿到新配色
         self.doc.export_style = ExportStyle::from_theme(&self.input_state.theme);
+        // 导出正文字族与屏内排版保持同族（引擎在设置生效时已驻留该名）。
+        self.doc.export_style.font_family = self.engine.doc_face();
         self.input_state.revs.theme += 1;
         self.ui_state.chrome.clear_label_cache();
         // Mermaid 位图随主题重渲：dark 参数进渲染请求，主题切换必须清空位图/失败记忆/去重集合，
@@ -1269,7 +1275,7 @@ impl App {
     /// 返回是否写入成功；失败时已写入可见错误提示，调用方不得再覆盖为成功提示
     /// （DEF-T10-008）。
     pub(crate) fn save_config(&mut self, part: ConfigSave) -> bool {
-        let mut merged = self.config;
+        let mut merged = self.config.clone();
         // 保留原文：严格 TOML 时原地编辑，注释与未知键不丢（ADR-012 / S2）。
         let raw = self.ports.config.load().ok();
         if let Some(text) = raw.as_deref() {
@@ -1285,7 +1291,7 @@ impl App {
             }
             // All: 完整覆盖所有字段（settings 模态 OK 时）
             ConfigSave::All => {
-                merged = self.config;
+                merged = self.config.clone();
             }
         }
         let text = merged.to_toml_preserving(raw.as_deref());

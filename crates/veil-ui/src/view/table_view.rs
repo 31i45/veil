@@ -95,12 +95,13 @@ impl LayoutEngine {
             } else {
                 Attrs::new()
             };
-            match doc_family(self.doc_font()) {
+            match doc_family(self.doc_font(), self.doc_face()) {
                 Some(family) => a.family(family),
                 None => a,
             }
         };
         let doc_font = self.doc_font();
+        let doc_face = self.doc_face();
         let mono_family = self.mono_family();
         // 与 rich_spans 相同叠加表头粗体；整格 mono 尤其不能用正文字体测量，
         // 否则列宽按 mono 求出后，折行却会按另一套宽度把 code 拆成 cod/e。
@@ -113,6 +114,7 @@ impl LayoutEngine {
                     st,
                     link_color,
                     doc_font,
+                    doc_face,
                     mono_family,
                     metrics.font_size,
                 )
@@ -140,6 +142,7 @@ impl LayoutEngine {
                     default_style,
                     link_color,
                     doc_font,
+                    doc_face,
                     mono_family,
                     metrics.font_size,
                 );
@@ -149,6 +152,7 @@ impl LayoutEngine {
                     bold,
                     link_color,
                     doc_font,
+                    doc_face,
                     mono_family,
                     metrics.font_size,
                 );
@@ -381,12 +385,14 @@ fn display_styles(
 }
 
 /// 展示坐标样式段 → cosmic `set_rich_text` 输入（表头整行加粗）。
+#[allow(clippy::too_many_arguments)] // 与 attrs_of 同参：字族/字族名/等宽族 + 样式
 fn rich_spans<'a>(
     display: &'a str,
     dense: &[(usize, usize, Style)],
     bold: bool,
     link_color: [u8; 3],
     doc_font: crate::theme::DocFontFamily,
+    doc_face: Option<&'static str>,
     mono_family: Option<&'static str>,
     pt: f32,
 ) -> Vec<(&'a str, Attrs<'static>)> {
@@ -402,7 +408,15 @@ fn rich_spans<'a>(
         st.bold |= bold;
         out.push((
             &display[s..e],
-            attrs_of(BlockKind::Table, st, link_color, doc_font, mono_family, pt),
+            attrs_of(
+                BlockKind::Table,
+                st,
+                link_color,
+                doc_font,
+                doc_face,
+                mono_family,
+                pt,
+            ),
         ));
     }
     out

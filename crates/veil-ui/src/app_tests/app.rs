@@ -2156,6 +2156,94 @@ fn caret_after_trailing_blank_line_has_full_line_space() {
     assert!(a.editor.session().serialize().ends_with('b'));
 }
 
+/// Task 4（ppq-task4）：源码模式复用块布局（非纯文本行布局），块间空行不产生可命中行
+/// —— 光标不能停在空行上；但空行可被删除，且几何按「段距 + N 行行高」计入间距。
+/// 本测试锁定该产品限制，防止回归成「空行消失」或「删空行后总高不更新」。
+#[test]
+fn source_mode_blank_line_cannot_hold_caret_but_is_deletable_and_occupies_height() {
+    let store = MemStore::default();
+    let text = "第一段\n\n\n第二段"; // 3 个换行 = 2 个空行
+    let mut a = app(text, None, false, &store);
+    a.perform_action(Action::OpenSourceMode);
+    a.paint();
+    assert!(a.source_mode());
+
+    let first_end = "第一段".len(); // 9
+    let second_start = text.find("第二段").unwrap(); // 12
+    assert_eq!(text[first_end..second_start].matches('\n').count(), 3);
+
+    // 块布局剥掉块尾换行：第一段只排 1 行，「空行」不进入任何块的行集合。
+    assert_eq!(layout_of_text(&a, "第一段").layout_text(), "第一段");
+    assert_eq!(layout_of_text(&a, "第二段").layout_text(), "第二段");
+
+    // 断言 A：从第一段末行（单行段落即末行）行首按 ArrowDown 一次，
+    // 光标直接落到第二段首行，中间两个空行（字节 10/11）没有任何停留机会。
+    assert!(a.editor.set_caret(0));
+    a.window_state.goal_x = None;
+    a.route_key(Key::Down);
+    assert_eq!(
+        a.editor.caret(),
+        second_start,
+        "源码模式的下移必须跳过块间空行，落到下一段首行"
+    );
+    // 同一条末行从行尾下移：目标列被夹到第二段行尾，同样不会停在空行上。
+    assert!(a.editor.set_caret(first_end));
+    a.window_state.goal_x = None;
+    a.route_key(Key::Down);
+    let landed = a.editor.caret();
+    assert!(
+        (second_start..=second_start + "第二段".len()).contains(&landed),
+        "下移落点必须落在第二段内，不得停在空行字节: {landed}"
+    );
+
+    // 断言 C（前测）：源码模式下两个空行按「段距 + 2 行」计入块间距。
+    let scale = a.input_state.scale;
+    let line_h = BASE_LINE_HEIGHT * scale;
+    let gap = {
+        let (b0, b1) = (&a.index.blocks[0], &a.index.blocks[1]);
+        b1.top - (b0.top + b0.height)
+    };
+    assert!(
+        (gap - (PARA_GAP * scale + 2.0 * line_h)).abs() < 1e-3,
+        "两个空行应占 段距 + 2 行: {gap} vs {}",
+        PARA_GAP * scale + 2.0 * line_h
+    );
+    let total_before = a.index.total_h;
+
+    // 断言 B：第二段开头 Backspace 一次，段落间换行数减 1 —— 空行可删，只是不可见/不可停。
+    assert!(a.editor.set_caret(second_start));
+    a.route_key(Key::Backspace);
+    let after = doc_text(&a);
+    assert_eq!(after, "第一段\n\n第二段", "Backspace 应删除一个块间换行");
+    assert_eq!(
+        after.matches('\n').count(),
+        text.matches('\n').count() - 1,
+        "段落之间的换行数应减 1"
+    );
+
+    // 断言 C（后测）：删除一个空行后，文档总高正好减少一行行高。
+    a.paint();
+    let total_after = a.index.total_h;
+    assert!(
+        (total_before - total_after - line_h).abs() < 1e-3,
+        "删一个空行总高应减少一行: {total_before} → {total_after}, line_h={line_h}"
+    );
+
+    // Ctrl+Z 恢复原文本与总高。
+    a.input_state.mods = Mods {
+        ctrl: true,
+        ..Mods::default()
+    };
+    a.route_key(Key::Z);
+    assert_eq!(doc_text(&a), text, "Ctrl+Z 应恢复被删的空行");
+    a.paint();
+    assert!(
+        (a.index.total_h - total_before).abs() < 1e-3,
+        "撤销后总高应复原: {} vs {total_before}",
+        a.index.total_h
+    );
+}
+
 /// 文档以空块结尾（空列表项）：块高 = 1 行，光标可达且可输入（B5-3）。
 #[test]
 fn trailing_empty_list_item_keeps_one_line_and_is_editable() {

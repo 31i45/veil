@@ -62,25 +62,90 @@ fn strikethrough_absent_without_syntax() {
     assert!(l.strikes.is_empty());
 }
 
-// ---- 任务列表复选框（P3-5） ----
+// ---- 任务列表复选框（P3-5 / Task 5：改为自绘方框） ----
 
 #[test]
 fn task_item_checkbox_substitution() {
-    // 非激活：`- [ ] foo` → `☐ foo`；勾选 → `☑`
+    // 非激活：`- [ ] foo` 的标记段整体换成定宽占位（NBSP），不再出现 ☐/☑ 字形
     let (_eng, l) = layout_of("- [ ] foo", 400.0);
-    assert_eq!(l.layout_text(), "☐ foo");
+    let lt = l.layout_text();
+    assert!(!lt.contains(['☐', '☑']), "不得再用字形复选框: {lt:?}");
+    assert!(lt.starts_with('\u{A0}') && lt.ends_with(" foo"), "{lt:?}");
+    assert_eq!(l.task_boxes.len(), 1);
+    assert!(!l.task_boxes[0].done);
     let (_eng, l) = layout_of("- [x] bar", 400.0);
-    assert_eq!(l.layout_text(), "☑ bar");
+    assert_eq!(l.task_boxes.len(), 1);
+    assert!(l.task_boxes[0].done);
     // 有序列表任务同规则
     let (_eng, l) = layout_of("1. [x] done", 400.0);
-    assert_eq!(l.layout_text(), "☑ done");
+    assert_eq!(l.task_boxes.len(), 1);
+    assert!(l.task_boxes[0].done);
+}
+
+#[test]
+fn task_box_geometry_stable_across_checked_state() {
+    // 勾选前后方框外接矩形（x/y/边长）必须完全一致，勾选态只影响绘制
+    let (_eng, open) = layout_of("- [ ] foo", 400.0);
+    let (_eng, done) = layout_of("- [x] foo", 400.0);
+    let a = *open.task_boxes.first().expect("未勾选应记录方框");
+    let b = *done.task_boxes.first().expect("已勾选应记录方框");
+    assert_eq!((a.x, a.y, a.side), (b.x, b.y, b.side));
+    assert!(!a.done && b.done);
+    // 占位（NBSP 前缀）宽度不因勾选变化
+    let prefix = |l: &BlockLayout| {
+        l.layout_text()
+            .chars()
+            .take_while(|c| *c == '\u{A0}')
+            .count()
+    };
+    assert_eq!(prefix(&open), prefix(&done), "占位宽度不得随勾选态变化");
+    let (eng, _) = layout_of("- [ ] foo", 400.0);
+    let rects = eng.selection_rects(&open, 0, 6);
+    assert!(
+        rects[0].2 + 0.01 >= a.side,
+        "占位须容纳方框: rect={} side={}",
+        rects[0].2,
+        a.side
+    );
+}
+
+#[test]
+fn task_box_geometry_identical_across_preset_families() {
+    // 4 个预置字族（System/Sans/Serif/Mono）下方框矩形必须逐值相同
+    use crate::theme::DocFontFamily;
+    let mut rects = Vec::new();
+    for family in [
+        DocFontFamily::System,
+        DocFontFamily::Sans,
+        DocFontFamily::Serif,
+        DocFontFamily::Mono,
+    ] {
+        let mut eng = LayoutEngine::new();
+        eng.set_doc_typography(16.0, 22.0, family, None);
+        let src = "- [ ] 字族\n";
+        let s = Session::open(src);
+        let (id, kind, range) = s.blocks()[0].clone();
+        let inlines = s.block_inlines(id).unwrap();
+        let text = &src[range.start..range.end];
+        let l = eng.layout_block(kind, text, range, &inlines, 400.0, usize::MAX, &[], false);
+        let b = *l.task_boxes.first().expect("应有自绘方框");
+        rects.push(b);
+    }
+    for b in &rects[1..] {
+        assert_eq!(
+            (b.x, b.y, b.side),
+            (rects[0].x, rects[0].y, rects[0].side),
+            "方框矩形不得随字族变化"
+        );
+    }
 }
 
 #[test]
 fn task_item_active_shows_source() {
-    // 光标进入块内：显源码 `- [ ] foo`（与列表符号/引用的激活行为一致）
+    // 光标进入块内：显源码 `- [ ] foo`（与列表符号/引用的激活行为一致），且不画方框
     let (_eng, l) = layout_with_caret("- [ ] foo", 4, 400.0);
     assert_eq!(l.layout_text(), "- [ ] foo");
+    assert!(l.task_boxes.is_empty(), "源码编辑态不绘制自绘方框");
 }
 
 #[test]
@@ -1197,6 +1262,7 @@ fn mermaid_attrs_match_fenced_mono_and_preserve_paragraph_doc_font() {
             Style::default(),
             [0, 0, 0],
             DocFontFamily::Serif,
+            None,
             Some("Consolas"),
             16.0,
         )
@@ -1629,7 +1695,13 @@ fn quote_container_renders_nested_list_task_and_quote() {
         "行内标记应消隐: {lt:?}"
     );
     assert!(lt.contains('•'), "无序列表应显示圆点: {lt:?}");
-    assert!(lt.contains('☐') && lt.contains('☑'), "任务框应显示: {lt:?}");
+    assert!(
+        l.task_boxes.len() == 2
+            && l.task_boxes.iter().any(|b| b.done)
+            && l.task_boxes.iter().any(|b| !b.done),
+        "两个任务框应各自记录自绘几何（一勾选一未勾选）: {:?}",
+        l.task_boxes
+    );
     assert!(lt.contains("1."), "有序列表编号保留源码编号: {lt:?}");
     assert!(lt.contains("加粗") && !lt.contains("**加粗**"));
 }

@@ -1,6 +1,6 @@
 use crate::app::App;
 use crate::chrome;
-use crate::geometry::{Rect, MARGIN};
+use crate::geometry::Rect;
 use crate::i18n::{t, tf, Key};
 use crate::paint::{
     caret_visual, link_tip_max_text_w, link_tip_rect, truncate_link_tip, CaretVisual,
@@ -142,6 +142,7 @@ impl App {
                 scroll: 0,
                 shown_rows: 0,
                 max_scroll: 0,
+                font_hint: None,
             };
         };
         let mut text = ModalText {
@@ -1175,12 +1176,12 @@ impl App {
             let caret_center = cy + ch / 2.0 - vp.y + self.window_state.scroll_y;
             target = typewriter_target_y(caret_center, vp.h, max);
         } else if cy < vp.y {
-            target += cy - vp.y - MARGIN * self.input_state.scale;
+            target += cy - vp.y - self.engine.doc_margin_px() * self.input_state.scale;
         } else if cy + ch > vp.y + vp.h {
             // B5：光标行下方至少保留 `BOTTOM_PAD_LINES` 行可点击空白，
             // 换行继续输入时不会贴着状态栏（文档已含同等底部留白）。
             let pad = (crate::tokens::doc::BOTTOM_PAD_LINES * self.engine.doc_line_height())
-                .max(MARGIN)
+                .max(self.engine.doc_margin_px())
                 * self.input_state.scale;
             target += cy + ch - (vp.y + vp.h) + pad;
         }

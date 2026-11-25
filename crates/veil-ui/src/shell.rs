@@ -115,16 +115,20 @@ impl Shell {
                     app.window_state.startup_error = Some(detail);
                     None
                 }
-                None => app.create_window(event_loop),
+                None => app.create_window_hidden(event_loop),
             }
         } else {
-            app.create_window(event_loop)
+            app.create_window_hidden(event_loop)
         };
         #[cfg(not(test))]
-        let id = app.create_window(event_loop);
+        let id = app.create_window_hidden(event_loop);
         if let Some(id) = id {
             let entry = self.build_window_entry(event_loop, id, app);
             self.windows.insert(id, entry);
+            // 唯一允许触发首次显示的位置：adapter（feature 下）已在隐藏阶段创建完毕。
+            if let Some(entry) = self.windows.get_mut(&id) {
+                entry.app.begin_startup();
+            }
             return;
         }
         let detail = app.window_state.take_startup_error();
@@ -140,22 +144,48 @@ impl Shell {
     }
 
     /// 把 App 包装成 WindowEntry，并在 feature 下创建 mixed-handler AccessKit 适配器。
-    /// 入口须在隐藏窗口状态调用（App::create_window 已保证 `with_visible(false)`）。
+    /// 入口须在隐藏窗口状态调用（`App::create_window_hidden` 已保证 `with_visible(false)`），
+    /// adapter 因此严格早于 `begin_startup` 触发的首次显示。
     fn build_window_entry(
         &mut self,
         _event_loop: &ActiveEventLoop,
         _id: WindowId,
         app: App,
     ) -> WindowEntry {
-        WindowEntry {
-            app,
-            #[cfg(feature = "accessibility")]
-            adapter: None,
-            #[cfg(feature = "accessibility")]
-            snapshot: None,
-            #[cfg(feature = "accessibility")]
-            activated: None,
+        #[cfg(feature = "accessibility")]
+        {
+            let snapshot = std::sync::Arc::new(std::sync::Mutex::new(build_semantic_tree(&app)));
+            let activated = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let created = match (self.proxy.clone(), app.window_state.window.as_ref()) {
+                (Some(proxy), Some(window)) => {
+                    let activation = SnapshotActivation {
+                        snapshot: std::sync::Arc::clone(&snapshot),
+                        activated: std::sync::Arc::clone(&activated),
+                        window_id: window.id(),
+                        main_thread: self.main_thread,
+                    };
+                    Some(Adapter::with_mixed_handlers(
+                        _event_loop,
+                        window,
+                        activation,
+                        proxy,
+                    ))
+                }
+                _ => None,
+            };
+            let (adapter, snapshot, activated) = match created {
+                Some(adapter) => (Some(adapter), Some(snapshot), Some(activated)),
+                None => (None, None, None),
+            };
+            WindowEntry {
+                app,
+                adapter,
+                snapshot,
+                activated,
+            }
         }
+        #[cfg(not(feature = "accessibility"))]
+        WindowEntry { app }
     }
 
     /// 窗口创建失败的统一处置：返回 true 表示已记录致命启动错误、调用方应退出事件循环。
@@ -366,13 +396,9 @@ impl ApplicationHandler<ShellEvent> for Shell {
                 break;
             }
         }
-        // 为刚创建的窗口挂 mixed-handler adapter。
-        self.install_accessibility_adapters(event_loop);
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
-        // lazy 安装：某些情况下窗口可能在首帧后才被 resumed 覆盖
-        self.install_accessibility_adapters(event_loop);
         let outcome = self.route_event(id, event);
         if outcome.new_window && !outcome.closed {
             self.open_doc(
@@ -423,42 +449,6 @@ impl ApplicationHandler<ShellEvent> for Shell {
             Some(at) => ControlFlow::WaitUntil(at),
             None => ControlFlow::Wait,
         });
-    }
-}
-
-#[cfg(feature = "accessibility")]
-impl Shell {
-    /// 给所有尚未安装的窗口创建 mixed-handler Adapter。
-    /// 必须在 App::create_window 后、settle_startup 前——此时窗口仍隐藏。
-    /// mixed handler 只需要同步 ActivationHandler + EventLoopProxy；
-    /// accesskit_winit 内部会自动把 action/deactivation 事件经 proxy 派发。
-    fn install_accessibility_adapters(&mut self, event_loop: &ActiveEventLoop) {
-        let Some(proxy) = self.proxy.clone() else {
-            return;
-        };
-        let main_thread = self.main_thread;
-        for entry in self.windows.values_mut() {
-            if entry.adapter.is_some() {
-                continue;
-            }
-            let Some(window) = entry.app.window_state.window.as_ref() else {
-                continue;
-            };
-            let snapshot =
-                std::sync::Arc::new(std::sync::Mutex::new(build_semantic_tree(&entry.app)));
-            let activated = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-            let activation = SnapshotActivation {
-                snapshot: std::sync::Arc::clone(&snapshot),
-                activated: std::sync::Arc::clone(&activated),
-                window_id: window.id(),
-                main_thread,
-            };
-            let adapter =
-                Adapter::with_mixed_handlers(event_loop, window, activation, proxy.clone());
-            entry.adapter = Some(adapter);
-            entry.snapshot = Some(snapshot);
-            entry.activated = Some(activated);
-        }
     }
 }
 

@@ -2765,6 +2765,16 @@ impl App {
         false
     }
 
+    /// 块是否完全在扩展视口外（复用 `visible_index_range` 的口径：上一屏 + 下一屏 overscan）。
+    /// 用于几何重算跳过 cache miss 的 offscreen 块，避免全量 LayoutKey 比对。
+    fn block_is_offscreen(&self, g: &BlockGeom) -> bool {
+        let vp = self.viewport();
+        let lo = self.window_state.scroll_y - vp.h;
+        let hi = self.window_state.scroll_y + 2.0 * vp.h;
+        let bot = g.top + g.height;
+        g.top > hi || bot < lo
+    }
+
     /// details 卡片需额外覆盖的子块高度（B3：所有层级更深的后续块）。
     /// 按块高 + 与几何一致的段距累加（隐藏子块高度 0、组内段距 0），
     /// 不依赖子块 `top` 是否已重算，视图态变化后可立即取到正确高度。
@@ -2859,6 +2869,16 @@ impl App {
                 .cache
                 .table(g.id, self.table_key(g.id))
                 .map_or(g.est_h, |t| t.height);
+        }
+        // PERF: 视口外 cache miss 直接返回 est_h，跳过 LayoutKey 构造与 reveal_state
+        // 比对——recompute_geometry 对 5000+ offscreen 块全量查表曾是首帧瓶颈。
+        // 打印态跳过优化（需要全量真实几何）。cache hit 的 offscreen 块仍须走
+        // 正常 cache.layout 路径：它们可能是之前滚到过又滚走的，已排好真实高度。
+        if self.window_state.print.is_none()
+            && self.block_is_offscreen(g)
+            && !self.cache.has_layout(g.id)
+        {
+            return g.est_h;
         }
         self.cache
             .layout(

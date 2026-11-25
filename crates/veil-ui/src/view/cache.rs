@@ -407,6 +407,12 @@ impl Cache {
             .map(|_| &self.layouts[&id].value)
     }
 
+    /// 纯存在性查询（不校验键）：供几何重算快速跳过 cache miss + 视口外的块——
+    /// 避免对 5000+ offscreen 块逐一构造 LayoutKey 并比对 reveal_state。
+    pub(crate) fn has_layout(&self, id: BlockId) -> bool {
+        self.layouts.contains_key(&id)
+    }
+
     /// 绘制路径用：光栅与布局共用同一键，布局命中后直接取键比对光栅。
     pub(crate) fn raster_key(
         &self,

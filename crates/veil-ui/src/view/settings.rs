@@ -110,6 +110,62 @@ pub(crate) struct SettingsForm {
     /// 字体字段的可选值：四档预置 + 打开设置时探测到的已安装字族。
     /// 仅在表单生命周期内使用（不落盘）；字体探测较贵，因此随表单快照一次。
     pub(crate) font_options: Vec<FontSelection>,
+    /// 字体选择弹层（None = 未打开）。放在表单上而非 `SettingsState`：
+    /// 后者是 Copy 的轻量状态，不宜持堆分配的查询串与候选表。
+    pub(crate) font_picker: Option<FontPicker>,
+}
+
+/// 字体选择弹层：查询串 + 过滤后的候选下标（指向 `font_options`）+ 选中/滚动位置。
+#[derive(Clone, Debug, Default)]
+pub(crate) struct FontPicker {
+    pub(crate) query: String,
+    pub(crate) hits: Vec<usize>,
+    pub(crate) sel: usize,
+    pub(crate) top: usize,
+}
+
+/// 字体弹层几何：锚在字体控件正下方，行高与控件一致；绘制/命中/滚轮共用。
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct FontPickerGeom {
+    pub(crate) rect: Rect,
+    pub(crate) row_h: f32,
+    pub(crate) rows: usize,
+}
+
+/// 弹层最大行数（同时是键盘移动的保守上界）。
+const FONT_PICKER_MAX_ROWS: usize = 8;
+
+/// 计算字体弹层几何：无弹层/字段被滚动隐藏时返回 None。
+/// 行数夹取到「卡片底边之上」且不超过 8 行，保证列表永不压住底部按钮。
+pub(crate) fn font_picker_geom(
+    layout: &SettingsLayout,
+    form: &SettingsForm,
+) -> Option<FontPickerGeom> {
+    let picker = form.font_picker.as_ref()?;
+    let idx = form
+        .fields
+        .iter()
+        .position(|f| matches!(f.kind, FieldKind::FontFamily))?;
+    let c = layout.fields.get(idx)?.control;
+    if c.w <= 0.0 || c.h <= 0.0 {
+        return None;
+    }
+    let row_h = c.h;
+    let top = c.y + c.h + 2.0;
+    let bottom = layout.card.y + layout.card.h - row_h * 0.5;
+    let avail = (bottom - top).max(row_h);
+    let max_rows = ((avail / row_h).floor() as usize).clamp(1, FONT_PICKER_MAX_ROWS);
+    let rows = max_rows.min(picker.hits.len().max(1));
+    Some(FontPickerGeom {
+        rect: Rect {
+            x: c.x,
+            y: top,
+            w: c.w,
+            h: row_h * rows as f32,
+        },
+        row_h,
+        rows,
+    })
 }
 
 /// 四档预置（顺序固定：系统默认 → 无衬线 → 衬线 → 等宽）。
@@ -266,6 +322,7 @@ impl SettingsForm {
         Self {
             fields,
             font_options,
+            font_picker: None,
         }
     }
 
@@ -314,6 +371,129 @@ impl SettingsForm {
         }
         let next = (pos as i32 + delta).rem_euclid(n) as usize;
         self.fields[idx].value = FieldValue::FontFamily(self.font_options[next].clone());
+    }
+
+    /// 打开字体选择弹层：默认选中当前值，并把它滚进可视区。
+    pub(crate) fn open_font_picker(&mut self) {
+        let current = self.font_selection().cloned();
+        let mut picker = FontPicker {
+            query: String::new(),
+            hits: (0..self.font_options.len()).collect(),
+            sel: 0,
+            top: 0,
+        };
+        if let Some(current) = current {
+            picker.sel = self
+                .font_options
+                .iter()
+                .position(|o| *o == current)
+                .unwrap_or(0);
+        }
+        picker.top = picker.sel.saturating_sub(FONT_PICKER_MAX_ROWS - 1);
+        self.font_picker = Some(picker);
+    }
+
+    pub(crate) fn close_font_picker(&mut self) {
+        self.font_picker = None;
+    }
+
+    /// 查询串追加（IME 提交或普通字符）后重新过滤。
+    pub(crate) fn font_query_push(&mut self, s: &str) {
+        let Some(mut picker) = self.font_picker.take() else {
+            return;
+        };
+        picker.query.push_str(s);
+        Self::refilter_fonts(&self.font_options, &mut picker);
+        self.font_picker = Some(picker);
+    }
+
+    /// 退格：删除查询串最后一个字符并重新过滤。
+    pub(crate) fn font_query_pop(&mut self) {
+        let Some(mut picker) = self.font_picker.take() else {
+            return;
+        };
+        picker.query.pop();
+        Self::refilter_fonts(&self.font_options, &mut picker);
+        self.font_picker = Some(picker);
+    }
+
+    fn refilter_fonts(options: &[FontSelection], picker: &mut FontPicker) {
+        let q = picker.query.trim().to_lowercase();
+        picker.hits = options
+            .iter()
+            .enumerate()
+            .filter(|(_, o)| q.is_empty() || o.display().to_lowercase().contains(&q))
+            .map(|(i, _)| i)
+            .collect();
+        picker.sel = 0;
+        picker.top = 0;
+    }
+
+    /// 键盘上下移动选中项（越界循环），并把选中项保持在可视窗口内。
+    pub(crate) fn font_picker_move(&mut self, delta: i32) {
+        let Some(p) = self.font_picker.as_mut() else {
+            return;
+        };
+        if p.hits.is_empty() {
+            return;
+        }
+        let n = p.hits.len() as i32;
+        p.sel = (p.sel as i32 + delta).rem_euclid(n) as usize;
+        if p.sel < p.top {
+            p.top = p.sel;
+        } else if p.sel >= p.top + FONT_PICKER_MAX_ROWS {
+            p.top = p.sel + 1 - FONT_PICKER_MAX_ROWS;
+        }
+    }
+
+    /// 滚轮滚动候选窗口，并夹取选中项到窗口内。
+    pub(crate) fn font_picker_scroll(&mut self, delta: i32, rows: usize) {
+        let Some(p) = self.font_picker.as_mut() else {
+            return;
+        };
+        let rows = rows.max(1);
+        let max_top = p.hits.len().saturating_sub(rows);
+        p.top = (p.top as i32 + delta).clamp(0, max_top as i32) as usize;
+        if p.sel < p.top {
+            p.sel = p.top;
+        } else if p.sel >= p.top + rows {
+            p.sel = (p.top + rows - 1).min(p.hits.len().saturating_sub(1));
+        }
+    }
+
+    /// Enter：把当前选中候选写回字体字段并关闭弹层。
+    pub(crate) fn apply_font_picker(&mut self) {
+        let Some(p) = self.font_picker.take() else {
+            return;
+        };
+        let Some(&opt) = p.hits.get(p.sel) else {
+            return;
+        };
+        self.set_font_option(opt);
+    }
+
+    /// 鼠标点击第 `pos` 个过滤结果（下标指向 `hits`），选中并关闭。
+    pub(crate) fn pick_font_hit(&mut self, pos: usize) {
+        let Some(p) = self.font_picker.take() else {
+            return;
+        };
+        let Some(&opt) = p.hits.get(pos) else {
+            return;
+        };
+        self.set_font_option(opt);
+    }
+
+    fn set_font_option(&mut self, opt: usize) {
+        let Some(value) = self.font_options.get(opt).cloned() else {
+            return;
+        };
+        if let Some(field) = self
+            .fields
+            .iter_mut()
+            .find(|f| matches!(f.kind, FieldKind::FontFamily))
+        {
+            field.value = FieldValue::FontFamily(value);
+        }
     }
 
     /// 版心档位循环（紧凑 → 标准 → 宽松 → 全宽 → 自定义，越界循环）。
@@ -800,12 +980,12 @@ impl SettingsState {
         if self.focused_button.is_some() {
             return;
         }
-        // 字体字段：循环可选字族（预置四档 → 含中文族 → 其它族）。
+        // 字体字段：打开可搜索的候选弹层（←/→ 仍保留为快速微调）。
         if matches!(
             form.fields.get(self.focused_field).map(|f| &f.kind),
             Some(FieldKind::FontFamily)
         ) {
-            form.cycle_font(1);
+            form.open_font_picker();
             return;
         }
         if matches!(
@@ -894,6 +1074,19 @@ impl SettingsState {
         layout: &SettingsLayout,
         form: &mut SettingsForm,
     ) -> Option<u16> {
+        // 字体弹层优先：点候选即选中关闭；点其它位置则先关闭弹层再按常规路由。
+        if form.font_picker.is_some() {
+            if let Some(g) = font_picker_geom(layout, form) {
+                if hit(mouse, &g.rect) {
+                    let row = ((mouse.1 - g.rect.y) / g.row_h).floor().max(0.0) as usize;
+                    let row = row.min(g.rows.saturating_sub(1));
+                    let top = form.font_picker.as_ref().map_or(0, |p| p.top);
+                    form.pick_font_hit(top + row);
+                    return None;
+                }
+            }
+            form.close_font_picker();
+        }
         // 先检按钮
         for (i, r) in layout.buttons.iter().enumerate() {
             if hit(mouse, r) {
@@ -962,6 +1155,21 @@ impl SettingsState {
         layout: &SettingsLayout,
     ) -> Option<u16> {
         let shift = mods.shift;
+        // 字体弹层打开时独占键盘：输入即筛选，↑↓ 选择，Enter 确认，Esc 取消。
+        if form.font_picker.is_some() {
+            match key {
+                InputKey::Escape => form.close_font_picker(),
+                InputKey::Up => form.font_picker_move(-1),
+                InputKey::Down => form.font_picker_move(1),
+                InputKey::PageUp => form.font_picker_move(-(FONT_PICKER_MAX_ROWS as i32)),
+                InputKey::PageDown => form.font_picker_move(FONT_PICKER_MAX_ROWS as i32),
+                InputKey::Enter => form.apply_font_picker(),
+                InputKey::Backspace => form.font_query_pop(),
+                InputKey::Text(t) => form.font_query_push(t),
+                _ => {}
+            }
+            return None;
+        }
         match key {
             InputKey::Escape => {
                 // 返回最后一个按钮 id（通常是 Cancel）
@@ -1084,9 +1292,16 @@ pub(crate) fn paint(
             continue;
         }
         let is_focused = state.focused_button.is_none() && state.focused_field == i;
+        // 字体弹层打开时，字体控件本身变成查询输入框（无独立搜索行，控件即搜索框）。
+        let query = if matches!(f.kind, FieldKind::FontFamily) {
+            form.font_picker.as_ref().map(|p| p.query.as_str())
+        } else {
+            None
+        };
         paint_field_label(frame, text, f, fr, theme);
-        paint_field_control(frame, text, f, fr, theme, scale, is_focused);
+        paint_field_control(frame, text, f, fr, theme, scale, is_focused, query);
     }
+    paint_font_picker(frame, text, form, layout, theme, scale);
 
     // 字族缺中文提示：不阻塞选择，仅说明正文会回退到系统字体。
     if let Some(r) = layout.font_hint {
@@ -1167,6 +1382,7 @@ fn paint_field_control(
     theme: &crate::theme::Theme,
     scale: f32,
     is_focused: bool,
+    font_query: Option<&str>,
 ) {
     let c = fr.control;
     let cr = surface::corner_radius(scale);
@@ -1207,7 +1423,11 @@ fn paint_field_control(
     // 控件值文本（在焦点环上层，始终可见）
     let inner_x = c.x + 6.0 * scale;
     let inner_y = c.y + (c.h - typography::UI_LINE_HEIGHT * scale) * 0.5;
-    let value_text = field_value_display(f);
+    let value_text = match font_query {
+        Some(q) if q.is_empty() => t(Key::SettingsFontSearch).to_string(),
+        Some(q) => q.to_string(),
+        None => field_value_display(f),
+    };
     // 字族名可达 64 字节，按控件可用宽度截断，避免压到卡片边缘。
     let fitted = elide_with_ellipsis(&value_text, (c.w - 12.0 * scale).max(0.0), |s| {
         text.width(s)
@@ -1220,6 +1440,77 @@ fn paint_field_control(
         inner_x as i32,
         inner_y as i32,
     );
+}
+
+/// 字体候选弹层：选中行用 hover 底，其余行 muted；无匹配时给一行提示。
+fn paint_font_picker(
+    frame: &mut Frame,
+    text: &mut dyn Text,
+    form: &SettingsForm,
+    layout: &SettingsLayout,
+    theme: &crate::theme::Theme,
+    scale: f32,
+) {
+    let Some(g) = font_picker_geom(layout, form) else {
+        return;
+    };
+    let Some(picker) = form.font_picker.as_ref() else {
+        return;
+    };
+    let cr = surface::corner_radius(scale);
+    stroke_frame(
+        frame,
+        g.rect,
+        cr,
+        [
+            theme.chrome_border[0],
+            theme.chrome_border[1],
+            theme.chrome_border[2],
+        ],
+        palette::surface_popup(theme),
+    );
+    let line_h = typography::UI_LINE_HEIGHT * scale;
+    let pad_x = 6.0 * scale;
+    let x = (g.rect.x + pad_x) as i32;
+    if picker.hits.is_empty() {
+        let ty = g.rect.y + (g.row_h - line_h) * 0.5;
+        text.draw(
+            frame,
+            t(Key::SettingsFontNoMatch),
+            theme.muted,
+            x,
+            ty.round() as i32,
+        );
+        return;
+    }
+    for row in 0..g.rows {
+        let Some(&opt) = picker.hits.get(picker.top + row) else {
+            break;
+        };
+        let row_y = g.rect.y + row as f32 * g.row_h;
+        let selected = picker.top + row == picker.sel;
+        if selected {
+            frame.fill_rect(
+                g.rect.x.round() as i32,
+                row_y.round() as i32,
+                g.rect.w.max(0.0) as u32,
+                g.row_h.ceil() as u32,
+                theme.hover,
+            );
+        }
+        let label = form.font_options[opt].display();
+        let fitted = elide_with_ellipsis(&label, (g.rect.w - 12.0 * scale).max(0.0), |s| {
+            text.width(s)
+        });
+        let ty = row_y + (g.row_h - line_h) * 0.5;
+        text.draw(
+            frame,
+            &fitted,
+            if selected { theme.text } else { theme.muted },
+            x,
+            ty.round() as i32,
+        );
+    }
 }
 
 fn field_value_display(f: &SettingsField) -> String {
@@ -2275,6 +2566,64 @@ mod tests {
         assert_eq!(out.doc_font_face, None);
         assert_eq!(out.doc_font_family, DocFontFamily::Sans);
         assert_eq!(font_field_index(&form), idx);
+    }
+
+    /// 字体弹层：输入即筛选、Enter 写回；无匹配时保持原值；空格/点击打开的是弹层而非循环。
+    #[test]
+    fn font_picker_filters_and_applies() {
+        let installed = vec![
+            ("Consolas".to_string(), false),
+            ("Cascadia Code".to_string(), false),
+            ("SimSun".to_string(), true),
+        ];
+        let config = Config::default();
+        let mut form = SettingsForm::from_config_with_families(&config, &installed);
+
+        // 空格/点击进入的是可搜索弹层，而不是一次循环。
+        let idx = font_field_index(&form);
+        let mut state = SettingsState::new(&form);
+        state.focused_field = idx;
+        state.focused_button = None;
+        state.toggle_field(&mut form);
+        assert!(form.font_picker.is_some(), "字体字段应打开候选弹层");
+
+        form.font_query_push("sim");
+        let hit = form.font_picker.as_ref().unwrap().hits.clone();
+        assert_eq!(hit.len(), 1, "查询应过滤到唯一候选");
+        assert!(matches!(
+            &form.font_options[hit[0]],
+            FontSelection::Installed { name, .. } if name == "SimSun"
+        ));
+
+        form.apply_font_picker();
+        assert!(form.font_picker.is_none(), "Enter 后弹层关闭");
+        assert_eq!(form.apply(&config).doc_font_face.as_deref(), Some("SimSun"));
+
+        // 无匹配：Enter 不改变已选值。
+        form.open_font_picker();
+        form.font_query_push("no-such-font");
+        assert!(form.font_picker.as_ref().unwrap().hits.is_empty());
+        form.apply_font_picker();
+        assert_eq!(form.apply(&config).doc_font_face.as_deref(), Some("SimSun"));
+    }
+
+    /// 弹层键盘移动：越界循环，且选中项始终留在可视窗口内。
+    #[test]
+    fn font_picker_move_wraps_and_keeps_selection_visible() {
+        let installed: Vec<(String, bool)> =
+            (0..20).map(|i| (format!("Font{i:02}"), false)).collect();
+        let mut form = SettingsForm::from_config_with_families(&Config::default(), &installed);
+        form.open_font_picker();
+        form.font_picker_move(-1); // 从 0 往上越界 → 末项
+        let p = form.font_picker.as_ref().unwrap();
+        assert_eq!(p.sel, p.hits.len() - 1);
+        assert!(p.top + FONT_PICKER_MAX_ROWS > p.sel, "末项必须可见");
+        form.font_picker_move(1);
+        assert_eq!(
+            form.font_picker.as_ref().unwrap().sel,
+            0,
+            "再下一项回到首项"
+        );
     }
 
     /// 缺中文提示：仅具体西文字族触发，并排在该字段下方；预置/含中文族不触发。

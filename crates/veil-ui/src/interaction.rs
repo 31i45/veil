@@ -1881,7 +1881,14 @@ impl App {
             let layout = self.settings_layout();
             if let Some(s) = self.ui_state.settings.as_mut() {
                 let step = if d > 0.0 { -1 } else { 1 };
-                s.state.scroll(step, layout.max_scroll);
+                if s.form.font_picker.is_some() {
+                    // 字体弹层打开时滚轮滚候选列表，不滚字段区。
+                    let rows = crate::view::settings::font_picker_geom(&layout, &s.form)
+                        .map_or(6, |g| g.rows);
+                    s.form.font_picker_scroll(step, rows);
+                } else {
+                    s.state.scroll(step, layout.max_scroll);
+                }
             }
             self.request_redraw();
             return;

@@ -669,6 +669,8 @@ keys! {
     SettingsFontSans => "settings.font_sans", "无衬线";
     SettingsFontSerif => "settings.font_serif", "衬线";
     SettingsFontMono => "settings.font_mono", "等宽";
+    SettingsFontSearch => "settings.font_search", "搜索字体（输入筛选，↑↓ 选择，Enter 确认）";
+    SettingsFontNoMatch => "settings.font_no_match", "无匹配字体";
     SettingsFontMissingCjk => "settings.font_missing_cjk", "该字族缺少中文字形，正文将回退到系统字体";
     SettingsAllowRemoteImages => "settings.allow_remote_images", "允许远程图片";
     SettingsWindowGeom => "settings.window_geom", "上次窗口几何";
@@ -1798,6 +1800,11 @@ fn main() {
     (Key::SettingsFontSans, "Sans Serif"),
     (Key::SettingsFontSerif, "Serif"),
     (Key::SettingsFontMono, "Monospace"),
+    (
+        Key::SettingsFontSearch,
+        "Search fonts (type to filter, ↑↓ to select, Enter to apply)",
+    ),
+    (Key::SettingsFontNoMatch, "No matching fonts"),
     (
         Key::SettingsFontMissingCjk,
         "This family lacks Chinese glyphs; body text falls back to a system font",

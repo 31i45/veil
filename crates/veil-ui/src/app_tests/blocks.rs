@@ -846,7 +846,12 @@ fn dark_kbd_renders_on_dark_surface() {
     let kx = (cx + (k_rect.0 - 1.0) as i32).max(0) as u32;
     let ky = sy + (k_rect.1 + k_rect.3 / 2.0) as i32;
     let f = a.render();
-    let border = [theme.kbd_border[0], theme.kbd_border[1], theme.kbd_border[2], 255];
+    let border = [
+        theme.kbd_border[0],
+        theme.kbd_border[1],
+        theme.kbd_border[2],
+        255,
+    ];
     assert_eq!(
         f.get(kx, ky as u32),
         border,

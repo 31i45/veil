@@ -768,6 +768,10 @@ pub(crate) struct WindowState {
     /// 测试专用窗口尺寸覆盖：headless 测试无 winit 窗口，需要验证超宽窗口排版时注入。
     #[cfg(test)]
     pub(crate) test_size: Option<(u32, u32)>,
+    /// 测试 hook：`set_ime_area` 每次被调时的 (x, y, h) 坐标入栈。
+    /// 无窗口（headless 单测）时同样记录——用于锁定候选窗锚点正确性。
+    #[cfg(test)]
+    pub(crate) ime_area_calls: Vec<(f32, f32, f32)>,
     /// 启动失败的可读详情：文档打开错误在 `App::new` 预置，窗口/呈现上下文创建失败时追加原始诊断。
     /// 仅在「首窗创建失败」时由 Shell 取走并作为致命错误上报；正常启动路径不消费。
     pub(crate) startup_error: Option<String>,
@@ -801,6 +805,8 @@ impl Default for WindowState {
             code_copied: None,
             #[cfg(test)]
             test_size: None,
+            #[cfg(test)]
+            ime_area_calls: Vec::new(),
             startup_error: None,
         }
     }
@@ -1618,9 +1624,6 @@ impl App {
     }
 
     pub(crate) fn set_ime_area(&mut self) {
-        let Some(w) = self.window_state.window.clone() else {
-            return; // 无窗口（测试）：不触发按需排版
-        };
         let (x, y, h) = if let Some(l) = self.quick_rect() {
             // 快速打开：候选框贴过滤串末端
             let pad = quick_open::PAD * self.input_state.scale;
@@ -1649,10 +1652,16 @@ impl App {
                 None => self.caret_screen(),
             }
         };
-        w.set_ime_cursor_area(
-            PhysicalPosition::new(x as f64, y as f64),
-            PhysicalSize::new(2.0, h as f64),
-        );
+        // 测试 hook：无论有没有窗口都记录坐标，供锚点正确性断言。
+        #[cfg(test)]
+        self.window_state.ime_area_calls.push((x, y, h));
+        // 生产路径：只有有窗口才下发。
+        if let Some(w) = self.window_state.window.clone() {
+            w.set_ime_cursor_area(
+                PhysicalPosition::new(x as f64, y as f64),
+                PhysicalSize::new(2.0, h as f64),
+            );
+        }
     }
 
     /// 打开/关闭模态时同步 IME：模态独占键盘，若 IME 仍启用，

@@ -1193,6 +1193,203 @@ fn opening_history_or_image_preview_clears_preedit() {
     assert_eq!(doc_text(&b), "abc\n", "图片预览吞掉上屏");
 }
 
+/// 真实输入法事件序列（winit `WindowEvent::Ime`）：
+/// preedit → 更新 preedit → commit → preedit 被清 → 文档落字。
+/// 走 `handle_window_event` 生产路径而非直接调 `ime_preedit` / `ime_commit`。
+#[test]
+fn ime_chinese_composition_full_preedit_to_commit_flow() {
+    use winit::event::{Ime, WindowEvent};
+    let store = MemStore::default();
+    let mut a = app("", None, false, &store);
+    a.ensure_layouts_all();
+
+    // 阶段 1：初始 preedit（如 "zhong"），cursor 指向末端
+    a.handle_window_event(WindowEvent::Ime(Ime::Preedit("zhong".into(), Some((0, 5)))));
+    let pre = a.editor.preedit().expect("preedit 必须挂载到 Editor");
+    assert_eq!(pre.text, "zhong");
+    assert_eq!(pre.cursor, Some((0, 5)));
+    assert_eq!(doc_text(&a), "", "组合期不得写正文");
+
+    // 阶段 2：preedit 更新（继续输入 → "zhongwen"），cursor 前移
+    a.handle_window_event(WindowEvent::Ime(Ime::Preedit(
+        "zhongwen".into(),
+        Some((0, 8)),
+    )));
+    let pre2 = a.editor.preedit().expect("更新后 preedit 仍存在");
+    assert_eq!(pre2.text, "zhongwen");
+    assert_eq!(pre2.cursor, Some((0, 8)));
+    assert_eq!(doc_text(&a), "", "更新阶段不得写正文");
+
+    // 阶段 3：commit "中文" → preedit 被清 + 文档落字 + 另起撤销步
+    let depth_before = a.editor.session().undo_depth();
+    a.handle_window_event(WindowEvent::Ime(Ime::Commit("中文".into())));
+    assert!(a.editor.preedit().is_none(), "commit 后 preedit 必须清除");
+    assert_eq!(doc_text(&a), "中文", "commit 必须把文本写入正文");
+    assert_eq!(
+        a.editor.session().undo_depth(),
+        depth_before + 1,
+        "IME commit 必须是独立撤销步"
+    );
+
+    // 阶段 4：IME Disabled 也必须保持 preedit 已清状态（幂等无副作用）
+    let depth_after = a.editor.session().undo_depth();
+    a.handle_window_event(WindowEvent::Ime(Ime::Disabled));
+    assert!(a.editor.preedit().is_none());
+    assert_eq!(doc_text(&a), "中文");
+    assert_eq!(
+        a.editor.session().undo_depth(),
+        depth_after,
+        "Disabled 不产生撤销步"
+    );
+}
+
+/// IME Disabled 在 preedit 活跃时必须立即收掉组合态（场景：切到英文模式或 IME 关闭）。
+#[test]
+fn ime_disabled_clears_active_preedit() {
+    use winit::event::{Ime, WindowEvent};
+    let store = MemStore::default();
+    let mut a = app("你好\n", None, false, &store);
+    a.ensure_layouts_all();
+
+    a.handle_window_event(WindowEvent::Ime(Ime::Preedit("zhong".into(), Some((0, 5)))));
+    assert!(a.editor.preedit().is_some(), "preedit 已挂载");
+
+    a.handle_window_event(WindowEvent::Ime(Ime::Disabled));
+    assert!(a.editor.preedit().is_none(), "Disabled 必须清 preedit");
+    assert_eq!(doc_text(&a), "你好\n", "Disabled 不得产生文档副作用");
+}
+
+/// 候选窗锚点正确性（CRTL）：`set_ime_area` 每次被调都记录坐标，
+/// 断言记录坐标与 `caret_screen()` 一致；换行后第二次调用坐标确实更新了。
+#[test]
+fn ime_candidate_window_anchor_updates_after_linebreak() {
+    use winit::event::{Ime, WindowEvent};
+    let store = MemStore::default();
+    let mut a = app("第一行", None, false, &store);
+    a.ensure_layouts_all();
+    // 初始光标在文首（块外），先移到文末让 commit 落到段尾
+    a.perform_action(Action::Doc(Intent::MoveDocEnd));
+    a.after_edit(Vec::new());
+    a.scroll_to_caret();
+    a.ensure_layouts_all();
+
+    // 初始：光标在文末，手动触发 set_ime_area 作为基准
+    a.window_state.ime_area_calls.clear();
+    a.set_ime_area();
+    let base = a
+        .window_state
+        .ime_area_calls
+        .pop()
+        .expect("set_ime_area 必须记录一次");
+    let carets = a.caret_screen();
+    assert!(
+        (base.0 - carets.0).abs() < 0.5 && (base.1 - carets.1).abs() < 0.5,
+        "set_ime_area 坐标必须与 caret_screen 一致: recorded={base:?} vs caret={carets:?}"
+    );
+
+    // IME preedit：不触发 set_ime_area（preedit 只改组合串，光标不动）
+    a.window_state.ime_area_calls.clear();
+    a.handle_window_event(WindowEvent::Ime(Ime::Preedit("zh".into(), Some((0, 2)))));
+    assert!(
+        a.window_state.ime_area_calls.is_empty(),
+        "preedit 不得触发 set_ime_area（光标未移动）"
+    );
+
+    // IME commit "中" → set_ime_area 被调 → 坐标仍在第一段末尾附近
+    a.window_state.ime_area_calls.clear();
+    a.handle_window_event(WindowEvent::Ime(Ime::Commit("中".into())));
+    let commit_call = *a
+        .window_state
+        .ime_area_calls
+        .last()
+        .expect("commit 必须触发 set_ime_area");
+    let caret_commit = a.caret_screen();
+    assert!(
+        (commit_call.0 - caret_commit.0).abs() < 0.5
+            && (commit_call.1 - caret_commit.1).abs() < 0.5,
+        "commit 后 set_ime_area 必须对齐 caret_screen: recorded={commit_call:?} vs caret={caret_commit:?}"
+    );
+    assert_eq!(doc_text(&a), "第一行中", "commit 落字正确");
+
+    // 插入换行：光标从第一段末尾跳到第二段开头 → set_ime_area 第二次调用，y 坐标必须下移
+    let calls_before = a.window_state.ime_area_calls.len();
+    a.route_key(Key::Enter);
+    let newline_calls: Vec<_> = a.window_state.ime_area_calls[calls_before..].to_vec();
+    assert!(
+        !newline_calls.is_empty(),
+        "换行必须触发 set_ime_area（光标换行）"
+    );
+    let last_after_newline = *newline_calls.last().unwrap();
+    let caret_after_newline = a.caret_screen();
+    assert!(
+        (last_after_newline.0 - caret_after_newline.0).abs() < 0.5
+            && (last_after_newline.1 - caret_after_newline.1).abs() < 0.5,
+        "换行后 set_ime_area 必须对齐 caret_screen: recorded={last_after_newline:?} vs caret={caret_after_newline:?}"
+    );
+    assert!(
+        last_after_newline.1 > commit_call.1,
+        "换行后锚点 y 必须大于 commit 前的 y（光标已下移）"
+    );
+    assert_eq!(doc_text(&a), "第一行中\n", "Enter 必须产生段尾换行");
+}
+
+/// 移动光标后 preedit cursor 同步更新——编辑器 preedit 是 (text, cursor) 元组，
+/// 光标移动后 IME 必须用新的 cursor 重发 preedit（真实 IME 在光标移动时会自动重发）。
+#[test]
+fn ime_preedit_with_cursor_position_updates_after_caret_move() {
+    use winit::event::{Ime, WindowEvent};
+    let store = MemStore::default();
+    let mut a = app("abcdef\n", None, false, &store);
+    a.ensure_layouts_all();
+
+    // 在 "cdef" 处挂 preedit（cursor 指向当前光标位置）
+    assert!(a.editor.set_caret(3), "光标应能移动到位置 3（'d' 前）");
+    a.handle_window_event(WindowEvent::Ime(Ime::Preedit("zhong".into(), Some((0, 3)))));
+    let pre = a.editor.preedit().expect("preedit 已挂载");
+    assert_eq!(pre.text, "zhong");
+    assert_eq!(pre.cursor, Some((0, 3)));
+
+    // 模拟：真实 IME 在用户按方向键移动光标后重发 preedit + 新 cursor
+    assert!(a.editor.set_caret(5), "光标应能移动到位置 5（'f' 前）");
+    a.handle_window_event(WindowEvent::Ime(Ime::Preedit("zhong".into(), Some((0, 5)))));
+    let pre2 = a.editor.preedit().expect("光标移动后 preedit 应仍存在");
+    assert_eq!(
+        pre2.cursor,
+        Some((0, 5)),
+        "cursor 必须同步到新的 caret 位置"
+    );
+    assert_eq!(pre2.text, "zhong", "cursor 更新不得修改组合文本");
+    assert_eq!(doc_text(&a), "abcdef\n", "组合期不得写正文");
+
+    // 空 preedit 等价于组合结束（winit 0.30 的约定）
+    a.handle_window_event(WindowEvent::Ime(Ime::Preedit(String::new(), None)));
+    assert!(a.editor.preedit().is_none(), "空 preedit 必须清除组合态");
+}
+
+/// 既有测试强化：扩 `ime_preedit_cleared_when_commit_lands_in_menu_or_history` 覆盖换行。
+#[test]
+fn ime_preedit_cleared_when_commit_lands_in_menu_or_history_extended_to_newline() {
+    use winit::event::{Ime, WindowEvent};
+    let store = MemStore::default();
+    let mut a = app("abc\ndef\n", None, false, &store);
+    a.ensure_layouts_all();
+
+    // 换行后打开菜单：preedit 不挂载，提交吞掉
+    a.route_key(Key::Enter); // 触发换行 → 光标到第二段
+    a.window_state.ime_area_calls.clear();
+    a.ui_state.chrome.open = Some(0); // 打开菜单
+    a.handle_window_event(WindowEvent::Ime(Ime::Preedit("zh".into(), Some((0, 2)))));
+    assert!(
+        a.editor.preedit().is_none(),
+        "菜单不挂组合串（换行后仍不挂）"
+    );
+
+    // 切菜单前已有的 preedit 必须被 IME Disabled 收掉
+    a.editor.set_preedit("残".into(), None);
+    a.handle_window_event(WindowEvent::Ime(Ime::Disabled));
+    assert!(a.editor.preedit().is_none(), "Disabled 必须清残留 preedit");
+}
+
 #[test]
 fn search_bar_clicks_run_buttons_and_swallow_text_area() {
     let store = MemStore::default();

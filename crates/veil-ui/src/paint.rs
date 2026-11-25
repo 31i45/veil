@@ -1876,9 +1876,9 @@ fn component_eq_ci<'a, 'b>(a: &Component<'a>, b: &Component<'b>) -> bool {
         (Component::CurDir, Component::CurDir)
         | (Component::ParentDir, Component::ParentDir)
         | (Component::RootDir, Component::RootDir) => true,
-        (Component::Normal(x), Component::Normal(y)) => {
-            x.to_string_lossy().eq_ignore_ascii_case(&y.to_string_lossy())
-        }
+        (Component::Normal(x), Component::Normal(y)) => x
+            .to_string_lossy()
+            .eq_ignore_ascii_case(&y.to_string_lossy()),
         // PrefixComponent::as_os_str 在 stable 可用；它返回内部原始前缀字节。
         (Component::Prefix(px), Component::Prefix(py)) => {
             let ax = px.as_os_str().to_string_lossy().to_ascii_lowercase();
@@ -1898,8 +1898,8 @@ fn is_contained_within(root: &Path, candidate: &Path) -> bool {
         let a = rc.next();
         let b = cc.next();
         match (a, b) {
-            (None, None) => return true,   // 等长且完全一致
-            (None, Some(_)) => return true, // root 已耗尽 → candidate 以前缀 root 开头，是后代 ✓
+            (None, None) => return true,     // 等长且完全一致
+            (None, Some(_)) => return true,  // root 已耗尽 → candidate 以前缀 root 开头，是后代 ✓
             (Some(_), None) => return false, // candidate 更短，不可能是 root 的后代
             (Some(x), Some(y)) => {
                 if !component_eq_ci(&x, &y) {

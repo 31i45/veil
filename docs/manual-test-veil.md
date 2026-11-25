@@ -196,15 +196,23 @@ New-Item -ItemType Directory -Path $env:VEIL_HOME -Force | Out-Null
 ```
 
 - 暗色轮把 `mode = "light"` 改为 `mode = "dark"` 后重启。
-- 取证脚本（参数以 `-Help` 为准）。滚动条由脚本直接截；菜单/模态需人工展开后截：
+- 取证脚本（参数以 `-Help` 为准）支持脚本化合成输入，因此三类截图都可复现。**产品没有 Alt 助记键**（实测 `Alt+F` 会把 `f` 输入正文），菜单弹层只能用合成鼠标点击打开；`Ctrl+,` 打开设置模态（无按钮），未保存确认模态用 `Alt+F4`：
 
 ```powershell
 $exe = 'target\release\veil.exe'
+# 滚动条（直接裁切）
 pwsh -NoProfile -File tools/verify/ac9_capture.ps1 -Exe $exe -Theme light -Region scrollbar -Doc .\README.zh-CN.md
 pwsh -NoProfile -File tools/verify/ac9_capture.ps1 -Exe $exe -Theme dark  -Region scrollbar -Doc .\README.zh-CN.md
+# 菜单弹层（合成点击展开「文件」，-Region menu 在合成输入下扩展为整窗裁切）
+pwsh -NoProfile -File tools/verify/ac9_capture.ps1 -Exe $exe -Theme light -Region menu -ClickMenu -OutDir evidence\verify\ac9
+pwsh -NoProfile -File tools/verify/ac9_capture.ps1 -Exe $exe -Theme dark  -Region menu -ClickMenu -OutDir evidence\verify\ac9
+# 未保存确认模态（粘贴一个字符置脏，再 Alt+F4）
+pwsh -NoProfile -File tools/verify/ac9_capture.ps1 -Exe $exe -Theme light -Region modal -SendKeys "^v%{F4}" -OutDir evidence\verify\ac9
+pwsh -NoProfile -File tools/verify/ac9_capture.ps1 -Exe $exe -Theme dark  -Region modal -SendKeys "^v%{F4}" -OutDir evidence\verify\ac9
 ```
 
-- `-Region menu` 只裁菜单栏，不等于菜单弹层；`-Region modal` 只截整窗基线并在日志中 WARN，二者不能当 `-menu.png` / `-modal.png` 证据。脚本缺失或失败时记 `NOT RUN`，不得用旧图、手工拼图或系统截图冒充本节证据。
+- 每次合成输入都会在日志/header 中记录（`send_keys` / `click_menu`），便于复跑与审计。
+- 未使用合成输入时，`-Region menu` 只裁菜单栏、`-Region modal` 只截整窗基线并 WARN，不能当 `-menu.png` / `-modal.png` 证据。脚本失败时记 `NOT RUN`，不得用旧图、手工拼图或系统截图冒充本节证据。
 
 **三项签名元素与判定**
 
@@ -224,7 +232,7 @@ pwsh -NoProfile -File tools/verify/ac9_capture.ps1 -Exe $exe -Theme dark  -Regio
 
 **盲测方法**
 
-1. 六张 Veil 图分三组：滚动条用 `ac9_capture.ps1 -Region scrollbar` 直接截；菜单用同主题启动 Veil 后点开「文件」弹层（不要用含「关于 Veil」的菜单），截弹层外扩 24px；模态在脏文档上按 `Alt+F4` 打开未保存确认（不要用「关于 Veil」弹窗），截卡片外扩 24px。菜单/模态用 `Win+Shift+S` 保存为 `-menu.png` / `-modal.png`，亮/暗各一套，共六张。
+1. 六张 Veil 图分三组：滚动条用 `ac9_capture.ps1 -Region scrollbar` 直接截；菜单用 `-Region menu -ClickMenu` 截「文件」弹层（不要用含「关于 Veil」的菜单）；模态用 `-Region modal -SendKeys "^v%{F4}"` 截未保存确认卡片（不要用「关于 Veil」弹窗）。亮/暗各一套，共六张；脚本产出的 `-masked.png`（裁掉顶部 45px 非客户区）可直接用于盲评。脚本不可用时才退回「人工展开 + `Win+Shift+S`」，并在记录中写明。
 2. 参照物至少一个同类工具：记事本或 VS Code。滚动条用记事本长文档；菜单用记事本/VS Code 的「文件」弹层；模态用记事本的未保存对话框。参照物与 Veil 同窗口尺寸、同 150%、同裁切尺寸。
 3. 遮住标题栏文字、应用图标、任务栏标签，以及任何直接暴露应用名的文字；保留被测控件本体，否则无法量圆角和对齐。
 4. 把 Veil 图与参照图随机命名为 A/B/C，交给至少一名未参与开发的人，只给上面的判定表，不给品牌信息。开发者本人不得是唯一评审；若只有本人，结论标注“非盲评”。
@@ -273,22 +281,25 @@ $exe = 'target\release\veil.exe'
 
 | 步 | 操作 | 预期 Narrator 朗读（关键片段） | 预期界面变化 | 实际朗读（原样记录） | 通过 |
 |---|---|---|---|---|---|
-| A1 | 启动 `$exe`，等示例页出现后按 `Ctrl+N` 新建空文档 | “veil，窗口”（窗口根节点标签）；`Ctrl+N` 本身不朗读 | 出现空白文档，正文为空 |  | ☐ |
-| A2 | 按一下 `Alt` 后松开，不按其他键 | “主菜单栏”（菜单栏获得焦点） | 菜单栏出现键盘焦点/高亮 |  | ☐ |
-| A3 | 按 `→` 直到「文件」高亮（已在「文件」则跳过） | “文件” | 「文件」标题高亮，弹层尚未展开 |  | ☐ |
-| A4 | 按 `Enter` | “文件，菜单”；随后“新建，菜单项，Ctrl+N” | 「文件」弹层展开，首项「新建」高亮 |  | ☐ |
-| A5 | 按 `↓` 逐项到「关闭窗口」 | 依次读“新建窗口”“打开…”“快速打开”…“版本历史”；末项“关闭窗口，菜单项”。分隔线与禁用项不朗读 | 高亮逐项下移，弹层不消失 |  | ☐ |
-| A6 | 保持弹层展开，用 Narrator 扫描模式（`Caps+↓`）定位「导出 HTML」 | “导出 HTML，不可用”（或“导出 HTML，变暗”） | 该项置灰并显示“空文档”类原因；按 `Enter` 不产生导出 |  | ☐ |
-| A7 | 按 `Esc` 退出扫描模式，必要时再按 `Esc` 关闭弹层；重新展开「文件」，按 `↓` 到「关闭窗口」，按 `Enter` | “关闭窗口，菜单项”；触发后无播报 | 窗口关闭，进程退出；不得弹出未保存确认 |  | ☐ |
+| A1 | 启动 feature 构建，等示例页出现；`Win+Ctrl+Enter` 开启 Narrator | “veil，窗口”（根节点标签，含文档标题） | 窗口可见，正文为示例页 |  | ☐ |
+| A2 | 用 Narrator 导航键（`Caps+→`，或 `Insert+Right`）从窗口移到“主菜单栏” | “主菜单栏” | 焦点框移到菜单栏 |  | ☐ |
+| A3 | 再按一次导航键到“文件” | “文件” | 焦点框在“文件”上（菜单**不会**视觉展开，见下方说明） |  | ☐ |
+| A4 | 再按导航键到第一项“新建” | “新建，菜单项，Ctrl+N” | 无视觉变化 |  | ☐ |
+| A5 | 继续逐项导航到“关闭窗口” | 依次读“新建窗口”“打开…”“快速打开”“保存”“另存为…”“导出 HTML…”“导出 PDF…”“打印…”“版本历史”；空文档下导出/打印应读“不可用” | 无视觉变化 |  | ☐ |
+| A6 | 先导航到「导出 HTML…」按一次 `Enter`（空文档禁用态） | “导出 HTML…，不可用” | **不得**出现导出对话框或文件写入 |  | ☐ |
+| A7 | 导航到“视图”→“主题：暗色”，按 `Enter` | “主题：暗色，菜单项” | **界面立即切换为暗色**（动作真正执行） |  | ☐ |
+| A8 | 导航回“文件”→“关闭窗口”，按 `Enter` | “关闭窗口，菜单项” | 窗口关闭、进程退出；此时正文未修改，不弹未保存确认 |  | ☐ |
 
-- 方向键会跳过分隔线与禁用项，所以 A5 听不到「导出 HTML」「导出 PDF」「打印」属正常；禁用态只看 A6 的扫描模式与 UIA 树，不以方向键是否经过为准。
-- A2 无播报或菜单栏不亮时，A2 记失败、路径 A 已失败；为了继续验证 A3–A7，可用鼠标点「文件」展开后继续，并在记录中写明“改用鼠标进入”。
+- 当前实现把 4 个顶层菜单及全部非分隔菜单项**常驻**语义树（产品没有 Alt 助记键，纯键盘无法展开菜单），所以 A3–A7 不需要鼠标展开弹层；读屏导航与视觉“菜单展开”是两条独立路径。
+- A2 若无法到达“主菜单栏”，记 A2 失败；为继续 A3–A8，可先用鼠标点开「文件」再回到读屏导航，并在记录中写明“改用鼠标进入”。
+- A6 的失败判定是“禁用项被当成可用并真的执行”；只朗读成“不可用”但 `Enter` 仍执行，同样记 J-F3。
+- A7 以“界面切换暗色”作为动作执行的可观察证据；朗读正确但界面无变化，记动作未接线。
 
 **路径 B（模态）**
 
 | 步 | 操作 | 预期 Narrator 朗读（关键片段） | 预期界面变化 | 实际朗读（原样记录） | 通过 |
 |---|---|---|---|---|---|
-| B1 | 启动后直接在示例页末尾输入 `abc`，不保存 | 开启字符回显时读“a”“b”“c”；关闭时无播报 | 标题出现前置 `*`，状态栏显示未保存 |  | ☐ |
+| B1 | 启动后直接在示例页末尾输入 `abc`（切到英文输入法；中文 IME 未上屏的拼音属于预编辑，不计入），不保存 | 开启字符回显时读“a”“b”“c”；关闭时无播报 | 标题出现前置 `*`，状态栏显示未保存 |  | ☐ |
 | B2 | 按 `Alt+F4` | 无（或立即进入 B3 的标题播报） | 弹出未保存确认模态，背景被遮罩 |  | ☐ |
 | B3 | 等 1 秒，不动键盘 | “是否保存对「未命名草稿」的更改？，对话框”；当前焦点“保存，按钮” | 模态卡片出现，焦点环在「保存」 |  | ☐ |
 | B4 | 按 `Tab` | “不保存，按钮” | 焦点移到「不保存」 |  | ☐ |
@@ -316,8 +327,8 @@ $exe = 'target\release\veil.exe'
 
 | 证据 | 路径 | 生成方式 | 验收点 |
 |---|---|---|---|
-| `evidence\verify\ac11\uia-tree-menu.txt` | A | `pwsh -NoProfile -File tools/verify/ac11_uia_dump.ps1 -Exe $exe -Scenario menu -WaitMs 20000 -OutFile evidence\verify\ac11\uia-tree-menu.txt`。脚本启动 Veil 后有 20 秒等待期，在此期间先按 `Ctrl+N` 新建空文档，再用鼠标点开「文件」弹层并保持展开，等待结束即导出 | 含 `MenuBar`“主菜单栏”、`Menu`“文件”、`MenuItem`“新建”…“关闭窗口”；空文档下「导出 HTML」「导出 PDF」「打印」带 `IsEnabled=False` |
-| `evidence\verify\ac11\uia-tree-modal.txt` | B | `pwsh -NoProfile -File tools/verify/ac11_uia_dump.ps1 -Exe $exe -Scenario modal -WaitMs 20000 -OutFile evidence\verify\ac11\uia-tree-modal.txt`。脚本会打开 README 临时副本；在 20 秒内输入一个字符，再按 `Alt+F4` 打开未保存模态并保持到导出 | 含 `Dialog` 标题“是否保存对「…」的更改？”、`Button`“保存/不保存/取消” |
+| `evidence\verify\ac11\uia-tree-menu.txt` | A | `pwsh -NoProfile -File tools/verify/ac11_uia_dump.ps1 -Exe $exe -Scenario menu -ClickMenu -WaitMs 20000 -OutFile evidence\verify\ac11\uia-tree-menu.txt`。`-ClickMenu` 由脚本合成点击展开「文件」，header 会记录 `click_menu = yes`；另跑一次不带 `-ClickMenu` 的同一命令存为 `uia-tree-menu-closed.txt`，验证未展开时菜单项也常驻 | 两份都含 `MenuBar`“主菜单栏”、`Menu`“文件”与全部 `MenuItem`（当前实测 nodes=45、menu_items=39）；空文档下「导出 HTML…」「导出 PDF…」「打印…」带 `IsEnabled=False` |
+| `evidence\verify\ac11\uia-tree-modal.txt` | B | `pwsh -NoProfile -File tools/verify/ac11_uia_dump.ps1 -Exe $exe -Scenario modal -SendKeys "^v%{F4}" -SettleMs 1200 -WaitMs 20000 -OutFile evidence\verify\ac11\uia-tree-modal.txt`（合成粘贴一个字符置脏，再 Alt+F4 打开未保存确认） | 除根节点外**无** `MenuBar`/`MenuItem`；含 `Dialog` 标题“是否保存对「…」的更改？”与 `Button`“保存/不保存/取消”（当前实测 nodes=5、menu_items=0） |
 | `evidence\verify\ac11\<YYYYMMDD>-menu.mp4` | A | 含系统音频的录屏，从 A1 前开始到 A7 结束 | 能听到每一步朗读；播放确认非静音 |
 | `evidence\verify\ac11\<YYYYMMDD>-modal.mp4` | B | 含系统音频的录屏，从 B1 前开始到 B8 结束 | 能听到标题、按钮切换、取消后焦点变化；播放确认非静音 |
 

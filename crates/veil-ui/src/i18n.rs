@@ -680,6 +680,7 @@ keys! {
     SettingsExportToc => "settings.export_toc", "导出 PDF 时包含目录页";
     SettingsExportMarginMm => "settings.export_margin_mm", "导出 PDF 页边距（毫米，0–50）";
     SettingsTabWidth => "settings.tab_width", "制表符宽度（2 或 4）";
+    SettingsSourcePlainLines => "settings.source_plain_lines", "源码模式：纯文本行视图";
     NoticeSettingsSaved => "notice.settings_saved", "设置已保存";
     NoticeUiLanguageRestart => "notice.ui_language_restart", "界面语言已更改，重启后生效";
     NoticeSettingsSaveFailed => "notice.settings_save_failed",
@@ -1829,6 +1830,10 @@ fn main() {
         "PDF Export Margin (mm, 0–50)",
     ),
     (Key::SettingsTabWidth, "Tab Width (2 or 4)"),
+    (
+        Key::SettingsSourcePlainLines,
+        "Source Mode: Plain-Text Line View",
+    ),
     (Key::NoticeSettingsSaved, "Settings saved"),
     (
         Key::NoticeUiLanguageRestart,

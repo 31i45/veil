@@ -1073,6 +1073,103 @@ fn settings_excludes_ime_text_from_document() {
     assert!(a.ui_state.settings.is_some());
 }
 
+/// 字体弹层 IME：组字期间组合串不得写入过滤串；上屏后只写入最终提交串并重新过滤。
+#[test]
+fn settings_font_picker_ime_composition_does_not_pollute_filter() {
+    use crate::view::settings::FieldKind;
+    let store = MemStore::default();
+    let mut a = app("abc\n", None, false, &store);
+    a.open_settings();
+    {
+        let s = a.ui_state.settings.as_mut().expect("设置已打开");
+        let idx = s
+            .form
+            .fields
+            .iter()
+            .position(|f| matches!(f.kind, FieldKind::FontFamily))
+            .expect("字体字段存在");
+        s.state.focused_field = idx;
+        s.state.focused_button = None;
+    }
+    a.route_key(Key::Text(" ".into()));
+    assert!(
+        a.ui_state
+            .settings
+            .as_ref()
+            .expect("设置已打开")
+            .form
+            .font_picker
+            .is_some(),
+        "Space 必须打开字体弹层"
+    );
+
+    // 组字期间：组合串只到 IME preedit，过滤串保持为空。
+    a.ime_preedit("zhong".into(), Some((0, 5)));
+    assert!(a.editor.preedit().is_none(), "设置弹层不挂组合串");
+    assert_eq!(
+        a.ui_state
+            .settings
+            .as_ref()
+            .expect("设置已打开")
+            .form
+            .font_picker
+            .as_ref()
+            .expect("字体弹层已打开")
+            .query,
+        "",
+        "组合串不得写入过滤串"
+    );
+
+    // 上屏：只写入最终提交串，并立即重新过滤。
+    a.ime_commit("字形".into());
+    let picker = a
+        .ui_state
+        .settings
+        .as_ref()
+        .expect("设置已打开")
+        .form
+        .font_picker
+        .as_ref()
+        .expect("字体弹层已打开");
+    assert_eq!(picker.query, "字形", "上屏后过滤串为提交串");
+    assert!(!picker.query.contains("zhong"), "组合串不得残留");
+    assert!(picker.hits.is_empty(), "不存在的字族应过滤为空");
+    assert_eq!(doc_text(&a), "abc\n", "设置期间上屏不得写入正文");
+}
+
+/// 源码纯文本行灰度开关：OK 后写回 Config 并落盘。
+#[test]
+fn settings_source_plain_lines_writes_back_and_persists() {
+    use crate::view::settings::{FieldKind, FieldValue, BTN_OK};
+    let cfg = MemConfig::default();
+    let saves = cfg.saves.clone();
+    let mut a = app_theme(Box::new(cfg), Rc::new(Cell::new(Some(false))));
+    assert!(!a.config.source_plain_lines);
+
+    a.open_settings();
+    {
+        let s = a.ui_state.settings.as_mut().expect("设置已打开");
+        let idx = s
+            .form
+            .fields
+            .iter()
+            .position(|f| f.label == I18nKey::SettingsSourcePlainLines)
+            .expect("源码纯文本行开关必须存在");
+        assert!(matches!(s.form.fields[idx].kind, FieldKind::Toggle));
+        assert!(matches!(
+            s.form.fields[idx].value,
+            FieldValue::Toggle(false)
+        ));
+        s.form.fields[idx].value = FieldValue::Toggle(true);
+    }
+    a.resolve_settings(BTN_OK);
+
+    assert!(a.config.source_plain_lines, "OK 后必须写回 Config");
+    let saved = saves.borrow().last().cloned().expect("OK 必须写盘");
+    let parsed = crate::theme::decode_config(saved.as_bytes()).expect("写盘内容可解析");
+    assert!(parsed.config.source_plain_lines, "开关必须落盘");
+}
+
 #[test]
 fn opening_history_or_image_preview_clears_preedit() {
     let store = MemStore::default();

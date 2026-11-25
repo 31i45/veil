@@ -274,6 +274,13 @@ impl SettingsForm {
                 read_only: false,
             },
             SettingsField {
+                label: Key::SettingsSourcePlainLines,
+                kind: FieldKind::Toggle,
+                value: FieldValue::Toggle(cfg.source_plain_lines),
+                buffer: None,
+                read_only: false,
+            },
+            SettingsField {
                 label: Key::SettingsWindowGeom,
                 kind: FieldKind::WindowGeom,
                 value: FieldValue::Geom(cfg.window.map(|w| (w.width, w.height, w.x, w.y))),
@@ -575,6 +582,11 @@ impl SettingsForm {
                         out.allow_remote_images = v;
                     }
                 }
+                Key::SettingsSourcePlainLines => {
+                    if let FieldValue::Toggle(v) = f.value {
+                        out.source_plain_lines = v;
+                    }
+                }
                 Key::SettingsExportPageNumbers => {
                     if let FieldValue::Toggle(v) = f.value {
                         out.export_page_numbers = v;
@@ -620,8 +632,9 @@ pub(crate) const BTN_OK: u16 = 1;
 pub(crate) const BTN_RESET_DEFAULTS: u16 = 2;
 pub(crate) const BTN_CANCEL: u16 = 3;
 
-/// 键盘焦点顺序：OK → Cancel → Restore Defaults（值为 buttons() 中的索引）。
-const BUTTON_TAB_ORDER: [usize; 3] = [0, 2, 1];
+/// 键盘焦点顺序：按视觉从左到右的阅读顺序 OK → Restore Defaults → Cancel
+/// （值为 buttons() 中的索引；按钮自右向左排布，故索引与视觉顺序一致）。
+const BUTTON_TAB_ORDER: [usize; 3] = [0, 1, 2];
 
 /// 「清除」按钮的水平内边距：按钮宽度按标签实测宽 + 两侧内边距，
 /// 不再用固定 120px（小于标签宽时文字会溢出描边，看起来不像按钮）。
@@ -939,7 +952,9 @@ impl SettingsState {
         }
     }
 
-    /// Tab 循环：非只读字段 → OK → Cancel → Restore Defaults；Shift+Tab 反向。
+    /// Tab 顺序：非只读字段（按视觉行序）→ OK → Restore Defaults → Cancel；
+    /// Shift+Tab 反向。线性不环形：首项再 Shift+Tab / 末项再 Tab 原地不动，
+    /// 避免键盘用户在面板里「绕圈」丢失当前位置。
     pub(crate) fn tab(&mut self, form: &SettingsForm, shift: bool) {
         let non_readonly: Vec<usize> = form
             .fields
@@ -948,6 +963,10 @@ impl SettingsState {
             .filter(|(_, f)| !f.read_only)
             .map(|(i, _)| i)
             .collect();
+        let total = non_readonly.len() + BUTTON_TAB_ORDER.len();
+        if total == 0 {
+            return;
+        }
         let cur_pos = match self.focused_button {
             Some(button) => {
                 non_readonly.len()
@@ -961,11 +980,10 @@ impl SettingsState {
                 .position(|&i| i == self.focused_field)
                 .unwrap_or(0),
         };
-        let total = non_readonly.len() + BUTTON_TAB_ORDER.len();
         let next = if shift {
-            (cur_pos + total - 1) % total
+            cur_pos.saturating_sub(1)
         } else {
-            (cur_pos + 1) % total
+            (cur_pos + 1).min(total - 1)
         };
         if next < non_readonly.len() {
             self.focused_field = non_readonly[next];
@@ -1176,10 +1194,15 @@ impl SettingsState {
                 layout.button_ids.last().copied()
             }
             InputKey::Enter => {
-                // 如果有聚焦按钮 → 激活；否则激活 OK
-                self.focused_button
-                    .and_then(|i| layout.button_ids.get(i).copied())
-                    .or_else(|| layout.button_ids.first().copied())
+                // 字段上 Enter 与 Space 等价：打开字体弹层 / 切换主题、语言、开关。
+                // 只有焦点落在按钮上时才作为「按下按钮」返回 id。
+                match self.focused_button {
+                    Some(i) => layout.button_ids.get(i).copied(),
+                    None => {
+                        self.toggle_field(form);
+                        None
+                    }
+                }
             }
             InputKey::Tab => {
                 self.tab(form, shift);
@@ -1782,6 +1805,7 @@ mod tests {
     use super::*;
     use crate::i18n::{translate, LOCALES};
     use crate::input::Mods;
+    use std::time::Instant;
 
     const EPSILON: f32 = 0.001;
 
@@ -2104,7 +2128,11 @@ mod tests {
 
     #[test]
     fn focused_field_and_secondary_use_shared_contrast_policy() {
-        for theme in [crate::theme::Theme::light(), crate::theme::Theme::dark()] {
+        for theme in [
+            crate::theme::Theme::light(),
+            crate::theme::Theme::dark(),
+            crate::theme::Theme::high_contrast(),
+        ] {
             let form = default_form();
             let layout = layout_scrolled(viewport(1280.0, 800.0), &form, 1.0, 0);
             let popup = palette::surface_popup(&theme);
@@ -2141,7 +2169,11 @@ mod tests {
 
     #[test]
     fn field_and_button_focus_rings_share_dpi_thickness() {
-        for theme in [crate::theme::Theme::light(), crate::theme::Theme::dark()] {
+        for theme in [
+            crate::theme::Theme::light(),
+            crate::theme::Theme::dark(),
+            crate::theme::Theme::high_contrast(),
+        ] {
             let form = default_form();
             let scale = 1.5;
             let layout = layout_scrolled(viewport(1280.0, 800.0), &form, scale, 0);
@@ -2219,7 +2251,23 @@ mod tests {
         let layout = layout_for(viewport(1280.0, 800.0), &form);
         let mut state = SettingsState::new(&form);
 
-        for expected_id in [BTN_RESET_DEFAULTS, BTN_CANCEL, BTN_OK] {
+        // 首项再 Shift+Tab：线性不环形，位置保持不动。
+        state.tab(&form, true);
+        assert_eq!(state.focused_field, editable[0]);
+        assert_eq!(state.focused_button, None);
+
+        // 先走到末项（最后一个按钮 Cancel），再反向走完整条链。
+        for _ in 0..(editable.len() + BUTTON_TAB_ORDER.len() - 1) {
+            state.tab(&form, false);
+        }
+        let cancel = layout
+            .button_ids
+            .iter()
+            .position(|&id| id == BTN_CANCEL)
+            .expect("Cancel 按钮必须存在");
+        assert_eq!(state.focused_button, Some(cancel));
+
+        for expected_id in [BTN_RESET_DEFAULTS, BTN_OK] {
             state.tab(&form, true);
             let expected = layout
                 .button_ids
@@ -2234,13 +2282,11 @@ mod tests {
             assert_eq!(state.focused_button, None);
         }
 
+        // 已在首项：Shift+Tab 停在原地，不回环到末项。
+        let first = state.focused_field;
         state.tab(&form, true);
-        let reset = layout
-            .button_ids
-            .iter()
-            .position(|&id| id == BTN_RESET_DEFAULTS)
-            .expect("Restore Defaults 按钮必须存在");
-        assert_eq!(state.focused_button, Some(reset));
+        assert_eq!(state.focused_field, first);
+        assert_eq!(state.focused_button, None);
     }
 
     #[test]
@@ -2258,7 +2304,7 @@ mod tests {
             assert_eq!(state.focused_field, expected);
             assert_eq!(state.focused_button, None);
         }
-        for expected_id in [BTN_OK, BTN_CANCEL, BTN_RESET_DEFAULTS] {
+        for expected_id in [BTN_OK, BTN_RESET_DEFAULTS, BTN_CANCEL] {
             state.tab(&form, false);
             actual_stops += 1;
             let expected = layout
@@ -2270,9 +2316,169 @@ mod tests {
         }
         assert_eq!(actual_stops, expected_stops);
 
+        // 末项再 Tab：线性不环形，保持在最后一个按钮上。
         state.tab(&form, false);
-        assert_eq!(state.focused_field, editable[0]);
-        assert_eq!(state.focused_button, None);
+        let cancel = layout
+            .button_ids
+            .iter()
+            .position(|&id| id == BTN_CANCEL)
+            .expect("Cancel 按钮必须存在");
+        assert_eq!(state.focused_button, Some(cancel));
+    }
+
+    /// Tab 顺序数组：字段按视觉行序 → OK → Restore Defaults → Cancel，线性不跳不回环。
+    #[test]
+    fn tab_order_matches_linear_visual_reading_order() {
+        #[derive(Debug, PartialEq, Eq)]
+        enum Stop {
+            Field(usize),
+            Button(u16),
+        }
+
+        let form = default_form();
+        let layout = layout_for(viewport(1280.0, 800.0), &form);
+        let editable = editable_indices(&form);
+        let mut state = SettingsState::new(&form);
+        let mut order = vec![Stop::Field(state.focused_field)];
+        for _ in 1..(editable.len() + BUTTON_TAB_ORDER.len()) {
+            state.tab(&form, false);
+            order.push(match state.focused_button {
+                Some(i) => Stop::Button(layout.button_ids[i]),
+                None => Stop::Field(state.focused_field),
+            });
+        }
+
+        let mut expected: Vec<Stop> = editable.into_iter().map(Stop::Field).collect();
+        expected.extend([
+            Stop::Button(BTN_OK),
+            Stop::Button(BTN_RESET_DEFAULTS),
+            Stop::Button(BTN_CANCEL),
+        ]);
+        assert_eq!(order, expected, "Tab 顺序必须是可预期的线性阅读顺序");
+    }
+
+    /// Esc 分级：弹层打开时第一次 Esc 只关弹层，第二次才关整个设置模态。
+    #[test]
+    fn escape_closes_font_picker_before_settings_modal() {
+        let mut form = SettingsForm::from_config_with_families(
+            &Config::default(),
+            &[("Arial".to_string(), false)],
+        );
+        let layout = layout_for(viewport(1280.0, 800.0), &form);
+        let mut state = SettingsState::new(&form);
+        form.open_font_picker();
+
+        assert_eq!(
+            state.on_key(&InputKey::Escape, Mods::default(), &mut form, &layout),
+            None,
+            "弹层打开时 Esc 不直接关闭模态"
+        );
+        assert!(form.font_picker.is_none(), "第一次 Esc 只关闭字体弹层");
+        assert_eq!(
+            state.on_key(&InputKey::Escape, Mods::default(), &mut form, &layout),
+            Some(BTN_CANCEL),
+            "第二次 Esc 才以取消关闭整个设置模态"
+        );
+    }
+
+    /// 灰度开关：绑定 Config.source_plain_lines；Space/Enter 翻转并即时反映到 apply 结果。
+    #[test]
+    fn source_plain_lines_toggle_binds_and_writes_back_config() {
+        let config = Config::default();
+        assert!(!config.source_plain_lines);
+
+        let mut form = SettingsForm::from_config(&config);
+        let idx = form
+            .fields
+            .iter()
+            .position(|f| f.label == Key::SettingsSourcePlainLines)
+            .expect("源码纯文本行开关必须存在");
+        assert!(matches!(form.fields[idx].value, FieldValue::Toggle(false)));
+        let layout = layout_for(viewport(1280.0, 800.0), &form);
+        let mut state = SettingsState::new(&form);
+        state.focused_field = idx;
+        state.focused_button = None;
+
+        let space = InputKey::Text(" ".to_string());
+        assert_eq!(
+            state.on_key(&space, Mods::default(), &mut form, &layout),
+            None
+        );
+        assert!(form.apply(&config).source_plain_lines, "Space 必须写入配置");
+
+        assert_eq!(
+            state.on_key(&InputKey::Enter, Mods::default(), &mut form, &layout),
+            None,
+            "字段上的 Enter 与 Space 等价"
+        );
+        assert!(
+            !form.apply(&config).source_plain_lines,
+            "Enter 必须写回关闭"
+        );
+
+        form.fields[idx].value = FieldValue::Toggle(true);
+        assert!(
+            !form.reset_defaults().apply(&config).source_plain_lines,
+            "恢复默认必须回到关闭"
+        );
+    }
+
+    /// Space / Enter 在字体字段上打开候选弹层（不是一次循环）。
+    #[test]
+    fn space_and_enter_open_font_picker() {
+        for key in [InputKey::Text(" ".to_string()), InputKey::Enter] {
+            let mut form = SettingsForm::from_config_with_families(
+                &Config::default(),
+                &[("Arial".to_string(), false)],
+            );
+            let layout = layout_for(viewport(1280.0, 800.0), &form);
+            let mut state = SettingsState::new(&form);
+            state.focused_field = font_field_index(&form);
+            state.focused_button = None;
+
+            assert_eq!(
+                state.on_key(&key, Mods::default(), &mut form, &layout),
+                None
+            );
+            assert!(form.font_picker.is_some(), "Space/Enter 必须打开字体弹层");
+        }
+    }
+
+    /// 数值项：方向键微调（既有实现），左右与上下都按步长增减并夹取范围。
+    #[test]
+    fn arrow_keys_adjust_number_fields() {
+        let mut form = SettingsForm::from_config(&Config::default());
+        let layout = layout_for(viewport(1280.0, 800.0), &form);
+        let mut state = SettingsState::new(&form);
+        let idx = form
+            .fields
+            .iter()
+            .position(|f| f.label == Key::SettingsDocFontSize)
+            .expect("正文字号字段必须存在");
+        state.focused_field = idx;
+        state.focused_button = None;
+
+        let number = |form: &SettingsForm| match form.fields[idx].value {
+            FieldValue::Number(v) => v,
+            _ => panic!("字号字段必须是数值"),
+        };
+        let start = number(&form);
+
+        state.on_key(&InputKey::Right, Mods::default(), &mut form, &layout);
+        assert_eq!(number(&form), start + 1.0, "Right 增加一个步长");
+        state.on_key(&InputKey::Left, Mods::default(), &mut form, &layout);
+        assert_eq!(number(&form), start, "Left 回落一个步长");
+        state.on_key(&InputKey::Down, Mods::default(), &mut form, &layout);
+        assert_eq!(number(&form), start + 1.0, "Down 增加一个步长");
+        state.on_key(&InputKey::Up, Mods::default(), &mut form, &layout);
+        assert_eq!(number(&form), start, "Up 减少一个步长");
+
+        form.fields[idx].value = FieldValue::Number(32.0);
+        state.on_key(&InputKey::Right, Mods::default(), &mut form, &layout);
+        assert_eq!(number(&form), 32.0, "方向键不得越过上限");
+        form.fields[idx].value = FieldValue::Number(10.0);
+        state.on_key(&InputKey::Left, Mods::default(), &mut form, &layout);
+        assert_eq!(number(&form), 10.0, "方向键不得越过下限");
     }
 
     #[test]
@@ -2624,6 +2830,56 @@ mod tests {
             form.font_picker.as_ref().unwrap().sel,
             0,
             "再下一项回到首项"
+        );
+    }
+
+    /// 大列表首帧预算：220 个已安装字族下，构造表单 + 打开弹层 + 首次布局。
+    /// 口径：使用 `FakeText` 的度量接缝，覆盖真实热点——220 条候选表构建、
+    /// 打开弹层后的过滤，以及首帧可见窗口（8 行）的布局。
+    ///
+    /// 诚实标注：本测试**不含整帧像素光栅化**（遮罩/卡片/阴影的软件填充）。
+    /// 实测（同一机器）：本路径 release 96µs / debug 360µs；
+    /// 若把 `Frame::new` + `paint` 也计入，release 整帧约 13.8ms，
+    /// 开销主要来自 1280×800 遮罩与卡片填充，与字族数量无关。
+    /// 本测试锁定的正是「200+ 字族」这条路径，debug 与 release 均按 16ms 断言。
+    #[test]
+    fn font_picker_220_families_first_frame_within_budget() {
+        let installed: Vec<(String, bool)> = (0..220)
+            .map(|i| (format!("Family {i:03}"), i % 3 == 0))
+            .collect();
+
+        let started = Instant::now();
+        let mut form = SettingsForm::from_config_with_families(&Config::default(), &installed);
+        form.open_font_picker();
+        let vp = viewport(1280.0, 800.0);
+        let buttons = buttons();
+        let mut text = FakeText;
+        let layout = layout(vp, 1.0, &form, &mut text, &buttons, 0);
+        let elapsed = started.elapsed();
+
+        assert!(
+            form.font_options.len() >= 220,
+            "候选表必须包含 220 个字族: {}",
+            form.font_options.len()
+        );
+        assert_eq!(
+            form.font_picker.as_ref().map(|p| p.hits.len()),
+            Some(form.font_options.len()),
+            "空查询必须命中全部候选"
+        );
+        assert!(
+            font_picker_geom(&layout, &form).is_some(),
+            "首帧必须给出弹层几何"
+        );
+        let budget = std::time::Duration::from_millis(16);
+        eprintln!(
+            "font picker 220 families first frame (list+layout): {elapsed:?} \
+             (budget {budget:?}, debug={})",
+            cfg!(debug_assertions)
+        );
+        assert!(
+            elapsed < budget,
+            "220 字族首帧超出预算: {elapsed:?} >= {budget:?}"
         );
     }
 

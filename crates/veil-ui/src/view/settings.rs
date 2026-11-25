@@ -1374,6 +1374,7 @@ fn paint_field_label(
     );
 }
 
+#[allow(clippy::too_many_arguments)] // 绘制原语：控件/主题/缩放/焦点/查询天然多参
 fn paint_field_control(
     frame: &mut Frame,
     text: &mut dyn Text,
@@ -1424,7 +1425,7 @@ fn paint_field_control(
     let inner_x = c.x + 6.0 * scale;
     let inner_y = c.y + (c.h - typography::UI_LINE_HEIGHT * scale) * 0.5;
     let value_text = match font_query {
-        Some(q) if q.is_empty() => t(Key::SettingsFontSearch).to_string(),
+        Some("") => t(Key::SettingsFontSearch).to_string(),
         Some(q) => q.to_string(),
         None => field_value_display(f),
     };

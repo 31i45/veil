@@ -23,7 +23,9 @@ pub(crate) type ShellEvent = Doc;
 pub(crate) use crate::accessibility::ShellEvent;
 
 #[cfg(feature = "accessibility")]
-use crate::accessibility::{build_semantic_tree, SnapshotActivation};
+use crate::accessibility::{
+    accessibility_click, build_semantic_tree, perform_click, SnapshotActivation,
+};
 
 #[cfg(feature = "accessibility")]
 use accesskit_winit::Adapter;
@@ -279,13 +281,39 @@ impl Shell {
                 }
             }
             AkWinEvent::ActionRequested(req) => {
-                // Task 5 最小实现：AccessKit Click/Focus 动作记录日志；
-                // Task 6+ 会在这里路由到具体 UI 行为。
+                use accesskit::Action;
                 let _ = event_loop;
-                eprintln!(
-                    "AK_ACTION window={:?} action={:?} target={:?}",
-                    event.window_id, req.action, req.target_node
-                );
+                // 节点 → 意图的判定是纯函数，便于无 GUI 单测；这里只负责落地执行。
+                let target = accessibility_click(&entry.app, req.target_node);
+                match (req.action, target) {
+                    (Action::Click, Some(target)) => {
+                        if !perform_click(&mut entry.app, target) {
+                            eprintln!(
+                                "AK_ACTION ignored window={:?} target={:?} reason=disabled-or-invalid",
+                                event.window_id, req.target_node
+                            );
+                        }
+                    }
+                    (Action::Click, None) => {
+                        eprintln!(
+                            "AK_ACTION ignored window={:?} target={:?} reason=not-interactive",
+                            event.window_id, req.target_node
+                        );
+                    }
+                    (Action::Focus, _) => {
+                        // Narrator 自行维护 UIA 焦点：不移动正文 caret，仅记录。
+                        eprintln!(
+                            "AK_FOCUS window={:?} target={:?}",
+                            event.window_id, req.target_node
+                        );
+                    }
+                    (action, _) => {
+                        eprintln!(
+                            "AK_ACTION unsupported window={:?} action={:?} target={:?}",
+                            event.window_id, action, req.target_node
+                        );
+                    }
+                }
             }
         }
     }
@@ -1008,6 +1036,200 @@ mod tests {
                 "REAL_EVENT_LOOP_CHILD PASS native_prompt=returned original_window=visible original_document=unchanged graceful_close=true"
             );
         }
+    }
+}
+
+// —— AccessKit 动作/语义树确定性测试（无 GUI，feature 保护）—— //
+#[cfg(all(test, feature = "accessibility"))]
+mod accessibility_tests {
+    use std::collections::HashSet;
+
+    use accesskit::{NodeId, Role, TreeUpdate};
+
+    use super::*;
+    use crate::accessibility::{
+        accessibility_click, build_semantic_tree, perform_click, ClickTarget, MENU_EDIT_ID,
+        MENU_FILE_ID, MENU_HELP_ID, MENU_VIEW_ID, MODAL_ID,
+    };
+    use crate::app::{ActiveModal, ModalPurpose};
+    use crate::chrome::MenuAction;
+    use crate::theme::ThemeMode;
+    use crate::view::modal::{ButtonRole, ModalButton, ModalSpec, ModalState};
+
+    fn app(text: &str) -> App {
+        let store = crate::app_tests::MemStore::default();
+        App::new(
+            Doc {
+                text: text.into(),
+                path: None,
+                bom: false,
+                resume: false,
+                open_error: None,
+            },
+            crate::app_tests::ports(&store, crate::app_tests::no_url()),
+        )
+    }
+
+    fn roles(tree: &TreeUpdate) -> Vec<Role> {
+        tree.nodes.iter().map(|(_, node)| node.role()).collect()
+    }
+
+    fn menu_item_count(tree: &TreeUpdate) -> usize {
+        roles(tree)
+            .into_iter()
+            .filter(|role| *role == Role::MenuItem)
+            .count()
+    }
+
+    /// 缺陷 2：未展开菜单时，4 个顶层菜单及其全部非分隔项仍必须在树中且 NodeId 唯一。
+    #[test]
+    fn accessibility_closed_menus_expose_all_items() {
+        let a = app("ab\n");
+        assert!(a.ui_state.chrome.open.is_none(), "前置：菜单未展开");
+
+        let tree = build_semantic_tree(&a);
+        let ids: Vec<u64> = tree.nodes.iter().map(|(id, _)| id.0).collect();
+        let unique: HashSet<u64> = ids.iter().copied().collect();
+        assert_eq!(ids.len(), unique.len(), "NodeId 不得重复");
+
+        let kinds = roles(&tree);
+        assert!(kinds.contains(&Role::MenuBar), "MenuBar 必须存在");
+
+        let expected: usize = crate::chrome::MENUS
+            .iter()
+            .map(|def| {
+                def.items
+                    .iter()
+                    .filter(|(_, _, action)| *action != MenuAction::Separator)
+                    .count()
+            })
+            .sum();
+        assert_eq!(menu_item_count(&tree), expected, "全部非分隔项都必须出现");
+        assert!(expected >= 4);
+
+        for id in [MENU_FILE_ID, MENU_EDIT_ID, MENU_VIEW_ID, MENU_HELP_ID] {
+            let node = tree
+                .nodes
+                .iter()
+                .find(|(nid, _)| *nid == id)
+                .map(|(_, node)| node)
+                .expect("4 个顶层菜单节点都必须存在");
+            assert_eq!(node.role(), Role::Menu);
+            assert!(!node.children().is_empty(), "菜单必须有子项");
+        }
+    }
+
+    /// 缺陷 1：点击 enabled 菜单项真的执行动作（视图 → 深色主题）。
+    #[test]
+    fn accessibility_click_runs_enabled_menu_item() {
+        let mut a = app("ab\n");
+        // 视图菜单（下标 2）第 10 项 = 深色主题，原始下标与 NodeId 规划一致。
+        let target = accessibility_click(&a, NodeId(MENU_VIEW_ID.0 + 1 + 10))
+            .expect("主题项应解析为菜单项意图");
+        assert_eq!(target, ClickTarget::MenuItem { menu: 2, item: 10 });
+        assert!(perform_click(&mut a, target), "enabled 项必须执行");
+        assert_eq!(a.input_state.theme.mode, ThemeMode::Dark, "动作必须落地");
+        assert!(a.ui_state.chrome.open.is_none(), "执行后菜单保持关闭");
+    }
+
+    /// 缺陷 1：禁用项拒绝执行且无副作用（空文档 → 文件 → 导出 HTML）。
+    #[test]
+    fn accessibility_click_ignores_disabled_menu_item() {
+        let mut a = app("");
+        let target =
+            accessibility_click(&a, NodeId(MENU_FILE_ID.0 + 1 + 8)).expect("导出项仍是可解析节点");
+        assert_eq!(target, ClickTarget::MenuItem { menu: 0, item: 8 });
+        assert!(
+            !crate::chrome::action_enabled(MenuAction::Export, a.menu_flags()),
+            "前置：空文档导出为禁用态"
+        );
+        assert!(!perform_click(&mut a, target), "禁用项不得执行");
+        assert_eq!(a.editor.session().serialize(), "", "文档不得改变");
+        assert!(a.ui_state.chrome.notice.is_empty(), "禁用项不产生提示");
+    }
+
+    /// 缺陷 3：模态打开时语义树只含 root + dialog；关闭后恢复完整背景。
+    #[test]
+    fn accessibility_modal_suppresses_background_tree() {
+        let mut a = app("ab\n");
+        let spec = ModalSpec::new(
+            "确认",
+            "未保存",
+            vec![
+                ModalButton::new(1, "保存", ButtonRole::Primary),
+                ModalButton::new(3, "取消", ButtonRole::Secondary),
+            ],
+        );
+        a.ui_state.modal = Some(ActiveModal {
+            state: ModalState::new(&spec),
+            spec,
+            intent: None,
+            purpose: ModalPurpose::Unsaved,
+        });
+
+        let tree = build_semantic_tree(&a);
+        let kinds = roles(&tree);
+        assert!(!kinds.contains(&Role::MenuBar), "模态时不得含 MenuBar");
+        assert!(!kinds.contains(&Role::MenuItem), "模态时不得含 MenuItem");
+        assert!(kinds.contains(&Role::Dialog), "模态必须含 Dialog");
+        assert_eq!(
+            kinds.iter().filter(|role| **role == Role::Button).count(),
+            2,
+            "Dialog 必须含其按钮"
+        );
+
+        a.ui_state.modal = None;
+        let tree = build_semantic_tree(&a);
+        let kinds = roles(&tree);
+        assert!(kinds.contains(&Role::MenuBar), "关闭模态后 MenuBar 恢复");
+        assert!(menu_item_count(&tree) >= 4, "关闭模态后菜单项恢复");
+
+        // 设置模态同样抑制背景。
+        a.perform_menu(MenuAction::Settings);
+        assert!(a.ui_state.settings.is_some(), "前置：设置模态已打开");
+        let tree = build_semantic_tree(&a);
+        let kinds = roles(&tree);
+        assert!(!kinds.contains(&Role::MenuBar), "设置模态时不得含 MenuBar");
+        assert!(kinds.contains(&Role::Dialog), "设置模态必须含 Dialog");
+    }
+
+    /// 缺陷 1：点击模态按钮等价于 `resolve_modal(button.id)`。
+    #[test]
+    fn accessibility_modal_button_click_matches_resolve_modal() {
+        fn with_external_modal() -> App {
+            let mut a = app("ab\n");
+            let spec = ModalSpec::new(
+                "外部修改",
+                "磁盘已变更",
+                vec![
+                    ModalButton::new(1, "重新加载", ButtonRole::Primary),
+                    ModalButton::new(2, "保留当前内容", ButtonRole::Secondary),
+                    ModalButton::new(3, "另存为", ButtonRole::Secondary),
+                ],
+            );
+            a.ui_state.modal = Some(ActiveModal {
+                state: ModalState::new(&spec),
+                spec,
+                intent: None,
+                purpose: ModalPurpose::External,
+            });
+            a
+        }
+
+        let mut clicked = with_external_modal();
+        let target = accessibility_click(&clicked, NodeId(MODAL_ID.0 + 1 + 1))
+            .expect("模态按钮应解析为按钮意图");
+        assert_eq!(target, ClickTarget::ModalButton { index: 1 });
+        assert!(perform_click(&mut clicked, target), "按钮点击必须执行");
+
+        let mut control = with_external_modal();
+        control.resolve_modal(2);
+
+        assert!(clicked.ui_state.modal.is_none(), "点击后模态关闭");
+        assert_eq!(
+            clicked.ui_state.chrome.notice, control.ui_state.chrome.notice,
+            "点击按钮与 resolve_modal(button.id) 结果必须一致"
+        );
     }
 }
 

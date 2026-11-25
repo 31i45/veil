@@ -94,7 +94,57 @@ impl ActivationHandler for SnapshotActivation {
 
 // —— 构建语义树 —— //
 
-/// 根据当前 App 状态构建最小语义树（Task 5 范围）。
+/// 顶层菜单下标 → 菜单节点 ID（与既有 NodeId 规划一致）。
+fn menu_node_id(idx: usize) -> NodeId {
+    match idx {
+        0 => MENU_FILE_ID,
+        1 => MENU_EDIT_ID,
+        2 => MENU_VIEW_ID,
+        3 => MENU_HELP_ID,
+        _ => MENU_FILE_ID,
+    }
+}
+
+/// 构建单个顶层菜单节点及其非分隔项（项 ID = 菜单基址 + 1 + `def.items` 原始下标，
+/// Separator 占位但不产生节点）。label/快捷键/禁用态与菜单打开态同源。
+fn build_menu(
+    idx: usize,
+    flags: crate::chrome::MenuFlags,
+    nodes: &mut Vec<(NodeId, Node)>,
+) -> NodeId {
+    let menu_id = menu_node_id(idx);
+    let def = &crate::chrome::MENUS[idx];
+    let mut menu_node = Node::new(Role::Menu);
+    menu_node.set_label(crate::i18n::t(def.title).to_string());
+    let mut item_children: Vec<NodeId> = Vec::new();
+    for (i, (label_key, shortcut_key, action)) in def.items.iter().enumerate() {
+        if *action == crate::chrome::MenuAction::Separator {
+            continue;
+        }
+        let item_id = NodeId(menu_id.0 + 1 + i as u64);
+        let mut item = Node::new(Role::MenuItem);
+        item.set_label(crate::i18n::t(*label_key).to_string());
+        item.add_action(Action::Click);
+        item.add_action(Action::Focus);
+        // 禁用态：与 chrome::action_enabled 同源（MenuFlags）
+        if !crate::chrome::action_enabled(*action, flags) {
+            item.set_disabled();
+        }
+        // 快捷键
+        let sc = crate::i18n::t(*shortcut_key);
+        if !sc.is_empty() && *shortcut_key != crate::i18n::Key::Empty {
+            item.set_keyboard_shortcut(sc.to_string());
+        }
+        nodes.push((item_id, item));
+        item_children.push(item_id);
+    }
+    menu_node.set_children(item_children);
+    nodes.push((menu_id, menu_node));
+    menu_id
+}
+
+/// 根据当前 App 状态构建语义树。
+/// 模态（设置/确认）打开时只暴露 root + 该 dialog；否则暴露完整背景（菜单栏 + 面板 + 右键菜单）。
 pub(crate) fn build_semantic_tree(app: &crate::app::App) -> TreeUpdate {
     let mut nodes: Vec<(NodeId, Node)> = Vec::new();
 
@@ -106,59 +156,7 @@ pub(crate) fn build_semantic_tree(app: &crate::app::App) -> TreeUpdate {
 
     let mut children: Vec<NodeId> = Vec::new();
 
-    // —— 菜单栏始终可见 —— //
-    let mut menu_bar = Node::new(Role::MenuBar);
-    menu_bar.set_label("主菜单栏");
-    nodes.push((MENU_BAR_ID, menu_bar));
-    children.push(MENU_BAR_ID);
-
-    // —— 当前打开的顶层菜单 —— //
-    if let Some(idx) = app.ui_state.chrome.open {
-        if idx < crate::chrome::MENUS.len() {
-            let menu_id = match idx {
-                0 => MENU_FILE_ID,
-                1 => MENU_EDIT_ID,
-                2 => MENU_VIEW_ID,
-                3 => MENU_HELP_ID,
-                _ => MENU_FILE_ID,
-            };
-            children.push(menu_id);
-
-            let def = &crate::chrome::MENUS[idx];
-            let mut menu_node = Node::new(Role::Menu);
-            menu_node.set_label(crate::i18n::t(def.title).to_string());
-            let mut item_children: Vec<NodeId> = Vec::new();
-            for (i, (label_key, shortcut_key, action)) in def.items.iter().enumerate() {
-                if *action == crate::chrome::MenuAction::Separator {
-                    continue;
-                }
-                let item_id = NodeId(menu_id.0 + 1 + i as u64);
-                let mut item = Node::new(Role::MenuItem);
-                let label_text = crate::i18n::t(*label_key).to_string();
-                item.set_label(label_text);
-                item.add_action(Action::Click);
-                item.add_action(Action::Focus);
-                // 禁用态：与 chrome::action_enabled 同源（MenuFlags）
-                // —— Separator 已在上方跳过；disabled_reason 覆盖 Save/Export/Print/Undo/Redo 等
-                // —— 其余项默认 enabled。未来可接入更细粒度的禁用原因展示
-                let flags = app.menu_flags();
-                if !crate::chrome::action_enabled(*action, flags) {
-                    item.set_disabled();
-                }
-                // 快捷键
-                let sc = crate::i18n::t(*shortcut_key);
-                if !sc.is_empty() && *shortcut_key != crate::i18n::Key::Empty {
-                    item.set_keyboard_shortcut(sc.to_string());
-                }
-                nodes.push((item_id, item));
-                item_children.push(item_id);
-            }
-            menu_node.set_children(item_children);
-            nodes.push((menu_id, menu_node));
-        }
-    }
-
-    // —— 模态框优先于其他面板 —— //
+    // —— 模态框优先：打开期间背景节点不进入语义树 —— //
     if app.ui_state.settings.is_some() {
         let mut dialog = Node::new(Role::Dialog);
         dialog.set_label("设置");
@@ -183,6 +181,17 @@ pub(crate) fn build_semantic_tree(app: &crate::app::App) -> TreeUpdate {
         nodes.push((MODAL_ID, dialog));
         children.push(MODAL_ID);
     } else {
+        // —— 菜单栏：无论是否展开，始终暴露全部 4 个顶层菜单的全部非分隔项 —— //
+        let flags = app.menu_flags();
+        let mut menu_bar = Node::new(Role::MenuBar);
+        menu_bar.set_label("主菜单栏");
+        let menu_ids: Vec<NodeId> = (0..crate::chrome::MENUS.len())
+            .map(|idx| build_menu(idx, flags, &mut nodes))
+            .collect();
+        menu_bar.set_children(menu_ids);
+        nodes.push((MENU_BAR_ID, menu_bar));
+        children.push(MENU_BAR_ID);
+
         // 非模态状态：面板（查找/大纲/快速打开）
         if app.ui_state.search.open {
             let mut panel = Node::new(Role::Group);
@@ -205,14 +214,14 @@ pub(crate) fn build_semantic_tree(app: &crate::app::App) -> TreeUpdate {
             nodes.push((QUICK_OPEN_PANEL_ID, panel));
             children.push(QUICK_OPEN_PANEL_ID);
         }
-    }
 
-    // —— 右键菜单 —— //
-    if app.ui_state.ctx.open {
-        let mut menu = Node::new(Role::Menu);
-        menu.set_label("上下文菜单");
-        nodes.push((CONTEXT_MENU_ID, menu));
-        children.push(CONTEXT_MENU_ID);
+        // —— 右键菜单 —— //
+        if app.ui_state.ctx.open {
+            let mut menu = Node::new(Role::Menu);
+            menu.set_label("上下文菜单");
+            nodes.push((CONTEXT_MENU_ID, menu));
+            children.push(CONTEXT_MENU_ID);
+        }
     }
 
     // 回填根节点 children（nodes[0] 是 root）
@@ -238,6 +247,76 @@ pub(crate) fn build_semantic_tree(app: &crate::app::App) -> TreeUpdate {
         tree: Some(TreeInfo::new(ROOT_ID)),
         tree_id: TreeId::ROOT,
         focus,
+    }
+}
+
+// —— 动作接线：节点 ID → 意图 → App 行为 —— //
+
+/// AccessKit 点击目标：语义树节点 ID 解析出的可执行意图。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ClickTarget {
+    /// 菜单项：`menu` 为顶层菜单下标，`item` 为 `def.items` 原始下标（含 Separator 占位）。
+    MenuItem { menu: usize, item: usize },
+    /// 模态按钮：`index` 为 `spec.buttons` 下标。
+    ModalButton { index: usize },
+}
+
+/// 纯函数：把语义树节点 ID 解析成意图。非交互节点返回 None。
+/// 模态打开期间背景节点不在树中，迟到的背景点击同样返回 None。
+pub(crate) fn accessibility_click(app: &crate::app::App, node: NodeId) -> Option<ClickTarget> {
+    if app.ui_state.settings.is_some() || app.ui_state.modal.is_some() {
+        let modal = app.ui_state.modal.as_ref()?;
+        let index = node.0.checked_sub(MODAL_ID.0 + 1)? as usize;
+        return (index < modal.spec.buttons.len()).then_some(ClickTarget::ModalButton { index });
+    }
+    if node.0 == ROOT_ID.0 || node.0 == MENU_BAR_ID.0 {
+        return None;
+    }
+    for (menu, def) in crate::chrome::MENUS.iter().enumerate() {
+        let base = menu_node_id(menu).0;
+        // 项 ID 紧邻菜单基址：base+1 ..= base+items.len()
+        if node.0 > base && node.0 <= base + def.items.len() as u64 {
+            let item = (node.0 - base - 1) as usize;
+            if def.items[item].2 == crate::chrome::MenuAction::Separator {
+                return None;
+            }
+            return Some(ClickTarget::MenuItem { menu, item });
+        }
+    }
+    None
+}
+
+/// 执行点击意图，返回是否真的执行了动作。
+/// 菜单项语义与 `interaction_menu::menu_accept` 一致：`chrome::action_at` 取动作、
+/// `chrome::action_enabled` 判可用，通过后关闭菜单、请求重绘并 `perform_menu`。
+pub(crate) fn perform_click(app: &mut crate::app::App, target: ClickTarget) -> bool {
+    match target {
+        ClickTarget::MenuItem { menu, item } => {
+            let recent = app.recent_labels();
+            let Some(action) = crate::chrome::action_at(menu, item, &recent) else {
+                return false;
+            };
+            if !crate::chrome::action_enabled(action, app.menu_flags()) {
+                return false;
+            }
+            app.ui_state.chrome.close();
+            app.request_redraw();
+            app.perform_menu(action);
+            true
+        }
+        ClickTarget::ModalButton { index } => {
+            let Some(id) = app
+                .ui_state
+                .modal
+                .as_ref()
+                .and_then(|m| m.spec.buttons.get(index))
+                .map(|b| b.id)
+            else {
+                return false;
+            };
+            app.resolve_modal(id);
+            true
+        }
     }
 }
 

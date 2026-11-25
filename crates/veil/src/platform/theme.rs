@@ -55,8 +55,6 @@ const SPI_GETCLIENTAREAANIMATION: u32 = 0x1042;
 /// SPI_GETHIGHCONTRAST：获取高对比度结构。
 const SPI_GETHIGHCONTRAST: u32 = 0x0042;
 
-/// HIGHCONTRASTW.cbSize。
-const HIGHCONTRAST_SIZE: u32 = 12;
 /// HIGHCONTRASTW.dwFlags 中的「高对比度启用」位。
 const HCF_HIGHCONTRASTON: u32 = 0x00000001;
 
@@ -124,15 +122,19 @@ impl SystemTheme for WinSystemTheme {
     /// 检测 Windows 高对比度模式：SPI_GETHIGHCONTRAST 优先，失败则回退 COLOR_WINDOW 启发式。
     /// 两个路径都静默：任何 FFI 失败都返回 false（高对比度不启用），不影响正常外观。
     fn is_high_contrast(&mut self) -> bool {
+        // cbSize / uiParam 必须是结构体的实际 ABI 大小：64 位下指针让
+        // HIGHCONTRASTW 为 16 字节，写死 12 会让 SPI_GETHIGHCONTRAST 直接失败
+        // （实测 rc=FALSE），轮询永远读到「未启用」。
+        let size = std::mem::size_of::<HighContrast>() as u32;
         let mut hc = HighContrast {
-            cb_size: HIGHCONTRAST_SIZE,
+            cb_size: size,
             dw_flags: 0,
             lpsz_default_scheme: std::ptr::null(),
         };
         let rc = unsafe {
             SystemParametersInfoW(
                 SPI_GETHIGHCONTRAST,
-                std::mem::size_of::<HighContrast>() as u32,
+                size,
                 &mut hc as *mut HighContrast as *mut c_void,
                 0,
             )
@@ -232,5 +234,17 @@ mod tests {
         assert_eq!(backdrop_type(true), DWMSBT_MAINWINDOW);
         assert_eq!(backdrop_type(false), DWMSBT_MAINWINDOW);
         assert_eq!(backdrop_type(true), backdrop_type(false));
+    }
+
+    /// cbSize 必须等于 HIGHCONTRASTW 的 ABI 实际大小（u32 + u32 + 指针）。
+    ///
+    /// 回归锁：曾写死 12，在 64 位下让 SPI_GETHIGHCONTRAST 返回 FALSE，
+    /// 高对比度轮询永远读不到「已启用」。
+    #[test]
+    fn highcontrast_struct_size_matches_abi() {
+        assert_eq!(
+            std::mem::size_of::<HighContrast>(),
+            std::mem::size_of::<usize>() + 8
+        );
     }
 }

@@ -98,6 +98,17 @@ pub const READABLE_COLS: f32 = crate::tokens::doc::READABLE_COLS;
 /// 窄窗口保持满宽排版，只有超宽窗口才左右留白居中。
 pub const WIDE_WINDOW: f32 = crate::tokens::doc::WIDE_WINDOW;
 
+/// 把物理像素长度吸附到整数像素网格（四舍五入，幂等）。
+///
+/// 光栅化原语（`Frame::fill_rect` / `fill_rounded_rect`）以整数物理像素为网格，
+/// 而设计令牌按 `dpi_scale × user_zoom` 线性放大：1.25 这类缩放会把 6px 圆角
+/// 乘成 7.5、2px 小圆角乘成 2.5，落在半像素上让边缘发糊。几何令牌在乘完 scale 后
+/// 统一走本函数，保证边界落在整数物理像素；scale = 1.0 时全部令牌保持原值，
+/// 观感不变。
+pub(crate) fn snap_to_pixel(v: f32) -> f32 {
+    v.round()
+}
+
 /// 屏幕版心边距（逻辑像素，未乘 scale）：由配置档位解析出运行时值。
 /// `Custom` 使用用户值并夹取到 4..=200；Standard 与 `MARGIN` 常量同源。
 pub(crate) fn content_margin(mode: DocMargin, custom_px: f32) -> f32 {

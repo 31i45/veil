@@ -1,0 +1,19 @@
+[16:17:37.154] INFO  开始：Exe=D:\VSCode\Veil\target\release\veil.exe OutDir=D:\VSCode\Veil\evidence\verify\qq-task7
+[16:17:37.343] INFO  已启动 release：PID=13980 文档=C:\Users\31i45\AppData\Local\Temp\veil-qq-task7-20261125-161737-7596\qq-task7-doc.md
+[16:17:37.900] INFO  主窗口：HWND=7735310 标题=veil — qq-task7-doc.md
+[16:17:40.201] INFO  槽位 100%（zoom=1） → scale-100.png
+[16:17:40.330] PASS  已保存 D:\VSCode\Veil\evidence\verify\qq-task7\scale-100.png（1372x1106，方法=PrintWindow，降级=False，平均亮度=241.1，字节=101607）
+[16:17:40.334] INFO  等效缩放抽样（zoom 路径），不是系统 DPI 切换
+[16:17:42.054] INFO  槽位 125%（实际 zoom=1.2，UI 缩放按 0.1 量化无法取 1.25） → scale-125.png
+[16:17:42.087] WARN  PrintWindow 第 1 次返回空白，重试
+[16:17:42.477] WARN  PrintWindow 第 2 次返回空白，重试
+[16:17:42.869] WARN  PrintWindow 第 3 次返回空白，重试
+[16:17:43.616] PASS  已保存 D:\VSCode\Veil\evidence\verify\qq-task7\scale-125.png（1354x1097，方法=CopyFromScreen，降级=True，平均亮度=250.6，字节=60547）
+[16:17:43.620] INFO  等效缩放抽样（zoom 路径），不是系统 DPI 切换
+[16:17:45.703] INFO  槽位 150%（zoom=1.5） → scale-150.png
+[16:17:45.749] PASS  已保存 D:\VSCode\Veil\evidence\verify\qq-task7\scale-150.png（1372x1106，方法=PrintWindow，降级=False，平均亮度=249.6，字节=62425）
+[16:17:45.752] INFO  等效缩放抽样（zoom 路径），不是系统 DPI 切换
+[16:17:48.627] INFO  槽位 200%（zoom=2） → scale-200.png
+[16:17:48.673] PASS  已保存 D:\VSCode\Veil\evidence\verify\qq-task7\scale-200.png（1372x1106，方法=PrintWindow，降级=False，平均亮度=250.3，字节=62628）
+[16:17:48.677] INFO  等效缩放抽样（zoom 路径），不是系统 DPI 切换
+[16:17:48.689] INFO  stderr（最后 1 行）：图片加载失败（降级为 alt 文本） C:\Users\31i45\AppData\Local\Temp\veil-qq-task7-20261125-161737-7596\icons/veil.ico: 系统找不到指定的路径。 (os error 3)

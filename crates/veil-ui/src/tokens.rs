@@ -81,8 +81,10 @@ pub(crate) mod surface {
     /// 深色主题遮罩 alpha（黑）：深底需更重才有分离感。
     pub const SCRIM_ALPHA_DARK: u8 = 120;
 
+    /// 浮层圆角（物理像素）：乘完 scale 后吸附到整数物理像素，
+    /// 避免 1.25× 时 6 × 1.25 = 7.5 让四角落在半像素上。
     pub fn corner_radius(scale: f32) -> f32 {
-        CORNER_RADIUS * scale
+        crate::geometry::snap_to_pixel(CORNER_RADIUS * scale)
     }
     pub fn row_height(scale: f32) -> f32 {
         ROW_HEIGHT * scale
@@ -112,8 +114,9 @@ pub(crate) mod surface {
     pub fn shadow_offset_y(scale: f32) -> f32 {
         SHADOW_OFFSET_Y * scale
     }
+    /// 模态圆角（物理像素）：与 `corner_radius` 同样吸附到整数物理像素。
     pub fn dialog_radius(scale: f32) -> f32 {
-        DIALOG_RADIUS * scale
+        crate::geometry::snap_to_pixel(DIALOG_RADIUS * scale)
     }
     pub fn dialog_padding(scale: f32) -> f32 {
         DIALOG_PADDING * scale
@@ -461,6 +464,51 @@ mod tests {
     #[allow(clippy::assertions_on_constants)] // 令牌为编译期常量，仍按运行时断言校验
     fn stroke_tokens_are_positive() {
         assert!(stroke::HAIRLINE > 0.0);
+    }
+
+    /// 像素对齐回归锁（抽样 100/125/150/200%）：1px 发丝线、2px 小圆角与浮层/模态
+    /// 圆角乘完 scale 后都必须落在整数物理像素上，不得停在 .25/.5/.75。
+    ///
+    /// 真实缺陷来源（1.25×）：`CORNER_RADIUS(6) × 1.25 = 7.5`、`2 × 1.25 = 2.5`；
+    /// 前者经 `surface::corner_radius` 统一吸附，后者走 `snap_to_pixel`。
+    #[test]
+    fn scaled_geometry_snaps_to_integer_physical_pixels() {
+        use super::surface;
+        use crate::geometry::snap_to_pixel;
+
+        for scale in [1.0f32, 1.25, 1.5, 2.0] {
+            let hairline = snap_to_pixel(stroke::HAIRLINE * scale);
+            assert!(hairline >= 1.0, "线宽不得消失：scale={scale}");
+            assert_eq!(
+                hairline,
+                hairline.round(),
+                "1px 分隔线必须落在整数物理像素：scale={scale} 得到 {hairline}"
+            );
+
+            let small_radius = snap_to_pixel(2.0 * scale);
+            assert!(small_radius >= 1.0, "圆角不得消失：scale={scale}");
+            assert_eq!(
+                small_radius,
+                small_radius.round(),
+                "2px 圆角必须落在整数物理像素：scale={scale} 得到 {small_radius}"
+            );
+
+            for r in [surface::corner_radius(scale), surface::dialog_radius(scale)] {
+                assert_eq!(
+                    r,
+                    r.round(),
+                    "圆角令牌必须落在整数物理像素：scale={scale} 得到 {r}"
+                );
+            }
+        }
+
+        // 1.0× 保持原值（浅色默认观感不变）。
+        assert_eq!(surface::corner_radius(1.0), surface::CORNER_RADIUS);
+        assert_eq!(surface::dialog_radius(1.0), surface::DIALOG_RADIUS);
+        // 已知半像素点：1.25× 下 6px → 7.5、2px → 2.5；吸附后分别为 8、3。
+        assert_eq!(surface::CORNER_RADIUS * 1.25, 7.5);
+        assert_eq!(surface::corner_radius(1.25), 8.0);
+        assert_eq!(snap_to_pixel(2.0 * 1.25), 3.0);
     }
 
     #[test]

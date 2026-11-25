@@ -1,0 +1,9 @@
+[16:17:58.680] INFO  原值：Flags(注册表)=126  Flags(SPI)=126 (0x7E)
+[16:17:58.799] INFO  已启动 release：PID=16516 文档=C:\Users\31i45\AppData\Local\Temp\veil-qq-task7-hc-20261125-161758-23852\qq-task7-hc-doc.md
+[16:17:59.152] INFO  主窗口：HWND=4590004 标题=veil — qq-task7-hc-doc.md
+[16:18:00.768] INFO  切换前基线：平均亮度=241.1（system 模式下应为浅色/深色常态）
+[16:18:04.267] INFO  已请求开启高对比度：SPI=127（接口返回 True），注册表=127；已广播 WM_SETTINGCHANGE(Accessibility)
+[16:18:04.508] PASS  Veil 已切换为高对比度配色：耗时 234ms，平均亮度 37.4
+[16:18:06.321] PASS  已保存 high-contrast.png
+[16:18:10.036] PASS  已恢复原值：Flags=126，注册表=126
+[16:18:12.108] PASS  已还原：平均亮度 241.1，high-contrast-restored.png 已保存

@@ -1036,6 +1036,7 @@ fn paste_image_files_prefer_file_list_over_path_text() {
     let mut app = App::new(
         doc,
         Ports {
+            ime_anchor: Box::new(NoopImeAnchor),
             clipboard: Box::new(ClipFiles {
                 files: vec![
                     PathBuf::from("C:/pics/cat.png"),
@@ -1496,6 +1497,7 @@ fn empty_mermaid_click_ignored_in_source_mode() {
     // 不能弹出模板菜单（否则改源码会被劫持）。
     let store = MemStore::default();
     let mut a = app(EMPTY_MERMAID_DOC, None, false, &store);
+    a.config.source_plain_lines = false; // 本测试锁定旧块布局的源码视图
     a.perform_action(Action::OpenSourceMode);
     assert!(a.source_mode());
     let n = a.editor.session().text_len();
@@ -2322,6 +2324,7 @@ fn empty_mermaid_menu_cancel_keeps_bytes() {
 fn empty_mermaid_hint_absent_in_source_mode() {
     let store = MemStore::default();
     let mut a = app(EMPTY_MERMAID_DOC, None, false, &store);
+    a.config.source_plain_lines = false; // 本测试锁定旧块布局的源码视图
     a.ensure_layouts_all();
     let id = block_id_of(&a, |k| matches!(k, BlockKind::Mermaid));
     assert!(

@@ -72,6 +72,7 @@ fn e2e_table_edit_and_image_paste() {
             open_error: None,
         },
         Ports {
+            ime_anchor: Box::new(NoopImeAnchor),
             clipboard: Box::new(ClipImage {
                 text: None,
                 html: None,
@@ -390,6 +391,7 @@ fn print_hard_cuts_atomic_block_taller_than_page() {
     let mut a = App::new(
         doc,
         Ports {
+            ime_anchor: Box::new(NoopImeAnchor),
             clipboard: Box::new(NoClip),
             store: Box::new(MemStore::default()),
             math: Box::new(TallMath),
@@ -1311,6 +1313,7 @@ fn source_mode_toggles_markup_but_keeps_caret_and_scroll() {
     let store = MemStore::default();
     let text = "# 标题\n\n**粗体** 与 [链接](https://example.com)\n\n尾\n";
     let mut a = app(text, None, false, &store);
+    a.config.source_plain_lines = false; // 本测试锁定旧块布局的源码视图
     a.editor.set_caret(text.len() - 1); // 光标停在尾段，标题/行内节点均非激活
     a.ensure_layouts_all();
     a.window_state.scroll_y = 42.0;
@@ -1355,6 +1358,7 @@ fn frontmatter_hidden_in_wysiwyg_and_source_shows_raw() {
     let store = MemStore::default();
     let text = "---\ntitle: 演示\ntags: [a, b]\n---\n\n# 标题\n\n正文\n";
     let mut a = app(text, None, false, &store);
+    a.config.source_plain_lines = false; // 本测试锁定旧块布局的源码视图
     a.editor.set_caret(text.find("正文").unwrap());
     a.ensure_layouts_all();
     a.render();
@@ -1512,6 +1516,7 @@ fn source_mode_hides_math_image_and_table_grid() {
     let store = MemStore::default();
     let text = "前言\n\n$$\nx=1\n$$\n\n| a | b |\n| - | - |\n| 1 | 2 |\n";
     let mut a = app(text, None, false, &store);
+    a.config.source_plain_lines = false; // 本测试锁定旧块布局的源码视图
     a.editor.set_caret(0); // 光标只在首段，公式/表格块均非激活
     a.ensure_layouts_all();
     a.ensure_math();
@@ -1559,6 +1564,7 @@ fn source_mode_hides_math_image_and_table_grid() {
 fn source_mode_table_paints_raw_rows_instead_of_blank() {
     let store = MemStore::default();
     let mut a = app("| a | b |\n| --- | --- |\n| c | d |\n", None, false, &store);
+    a.config.source_plain_lines = false; // 本测试锁定旧块布局的源码视图
     a.perform_action(Action::OpenSourceMode);
     let _ = a.render(); // 先完成排版/几何，再取稳定坐标
     let (top, h) = a
@@ -1593,6 +1599,7 @@ fn toc_marker_renders_directory_in_view_only() {
     let store = MemStore::default();
     let src = "[TOC]\n\n# 一\n\n## 二\n\n正文\n";
     let mut a = app(src, None, false, &store);
+    a.config.source_plain_lines = false; // 本测试锁定旧块布局的源码视图
     a.editor.set_caret(src.len());
     a.refresh_index();
     a.ensure_layouts_all();
@@ -1817,6 +1824,7 @@ fn print_ignores_source_mode_and_screen_restores_it() {
     let flag = probe.source_during_print.clone();
     let text = "# 标\n\n尾\n";
     let mut a = app_print(text, Box::new(probe));
+    a.config.source_plain_lines = false; // 本测试锁定旧块布局的源码视图
     a.editor.set_caret(text.len() - 1);
     a.perform_action(Action::OpenSourceMode);
     a.ensure_layouts_all();
@@ -2197,6 +2205,7 @@ fn source_mode_blank_line_cannot_hold_caret_but_is_deletable_and_occupies_height
     let store = MemStore::default();
     let text = "第一段\n\n\n第二段"; // 3 个换行 = 2 个空行
     let mut a = app(text, None, false, &store);
+    a.config.source_plain_lines = false; // 本测试锁定旧块布局的源码视图
     a.perform_action(Action::OpenSourceMode);
     a.paint();
     assert!(a.source_mode());
@@ -2894,7 +2903,7 @@ fn source_plain_flag_off_matches_legacy_path() {
     let store = MemStore::default();
     let text = "a\n\n\nb";
     let mut a = app(text, None, false, &store);
-    assert!(!a.config.source_plain_lines);
+    a.config.source_plain_lines = false; // 本测试就是「开关关闭」的旧路径基线
     a.perform_action(Action::OpenSourceMode);
     a.paint();
     assert!(!a.source_plain_active());

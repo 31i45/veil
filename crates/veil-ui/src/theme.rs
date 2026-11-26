@@ -715,7 +715,7 @@ pub struct Config {
     pub doc_margin_px: f32,
     /// 普通远程图片自动加载（默认关）；true = 用户显式允许，false = 全局阻止，只显示 alt 文本。
     pub allow_remote_images: bool,
-    /// 源码模式「纯文本行视图」（灰度，默认关）：开启后空行成为可寻址行。
+    /// 源码模式「纯文本行视图」（默认开）：开启后空行成为可寻址行。
     /// 仅影响源码模式的排版/光标几何，不改变保存字节。
     pub source_plain_lines: bool,
     /// 制表符宽度（2 或 4，默认 4）；其它值夹到 4。
@@ -739,7 +739,7 @@ impl Default for Config {
             doc_margin: DocMargin::Standard,
             doc_margin_px: DEFAULT_DOC_MARGIN_PX,
             allow_remote_images: false,
-            source_plain_lines: false,
+            source_plain_lines: true,
             tab_width: DEFAULT_TAB_WIDTH,
             window: None,
         }
@@ -1985,14 +1985,14 @@ mod tests {
     }
 
     #[test]
-    fn source_plain_lines_defaults_false_and_parses_bool() {
-        assert!(!Config::default().source_plain_lines);
-        assert!(!parse("mode = \"dark\"\n").config.source_plain_lines);
+    fn source_plain_lines_defaults_true_and_parses_bool() {
+        assert!(Config::default().source_plain_lines);
+        assert!(parse("mode = \"dark\"\n").config.source_plain_lines);
         assert!(
-            !parse("source_plain_lines = \"true\"")
+            parse("source_plain_lines = \"true\"")
                 .config
                 .source_plain_lines,
-            "非法类型回退 false"
+            "非法类型保留默认（开）并计入忽略"
         );
         assert!(
             !parse("source_plain_lines = false")
@@ -2001,7 +2001,7 @@ mod tests {
         );
         assert!(parse("source_plain_lines = true").config.source_plain_lines);
         let p = parse("source_plain_lines = \"yes\"");
-        assert!(!p.config.source_plain_lines);
+        assert!(p.config.source_plain_lines);
         assert_eq!(p.ignored, 1, "非法字面量计入忽略");
     }
 
@@ -2035,7 +2035,10 @@ mod tests {
             ..Config::default()
         };
         assert!(cfg.source_plain_lines_enabled());
-        let off = Config::default();
+        let off = Config {
+            source_plain_lines: false,
+            ..Config::default()
+        };
         // 测试环境默认不设置 VEIL_SOURCE_PLAIN；若被外部设置也不应与 false 配置冲突。
         if std::env::var("VEIL_SOURCE_PLAIN").ok().as_deref() != Some("1") {
             assert!(!off.source_plain_lines_enabled());

@@ -1268,6 +1268,7 @@ fn save_as_rebinds_watcher() {
     let mut a = App::new(
         doc,
         Ports {
+            ime_anchor: Box::new(NoopImeAnchor),
             clipboard: Box::new(NoClip),
             store: Box::new(store.clone()),
             math: Box::new(m),

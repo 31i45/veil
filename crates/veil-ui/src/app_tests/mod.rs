@@ -552,6 +552,7 @@ fn app_clip(html: Option<&str>, plain: Option<&str>) -> App {
     App::new(
         doc,
         Ports {
+            ime_anchor: Box::new(NoopImeAnchor),
             clipboard: Box::new(Clip {
                 html: html.map(str::to_string),
                 text: plain.map(str::to_string),
@@ -728,6 +729,7 @@ fn app_with_mermaid(text: &str, mermaid: RecordingMermaid) -> App {
     App::new(
         doc,
         Ports {
+            ime_anchor: Box::new(NoopImeAnchor),
             clipboard: Box::new(NoClip),
             store: Box::new(MemStore::default()),
             math: Box::new(m),
@@ -779,6 +781,7 @@ fn app_math(text: &str, fail: bool) -> (App, MathCalls) {
     let a = App::new(
         doc,
         Ports {
+            ime_anchor: Box::new(NoopImeAnchor),
             clipboard: Box::new(NoClip),
             store: Box::new(MemStore::default()),
             math: Box::new(m),
@@ -849,6 +852,7 @@ fn app_with_images(
     let a = App::new(
         doc,
         Ports {
+            ime_anchor: Box::new(NoopImeAnchor),
             clipboard: Box::new(NoClip),
             store: Box::new(MemStore::default()),
             math: Box::new(m),
@@ -925,6 +929,7 @@ fn app_paste_image(
     let app = App::new(
         doc,
         Ports {
+            ime_anchor: Box::new(NoopImeAnchor),
             clipboard: Box::new(ClipImage {
                 text: plain.map(str::to_string),
                 html: html.map(str::to_string),
@@ -984,6 +989,7 @@ fn app_remote(text: &str, config: Box<dyn ConfigStore>, images: RemoteImages) ->
     App::new(
         doc,
         Ports {
+            ime_anchor: Box::new(NoopImeAnchor),
             clipboard: Box::new(NoClip),
             store: Box::new(MemStore::default()),
             math: Box::new(FakeMath {
@@ -1044,6 +1050,7 @@ fn app_drop(
     let app = App::new(
         doc,
         Ports {
+            ime_anchor: Box::new(NoopImeAnchor),
             clipboard: Box::new(NoClip),
             store: Box::new(MemStore::default()),
             math: Box::new(m),
@@ -1186,6 +1193,7 @@ pub(crate) fn ports(store: &MemStore, url_opener: Box<dyn UrlOpener>) -> Ports {
         calls: Rc::new(RefCell::new(Vec::new())),
     };
     Ports {
+        ime_anchor: Box::new(NoopImeAnchor),
         clipboard: Box::new(NoClip),
         store: Box::new(store.clone()),
         math: Box::new(m),
@@ -1249,6 +1257,7 @@ fn app_code_copy(text: &str) -> (App, Rc<RefCell<Vec<String>>>) {
     let app = App::new(
         doc,
         Ports {
+            ime_anchor: Box::new(NoopImeAnchor),
             clipboard: Box::new(ClipLog(log.clone())),
             store: Box::new(MemStore::default()),
             math: Box::new(m),
@@ -1290,6 +1299,7 @@ fn app_startup_error(path: &str, store: &MemStore) -> App {
     App::new(
         doc,
         Ports {
+            ime_anchor: Box::new(NoopImeAnchor),
             clipboard: Box::new(NoClip),
             store: Box::new(store.clone()),
             math: Box::new(m),
@@ -1353,6 +1363,7 @@ fn app_history_with_assets(
     App::new(
         doc,
         Ports {
+            ime_anchor: Box::new(NoopImeAnchor),
             clipboard: Box::new(NoClip),
             store: Box::new(store.clone()),
             math: Box::new(m),
@@ -1436,6 +1447,7 @@ fn app_export(text: &str, path: Option<&str>, fail: bool) -> (App, ExportCalls) 
     let a = App::new(
         doc,
         Ports {
+            ime_anchor: Box::new(NoopImeAnchor),
             clipboard: Box::new(NoClip),
             store: Box::new(MemStore::default()),
             math: Box::new(m),
@@ -1487,6 +1499,7 @@ fn app_export_with_dialog(
     let a = App::new(
         doc,
         Ports {
+            ime_anchor: Box::new(NoopImeAnchor),
             clipboard: Box::new(NoClip),
             store: Box::new(MemStore::default()),
             math: Box::new(m),
@@ -1542,6 +1555,7 @@ fn app_dialogs(
     let a = App::new(
         doc,
         Ports {
+            ime_anchor: Box::new(NoopImeAnchor),
             clipboard: Box::new(NoClip),
             store: Box::new(store.clone()),
             math: Box::new(m),
@@ -1617,6 +1631,7 @@ fn app_watch_dialogs(
     App::new(
         doc,
         Ports {
+            ime_anchor: Box::new(NoopImeAnchor),
             clipboard: Box::new(NoClip),
             store: Box::new(store.clone()),
             math: Box::new(m),
@@ -1666,6 +1681,7 @@ fn app_confirm(
     App::new(
         doc,
         Ports {
+            ime_anchor: Box::new(NoopImeAnchor),
             clipboard: Box::new(NoClip),
             store: Box::new(store.clone()),
             math: Box::new(m),
@@ -1753,6 +1769,7 @@ fn app_theme(config: Box<dyn ConfigStore>, system: Rc<Cell<Option<bool>>>) -> Ap
     App::new(
         doc,
         Ports {
+            ime_anchor: Box::new(NoopImeAnchor),
             clipboard: Box::new(NoClip),
             store: Box::new(MemStore::default()),
             math: Box::new(m),
@@ -2075,6 +2092,7 @@ fn app_persist(
     App::new(
         doc,
         Ports {
+            ime_anchor: Box::new(NoopImeAnchor),
             clipboard: Box::new(NoClip),
             store: Box::new(store.clone()),
             math: Box::new(m),
@@ -2131,6 +2149,7 @@ fn app_persist_dialogs(
     App::new(
         draft,
         Ports {
+            ime_anchor: Box::new(NoopImeAnchor),
             clipboard: Box::new(NoClip),
             store: Box::new(store.clone()),
             math: Box::new(m),
@@ -2339,6 +2358,7 @@ fn app_print(text: &str, print: Box<dyn Print>) -> App {
     App::new(
         doc,
         Ports {
+            ime_anchor: Box::new(NoopImeAnchor),
             clipboard: Box::new(NoClip),
             store: Box::new(MemStore::default()),
             math: Box::new(m),
@@ -2538,6 +2558,7 @@ fn app_remote_assets_env(
     App::new(
         doc,
         Ports {
+            ime_anchor: Box::new(NoopImeAnchor),
             clipboard: Box::new(NoClip),
             store: Box::new(store.clone()),
             math: Box::new(FakeMath {

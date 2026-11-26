@@ -282,8 +282,8 @@ fn draw_arrow_right(frame: &mut Frame, cx: i32, cy: i32, size: i32, color: [u8; 
 }
 
 /// 任务列表自绘方框（Task 5）：外接矩形恒为 `(x, y, side, side)`（排版期按行高定死），
-/// 描边一律沿内缘绘制，勾选态只叠底色与对勾 —— 方框位置/边长/圆角/描边宽度不因
-/// 勾选或正文字族变化，彻底摆脱 `☐`/`☑` 字形宽窄差异。
+/// 描边一律沿内缘绘制，勾选态只换描边色并叠对勾 —— 不整块填充，避免实心块在视觉上
+/// 比未选中的细描边「更大」；方框位置/边长/圆角/描边宽度不因勾选或正文字族变化。
 #[allow(clippy::too_many_arguments)] // 方框绘制参数天然多（同 frame 的位图原语）
 fn draw_task_box(
     frame: &mut Frame,
@@ -310,28 +310,23 @@ fn draw_task_box(
     );
     let inner = side - 2 * stroke;
     if inner > 0 {
-        let fill = if done {
-            [theme.accent[0], theme.accent[1], theme.accent[2], 255]
-        } else {
-            // 未勾选内部必须用所在块的底色（Callout 浅底 / Details 卡片底），
-            // 否则会在带底色的块里留下页面底色的小方块。
-            bg
-        };
+        // 勾选态不整块填充强调色：实心块在视觉上比细描边「更大」，会让勾选前后
+        // 看起来不是一个尺寸。两态都保持底色 + 描边，勾选只换描边色并叠对勾。
         frame.fill_rounded_rect(
             x + stroke,
             y + stroke,
             inner as u32,
             inner as u32,
             (radius - stroke as f32).max(0.0),
-            fill,
+            bg,
         );
     }
     if done {
         // 对勾：两条斜线（粗细 = stroke），端点按方框比例取，不新增依赖也不用字形。
         let c = [
-            theme.accent_text[0],
-            theme.accent_text[1],
-            theme.accent_text[2],
+            theme.accent[0],
+            theme.accent[1],
+            theme.accent[2],
             255,
         ];
         let (x0, y0) = (x as f32, y as f32);
@@ -1490,7 +1485,7 @@ impl App {
                 *rh
             };
             // 任务列表自绘方框（Task 5）：几何在排版期由行高定死（勾选前后同一矩形），
-            // 勾选态只叠底色与对勾，不再依赖 `☐`/`☑` 字形，故换字族也不变。
+            // 勾选态只换描边色并叠对勾，不整块填充，故换字族/勾选都不改视觉尺寸。
             // 未勾选方框内部用所在块底色（Callout 浅底 / Details 卡片底），避免页面底色露出。
             let task_box_bg = if let Some(accent) = callout_accent(&kind) {
                 tint(accent, crate::tokens::palette::surface_base(&theme), 0.10)
@@ -2025,6 +2020,30 @@ mod tests {
         assert!(seeds[&0][0].alt.is_none(), "HTML alt 不得成为删除区间");
         assert!(seeds[&1][0].alt.is_some(), "Markdown alt 才可按区间去重");
         assert_eq!(table.header[0].text, "左 HTMLalt 右");
+    }
+
+    #[test]
+    fn task_box_center_stays_background_when_checked() {
+        // 勾选只换描边色 + 叠对勾，不整块填充：中心像素两态都应是底色，
+        // 避免「选中框看起来比未选中框大」（issue #7）。
+        let theme = crate::theme::Theme::high_contrast();
+        let bg = [250u8, 250, 245, 255];
+        for done in [false, true] {
+            let mut f = Frame::new(40, 40, bg);
+            draw_task_box(&mut f, 5, 5, 20, done, &theme, 1.0, bg);
+            assert_eq!(
+                f.get(15, 15),
+                bg,
+                "任务框中心不得填充实色（done={done}）"
+            );
+            let border = f.get(5, 15);
+            let expected = if done { theme.accent } else { theme.muted };
+            assert_eq!(
+                [border[0], border[1], border[2]],
+                expected,
+                "描边颜色只由勾选态决定（done={done}）"
+            );
+        }
     }
 
     #[test]

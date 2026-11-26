@@ -2400,11 +2400,11 @@ mod tests {
         );
     }
 
-    /// 灰度开关：绑定 Config.source_plain_lines；Space/Enter 翻转并即时反映到 apply 结果。
+    /// 源码纯文本行开关：绑定 Config.source_plain_lines；Space/Enter 翻转并即时反映到 apply 结果。
     #[test]
     fn source_plain_lines_toggle_binds_and_writes_back_config() {
         let config = Config::default();
-        assert!(!config.source_plain_lines);
+        assert!(config.source_plain_lines, "默认开启纯文本行视图（空行可见）");
 
         let mut form = SettingsForm::from_config(&config);
         let idx = form
@@ -2412,7 +2412,7 @@ mod tests {
             .iter()
             .position(|f| f.label == Key::SettingsSourcePlainLines)
             .expect("源码纯文本行开关必须存在");
-        assert!(matches!(form.fields[idx].value, FieldValue::Toggle(false)));
+        assert!(matches!(form.fields[idx].value, FieldValue::Toggle(true)));
         let layout = layout_for(viewport(1280.0, 800.0), &form);
         let mut state = SettingsState::new(&form);
         state.focused_field = idx;
@@ -2423,7 +2423,7 @@ mod tests {
             state.on_key(&space, Mods::default(), &mut form, &layout),
             None
         );
-        assert!(form.apply(&config).source_plain_lines, "Space 必须写入配置");
+        assert!(!form.apply(&config).source_plain_lines, "Space 必须写入关闭");
 
         assert_eq!(
             state.on_key(&InputKey::Enter, Mods::default(), &mut form, &layout),
@@ -2431,14 +2431,14 @@ mod tests {
             "字段上的 Enter 与 Space 等价"
         );
         assert!(
-            !form.apply(&config).source_plain_lines,
-            "Enter 必须写回关闭"
+            form.apply(&config).source_plain_lines,
+            "Enter 必须写回开启"
         );
 
-        form.fields[idx].value = FieldValue::Toggle(true);
+        form.fields[idx].value = FieldValue::Toggle(false);
         assert!(
-            !form.reset_defaults().apply(&config).source_plain_lines,
-            "恢复默认必须回到关闭"
+            form.reset_defaults().apply(&config).source_plain_lines,
+            "恢复默认必须回到开启"
         );
     }
 

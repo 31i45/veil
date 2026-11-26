@@ -73,8 +73,7 @@ fn head(style: &ExportStyle) -> String {
          details{{margin:.8em 0;padding:.2em .6em;border-left:3px solid {border}}}\n\
          summary{{cursor:pointer;font-weight:600}}\n\
          details[open] summary{{margin-bottom:.4em}}\n\
-         img{{max-width:100%;height:auto;max-height:3.2em}}\n\
-         p>img:only-child,figure img{{max-height:9.6em}}\n\
+         img{{max-width:100%;height:auto}}\n\
          figure{{margin:1em 0;text-align:left}}\n\
          figure.img-center{{text-align:center}}\n\
          figure.img-right{{text-align:right}}\n\
@@ -2811,15 +2810,19 @@ mod tests {
             css.contains("details[open] summary{margin-bottom:.4em}"),
             "实际输出: {css}"
         );
-        // img：不溢出正文栏宽；行内限高 2 行（3.2em），独占一行放宽到 6 行（9.6em），
-        // 表格单元格 1.5 行（2.4em）——与编辑视图 B4 策略一致（body 1.6 行距基准）。
+        // img：正文图只限宽不限高（导出是「按原尺寸阅读」，不再压成 2/6 行缩略图）；
+        // 表格单元格仍限高 1.5 行（2.4em），避免单元格被单图撑爆。
         assert!(
-            css.contains("img{max-width:100%;height:auto;max-height:3.2em}"),
+            css.contains("img{max-width:100%;height:auto}"),
             "实际输出: {css}"
         );
         assert!(
-            css.contains("p>img:only-child,figure img{max-height:9.6em}"),
-            "实际输出: {css}"
+            !css.contains("img{max-width:100%;height:auto;max-height"),
+            "正文图不得再带 max-height: {css}"
+        );
+        assert!(
+            !css.contains("p>img:only-child,figure img{max-height"),
+            "独占行图的 max-height 必须删除: {css}"
         );
         assert!(
             css.contains("figcaption{margin-top:.4em;color:#666666;font-size:.9em;overflow-wrap:anywhere;word-break:break-word}"),

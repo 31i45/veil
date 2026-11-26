@@ -151,8 +151,12 @@ static PREWARM_STARTED: OnceLock<()> = OnceLock::new();
 static PREWARM_STOP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// 启动后台预热线程（每进程至多一次；重复调用直接返回）。
-pub(crate) fn prewarm_common_syntaxes() {
-    if PREWARM_STARTED.set(()).is_err() {
+///
+/// 不依赖任何 `LayoutEngine`/窗口实例，可安全地在进程入口最早期调用；
+/// 预热只影响正则的编译时机，不改变任何渲染结果。
+pub fn prewarm_syntax_async() {
+    // 单测里跳过：避免每个用例都额外编译一遍语法集、干扰时序断言。
+    if cfg!(test) || PREWARM_STARTED.set(()).is_err() {
         return;
     }
     let spawned = std::thread::Builder::new()

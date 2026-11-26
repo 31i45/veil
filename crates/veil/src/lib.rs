@@ -37,6 +37,11 @@ pub fn run() {
     // 诊断内核必须最早初始化：早于 /register、CLI 解析与 UI 初始化。
     // release 下 panic = "abort"，但 hook 仍先执行，任何早期崩溃都能取证。
     diag::install();
+    // 语法正则预热：进程入口即起后台线程（幂等），抢在窗口创建与首帧之前编译
+    // 常见围栏语言的正则——Rust 语法首次 parse 约 40 ms，原本落在首帧代码块布局上。
+    // 只影响编译时机，不改变首帧内容与配色；测试构建跳过。
+    #[cfg(not(test))]
+    veil_ui::prewarm_syntax_async();
     veil_ui::diag::record("app", "run start");
     // 运行时语言必须早于任何 t() 取词（/register 提示、CLI 错误对话框都用 t()）：
     // 优先级为 配置手动选择 > VEIL_UI_LANG（仅 QA） > 系统 UI 语言。

@@ -73,4 +73,5 @@ pub use theme::{
     SystemTheme, ThemeEnv, WindowEffects,
 };
 // bench_typing（产品层纯度量 example）需要 LayoutEngine / Frame 做纯排版与帧分配基准
+pub use view::highlight::prewarm_syntax_async;
 pub use view::{BlockLayout, Frame, LayoutEngine, BASE_FONT_SIZE, BASE_LINE_HEIGHT};

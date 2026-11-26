@@ -233,3 +233,66 @@ fn raster_baseline_snap_sub_sup_matches_integer_reference() {
         assert_matches_integer_baseline(&mut eng, &layout, &layout.script_ranges, Some(target));
     }
 }
+
+/// 最小字体闭集的四类覆盖：中文正文、拉丁文、等宽代码、emoji 都必须有真实字形。
+/// `glyph_id == 0` 即 .notdef（缺字形框），是「缺字」的直接证据。
+#[test]
+fn minimal_font_set_covers_cjk_latin_mono_and_emoji() {
+    let cases: &[(&str, &str)] = &[
+        // 含 CJK 扩展 B 区生僻字（雅黑不覆盖，靠 SimSun-ExtB 兜底）
+        ("cjk", "中文排版测试 标题𠀀"),
+        ("latin", "Latin typography 123"),
+        ("mono", "```rust\nfn main() { println!(\"hi\"); }\n```"),
+        ("emoji", "😀🎉"),
+    ];
+    let mut eng = LayoutEngine::new();
+    for (label, text) in cases {
+        let layout = paragraph(&mut eng, text, 500.0);
+        let mut glyphs = 0usize;
+        let mut width = 0.0_f32;
+        for run in layout.buffer.layout_runs() {
+            width = width.max(run.line_w);
+            for glyph in run.glyphs {
+                let cluster = &run.text[glyph.start..glyph.end];
+                if cluster.chars().all(char::is_whitespace) {
+                    continue;
+                }
+                assert_ne!(
+                    glyph.glyph_id, 0,
+                    "{label}: 文本 {cluster:?} 缺字形（glyph_id == 0 即 .notdef）"
+                );
+                glyphs += 1;
+            }
+        }
+        assert!(glyphs > 0, "{label}: 未排到任何字形");
+        assert!(width > 0.0, "{label}: 布局宽度应为正，实际 {width}");
+    }
+}
+
+/// 最小闭集不能只留常规面：粗体/斜体必须命中真实字面，否则强调文本静默退回常规。
+#[test]
+fn minimal_font_set_keeps_bold_and_italic_faces() {
+    let mut eng = LayoutEngine::new();
+    let mono = eng.mono_family().expect("测试机应探测到等宽族");
+    let db = eng.font_system().db();
+    let has = |family: &str, weight: Option<Weight>, style: Option<FontStyle>| {
+        db.faces().any(|f| {
+            f.families.iter().any(|(fam, _)| fam == family)
+                && weight.is_none_or(|w| f.weight >= w)
+                && style.is_none_or(|s| f.style == s)
+        })
+    };
+    assert!(has(mono, Some(Weight::BOLD), None), "{mono} 缺粗体字面");
+    assert!(
+        has(mono, None, Some(FontStyle::Italic)),
+        "{mono} 缺斜体字面"
+    );
+    assert!(
+        has("Segoe UI", Some(Weight::BOLD), None),
+        "Segoe UI 缺粗体字面"
+    );
+    assert!(
+        has("Segoe UI", None, Some(FontStyle::Italic)),
+        "Segoe UI 缺斜体字面"
+    );
+}

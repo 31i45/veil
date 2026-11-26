@@ -2,7 +2,11 @@ use super::*;
 
 impl LayoutEngine {
     pub fn new() -> Self {
-        let (font_system, mono_family) = new_font_system();
+        let StartupFonts {
+            font_system,
+            mono_family,
+            minimal,
+        } = new_font_system();
         let (bg_tx, bg_rx) = crate::view::highlight_bg::spawn_background();
         LayoutEngine {
             font_system,
@@ -16,6 +20,7 @@ impl LayoutEngine {
             doc_readable_cols: crate::geometry::readable_cols(DocMargin::Standard),
             plain_lines: false,
             mono_family,
+            fonts_minimal: minimal,
             syntax: SyntaxColors::default_light(),
             highlighter: Highlighter::default(),
             link_color: Theme::light().link,
@@ -25,6 +30,24 @@ impl LayoutEngine {
             bg_tx: Some(bg_tx),
             bg_rx: Some(bg_rx),
         }
+    }
+
+    /// 最小闭集启动后按需补全系统字族：只在真正需要「全部已安装字族」时发生一次
+    /// （打开设置面板列字体、应用配置里的自定义字族），不进入首帧路径。
+    fn ensure_full_font_set(&mut self) {
+        if !self.fonts_minimal {
+            return;
+        }
+        self.fonts_minimal = false;
+        self.font_system.db_mut().load_system_fonts();
+    }
+
+    /// 该字族是否已在字体库中（最小闭集只含少数几个族）。
+    fn has_family(&self, name: &str) -> bool {
+        self.font_system
+            .db()
+            .faces()
+            .any(|f| f.families.iter().any(|(fam, _)| fam == name))
     }
 
     /// 设置正文排版参数（字号/行高为物理像素基准，字体族与显式字族名）。
@@ -40,6 +63,13 @@ impl LayoutEngine {
         font: DocFontFamily,
         face: Option<&str>,
     ) {
+        // 配置里可能保存着最小闭集之外的族（用户此前从系统字体里选的）：
+        // 此时补一次全量扫描，否则该族会静默退回默认族（可见的字体回退）。
+        if let Some(name) = face {
+            if !self.has_family(name) {
+                self.ensure_full_font_set();
+            }
+        }
         self.doc_font_size = font_size.max(1.0);
         self.doc_line_height = line_height.max(1.0);
         self.doc_font = font;
@@ -95,7 +125,10 @@ impl LayoutEngine {
     /// 已安装字族（去重排序）+ 是否含中文字形。
     ///
     /// 中文判定见 [`Self::family_has_cjk`]；结果在设置面板打开时计算一次。
-    pub(crate) fn installed_families(&self) -> Vec<(String, bool)> {
+    /// 最小闭集启动时这里补一次全量扫描：字体字段要列出全部已安装族，且用户
+    /// 选中的族必须真的在库中（否则会静默退回默认族）。
+    pub(crate) fn installed_families(&mut self) -> Vec<(String, bool)> {
+        self.ensure_full_font_set();
         let mut names: Vec<String> = self
             .font_system
             .db()

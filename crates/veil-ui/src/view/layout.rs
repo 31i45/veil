@@ -9,7 +9,7 @@
 use std::collections::{HashMap, HashSet};
 
 use cosmic_text::{
-    Attrs, Buffer, Color, Cursor, Family, FontSystem, Metrics, Shaping, Style as FontStyle,
+    fontdb, Attrs, Buffer, Color, Cursor, Family, FontSystem, Metrics, Shaping, Style as FontStyle,
     SwashCache, Weight, Wrap,
 };
 use veil_core::{task_span, BlockId, BlockKind, HtmlTag, InlineKind, InlineNode, Range};
@@ -689,16 +689,113 @@ pub(super) fn doc_family(
     }
 }
 
+/// 必需字面组（Windows 系统字体目录内的文件名）：组内按顺序取第一个可加载的。
+/// 任一组缺失或解析失败（非 Windows、精简系统、字体被裁掉）即判定最小闭集不可用，
+/// 回退 [`FontSystem::new()`] 的全量系统字体扫描，保证不缺字。
+const ESSENTIAL_FONT_GROUPS: &[&[&str]] = &[
+    // 拉丁 UI / 正文常规
+    &["segoeui.ttf"],
+    // 正文 CJK（微软雅黑；msyh.ttc 内含 YaHei / YaHei UI 两族）
+    &["msyh.ttc", "msyhbd.ttc"],
+    // 等宽（代码块 / 行内代码）
+    &["consola.ttf", "cascadiamono.ttf"],
+];
+
+/// 最小闭集候选文件名（`%SystemRoot%\Fonts` 下）：存在即加载，缺失只影响对应样式。
+///
+/// 粗体/斜体必须显式列出：缺面时 cosmic-text 会取最近的常规面，强调文本静默退回直立，
+/// 视觉上等同字体回退——不能为了启动耗时省掉。
+const MINIMAL_FONT_FILES: &[&str] = &[
+    "segoeui.ttf",      // 拉丁常规
+    "segoeuib.ttf",     // 拉丁粗体
+    "segoeuii.ttf",     // 拉丁斜体
+    "segoeuiz.ttf",     // 拉丁粗斜体
+    "msyh.ttc",         // CJK 正文
+    "msyhbd.ttc",       // CJK 粗体
+    "consola.ttf",      // 等宽常规
+    "consolab.ttf",     // 等宽粗体
+    "consolai.ttf",     // 等宽斜体
+    "consolaz.ttf",     // 等宽粗斜体
+    "cascadiamono.ttf", // 等宽后备（Consolas 缺失时）
+    "seguiemj.ttf",     // emoji 回退（彩色）
+    "simsun.ttc",       // 衬线正文（DocFontFamily::Serif 的显式族名 "SimSun"）
+    "simsunb.ttf",      // 生僻汉字兜底（CJK 扩展 B 区，雅黑不覆盖）
+];
+
+/// 系统字体目录：`%SystemRoot%\Fonts`（`windir` 兜底，兼容装在非 C 盘的系统）；
+/// 两个变量都没有（非 Windows）时返回 `None`。
+fn system_font_dir() -> Option<std::path::PathBuf> {
+    std::env::var_os("SystemRoot")
+        .or_else(|| std::env::var_os("windir"))
+        .map(|root| std::path::PathBuf::from(root).join("Fonts"))
+}
+
+/// 排版 locale：优先 `LC_ALL`/`LC_CTYPE`/`LANG`，取不到时用 `zh-CN`。
+///
+/// cosmic-text 只用它决定 Han 统一回退族；`zh-CN` 对应微软雅黑，正是最小闭集里
+/// 实际加载的 CJK 族，其他语言只会落到同一默认分支。
+fn font_locale() -> String {
+    for key in ["LC_ALL", "LC_CTYPE", "LANG"] {
+        if let Ok(raw) = std::env::var(key) {
+            let tag = raw
+                .split(['.', '@'])
+                .next()
+                .unwrap_or_default()
+                .replace('_', "-");
+            if !tag.is_empty() && tag != "C" && tag != "POSIX" {
+                return tag;
+            }
+        }
+    }
+    "zh-CN".to_string()
+}
+
+/// 只用最小字体闭集构造 `FontSystem`：不枚举系统字体目录，只 `load_font_file` 上面
+/// 列出的几个字面。必需组缺失时返回 `None`，由调用方回退全量扫描。
+fn minimal_font_system() -> Option<FontSystem> {
+    let dir = system_font_dir()?;
+    let mut db = fontdb::Database::new();
+    let mut loaded: Vec<&str> = Vec::new();
+    for name in MINIMAL_FONT_FILES {
+        let path = dir.join(name);
+        if path.is_file() && db.load_font_file(&path).is_ok() {
+            loaded.push(name);
+        }
+    }
+    let complete = ESSENTIAL_FONT_GROUPS
+        .iter()
+        .all(|group| group.iter().any(|name| loaded.contains(name)));
+    if !complete {
+        return None;
+    }
+    Some(FontSystem::new_with_locale_and_db(font_locale(), db))
+}
+
+/// 启动期字体系统构造结果。
+struct StartupFonts {
+    font_system: FontSystem,
+    /// 显式等宽族名（N9：避免 generic Monospace 的候选链截走 Han）。
+    mono_family: Option<&'static str>,
+    /// 是否只加载了最小闭集（未枚举全部系统字体），供后续按需补全。
+    minimal: bool,
+}
+
 /// 创建字体系统并显式指定 generic family（D8）。
 ///
-/// cosmic-text 的默认族（Open Sans / Noto Sans Mono）在 Windows 上通常不存在，
-/// 汉字会走各自回退，造成「`#` 与汉字不同族」。这里按 `typography` 的回退链
-/// 探测存在的族后显式设置；候选全部缺失时保持 fontdb 默认。
+/// 启动路径只加载最小闭集（约几个字体文件），不再全量枚举 `C:\Windows\Fonts`
+/// （fontdb 全量扫描约 140 ms）。cosmic-text 的默认族（Open Sans / Noto Sans Mono）
+/// 在 Windows 上通常不存在，汉字会走各自回退，造成「`#` 与汉字不同族」——这里按
+/// `typography` 的回退链探测已加载的族后显式设置；候选全部缺失时保持 fontdb 默认。
 ///
 /// 返回同时给出探测到的等宽族名：generic `Monospace` 的回退链会先耗尽等宽候选，
 /// 旧 CJK 等宽字体（如 MS Gothic）会截走 Han，因此代码文本改用显式族名（N9）。
-fn new_font_system() -> (FontSystem, Option<&'static str>) {
-    let mut fs = FontSystem::new();
+fn new_font_system() -> StartupFonts {
+    // 回退分支：最小闭集不可用（非 Windows / 精简系统 / 字体缺失）时退回原行为——
+    // 枚举全部系统字体。宁可启动慢，也不能缺字。
+    let (mut fs, minimal) = match minimal_font_system() {
+        Some(fs) => (fs, true),
+        None => (FontSystem::new(), false),
+    };
     let (sans, mono) = {
         let db = fs.db_mut();
         let pick = |candidates: &'static [&'static str]| {
@@ -719,7 +816,11 @@ fn new_font_system() -> (FontSystem, Option<&'static str>) {
     if let Some(family) = mono {
         db.set_monospace_family(family);
     }
-    (fs, mono)
+    StartupFonts {
+        font_system: fs,
+        mono_family: mono,
+        minimal,
+    }
 }
 pub struct LayoutEngine {
     font_system: FontSystem,
@@ -748,6 +849,9 @@ pub struct LayoutEngine {
     /// 启动时探测到的等宽族名：代码/行内代码显式指定，避免 generic Monospace 的
     /// 等宽候选链截走 Han（N9）。
     mono_family: Option<&'static str>,
+    /// 启动期只加载了最小字体闭集：首次需要「全部已安装字族」（设置面板列字体、
+    /// 应用配置里的自定义字族）时再补一次全量扫描，不拖慢首帧。
+    fonts_minimal: bool,
     /// 代码块语法高亮色板（随主题切换更新）。
     syntax: SyntaxColors,
     /// 代码块增量高亮器：语法集惰性加载，逐行状态跨布局复用。

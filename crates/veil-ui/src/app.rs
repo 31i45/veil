@@ -2189,8 +2189,10 @@ impl App {
         }
         self.window_state.startup = None;
         if first_present {
-            crate::diag::perf_trace_first_frame();
+            // 两条都走 stage 异步通道：先入队 `first-present`，再由首帧埋点在
+            // 取值后统一排空，保证首帧后立刻退出的进程也不丢最后一行。
             crate::diag::perf_stage("first-present");
+            crate::diag::perf_trace_first_frame();
         }
         if let Some(window) = &self.window_state.window {
             window.set_visible(true);

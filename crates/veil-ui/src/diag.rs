@@ -9,7 +9,8 @@
 //! POSIX 根目录起点都会一直吞到硬终止符（含空格，宁可过度替换）。
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
+use std::sync::mpsc::{self, Sender};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -56,6 +57,65 @@ static PERF_START: OnceLock<Instant> = OnceLock::new();
 static PERF_FIRST_FRAME_TRACED: AtomicBool = AtomicBool::new(false);
 /// 分阶段埋点已打印过的 stage 名称（同名每进程至多一次）。
 static PERF_STAGES_SEEN: Mutex<Vec<&'static str>> = Mutex::new(Vec::new());
+/// stage 行的异步输出通道：首次需要输出时才创建（`OnceLock` 惰性初始化）。
+/// 测量路径只做 `send`，stderr 写入交给后台线程；否则重定向到文件时单次写入
+/// 约 4 ms，会把首帧前的 12 条 stage 行叠成约 48 ms 的虚增。
+static STAGE_TX: OnceLock<Option<Sender<String>>> = OnceLock::new();
+/// 已入队但尚未写出的行数（单通道、进程级；语义等同 `Arc<AtomicUsize>`，
+/// 无需再为计数器单独持有 `Arc`）。用于首帧后有限等待排空。
+static STAGE_PENDING: AtomicUsize = AtomicUsize::new(0);
+
+/// 惰性取得 stage 输出通道：首次调用时建 channel 并 spawn 后台写线程
+/// （线程名 `veil-stage-log`，detached：句柄立即丢弃）。spawn 失败返回 `None`，
+/// 调用方回退到同步 `eprintln!`，输出功能不受影响。
+fn stage_sender() -> Option<&'static Sender<String>> {
+    STAGE_TX
+        .get_or_init(|| {
+            let (tx, rx) = mpsc::channel::<String>();
+            std::thread::Builder::new()
+                .name("veil-stage-log".to_string())
+                .spawn(move || {
+                    // channel 是 FIFO：send 顺序即打印顺序；
+                    // 每行 `eprintln!` 自带换行并 flush stderr。
+                    for line in rx {
+                        eprintln!("{line}");
+                        STAGE_PENDING.fetch_sub(1, Ordering::SeqCst);
+                    }
+                })
+                .ok()
+                .map(|_| tx)
+        })
+        .as_ref()
+}
+
+/// 把一行交给后台线程写出；通道不可用（未创建成功/接收端已退出）时同步兜底。
+fn stage_emit(line: String) {
+    if let Some(tx) = stage_sender() {
+        STAGE_PENDING.fetch_add(1, Ordering::SeqCst);
+        match tx.send(line) {
+            Ok(()) => {}
+            Err(err) => {
+                STAGE_PENDING.fetch_sub(1, Ordering::SeqCst);
+                eprintln!("{}", err.0);
+            }
+        }
+        return;
+    }
+    eprintln!("{line}");
+}
+
+/// 等待已入队的行写出（纯自旋 + yield，上限 `timeout`）。
+/// 只在首帧埋点后调用一次，避免进程随即退出时丢掉最后几行；不阻塞常态路径。
+fn stage_drain(timeout: Duration) {
+    let deadline = Instant::now() + timeout;
+    while STAGE_PENDING.load(Ordering::SeqCst) > 0 {
+        if Instant::now() >= deadline {
+            break;
+        }
+        std::hint::spin_loop();
+        std::thread::yield_now();
+    }
+}
 
 /// 性能埋点开关：只读环境变量，不做 IO；未开启时两个埋点函数都是空操作。
 fn perf_trace_enabled() -> bool {
@@ -85,10 +145,15 @@ pub fn perf_trace_first_frame() {
     if PERF_FIRST_FRAME_TRACED.swap(true, Ordering::Relaxed) {
         return;
     }
-    eprintln!(
+    // 先取值再入队：数值口径仍是「进程入口 → 本次 present 成功」，与写盘无关。
+    let line = format!(
         "veil-first-frame-ms: {:.1}",
         start.elapsed().as_secs_f64() * 1000.0
     );
+    stage_emit(line);
+    // 首帧已测完：有限等待日志落盘（≤50 ms），避免进程随后退出丢行。
+    // 此等待发生在测量之后，不会回灌到 `veil-first-frame-ms`。
+    stage_drain(Duration::from_millis(50));
 }
 
 /// 分阶段埋点是否应当生效：环境变量开启且计时原点已由 `perf_mark_start()` 建立。
@@ -125,7 +190,8 @@ fn stage_seen() -> MutexGuard<'static, Vec<&'static str>> {
 ///
 /// 与 `perf_mark_start()` 共用 `PERF_START`；未开启埋点或原点未建立时直接返回
 /// （不自建原点，保证与 `veil-first-frame-ms` 口径一致）。每个 name 每进程至多一次；
-/// 重复调用在读时钟之前就返回，常态下零 IO、零时钟读取。
+/// 重复调用在读时钟之前就返回，常态下零 IO、零时钟读取、不建 channel。
+/// 输出走后台写线程（只做 `send`），stderr 写入不再落在被测的首帧路径上。
 pub fn perf_stage(name: &'static str) {
     let trace_enabled = perf_trace_enabled();
     let start = PERF_START.get();
@@ -141,7 +207,7 @@ pub fn perf_stage(name: &'static str) {
             return;
         }
     }
-    eprintln!("{}", stage_line(name, start.elapsed()));
+    stage_emit(stage_line(name, start.elapsed()));
 }
 
 /// 记录结构化事件；detail 会经过脱敏与截断（禁止换行、绝对路径替换为 `<path>`、
@@ -884,6 +950,31 @@ mod tests {
         );
         assert!(mark_stage_once(&mut seen, "app-theme"));
         assert_eq!(seen, vec!["app-config", "app-theme"]);
+    }
+
+    #[test]
+    fn perf_stage_lines_are_ordered() {
+        // channel 是 FIFO：send 顺序即写出顺序。只测这段纯逻辑，不依赖真实
+        // stderr 重定向，避免测试去抢进程级 stderr。
+        let (tx, rx) = mpsc::channel::<String>();
+        let names = [
+            "cli-done",
+            "ipc-done",
+            "doc-load",
+            "first-render-start",
+            "first-present",
+        ];
+        let expected: Vec<String> = names
+            .iter()
+            .map(|name| stage_line(name, Duration::from_millis(1)))
+            .collect();
+        for line in expected.iter() {
+            tx.send(line.clone()).expect("接收端仍在");
+        }
+        // 发送端必须销毁，`into_iter` 才会在队列排空后结束。
+        drop(tx);
+        let received: Vec<String> = rx.into_iter().collect();
+        assert_eq!(received, expected, "send 顺序必须等于写出顺序");
     }
 
     #[test]

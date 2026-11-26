@@ -3746,4 +3746,8 @@ mod tests {
             assert_eq!(label_page, body_page, "n={n}：代码标题与代码体被分页拆开");
         }
     }
+
+    // Task 7：屏幕 / PDF 断行一致性差分工具（只读生产逻辑，不改行为）。
+    #[path = "../../pdf_layout_consistency_tests.rs"]
+    mod consistency;
 }

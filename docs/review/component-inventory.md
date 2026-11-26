@@ -717,3 +717,92 @@ pwsh -NoProfile -File "d:\VSCode\Veil\tools\walkthrough.ps1" -Doc "<doc>" -Perf 
 - base64（A-1 已执行）：`crates/veil/src/export.rs::base64_encode`、`crates/veil-core/src/mermaid.rs::base64url_encode`
 - 手写 JSON：`crates/veil-core/src/callouts.rs`
 - 手写 HTML→MD：`crates/veil-ui/src/html.rs`
+
+---
+
+## 11. v3.0.2 当前 HEAD 重新基线（2026-11-26）
+
+> 本节是追加基线，供后续体积放行/否决使用。§1–§10 的 v2 结论与数字保留**历史身份**，不因本节改写；v2 的 `9.89 MB / 10 MiB` 不再作为当前版本的放行依据。
+
+### 11.1 基线卡
+
+| 项 | 当前值 | 来源/口径 |
+|---|---|---|
+| HEAD | `71cb42a`（`git describe`：`v3.0.2-58-g71cb42a`） | 本机 `git rev-parse --short HEAD` |
+| 版本 | `3.0.2` | `Cargo.toml` workspace.package.version |
+| 构建 profile | `release`：`lto=true`、`codegen-units=1`、`panic=abort`、`strip=true`、`opt-level="s"` | `Cargo.toml`；与 Phase 2 证据一致 |
+| 工具链 / 平台 | rustc/cargo 1.99.1；Windows 11 x64 | 本机 `rustc --version`；证据同 |
+| 产物 | `target\release\veil.exe` **14,170,112 B**（13.51 MiB） | `Get-Item`；构建于 2026-11-26 12:48:55 |
+| SHA-256 | `73A08EE9F0260AEFEA2C99ECC7BEB9EEF476E804E1908900362E4EFB05A5A3C3` | `Get-FileHash` |
+| 体积门禁 | **≤ 14 MiB = 14,680,064 B**（发布门禁） | `README.md:208` |
+| 对门禁余量 | **509,952 B（498.0 KiB）**，占门禁 3.47%；exe 已占门禁 96.53% | 14,680,064 − 14,170,112 |
+| 门禁脚本固定基线 | 14,135,296 B；当前比该基线 **+34,816 B** | `docs/review/evidence/perf/perf-gate-2026-11-26.md` |
+| 复测一致性 | 体积与 SHA-256 均与 Phase 2 证据逐字节一致 | `docs/review/evidence/perf/current-head-2026-11-26.md` §2/§4 |
+
+**与 v2 的关系**：v2 基线为 `9,889,792 B @ ac25a9a`，门禁为 `10 MiB = 10,485,760 B`。`ac25a9a` 在当前克隆中不可检出（v3 历史已重写），其数字只作历史引用。当前 exe 比 v2 大 **+4,280,320 B（+43.28%）**，但两者的门禁与内容不同（v3 默认包含离线 Mermaid：完整 `mermaid.js` + QuickJS + resvg），因此**不直接比较通过/不通过或余量**，差值只用于 §11.3 归因。
+
+### 11.2 PE 节对比（v2 → 当前）
+
+| 节 | v2（9,889,792 B） | 当前（14,170,112 B） | 增量 | 当前占 exe |
+|---|---:|---:|---:|---:|
+| `.text` | 7,228,928 | 7,826,944 | **+598,016** | 55.24% |
+| `.rdata` | 2,462,720 | 6,067,712 | **+3,604,992** | 42.82% |
+| `.data` | 2,048 | 3,072 | +1,024 | 0.02% |
+| `.pdata` | 62,464 | 122,368 | +59,904 | 0.86% |
+| `.rsrc` | 91,136 | 91,136 | **0** | 0.64% |
+| `.reloc` | 41,472 | 57,856 | +16,384 | 0.41% |
+| PE 头（`SizeOfHeaders`） | 1,024 | 1,024 | 0 | 0.01% |
+| **合计** | **9,889,792** | **14,170,112** | **+4,280,320** | **100%** |
+
+增量集中在 `.rdata`（+3,604,992 B，占增量 84.22%）与 `.text`（+598,016 B，13.97%）；`.rsrc` 完全未变，说明**图标没有增长**。
+
+### 11.3 体积增量归因
+
+| 归因项 | 字节 | 占 +4,280,320 | 证据等级 | 说明 |
+|---|---:|---:|---|---|
+| Mermaid 内嵌 JS 资源 | **3,213,314** | 75.07% | 实测（源文件字节） | 见下表；全部位于 `.rdata` |
+| QuickJS 引擎、resvg 光栅栈及其他新增依赖 | **1,067,006** | 24.93% | **未细分** | 本 HEAD 尚无 crate 级 cargo-bloat 归因结论，无法在 rquickjs / resvg / regex / serde_json 等之间精确切分 |
+| 字体 / 图标 | **0** | 0% | 实测（PE 节） | `.rsrc` 91,136 B 未变（两枚 ico 共 89,277 B 仍在内）；`tmTheme` 共 4,432 B 未变；仓库无新增字体文件；正文字体仍由 `fontdb` 扫描系统字体，公式字体仍随 `latex-rust` 编译 |
+| AccessKit | **0（未加入）** | 0% | 静态 | `Cargo.toml` / `Cargo.lock` 无 `accesskit`；旧 feature 实现已在 `bd3b03e` 移除。Phase 5 预估增量**单列**，见下 |
+
+Mermaid 内嵌 JS 明细（`crates/veil-mermaid-offline/assets/`）：
+
+| 资源 | 字节 | 用途 |
+|---|---:|---|
+| `mermaid.min.js` | 2,751,963 | 完整 mermaid 引擎（默认 feature 编译进 exe） |
+| `linkedom.worker.mjs` | 421,658 | 无头 DOM（构建期转 IIFE 后 `include_str!`） |
+| `bootstrap.js` | 39,693 | QuickJS 启动/桥接脚本 |
+| **合计** | **3,213,314** | 占 exe 22.68%，占 v2→当前增量 75.07% |
+
+- `crates/veil/Cargo.toml:8` 自述离线 Mermaid 功能“体积 +约 5 MiB”。这是**功能级估计**，不是隔离实测：本 HEAD 可复核的是整包相对 v2 增长 **4.08 MiB**，其中 JS 资源 **3.06 MiB**；其余 **1.02 MiB** 含 bundled QuickJS C 引擎、resvg/usvg、正则查找、callouts 的 `serde_json` 等，**未细分**。
+- 新增直接依赖（静态）：`rquickjs 0.9.0`（bundled QuickJS，`veil-mermaid-offline`）、`resvg 0.50.0` 与 `tiny-skia-path 0.12`（`veil`）、`regex 1.13.2`（`veil-ui`，正则查找）、`serde` / `serde_json 1.0.154`（`veil-core`，callouts）。依赖树唯一包 **128（v2 记录）→ 162（本 HEAD 同口径）**，增量含 `rquickjs-sys`、`usvg`、`svgtypes` 等传递包。
+- 已知重复：`resvg` 带入 `tiny-skia 0.12.0`，而 `latex-rust` 仍使用 `tiny-skia 0.11.4`，两份并存，相关代码无法完全去重。
+- **AccessKit（Phase 5 预估增量单列）**：本 HEAD **未加入**，当前增量记 0。历史 feature 构建曾实测 **+185 KiB（189,440 B）**（非 spike 的 +198 KiB 预测），但那是旧树、旧默认体积；本 HEAD 未称重，Phase 5 引入前必须重测。按 185 KiB 粗算，当前 509,952 B 余量可容纳（剩约 320,512 B），但此数**不构成承诺**。
+
+### 11.4 B 类记录更新（截至当前 HEAD）
+
+决策全部维持 v2 的 **Keep**；仅 B-1 由 `Spike-later` 更新为**已完成**。表中“替换后余量”以当前门禁余量 509,952 B 起算；边际值沿用 v2 独立探针（本 HEAD 未复跑），体积只作成本项。
+
+| 编号 | 项 | 当前状态（HEAD `71cb42a`） | 决策 | 体积 / 依据 |
+|---|---|---|---|---|
+| B-1 | `callouts.rs` → `serde_json` | **已完成**：`veil-core` 直接依赖 `serde_json`；`from_json` 整文件解析后逐项提取，测试覆盖 emoji/代理对与 `\b`/`\f` | **Done（原 Spike-later 关闭）** | 实际增量**未细分**（已计入当前 exe；v2 探针 +61,952 B 为独立工程上限） |
+| B-2 | `html.rs` → `html2md` | 仍手写；无 `html2md` 依赖 | **Keep** | GPL-3.0+ 许可证 + `panic=abort` 不兼容；+2,291,712 B → 替换后余量 **−1,781,760 B** |
+| B-3 | `quick_open.rs` 排序 → `fuzzy-matcher` | 仍手写 `score/filter` | **Keep** | 质量负收益（`config` 2/10 vs 5/10）；+24,576–92,160 B，余量 417,792–485,376 B |
+| B-4 | `theme.rs` 加载 → `toml_edit` | 仍为行解析 + `toml_edit` 写回的双解析器 | **Keep** | 0 边际，但 3 条容错语义相反，未获产品批准 |
+| B-5 | `i18n.rs` → `fluent` | 仍 `keys!` 静态表、单语言 | **Keep** | +224,256 B → 余量 285,696 B；无复数/日期需求 |
+| B-6 | `search_strategy.rs` 字面搜索 → `regex` | 字面 `memchr` 路径保留；`regex 1.13.2` 现为直接依赖，作为可选正则模式（`README.md:108`），**不是**对字面搜索的替换 | **Keep** | v2 的“`regex` 未链接 / +1,198,592 B”前提已过时；字面搜索仍是默认需求 |
+| B-7 | `link_safety.rs` → `url` | 仍白名单 + 实体/百分号去混淆 | **Keep** | +221,696 B → 余量 288,256 B；`url` 只覆盖 scheme 语法，安全语义更弱 |
+| B-8 | `slug.rs` → `slug` | 仍自研、CJK 原样保留 | **Keep** | +6,144 B → 余量 503,808 B；音译会改变既有锚点身份 |
+| B-9 | `cli.rs` → `clap` | 仍手写；仅 `--new-window`、`--`、单位置参数 | **Keep** | +293,376 B → 余量 216,576 B；1 个 flag 属过度 |
+
+### 11.5 复现
+
+```powershell
+cargo build --release --bin veil
+(Get-Item target\release\veil.exe).Length            # 14,170,112
+Get-FileHash target\release\veil.exe -Algorithm SHA256
+dumpbin /headers target\release\veil.exe             # .text / .rdata 等节
+cargo tree -e no-dev -p veil --prefix none           # 唯一包计数
+```
+
+证据引用：`docs/review/evidence/perf/current-head-2026-11-26.md`（体积/SHA/门禁）、`docs/review/evidence/perf/perf-gate-2026-11-26.md`（自动门禁与固定基线）、`README.md:208`（14 MiB 门禁）。本节的 v2 对照数字来自 §3.1，未重新生成。

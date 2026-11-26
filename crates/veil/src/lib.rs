@@ -87,6 +87,7 @@ pub fn run() {
             std::process::exit(2);
         }
     };
+    veil_ui::diag::perf_stage("cli-done");
     let (initial_path, initial_sample) = match &launch {
         cli::Launch::Default => (None, true),
         cli::Launch::Open(path) | cli::Launch::NewWindow(Some(path)) => {
@@ -127,6 +128,7 @@ pub fn run() {
             std::process::exit(1);
         }
     };
+    veil_ui::diag::perf_stage("ipc-done");
 
     let doc = if let Some(path) = initial_path {
         match load_document(&path) {
@@ -167,6 +169,8 @@ pub fn run() {
             open_error: None,
         }
     };
+
+    veil_ui::diag::perf_stage("doc-load");
 
     let doc_requests = requests.map(|requests| {
         let (tx, rx) = std::sync::mpsc::channel();

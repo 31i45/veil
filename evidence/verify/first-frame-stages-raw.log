@@ -1,0 +1,85 @@
+===== run 1 (ok=True) =====
+veil-stage-ms: cli-done 1.8
+veil-stage-ms: ipc-done 6.6
+veil-stage-ms: doc-load 11.5
+veil-stage-ms: app-config 21.3
+veil-stage-ms: app-theme 25.7
+veil-stage-ms: app-startup-doc 29.9
+veil-stage-ms: app-editor 51.8
+veil-stage-ms: app-fonts 189.2
+veil-stage-ms: app-index 196.1
+清理临时文件失败 C:\Users\31i45\AppData\Roaming\Veil\session.txt.veil-tmp: 拒绝访问。 (os error 5)
+最近文件记录失败: 拒绝访问。 (os error 5)（写入 C:\Users\31i45\AppData\Roaming\Veil\session.txt）
+veil-stage-ms: app-new 225.4
+veil-stage-ms: window-created 403.9
+veil-stage-ms: first-render-start 408.6
+veil-first-frame-ms: 424.7
+veil-stage-ms: first-present 434.9
+===== run 2 (ok=True) =====
+veil-stage-ms: cli-done 0.8
+veil-stage-ms: ipc-done 5.4
+veil-stage-ms: doc-load 10.2
+veil-stage-ms: app-config 30.2
+veil-stage-ms: app-theme 34.2
+veil-stage-ms: app-startup-doc 38.5
+veil-stage-ms: app-editor 60.5
+veil-stage-ms: app-fonts 190.4
+veil-stage-ms: app-index 207.8
+清理临时文件失败 C:\Users\31i45\AppData\Roaming\Veil\session.txt.veil-tmp: 拒绝访问。 (os error 5)
+最近文件记录失败: 拒绝访问。 (os error 5)（写入 C:\Users\31i45\AppData\Roaming\Veil\session.txt）
+veil-stage-ms: app-new 241.0
+veil-stage-ms: window-created 416.7
+veil-stage-ms: first-render-start 421.6
+veil-first-frame-ms: 438.8
+veil-stage-ms: first-present 448.8
+===== run 3 (ok=True) =====
+veil-stage-ms: cli-done 0.9
+veil-stage-ms: ipc-done 5.2
+veil-stage-ms: doc-load 9.9
+veil-stage-ms: app-config 22.4
+veil-stage-ms: app-theme 26.8
+veil-stage-ms: app-startup-doc 31.2
+veil-stage-ms: app-editor 53.6
+veil-stage-ms: app-fonts 184.1
+veil-stage-ms: app-index 192.0
+清理临时文件失败 C:\Users\31i45\AppData\Roaming\Veil\session.txt.veil-tmp: 拒绝访问。 (os error 5)
+最近文件记录失败: 拒绝访问。 (os error 5)（写入 C:\Users\31i45\AppData\Roaming\Veil\session.txt）
+veil-stage-ms: app-new 223.1
+veil-stage-ms: window-created 397.1
+veil-stage-ms: first-render-start 402.5
+veil-first-frame-ms: 419.9
+veil-stage-ms: first-present 435.6
+===== run 4 (ok=True) =====
+veil-stage-ms: cli-done 0.7
+veil-stage-ms: ipc-done 5.0
+veil-stage-ms: doc-load 9.6
+veil-stage-ms: app-config 18.6
+veil-stage-ms: app-theme 23.3
+veil-stage-ms: app-startup-doc 27.9
+veil-stage-ms: app-editor 50.8
+veil-stage-ms: app-fonts 191.6
+veil-stage-ms: app-index 199.5
+清理临时文件失败 C:\Users\31i45\AppData\Roaming\Veil\session.txt.veil-tmp: 拒绝访问。 (os error 5)
+最近文件记录失败: 拒绝访问。 (os error 5)（写入 C:\Users\31i45\AppData\Roaming\Veil\session.txt）
+veil-stage-ms: app-new 230.7
+veil-stage-ms: window-created 406.7
+veil-stage-ms: first-render-start 411.7
+veil-first-frame-ms: 428.2
+veil-stage-ms: first-present 438.0
+===== run 5 (ok=True) =====
+veil-stage-ms: cli-done 0.7
+veil-stage-ms: ipc-done 4.9
+veil-stage-ms: doc-load 9.8
+veil-stage-ms: app-config 20.7
+veil-stage-ms: app-theme 25.3
+veil-stage-ms: app-startup-doc 29.8
+veil-stage-ms: app-editor 52.5
+veil-stage-ms: app-fonts 176.0
+veil-stage-ms: app-index 182.9
+清理临时文件失败 C:\Users\31i45\AppData\Roaming\Veil\session.txt.veil-tmp: 拒绝访问。 (os error 5)
+最近文件记录失败: 拒绝访问。 (os error 5)（写入 C:\Users\31i45\AppData\Roaming\Veil\session.txt）
+veil-stage-ms: app-new 211.8
+veil-stage-ms: window-created 419.3
+veil-stage-ms: first-render-start 423.2
+veil-first-frame-ms: 439.5
+veil-stage-ms: first-present 449.6

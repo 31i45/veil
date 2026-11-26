@@ -1033,6 +1033,7 @@ impl App {
             // 文件不存在属正常状态（首次运行）：静默用默认配置
             Err(_) => (Config::default(), String::new()),
         };
+        crate::diag::perf_stage("app-config");
         // 跟随系统且高对比度开启时，强制使用高对比度主题（覆盖 light/dark）
         let theme = if app_config.mode == ThemeMode::System && high_contrast {
             Theme::high_contrast()
@@ -1041,6 +1042,7 @@ impl App {
         };
         // 导出样式随主题一起初始化：之后只在 refresh_theme_visuals 一处同步，避免两处漂移
         let export_style = ExportStyle::from_theme(&theme);
+        crate::diag::perf_stage("app-theme");
         let mut ports = AppPorts {
             clipboard: ports.clipboard,
             store: ports.store,
@@ -1062,7 +1064,9 @@ impl App {
             url_opener: ports.url_opener,
         };
         let start = startup_doc(&mut ports, doc);
+        crate::diag::perf_stage("app-startup-doc");
         let mut editor = Editor::new_with_callouts(&start.doc.text, &callouts);
+        crate::diag::perf_stage("app-editor");
         if start.recovered {
             editor.set_dirty(true); // 恢复内容相对磁盘基线是未保存修改
         }
@@ -1074,6 +1078,9 @@ impl App {
         // 图片缓存字节上限固化为常量 DEFAULT_IMAGE_CACHE_LIMIT_MB（200 MiB，0 = 不限制）
         let mut cache = Cache::default();
         cache.set_image_limit_mb(theme::DEFAULT_IMAGE_CACHE_LIMIT_MB);
+        // 字体系统在 LayoutEngine::new 内创建：提前绑定到局部变量，便于在其后埋点。
+        let engine = LayoutEngine::new();
+        crate::diag::perf_stage("app-fonts");
         let mut app = App {
             doc: DocState {
                 path: start.doc.path.clone(),
@@ -1092,7 +1099,7 @@ impl App {
             config: app_config,
             window_state: WindowState::default(),
             editor,
-            engine: LayoutEngine::new(),
+            engine,
             index: BlockIndex::default(),
             cache,
             pending_mermaid_auto: Vec::new(),
@@ -1150,6 +1157,7 @@ impl App {
             .set_doc_margin(app.config.doc_margin, app.config.doc_margin_px);
         app.doc.export_style.font_family = app.engine.doc_face();
         app.refresh_index();
+        crate::diag::perf_stage("app-index");
         // 真实 `recompute_geometry()` 推迟到首次 render 的 `geometry_stale` 分支。
         // 窗口尚未创建时 cosmic-text 无 viewport，提前重算只会在 cache.layout()
         // 上做全量 miss 判定（每块构造 BaseKey + 哈希 + 查表），算完首次 render 还会
@@ -2097,6 +2105,7 @@ impl App {
         // 否则 softbuffer 的 buffer_mut() 会 panic（Must set size of surface...）。
         self.sync_surface_to_client();
         let id = self.window_state.window.as_ref().map(|w| w.id());
+        crate::diag::perf_stage("window-created");
         if id.is_some() {
             self.begin_startup();
         }
@@ -2141,6 +2150,7 @@ impl App {
             return;
         }
         self.apply_pending_resize();
+        crate::diag::perf_stage("first-render-start");
         let _ = self.render();
         let presented = self.present();
         self.settle_startup(presented, Instant::now());
@@ -2159,6 +2169,7 @@ impl App {
         self.window_state.startup = None;
         if first_present {
             crate::diag::perf_trace_first_frame();
+            crate::diag::perf_stage("first-present");
         }
         if let Some(window) = &self.window_state.window {
             window.set_visible(true);

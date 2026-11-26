@@ -11,7 +11,7 @@
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Mutex, MutexGuard, OnceLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// 产品名（崩溃报告与诊断导出共用）。
 pub const PRODUCT: &str = "Veil";
@@ -54,6 +54,8 @@ static DPI_BITS: AtomicU32 = AtomicU32::new(0x3f80_0000); // 1.0f32 的位模式
 static PERF_START: OnceLock<Instant> = OnceLock::new();
 /// 首帧埋点只打印一次。
 static PERF_FIRST_FRAME_TRACED: AtomicBool = AtomicBool::new(false);
+/// 分阶段埋点已打印过的 stage 名称（同名每进程至多一次）。
+static PERF_STAGES_SEEN: Mutex<Vec<&'static str>> = Mutex::new(Vec::new());
 
 /// 性能埋点开关：只读环境变量，不做 IO；未开启时两个埋点函数都是空操作。
 fn perf_trace_enabled() -> bool {
@@ -87,6 +89,59 @@ pub fn perf_trace_first_frame() {
         "veil-first-frame-ms: {:.1}",
         start.elapsed().as_secs_f64() * 1000.0
     );
+}
+
+/// 分阶段埋点是否应当生效：环境变量开启且计时原点已由 `perf_mark_start()` 建立。
+/// 纯函数，便于测试守卫逻辑而不依赖真实环境变量。
+fn stage_ready(trace_enabled: bool, start_present: bool) -> bool {
+    trace_enabled && start_present
+}
+
+/// 把 stage 标记为已打印；返回 true 表示首次出现（应输出），false 表示重复（跳过）。
+/// 纯去重逻辑，`seen` 由调用方提供的进程级列表持有。
+fn mark_stage_once(seen: &mut Vec<&'static str>, name: &'static str) -> bool {
+    if seen.contains(&name) {
+        return false;
+    }
+    seen.push(name);
+    true
+}
+
+/// 阶段行的固定格式：`veil-stage-ms: <name> <毫秒>`（一位小数）。
+fn stage_line(name: &str, elapsed: Duration) -> String {
+    format!(
+        "veil-stage-ms: {} {:.1}",
+        name,
+        elapsed.as_secs_f64() * 1000.0
+    )
+}
+
+fn stage_seen() -> MutexGuard<'static, Vec<&'static str>> {
+    // 锁中毒只说明此前有 panic，内部数据仍可读；恢复而不是二次 panic。
+    PERF_STAGES_SEEN.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// 首帧分阶段计时：向 stderr 打印 `veil-stage-ms: <name> <毫秒>`（一位小数）。
+///
+/// 与 `perf_mark_start()` 共用 `PERF_START`；未开启埋点或原点未建立时直接返回
+/// （不自建原点，保证与 `veil-first-frame-ms` 口径一致）。每个 name 每进程至多一次；
+/// 重复调用在读时钟之前就返回，常态下零 IO、零时钟读取。
+pub fn perf_stage(name: &'static str) {
+    let trace_enabled = perf_trace_enabled();
+    let start = PERF_START.get();
+    if !stage_ready(trace_enabled, start.is_some()) {
+        return;
+    }
+    let Some(start) = start else {
+        return;
+    };
+    {
+        let mut seen = stage_seen();
+        if !mark_stage_once(&mut seen, name) {
+            return;
+        }
+    }
+    eprintln!("{}", stage_line(name, start.elapsed()));
 }
 
 /// 记录结构化事件；detail 会经过脱敏与截断（禁止换行、绝对路径替换为 `<path>`、
@@ -805,6 +860,42 @@ mod tests {
         assert!(!diagnostics.contains("alice") && !diagnostics.contains("secret"));
         assert!(!diagnostics.contains("机密章节") && !diagnostics.contains("文档正文"));
         set_dpi_scale(1.0);
+    }
+
+    #[test]
+    fn perf_stage_is_silent_when_disabled() {
+        let _guard = guard();
+        // 未开启埋点 / 无计时原点（不自建原点）都必须静默。
+        assert!(!stage_ready(false, true), "未开启 VEIL_PERF_TRACE 不得输出");
+        assert!(
+            !stage_ready(true, false),
+            "无计时原点不得输出（不复用新原点）"
+        );
+        assert!(stage_ready(true, true), "开启且有原点时才输出");
+    }
+
+    #[test]
+    fn perf_stage_dedupes_same_name() {
+        let mut seen: Vec<&'static str> = Vec::new();
+        assert!(mark_stage_once(&mut seen, "app-config"), "首次出现应输出");
+        assert!(
+            !mark_stage_once(&mut seen, "app-config"),
+            "同名再次出现应跳过"
+        );
+        assert!(mark_stage_once(&mut seen, "app-theme"));
+        assert_eq!(seen, vec!["app-config", "app-theme"]);
+    }
+
+    #[test]
+    fn stage_line_has_fixed_format() {
+        assert_eq!(
+            stage_line("doc-load", Duration::from_micros(12_300)),
+            "veil-stage-ms: doc-load 12.3"
+        );
+        assert_eq!(
+            stage_line("cli-done", Duration::from_micros(45)),
+            "veil-stage-ms: cli-done 0.0"
+        );
     }
 
     #[test]

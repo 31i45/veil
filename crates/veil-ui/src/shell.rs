@@ -58,6 +58,7 @@ impl Shell {
         on_error: Box<dyn Fn(&str)>,
     ) -> Self {
         let initial = App::new(doc, make_ports());
+        crate::diag::perf_stage("app-new");
         Self {
             windows: HashMap::new(),
             make_ports,

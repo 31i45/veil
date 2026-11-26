@@ -155,6 +155,16 @@ Beyond rendering and export, this section also records verification gaps and sta
 - **Fonts come from the system; nothing is bundled**: body text is laid out with the installed fonts enumerated via `fontdb`; no font file ships in the repository or inside the binary, so font choice never affects the `veil.exe` size. Any installed family can be selected under **Settings → Body Font Family**; when the chosen face lacks a glyph (for example a Latin-only face used for Chinese), it falls back to a system CJK font instead of showing tofu.
 - **Source mode layouts**: Source mode has two layouts over the same bytes. By default it is "block layout + visible markers": a blank line between blocks is not independently addressable, and Up/Down jumps straight to the neighbouring block (the blank line can still be deleted with Backspace at the start of the next paragraph, and `Ctrl+Z` restores it). Enable **Settings → Source mode: plain-text line view** (off by default) to lay every physical line, blank lines included, on its own addressable row; Up/Down then stops on blank lines. Saving bytes are identical in both layouts.
 
+## Accessibility
+
+Veil ships a deliberately narrow AccessKit/UIA layer (`accessibility` feature, enabled by default in release builds). **It does not claim full screen-reader compatibility.**
+
+- **Works**: Windows UIA reaches the four persistent top-level menus and all menu items without opening them; menu items and dialog buttons expose Invoke/Focus, and UIA clicks run the same product paths as mouse clicks; the body is exposed as one `Edit` node labelled "正文"; Settings/modal dialogs expose their buttons and remove background controls while open.
+- **Does not work**: the body is a bounded plain-text snapshot (first 8000 bytes) with no caret, selection or per-line semantics; Quick Open candidates are not exposed item by item; nodes carry no screen bounds; AccessKit `Dialog` appears as `ControlType.Window`; Narrator/NVDA voice flows and Chinese IME candidate windows are **NOT RUN**.
+- Scope and limits: [docs/review/accessibility-scope-and-limits.md](docs/review/accessibility-scope-and-limits.md); UIA evidence: [accesskit-uia-2026-11-26.md](docs/review/evidence/ux/accesskit-uia-2026-11-26.md).
+
+To build without it: `cargo build --release -p veil --no-default-features --features mermaid-offline`.
+
 ## Build / Run / Test
 
 Requires: Rust stable (edition 2021). Acceptance environment: Windows 11 23H2+. Windows 10 is also reported working by community testers and is expected to work, but it is not part of the formal acceptance matrix. Mica acrylic degrades to a solid colour where it is unavailable.

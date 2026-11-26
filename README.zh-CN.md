@@ -156,6 +156,16 @@ Veil 不宣称所有 Markdown / Mermaid 语法在渲染模式、源码模式、H
 - **字体来自系统，仓库不内嵌**：正文按 `fontdb` 枚举出的已安装字体排版；仓库与产物都不内嵌任何字体文件，因此字族选择不会改变 `veil.exe` 的体积。可在「设置 → 正文字体族」中选择任意已安装字族；所选字族缺少某个字形时（例如只含拉丁字形的字族用于中文），自动回退到系统 CJK 字体，不出现方块。
 - **源码模式的两种排版**：源码模式对同一份字节提供两种排版。默认是「块布局 + 显示标记」：块间空行不是独立可寻址行，按 ↑/↓ 会直接跳到相邻块（空行仍可删除：在下一段开头按 Backspace 删掉一个换行，`Ctrl+Z` 可恢复）。开启「设置 → 源码模式：纯文本行视图」（默认关）后，每个物理行（含空行）都是可寻址行，↑/↓ 会停在空行上。两种排版的保存字节完全相同。
 
+## 无障碍
+
+Veil 提供一个范围明确的 AccessKit/UIA 层（`accessibility` feature，发行版默认开启）。**不宣称完整屏幕阅读器兼容。**
+
+- **可以做**：Windows UIA 无需展开菜单即可到达四个常驻顶层菜单与全部菜单项；菜单项与模态按钮支持 UIA Click/Focus，Click 走与鼠标相同的产品路径；正文暴露为一个 `Edit` 节点（名称「正文」）；设置/模态打开时只保留 Dialog 与按钮，后台控件从树中移除。
+- **不能做**：正文只有前 8000 字节的有界纯文本快照，没有 caret、选区或逐行语义；快速打开候选未逐项暴露；节点没有屏幕边界；AccessKit `Dialog` 在 UIA 下呈 `ControlType.Window`；Narrator/NVDA 语音流程与中文 IME 候选窗均为 **NOT RUN**。
+- 范围与限制：[docs/review/accessibility-scope-and-limits.md](docs/review/accessibility-scope-and-limits.md)；UIA 证据：[accesskit-uia-2026-11-26.md](docs/review/evidence/ux/accesskit-uia-2026-11-26.md)。
+
+关闭：`cargo build --release -p veil --no-default-features --features mermaid-offline`。
+
 ## 构建 / 运行 / 测试
 
 前置：Rust stable（edition 2021）。验收环境：Windows 11 23H2+；Windows 10 已有使用者实测可用，预期可正常运行，但不在正式验收矩阵内；Mica 亚克力在不可用时自动降级为纯色。

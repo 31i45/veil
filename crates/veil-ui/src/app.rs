@@ -9,10 +9,10 @@ use std::time::{Duration, Instant};
 
 use softbuffer::{Context, Surface};
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
-#[cfg(windows)]
-use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use winit::event::{ElementState, Ime, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::ActiveEventLoop;
+#[cfg(windows)]
+use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use winit::window::{Icon, Window, WindowId};
 
 use crate::autosave::Autosave;
@@ -343,6 +343,15 @@ pub struct StartupError {
     /// 已含路径/原因/下一步的正文（产品层传 `open_failure_text`）。
     pub message: String,
 }
+
+impl std::fmt::Display for StartupError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // message 已含路径/原因/下一步；title 提供「打开失败」这类归因标签。
+        write!(f, "{}：{}", self.title, self.message)
+    }
+}
+
+impl std::error::Error for StartupError {}
 
 /// 待编辑文档：产品层从 CLI 参数或默认样例构造。
 pub struct Doc {
@@ -2098,7 +2107,7 @@ impl App {
     }
 
     /// 以隐藏状态创建窗口并完成 surface 准备。首次显示由调用方随后调用
-    /// `begin_startup` 触发——AccessKit adapter 必须插在这两步之间创建。
+    /// `begin_startup` 触发。
     pub(crate) fn create_window_hidden(
         &mut self,
         event_loop: &ActiveEventLoop,
@@ -2827,5 +2836,23 @@ impl App {
             id.0 < SOURCE_PLAIN_ID_BASE || id.0 - SOURCE_PLAIN_ID_BASE < count as u64
         });
         self.recompute_geometry();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 启动失败可统一打印并装进 `Box<dyn Error>`（上层消费契约）。
+    #[test]
+    fn startup_error_display_and_error_trait() {
+        let e = StartupError {
+            path: PathBuf::from("D:/docs/笔记.md"),
+            title: "打开失败".into(),
+            message: "无法读取 D:/docs/笔记.md：文件不存在".into(),
+        };
+        assert!(e.to_string().contains("笔记.md"), "{e}");
+        let boxed: Box<dyn std::error::Error> = Box::new(e);
+        assert!(!boxed.to_string().is_empty());
     }
 }

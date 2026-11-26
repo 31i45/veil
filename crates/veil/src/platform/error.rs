@@ -7,6 +7,7 @@ use std::path::Path;
 use veil_ui::i18n::{t, tf, Key};
 
 /// 打开失败的可归因原因：决定文案里的原因与「下一步」。
+#[derive(Debug)]
 pub enum OpenFailure {
     /// 文件不是合法 UTF-8（GBK 等本地编码最常见）。
     NotUtf8(String),
@@ -28,6 +29,19 @@ impl OpenFailure {
         }
     }
 }
+
+impl std::fmt::Display for OpenFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            OpenFailure::NotUtf8(e) => write!(f, "文件不是合法的 UTF-8 文本（{e}）"),
+            OpenFailure::NotFound(e) => write!(f, "文件不存在或已被移动、删除（{e}）"),
+            OpenFailure::Denied(e) => write!(f, "没有读取该文件的权限（{e}）"),
+            OpenFailure::Other(e) => write!(f, "读取文件失败（{e}）"),
+        }
+    }
+}
+
+impl std::error::Error for OpenFailure {}
 
 /// 打开失败说明：包含完整路径、可读原因与可执行的下一步（纯函数，便于测试）。
 pub fn open_failure_text(path: &Path, failure: &OpenFailure) -> String {
@@ -214,5 +228,14 @@ mod tests {
             text.contains("请检查图形环境后重试；文档内容未被修改。"),
             "{text}"
         );
+    }
+
+    /// 错误可统一打印并装进 `Box<dyn Error>`（上层消费契约）。
+    #[test]
+    fn open_failure_display_and_error_trait() {
+        let missing = OpenFailure::NotFound("系统找不到指定的文件。".into());
+        assert!(missing.to_string().contains("不存在"), "{missing}");
+        let boxed: Box<dyn std::error::Error> = Box::new(OpenFailure::Denied("拒绝访问。".into()));
+        assert!(!boxed.to_string().is_empty());
     }
 }

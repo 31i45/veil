@@ -22,6 +22,19 @@ pub enum EditError {
     NotCharBoundary,
 }
 
+impl std::fmt::Display for EditError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            EditError::OutOfRange => {
+                write!(f, "编辑区间越界：起始偏移大于结束偏移，或超出文档长度")
+            }
+            EditError::NotCharBoundary => write!(f, "编辑偏移未落在 UTF-8 字符边界上"),
+        }
+    }
+}
+
+impl std::error::Error for EditError {}
+
 /// 一次变更后视图需要知道的一切。
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Events {
@@ -771,5 +784,14 @@ mod tests {
             s.last_rescan_lines()
         );
         assert!(s.block_count() >= 2000, "bench 文档应产生大量块");
+    }
+
+    /// 错误可统一打印并装进 `Box<dyn Error>`（上层消费契约）。
+    #[test]
+    fn edit_error_display_and_error_trait() {
+        assert!(!EditError::OutOfRange.to_string().is_empty());
+        assert!(EditError::NotCharBoundary.to_string().contains("UTF-8"));
+        let boxed: Box<dyn std::error::Error> = Box::new(EditError::OutOfRange);
+        assert!(!boxed.to_string().is_empty());
     }
 }

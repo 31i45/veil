@@ -3750,4 +3750,8 @@ mod tests {
     // Task 7：屏幕 / PDF 断行一致性差分工具（只读生产逻辑，不改行为）。
     #[path = "../../pdf_layout_consistency_tests.rs"]
     mod consistency;
+
+    // Task 9：PDF 断行候选组件 spike（dev-dependency unicode-linebreak，不进生产路径）。
+    #[path = "../../pdf_linebreak_spike_tests.rs"]
+    mod spike;
 }

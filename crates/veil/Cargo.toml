@@ -37,3 +37,8 @@ subsetter = "0.2.6"
 resvg = { version = "0.50", default-features = true }
 # resvg re-export 了 tiny_skia 但未 re-export tiny_skia_path——Transform::from_scale 在这里
 tiny-skia-path = "0.12"
+
+[dev-dependencies]
+# Task 9 spike：UAX #14 断点候选，仅测试期使用，不进入生产排版路径。
+# 该 crate 已由 cosmic-text 传递引入（见 Cargo.lock），不新增包、不影响发行体积。
+unicode-linebreak = "0.1.5"

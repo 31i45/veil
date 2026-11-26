@@ -161,6 +161,8 @@ fn e2e_search_replace_and_crash_recovery() {
         false,
     );
     a.ensure_layouts_all();
+    // 最近文件登记推迟到首帧之后（headless 测试无首帧，显式触发同一收口）。
+    a.flush_deferred_startup();
     a.perform_action(Action::Replace);
     assert!(a.ui_state.search.open && a.ui_state.search.replace_open);
     a.search_input("alpha");
@@ -196,6 +198,7 @@ fn e2e_search_replace_and_crash_recovery() {
 
     // 重启：崩溃恢复优先，内容与路径都来自快照
     let mut b = app_persist("默认样例", None, &store, &rec, &ses, true);
+    b.flush_deferred_startup();
     assert_eq!(doc_text(&b), "gamma beta gamma\n", "重启后恢复未保存内容");
     assert_eq!(b.doc.path, Some(PathBuf::from("r.md")));
     assert!(b.editor.is_dirty(), "恢复内容相对磁盘是未保存修改");

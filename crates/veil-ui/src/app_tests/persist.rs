@@ -7,6 +7,8 @@ fn watcher_follows_current_path() {
     let store = MemStore::default();
     let watch = FakeWatch::default();
     let mut a = app_watch("x", Some("a.md"), &store, &watch);
+    // 监听启动推迟到首帧之后（headless 测试无首帧，显式触发同一收口）。
+    a.flush_deferred_startup();
     assert_eq!(
         watch.calls.borrow().as_slice(),
         &["watch:a.md".to_string()],
@@ -843,6 +845,7 @@ fn watch_failure_surfaces_notice_without_blocking_edit() {
         ..Default::default()
     };
     let mut a = app_watch("x", Some("a.md"), &store, &watch);
+    a.flush_deferred_startup();
     assert!(a.ui_state.chrome.notice.contains("监听不可用"));
     a.editor.apply(Intent::InsertText("y".into())).unwrap();
     assert_eq!(a.editor.session().serialize(), "yx");
@@ -1972,6 +1975,8 @@ fn quick_open_step_and_backspace_requery() {
             .insert(PathBuf::from(p), b"x".to_vec());
     }
     let mut a = app("cur", Some("dir/cur.md"), false, &store);
+    // 最近文件登记推迟到首帧之后（headless 测试无首帧，显式触发同一收口）。
+    a.flush_deferred_startup();
     a.input_state.mods.ctrl = true;
     a.route_key(Key::P);
     a.input_state.mods.ctrl = false;

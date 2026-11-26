@@ -819,6 +819,16 @@ impl WindowState {
     }
 }
 
+/// 首帧呈现后才执行的非关键启动工作：不影响首帧内容，但必须保留语义
+/// （最近文件仍会登记、文件监听仍会启动，只是晚到首帧之后）。
+#[derive(Default)]
+pub(crate) struct DeferredStartup {
+    /// 待登记并落盘的最近文件路径（`App::new` 时的当前文档）。
+    pub(crate) note_opened: Option<PathBuf>,
+    /// 是否需要在首帧后启动文件监听。
+    pub(crate) watch: bool,
+}
+
 /// 应用编排器：三域（document 真值 / view 派生 / 交互事件）的装配点。
 /// 字段 pub(crate) 供各域文件的 `impl App` 直接读写——同一 crate 内的模块即协作者，
 /// 行为约束由各领域方法的文档与测试承载，不经访问器转发。
@@ -860,6 +870,8 @@ pub(crate) struct App {
     pub(crate) last_blink: Option<Instant>,
     /// 上一次 tick 记录的 caret 值——用于检测 caret 移动并立即重置可见性。
     pub(crate) last_seen_caret: usize,
+    /// 推迟到首帧之后执行的启动工作（最近文件登记 / 文件监听启动）。
+    pub(crate) deferred_startup: DeferredStartup,
 }
 
 /// 15 个平台端口聚合结构：能力集合，不携带状态语义（ADR-009 决策六）。
@@ -1134,6 +1146,7 @@ impl App {
             cursor_visible: true,
             last_blink: None,
             last_seen_caret: initial_caret,
+            deferred_startup: DeferredStartup::default(),
         };
         app.ui_state.chrome.notify(
             if start.notice.is_empty() {
@@ -1162,11 +1175,14 @@ impl App {
         // 窗口尚未创建时 cosmic-text 无 viewport，提前重算只会在 cache.layout()
         // 上做全量 miss 判定（每块构造 BaseKey + 哈希 + 查表），算完首次 render 还会
         // 重跑一次——直接删掉，让 estimate_geometry 用 est_h 先顶一下。
-        // 启动即登记最近文件（CLI 打开/会话恢复/崩溃恢复路径统一入口）
+        // 启动即登记最近文件（CLI 打开/会话恢复/崩溃恢复路径统一入口）+ 启动文件监听：
+        // 两者都不影响首帧内容（最近列表只喂菜单/快速打开，监听只为后续外部变更轮询），
+        // 推迟到首帧呈现后再执行，把会话落盘与监听线程创建的 IO 移出首帧关键路径。
+        // 语义不变：`flush_deferred_startup` 在首次呈现（或兜底显示）后必执行一次。
         if let Some(p) = app.doc.path.clone() {
-            app.note_opened(p);
+            app.deferred_startup.note_opened = Some(p);
         }
-        app.watch_current();
+        app.deferred_startup.watch = true;
         if let Some(err) = open_error {
             // 窗口建不起来时这条详情就是用户唯一能看到的线索，先留存再交给应用内模态。
             app.window_state.startup_error = Some(err.message.clone());
@@ -2179,6 +2195,20 @@ impl App {
         if let Some(window) = &self.window_state.window {
             window.set_visible(true);
             window.request_redraw();
+        }
+        // 首帧已呈现（或超时兜底显示）：执行推迟的非关键启动工作。
+        // 放在 set_visible 之后，保证上屏路径不被会话落盘/监听线程创建耽误。
+        self.flush_deferred_startup();
+    }
+
+    /// 执行推迟到首帧之后的启动工作（最近文件登记 + 文件监听）。幂等，只执行一次。
+    /// 语义与 `App::new` 中原先的就地调用完全一致，仅时间点更晚。
+    pub(crate) fn flush_deferred_startup(&mut self) {
+        if let Some(path) = self.deferred_startup.note_opened.take() {
+            self.note_opened(path);
+        }
+        if std::mem::take(&mut self.deferred_startup.watch) {
+            self.watch_current();
         }
     }
 

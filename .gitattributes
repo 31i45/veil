@@ -18,6 +18,10 @@ Cargo.lock text eol=lf
 *.yml text eol=lf
 *.yaml text eol=lf
 
+# Golden HTML snapshots — byte-exact: the QA harness compares them verbatim,
+# so they must never gain CRLF on Windows checkout.
+docs/qa/golden/**/*.html text eol=lf
+
 # Binary assets — never apply text normalization or text diffs
 *.png binary
 *.pdf binary

@@ -741,6 +741,10 @@ pub(crate) struct WindowState {
     pub(crate) visible: bool,
     /// 首帧守卫：Some 期间窗口仍隐藏，首帧成功/兜底超时后置 None 并显示（Task 5）。
     pub(crate) startup: Option<StartupGate>,
+    /// 窗口外观效果（深色标题栏 + 擦除色 + 动效开关）已下发。
+    /// 推迟到首帧呈现之后执行以缩短窗口创建段；擦除色必须在 `set_visible(true)`
+    /// 之前落地，因此由显示前的唯一入口下发，该标记保证 present 重试/超时兜底只执行一次。
+    pub(crate) effects_applied: bool,
     /// 已获准退出：仅当「关闭意图」真正执行后置 true，由 Shell 只移除当前窗口。
     pub(crate) exit_requested: bool,
     /// 用户请求新建独立窗口；Shell 消费后在主事件循环中创建另一个 App。
@@ -768,6 +772,9 @@ pub(crate) struct WindowState {
     /// 测试专用窗口尺寸覆盖：headless 测试无 winit 窗口，需要验证超宽窗口排版时注入。
     #[cfg(test)]
     pub(crate) test_size: Option<(u32, u32)>,
+    /// 测试专用原生句柄：headless 无 winit 窗口时验证外观效果（擦除色）下发内容与时机。
+    #[cfg(test)]
+    pub(crate) test_native: Option<crate::theme::NativeWindow>,
     /// 测试 hook：`set_ime_area` 每次被调时的 (x, y, h) 坐标入栈。
     /// 无窗口（headless 单测）时同样记录——用于锁定候选窗锚点正确性。
     #[cfg(test)]
@@ -793,6 +800,7 @@ impl Default for WindowState {
             resize_pending: false,
             visible: true,
             startup: None,
+            effects_applied: false,
             exit_requested: false,
             new_window_requested: false,
             geom_dirty: false,
@@ -805,6 +813,8 @@ impl Default for WindowState {
             code_copied: None,
             #[cfg(test)]
             test_size: None,
+            #[cfg(test)]
+            test_native: None,
             #[cfg(test)]
             ime_area_calls: Vec::new(),
             startup_error: None,
@@ -1194,6 +1204,12 @@ impl App {
     /// 窗口外观效果（深色标题栏/Mica）：窗口创建或主题切换时调用；无窗口/非 Win32 静默跳过。
     /// 效果失败不影响内容绘制（内容区始终为不透明底色，Win10 上即纯色外观）。
     fn apply_window_effects(&mut self) {
+        // 测试注入的原生句柄：headless 无 winit 窗口时仍可验证下发内容与时机。
+        #[cfg(test)]
+        if let Some(native) = self.window_state.test_native {
+            self.apply_window_effects_to(native);
+            return;
+        }
         #[cfg(windows)]
         {
             use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -2118,10 +2134,8 @@ impl App {
         self.window_state.surface = Surface::new(&context, window.clone()).ok();
         self.set_ime_area();
         self.window_state.window = Some(window);
-        self.apply_window_effects();
-        // 动效开关（S6）：系统「显示动画」关闭时悬停高亮立即到位。
-        let animations = self.ports.system.animations_enabled();
-        self.set_animations(animations);
+        // 窗口外观效果（深色标题栏/擦除色/动效开关）推迟到首帧呈现后、显示前执行：
+        // 窗口在首帧前始终隐藏，晚几毫秒不可见，却把这段 DWM/系统查询移出窗口创建段。
         // 隐藏窗口不会收到首次 Resized：必须在首次 paint 前显式设置 surface 尺寸，
         // 否则 softbuffer 的 buffer_mut() 会 panic（Must set size of surface...）。
         self.sync_surface_to_client();
@@ -2194,6 +2208,9 @@ impl App {
             crate::diag::perf_stage("first-present");
             crate::diag::perf_trace_first_frame();
         }
+        // 窗口外观效果（深色标题栏 + 擦除色）必须先于显示落地：否则首次显示可能闪系统底色。
+        // 无窗口（headless）时同样推进守门状态，效果调用本身静默跳过。
+        self.apply_deferred_window_effects();
         if let Some(window) = &self.window_state.window {
             window.set_visible(true);
             window.request_redraw();
@@ -2201,6 +2218,21 @@ impl App {
         // 首帧已呈现（或超时兜底显示）：执行推迟的非关键启动工作。
         // 放在 set_visible 之后，保证上屏路径不被会话落盘/监听线程创建耽误。
         self.flush_deferred_startup();
+    }
+
+    /// 执行推迟到首帧之后的窗口外观效果：深色标题栏 + 擦除色 + 动效开关。
+    /// 幂等，只执行一次（present 重试、尺寸变化重做首帧都复用本入口）。
+    /// 主题切换仍走 `apply_window_effects`（`refresh_theme_visuals`），不受此守门影响。
+    fn apply_deferred_window_effects(&mut self) {
+        if self.window_state.effects_applied {
+            return;
+        }
+        self.window_state.effects_applied = true;
+        self.apply_window_effects();
+        // 动效开关（S6）：系统「显示动画」关闭时悬停高亮立即到位。
+        // 首帧画面不含过渡中间态（无悬停/展开菜单），推迟到显示前不影响首帧像素。
+        let animations = self.ports.system.animations_enabled();
+        self.set_animations(animations);
     }
 
     /// 执行推迟到首帧之后的启动工作（最近文件登记 + 文件监听）。幂等，只执行一次。

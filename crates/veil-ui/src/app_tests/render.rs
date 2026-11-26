@@ -1358,6 +1358,41 @@ fn theme_switch_applies_current_theme_bg_to_window_effects() {
     );
 }
 
+#[test]
+fn window_effects_applied_before_visible() {
+    // 窗口创建段预算：外观效果（深色标题栏 + 擦除色）推迟到「首帧呈现后、显示前」，
+    // 且只下发一次。擦除色晚于 `set_visible(true)` 会闪系统底色，故顺序是硬约束：
+    // `settle_startup` 在 set_visible 之前调用唯一的 `apply_deferred_window_effects`。
+    let store = MemStore::default();
+    let mut a = app("# t\n\np\n", None, false, &store);
+    let rec = RecordingEffects::default();
+    a.ports.effects = Box::new(rec.clone());
+    a.window_state.test_native = Some(NativeWindow { hwnd: 1 });
+    a.window_state.visible = false;
+    assert!(
+        !a.window_state.effects_applied && rec.backgrounds.borrow().is_empty(),
+        "首帧呈现前不得下发窗口外观效果（窗口此时仍隐藏）"
+    );
+    a.window_state.startup = Some(StartupGate::new(Instant::now()));
+    // headless 无 surface：走兜底显示路径，同样必须「先效果、后显示」。
+    a.try_show_first_frame();
+    let expected = window_erase_rgb(a.input_state.theme.bg);
+    assert_eq!(
+        rec.backgrounds.borrow().as_slice(),
+        &[expected],
+        "显示前必须已下发擦除色（等于当前主题底色）"
+    );
+    assert!(a.window_state.effects_applied);
+    // 幂等：present 重试/超时兜底不得重复下发。
+    a.window_state.startup = Some(StartupGate::new(Instant::now()));
+    a.try_show_first_frame();
+    assert_eq!(
+        rec.backgrounds.borrow().len(),
+        1,
+        "外观效果只能执行一次（窗口隐藏期间重试不重复下发）"
+    );
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // 性质级测试（ADR-009 S6 阶段 B）：验证 Memo 因果键对任意编辑序列的正确性。
 // 两个性质：

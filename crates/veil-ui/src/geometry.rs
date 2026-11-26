@@ -94,9 +94,6 @@ pub const MARGIN: f32 = crate::tokens::doc::MARGIN;
 pub const PARA_GAP: f32 = crate::tokens::doc::PARA_GAP;
 /// 正文可读列宽上限（全角字符当量，随字号/缩放换算为物理像素）。
 pub const READABLE_COLS: f32 = crate::tokens::doc::READABLE_COLS;
-/// 历史常量：曾作为「窗口宽 > 1600 才封顶」的阈值（物理像素，scale = 1 基准）。
-/// 版心封顶已改为按可用宽度与可读列宽比较，不再引用此值；保留仅为兼容旧引用。
-pub const WIDE_WINDOW: f32 = crate::tokens::doc::WIDE_WINDOW;
 
 /// 把物理像素长度吸附到整数像素网格（四舍五入，幂等）。
 ///

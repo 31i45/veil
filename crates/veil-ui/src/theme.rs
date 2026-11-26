@@ -504,8 +504,8 @@ impl DocFontFamily {
 
 /// 屏幕版心边距档位（与 PDF 导出边距 `export_margin_mm` 完全无关）。
 ///
-/// 只描述「屏幕阅读时的左右留白」；宽屏（窗口 ≥ `doc::WIDE_WINDOW`）下
-/// 除 `Full` 外仍受可读列宽上限约束并居中。
+/// 只描述「屏幕阅读时的左右留白」；可用宽度超过可读列宽上限时，
+/// 除 `Full` 外仍受上限约束并居中。
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum DocMargin {
     /// 紧凑：8 逻辑像素。

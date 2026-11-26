@@ -2434,6 +2434,222 @@ mod tests {
         );
     }
 
+    // ------------------------------------------------------------------
+    // 配置读写 round-trip（文件级）：写 config.toml → 重新读取 → 语义比较。
+    // 用真实落盘字节而非内存字符串，锁住 UTF-8/BOM/换行与 toml_edit 输出格式。
+    // ------------------------------------------------------------------
+
+    /// 唯一临时配置文件：`std::env::temp_dir()` + 进程 id/时间戳/自增序号。
+    /// Drop 时删除，断言失败展开也会清理。
+    struct TempConfig(std::path::PathBuf);
+
+    impl TempConfig {
+        fn new(tag: &str) -> Self {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static SEQ: AtomicU64 = AtomicU64::new(0);
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            let mut path = std::env::temp_dir();
+            path.push(format!(
+                "veil-config-roundtrip-{}-{nanos}-{}-{tag}.toml",
+                std::process::id(),
+                SEQ.fetch_add(1, Ordering::Relaxed)
+            ));
+            TempConfig(path)
+        }
+
+        fn write(&self, text: &str) {
+            std::fs::write(&self.0, text.as_bytes()).expect("写临时配置");
+        }
+
+        /// 产品读取路径等价物：文件字节 → `decode_config`（剥 BOM、要求合法 UTF-8）。
+        fn reload(&self) -> ConfigParse {
+            let bytes = std::fs::read(&self.0).expect("读临时配置");
+            decode_config(&bytes).expect("自产/临时配置必须是合法 UTF-8")
+        }
+
+        fn text(&self) -> String {
+            std::fs::read_to_string(&self.0).expect("读临时配置文本")
+        }
+    }
+
+    impl Drop for TempConfig {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    /// 全字段（15 个配置字段 + 4 个窗口键）写盘再读回必须恒等。
+    /// 这里刻意逐个列出字段而非 `..Default::default()`：新增字段时本测试编译失败，
+    /// 强制把新字段纳入 round-trip 门禁。
+    #[test]
+    fn config_roundtrip_all_fields_through_file() {
+        let cfg = Config {
+            mode: ThemeMode::Dark,
+            ui_language: UiLanguage::ZhCn,
+            export_margin_mm: 12.5,
+            export_page_numbers: false,
+            export_toc: false,
+            doc_font_family: DocFontFamily::Serif,
+            doc_font_face: Some("Noto Serif CJK SC".to_string()),
+            doc_font_size: 18.0,
+            doc_line_height: 27.0,
+            doc_margin: DocMargin::Custom,
+            doc_margin_px: 28.5,
+            allow_remote_images: true,
+            source_plain_lines: true,
+            tab_width: 2,
+            window: Some(WindowGeom {
+                width: 1280,
+                height: 800,
+                x: -40,
+                y: 60,
+            }),
+        };
+        let file = TempConfig::new("all-fields");
+        file.write(&cfg.to_toml());
+
+        let p = file.reload();
+        assert_eq!(p.config, cfg, "全字段写盘再读回必须恒等");
+        assert_eq!(p.ignored, 0, "自产配置不得含无法识别条目");
+        // 新版格式：不写历史段标题，窗口几何成组出现。
+        let text = file.text();
+        assert!(!text.contains("[theme]"), "{text}");
+        for key in ["window_width", "window_height", "window_x", "window_y"] {
+            assert!(text.contains(key), "有几何时必须写 {key}: {text}");
+        }
+    }
+
+    /// 手写配置（注释 + 未知键）→ 修改 → 保留式写回 → 再读取：
+    /// 已知字段按修改生效，未知键/注释保留，语义不漂移；再次保存字节稳定。
+    #[test]
+    fn config_roundtrip_edit_then_reload_preserves_semantics() {
+        let original = "# 手写注释\nmode = \"light\" # 行尾注释\n\
+                        future_flag = true\nfuture_table = { a = 1 }\n\
+                        image_cache_limit_mb = 512\nsmooth_scroll = false\n";
+        let file = TempConfig::new("hand-written");
+        file.write(original);
+
+        let first = file.reload();
+        assert_eq!(first.config.mode, ThemeMode::Light);
+        assert_eq!(first.ignored, 2, "只有两个未知键计数；已移除旧键静默忽略");
+
+        // 用户在设置里改动若干字段。
+        let updated = Config {
+            mode: ThemeMode::Dark,
+            export_toc: false,
+            doc_font_face: Some("SimSun".to_string()),
+            tab_width: 2,
+            allow_remote_images: true,
+            window: Some(WindowGeom {
+                width: 1024,
+                height: 720,
+                x: 10,
+                y: -20,
+            }),
+            ..first.config.clone()
+        };
+        let saved = updated.to_toml_preserving(Some(original));
+        file.write(&saved);
+
+        let reloaded = file.reload();
+        assert_eq!(reloaded.config, updated, "保存后重新加载必须等价");
+        assert_eq!(reloaded.ignored, 2, "未知键仍按既有口径计数");
+        let text = file.text();
+        for keep in [
+            "# 手写注释",
+            "# 行尾注释",
+            "future_flag = true",
+            "future_table = { a = 1 }",
+            "mode = \"dark\"",
+            "doc_font_face = \"SimSun\"",
+        ] {
+            assert!(text.contains(keep), "写回不得丢 {keep}: {text}");
+        }
+        assert!(
+            !text.contains("image_cache_limit_mb"),
+            "已固化旧键应在保存时剥离: {text}"
+        );
+        // 既有容错语义（记录而非修正）：`smooth_scroll` 等已移除旧键会留在文件里，
+        // 读取端静默忽略、不计数、不改变行为；保存端只有 `image_cache_limit_mb` 被剥离。
+        assert!(
+            text.contains("smooth_scroll = false"),
+            "已移除旧键按既有语义原样保留: {text}"
+        );
+        assert_eq!(
+            parse_config(&text).config,
+            updated,
+            "保留的旧键不得回流为行为"
+        );
+        assert_eq!(parse_config(&text).ignored, 2, "保留的旧键不得计入无法识别");
+
+        // 幂等：对已保存文件再存一次，字节不变（避免每次保存产生 diff）。
+        let saved_again = reloaded.config.to_toml_preserving(Some(&text));
+        assert_eq!(saved_again, text, "重复保存必须字节稳定");
+    }
+
+    /// 数值边界（含非二进制精确小数）经写盘/读回后必须逐位相等；
+    /// 锁定 `to_toml` 的 f32 文本格式与 `parse_config` 的 f64→f32 读取不产生漂移。
+    #[test]
+    fn config_roundtrip_numeric_edges_through_file() {
+        let file = TempConfig::new("numeric-edges");
+        for margin_mm in [0.0_f32, 12.5, 13.7, 20.0, 50.0] {
+            for margin_px in [4.0_f32, 28.5, 200.0] {
+                for (font_size, line_height) in [
+                    (10.0_f32, 10.0_f32),
+                    (16.0, 22.0),
+                    (18.0, 27.0),
+                    (32.0, 96.0),
+                ] {
+                    let cfg = Config {
+                        export_margin_mm: margin_mm,
+                        doc_margin: DocMargin::Custom,
+                        doc_margin_px: margin_px,
+                        doc_font_size: font_size,
+                        doc_line_height: line_height,
+                        ..Config::default()
+                    };
+                    file.write(&cfg.to_toml());
+                    let p = file.reload();
+                    assert_eq!(
+                        p.config, cfg,
+                        "数值往返漂移: margin_mm={margin_mm} margin_px={margin_px} \
+                         size={font_size} line_height={line_height}"
+                    );
+                    assert_eq!(p.ignored, 0);
+                }
+            }
+        }
+    }
+
+    /// 真实世界容错：BOM + CRLF + 历史 `[theme]` 段。读取语义正确；
+    /// 保存走整文件重生成（有意为之），重新加载语义仍等价。
+    #[test]
+    fn config_roundtrip_legacy_section_bom_crlf_keeps_semantics() {
+        let original = "\u{feff}[theme]\r\nmode = \"dark\"\r\n# 旧注释\r\n";
+        let file = TempConfig::new("legacy-bom");
+        file.write(original);
+
+        let p = file.reload();
+        assert_eq!(p.config.mode, ThemeMode::Dark);
+        assert_eq!(p.ignored, 0, "段标题行不承载配置项，不计数");
+
+        let cfg = Config {
+            mode: ThemeMode::Dark,
+            ..Config::default()
+        };
+        // 含表段 → 回退整文件重生成（历史注释被丢弃是既有语义，记录于证据文档）。
+        let saved = cfg.to_toml_preserving(Some(original));
+        assert!(
+            !saved.contains("[theme]"),
+            "重生成后不再保留段标题: {saved}"
+        );
+        file.write(&saved);
+        assert_eq!(file.reload().config, cfg);
+    }
+
     /// 未设置 `VEIL_HOME` 时与旧推导逐字节一致。
     #[test]
     fn unset_veil_home_matches_legacy_paths() {

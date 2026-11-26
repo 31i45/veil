@@ -724,7 +724,7 @@ pwsh -NoProfile -File "d:\VSCode\Veil\tools\walkthrough.ps1" -Doc "<doc>" -Perf 
 
 > 本节是追加基线，供后续体积放行/否决使用。§1–§10 的 v2 结论与数字保留**历史身份**，不因本节改写；v2 的 `9.89 MB / 10 MiB` 不再作为当前版本的放行依据。
 
-### 11.1 基线卡
+### 11.1 Task 8 基线卡
 
 | 项 | 当前值 | 来源/口径 |
 |---|---|---|
@@ -739,11 +739,15 @@ pwsh -NoProfile -File "d:\VSCode\Veil\tools\walkthrough.ps1" -Doc "<doc>" -Perf 
 | 门禁脚本固定基线 | 14,135,296 B；当前比该基线 **+34,816 B** | `docs/review/evidence/perf/perf-gate-2026-11-26.md` |
 | 复测一致性 | 体积与 SHA-256 均与 Phase 2 证据逐字节一致 | `docs/review/evidence/perf/current-head-2026-11-26.md` §2/§4 |
 
+> 本卡保留 Task 8 称重口径；下方“当前”均指 Task 8 基线。Phase 5 AccessKit 接入后的当前产物为 **14,362,624 B**、余量 **317,440 B**、SHA-256 见 §13。
+
 **与 v2 的关系**：v2 基线为 `9,889,792 B @ ac25a9a`，门禁为 `10 MiB = 10,485,760 B`。`ac25a9a` 在当前克隆中不可检出（v3 历史已重写），其数字只作历史引用。当前 exe 比 v2 大 **+4,280,320 B（+43.28%）**，但两者的门禁与内容不同（v3 默认包含离线 Mermaid：完整 `mermaid.js` + QuickJS + resvg），因此**不直接比较通过/不通过或余量**，差值只用于 §11.3 归因。
 
-### 11.2 PE 节对比（v2 → 当前）
+### 11.2 PE 节对比（v2 → Task 8 基线）
 
-| 节 | v2（9,889,792 B） | 当前（14,170,112 B） | 增量 | 当前占 exe |
+> 本节节表是 Task 8 基线（14,170,112 B）的快照；Phase 5 接入 AccessKit 后的当前产物见 §13。
+
+| 节 | v2（9,889,792 B） | Task 8 基线（14,170,112 B） | 增量 | 基线占 exe |
 |---|---:|---:|---:|---:|
 | `.text` | 7,228,928 | 7,826,944 | **+598,016** | 55.24% |
 | `.rdata` | 2,462,720 | 6,067,712 | **+3,604,992** | 42.82% |
@@ -763,7 +767,7 @@ pwsh -NoProfile -File "d:\VSCode\Veil\tools\walkthrough.ps1" -Doc "<doc>" -Perf 
 | Mermaid 内嵌 JS 资源 | **3,213,314** | 75.07% | 实测（源文件字节） | 见下表；全部位于 `.rdata` |
 | QuickJS 引擎、resvg 光栅栈及其他新增依赖 | **1,067,006** | 24.93% | **未细分** | 本 HEAD 尚无 crate 级 cargo-bloat 归因结论，无法在 rquickjs / resvg / regex / serde_json 等之间精确切分 |
 | 字体 / 图标 | **0** | 0% | 实测（PE 节） | `.rsrc` 91,136 B 未变（两枚 ico 共 89,277 B 仍在内）；`tmTheme` 共 4,432 B 未变；仓库无新增字体文件；正文字体仍由 `fontdb` 扫描系统字体，公式字体仍随 `latex-rust` 编译 |
-| AccessKit | **0（未加入）** | 0% | 静态 | `Cargo.toml` / `Cargo.lock` 无 `accesskit`；旧 feature 实现已在 `bd3b03e` 移除。Phase 5 预估增量**单列**，见下 |
+| AccessKit | **192,512（Phase 5 实测）** | 4.50%* | 实测 | 2026-11-26 起已加入（`accesskit 0.25.2` + `accesskit_winit 0.34.2`）；Task 8 基线时为 0，加入后总增量变为 **+4,472,832 B**；*百分比分母仍是 Task 8 的 +4,280,320 B，便于与本表各项对照。详见 §13 |
 
 Mermaid 内嵌 JS 明细（`crates/veil-mermaid-offline/assets/`）：
 
@@ -777,7 +781,7 @@ Mermaid 内嵌 JS 明细（`crates/veil-mermaid-offline/assets/`）：
 - `crates/veil/Cargo.toml:8` 自述离线 Mermaid 功能“体积 +约 5 MiB”。这是**功能级估计**，不是隔离实测：本 HEAD 可复核的是整包相对 v2 增长 **4.08 MiB**，其中 JS 资源 **3.06 MiB**；其余 **1.02 MiB** 含 bundled QuickJS C 引擎、resvg/usvg、正则查找、callouts 的 `serde_json` 等，**未细分**。
 - 新增直接依赖（静态）：`rquickjs 0.9.0`（bundled QuickJS，`veil-mermaid-offline`）、`resvg 0.50.0` 与 `tiny-skia-path 0.12`（`veil`）、`regex 1.13.2`（`veil-ui`，正则查找）、`serde` / `serde_json 1.0.154`（`veil-core`，callouts）。依赖树唯一包 **128（v2 记录）→ 162（本 HEAD 同口径）**，增量含 `rquickjs-sys`、`usvg`、`svgtypes` 等传递包。
 - 已知重复：`resvg` 带入 `tiny-skia 0.12.0`，而 `latex-rust` 仍使用 `tiny-skia 0.11.4`，两份并存，相关代码无法完全去重。
-- **AccessKit（Phase 5 预估增量单列）**：本 HEAD **未加入**，当前增量记 0。历史 feature 构建曾实测 **+185 KiB（189,440 B）**（非 spike 的 +198 KiB 预测），但那是旧树、旧默认体积；本 HEAD 未称重，Phase 5 引入前必须重测。按 185 KiB 粗算，当前 509,952 B 余量可容纳（剩约 320,512 B），但此数**不构成承诺**。
+- **AccessKit（Phase 5 已加入，实测 +192,512 B）**：历史预测为 **+185 KiB（189,440 B）**（非 spike 的 +198 KiB 预测），保留作对照；实测比预测多 **3,072 B（+1.62%）**。新产物 **14,362,624 B**，对 14 MiB 门禁余量 **317,440 B**。旧树 `bd3b03e` 的移除原因（只读标题、菜单无子节点、ActionRequested 不执行）已在本次接入中逐项解决，证据见 [accessibility-scope-and-limits.md](accessibility-scope-and-limits.md)。详见 §13。
 
 ### 11.4 B 类记录更新（截至当前 HEAD）
 
@@ -799,7 +803,7 @@ Mermaid 内嵌 JS 明细（`crates/veil-mermaid-offline/assets/`）：
 
 ```powershell
 cargo build --release --bin veil
-(Get-Item target\release\veil.exe).Length            # 14,170,112
+(Get-Item target\release\veil.exe).Length            # 14,362,624（Task 8 基线为 14,170,112）
 Get-FileHash target\release\veil.exe -Algorithm SHA256
 dumpbin /headers target\release\veil.exe             # .text / .rdata 等节
 cargo tree -e no-dev -p veil --prefix none           # 唯一包计数
@@ -856,5 +860,44 @@ cargo tree -e no-dev -p veil --prefix none           # 唯一包计数
 
 ### 12.4 与 follow-ups 的一致性
 
-- **D3**：当前版本仍“不引入 AccessKit、不建 UIA 树”；本 program `converge-veil-under-jobs-lens` 的 **Phase 5** 会延后接入最小 chrome/菜单/模态语义树与 Narrator 流程，且不宣称完整屏幕阅读器兼容。两者不矛盾：Phase 1–4 不提前引入，Phase 5 接入前按当前 HEAD 重新称重。
+- **D3**：**2026-11-26 起已接入**。Phase 5 已加入最小 chrome/菜单/模态语义树与正文入口；`veil` 默认 feature 含 `accessibility`，可用 `--no-default-features --features mermaid-offline` 关闭。仍**不宣称完整屏幕阅读器兼容**；Narrator/NVDA 真实语音流程仍为 NOT RUN。限制见 [accessibility-scope-and-limits.md](accessibility-scope-and-limits.md)。
 - **4.1** 已回写为 **NO-GO**；**4.2 / 4.3** 已标记观察备忘录完成、不引入（含 `image` 由 `arboard`/WIC 覆盖的订正）；**4.4 / 4.5** 保持已完成/已记录。详见 `.trae/specs/evaluate-veil-through-jobs-lens/follow-ups.md`（该目录被 `.gitignore` 忽略，不入库）。
+
+---
+
+## 13. Phase 5 实际称重：AccessKit 接入（2026-11-26）
+
+> 本节替代 §11 中“Phase 5 预估/未加入”的口径；历史预测保留在 §11.3 作对照。
+
+### 13.1 产物
+
+| 项 | 值 |
+|---|---|
+| 提交 | `753c962`（`feat(a11y): expose navigable AccessKit tree for chrome and body`）；本文档提交在其后 |
+| 构建 | `cargo build --release -p veil`（默认 feature 含 `accessibility`） |
+| 产物 | `target\release\veil.exe` **14,362,624 B**（13.70 MiB） |
+| Task 8 基线 | 14,170,112 B |
+| AccessKit 实测增量 | **+192,512 B**（188.0 KiB） |
+| 历史预测 | +185 KiB（189,440 B）；实测多 **+3,072 B（+1.62%）** |
+| 14 MiB 门禁 | 14,680,064 B |
+| 门禁余量 | **317,440 B**（310.0 KiB），占门禁 2.16% |
+| 总增量（v2 → 当前） | +4,472,832 B |
+| SHA-256 | `1D456A3D532CEC10A8D141592281D502E88A419BFCC22EC3CB8CB0D0BD819EC3` |
+
+### 13.2 依赖与开关
+
+- `accesskit =0.25.2`、`accesskit_winit =0.34.2`（`default-features=false, features=["rwh_06"]`），均为 optional。
+- `veil-ui` 自身默认关闭 `accessibility`；`veil` 默认 feature 显式开启，发行产物包含。
+- 关闭：`cargo build --release -p veil --no-default-features --features mermaid-offline`。
+
+### 13.3 复现与证据
+
+```powershell
+cargo build --release -p veil
+(Get-Item target\release\veil.exe).Length            # 14,362,624
+Get-FileHash target\release\veil.exe -Algorithm SHA256
+```
+
+- 体积门禁余量按尺寸判定，不做逐字节回归；SHA 随重建变化，以本表为准。
+- 功能与限制：[accessibility-scope-and-limits.md](accessibility-scope-and-limits.md)。
+- UIA 实测：[evidence/ux/accesskit-uia-2026-11-26.md](evidence/ux/accesskit-uia-2026-11-26.md)。

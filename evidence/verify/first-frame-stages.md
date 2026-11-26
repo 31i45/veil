@@ -21,6 +21,27 @@ $env:VEIL_PERF_TRACE=1
 | 窗口外观效果后移后 | 77.7 ms | 简单语料（标题 + 段落） |
 | 语法高亮预热后 | 83.9 ms | 门禁语料（含 520 个 ```rust 围栏） |
 | **门禁脚本终判** | **96.5 ms** | `perf_gate.ps1` 5 次：81.3 / 138.9 / 96.5 / 81.6 / 103.3，**PASS（余量 3.5 ms）** |
+| 门禁脚本（清理前） | 96.5 ms | 5 次：81.3 / 138.9 / 96.5 / 81.6 / 103.3，PASS（余量 3.5 ms） |
+| 埋点开关缓存 + 移除临时子阶段后 | **81.9 ms** | 7 次门禁语料复测：77.4–91.5 ms |
+| **门禁脚本终判（最终）** | **80.7 ms** | 5 次：80.7 / 83.5 / 78.0 / 85.6 / 77.6，**PASS（余量 19.3 ms）** |
+
+## 环境敏感性（必读，诚实记录）
+
+同一二进制、同一门禁语料，在不同机器负载下差异显著：
+
+| 条件 | 样本 | 中位 | 区间 |
+|---|---|---:|---|
+| 空载（无并行编译） | 9 次 | 78.4 ms | 76.9 – 89.3 ms |
+| 空载复测（清理后） | 7 次 | 81.9 ms | 77.4 – 91.5 ms |
+| 门禁脚本测量阶段 | 5 次 | 96.5 ms | 81.3 – 138.9 ms |
+| 门禁脚本终判 | 5 次 | **80.7 ms** | 77.6 – 85.6 ms |
+| **持续编译负载下**（独立审查员复测） | 8 次 | **114.9 ms** | 106.2 – 175.9 ms |
+
+结论：
+- **门禁协议下（测量阶段无并行编译）稳定达标**，中位 78–97 ms。
+- **机器处于持续 CPU 争用（如并行 `cargo clippy` / `cargo test`）时会超过 100 ms**，此时 `window-created` 从 ~27 ms 涨到 93–162 ms、`app-editor` 从 ~24 ms 涨到 ~38 ms——几乎所有阶段同比例变慢，是抢占而非代码回归。
+- 因此「首帧 < 100 ms」的结论带明确前提：**单实例、无并行重编译负载**。门禁脚本的测量段满足该前提；日常使用（用户在编辑器里降速的窗口期通常无编译负载）也满足。这一点已写入证据，不做掩饰。
+- 余量在轻载下 10–20 ms、在门禁脚本自身的测量条件下 3.5 ms，属偏薄但真实。
 
 > 关键教训：**测量工具污染了被测对象**。stage 埋点若同步写 stderr，每条约 4.4 ms，12 条 = ~48 ms 虚增，足以让任何优化看起来无效。异步写线程修好后，真实首帧才显形。
 >
@@ -75,6 +96,7 @@ $env:VEIL_PERF_TRACE=1
 ## 本轮 commit 序列（均本地，未 push）
 
 ```
+a24191d chore(perf): cache trace switch and drop ad-hoc render stages
 ae850a5 perf(render): start syntax prewarm at process entry
 1d2bbf4 perf(render): cut first-frame raster cost for code blocks
 0d82aa2 perf(window): apply native effects just before first show
@@ -94,7 +116,7 @@ ce2695f chore(perf): stage-level first-frame instrumentation
 | `cargo clippy --workspace --all-targets --exclude veil-core -- -D warnings` | PASS |
 | `cargo test --workspace` | PASS（全绿；veil-ui 1423 passed） |
 | `cargo build --release --bin veil` | PASS |
-| 端到端首帧 < 100 ms | **PASS（96.5 ms，余量 3.5 ms）** |
+| 端到端首帧 < 100 ms | **PASS（80.7 ms，余量 19.3 ms）** |
 | 击键 p99 < 16 ms | PASS（0.305 ms） |
 | 常驻内存 < 300 MB | PASS（65.47 MB） |
 | 体积 ≤ 14,680,064 B | PASS（14,166,528 B） |

@@ -377,11 +377,17 @@ impl HttpFetcher {
             return;
         }
         let tx = self.tx.clone();
-        std::thread::spawn(move || {
+        // Builder::spawn 返回 Result：线程创建失败（资源耗尽）时经 channel 回传 Err，
+        // 走既有失败降级，而非 std::thread::spawn 的 panic。
+        let err_tx = self.tx.clone();
+        let err_url = url.clone();
+        if let Err(e) = std::thread::Builder::new().spawn(move || {
             let label = url.clone();
             let result = fetch(&url);
             let _ = tx.send((label, result));
-        });
+        }) {
+            let _ = err_tx.send((err_url, Err(format!("后台抓取线程创建失败: {e}"))));
+        }
     }
 
     /// 非阻塞取走全部已完成结果。

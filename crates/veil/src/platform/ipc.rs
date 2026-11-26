@@ -286,10 +286,14 @@ mod imp {
                     unsafe {
                         DisconnectNamedPipe(handle);
                     }
-                    if let Ok(request) = request {
-                        if tx.send(request).is_err() {
-                            return;
+                    match request {
+                        Ok(request) => {
+                            if tx.send(request).is_err() {
+                                return;
+                            }
                         }
+                        // 单帧读取失败（客户端断连/帧损坏）不中断监听循环，但保留诊断。
+                        Err(e) => eprintln!("IPC 帧读取失败: {e}"),
                     }
                 } else {
                     // SAFETY: 未转交 File 的失败句柄仍需关闭。

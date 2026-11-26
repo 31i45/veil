@@ -93,9 +93,13 @@ impl FileWatcher for NotifyWatcher {
         let mut changed = false;
         while let Ok(res) = self.rx.try_recv() {
             // notify 的错误事件（如系统缓冲区溢出）不改变「哪一版内容在磁盘上」，
-            // 跳过但继续消费，避免一次错误吞掉同批次的真实事件。
-            let Ok(ev) = res else {
-                continue;
+            // 跳过但继续消费，避免一次错误吞掉同批次的真实事件；错误本身记录诊断。
+            let ev = match res {
+                Ok(ev) => ev,
+                Err(e) => {
+                    eprintln!("文件监听事件错误: {e}");
+                    continue;
+                }
             };
             if !ev
                 .paths

@@ -1096,8 +1096,12 @@ impl App {
                     tf(Key::NoticeConfigInvalid, &[&e.to_string()]),
                 ),
             },
-            // 文件不存在属正常状态（首次运行）：静默用默认配置
-            Err(_) => (Config::default(), String::new()),
+            // 读取失败（含首跑文件不存在）：用默认配置。原始原因记入内部诊断通道
+            // （diag 对用户不可见，首跑的"文件不存在"也在此记录，便于排查权限/损坏类失败）。
+            Err(e) => {
+                crate::diag::record("config", format!("配置读取失败，使用默认配置: {e}"));
+                (Config::default(), String::new())
+            }
         };
         crate::diag::perf_stage("app-config");
         // 跟随系统且高对比度开启时，强制使用高对比度主题（覆盖 light/dark）
@@ -1559,7 +1563,9 @@ impl App {
                     self.cache.remote_failed.remove(&url);
                     self.cache.insert_remote_image(url, img);
                 }
-                Err(_) => {
+                Err(e) => {
+                    // 诊断归因：保留具体失败原因（网络/解码），对齐 mermaid 分支，不静默吞错。
+                    eprintln!("远程图片加载失败 {url}: {e}");
                     self.cache.remote_failed.insert(url);
                     failed = true;
                 }

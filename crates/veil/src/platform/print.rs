@@ -145,6 +145,7 @@ const _: () = {
 #[link(name = "comdlg32")]
 extern "system" {
     fn PrintDlgW(pd: *mut PrintDlgW) -> i32;
+    fn CommDlgExtendedError() -> u32;
 }
 
 #[link(name = "gdi32")]
@@ -719,7 +720,13 @@ impl Print for WinPrint {
             h_setup_template: std::ptr::null_mut(),
         };
         if unsafe { PrintDlgW(&mut pd) } == 0 {
-            return; // 用户取消：静默返回，不打断工作流
+            // PrintDlgW 返回 0 既可能是用户取消也可能是 API 失败：CommDlgExtendedError
+            // 为 0 表示用户取消（静默，不打断工作流）；非 0 为错误码，记录诊断。
+            let err = unsafe { CommDlgExtendedError() };
+            if err != 0 {
+                eprintln!("打印对话框失败 (CommDlgExtendedError=0x{err:04x})");
+            }
+            return;
         }
         // 份数：对话框的 nCopies 写回 DEVMODE 并应用到 DC，驱动按份数/份内排序输出。
         // 不设 PD_USEDEVMODECOPIES，保证对话框里的份数输入权威。

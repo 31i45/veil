@@ -421,7 +421,27 @@ pub fn html_of_doc(
     // `href`，只能在成品标签上复核；非白名单目标整条属性删除，文字保留。
     let sanitized = sanitize_html_urls(&localized);
     let content = restore_mermaid_styles(&sanitized, &mermaid_styles, &mermaid_style_prefix);
-    format!("{}{content}</body>\n</html>\n", head(style))
+    // 远程图片无法在离线导出件里内联：正文顶部给可见警告，避免用户以为图片凭空消失。
+    let warning = if localized.contains(REMOTE_IMAGE_MARKER) {
+        remote_image_warning()
+    } else {
+        ""
+    };
+    format!("{}{warning}{content}</body>\n</html>\n", head(style))
+}
+
+/// 正文顶部的远程图片警告：中英双语静态文本（导出件脱离应用语言设置，
+/// 故不复用 i18n key），保证离线打开时用户知道图片为何缺失。
+fn remote_image_warning() -> &'static str {
+    concat!(
+        "<div class=\"veil-export-warning\" style=\"margin:1em 0;padding:.6em .8em;\
+         border:1px solid #d9a441;border-radius:4px;background:#fff8e5;color:#5a4300;\">\n",
+        "<strong>远程图片未内联</strong>：本文件包含远程图片，导出时已移除其地址；\
+         离线打开时这些图片可能缺失。\n<br>\n",
+        "<strong>Remote images not embedded</strong>: remote image sources were removed \
+         from this export and may be missing when opened offline.\n",
+        "</div>\n"
+    )
 }
 
 /// 引用块首行 `[!NAME]` 标记区间（字节，行内相对块起点）：缩进 + `>` + 空白 +
@@ -707,7 +727,11 @@ fn collect_html_inlines(
                         // 两者皆空时降级为 alt-only（缺图提示，不留断链）。
                         let src = attrs.src.as_deref().unwrap_or("");
                         let alt = attrs.alt.as_deref().unwrap_or("");
-                        if src.is_empty() {
+                        if attrs.remote_src.is_some() {
+                            // 行内 HTML 图片的远程地址在解析层就被移出 src；这里留标记，
+                            // 让正文顶部的「远程图片未内联」警告同样覆盖这条路径。
+                            format!("<img alt=\"{}\"> {REMOTE_IMAGE_MARKER}", escape_attr(alt))
+                        } else if src.is_empty() {
                             format!(
                                 "<img alt=\"{}\"> <!-- veil image unavailable -->",
                                 escape_attr(alt)
@@ -1670,6 +1694,12 @@ const MAX_INLINE_IMAGE_BYTES: u64 = 8 * 1024 * 1024;
 /// 全部内嵌图片总量上限：超出的图片降级为 alt-only。
 const MAX_INLINE_IMAGE_TOTAL_BYTES: u64 = 24 * 1024 * 1024;
 
+/// 远程图片地址被删除后留下的标记；导出件据它在正文顶部放可见警告，
+/// 让「未内联」成为用户看得见的事实，而不是静默丢图。
+const REMOTE_IMAGE_MARKER: &str = "<!-- veil blocked remote -->";
+/// 非位图 data URI 等可携带脚本的地址被删除后留下的标记（与远程图片区分）。
+const BLOCKED_IMAGE_MARKER: &str = "<!-- veil blocked src -->";
+
 /// 图片 `src` 的处置结果。
 enum ImageSrc {
     /// 原标签保持不变（无 src、已是安全 data URI、或调用方无基准目录）。
@@ -1677,6 +1707,8 @@ enum ImageSrc {
     /// 改写为内嵌 data URI。
     Data(String),
     /// 远程地址：删除 src，绝不产生远程请求。
+    BlockedRemote,
+    /// 非位图 data URI：删除 src（可携带脚本，不可内联）。
     Blocked,
     /// 本地不可用/超限/格式不支持：删除 src，保留 alt。
     Unavailable,
@@ -1721,9 +1753,15 @@ fn localize_images(html: &str, base_dir: Option<&Path>) -> String {
         match decide_image_src(src, base_dir, &mut budget) {
             ImageSrc::Keep => out.push_str(&html[i..end]),
             ImageSrc::Data(uri) => out.push_str(&render_img_tag(&attrs, Some(&uri))),
+            ImageSrc::BlockedRemote => {
+                out.push_str(&render_img_tag(&attrs, None));
+                out.push(' ');
+                out.push_str(REMOTE_IMAGE_MARKER);
+            }
             ImageSrc::Blocked => {
                 out.push_str(&render_img_tag(&attrs, None));
-                out.push_str(" <!-- veil blocked remote -->");
+                out.push(' ');
+                out.push_str(BLOCKED_IMAGE_MARKER);
             }
             ImageSrc::Unavailable => {
                 out.push_str(&render_img_tag(&attrs, None));
@@ -1746,7 +1784,7 @@ fn decide_image_src(src: Option<&str>, base_dir: Option<&Path>, budget: &mut u64
     }
     match veil_core::link_scheme(value).as_deref() {
         // 远程资源：导出件不得隐式联网（离线打开也不该产生第三方请求）。
-        Some("http" | "https") => ImageSrc::Blocked,
+        Some("http" | "https") => ImageSrc::BlockedRemote,
         // 作者已写成 data URI：只接受位图 MIME，SVG 等可携带脚本的一律删除。
         Some("data") => {
             if is_data_image(value) {
@@ -3300,6 +3338,45 @@ mod tests {
         let body = body_of("<img src=\"https://example.invalid/a.png\" alt=\"远程\">\n");
         assert!(!body.contains("example.invalid"), "实际输出: {body}");
         assert!(!body.contains("src=\"http"), "实际输出: {body}");
+    }
+
+    #[test]
+    fn remote_markdown_image_adds_visible_export_warning() {
+        // 远程图片不能内联时必须可见提示，不得静默丢图。
+        let s = Session::open("![远程](https://example.invalid/p.png)\n");
+        let html = html_of(&s, &ExportStyle::default(), &font(), None);
+        assert!(html.contains("veil-export-warning"), "应有可见警告块: {html}");
+        assert!(html.contains("远程图片未内联"), "须有中文说明");
+        assert!(html.contains("Remote images not embedded"), "须有英文说明");
+        let warning = html.find("veil-export-warning").expect("warning block");
+        let image = html.find("<img").expect("degraded image");
+        assert!(warning < image, "警告须位于正文之前");
+        assert!(!html.contains("example.invalid"), "远程地址不得出现");
+        assert!(!html.contains("src=\"http"), "不得引用远程图片");
+    }
+
+    #[test]
+    fn remote_inline_html_image_adds_visible_export_warning() {
+        // 行内 HTML 图片的远程地址同样触发同一警告。
+        let s = Session::open("<img src=\"https://example.invalid/a.png\" alt=\"远程\">\n");
+        let html = html_of(&s, &ExportStyle::default(), &font(), None);
+        assert!(html.contains("veil-export-warning"), "应有可见警告块: {html}");
+        assert!(!html.contains("example.invalid"), "远程地址不得出现");
+    }
+
+    #[test]
+    fn local_image_export_has_no_remote_warning() {
+        // 无远程图片时不得出现警告噪音。
+        let dir = temp_dir("warn-local");
+        std::fs::write(dir.join("p.png"), PNG_HEADER).unwrap();
+        let s = Session::open("![pic](p.png)\n");
+        let html = html_of_doc(&s, &ExportStyle::default(), &font(), Some(&dir), None);
+        assert!(
+            !html.contains("veil-export-warning"),
+            "本地图片不应触发远程警告: {html}"
+        );
+        assert!(html.contains("data:image/png;base64,"), "本地图片须内嵌");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

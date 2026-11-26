@@ -2048,16 +2048,21 @@ impl App {
                 monitors.swap(0, i);
             }
         }
-        let work_area = match (primary, monitors.first()) {
-            (Some((primary_rect, primary_scale)), Some((first, _))) if *first == primary_rect => {
-                system_work_area().map(|area| (area, primary_scale))
-            }
-            _ => None,
-        };
         let screens: Vec<ScreenRect> = monitors.iter().map(|(s, _)| *s).collect();
         let saved_geom = self.config.window.map(|g| clamp_window_geom(g, &screens));
-        let initial_geom = fit_initial_window(DEFAULT_WIN_W, DEFAULT_WIN_H, &monitors, work_area);
-        let mut geom = saved_geom.unwrap_or(initial_geom);
+        // 工作区只服务「无保存几何」的默认尺寸与居中：有保存几何时那次系统查询是纯浪费，
+        // 因此把查询与默认几何一起按需计算（几何结果与原来完全一致）。
+        let mut geom = saved_geom.unwrap_or_else(|| {
+            let work_area = match (primary, monitors.first()) {
+                (Some((primary_rect, primary_scale)), Some((first, _)))
+                    if *first == primary_rect =>
+                {
+                    system_work_area().map(|area| (area, primary_scale))
+                }
+                _ => None,
+            };
+            fit_initial_window(DEFAULT_WIN_W, DEFAULT_WIN_H, &monitors, work_area)
+        });
         // 历史几何可能记录过更小的尺寸：最小尺寸对恢复路径同样是硬约束。
         geom.width = geom.width.max(MIN_WINDOW_SIZE.0 as u32);
         geom.height = geom.height.max(MIN_WINDOW_SIZE.1 as u32);

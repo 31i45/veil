@@ -727,13 +727,6 @@ fn clipboard() -> Box<dyn veil_ui::Clipboard> {
             self.0.get().file_list().unwrap_or_default()
         }
     }
-    struct Noop; // 剪贴板初始化失败（如无显示服务器）：Ctrl+C/X/V 静默无效
-    impl veil_ui::Clipboard for Noop {
-        fn get(&mut self) -> Option<String> {
-            None
-        }
-        fn set(&mut self, _text: &str) {}
-    }
     match arboard::Clipboard::new() {
         Ok(c) => Box::new(Sys(c)),
         Err(e) => {
@@ -741,6 +734,15 @@ fn clipboard() -> Box<dyn veil_ui::Clipboard> {
             Box::new(Noop)
         }
     }
+}
+
+/// 剪贴板初始化失败（如无显示服务器）的兜底：Ctrl+C/X/V 静默无效，进程不 panic。
+struct Noop;
+impl veil_ui::Clipboard for Noop {
+    fn get(&mut self) -> Option<String> {
+        None
+    }
+    fn set(&mut self, _text: &str) {}
 }
 
 #[cfg(test)]
@@ -1106,5 +1108,65 @@ mod tests {
             height: 2,
         };
         assert!(encode_png_rgba(&bad).is_err(), "尺寸不符须拒绝，不写坏文件");
+    }
+
+    // ---- 分层恢复门禁（error-recovery-layering.md §4）：注入失败 → 不 panic + 降级/可归因 Err ----
+
+    /// G-数学字体：字体初始化失败的兜底必须恒 Err（公式降级源码、导出拒绝），进程不 panic。
+    #[test]
+    fn math_font_unavailable_degrades_without_panic() {
+        use veil_ui::{Exporter, MathRenderer};
+        let mut no_math = NoMath;
+        match no_math.render("x", false, 1.0, [0, 0, 0]) {
+            Err(e) => assert!(!e.is_empty(), "错误须含可归因提示"),
+            Ok(_) => panic!("NoMath 必须 Err（公式降级源码）"),
+        }
+
+        let mut no_export = NoExport;
+        let session = veil_core::Session::open("# t");
+        let r = no_export.export_html(&session, veil_ui::ExportStyle::default(), None, None, None);
+        assert!(r.is_err(), "NoExport 必须 Err（导出拒绝）");
+    }
+
+    /// G-文档加载：IO 错误按 kind 归因，且用户可见提示含路径与"下一步"（信任显性化）。
+    #[test]
+    fn open_failure_attributes_io_kinds() {
+        let notfound =
+            platform::OpenFailure::from_io(&std::io::Error::from(std::io::ErrorKind::NotFound));
+        assert!(matches!(notfound, platform::OpenFailure::NotFound(_)));
+        let denied = platform::OpenFailure::from_io(&std::io::Error::from(
+            std::io::ErrorKind::PermissionDenied,
+        ));
+        assert!(matches!(denied, platform::OpenFailure::Denied(_)));
+        let other = platform::OpenFailure::from_io(&std::io::Error::from(
+            std::io::ErrorKind::UnexpectedEof,
+        ));
+        assert!(matches!(other, platform::OpenFailure::Other(_)));
+        let text = platform::open_failure_text(Path::new("D:/x.md"), &notfound);
+        assert!(text.contains("x.md"), "提示须含路径: {text}");
+        assert!(!text.is_empty());
+    }
+
+    /// G-文档加载（端到端）：不存在的路径 → NotFound，而非 panic。
+    #[test]
+    fn load_document_missing_file_is_not_found() {
+        let missing = std::env::temp_dir().join(format!("veil-missing-{}.md", std::process::id()));
+        let r = load_document(&missing);
+        assert!(
+            matches!(r, Err(platform::OpenFailure::NotFound(_))),
+            "不存在路径必须归因 NotFound"
+        );
+    }
+
+    /// G-剪贴板：初始化失败的 Noop 兜底各方法安全返回（None/空），进程不 panic。
+    #[test]
+    fn clipboard_noop_degrades_safely() {
+        use veil_ui::Clipboard;
+        let mut noop = Noop;
+        assert!(noop.get().is_none(), "Noop.get 必须 None");
+        noop.set("x"); // 不应 panic
+        assert!(noop.get_html().is_none());
+        assert!(noop.get_image().is_none());
+        assert!(noop.get_files().is_empty());
     }
 }

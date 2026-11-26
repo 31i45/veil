@@ -83,10 +83,7 @@ fn candidate_lines(text: &str, max_w: f32) -> Vec<String> {
         let first_mandatory = (start + 1..=n).find(|&p| mandatory[p]);
         let cut = match first_mandatory {
             Some(p) if p <= end => p,
-            _ => (start + 1..=end)
-                .rev()
-                .find(|&p| allowed[p])
-                .unwrap_or(end),
+            _ => (start + 1..=end).rev().find(|&p| allowed[p]).unwrap_or(end),
         };
 
         let mut line: String = chars[start..cut].iter().collect();
@@ -125,9 +122,7 @@ fn start_violations(lines: &[String], forbidden: impl Fn(char) -> bool) -> Vec<(
 fn line_text_diff(a: &[String], b: &[String]) -> usize {
     let n = a.len().max(b.len());
     (0..n)
-        .filter(|&i| {
-            a.get(i).map(|s| content(s)) != b.get(i).map(|s| content(s))
-        })
+        .filter(|&i| a.get(i).map(|s| content(s)) != b.get(i).map(|s| content(s)))
         .count()
 }
 
@@ -197,11 +192,7 @@ fn pdf_linebreak_spike_compare_current_and_unicode_linebreak() {
         );
         // 不变量：两侧都不越出版心（超长不可断串由硬断处理）。
         assert_eq!(overflow_lines(&current, em), 0, "{name}: 当前策略行宽溢出");
-        assert_eq!(
-            overflow_lines(&candidate, em),
-            0,
-            "{name}: 候选行宽溢出"
-        );
+        assert_eq!(overflow_lines(&candidate, em), 0, "{name}: 候选行宽溢出");
 
         let current_starts = visible_char_starts(&current);
         let candidate_starts = visible_char_starts(&candidate);
@@ -218,9 +209,7 @@ fn pdf_linebreak_spike_compare_current_and_unicode_linebreak() {
             current.len(),
             candidate.len()
         );
-        eprintln!(
-            "[spike]   starts current={current_starts:?} candidate={candidate_starts:?}"
-        );
+        eprintln!("[spike]   starts current={current_starts:?} candidate={candidate_starts:?}");
         eprintln!(
             "[spike]   max_width_em current={max_current:.2} candidate={max_candidate:.2} capacity={em:.2}"
         );

@@ -506,7 +506,11 @@ mod tests {
             .flat_map(|m| m.items.iter())
             .filter(|(_, _, a)| matches!(a, MenuAction::Separator))
             .count();
-        assert_eq!(items.len(), total - separators, "全部非分隔线菜单项都在面板里");
+        assert_eq!(
+            items.len(),
+            total - separators,
+            "全部非分隔线菜单项都在面板里"
+        );
         assert!(items
             .iter()
             .all(|it| it.action.is_some() && !it.label.is_empty()));

@@ -1158,10 +1158,7 @@ fn settings_source_plain_lines_writes_back_and_persists() {
             .position(|f| f.label == I18nKey::SettingsSourcePlainLines)
             .expect("源码纯文本行开关必须存在");
         assert!(matches!(s.form.fields[idx].kind, FieldKind::Toggle));
-        assert!(matches!(
-            s.form.fields[idx].value,
-            FieldValue::Toggle(true)
-        ));
+        assert!(matches!(s.form.fields[idx].value, FieldValue::Toggle(true)));
         s.form.fields[idx].value = FieldValue::Toggle(false);
     }
     a.resolve_settings(BTN_OK);
@@ -1264,7 +1261,8 @@ fn ime_disabled_clears_active_preedit() {
 /// 候选窗锚点正确性（CRTL）：`set_ime_area` 每次被调都记录坐标，
 /// 断言记录坐标与 `caret_screen()` 一致；换行后第二次调用坐标确实更新了。
 #[test]
-fn ime_candidate_window_anchor_updates_after_linebreak() {    use winit::event::{Ime, WindowEvent};
+fn ime_candidate_window_anchor_updates_after_linebreak() {
+    use winit::event::{Ime, WindowEvent};
     let store = MemStore::default();
     let mut a = app("第一行", None, false, &store);
     a.ensure_layouts_all();
@@ -1338,7 +1336,8 @@ fn ime_candidate_window_anchor_updates_after_linebreak() {    use winit::event::
 /// 且高度是行高（组合窗纠正依赖这组左上角 + 尺寸，不允许再传底部坐标）。
 #[test]
 fn ime_anchor_port_receives_caret_top_left() {
-    struct Probe(Rc<RefCell<Vec<(isize, f64, f64, f64, f64)>>>);
+    type AnchorCalls = Rc<RefCell<Vec<(isize, f64, f64, f64, f64)>>>;
+    struct Probe(AnchorCalls);
     impl ImeAnchor for Probe {
         fn correct(&mut self, hwnd: isize, x: f64, y: f64, w: f64, h: f64) {
             self.0.borrow_mut().push((hwnd, x, y, w, h));
@@ -1346,7 +1345,7 @@ fn ime_anchor_port_receives_caret_top_left() {
     }
 
     let store = MemStore::default();
-    let log = Rc::new(RefCell::new(Vec::new()));
+    let log: AnchorCalls = Rc::new(RefCell::new(Vec::new()));
     let mut p = ports(&store, no_url());
     p.ime_anchor = Box::new(Probe(log.clone()));
     let doc = Doc {

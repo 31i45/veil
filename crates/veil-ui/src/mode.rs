@@ -103,9 +103,7 @@ pub(crate) fn route(mode: Mode, key: Key, mods: Mods, composing: bool) -> Cmd {
             } else {
                 match key {
                     // 打印兜底键 Ctrl+Alt+P：AltGr 会让 `ctrl` 为 false，单独放行。
-                    Key::P if mods.ctrl && mods.alt && !mods.shift => {
-                        Cmd::Edit(Action::Print)
-                    }
+                    Key::P if mods.ctrl && mods.alt && !mods.shift => Cmd::Edit(Action::Print),
                     Key::Up => Cmd::MenuMove(-1),
                     Key::Down => Cmd::MenuMove(1),
                     Key::Left => Cmd::MenuSwitch(-1),

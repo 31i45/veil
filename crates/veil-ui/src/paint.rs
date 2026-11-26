@@ -323,12 +323,7 @@ fn draw_task_box(
     }
     if done {
         // 对勾：两条斜线（粗细 = stroke），端点按方框比例取，不新增依赖也不用字形。
-        let c = [
-            theme.accent[0],
-            theme.accent[1],
-            theme.accent[2],
-            255,
-        ];
+        let c = [theme.accent[0], theme.accent[1], theme.accent[2], 255];
         let (x0, y0) = (x as f32, y as f32);
         let s = side as f32;
         let p = |fx: f32, fy: f32| (x0 + s * fx, y0 + s * fy);
@@ -2031,11 +2026,7 @@ mod tests {
         for done in [false, true] {
             let mut f = Frame::new(40, 40, bg);
             draw_task_box(&mut f, 5, 5, 20, done, &theme, 1.0, bg);
-            assert_eq!(
-                f.get(15, 15),
-                bg,
-                "任务框中心不得填充实色（done={done}）"
-            );
+            assert_eq!(f.get(15, 15), bg, "任务框中心不得填充实色（done={done}）");
             let border = f.get(5, 15);
             let expected = if done { theme.accent } else { theme.muted };
             assert_eq!(

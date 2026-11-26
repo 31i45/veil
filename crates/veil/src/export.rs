@@ -3348,7 +3348,10 @@ mod tests {
         // 远程图片不能内联时必须可见提示，不得静默丢图。
         let s = Session::open("![远程](https://example.invalid/p.png)\n");
         let html = html_of(&s, &ExportStyle::default(), &font(), None);
-        assert!(html.contains("veil-export-warning"), "应有可见警告块: {html}");
+        assert!(
+            html.contains("veil-export-warning"),
+            "应有可见警告块: {html}"
+        );
         assert!(html.contains("远程图片未内联"), "须有中文说明");
         assert!(html.contains("Remote images not embedded"), "须有英文说明");
         let warning = html.find("veil-export-warning").expect("warning block");
@@ -3363,7 +3366,10 @@ mod tests {
         // 行内 HTML 图片的远程地址同样触发同一警告。
         let s = Session::open("<img src=\"https://example.invalid/a.png\" alt=\"远程\">\n");
         let html = html_of(&s, &ExportStyle::default(), &font(), None);
-        assert!(html.contains("veil-export-warning"), "应有可见警告块: {html}");
+        assert!(
+            html.contains("veil-export-warning"),
+            "应有可见警告块: {html}"
+        );
         assert!(!html.contains("example.invalid"), "远程地址不得出现");
     }
 

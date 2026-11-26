@@ -2404,7 +2404,10 @@ mod tests {
     #[test]
     fn source_plain_lines_toggle_binds_and_writes_back_config() {
         let config = Config::default();
-        assert!(config.source_plain_lines, "默认开启纯文本行视图（空行可见）");
+        assert!(
+            config.source_plain_lines,
+            "默认开启纯文本行视图（空行可见）"
+        );
 
         let mut form = SettingsForm::from_config(&config);
         let idx = form
@@ -2423,17 +2426,17 @@ mod tests {
             state.on_key(&space, Mods::default(), &mut form, &layout),
             None
         );
-        assert!(!form.apply(&config).source_plain_lines, "Space 必须写入关闭");
+        assert!(
+            !form.apply(&config).source_plain_lines,
+            "Space 必须写入关闭"
+        );
 
         assert_eq!(
             state.on_key(&InputKey::Enter, Mods::default(), &mut form, &layout),
             None,
             "字段上的 Enter 与 Space 等价"
         );
-        assert!(
-            form.apply(&config).source_plain_lines,
-            "Enter 必须写回开启"
-        );
+        assert!(form.apply(&config).source_plain_lines, "Enter 必须写回开启");
 
         form.fields[idx].value = FieldValue::Toggle(false);
         assert!(

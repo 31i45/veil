@@ -30,10 +30,7 @@ fn task_checkbox_click_toggles_and_keeps_caret() {
     let (ix, _, _) = a.engine.caret_xy(l0, 0);
     let (tx, ty, th) = a.engine.caret_xy(l0, 6);
     let top0 = a.index.blocks[0].top;
-    let (mx, my) = (
-        a.content_x() + (ix + tx) / 2.0,
-        vp.y + top0 + ty + th / 2.0,
-    );
+    let (mx, my) = (a.content_x() + (ix + tx) / 2.0, vp.y + top0 + ty + th / 2.0);
     click_at(&mut a, mx, my);
     assert_eq!(a.editor.caret(), caret0, "点击方框不移动光标");
     assert_eq!(full(&a), "- [x] buy milk\n- [x] ship it\n");
@@ -58,10 +55,7 @@ fn task_checkbox_click_toggles_and_keeps_caret() {
     let l0b = &a.cache.layouts[&id0b];
     let (tbx, tby, tbh) = a.engine.caret_xy(l0b, 10); // "milk" 内
     let top0b = a.index.blocks[0].top;
-    let (mxb, myb) = (
-        a.content_x() + tbx + 1.0,
-        vp.y + top0b + tby + tbh / 2.0,
-    );
+    let (mxb, myb) = (a.content_x() + tbx + 1.0, vp.y + top0b + tby + tbh / 2.0);
     click_at(&mut a, mxb, myb);
     assert_eq!(
         full(&a),
@@ -83,10 +77,7 @@ fn double_click_selects_word_and_triple_click_selects_line() {
     let l = &a.cache.layouts[&id];
     let (cx, cy, ch) = a.engine.caret_xy(l, 7); // "beta" 内
     let top = a.index.blocks[0].top;
-    let (x, y) = (
-        a.content_x() + cx + 1.0,
-        vp.y + top + cy + ch / 2.0,
-    );
+    let (x, y) = (a.content_x() + cx + 1.0, vp.y + top + cy + ch / 2.0);
 
     click_at(&mut a, x, y);
     assert_eq!(a.editor.selection(), None, "单击只落光标");
@@ -150,10 +141,7 @@ fn mouse_click_breaks_undo_group() {
     let l = &a.cache.layouts[&id];
     let (cx, cy, ch) = a.engine.caret_xy(l, 0);
     let top = a.index.blocks[0].top;
-    let (mx, my) = (
-        a.content_x() + cx + 1.0,
-        vp.y + top + cy + ch / 2.0,
-    );
+    let (mx, my) = (a.content_x() + cx + 1.0, vp.y + top + cy + ch / 2.0);
     click_at(&mut a, mx, my);
     assert_eq!(a.editor.caret(), 0, "单击须落光标到文首");
 

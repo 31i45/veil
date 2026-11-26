@@ -7,6 +7,8 @@ mod clock;
 pub mod diag; // 崩溃取证（P0-1）：panic hook + 报告原子落盘
 mod error;
 pub mod http; // 远程图片抓取（v1.4）：WinHTTP 手写 FFI
+#[cfg(windows)]
+mod ime;
 pub mod ipc;
 pub mod locale; // 运行时界面语言：系统 UI 语言探测 + VEIL_UI_LANG 覆盖
 pub mod mermaid; // SVG → resvg 光栅化（离线引擎出 SVG 后共用）
@@ -17,8 +19,6 @@ mod pdf; // 原生 PDF 导出（Wave 3A，跨平台 crate 但字体链 Windows �
 mod pdf_layout; // Wave 4：Markdown → PDF 版面（纯逻辑，可单测）
 #[cfg(windows)]
 mod pdf_media; // Wave 4：图片（WIC）/ 公式（latex-rust）→ RGB
-#[cfg(windows)]
-mod ime;
 #[cfg(windows)]
 mod print;
 #[cfg(windows)]

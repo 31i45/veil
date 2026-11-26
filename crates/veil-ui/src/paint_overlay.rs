@@ -1143,13 +1143,7 @@ impl App {
             let (px, w, h) = self.engine.rasterize(&l, fg);
             let top = (cy + ch - h as f32).max(0.0);
             let bg = crate::tokens::palette::surface_base(&self.input_state.theme);
-            frame.fill_rect(
-                cx as i32,
-                top as i32,
-                w,
-                h,
-                [bg[0], bg[1], bg[2], 255],
-            );
+            frame.fill_rect(cx as i32, top as i32, w, h, [bg[0], bg[1], bg[2], 255]);
             frame.blit(&px, w, h, cx as i32, top as i32);
             let underline = (self.input_state.scale * 2.0).round().max(2.0) as u32;
             let accent = self.input_state.theme.accent;

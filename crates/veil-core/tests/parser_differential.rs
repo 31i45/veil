@@ -320,8 +320,10 @@ fn kind_label(kind: &BlockKind) -> String {
 
 /// 单文件四维差分。`expected` 为规范期望 HTML（真实文档为 None）。
 fn analyze_doc(label: &str, md: &str, expected: Option<&str>, details: &mut Vec<String>) -> Stats {
-    let mut st = Stats::default();
-    st.files = 1;
+    let mut st = Stats {
+        files: 1,
+        ..Stats::default()
+    };
     let outcome = catch_unwind(AssertUnwindSafe(|| {
         let s = Session::open(md);
         let vb = actual_blocks(&s);
@@ -412,10 +414,9 @@ fn analyze_doc(label: &str, md: &str, expected: Option<&str>, details: &mut Vec<
             st.text_diff_blocks += 1;
             if details.len() < 60 {
                 details.push(format!(
-                    "[text] {label}: veil({})={:?} pd({})={:?}",
+                    "[text] {label}: veil({})={:?} pd({rk:?})={:?}",
                     kind_label(&e.kind),
                     en,
-                    format!("{:?}", rk),
                     rn
                 ));
             }
@@ -541,11 +542,10 @@ fn parser_differential_corpus() {
         total.files,
         "文件分类不完整"
     );
-    assert!(
-        cm_gfm.type_mismatch_files <= BASELINE_TYPE_MISMATCH_FILES,
-        "CommonMark/GFM 块骨架退化：{} > {}",
-        cm_gfm.type_mismatch_files,
-        BASELINE_TYPE_MISMATCH_FILES
+    assert_eq!(
+        cm_gfm.type_mismatch_files, BASELINE_TYPE_MISMATCH_FILES,
+        "CommonMark/GFM 块骨架退化：{} != {}",
+        cm_gfm.type_mismatch_files, BASELINE_TYPE_MISMATCH_FILES
     );
     assert!(
         real.type_mismatch_files <= BASELINE_REAL_TYPE_MISMATCH_FILES,

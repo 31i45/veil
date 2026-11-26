@@ -76,7 +76,7 @@ impl ImeAnchor for WinImeAnchor {
             let composition = CompositionForm {
                 style: CFS_POINT,
                 current_pos: Point { x, y },
-                area: area,
+                area,
             };
             let candidate = CandidateForm {
                 index: 0,

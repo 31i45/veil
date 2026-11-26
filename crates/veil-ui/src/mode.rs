@@ -102,6 +102,10 @@ pub(crate) fn route(mode: Mode, key: Key, mods: Mods, composing: bool) -> Cmd {
                 }
             } else {
                 match key {
+                    // 打印兜底键 Ctrl+Alt+P：AltGr 会让 `ctrl` 为 false，单独放行。
+                    Key::P if mods.ctrl && mods.alt && !mods.shift => {
+                        Cmd::Edit(Action::Print)
+                    }
                     Key::Up => Cmd::MenuMove(-1),
                     Key::Down => Cmd::MenuMove(1),
                     Key::Left => Cmd::MenuSwitch(-1),
@@ -146,9 +150,9 @@ pub(crate) fn route(mode: Mode, key: Key, mods: Mods, composing: bool) -> Cmd {
                 // Ctrl+F/H/P 穿透：重申查询焦点 / 展开替换 / 打开快速打开
                 Key::F if ctrl => Cmd::Edit(Action::Find),
                 Key::H if ctrl => Cmd::Edit(Action::Replace),
-                // Ctrl+P = 快速打开（穿透查找栏）；Ctrl+Shift+P = 打印不穿透
-                // （避免在查询框输入时误触系统打印对话框）
-                Key::P if ctrl && mods.shift => Cmd::Ignore,
+                // Ctrl+P = 快速打开（穿透查找栏）；Ctrl+Shift+P = 命令面板
+                // （打开即关闭查找栏，不再与打印共用组合键）
+                Key::P if ctrl && mods.shift => Cmd::Edit(Action::CommandPalette),
                 Key::P if ctrl => Cmd::OpenQuick,
                 // 查找栏输入框自己的粘贴：Ctrl+V 不能让 Action::Paste 去改文档，
                 // 必须粘进查询/替换框；文件列表/图片在查找栏语境下一律当文本粘入。
@@ -313,6 +317,10 @@ mod tests {
         );
         assert_eq!(
             route(Mode::Menu, Key::P, CTRL_SHIFT, false),
+            Cmd::Edit(Action::CommandPalette)
+        );
+        assert_eq!(
+            route(Mode::Menu, Key::P, CTRL_ALT, false),
             Cmd::Edit(Action::Print)
         );
         assert_eq!(
@@ -401,9 +409,12 @@ mod tests {
         // Ctrl+文本 / 未绑定键：吞掉，不得落进查询串
         assert_eq!(route(Mode::Search, text("f"), CTRL, false), Cmd::Ignore);
         assert_eq!(route(Mode::Search, Key::Left, NONE, false), Cmd::Ignore);
-        // Ctrl+P 抢占为快速打开；Ctrl+Shift+P（打印）在查找栏内不触发
+        // Ctrl+P 抢占为快速打开；Ctrl+Shift+P 打开命令面板并收掉查找栏
         assert_eq!(route(Mode::Search, Key::P, CTRL, false), Cmd::OpenQuick);
-        assert_eq!(route(Mode::Search, Key::P, CTRL_SHIFT, false), Cmd::Ignore);
+        assert_eq!(
+            route(Mode::Search, Key::P, CTRL_SHIFT, false),
+            Cmd::Edit(Action::CommandPalette)
+        );
         // 栏已开时 Ctrl+F/Ctrl+H 仍生效：重申查询焦点 / 展开替换行
         assert_eq!(
             route(Mode::Search, Key::F, CTRL, false),

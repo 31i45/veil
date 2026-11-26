@@ -744,6 +744,7 @@ impl App {
             theme.chrome_border,
         );
 
+        let kind = self.ui_state.quick.kind;
         let query = self.ui_state.quick.query.clone();
         let top = self.ui_state.quick.top;
         let selected = self.ui_state.quick.selected;
@@ -770,9 +771,13 @@ impl App {
         let mut qw = 0.0;
         if query.is_empty() {
             if self.editor.preedit().is_none() {
+                let placeholder = match kind {
+                    quick_open::QuickKind::Files => Key::QuickOpenPlaceholder,
+                    quick_open::QuickKind::Commands => Key::CommandPalettePlaceholder,
+                };
                 if let Some(lab) = self.ui_state.chrome.labels.get_or_insert(
                     &mut self.engine,
-                    t(Key::QuickOpenPlaceholder),
+                    t(placeholder),
                     theme.muted,
                     scale,
                 ) {
@@ -918,7 +923,8 @@ impl App {
         // 空态提示：占首行，水平/垂直居中；文案区分「无候选」与「查询不命中」。
         if empty {
             if let Some(row) = l.rows.first() {
-                let message = quick_open::empty_message(
+                let message = quick_open::empty_message_for(
+                    kind,
                     &self.ui_state.quick.query,
                     self.ui_state.quick.items.is_empty(),
                 );

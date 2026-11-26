@@ -1375,6 +1375,90 @@ fn keyboard_quick_open_esc_restores_focus_without_editing() {
     assert_eq!(doc_text(&a), before);
 }
 
+/// 命令面板（Ctrl+Shift+P）：空查询列出全部命令，输入过滤，回车执行菜单动作。
+#[test]
+fn keyboard_command_palette_filters_and_executes_menu_actions() {
+    let store = MemStore::default();
+    let text: String = (0..20).map(|i| format!("第 {i} 行\n")).collect();
+    let mut a = app(&text, None, false, &store);
+    a.ensure_layouts_all();
+    let before = doc_text(&a);
+
+    let open = |a: &mut App| {
+        a.input_state.mods.ctrl = true;
+        a.input_state.mods.shift = true;
+        a.route_key_with_focus(Key::P);
+        a.input_state.mods.ctrl = false;
+        a.input_state.mods.shift = false;
+    };
+    open(&mut a);
+    assert!(a.ui_state.quick.open);
+    assert_eq!(a.mode(), Mode::QuickOpen, "面板打开期间文档只读");
+    assert_eq!(
+        a.ui_state.quick.kind,
+        crate::view::quick_open::QuickKind::Commands
+    );
+    assert!(
+        a.ui_state.quick.filtered.len() > 20,
+        "空查询显示全部菜单命令"
+    );
+    a.route_key_with_focus(Key::Down);
+    assert_eq!(a.ui_state.quick.selected, 1, "↓ 移动选中项");
+    a.route_key_with_focus(Key::Up);
+    assert_eq!(a.ui_state.quick.selected, 0);
+
+    // 中文子串过滤 → 回车执行「打字机模式」
+    a.route_key_with_focus(Key::Text("打字机".into()));
+    assert_eq!(a.ui_state.quick.filtered.len(), 1);
+    a.route_key_with_focus(Key::Enter);
+    assert!(!a.ui_state.quick.open, "执行后关闭面板");
+    assert!(a.ui_state.writing.typewriter, "Enter 执行选中命令");
+    assert_eq!(doc_text(&a), before, "命令面板不编辑正文");
+
+    // 再开：过滤「设置」并执行，打开设置模态
+    open(&mut a);
+    a.route_key_with_focus(Key::Text("设置".into()));
+    assert!(a
+        .ui_state
+        .quick
+        .current()
+        .is_some_and(|it| it.label.contains("设置")));
+    a.route_key_with_focus(Key::Enter);
+    assert!(a.ui_state.settings.is_some(), "Enter 执行设置命令");
+    assert_eq!(doc_text(&a), before);
+}
+
+/// 命令面板 Esc：关闭并把焦点还给正文，过滤串不得写入文档。
+#[test]
+fn keyboard_command_palette_esc_restores_focus_without_editing() {
+    let store = MemStore::default();
+    let text: String = (0..80).map(|i| format!("第 {i} 行\n")).collect();
+    let mut a = app(&text, None, false, &store);
+    a.ensure_layouts_all();
+    a.editor.set_caret(3);
+    a.window_state.goal_y = 24.0;
+    a.window_state.scroll_y = 24.0;
+    let caret = a.editor.caret();
+    let scroll = a.window_state.scroll_y;
+    let before = doc_text(&a);
+
+    a.input_state.mods.ctrl = true;
+    a.input_state.mods.shift = true;
+    a.route_key_with_focus(Key::P);
+    a.input_state.mods.ctrl = false;
+    a.input_state.mods.shift = false;
+    assert!(a.ui_state.quick.open);
+    a.route_key_with_focus(Key::Text("zzz".into()));
+    assert_eq!(a.ui_state.quick.query, "zzz");
+    assert_eq!(doc_text(&a), before, "过滤串不得写入正文");
+
+    a.route_key_with_focus(Key::Escape);
+    assert!(!a.ui_state.quick.open);
+    assert_eq!(a.editor.caret(), caret, "Esc 归还光标");
+    assert_eq!(a.window_state.scroll_y, scroll, "Esc 归还滚动");
+    assert_eq!(doc_text(&a), before);
+}
+
 #[test]
 fn keyboard_settings_tab_cycles_inside_and_esc_restores_focus() {
     let store = MemStore::default();

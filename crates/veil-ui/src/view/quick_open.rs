@@ -1,13 +1,15 @@
-//! 快速打开浮层（阶段 1）：候选列表、模糊过滤与浮层几何。
+//! 快速打开 / 命令面板浮层：候选列表、过滤与浮层几何。
 //!
-//! 纯逻辑零 GUI：候选由 App 从最近文件 + 当前目录 Markdown 文件派生，本文件只做
-//! 去重/过滤/排序与「画在哪 / 点到谁」的纯函数；绘制在根级 paint，交互在 interaction。
-//! 打开期间文档只读（文本输入全部进入查询串）。
+//! 纯逻辑零 GUI：文件候选由 App 从最近文件 + 当前目录 Markdown 文件派生，命令候选
+//! 由菜单表 `chrome::MENUS` 展开；本文件只做去重/过滤/排序与「画在哪 / 点到谁」的
+//! 纯函数；绘制在根级 paint，交互在 interaction。打开期间文档只读（文本输入全部进入
+//! 查询串）。两种面板共用同一套浮动几何与交互骨架，以 `QuickKind` 区分候选语义。
 
 use std::path::{Path, PathBuf};
 
+use crate::chrome::{MenuAction, MENUS};
 use crate::geometry::Rect;
-use crate::i18n::Key;
+use crate::i18n::{t, Key};
 use crate::tokens::typography;
 
 /// 浮层基准宽（乘 DPI scale）。
@@ -22,8 +24,20 @@ pub const MAX_VISIBLE: usize = 10;
 pub const PAD: f32 = crate::theme::surface::PADDING;
 /// 候选上限：巨型目录也只入列有限条目。
 pub const CANDIDATE_CAP: usize = 500;
+/// 命令面板空查询的展示上限（菜单命令远少于此，防御性钳制）。
+pub const COMMAND_CAP: usize = 100;
 
-/// 单个候选：路径 + 展示名 + 来源说明。
+/// 浮层语义：文件快速打开 or 命令面板。两者共用几何/绘制/按键路由。
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub(crate) enum QuickKind {
+    /// 最近文件 + 当前目录 Markdown（Ctrl+P）。
+    #[default]
+    Files,
+    /// 菜单命令（Ctrl+Shift+P）。
+    Commands,
+}
+
+/// 单个候选：路径 + 展示名 + 来源说明；命令候选另带动作。
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub(crate) struct QuickItem {
     pub(crate) path: PathBuf,
@@ -33,12 +47,15 @@ pub(crate) struct QuickItem {
     pub(crate) hint: String,
     /// 是否来自最近文件（同分时优先）。
     pub(crate) recent: bool,
+    /// 命令候选的动作；文件候选为 None。
+    pub(crate) action: Option<MenuAction>,
 }
 
 /// 浮层状态：开关、查询、候选与过滤结果。
 #[derive(Default)]
 pub(crate) struct QuickOpen {
     pub(crate) open: bool,
+    pub(crate) kind: QuickKind,
     pub(crate) query: String,
     pub(crate) items: Vec<QuickItem>,
     /// 过滤结果（`items` 下标，按得分降序）。
@@ -64,9 +81,13 @@ impl QuickOpen {
         self.hover = None;
     }
 
-    /// 查询变化后重算过滤并回到首项。
+    /// 查询变化后重算过滤并回到首项。命令面板用大小写不敏感子串匹配，
+    /// 文件面板保留既有模糊匹配（行为不变）。
     pub(crate) fn refilter(&mut self) {
-        self.filtered = filter(&self.items, &self.query);
+        self.filtered = match self.kind {
+            QuickKind::Files => filter(&self.items, &self.query),
+            QuickKind::Commands => command_filter(&self.items, &self.query),
+        };
         self.selected = 0;
         self.top = 0;
         self.hover = None;
@@ -162,7 +183,40 @@ fn item(path: PathBuf, recent: bool) -> QuickItem {
         label,
         hint,
         recent,
+        action: None,
     }
+}
+
+/// 命令面板候选：展开 `chrome::MENUS` 的全部非分隔线项，标签与快捷键提示走 `t()`。
+/// 顺序与菜单一致（文件 → 编辑 → 视图 → 帮助），同一动作若在菜单出现多次则各列一行。
+pub(crate) fn command_items() -> Vec<QuickItem> {
+    MENUS
+        .iter()
+        .flat_map(|m| m.items.iter())
+        .filter(|(_, _, action)| !matches!(action, MenuAction::Separator))
+        .map(|(label, shortcut, action)| QuickItem {
+            path: PathBuf::new(),
+            label: t(*label).to_string(),
+            hint: t(*shortcut).to_string(),
+            recent: false,
+            action: Some(*action),
+        })
+        .collect()
+}
+
+/// 命令过滤：查询串大小写不敏感子串匹配展示标签；空查询保留全部（钳制 `COMMAND_CAP`）。
+pub(crate) fn command_filter(items: &[QuickItem], query: &str) -> Vec<usize> {
+    let q = query.trim().to_lowercase();
+    if q.is_empty() {
+        return (0..items.len().min(COMMAND_CAP)).collect();
+    }
+    items
+        .iter()
+        .enumerate()
+        .filter(|(_, it)| it.label.to_lowercase().contains(&q))
+        .map(|(i, _)| i)
+        .take(COMMAND_CAP)
+        .collect()
 }
 
 /// 模糊匹配得分：查询字符按顺序出现在候选文本（大小写不敏感）即命中。
@@ -229,6 +283,14 @@ pub(crate) fn empty_message(query: &str, items_empty: bool) -> Key {
         Key::QuickOpenEmptyNoCandidates
     } else {
         Key::QuickOpenEmptyNoMatch
+    }
+}
+
+/// 按面板语义取空态文案：命令面板恒为「无匹配命令」，不沿用文件候选的原因区分。
+pub(crate) fn empty_message_for(kind: QuickKind, query: &str, items_empty: bool) -> Key {
+    match kind {
+        QuickKind::Files => empty_message(query, items_empty),
+        QuickKind::Commands => Key::CommandPaletteEmpty,
     }
 }
 
@@ -432,6 +494,66 @@ mod tests {
                 l.rows[MAX_VISIBLE - 1].y + 1.0
             ),
             None
+        );
+    }
+
+    #[test]
+    fn command_items_expand_all_menu_commands_with_shortcut_hints() {
+        let items = command_items();
+        let total = MENUS.iter().map(|m| m.items.len()).sum::<usize>();
+        let separators = MENUS
+            .iter()
+            .flat_map(|m| m.items.iter())
+            .filter(|(_, _, a)| matches!(a, MenuAction::Separator))
+            .count();
+        assert_eq!(items.len(), total - separators, "全部非分隔线菜单项都在面板里");
+        assert!(items
+            .iter()
+            .all(|it| it.action.is_some() && !it.label.is_empty()));
+        let save = items
+            .iter()
+            .find(|it| it.action == Some(MenuAction::Save))
+            .expect("保存命令");
+        assert_eq!(save.label, "保存");
+        assert_eq!(save.hint, "Ctrl+S", "命令面板显示菜单快捷键提示");
+        let typewriter = items
+            .iter()
+            .find(|it| it.action == Some(MenuAction::ToggleTypewriter))
+            .expect("打字机命令");
+        assert_eq!(typewriter.label, "打字机模式");
+        assert!(typewriter.hint.is_empty(), "无快捷键的命令不伪造提示");
+    }
+
+    #[test]
+    fn command_filter_is_case_insensitive_substring() {
+        let items = command_items();
+        let export_pdf = items
+            .iter()
+            .position(|it| it.action == Some(MenuAction::ExportPdf))
+            .expect("导出 PDF 命令");
+        assert!(command_filter(&items, "pdf").contains(&export_pdf));
+        assert!(
+            command_filter(&items, "PDF").contains(&export_pdf),
+            "ASCII 大小写不敏感"
+        );
+        let typewriter = items
+            .iter()
+            .position(|it| it.action == Some(MenuAction::ToggleTypewriter))
+            .expect("打字机命令");
+        assert_eq!(
+            command_filter(&items, "打字机"),
+            vec![typewriter],
+            "中文子串精确命中"
+        );
+        assert_eq!(
+            command_filter(&items, "").len(),
+            items.len().min(COMMAND_CAP),
+            "空查询显示全部（受上限钳制）"
+        );
+        assert!(command_filter(&items, "zzzz").is_empty());
+        assert_eq!(
+            t(empty_message_for(QuickKind::Commands, "zzzz", false)),
+            "无匹配命令"
         );
     }
 

@@ -38,7 +38,8 @@ pub enum Key {
     A,
     /// 逻辑键 n（无论是否带 ctrl；用于 Ctrl+N 新建与文本分流）。
     N,
-    /// 逻辑键 p（无论是否带 ctrl；用于 Ctrl+P 快速打开、Ctrl+Shift+P 打印与文本分流）。
+    /// 逻辑键 p（无论是否带 ctrl；用于 Ctrl+P 快速打开、Ctrl+Shift+P 命令面板、
+    /// Ctrl+Alt+P 打印与文本分流）。
     P,
     /// 逻辑键 r（无论是否带 ctrl；仅用于模态助记符「重新加载」，非模态不绑定快捷键）。
     R,
@@ -106,6 +107,8 @@ pub enum Action {
     NewWindow,
     /// 快速打开（Ctrl+P）：浮层过滤最近文件与当前目录 Markdown 文件。
     QuickOpen,
+    /// 命令面板（Ctrl+Shift+P）：与快速打开共用浮层，候选来自菜单命令。
+    CommandPalette,
     /// 插入图片（Ctrl+Shift+I）：弹系统文件对话框选图并以 Typora 独占段落插入。
     InsertImage,
     /// 关闭菜单（Esc）：纯视图动作。
@@ -118,7 +121,8 @@ pub enum Action {
     Export,
     /// 直接导出 PDF（Ctrl+Shift+E）：无打印对话框，由 shell 经 `Print` trait 完成。
     ExportPdf,
-    /// 打印（Ctrl+Shift+P）：系统打印对话框（含预览），由 shell 经 `Print` trait 完成。
+    /// 打印（Ctrl+Alt+P）：系统打印对话框（含预览），由 shell 经 `Print` trait 完成。
+    /// `Ctrl+Shift+P` 让位给命令面板；AltGr 布局下该组合可能与字符输入冲突（已知取舍）。
     Print,
     /// 版本历史（Ctrl+Shift+H）：左侧快照列表 + 正文区只读预览；纯视图动作。
     VersionHistory,
@@ -177,7 +181,10 @@ pub fn translate(key: Key, mods: Mods) -> Option<Action> {
         Key::N if ctrl && mods.shift => Some(Action::NewWindow),
         Key::N if ctrl => Some(Action::New),
         Key::N => None, // 无 ctrl 的 n 文本由 Text 变体承载
-        Key::P if ctrl && mods.shift => Some(Action::Print),
+        // 命令面板占用通用约定 Ctrl+Shift+P；打印改到 Ctrl+Alt+P。
+        // 注意：Ctrl+Alt 通常被视为 AltGr 字符输入，此处按规格显式让 P 例外。
+        Key::P if mods.ctrl && mods.alt && !mods.shift => Some(Action::Print),
+        Key::P if ctrl && mods.shift => Some(Action::CommandPalette),
         Key::P if ctrl => Some(Action::QuickOpen),
         Key::P => None, // 无 ctrl 的 p 文本由 Text 变体承载
         Key::R => None, // 仅模态助记符使用；非模态不新增快捷键（Ctrl+R 亦无动作）
@@ -548,10 +555,11 @@ mod tests {
     }
 
     #[test]
-    fn quick_open_and_print_bindings() {
-        // Ctrl+P = 快速打开（与 VS Code 一致）；打印让位到 Ctrl+Shift+P
+    fn quick_open_command_palette_and_print_bindings() {
+        // Ctrl+P = 快速打开；Ctrl+Shift+P = 命令面板；打印让位到 Ctrl+Alt+P
         assert_eq!(translate(Key::P, CTRL), Some(Action::QuickOpen));
-        assert_eq!(translate(Key::P, CTRL_SHIFT), Some(Action::Print));
+        assert_eq!(translate(Key::P, CTRL_SHIFT), Some(Action::CommandPalette));
+        assert_eq!(translate(Key::P, ALT_GR), Some(Action::Print));
         assert_eq!(translate(Key::P, NONE), None); // 无 ctrl 的 p 由 Text 变体承载
     }
 

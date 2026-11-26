@@ -635,7 +635,7 @@ fn print_entry_label_has_no_export_wording() {
         .find(|(_, _, a)| *a == MenuAction::Print)
         .expect("文件菜单应含打印项");
     assert_eq!(t(print.0), "打印…");
-    assert_eq!(t(print.1), "Ctrl+Shift+P");
+    assert_eq!(t(print.1), "Ctrl+Alt+P");
     assert!(
         !MENUS[0]
             .items

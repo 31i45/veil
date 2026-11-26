@@ -296,6 +296,7 @@ impl App {
             Action::New => self.new_draft(),
             Action::NewWindow => self.window_state.new_window_requested = true,
             Action::QuickOpen => self.toggle_quick(),
+            Action::CommandPalette => self.toggle_command_palette(),
             Action::CloseMenu => self.close_top_panel(),
             Action::OpenOutline => self.toggle_outline(),
             Action::OpenSourceMode => self.toggle_source_mode(),
@@ -1992,7 +1993,38 @@ impl App {
         }
         self.editor.clear_preedit();
         self.ui_state.quick.open = true;
+        self.ui_state.quick.kind = quick_open::QuickKind::Files;
         self.refresh_quick();
+    }
+
+    /// 打开命令面板（Ctrl+Shift+P）：与快速打开共用浮层骨架，候选来自菜单命令。
+    /// 关闭菜单/查找栏并清空查询，空查询即列出全部命令。
+    pub(crate) fn open_command_palette(&mut self) {
+        self.close_history();
+        self.ui_state.chrome.close();
+        self.ui_state.ctx.close();
+        if self.ui_state.search.open {
+            self.ui_state.search.open = false;
+            self.ui_state.search.replace_open = false;
+            self.ui_state.search.clear();
+        }
+        self.editor.clear_preedit();
+        self.ui_state.quick.open = true;
+        self.ui_state.quick.kind = quick_open::QuickKind::Commands;
+        self.ui_state.quick.query.clear();
+        self.ui_state.quick.items = quick_open::command_items();
+        self.ui_state.quick.refilter();
+        self.set_ime_area();
+        self.request_redraw();
+    }
+
+    /// 命令面板 toggle（Ctrl+Shift+P）：命令面板已开则关；文件浮层已开则切换为命令面板。
+    pub(crate) fn toggle_command_palette(&mut self) {
+        if self.ui_state.quick.open && self.ui_state.quick.kind == quick_open::QuickKind::Commands {
+            self.close_quick();
+        } else {
+            self.open_command_palette();
+        }
     }
 
     /// 重建候选：最近文件（去重）在前，当前文档所在目录的 Markdown 文件其后。
@@ -2144,8 +2176,17 @@ impl App {
         self.request_redraw();
     }
 
-    /// 回车/点击：打开选中项；脏文档由 open_path 拒绝并在状态栏提示。
+    /// 回车/点击：打开选中项。文件候选走 open_path（脏文档由它拒绝并提示）；
+    /// 命令候选关闭面板后复用菜单动作分派，不新增命令语义。
     pub(crate) fn quick_accept(&mut self) {
+        if self.ui_state.quick.kind == quick_open::QuickKind::Commands {
+            let Some(action) = self.ui_state.quick.current().and_then(|it| it.action) else {
+                return;
+            };
+            self.close_quick();
+            self.perform_menu(action);
+            return;
+        }
         let Some(path) = self.ui_state.quick.current().map(|it| it.path.clone()) else {
             return;
         };

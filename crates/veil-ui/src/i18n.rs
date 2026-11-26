@@ -104,7 +104,7 @@ keys! {
     ShortcutSaveAs => "shortcut.save_as", "Ctrl+Shift+S";
     ShortcutExportHtml => "shortcut.export_html", "Ctrl+E";
     ShortcutExportPdf => "shortcut.export_pdf", "Ctrl+Shift+E";
-    ShortcutPrint => "shortcut.print", "Ctrl+Shift+P";
+    ShortcutPrint => "shortcut.print", "Ctrl+Alt+P";
     ShortcutVersionHistory => "shortcut.version_history", "Ctrl+Shift+H";
     ShortcutUndo => "shortcut.undo", "Ctrl+Z";
     ShortcutRedo => "shortcut.redo", "Ctrl+Shift+Z";
@@ -155,6 +155,10 @@ keys! {
     QuickOpenEmptyNoCandidates => "quick_open.empty.no_candidates", "暂无最近文件或同目录 Markdown";
     QuickOpenEmptyNoMatch => "quick_open.empty.no_match", "无匹配文件";
     QuickOpenRecent => "quick_open.recent", "最近";
+
+    // ---- 命令面板（Ctrl+Shift+P）：与快速打开共用浮层 ----
+    CommandPalettePlaceholder => "command_palette.placeholder", "命令面板：输入命令，回车执行";
+    CommandPaletteEmpty => "command_palette.empty", "无匹配命令";
 
     // ---- 查找替换 ----
     SearchPlaceholder => "search.placeholder", "查找";
@@ -872,7 +876,7 @@ fn main() {
     (Key::ShortcutSaveAs, "Ctrl+Shift+S"),
     (Key::ShortcutExportHtml, "Ctrl+E"),
     (Key::ShortcutExportPdf, "Ctrl+Shift+E"),
-    (Key::ShortcutPrint, "Ctrl+Shift+P"),
+    (Key::ShortcutPrint, "Ctrl+Alt+P"),
     (Key::ShortcutVersionHistory, "Ctrl+Shift+H"),
     (Key::ShortcutUndo, "Ctrl+Z"),
     (Key::ShortcutRedo, "Ctrl+Shift+Z"),
@@ -925,6 +929,11 @@ fn main() {
     ),
     (Key::QuickOpenEmptyNoMatch, "No matching files"),
     (Key::QuickOpenRecent, "Recent"),
+    (
+        Key::CommandPalettePlaceholder,
+        "Command palette: type a command and press Enter",
+    ),
+    (Key::CommandPaletteEmpty, "No matching commands"),
 
     // ---- 查找替换 ----
     (Key::SearchPlaceholder, "Find"),
@@ -2057,7 +2066,7 @@ mod tests {
     fn spot_check_matches_legacy_literals() {
         assert_eq!(t(Key::MenuFile), "文件");
         assert_eq!(t(Key::MenuFilePrint), "打印…");
-        assert_eq!(t(Key::ShortcutPrint), "Ctrl+Shift+P");
+        assert_eq!(t(Key::ShortcutPrint), "Ctrl+Alt+P");
         assert_eq!(t(Key::MenuCurrent), "当前");
         assert_eq!(t(Key::ModalOpenFailedTitle), "打开失败");
         assert_eq!(

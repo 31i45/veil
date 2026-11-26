@@ -272,9 +272,10 @@ fn print_paginates_clean_frames_and_restores_state() {
     assert_eq!(doc_text(&a), text, "打印只读，不动真值");
 }
 
-/// K2：Ctrl+P = 快速打开（VS Code 一致）；打印改到 Ctrl+Shift+P，二者不串位。
+/// K2：Ctrl+P = 快速打开（VS Code 一致）；Ctrl+Shift+P = 命令面板；
+/// 打印改到 Ctrl+Alt+P，三者互不串位。
 #[test]
-fn ctrl_p_quick_opens_and_ctrl_shift_p_prints() {
+fn ctrl_p_quick_opens_ctrl_shift_p_palette_and_ctrl_alt_p_prints() {
     let p = FakePrint {
         w: 300,
         h: 600,
@@ -288,6 +289,10 @@ fn ctrl_p_quick_opens_and_ctrl_shift_p_prints() {
     a.route_key(Key::P);
     a.input_state.mods.ctrl = false;
     assert!(a.ui_state.quick.open, "Ctrl+P 打开快速打开浮层");
+    assert_eq!(
+        a.ui_state.quick.kind,
+        crate::view::quick_open::QuickKind::Files
+    );
     assert!(!ended.get(), "Ctrl+P 不触发打印");
 
     a.close_quick();
@@ -296,7 +301,20 @@ fn ctrl_p_quick_opens_and_ctrl_shift_p_prints() {
     a.route_key(Key::P);
     a.input_state.mods.ctrl = false;
     a.input_state.mods.shift = false;
-    assert!(ended.get(), "Ctrl+Shift+P 经路由到达打印端口");
+    assert!(a.ui_state.quick.open, "Ctrl+Shift+P 打开命令面板");
+    assert_eq!(
+        a.ui_state.quick.kind,
+        crate::view::quick_open::QuickKind::Commands
+    );
+    assert!(!ended.get(), "Ctrl+Shift+P 不再触发打印");
+
+    a.close_quick();
+    a.input_state.mods.ctrl = true;
+    a.input_state.mods.alt = true;
+    a.route_key(Key::P);
+    a.input_state.mods.ctrl = false;
+    a.input_state.mods.alt = false;
+    assert!(ended.get(), "Ctrl+Alt+P 经路由到达打印端口");
 }
 
 #[test]
@@ -981,7 +999,11 @@ fn empty_document_shortcuts_are_gated_like_menu() {
 
     a.input_state.mods.shift = true;
     a.route_key(Key::E);
+    a.input_state.mods.shift = false;
+    // 打印快捷键已移到 Ctrl+Alt+P（Ctrl+Shift+P 归命令面板）
+    a.input_state.mods.alt = true;
     a.route_key(Key::P);
+    a.input_state.mods.alt = false;
     assert!(dialog_calls.borrow().is_empty(), "空文档导出/打印不得弹框");
     assert!(calls.borrow().is_empty(), "空文档导出/打印不得产生输出");
     assert_eq!(

@@ -574,13 +574,15 @@ fn image_wider_than_content_scales_proportionally() {
     );
     a.ensure_layouts_all();
     let (id, _, _) = a.editor.session().blocks()[0].clone();
-    // 默认版心宽 = 800 - 2*16 - 滚动条 12 = 756；1600×45 等比缩放
+    // 版心宽受可读列宽上限约束（默认窗口 800 宽时封顶 640）；1600×45 等比缩放
+    let want_w = a.content_width() as u32;
+    let want_h = (45.0 * a.content_width() / 1600.0) as u32;
     assert_eq!(
         (
             a.cache.layouts[&id].imgs[0].width,
             a.cache.layouts[&id].imgs[0].height
         ),
-        (756, 21)
+        (want_w, want_h)
     );
 }
 
@@ -807,7 +809,8 @@ fn standalone_image_block_height_recomputed_after_resize() {
     let (mut a, _, _files) = app_with_images(
         "前文\n\n![](p.png)\n\n## 1.1 背景\n",
         Some("dir/doc.md"),
-        &[("dir/p.png", 1600, 400)],
+        // 宽高比足够大：宽 640 时显示高 320，超过矮窗口的视口高上限，才能验证重算。
+        &[("dir/p.png", 1600, 800)],
     );
     a.window_state.test_size = Some((1280, 800));
     a.ensure_layouts_all();

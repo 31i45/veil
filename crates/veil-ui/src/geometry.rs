@@ -94,8 +94,8 @@ pub const MARGIN: f32 = crate::tokens::doc::MARGIN;
 pub const PARA_GAP: f32 = crate::tokens::doc::PARA_GAP;
 /// 正文可读列宽上限（全角字符当量，随字号/缩放换算为物理像素）。
 pub const READABLE_COLS: f32 = crate::tokens::doc::READABLE_COLS;
-/// 启用可读列宽上限的窗口宽度阈值（物理像素，scale = 1 基准）。
-/// 窄窗口保持满宽排版，只有超宽窗口才左右留白居中。
+/// 历史常量：曾作为「窗口宽 > 1600 才封顶」的阈值（物理像素，scale = 1 基准）。
+/// 版心封顶已改为按可用宽度与可读列宽比较，不再引用此值；保留仅为兼容旧引用。
 pub const WIDE_WINDOW: f32 = crate::tokens::doc::WIDE_WINDOW;
 
 /// 把物理像素长度吸附到整数像素网格（四舍五入，幂等）。
@@ -123,7 +123,8 @@ pub(crate) fn readable_cols(mode: DocMargin) -> Option<f32> {
 /// 屏幕版心几何：返回 `(x, width)`，均为物理像素。
 ///
 /// `margin_px` 为逻辑像素边距（未乘 scale）；`readable_cols` 为 `None` 时按窗口铺满。
-/// 宽屏（窗口宽 > `WIDE_WINDOW`）下按可读列宽封顶并在边距内居中；
+/// 只要可用宽度大于可读上限，就按上限封顶并在边距内居中；可用宽度不足上限时
+/// 降级为可用宽度（窄窗口保持铺满）。
 /// `reserved_right`/`reserved_left` 为滚动条、大纲/历史面板占用的横向空间。
 pub(crate) fn content_span(
     window_w: f32,
@@ -136,10 +137,8 @@ pub(crate) fn content_span(
     let margin = margin_px * scale;
     let available = (window_w - 2.0 * margin - reserved_right - reserved_left).max(32.0);
     let width = match readable_cols {
-        Some(cols) if window_w > WIDE_WINDOW * scale => {
-            available.min(cols * BASE_FONT_SIZE * scale)
-        }
-        _ => available,
+        Some(cols) => available.min(cols * BASE_FONT_SIZE * scale),
+        None => available,
     };
     let x = margin + ((available - width) / 2.0).max(0.0) + reserved_left;
     (x, width)
@@ -279,16 +278,18 @@ mod tests {
         }
     }
 
-    /// 1200 逻辑宽（窄屏，无封顶）：四档 + Custom 边界的版心几何。
+    /// 1200 逻辑宽：可用宽（≥ 640）已超过可读上限，四档 + Custom 都封顶并居中。
     #[test]
-    fn content_span_at_1200_follows_margin() {
+    fn content_span_caps_at_1200_when_available_exceeds_measure() {
+        // 封顶宽 = 40 全角 × 16px = 640；居中后左缘 = 边距 + (可用宽 − 640)/2。
+        // 各行边距恰好互补，故左缘统一落在 280。
         let cases = [
-            (DocMargin::Compact, 16.0, 8.0, 1184.0),
-            (DocMargin::Standard, 16.0, 16.0, 1168.0),
-            (DocMargin::Relaxed, 16.0, 32.0, 1136.0),
+            (DocMargin::Compact, 16.0, 280.0, 640.0),
+            (DocMargin::Standard, 16.0, 280.0, 640.0),
+            (DocMargin::Relaxed, 16.0, 280.0, 640.0),
             (DocMargin::Full, 16.0, 16.0, 1168.0),
-            (DocMargin::Custom, 4.0, 4.0, 1192.0),
-            (DocMargin::Custom, 200.0, 200.0, 800.0),
+            (DocMargin::Custom, 4.0, 280.0, 640.0),
+            (DocMargin::Custom, 200.0, 280.0, 640.0),
         ];
         for (mode, custom_px, want_x, want_w) in cases {
             let (x, w) = content_span(
@@ -304,7 +305,34 @@ mod tests {
         }
     }
 
-    /// 1920 逻辑宽（≥1600）：Standard 封顶 40 全角并居中；Full 铺满且保留边距。
+    /// 窄窗口（可用宽 ≤ 可读上限）：不封顶，铺满可用宽、原点等于左边距。
+    #[test]
+    fn content_span_narrow_window_fills_available_width() {
+        // 640 宽 / 16px 边距：可用宽 608 < 640，保持铺满。
+        let (x, w) = content_span(
+            640.0,
+            1.0,
+            content_margin(DocMargin::Standard, 16.0),
+            readable_cols(DocMargin::Standard),
+            0.0,
+            0.0,
+        );
+        assert!((x - 16.0).abs() < 1e-4, "x={x}");
+        assert!((w - 608.0).abs() < 1e-4, "w={w}");
+        // 边界：可用宽恰好等于上限（672 − 32 = 640）时不缩窄、不偏移。
+        let (x, w) = content_span(
+            672.0,
+            1.0,
+            content_margin(DocMargin::Standard, 16.0),
+            readable_cols(DocMargin::Standard),
+            0.0,
+            0.0,
+        );
+        assert!((x - 16.0).abs() < 1e-4, "边界 x={x}");
+        assert!((w - 640.0).abs() < 1e-4, "边界 w={w}");
+    }
+
+    /// 1920 逻辑宽：Standard 封顶 40 全角并居中；Full 铺满且保留边距。
     #[test]
     fn content_span_at_1920_caps_and_centers_except_full() {
         // 封顶宽 = 40 全角 × 16px = 640；居中后左缘 = 边距 + (可用宽 − 640)/2。

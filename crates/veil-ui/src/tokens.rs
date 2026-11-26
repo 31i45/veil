@@ -342,7 +342,8 @@ pub(crate) mod doc {
     pub const HEADING_GAP: f32 = PARA_GAP * 1.6;
     /// 正文可读列宽上限（全角字符当量）。
     pub const READABLE_COLS: f32 = 40.0;
-    /// 启用可读列宽上限的窗口宽度阈值（物理像素，scale = 1 基准）。
+    /// 历史常量：曾作为「窗口宽 > 1600 才封顶」的阈值（物理像素，scale = 1 基准）。
+    /// 版心封顶已改为按可用宽度与可读列宽比较，此值不再参与布局，保留仅为兼容引用。
     pub const WIDE_WINDOW: f32 = 1600.0;
     /// 空行高度（以正文行高为单位）：块间存在空行时额外占 1 行。
     pub const BLANK_LINE_LINES: f32 = 1.0;

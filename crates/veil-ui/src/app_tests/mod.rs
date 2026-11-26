@@ -2208,10 +2208,9 @@ fn point_at_doc(a: &mut App, offset: usize) -> (f32, f32) {
         let l = &a.cache.layouts[&id];
         a.engine.caret_xy(l, offset - start)
     };
-    let scale = a.input_state.scale;
     let vp = a.viewport();
     (
-        MARGIN * scale + lx + 1.0,
+        a.content_x() + lx + 1.0,
         vp.y + top - a.window_state.scroll_y + ly + lh / 2.0,
     )
 }

@@ -272,7 +272,7 @@ fn caret_before_commit_anchors_where_text_will_land() {
     let mut a = app("段一内容\n\n段二内容", None, false, &store);
     a.paint();
     a.perform_action(Action::Doc(Intent::MoveDocEnd));
-    let margin = MARGIN * a.input_state.scale;
+    let margin = a.content_x();
     let vp_y = a.viewport().y;
 
     // 软换行（Enter×1）：同段下一视觉行（块底），x 回行首
@@ -341,7 +341,7 @@ fn caret_in_mid_doc_gap_anchors_to_next_block_top() {
     a.route_key(Key::Enter);
     a.route_key(Key::Enter);
     a.paint();
-    let margin = MARGIN * a.input_state.scale;
+    let margin = a.content_x();
     let (cx, cy, _) = a.caret_screen();
     let next_top = a.index.blocks[2].top; // 「丙」当前顶边 = 新段将出现的位置
     let vp_y = a.viewport().y;
@@ -1288,6 +1288,9 @@ fn startup_gate_registers_deadline_in_next_wake() {
     // 1 秒保护时限；若该接线回退，纯状态机测试仍会全绿而窗口可能永久不可见。
     let store = MemStore::default();
     let mut a = app("# t\n\np\n", None, false, &store);
+    // 屏蔽光标闪烁唤醒：未命名草稿现在也闪烁，600ms 到期点会早于 1s 守卫，
+    // 本用例只验证 startup 守卫接线。
+    a.editor.set_preedit("x".into(), None);
     a.window_state.visible = false;
     let t0 = Instant::now();
     a.window_state.startup = Some(StartupGate::new(t0));

@@ -1647,11 +1647,12 @@ impl App {
         }
     }
 
-    /// 闪烁是否活跃：文档已加载 + 非打印 + 无 IME 组合串。
+    /// 闪烁是否活跃：非打印 + 无 IME 组合串。
+    ///
+    /// 未命名草稿（`path == None`）与已保存文档统一闪烁：首屏新开窗口没有路径，
+    /// 若按路径判断会导致插入点不闪，用户无法确认编辑器已获得焦点。
     fn blink_active(&self) -> bool {
-        self.doc.path.is_some()
-            && self.window_state.print.is_none()
-            && self.editor.preedit().is_none()
+        self.window_state.print.is_none() && self.editor.preedit().is_none()
     }
 
     /// 窗口焦点变化（winit `WindowEvent::Focused`）：写入焦点表达状态，仅在
@@ -1796,7 +1797,7 @@ impl App {
                 _ => {} // 间隔未到，保持当前可见性
             }
         } else {
-            // 闪烁不活跃：强制可见（preedit / 打印 / 无路径草稿都应显示）
+            // 闪烁不活跃：强制可见（preedit / 打印期间应显示）
             self.cursor_visible = true;
             self.last_blink = None;
         }

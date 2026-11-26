@@ -155,9 +155,9 @@ fn table_grid_caret_drawn_at_active_cell_content_start() {
     let vp = a.viewport();
     let (x, y, h) = a.caret_screen();
     assert!(
-        (x - (MARGIN * scale + cell_x)).abs() < 0.5,
+        (x - (a.content_x() + cell_x)).abs() < 0.5,
         "光标 x 应等于单元格内容左缘：{x} vs {}",
-        MARGIN * scale + cell_x
+        a.content_x() + cell_x
     );
     assert!(
         (y - (vp.y + top - a.window_state.scroll_y + cell_y)).abs() < 0.5,

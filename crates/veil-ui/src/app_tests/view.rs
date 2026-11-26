@@ -661,6 +661,8 @@ fn outline_toggle_lists_visible_headings_and_shrinks_content_width() {
         None,
         None,
     );
+    // 取真正窄窗口：版心不封顶，开面板后宽度精确减去面板宽。
+    a.window_state.test_size = Some((640, 800));
     let w0 = a.content_width();
     a.toggle_outline();
     assert!(a.ui_state.outline.open, "切换后面板开启");
@@ -2194,7 +2196,7 @@ fn search_highlights_use_selection_and_hover_colors() {
             .engine
             .selection_rects(&a.cache.layouts[&id], m.start, m.end)[0];
         f.get(
-            (MARGIN + rx + rw / 2.0) as u32,
+            (a.content_x() + rx + rw / 2.0) as u32,
             (10.0 + ry + rh / 2.0) as u32,
         )
     };

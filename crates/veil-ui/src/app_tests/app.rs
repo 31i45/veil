@@ -1916,14 +1916,15 @@ fn wide_window_caps_content_width_and_centers() {
     );
 }
 
-/// 窄窗口：上限不生效，content_width / content_x 与改动前公式逐字节一致。
+/// 真正的窄窗口（可用宽 ≤ 可读上限）：上限不生效，铺满可用宽、原点等于左边距。
 #[test]
 fn narrow_window_content_width_unchanged_by_readable_cap() {
     let store = MemStore::default();
     let mut a = app("正文", None, false, &store);
-    a.window_state.test_size = Some((1200, 800));
+    // 640 宽：扣除边距与滚动条后约 596 < 640，可读上限不触发。
+    a.window_state.test_size = Some((640, 800));
     let scale = a.input_state.scale;
-    let want = (1200.0 - 2.0 * MARGIN * scale - chrome::SCROLL_W * scale).max(32.0);
+    let want = (640.0 - 2.0 * MARGIN * scale - chrome::SCROLL_W * scale).max(32.0);
     assert!((a.content_width() - want).abs() < 1e-4);
     assert!(
         (a.content_x() - MARGIN * scale).abs() < 1e-4,
@@ -1938,10 +1939,17 @@ fn wide_window_click_hits_same_column_as_narrow() {
     let store = MemStore::default();
     let text: String = (0..40).map(|i| char::from(b'0' + (i % 10) as u8)).collect();
     let mut a = app(&text, None, false, &store);
+    // 显式取真正窄窗口：不封顶，原点等于左边距。
+    a.window_state.test_size = Some((640, 800));
     a.ensure_layouts_all();
     let vp = a.viewport();
+    let narrow_x = a.content_x() + 100.0;
+    assert!(
+        (narrow_x - (MARGIN * a.input_state.scale + 100.0)).abs() < 1e-4,
+        "窄窗口原点应等于左边距"
+    );
     let y = (vp.y + a.index.blocks[0].top + 5.0) as f64;
-    a.input_state.mouse = PhysicalPosition::new((MARGIN * a.input_state.scale + 100.0) as f64, y);
+    a.input_state.mouse = PhysicalPosition::new(narrow_x as f64, y);
     let narrow = a.hit_offset().expect("窄窗口命中");
 
     a.window_state.test_size = Some((2560, 800));

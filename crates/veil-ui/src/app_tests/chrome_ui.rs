@@ -31,7 +31,7 @@ fn task_checkbox_click_toggles_and_keeps_caret() {
     let (tx, ty, th) = a.engine.caret_xy(l0, 6);
     let top0 = a.index.blocks[0].top;
     let (mx, my) = (
-        MARGIN * a.input_state.scale + (ix + tx) / 2.0,
+        a.content_x() + (ix + tx) / 2.0,
         vp.y + top0 + ty + th / 2.0,
     );
     click_at(&mut a, mx, my);
@@ -46,7 +46,7 @@ fn task_checkbox_click_toggles_and_keeps_caret() {
     let (tx1, ty1, th1) = a.engine.caret_xy(l1, 6); // "ship" 起点
     let top1 = a.index.blocks[1].top;
     let (mx1, my1) = (
-        MARGIN * a.input_state.scale + (ix1 + tx1) / 2.0,
+        a.content_x() + (ix1 + tx1) / 2.0,
         vp.y + top1 + ty1 + th1 / 2.0,
     );
     click_at(&mut a, mx1, my1);
@@ -59,7 +59,7 @@ fn task_checkbox_click_toggles_and_keeps_caret() {
     let (tbx, tby, tbh) = a.engine.caret_xy(l0b, 10); // "milk" 内
     let top0b = a.index.blocks[0].top;
     let (mxb, myb) = (
-        MARGIN * a.input_state.scale + tbx + 1.0,
+        a.content_x() + tbx + 1.0,
         vp.y + top0b + tby + tbh / 2.0,
     );
     click_at(&mut a, mxb, myb);
@@ -84,7 +84,7 @@ fn double_click_selects_word_and_triple_click_selects_line() {
     let (cx, cy, ch) = a.engine.caret_xy(l, 7); // "beta" 内
     let top = a.index.blocks[0].top;
     let (x, y) = (
-        MARGIN * a.input_state.scale + cx + 1.0,
+        a.content_x() + cx + 1.0,
         vp.y + top + cy + ch / 2.0,
     );
 
@@ -151,7 +151,7 @@ fn mouse_click_breaks_undo_group() {
     let (cx, cy, ch) = a.engine.caret_xy(l, 0);
     let top = a.index.blocks[0].top;
     let (mx, my) = (
-        MARGIN * a.input_state.scale + cx + 1.0,
+        a.content_x() + cx + 1.0,
         vp.y + top + cy + ch / 2.0,
     );
     click_at(&mut a, mx, my);
@@ -619,6 +619,19 @@ fn blink_flips_600ms_after_last_activity() {
     assert!(a.cursor_visible, "重置后不得沿用旧到期点（610+600 才到期）");
     a.tick(t0 + Duration::from_millis(1215)); // 610 + 605
     assert!(!a.cursor_visible, "以新起点计满 600ms 才翻转");
+}
+
+/// 未命名草稿（无路径）与已保存文档统一闪烁：601ms 后照常翻转。
+#[test]
+fn blink_flips_for_unsaved_draft_without_path() {
+    let store = MemStore::default();
+    let mut a = app("hello", None, false, &store);
+    let t0 = Instant::now();
+    a.tick(t0);
+    a.tick(t0 + Duration::from_millis(599));
+    assert!(a.cursor_visible, "599ms 未到期，不翻转");
+    a.tick(t0 + Duration::from_millis(601));
+    assert!(!a.cursor_visible, "无路径草稿也必须按时翻转");
 }
 
 /// IME 组合期间强制可见且不翻转（blink 不活跃）。

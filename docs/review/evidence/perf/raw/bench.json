@@ -1,0 +1,21 @@
+{
+  "time_utc": "20261126-044901",
+  "raw_dir": "D:\\VSCode\\Veil\\bench\\results\\20261126-044901",
+  "normalized": {
+    "bench.block_count": "5005",
+    "bench.cold_start_p50_ms": 296.55,
+    "bench.cold_start_max_ms": 333.33,
+    "bench.keystroke_core_p50_us": 73.1,
+    "bench.keystroke_core_p95_us": 109.4,
+    "bench.layout_dirty_p50_us": 278.5,
+    "bench.layout_dirty_p95_us": 479.3,
+    "bench.frame_alloc_p50_ms": 1.84,
+    "bench.frame_alloc_p95_ms": 2.14,
+    "bench.frame_reuse_p50_ms": 0.46,
+    "bench.frame_reuse_p95_ms": 0.67,
+    "bench.peak_heap_mb": "74.34",
+    "bench.keystroke_core_p99_us": 305.3,
+    "bench.keystroke_core_max_us": 641.2,
+    "bench.keystroke_doc_chars": 128535
+  }
+}

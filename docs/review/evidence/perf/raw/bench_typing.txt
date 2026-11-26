@@ -1,0 +1,10 @@
+cold_start_ms=296.55/333.33
+keystroke_core_us=73.10/109.40
+full_scan_cost_us=1494.30/1740.40
+layout_dirty_us=278.50/479.30
+frame_alloc_ms=1.84/2.14
+frame_reuse_ms=0.46/0.67
+alloc_count=8673867
+alloc_bytes=6653793772
+peak_heap_mb=74.34
+block_count=5005

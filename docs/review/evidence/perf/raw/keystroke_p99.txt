@@ -1,0 +1,9 @@
+keystroke_core_samples=1000
+keystroke_core_p50_us=151.900
+keystroke_core_p95_us=237.800
+keystroke_core_p99_us=305.300
+keystroke_core_max_us=641.200
+keystroke_core_dirty_blocks=1
+keystroke_core_blocks=5005
+keystroke_core_doc_chars=128535
+keystroke_core_doc_bytes=128535

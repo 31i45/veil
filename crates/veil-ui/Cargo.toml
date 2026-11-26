@@ -4,18 +4,7 @@ edition.workspace = true
 version.workspace = true
 publish = false
 
-[features]
-# 可选无障碍支持（AccessKit + Windows UIA）。veil-ui 自身默认关闭，避免
-# 下游以编程方式依赖 veil-ui 时被动链接平台适配；产品 crate `veil` 的默认
-# feature 会显式开启，保证发行产物可被 Narrator/UIA 读取。
-accessibility = ["dep:accesskit", "dep:accesskit_winit"]
-
 [dependencies]
-# 版本锁死到 spike 验证组合（accesskit 0.25.2 + accesskit_winit 0.34.2）。
-accesskit = { version = "=0.25.2", optional = true }
-accesskit_winit = { version = "=0.34.2", default-features = false, features = [
-    "rwh_06",
-], optional = true }
 veil-core = { path = "../veil-core" }
 # 切片 1：winit 直收 IME（spike 验证路径）+ softbuffer 软件呈现 + cosmic-text 排版。
 # chrome 自绘 + Win32 FFI 对话框已定案（ADR-005），不引入 egui/GL。
@@ -30,7 +19,7 @@ syntect = { version = "5.3", default-features = false, features = [
 ] }
 plist = "1"
 # 配置保存：严格 TOML 编辑以保留注释/未知键；解析失败回退既有行解析与整文件重写。
-toml_edit = "0.22"
+toml_edit = "0.25"
 # 查找引擎：memchr memmem 比 str::match_indices 快 3–10×。已是 pulldown-cmark
 # 传递依赖，此处显式声明以保证版本稳定（与 pulldown-cmark 传递的 2.8.x 对齐）。
 memchr = "2"

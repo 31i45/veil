@@ -6,10 +6,8 @@ publish = false
 
 [features]
 # 唯一发行产物 veil.exe 默认包含离线 Mermaid（QuickJS + 完整 mermaid.js，体积 +约 5 MiB）。
-default = ["mermaid-offline", "accessibility"]
+default = ["mermaid-offline"]
 mermaid-offline = ["dep:veil-mermaid-offline"]
-# 屏幕阅读器（Narrator/UIA）生产接入：默认随发行产物编译，体积已过 14 MiB 门禁。
-accessibility = ["veil-ui/accessibility"]
 
 [dependencies]
 veil-core = { path = "../veil-core" }
@@ -27,7 +25,7 @@ base64 = "0.23"
 # 仅 HTML 导出使用（INSTANCE §6 预算内）；编辑/渲染主链路不经过它
 pulldown-cmark = "0.13"
 # 外部文件监听（切片 16）：事件线程 + 非阻塞通道，策略在 veil-ui
-notify = "8"
+notify = "9"
 # PDF 原生导出（Wave 3A）：pdf-writer 0.15 + ttf-parser + subsetter 0.2.6
 # spike 实测合计 +730 KB（零 PDF 时 6.18 MB → 引入后约 6.9 MB），门禁放宽到 7 MiB 仅因 PDF 导出门槛
 pdf-writer = "0.15"

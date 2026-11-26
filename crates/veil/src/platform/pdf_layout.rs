@@ -10,7 +10,8 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use veil_core::{
-    BlockId, BlockKind, CellAlign, ImageAlign, InlineKind, InlineNode, Range, Session,
+    split_heading_id, BlockId, BlockKind, CellAlign, ImageAlign, InlineKind, InlineNode, Range,
+    Session,
 };
 use veil_ui::i18n::{t, Key};
 
@@ -609,6 +610,8 @@ impl<'a> Ctx<'a> {
             Some((l, t)) => (l, t),
             None => (level, String::new()),
         };
+        // 标题尾缀 `{#id}` 是锚点指令，不得进入版面可见文本/书签。
+        let (text, _) = split_heading_id(&text);
         let size = heading_size(lvl);
         self.ensure(size * 2.4);
         self.y += size * 0.55;
@@ -786,7 +789,8 @@ impl<'a> Ctx<'a> {
                         highlight: Some(COL_CODE_BG),
                         ..style
                     };
-                    push_chars(
+                    // 代码内容原样：反斜杠与行尾 `\` 不是转义/硬换行标记。
+                    push_raw_chars(
                         out,
                         text,
                         base,
@@ -2049,6 +2053,41 @@ fn push_chars(out: &mut Vec<LItem>, text: &str, base: usize, from: usize, to: us
     if b > text.len() || !text.is_char_boundary(a) || !text.is_char_boundary(b) {
         return;
     }
+    // CommonMark 反斜杠转义：`\*` 显示字面 `*`；行尾 `\` + 换行是硬换行标记，
+    // 反斜杠本身不显示（与编辑器/HTML 一致）。其余反斜杠保持原样。
+    let mut it = text[a..b].chars().peekable();
+    while let Some(c) = it.next() {
+        if c == '\\' {
+            match it.peek().copied() {
+                Some('\n') | Some('\r') => continue,
+                Some(n) if n.is_ascii_punctuation() => {
+                    it.next();
+                    out.push(LItem::Ch(n, style));
+                    continue;
+                }
+                _ => {}
+            }
+        }
+        out.push(LItem::Ch(if c == '\n' || c == '\t' { ' ' } else { c }, style));
+    }
+}
+
+/// 代码等原文片段：不解释反斜杠转义，仅把换行/制表符折叠为空格。
+fn push_raw_chars(
+    out: &mut Vec<LItem>,
+    text: &str,
+    base: usize,
+    from: usize,
+    to: usize,
+    style: Style,
+) {
+    if from >= to || from < base {
+        return;
+    }
+    let (a, b) = (from - base, to - base);
+    if b > text.len() || !text.is_char_boundary(a) || !text.is_char_boundary(b) {
+        return;
+    }
     for c in text[a..b].chars() {
         out.push(LItem::Ch(
             if c == '\n' || c == '\t' { ' ' } else { c },
@@ -2217,7 +2256,16 @@ pub fn layout_document(
     for (id, kind, range) in session.blocks() {
         let (start, end) = (range.start, range.end);
         match kind {
-            BlockKind::Paragraph => ctx.paragraph(session, id, start, end, 0.0, &mut media),
+            BlockKind::Paragraph => {
+                // 纯 TOC 标记是编辑器视图指令（就地生成目录）；PDF/打印与 HTML
+                // 一致，不排版字面 `[TOC]`（需要目录页时走 `opts.toc`）。
+                if !session
+                    .text_slice(range)
+                    .is_some_and(|t| veil_core::is_toc_marker(&t))
+                {
+                    ctx.paragraph(session, id, start, end, 0.0, &mut media);
+                }
+            }
             BlockKind::AtxHeading(l) | BlockKind::SetextHeading(l) => ctx.heading(session, id, l),
             BlockKind::FencedCode(_) => {
                 ctx.code(session, id, start, end, true);
@@ -2742,6 +2790,51 @@ mod tests {
             .map(|p| page_text(p))
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    /// 纯 TOC 标记是视图指令：PDF/打印版面与 HTML 一致，不输出字面 `[TOC]`，标题照常。
+    #[test]
+    fn toc_marker_paragraph_is_not_laid_out() {
+        for marker in ["[TOC]", "[[TOC]]"] {
+            let doc = lay(&format!("{marker}\n\n# 第一章\n"), false);
+            let text = all_text(&doc);
+            assert!(!text.contains(marker), "不得排版字面 {marker}：{text}");
+            assert_eq!(
+                text.matches("第一章").count(),
+                1,
+                "标题应照常排版且仅一次：{text}"
+            );
+        }
+    }
+
+    /// 反斜杠转义与硬换行：`\*` 显示字面星号，行尾 `\` 不显示，正文与标题同理。
+    #[test]
+    fn backslash_escapes_and_hard_breaks_are_rendered_like_editor() {
+        let doc = lay("\\*不是强调\\*\n", false);
+        let text = all_text(&doc);
+        assert!(text.contains("*不是强调*"), "转义星号应显示为字面：{text}");
+        assert!(!text.contains('\\'), "转义反斜杠不得进入版面：{text}");
+
+        let doc = lay("第一行\\\n第二行\n", false);
+        let text = all_text(&doc);
+        assert!(text.contains("第一行") && text.contains("第二行"), "{text}");
+        assert!(!text.contains('\\'), "硬换行反斜杠不得进入版面：{text}");
+
+        // 代码内容不解释转义
+        let doc = lay("`\\*x\\*`\n", false);
+        let text = all_text(&doc);
+        assert!(text.contains("\\*x\\*"), "代码中的反斜杠应原样：{text}");
+    }
+
+    /// 标题尾缀 `{#id}` 是锚点指令：版面正文与书签都不得显示。
+    #[test]
+    fn heading_trailing_id_is_hidden_from_text_and_outline() {
+        let doc = lay("## 安装 {#install}\n", false);
+        let text = all_text(&doc);
+        assert!(text.contains("安装"), "{text}");
+        assert!(!text.contains("{#install}"), "{text}");
+        assert_eq!(doc.outline.len(), 1);
+        assert_eq!(doc.outline[0].title, "安装");
     }
 
     /// B7：多级中文标题的版面书签必须保留层级与文本；页数/书签数与标题数一致。

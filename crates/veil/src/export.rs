@@ -3,13 +3,14 @@
 //! 其余块交 pulldown-cmark（CommonMark 参考实现，仅作导出辅助，不进编辑主链路）。
 //! 公式渲染失败降级为转义源码 <pre>，绝不中断导出。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine as _;
 use veil_core::{
-    heading_slugs, percent_decode_path, BlockKind, HtmlTag, InlineKind, InlineNode, Range, Session,
+    heading_slug, percent_decode_path, split_heading_id, BlockKind, HtmlTag, InlineKind,
+    InlineNode, Range, Session,
 };
 use veil_ui::i18n::{tf, Key};
 use veil_ui::{ExportStyle, Exporter, FileStore};
@@ -141,22 +142,39 @@ pub fn html_of_doc(
             }
         }
     }
-    // 标题锚点：必须一次收集全文标题文本再交给 core 的 `heading_slugs` 去重——
-    // 逐块生成时无法知道同名标题已占用到第几个后缀。文本取 `Session::heading`
-    // 的可见文本（与大纲同一口径，已剥 ATX/Setext 标记与 inline 标记），
-    // 下游渲染的行内内容也从同一内容区间切出，二者保证同源。
+    // 标题锚点：必须一次收集全文标题文本再生成 slug 并去重——逐块生成时无法
+    // 知道同名标题已占用到第几个后缀。文本取 `Session::heading` 的可见文本
+    // （与大纲同一口径，已剥 ATX/Setext 标记与 inline 标记），下游渲染的行内
+    // 内容也从同一内容区间切出，二者保证同源。标题尾缀 `{#id}` 是显式锚点：
+    // 从可见文本移除，并直接作为 id（不参与 slug 化）。
     let mut heading_positions = Vec::new();
     let mut heading_texts = Vec::new();
+    let mut heading_ids = Vec::new();
     for (pos, (id, kind, _)) in blocks.iter().enumerate() {
         if heading_level(kind).is_some() {
+            let full = session.heading(*id).map(|(_, t)| t).unwrap_or_default();
+            let (text, explicit) = split_heading_id(&full);
             heading_positions.push(pos);
-            heading_texts.push(session.heading(*id).map(|(_, t)| t).unwrap_or_default());
+            heading_texts.push(text.to_string());
+            heading_ids.push(explicit.map(str::to_string));
         }
     }
-    let slugs: HashMap<usize, String> = heading_positions
-        .into_iter()
-        .zip(heading_slugs(heading_texts.iter().map(String::as_str)))
-        .collect();
+    let mut used: HashSet<String> = HashSet::new();
+    let mut next_suffix: HashMap<String, usize> = HashMap::new();
+    let mut slugs: HashMap<usize, String> = HashMap::new();
+    for (k, &pos) in heading_positions.iter().enumerate() {
+        let base = heading_ids[k]
+            .clone()
+            .unwrap_or_else(|| heading_slug(&heading_texts[k]));
+        let mut slug = base.clone();
+        while used.contains(&slug) {
+            let n = next_suffix.entry(base.clone()).or_insert(0);
+            *n += 1;
+            slug = format!("{base}-{n}");
+        }
+        used.insert(slug.clone());
+        slugs.insert(pos, slug);
+    }
     // 脚注定义一次收齐（重复定义 first-wins，与 core 一致）；引用替换与文末
     // 脚注区共用这张表。
     let footnote_defs = collect_footnote_defs(session, &blocks);
@@ -176,6 +194,16 @@ pub fn html_of_doc(
             } else {
                 break;
             }
+        }
+        // 纯 TOC 标记段落是编辑器视图指令（WYSIWYG 就地生成目录），导出不得输出
+        // 字面 `<p>[TOC]</p>`；与 PDF/打印共用同一「不输出字面标记」语义。
+        if kind == BlockKind::Paragraph
+            && session
+                .text_slice(range)
+                .is_some_and(|t| veil_core::is_toc_marker(&t))
+        {
+            i += 1;
+            continue;
         }
         if kind == BlockKind::Math {
             let tex = session.math_source(id).unwrap_or_default();
@@ -252,6 +280,8 @@ pub fn html_of_doc(
         if let Some(level) = heading_level(&kind) {
             let text = session.text_slice(range).unwrap_or_default();
             let (offset, content) = heading_content(&kind, &text);
+            // 标题尾缀 `{#id}` 只作为锚点指令：可见文本与渲染内容都须移除。
+            let (content, _) = split_heading_id(content);
             let nodes = session.block_inlines(id).unwrap_or_default();
             let rendered = render_block_inlines(
                 session,
@@ -643,6 +673,18 @@ fn collect_bare_links(nodes: &[InlineNode], out: &mut Vec<InlineNode>) {
             out.push(n.clone());
         }
         collect_bare_links(&n.children, out);
+    }
+}
+
+/// 收集 Markdown 图片节点（`![alt](url)`，递归含嵌套）。导出正文交 pulldown 渲染，
+/// 而 pulldown 只认半角定界符；core 已把 `![图]（a.png）` 解析为 Image，导出侧
+/// 需把全角定界符归一为半角再交给 pulldown，保证编辑器与导出识别一致。
+fn collect_images(nodes: &[InlineNode], out: &mut Vec<InlineNode>) {
+    for n in nodes {
+        if n.kind == InlineKind::Image {
+            out.push(n.clone());
+        }
+        collect_images(&n.children, out);
     }
 }
 
@@ -1469,6 +1511,65 @@ fn render_block_inlines(
             reps.push((s, e, format!("<span class=\"math-inline\">{svg}</span>")));
         }
     }
+    // N1：全角定界符图片（`![图]（a.png）`、允许混用）。pulldown 只认半角定界符，
+    // core 却已按全角定界符产出 Image 节点；这里把节点直接写成 `<img>`，与 pulldown
+    // 的图片输出同构，避免「编辑器显示图片、导出却是源码文字」。不走
+    // `![alt](<dest>)` 形式：pulldown 会把目标里的空格/CJK 百分号编码，本地图片
+    // 内嵌时路径就对不上了。仅改写渲染输入，源码与偏移不变。
+    let mut images = Vec::new();
+    collect_images(nodes, &mut images);
+    for node in images {
+        let (Some(s), Some(e), Some(cs), Some(ce), Some(url)) = (
+            node.range.start.checked_sub(base),
+            node.range.end.checked_sub(base),
+            node.content.start.checked_sub(base),
+            node.content.end.checked_sub(base),
+            node.url,
+        ) else {
+            continue;
+        };
+        let (Some(us), Some(ue)) = (url.start.checked_sub(base), url.end.checked_sub(base)) else {
+            continue;
+        };
+        if s >= e
+            || e > text.len()
+            || cs > ce
+            || ce > e
+            || us > ue
+            || ue > e
+            || !text.is_char_boundary(s)
+            || !text.is_char_boundary(e)
+            || !text.is_char_boundary(cs)
+            || !text.is_char_boundary(ce)
+            || !text.is_char_boundary(us)
+            || !text.is_char_boundary(ue)
+        {
+            continue;
+        }
+        // 半角写法的图片保持原样（含 title 等 pulldown 已能处理的部分）。
+        let open_full = text[ce..].starts_with("]（");
+        let close_full = text[s..e].ends_with('）');
+        if !open_full && !close_full {
+            continue;
+        }
+        // src/alt 转义后交后续 localize_images / sanitize_html_urls 照常兜底
+        // （远程 src 剥除、本地内嵌、危险 scheme 清理）。独占行的图片包一层 `<p>`
+        // 让 pulldown 按 HTML 块原样输出——既避免它把 `<img>` 单独成块多出空行，
+        // 也让既有的 figure/figcaption 包裹逻辑照常剥壳。
+        let img = format!(
+            "<img src=\"{}\" alt=\"{}\" />",
+            escape_attr(&text[us..ue]),
+            escape_html(&text[cs..ce])
+        );
+        let standalone =
+            veil_core::image_standalone(text, Range::new(base, base + text.len()), node.range);
+        let markup = if standalone {
+            format!("<p>{img}</p>")
+        } else {
+            img
+        };
+        reps.push((s, e, markup));
+    }
     reps.sort_by_key(|(s, _, _)| *s);
     let mut out = String::with_capacity(text.len() + 32);
     let mut p = 0usize;
@@ -2072,6 +2173,50 @@ mod tests {
         body.strip_suffix("</body>\n</html>\n").unwrap().to_string()
     }
 
+    /// 纯 TOC 标记段落是视图指令：导出不输出 `<p>[TOC]</p>`，标题照常输出。
+    #[test]
+    fn toc_marker_paragraph_is_not_exported() {
+        for marker in ["[TOC]", "[[TOC]]"] {
+            let md = format!("{marker}\n\n# 第一章\n");
+            let body = body_of(&md);
+            assert!(
+                !body.contains(marker),
+                "导出不得输出字面 {marker}：{body}"
+            );
+            assert!(!body.contains("<p>"), "TOC 标记段落不得产生 <p>：{body}");
+            assert!(
+                body.contains("<h1 id=\"第一章\">第一章</h1>"),
+                "标题应照常导出：{body}"
+            );
+        }
+    }
+
+    /// 标题尾缀 `{#id}`：作为标题 id，且不出现在可见文本；正文中的 `{#…}` 不受影响。
+    #[test]
+    fn heading_trailing_id_becomes_anchor_and_stays_hidden() {
+        let body = body_of("## 安装 {#install}\n");
+        assert!(
+            body.contains("<h2 id=\"install\">安装</h2>"),
+            "标题尾缀应转为 id 并从可见文本移除：{body}"
+        );
+        assert!(!body.contains("{#install}"), "{body}");
+
+        let body = body_of("正文里的 {#keep} 保持原样\n\n# 标题 {#tid}\n");
+        assert!(body.contains("{#keep}"), "正文中的普通花括号不得被吞：{body}");
+        assert!(
+            body.contains("<h1 id=\"tid\">标题</h1>"),
+            "标题 id 应生效：{body}"
+        );
+    }
+
+    /// 含 TOC 文字的普通段落照常导出（不误伤正文）。
+    #[test]
+    fn toc_marker_inside_paragraph_is_kept() {
+        let body = body_of("说明 [TOC] 的用法\n");
+        assert!(body.contains("[TOC]"), "普通段落中的标记文字不应被吞：{body}");
+        assert!(body.contains("<p>"), "{body}");
+    }
+
     /// 完整版把 11.12.0 corpus 的每张本地 SVG 内嵌；关闭远程图片也不影响导出。
     #[cfg(feature = "mermaid-offline")]
     #[test]
@@ -2592,6 +2737,28 @@ mod tests {
         ] {
             assert!(!body.contains("<figcaption>"), "{body}");
         }
+    }
+
+    #[test]
+    fn fullwidth_image_delimiters_export_as_image() {
+        // N1：全角定界符与编辑器同语义（core 已产出 Image 节点），导出不得退化为源码文字
+        assert_eq!(
+            body_of("![示例]（img/a.png）\n"),
+            "<figure>\n<img src=\"img/a.png\" alt=\"示例\" />\n<figcaption>示例</figcaption>\n</figure>\n"
+        );
+        // 半角/全角混用同样成立
+        for md in ["![示例]（img/a.png)\n", "![示例](img/a.png）\n"] {
+            let body = body_of(md);
+            assert!(
+                body.contains("<img src=\"img/a.png\" alt=\"示例\" />"),
+                "{md}: {body}"
+            );
+        }
+        // 目标含空格：导出侧改用 `<...>` 形式交给 pulldown，仍须成图
+        let body = body_of("![未命名 图]（未命名 图.png）\n");
+        assert!(body.contains("<img "), "{body}");
+        assert!(body.contains("alt=\"未命名 图\""), "{body}");
+        assert!(!body.contains("![未命名"), "不得残留源码语法：{body}");
     }
 
     #[test]

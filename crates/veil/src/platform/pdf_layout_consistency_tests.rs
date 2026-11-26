@@ -8,6 +8,19 @@
 //!
 //! 屏幕侧需要系统字体才能成形，因此凡是「字形 advance / 字体回退」引起的差异都记为
 //! 渲染层差异，不做数值断言；策略层差异（禁则表、断行点）才做断言。
+//!
+//! ## 例外：字体度量跨栈一致性（第 6 节）
+//!
+//! 审计遗留项「resvg 0.50 与 cosmic-text 0.19 字体度量可能不一致」在这里变成可执行断言：
+//! 用**同一字体文件**分别走三条独立栈测同一段固定文本的 advance 宽度——
+//! - PDF / 断行：`FontMetrics`（ttf-parser 读 hmtx，生产断行用的同一实现）；
+//! - Mermaid 光栅化：`resvg::usvg` 的 `<text>` 排版（harfrust shaping）；
+//! - 编辑器屏幕：`LayoutEngine`（cosmic-text 0.19，字体库按正文默认族链解析）。
+//!
+//! 容差是**实测后钉死的相对百分比**，依据见第 6 节测试注释。它守护的是：
+//! 「同一字体下三条栈算出的文本宽度不会把排版容器撑破/留白」。
+//! 若未来更换字体栈（升级 cosmic-text / resvg / 换默认正文字族）或默认字体链
+//! 改变，**必须重新测量本组数值再调整容差**，不能沿用旧上界。
 
 use std::collections::HashSet;
 
@@ -650,4 +663,123 @@ fn product_width_break_difference_summary() {
     );
 
     eprintln!("[layout] 总差异行数（产品宽度，规范化后逐行比较）：{total_diff}");
+}
+
+// =============================================================================
+// 6) 字体度量跨栈一致性：resvg 0.50 / cosmic-text 0.19 / ttf-parser
+// =============================================================================
+
+/// 固定语料：拉丁大小写 + 空格 + 中文各若干字（不随机、不依赖时钟/网络）。
+const FONT_PROBE_TEXT: &str = "Veil 排版引擎 Font Metrics 一致性验证";
+
+/// 在 usvg 树里找第一个 `<text>` 节点，返回其绝对包围盒宽度。
+/// usvg 的文本包围盒按「字体度量 + cluster advance」累加（见 usvg `text/layout.rs`
+/// 的 `convert_span`），与 cosmic-text 的 `line_w` 是同一语义，可直接比较。
+#[cfg(windows)]
+fn first_text_width(tree: &resvg::usvg::Tree) -> Option<f32> {
+    fn walk(group: &resvg::usvg::Group, out: &mut Option<f32>) {
+        for node in group.children() {
+            match node {
+                resvg::usvg::Node::Group(g) => walk(g, out),
+                resvg::usvg::Node::Text(t) => *out = Some(t.abs_bounding_box().width()),
+                _ => {}
+            }
+        }
+    }
+    let mut out = None;
+    walk(tree.root(), &mut out);
+    out
+}
+
+/// 同一字体文件的三条独立度量路径必须给出同一文本宽度。
+///
+/// 实测（16px 字号，27 字符，`C:\Windows\Fonts\msyh.ttc` / Microsoft YaHei）：
+/// - ttf-parser（PDF 断行）：282.312 px
+/// - usvg 0.50（resvg，harfrust）：281.227 px
+/// - cosmic-text 0.19（编辑器）：281.227 px
+///
+/// 相对差：resvg↔cosmic 0.000%，两者与 PDF 差 0.386%。
+///
+/// 差异成因（已定位，非字体栈缺陷）：PDF 侧 `FontMetrics` 是逐字 hmtx advance 的
+/// 直接累加，不含 GPOS 字距；两个 shaper（harfrust / cosmic-text 的 rustybuzz）
+/// 都会应用 kern 对，因此略窄。它属「有字距 vs 无字距」的度量口径差，不是回退到了
+/// 不同字体。
+///
+/// 容差依据：1% ≈ 实测 0.386% 的 2.6 倍余量，足以吸收 shaping/浮点舍入；
+/// 而字体回退到别的族（例如默认正文族链失效改用 Segoe UI/宋体）通常带来 5% 以上
+/// 的宽度偏差，仍会立即报红。若未来升级 cosmic-text/resvg、替换正文字体或改动
+/// `typography::SANS_FAMILIES`，必须重跑本测试并重新钉死此上界。
+#[cfg(windows)]
+#[test]
+fn font_metrics_agree_between_resvg_cosmic_text_and_pdf_stacks() {
+    use crate::platform::pdf::{find_cjk_font, FontMetrics};
+
+    let font_path = find_cjk_font().expect("Windows 上应有可用 CJK 字体");
+    let size = BASE_FONT_SIZE; // 16 px：屏幕 px、SVG 用户单位、PDF pt 口径一致
+
+    // —— PDF 侧：生产断行用的 FontMetrics（ttf-parser 读 hmtx）——
+    let pdf_metrics = FontMetrics::load(std::path::Path::new(font_path), FONT_PROBE_TEXT.chars())
+        .expect("PDF 字体度量");
+    let pdf_w = pdf_metrics.text_width(FONT_PROBE_TEXT, size);
+
+    // —— resvg 侧：usvg 0.50 文本排版，字体库只装这一个字体文件 ——
+    let bytes = std::fs::read(font_path).expect("读取字体文件");
+    let family = {
+        let face = ttf_parser::Face::parse(&bytes, 0).expect("解析字体");
+        face.names()
+            .into_iter()
+            .find_map(|n| {
+                (n.name_id == ttf_parser::name_id::FAMILY)
+                    .then(|| n.to_string())
+                    .flatten()
+            })
+            .expect("字体族名")
+    };
+    let mut opts = resvg::usvg::Options::default();
+    opts.fontdb_mut().load_font_data(bytes);
+    opts.fontdb_mut().set_sans_serif_family(family.clone());
+    opts.font_family = family.clone();
+    let svg = format!(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="64" viewBox="0 0 1200 64"><text x="0" y="48" font-family="{family}" font-size="{size}">{FONT_PROBE_TEXT}</text></svg>"#
+    );
+    let tree = resvg::usvg::Tree::from_str(&svg, &opts).expect("usvg 解析文本 SVG");
+    let resvg_w = first_text_width(&tree).expect("usvg 未产出 text 节点（字体族名不匹配？）");
+
+    // —— cosmic-text 侧：真机 LayoutEngine（正文默认族链）——
+    let mut engine = LayoutEngine::new();
+    let layout = engine.layout_block(
+        BlockKind::Paragraph,
+        FONT_PROBE_TEXT,
+        Range::new(0, FONT_PROBE_TEXT.len()),
+        &[],
+        4000.0,
+        usize::MAX,
+        &[],
+        false,
+    );
+    let cosmic_w = engine.caret_xy(&layout, FONT_PROBE_TEXT.len()).0;
+
+    let rel = |a: f32, b: f32| (a - b).abs() / b.max(1.0) * 100.0;
+    let pdf_resvg = rel(pdf_w, resvg_w);
+    let pdf_cosmic = rel(pdf_w, cosmic_w);
+    let resvg_cosmic = rel(resvg_w, cosmic_w);
+    eprintln!("[metrics] 字体={font_path} 族={family} 字号={size}");
+    eprintln!("[metrics] pdf={pdf_w:.3} resvg={resvg_w:.3} cosmic={cosmic_w:.3}");
+    eprintln!(
+        "[metrics] 相对差 pdf↔resvg={pdf_resvg:.3}% pdf↔cosmic={pdf_cosmic:.3}% resvg↔cosmic={resvg_cosmic:.3}%"
+    );
+
+    const TOL_PCT: f32 = 1.0;
+    assert!(
+        pdf_resvg <= TOL_PCT,
+        "resvg 与 PDF 度量偏差 {pdf_resvg:.3}%（{resvg_w} vs {pdf_w}），超出 {TOL_PCT}%"
+    );
+    assert!(
+        pdf_cosmic <= TOL_PCT,
+        "cosmic-text 与 PDF 度量偏差 {pdf_cosmic:.3}%（{cosmic_w} vs {pdf_w}），超出 {TOL_PCT}%"
+    );
+    assert!(
+        resvg_cosmic <= TOL_PCT,
+        "resvg 与 cosmic-text 度量偏差 {resvg_cosmic:.3}%（{resvg_w} vs {cosmic_w}），超出 {TOL_PCT}%"
+    );
 }

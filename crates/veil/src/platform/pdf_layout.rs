@@ -1712,7 +1712,6 @@ impl<'a> Ctx<'a> {
                     data: m.data.clone(),
                     width: m.width,
                     height: m.height,
-                    svg_text: None,
                     px_to_pt: m.px_to_pt,
                 })
             })
@@ -3242,6 +3241,149 @@ mod tests {
             Some(media),
             &mermaids,
         )
+    }
+
+    /// 假媒体：图片固定尺寸，公式渲染为固定位图（记录调用参数）。
+    struct FakeMathMedia {
+        calls: Vec<(String, bool)>,
+    }
+
+    impl FakeMathMedia {
+        fn new() -> Self {
+            Self { calls: Vec::new() }
+        }
+    }
+
+    impl MediaProvider for FakeMathMedia {
+        fn image(&mut self, _path: &Path) -> Result<ImageData, String> {
+            Ok(ImageData {
+                w: 240,
+                h: 150,
+                rgb: vec![0; 240 * 150 * 3],
+                baseline_px: 150.0,
+                px_to_pt: 1.0,
+            })
+        }
+
+        fn math(&mut self, tex: &str, display: bool) -> Result<ImageData, String> {
+            self.calls.push((tex.to_string(), display));
+            Ok(ImageData {
+                w: 40,
+                h: 16,
+                rgb: vec![255; 40 * 16 * 3],
+                baseline_px: 12.0,
+                px_to_pt: 1.0,
+            })
+        }
+    }
+
+    /// 回归：`math()` 返回 Ok 时，公式必须以位图（版面 `DrawOp::Image` → PDF
+    /// `/Subtype /Image` 图像 XObject）进入导出，不得被静默丢弃，也不得退化为
+    /// LaTeX 源码文字。
+    #[cfg(windows)]
+    #[test]
+    fn math_image_becomes_image_xobject_in_pdf() {
+        // 正文只含中文：ASCII 公式源码字符只会来自公式，便于在 PDF 中判定文字泄漏。
+        let md = "引子 $zq$ 尾声\n\n$$zq_{99}$$\n";
+        let mut media = FakeMathMedia::new();
+        let doc = lay_media(md, &mut media);
+
+        // —— 版面层 ——
+        assert_eq!(
+            media.calls,
+            vec![("zq".to_string(), false), ("zq_{99}".to_string(), true)],
+            "行内与块级公式都应交给 media.math 渲染"
+        );
+        let images: Vec<&DrawOp> = doc
+            .pages
+            .iter()
+            .flatten()
+            .filter(|op| matches!(op, DrawOp::Image { .. }))
+            .collect();
+        assert_eq!(images.len(), 2, "两个公式都应产出图像指令，不得被静默丢弃");
+        for op in &images {
+            let DrawOp::Image { w, h, id, .. } = op else {
+                unreachable!()
+            };
+            assert_eq!((*w, *h), (40.0, 16.0), "公式图像应使用 media 返回的尺寸");
+            assert_eq!(doc.images[*id].pt_w(), 40.0);
+        }
+        let text = all_text(&doc);
+        assert!(
+            !text.contains("zq"),
+            "公式不得退化为 LaTeX 源码文字: {text}"
+        );
+
+        // —— PDF 层 ——
+        let font_path = crate::platform::pdf::find_cjk_font().expect("需要 CJK 字体渲染 PDF");
+        let bytes = crate::platform::pdf::render_pages(
+            &doc.pages,
+            &doc.images,
+            &doc.outline,
+            &doc.links,
+            Path::new(font_path),
+        )
+        .expect("应产出 PDF");
+        let pdf = String::from_utf8_lossy(&bytes);
+        assert!(
+            pdf.contains("/Subtype /Image"),
+            "公式应作为图像 XObject 嵌入"
+        );
+        assert!(pdf.contains("/Im0 Do"), "内容流应绘制公式位图");
+        assert!(
+            pdf.matches("/Im1 Do").count() == 1,
+            "两个公式位图都应被内容流引用"
+        );
+
+        // 用与 render_pages 相同的字符集重建字体，把内容流中的 Tj 十六进制串解码回文字；
+        // 公式源码（zq）若被当作文字写出，解码结果里必然出现这些 ASCII 字符。
+        let page_chars: Vec<char> = doc
+            .pages
+            .iter()
+            .flatten()
+            .filter_map(|op| match op {
+                DrawOp::Text(t) => Some(t.text.chars()),
+                _ => None,
+            })
+            .flatten()
+            .chain(doc.outline.iter().flat_map(|o| o.title.chars()))
+            .collect();
+        let font = crate::platform::pdf::FontResource::load_and_subset(
+            Path::new(font_path),
+            page_chars,
+            false,
+        )
+        .expect("字体子集");
+        let decode = |hex: &str| -> String {
+            let digits: String = hex.chars().filter(char::is_ascii_hexdigit).collect();
+            digits
+                .as_bytes()
+                .chunks_exact(4)
+                .filter_map(|c| std::str::from_utf8(c).ok())
+                .filter_map(|s| u16::from_str_radix(s, 16).ok())
+                .filter_map(|cid| font.cid_to_char.get(cid as usize).copied())
+                .collect()
+        };
+        let mut shown = String::new();
+        for piece in pdf.split(" Tj") {
+            let tail = piece.rsplit('\n').next().unwrap_or("");
+            let is_cid_hex = tail.starts_with('<')
+                && tail.ends_with('>')
+                && tail
+                    .chars()
+                    .all(|c| c.is_ascii_hexdigit() || c == '<' || c == '>');
+            if is_cid_hex {
+                shown.push_str(&decode(tail));
+            }
+        }
+        assert!(
+            shown.contains("引子") && shown.contains("尾声"),
+            "PDF 应写出正文文字: {shown}"
+        );
+        assert!(
+            !shown.contains('z') && !shown.contains('q'),
+            "公式源码不得作为文字写入 PDF: {shown}"
+        );
     }
 
     #[test]

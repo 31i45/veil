@@ -4,7 +4,6 @@
 //! 可编辑控件（radio / toggle / number input / dropdown / 只读展示），需要独立的
 //! 布局、绘制和交互路径。
 #![allow(
-    dead_code,
     unused_variables,
     clippy::if_same_then_else,
     clippy::unnecessary_map_or
@@ -54,8 +53,6 @@ pub(crate) struct SettingsField {
     pub(crate) kind: FieldKind,
     /// 主值：radio / toggle / number / dropdown 的选中值。
     pub(crate) value: FieldValue,
-    /// 数字输入框的正在编辑文本（打字中）；None 表示无缓冲，值直接同步。
-    pub(crate) buffer: Option<String>,
     /// 只读展示字段：不能获得焦点、不能被编辑（如窗口几何）。
     pub(crate) read_only: bool,
 }
@@ -90,15 +87,6 @@ impl FontSelection {
                 DocFontFamily::Mono => t(Key::SettingsFontMono).into(),
             },
             FontSelection::Installed { name, .. } => name.clone(),
-        }
-    }
-}
-
-impl SettingsField {
-    pub(crate) fn value_is_valid(&self) -> bool {
-        match (&self.kind, &self.value) {
-            (FieldKind::Number(range), FieldValue::Number(v)) => *v >= range.min && *v <= range.max,
-            _ => true,
         }
     }
 }
@@ -218,14 +206,12 @@ impl SettingsForm {
                 label: Key::SettingsThemeMode,
                 kind: FieldKind::ThemeMode,
                 value: FieldValue::ThemeMode(cfg.mode),
-                buffer: None,
                 read_only: false,
             },
             SettingsField {
                 label: Key::SettingsUiLanguage,
                 kind: FieldKind::UiLanguage,
                 value: FieldValue::UiLanguage(cfg.ui_language),
-                buffer: None,
                 read_only: false,
             },
             SettingsField {
@@ -237,7 +223,6 @@ impl SettingsForm {
                     integers_only: true,
                 }),
                 value: FieldValue::Number(cfg.doc_font_size),
-                buffer: None,
                 read_only: false,
             },
             SettingsField {
@@ -249,21 +234,18 @@ impl SettingsForm {
                     integers_only: true,
                 }),
                 value: FieldValue::Number(cfg.doc_line_height),
-                buffer: None,
                 read_only: false,
             },
             SettingsField {
                 label: Key::SettingsDocFontFamily,
                 kind: FieldKind::FontFamily,
                 value: selected.clone(),
-                buffer: None,
                 read_only: false,
             },
             SettingsField {
                 label: Key::SettingsDocMargin,
                 kind: FieldKind::DocMargin,
                 value: FieldValue::DocMargin(cfg.doc_margin),
-                buffer: None,
                 read_only: false,
             },
             SettingsField {
@@ -275,42 +257,36 @@ impl SettingsForm {
                     integers_only: true,
                 }),
                 value: FieldValue::Number(cfg.doc_margin_px),
-                buffer: None,
                 read_only: false,
             },
             SettingsField {
                 label: Key::SettingsAllowRemoteImages,
                 kind: FieldKind::Toggle,
                 value: FieldValue::Toggle(cfg.allow_remote_images),
-                buffer: None,
                 read_only: false,
             },
             SettingsField {
                 label: Key::SettingsSourcePlainLines,
                 kind: FieldKind::Toggle,
                 value: FieldValue::Toggle(cfg.source_plain_lines),
-                buffer: None,
                 read_only: false,
             },
             SettingsField {
                 label: Key::SettingsWindowGeom,
                 kind: FieldKind::WindowGeom,
                 value: FieldValue::Geom(cfg.window.map(|w| (w.width, w.height, w.x, w.y))),
-                buffer: None,
                 read_only: true,
             },
             SettingsField {
                 label: Key::SettingsExportPageNumbers,
                 kind: FieldKind::Toggle,
                 value: FieldValue::Toggle(cfg.export_page_numbers),
-                buffer: None,
                 read_only: false,
             },
             SettingsField {
                 label: Key::SettingsExportToc,
                 kind: FieldKind::Toggle,
                 value: FieldValue::Toggle(cfg.export_toc),
-                buffer: None,
                 read_only: false,
             },
             SettingsField {
@@ -322,7 +298,6 @@ impl SettingsForm {
                     integers_only: false,
                 }),
                 value: FieldValue::Number(cfg.export_margin_mm),
-                buffer: None,
                 read_only: false,
             },
             SettingsField {
@@ -334,7 +309,6 @@ impl SettingsForm {
                     integers_only: true,
                 }),
                 value: FieldValue::Number(cfg.tab_width as f32),
-                buffer: None,
                 read_only: false,
             },
         ];
@@ -537,10 +511,6 @@ impl SettingsForm {
         let pos = ORDER.iter().position(|x| x == m).unwrap_or(1);
         let next = (pos as i32 + delta).rem_euclid(ORDER.len() as i32) as usize;
         *m = ORDER[next];
-    }
-
-    pub(crate) fn all_valid(&self) -> bool {
-        self.fields.iter().all(|f| f.value_is_valid())
     }
 
     /// 将表单值应用到 Config（clone 后返回新 Config）。
@@ -1159,26 +1129,6 @@ impl SettingsState {
             }
         }
         None
-    }
-
-    /// 悬停更新
-    pub(crate) fn on_hover(&mut self, mouse: (f32, f32), layout: &SettingsLayout) -> bool {
-        let prev_btn = self.hovered_button;
-        let prev_clear = self.hovered_clear;
-
-        self.hovered_button = layout
-            .buttons
-            .iter()
-            .enumerate()
-            .find(|(_, r)| hit(mouse, r))
-            .map(|(i, _)| i);
-        self.hovered_clear = layout
-            .window_geom_clear
-            .as_ref()
-            .map(|r| hit(mouse, r))
-            .unwrap_or(false);
-
-        prev_btn != self.hovered_button || prev_clear != self.hovered_clear
     }
 
     /// 键盘处理：返回被激活的按钮 id（Enter/Escape 立即返回按钮 id），

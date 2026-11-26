@@ -277,44 +277,6 @@ impl Session {
         self.deadline.set(None);
         result
     }
-
-    /// 调试辅助：查询 JS 侧 canvas 方法调用 trace（格式化为字符串数组）。
-    #[allow(dead_code)]
-    fn query_canvas_trace(&self) -> Vec<String> {
-        self.ctx.with(|ctx| {
-            let script = r#"(function() {
-                var t = (globalThis.__veilTrace || []);
-                return t.slice(-500).map(function(e) { return JSON.stringify(e); }).join('\n');
-            })()"#;
-            ctx.eval::<String, _>(script)
-                .map(|s| {
-                    s.split('\n')
-                        .filter(|l| !l.is_empty())
-                        .map(|s| s.to_string())
-                        .collect()
-                })
-                .unwrap_or_else(|e| vec![format!("<eval error: {}>", e)])
-        })
-    }
-
-    /// 调试辅助：查询 JS 侧 canvas mock 产生的 SVG 路径。
-    #[allow(dead_code)]
-    fn query_canvas_svg(&self) -> Vec<String> {
-        self.ctx.with(|ctx| {
-            let script = r#"(function() {
-                var t = (globalThis.__veilSvgPaths || []);
-                return t.slice(-100).join('\n');
-            })()"#;
-            ctx.eval::<String, _>(script)
-                .map(|s| {
-                    s.split('\n')
-                        .filter(|l| !l.is_empty())
-                        .map(|s| s.to_string())
-                        .collect()
-                })
-                .unwrap_or_else(|e| vec![format!("<eval error: {}>", e)])
-        })
-    }
 }
 
 fn run_script(ctx: &Ctx, name: &str, src: &str) -> Result<(), String> {

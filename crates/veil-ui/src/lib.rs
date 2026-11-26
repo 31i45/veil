@@ -13,8 +13,6 @@
 //! 公共导出（ADR-009 S5）：严格以产品层实际使用定义——只暴露端口 trait、启动入口、
 //! 解码函数、端口关联类型。内部类型（Editor / Chrome / Frame / LayoutEngine 等）不导出。
 
-#[cfg(feature = "accessibility")]
-pub(crate) mod accessibility;
 mod anim;
 mod app;
 mod autosave;

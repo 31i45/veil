@@ -8,10 +8,9 @@ mod export;
 mod platform;
 
 // —— 机制层公开入口：供集成测试直接访问 ——
-// svg_to_bitmap 是离线渲染与导出的共同光栅化接缝，保持公开以便集成测试验证
-// SVG → 位图。
+// SVG 光栅化实现不外暴露：编排层只能经 `MermaidRenderer` trait 使用 Mermaid，
+// 避免绕过 trait 直连光栅化实现。
 pub use platform::diag;
-pub use platform::mermaid::svg_to_bitmap;
 
 use std::path::{Path, PathBuf};
 

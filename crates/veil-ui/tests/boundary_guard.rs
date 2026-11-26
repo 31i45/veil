@@ -5,6 +5,23 @@
 
 const CORE_MANIFEST: &str = include_str!("../../veil-core/Cargo.toml");
 
+/// 策略层依赖白名单：veil-core 只允许这三项。
+/// 新增依赖须同步更新 ALLOWED 并说明理由（ADR-001：内核不得引入 GUI/异步运行时）。
+const ALLOWED: [&str; 3] = ["lapce-xi-rope", "serde", "serde_json"];
+
+/// GUI / 异步运行时黑名单（不区分连字符/下划线写法）。
+const BANNED_CRATES: [&str; 9] = [
+    "winit",
+    "cosmic-text",
+    "softbuffer",
+    "arboard",
+    "notify",
+    "latex-rust",
+    "tokio",
+    "async-std",
+    "pollster",
+];
+
 /// 取 `[dependencies]` 段（不含 dev-dependencies）。
 fn core_dependencies_section() -> &'static str {
     CORE_MANIFEST
@@ -14,34 +31,48 @@ fn core_dependencies_section() -> &'static str {
         .expect("veil-core/Cargo.toml 必须含 [dependencies] 与 [dev-dependencies] 段")
 }
 
-#[test]
-fn veil_core_dependencies_stay_minimal() {
-    let names: Vec<&str> = core_dependencies_section()
+/// `[dependencies]` 段内出现的顶层键（依赖名）。
+fn core_dependency_names() -> Vec<&'static str> {
+    core_dependencies_section()
         .lines()
         .filter(|l| !l.trim_start().starts_with('#'))
         .filter_map(|l| l.split_once('=').map(|(k, _)| k.trim()))
         .filter(|k| !k.is_empty())
+        .collect()
+}
+
+/// 白名单语义：出现未登记依赖即失败（精确清单匹配会在条目顺序/注释变化时误报）。
+#[test]
+fn veil_core_dependencies_stay_minimal() {
+    let unknown: Vec<&str> = core_dependency_names()
+        .into_iter()
+        .filter(|k| !ALLOWED.contains(k))
         .collect();
-    assert_eq!(
-        names,
-        ["lapce-xi-rope", "serde", "serde_json"],
-        "veil-core 依赖面变化需先过 ADR-001（内核不得引入 GUI/异步运行时）"
+    assert!(
+        unknown.is_empty(),
+        "veil-core 出现未登记的依赖 {unknown:?}：新增依赖须同步更新 ALLOWED 并说明理由\
+         （ADR-001：内核不得引入 GUI/异步运行时）"
     );
+}
+
+/// 白名单自身不得收录 GUI / 异步黑名单里的 crate（防止门禁被放宽）。
+#[test]
+fn allowed_core_dependencies_exclude_gui_and_async_crates() {
+    for banned in BANNED_CRATES {
+        let hyphen = banned.replace('_', "-");
+        let underscore = banned.replace('-', "_");
+        assert!(
+            !ALLOWED
+                .iter()
+                .any(|a| a.replace('_', "-") == hyphen || a.replace('-', "_") == underscore),
+            "ALLOWED 不得收录 {banned}"
+        );
+    }
 }
 
 #[test]
 fn veil_core_manifest_mentions_no_gui_or_async_crate() {
-    for banned in [
-        "winit",
-        "cosmic-text",
-        "softbuffer",
-        "arboard",
-        "notify",
-        "latex-rust",
-        "tokio",
-        "async-std",
-        "pollster",
-    ] {
+    for banned in BANNED_CRATES {
         assert!(
             !CORE_MANIFEST.contains(banned),
             "veil-core 不得依赖 {banned}"
@@ -73,4 +104,39 @@ fn veil_mermaid_offline_does_not_depend_on_veil_crate() {
         !offline_toml.contains("veil = ") || !offline_toml.contains("path = \"../veil\""),
         "veil-mermaid-offline must not depend on veil crate (策略层: veil-core, 编排层: veil bin)"
     );
+}
+
+/// 机制层 crate 之间不得反向依赖：veil-mermaid-offline 不引用 veil-ui。
+#[test]
+fn veil_mermaid_offline_does_not_depend_on_veil_ui() {
+    let offline_toml = include_str!("../../veil-mermaid-offline/Cargo.toml");
+    assert!(
+        !offline_toml.contains("veil-ui"),
+        "veil-mermaid-offline（机制层）不得反向依赖 veil-ui"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 编排层入口守卫：不得绕过 MermaidRenderer trait 直连 SVG 光栅化实现
+// ---------------------------------------------------------------------------
+
+/// 编排层（`veil/src/lib.rs`、`veil/src/export.rs`）只能经 `MermaidRenderer` trait
+/// 消费 Mermaid；出现 resvg/usvg 即意味着绕过 trait 接缝直连光栅化实现。
+/// `latex_rust` 不在禁止之列：编排层用它构造 `MathRenderer` 实现（ADR-002）。
+#[test]
+fn orchestration_layer_does_not_rasterize_svg_directly() {
+    for (name, src) in [
+        ("veil/src/lib.rs", include_str!("../../veil/src/lib.rs")),
+        (
+            "veil/src/export.rs",
+            include_str!("../../veil/src/export.rs"),
+        ),
+    ] {
+        for needle in ["resvg::", "usvg::"] {
+            assert!(
+                !src.contains(needle),
+                "编排层 {name} 不得直连光栅化实现（出现 `{needle}`）：请经 MermaidRenderer trait 调用"
+            );
+        }
+    }
 }

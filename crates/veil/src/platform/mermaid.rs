@@ -23,8 +23,6 @@ pub struct MermaidBitmap {
     pub width: u32,
     /// 图像高度（像素）。
     pub height: u32,
-    /// 原始 SVG 文本（HTML 导出内嵌用）。
-    pub svg_text: Option<String>,
     /// 光栅化时使用的 scale 对应的 px→pt 换算比：72.0 / (96.0 * scale)。
     /// scale 是 clamp 到 [2.0, 4.0] 后 resvg 实际使用的值。
     pub px_to_pt: f32,
@@ -62,7 +60,6 @@ pub fn svg_to_bitmap(svg_text: &str, dpi_scale: f32) -> Result<MermaidBitmap, St
         data: pixmap.data().to_vec(),
         width: w,
         height: h,
-        svg_text: None,
         px_to_pt,
     })
 }
@@ -78,3 +75,53 @@ pub fn mermaid_renderer() -> Box<dyn veil_ui::MermaidRenderer> {
 
 #[cfg(not(feature = "mermaid-offline"))]
 compile_error!("Veil 的 Mermaid 只在进程内渲染，必须启用 `mermaid-offline` feature");
+
+#[cfg(test)]
+mod tests {
+    use super::svg_to_bitmap;
+
+    /// 最小有效 SVG（resvg 可解析）。
+    const VALID_SVG: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="50" viewBox="0 0 100 50"><rect x="5" y="5" width="90" height="40"/><text x="50" y="28">Hello</text></svg>"#;
+
+    // =========================================================================
+    // 测试 1 — svg_to_bitmap happy path
+    // =========================================================================
+
+    #[test]
+    fn svg_to_bitmap_produces_nonempty_rgba() {
+        let bm = svg_to_bitmap(VALID_SVG, 2.0).expect("有效 SVG 应光栅化成功");
+        assert!(bm.width > 0, "宽度应 > 0");
+        assert!(bm.height > 0, "高度应 > 0");
+        assert!(!bm.data.is_empty(), "像素缓冲区非空");
+        assert_eq!(bm.data.len() as u32, bm.width * bm.height * 4);
+    }
+
+    /// scale=3.0 时位图更大（scale 被 clamp 到 [2.0, 4.0]）。
+    #[test]
+    fn svg_to_bitmap_scale_changes_dimensions() {
+        let bm2 = svg_to_bitmap(VALID_SVG, 2.0).expect("scale 2");
+        let bm3 = svg_to_bitmap(VALID_SVG, 3.0).expect("scale 3");
+        assert!(
+            bm3.width >= bm2.width,
+            "scale 3 应至少不小于 scale 2 的宽度：{} vs {}",
+            bm3.width,
+            bm2.width
+        );
+    }
+
+    // =========================================================================
+    // 测试 2 — svg_to_bitmap 错误路径
+    // =========================================================================
+
+    #[test]
+    fn svg_to_bitmap_rejects_garbage_input() {
+        let result = svg_to_bitmap("this is not svg at all", 2.0);
+        assert!(result.is_err(), "垃圾文本必须 Err：{result:?}");
+    }
+
+    #[test]
+    fn svg_to_bitmap_rejects_empty_input() {
+        let result = svg_to_bitmap("", 2.0);
+        assert!(result.is_err(), "空字符串必须 Err");
+    }
+}

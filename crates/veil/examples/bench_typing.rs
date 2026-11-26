@@ -100,12 +100,22 @@ fn pick_caret(session: &Session) -> usize {
 }
 
 /// 冷启动：Session::open + LayoutEngine::new + 全部块各排版一次。重复 5 次。
-fn measure_cold_start(text: &str) -> (f64, f64) {
+/// 返回 (总中位, 总最大, Session::open 中位, 引擎创建中位, 纯排版中位)。
+fn measure_cold_start(text: &str) -> (f64, f64, f64, f64, f64) {
     let mut runs = Vec::with_capacity(5);
+    let mut opens = Vec::with_capacity(5);
+    let mut engines = Vec::with_capacity(5);
+    let mut layouts = Vec::with_capacity(5);
     for _ in 0..5 {
         let t = Instant::now();
         let session = Session::open(text);
+        let open = t.elapsed().as_secs_f64() * 1000.0;
+
+        let t = Instant::now();
         let mut eng = LayoutEngine::new();
+        let engine_ms = t.elapsed().as_secs_f64() * 1000.0;
+
+        let t = Instant::now();
         let blocks = session.blocks();
         for (id, kind, range) in &blocks {
             let body = session.text_slice(*range).unwrap_or_default();
@@ -122,10 +132,21 @@ fn measure_cold_start(text: &str) -> (f64, f64) {
             );
             black_box(l.height);
         }
-        runs.push(t.elapsed().as_secs_f64() * 1000.0);
+        let layout_ms = t.elapsed().as_secs_f64() * 1000.0;
+
+        opens.push(open);
+        engines.push(engine_ms);
+        layouts.push(layout_ms);
+        runs.push(open + engine_ms + layout_ms);
     }
     runs.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    (pctl(&mut runs, 50.0), runs[runs.len() - 1])
+    (
+        pctl(&mut runs, 50.0),
+        runs[runs.len() - 1],
+        pctl(&mut opens, 50.0),
+        pctl(&mut engines, 50.0),
+        pctl(&mut layouts, 50.0),
+    )
 }
 
 /// 连续 1000 次单字符插入的 apply 耗时（µs），返回 (p50, p95)。
@@ -253,7 +274,7 @@ fn main() {
     let block_count = Session::open(&doc).blocks().len();
     let caret = pick_caret(&Session::open(&doc));
 
-    let (cold_med, cold_max) = measure_cold_start(&doc);
+    let (cold_med, cold_max, open_ms, engine_ms, layout_ms) = measure_cold_start(&doc);
     let (key_p50, key_p95) = measure_keystrokes(&doc, caret);
     let ((scan_p50, scan_p95), (alloc_count, alloc_bytes)) = measure_full_scan(&doc, caret);
     let (dirty_p50, dirty_p95) = measure_dirty_layout(&doc, caret);
@@ -261,6 +282,9 @@ fn main() {
     let (frame_reuse_p50, frame_reuse_p95) = measure_frame_reuse();
 
     println!("cold_start_ms={cold_med:.2}/{cold_max:.2}");
+    println!("cold_open_ms={open_ms:.2}");
+    println!("cold_engine_ms={engine_ms:.2}");
+    println!("cold_layout_ms={layout_ms:.2}");
     println!("keystroke_core_us={key_p50:.2}/{key_p95:.2}");
     println!("full_scan_cost_us={scan_p50:.2}/{scan_p95:.2}");
     println!("layout_dirty_us={dirty_p50:.2}/{dirty_p95:.2}");

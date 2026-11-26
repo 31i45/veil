@@ -6,8 +6,10 @@ publish = false
 
 [features]
 # 唯一发行产物 veil.exe 默认包含离线 Mermaid（QuickJS + 完整 mermaid.js，体积 +约 5 MiB）。
-default = ["mermaid-offline"]
+default = ["mermaid-offline", "accessibility"]
 mermaid-offline = ["dep:veil-mermaid-offline"]
+# 屏幕阅读器（Narrator/UIA）生产接入：默认随发行产物编译，体积已过 14 MiB 门禁。
+accessibility = ["veil-ui/accessibility"]
 
 [dependencies]
 veil-core = { path = "../veil-core" }

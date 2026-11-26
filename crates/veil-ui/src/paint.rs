@@ -1220,7 +1220,13 @@ impl App {
         self.ensure_layouts_visible();
         self.ensure_math_visible();
         self.ensure_tables_visible();
-        if self.index.geometry_stale {
+        // 估算高度欠估的块（典型：从未排版的图片块）在重算时展开为真实高度，
+        // 文档变高会让原本可见的光标掉到视口下方。此处先记录重算前的可见性，
+        // 收敛后仅在「可见 → 不可见」时把光标拉回，不做无条件每帧跟随，
+        // 否则用户主动滚走看别处时会被强行拽回。
+        let recompute_pending = self.index.geometry_stale;
+        let caret_visible_before = recompute_pending && self.caret_in_viewport();
+        if recompute_pending {
             self.recompute_geometry();
             self.ensure_layouts_visible();
             self.ensure_math_visible();
@@ -1228,6 +1234,9 @@ impl App {
             if self.index.geometry_stale {
                 self.recompute_geometry();
             }
+        }
+        if caret_visible_before && !self.caret_in_viewport() {
+            self.scroll_to_caret();
         }
         let base = self.base_key();
         let caret = self.effective_caret();

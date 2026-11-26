@@ -2946,6 +2946,14 @@ impl App {
         n
     }
 
+    /// 光标是否完整落在正文视口内（与测试同一 1px 容差，避免取整抖动误判）。
+    /// 依赖几何：调用方在几何重算前后各取一次，用于判定「重算把光标挤出视口」。
+    pub(crate) fn caret_in_viewport(&mut self) -> bool {
+        let vp = self.viewport();
+        let (_, cy, ch) = self.caret_screen();
+        cy >= vp.y - 1.0 && cy + ch <= vp.y + vp.h + 1.0
+    }
+
     /// 光标屏幕矩形（物理像素，含菜单栏偏移）。(x, y, h)；找不到所在块（空文档）时落视口原点。
     pub(crate) fn caret_screen(&mut self) -> (f32, f32, f32) {
         let caret = self.editor.caret();

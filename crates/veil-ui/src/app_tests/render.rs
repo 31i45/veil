@@ -467,6 +467,56 @@ fn new_paragraph_caret_with_cold_images_below() {
     );
 }
 
+/// 回归锁（2026-11-26）：几何重算把欠估的冷图片块展开后，原本可见的光标必须
+/// 被拉回视口；但用户主动滚走离开光标时不得被强行拽回（只纠正几何挤出）。
+#[test]
+fn geometry_recompute_keeps_visible_caret_in_view() {
+    let para = "这是一段足够长的中文段落，用来产生多行折行的真实排版效果。".repeat(6);
+    let mut parts: Vec<String> = Vec::new();
+    for i in 0..10 {
+        parts.push(para.clone());
+        parts.push(format!("![p{i}](p{i}.png)"));
+    }
+    let text = parts.join("\n\n");
+    let files: Vec<(String, u32, u32)> = (0..10)
+        .map(|i| (format!("doc/p{i}.png"), 600, 500))
+        .collect();
+    let files_ref: Vec<(&str, u32, u32)> =
+        files.iter().map(|(p, w, h)| (p.as_str(), *w, *h)).collect();
+    let (mut a, _calls, _files) = app_with_images(&text, Some("doc/note.md"), &files_ref);
+    // 不预热：估算几何下把光标移到文末，真实高度在 paint 时才展开。
+    a.perform_action(Action::Doc(Intent::MoveDocEnd));
+    a.paint();
+    a.route_key(Key::Enter);
+    a.route_key(Key::Enter);
+    a.route_key(Key::Text("n".into()));
+    a.paint();
+    let vp = a.viewport();
+    let (_, cy, ch) = a.caret_screen();
+    assert!(
+        cy >= vp.y - 1.0 && cy + ch <= vp.y + vp.h + 1.0,
+        "几何收敛后光标须仍在视口内：cy={cy} ch={ch} 视口={}..{}",
+        vp.y,
+        vp.y + vp.h
+    );
+    // 用户主动滚到文首看别处：重绘（含几何重算）不得把视图拽回光标。
+    a.on_wheel(a.doc_height());
+    a.paint();
+    a.paint();
+    assert!(
+        a.window_state.scroll_y <= 1.0,
+        "用户主动滚离光标后不得被拉回：scroll={}",
+        a.window_state.scroll_y
+    );
+    let (_, cy, _) = a.caret_screen();
+    assert!(
+        cy > vp.y + vp.h,
+        "光标应保持在视口外（未被拽回）：cy={cy} 视口={}..{}",
+        vp.y,
+        vp.y + vp.h
+    );
+}
+
 /// 同缺陷的富文档变体：大图片块（est 22px vs 实高数百 px）+ CJK 段落，
 /// 估算与真实高度大散度下 paint 两遍收敛仍须无空洞、光标贴块。
 #[test]

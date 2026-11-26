@@ -117,9 +117,12 @@ fn stage_drain(timeout: Duration) {
     }
 }
 
-/// 性能埋点开关：只读环境变量，不做 IO；未开启时两个埋点函数都是空操作。
+/// 性能埋点开关缓存：环境变量只在首次查询时读取一次（逐帧渲染路径每帧多次调用）。
+static PERF_ENABLED: OnceLock<bool> = OnceLock::new();
+
+/// 性能埋点开关：进程内只读一次环境变量，之后走缓存；未开启时埋点函数都是空操作。
 fn perf_trace_enabled() -> bool {
-    std::env::var_os("VEIL_PERF_TRACE").is_some_and(|v| v == "1")
+    *PERF_ENABLED.get_or_init(|| std::env::var_os("VEIL_PERF_TRACE").is_some_and(|v| v == "1"))
 }
 
 /// 记录「进程启动」计时原点；应在产品层 `run()` 最早期调用。

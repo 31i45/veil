@@ -564,11 +564,18 @@ fn resolve_emphasis(toks: Vec<Tok>, base: usize) -> Vec<InlineNode> {
         .collect()
 }
 
+/// 全角圆括号（Chinese IME 常把图片语法写成 `![a]（p.png）`）：按字节比较，
+/// 任意位置切片都安全（不会切在多字节字符内部）。
+const FW_OPEN: &[u8] = "（".as_bytes();
+const FW_CLOSE: &[u8] = "）".as_bytes();
+
 /// 解析 `](` 后的链接目标与可选 title（CommonMark §6.3）。
 /// 返回 `(url_start, url_end, end)`：url 区间为内容（不含尖括号），end 为 `)` 之后。
 /// 目标：`<...>`（无换行/未转义尖括号）或裸目标（无空格/换行/控制字符，括号须平衡）。
 /// title：`"..."` / `'...'` / `(...)`（无换行，未转义闭标记结束）。
-fn parse_link_dest(s: &str, start: usize) -> Option<(usize, usize, usize)> {
+/// `image=true` 时闭定界符额外接受全角 `）`（可与半角 `)` 混用），目标内的
+/// `（`/`）` 同样参与括号平衡；链接仍严格只认半角。
+fn parse_link_dest(s: &str, start: usize, image: bool) -> Option<(usize, usize, usize)> {
     let b = s.as_bytes();
     let mut pos = start;
     // 跳过前导空白（含换行——CommonMark 允许组件间空白含换行）
@@ -608,30 +615,41 @@ fn parse_link_dest(s: &str, start: usize) -> Option<(usize, usize, usize)> {
             if i >= b.len() {
                 return None; // 无 `)` 闭合
             }
-            match b[i] {
-                b')' => {
-                    if depth == 0 {
-                        url_start = pos;
-                        url_end = i;
-                        pos = i;
-                        break;
-                    }
-                    depth -= 1;
-                    i += 1;
-                }
-                b'(' => {
-                    depth += 1;
-                    i += 1;
-                }
-                b'\\' if i + 1 < b.len() => i += 2,
-                b' ' | b'\t' | b'\n' | b'\r' => {
+            if b[i] == b')' {
+                if depth == 0 {
                     url_start = pos;
                     url_end = i;
                     pos = i;
                     break;
                 }
-                c if c <= 0x1f || c == 0x7f => return None,
-                _ => i += 1,
+                depth -= 1;
+                i += 1;
+            } else if b[i] == b'(' {
+                depth += 1;
+                i += 1;
+            } else if image && b[i..].starts_with(FW_CLOSE) {
+                if depth == 0 {
+                    url_start = pos;
+                    url_end = i;
+                    pos = i;
+                    break;
+                }
+                depth -= 1;
+                i += FW_CLOSE.len();
+            } else if image && b[i..].starts_with(FW_OPEN) {
+                depth += 1;
+                i += FW_OPEN.len();
+            } else if b[i] == b'\\' && i + 1 < b.len() {
+                i += 2;
+            } else if matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') {
+                url_start = pos;
+                url_end = i;
+                pos = i;
+                break;
+            } else if b[i] <= 0x1f || b[i] == 0x7f {
+                return None;
+            } else {
+                i += 1;
             }
         }
         if depth > 0 {
@@ -670,17 +688,71 @@ fn parse_link_dest(s: &str, start: usize) -> Option<(usize, usize, usize)> {
     }
     if pos < b.len() && b[pos] == b')' {
         Some((url_start, url_end, pos + 1))
+    } else if image && b[pos..].starts_with(FW_CLOSE) {
+        Some((url_start, url_end, pos + FW_CLOSE.len()))
     } else {
         // 旧版 Veil 插入的目录锚点含空格（`(#第三章 - 结论)`、`(#11- 背景)`）：
         // 标准裸目标在空白处即终止，整条链接会退化成纯文本。仅对同文档锚点
         // （目标以 `#` 开头）放宽空白，其它目标/危险 scheme 保持严格解析。
-        parse_fragment_dest(s, start)
+        parse_fragment_dest(s, start, image)
     }
+}
+
+/// 图片目标的空白容错（仅全角定界符场景）：标准裸目标在空白处即止，
+/// `![图]（未命名 图.png）` 会整段退化成文字。这里取到首个未嵌套的闭定界符
+/// （`）` 或 `)`），允许目标含空格/制表符，首尾空白裁掉；跨行仍不识别。
+fn parse_image_dest_spaces(s: &str, start: usize) -> Option<(usize, usize, usize)> {
+    let b = s.as_bytes();
+    let mut depth: u32 = 0;
+    let mut i = start;
+    while i < b.len() {
+        if b[i] == b')' {
+            if depth == 0 {
+                let (a, z) = trim_dest_span(b, start, i);
+                return Some((a, z, i + 1));
+            }
+            depth -= 1;
+            i += 1;
+        } else if b[i] == b'(' {
+            depth += 1;
+            i += 1;
+        } else if b[i..].starts_with(FW_CLOSE) {
+            if depth == 0 {
+                let (a, z) = trim_dest_span(b, start, i);
+                return Some((a, z, i + FW_CLOSE.len()));
+            }
+            depth -= 1;
+            i += FW_CLOSE.len();
+        } else if b[i..].starts_with(FW_OPEN) {
+            depth += 1;
+            i += FW_OPEN.len();
+        } else if b[i] == b'\\' && i + 1 < b.len() {
+            i += 2;
+        } else if matches!(b[i], b'\n' | b'\r') || (b[i] < 0x20 && b[i] != b'\t') {
+            return None;
+        } else {
+            i += 1;
+        }
+    }
+    None
+}
+
+/// 目标区间首尾的空白/制表符裁除（字节偏移）。
+fn trim_dest_span(b: &[u8], start: usize, end: usize) -> (usize, usize) {
+    let mut a = start;
+    let mut z = end;
+    while a < z && matches!(b[a], b' ' | b'\t') {
+        a += 1;
+    }
+    while z > a && matches!(b[z - 1], b' ' | b'\t') {
+        z -= 1;
+    }
+    (a, z)
 }
 
 /// 同文档锚点容错目标：`#` 起头、允许空白、括号须平衡、不得跨行。
 /// 只放宽空白与括号——`#` 片段不会交给系统 shell，安全面与标准解析一致。
-fn parse_fragment_dest(s: &str, start: usize) -> Option<(usize, usize, usize)> {
+fn parse_fragment_dest(s: &str, start: usize, image: bool) -> Option<(usize, usize, usize)> {
     let b = s.as_bytes();
     let mut pos = start;
     while pos < b.len() && matches!(b[pos], b' ' | b'\t') {
@@ -696,22 +768,30 @@ fn parse_fragment_dest(s: &str, start: usize) -> Option<(usize, usize, usize)> {
         if i >= b.len() {
             return None; // 无 `)` 闭合
         }
-        match b[i] {
-            b')' => {
-                if depth == 0 {
-                    return Some((url_start, i, i + 1));
-                }
-                depth -= 1;
-                i += 1;
+        if b[i] == b')' {
+            if depth == 0 {
+                return Some((url_start, i, i + 1));
             }
-            b'(' => {
-                depth += 1;
-                i += 1;
+            depth -= 1;
+            i += 1;
+        } else if b[i] == b'(' {
+            depth += 1;
+            i += 1;
+        } else if image && b[i..].starts_with(FW_CLOSE) {
+            if depth == 0 {
+                return Some((url_start, i, i + FW_CLOSE.len()));
             }
-            b'\\' if i + 1 < b.len() => i += 2,
-            b'\n' | b'\r' => return None,
-            c if c < 0x20 && c != b'\t' => return None,
-            _ => i += 1,
+            depth -= 1;
+            i += FW_CLOSE.len();
+        } else if image && b[i..].starts_with(FW_OPEN) {
+            depth += 1;
+            i += FW_OPEN.len();
+        } else if b[i] == b'\\' && i + 1 < b.len() {
+            i += 2;
+        } else if matches!(b[i], b'\n' | b'\r') || (b[i] < 0x20 && b[i] != b'\t') {
+            return None;
+        } else {
+            i += 1;
         }
     }
 }
@@ -1629,7 +1709,7 @@ impl<'a> InlineParser<'a> {
         // 分支 1：`](` inline 链接（优先于引用式）
         if self.s[text_end..].starts_with("](") {
             let after_open = text_end + 2;
-            if let Some((url_s, url_e, end)) = parse_link_dest(self.s, after_open) {
+            if let Some((url_s, url_e, end)) = parse_link_dest(self.s, after_open, false) {
                 let children = self.link_children(start, text_end, depth);
                 self.pos = end;
                 return Some(self.node(
@@ -1691,9 +1771,10 @@ impl<'a> InlineParser<'a> {
     }
 
     /// 配对 (o, p) 能否成链/成图：`](`+合法目标、`][label]`/`][]`+定义、shortcut+定义。
+    /// 只服务链接开括号的淘汰判定（`!` 前的图片开括号已排除），故目标严格半角。
     fn pair_resolves(&self, o: usize, p: usize) -> bool {
         let after = &self.s[p + 1..];
-        if after.starts_with('(') && parse_link_dest(self.s, p + 2).is_some() {
+        if after.starts_with('(') && parse_link_dest(self.s, p + 2, false).is_some() {
             return true;
         }
         if after.starts_with('[') {
@@ -1717,6 +1798,8 @@ impl<'a> InlineParser<'a> {
 
     /// `![alt](url)` / `![alt][label]` / `![alt][]` / `![alt]`：alt 可空、为纯文本
     /// （不产生子节点）；闭合 `]` 与链接同一套括号配对。未闭合或查无定义按纯文本。
+    /// 目标定界符同时接受半角 `(` `)` 与全角 `（` `）`（允许混用），但只在
+    /// `![alt]` 之后**紧跟**定界符时生效，且必须找到配对闭合符。
     fn try_image(&mut self) -> Option<InlineNode> {
         if !self.s[self.pos..].starts_with("![") {
             return None;
@@ -1724,10 +1807,32 @@ impl<'a> InlineParser<'a> {
         let start = self.pos;
         let alt_end = self.bracket_pairs.get(start + 1).cloned().flatten()?;
         // 图片开括号 ours_is_image=true，内层成链不淘汰（inner_pair_kills_opener 恒 false）
-        // 分支 1：`](` inline 图片
-        if self.s[alt_end..].starts_with("](") {
-            let after_open = alt_end + 2;
-            if let Some((url_s, url_e, end)) = parse_link_dest(self.s, after_open) {
+        // 分支 1：`](` / `]（` inline 图片
+        let open_len = if self.s[alt_end..].starts_with("](") {
+            2
+        } else if self.s[alt_end..].starts_with("]（") {
+            1 + FW_OPEN.len()
+        } else {
+            0
+        };
+        if open_len > 0 {
+            let after_open = alt_end + open_len;
+            let dest = parse_link_dest(self.s, after_open, true).or_else(|| {
+                // 全角定界符容错：目标含空格时标准解析在空白处即止，无法闭合成图。
+                // 仅当定界符确实用了全角（开标记全角，或同一行内出现全角闭括号）才放宽，
+                // 纯 ASCII 图片（`![a](x y)`）保持 CommonMark 语义按纯文本。
+                let used_fullwidth = open_len > 2
+                    || self.s[after_open..]
+                        .split(['\n', '\r'])
+                        .next()
+                        .is_some_and(|line| line.contains('（') || line.contains('）'));
+                if used_fullwidth {
+                    parse_image_dest_spaces(self.s, after_open)
+                } else {
+                    None
+                }
+            });
+            if let Some((url_s, url_e, end)) = dest {
                 self.pos = end;
                 return Some(self.node(
                     InlineKind::Image,
@@ -1823,6 +1928,19 @@ mod tests {
                 return Some(n);
             }
             if let Some(f) = find_link(&n.children) {
+                return Some(f);
+            }
+        }
+        None
+    }
+
+    /// 首个 Image 节点（含嵌套）。用于断言「不得误判为图片」。
+    fn find_image(ns: &[InlineNode]) -> Option<&InlineNode> {
+        for n in ns {
+            if n.kind == InlineKind::Image {
+                return Some(n);
+            }
+            if let Some(f) = find_image(&n.children) {
                 return Some(f);
             }
         }
@@ -2383,6 +2501,58 @@ mod tests {
             sexp(&parse("[![a](i)](u)")),
             "Link[0..12 c=1..8 url=10..11 Image[1..8 c=3..4 url=6..7]]"
         );
+    }
+
+    #[test]
+    fn image_fullwidth_delimiters() {
+        // 全角开闭：`!` `[` 图(3B) `]` `（`(3B) `a.png` `）`(3B)
+        assert_eq!(
+            sexp(&parse("![图]（a.png）")),
+            "Image[0..17 c=2..5 url=9..14]"
+        );
+    }
+
+    #[test]
+    fn image_fullwidth_mixed_with_halfwidth() {
+        // 只换开定界符：`（` 3B 与半角 `)` 混用
+        assert_eq!(
+            sexp(&parse("![图]（a.png)")),
+            "Image[0..15 c=2..5 url=9..14]"
+        );
+        // 只换闭定界符：半角 `(` 与 `）` 3B 混用
+        assert_eq!(
+            sexp(&parse("![图](a.png）")),
+            "Image[0..15 c=2..5 url=7..12]"
+        );
+    }
+
+    #[test]
+    fn image_fullwidth_requires_paired_closer() {
+        // 只有开定界符全角、没有闭合符：仍是普通文字（不吞后续内容）
+        assert_eq!(sexp(&parse("![图]（a.png")), "");
+        assert!(find_image(&parse("![图]（a.png")).is_none());
+    }
+
+    #[test]
+    fn plain_fullwidth_parentheses_are_not_images() {
+        // 普通正文里的全角括号不得被当成图片定界符
+        assert_eq!(sexp(&parse("这是（说明）文字")), "");
+        assert!(find_image(&parse("这是（说明）文字")).is_none());
+        // 强调内的全角括号同理
+        assert!(find_image(&parse("**（强调）**")).is_none());
+        // 纯 ASCII 图片目标含空格仍按 CommonMark 语义降级为文字（不受本扩展影响）
+        assert!(find_image(&parse("![a](x y)")).is_none());
+    }
+
+    #[test]
+    fn image_fullwidth_alt_and_dest_with_spaces() {
+        // alt 含空格、目标含空格：alt/dest 区间须各自正确切出
+        let nodes = parse("![未命名 图]（a b.png）");
+        assert_eq!(sexp(&nodes), "Image[0..29 c=2..15 url=19..26]");
+        let img = nodes.first().expect("image node");
+        assert_eq!(&"![未命名 图]（a b.png）"[2..15], "未命名 图");
+        assert_eq!(&"![未命名 图]（a b.png）"[19..26], "a b.png");
+        assert_eq!(img.kind, InlineKind::Image);
     }
 
     #[test]

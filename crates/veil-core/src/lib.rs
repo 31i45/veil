@@ -23,7 +23,7 @@ pub use mermaid::{
 };
 pub use range::{Bias, MarkId, Range};
 pub use session::{Edit, EditError, Events, Session};
-pub use slug::{heading_slug, heading_slugs};
+pub use slug::{heading_slug, heading_slugs, split_heading_id};
 pub use syntax::{
     block_is_image_only, emphasis_spans, image_standalone, list_signature, sanitize_style,
     set_image_alt_fallback, should_strip_html, split_table_row, standalone_image_caption,

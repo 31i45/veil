@@ -39,6 +39,31 @@ pub fn heading_slug(text: &str) -> String {
     out
 }
 
+/// 拆分标题尾缀 `{#id}`：`安装 {#install}` → (`安装`, Some(`install`))。
+///
+/// 只识别由空白分隔、位于文本末尾的 `{#非空标记}`；正文中出现的 `{#…}`
+/// 原样保留。显式 id 供导出层作为标题锚点，并从可见文本中移除。
+pub fn split_heading_id(text: &str) -> (&str, Option<&str>) {
+    let trimmed = text.trim_end_matches([' ', '\t']);
+    let Some(rest) = trimmed.strip_suffix('}') else {
+        return (text, None);
+    };
+    let Some((before, id)) = rest.rsplit_once("{#") else {
+        return (text, None);
+    };
+    if id.is_empty()
+        || id.chars().any(|c| c.is_whitespace() || c == '{' || c == '}')
+        || !(before.ends_with(' ') || before.ends_with('\t'))
+    {
+        return (text, None);
+    }
+    let visible = before.trim_end_matches([' ', '\t']);
+    if visible.is_empty() {
+        return (text, None);
+    }
+    (visible, Some(id))
+}
+
 /// 文档级 slug 去重：重名依次为 `名称`、`名称-1`、`名称-2`……，并保证结果全局唯一
 /// （若 `名称-1` 恰好是另一标题的自然 slug，则继续递增到第一个未占用的名字）。
 /// 空 slug 同样参与去重（首个为空串，重复者得到 `-1`、`-2`），不会 panic。
@@ -100,6 +125,17 @@ mod tests {
         assert_eq!(heading_slug(""), "");
         assert_eq!(heading_slug("!!! ??? ..."), "");
         assert_eq!(heading_slug("。、！"), ""); // 非 ASCII 标点同样丢弃
+    }
+
+    #[test]
+    fn trailing_heading_id_is_split_from_visible_text() {
+        assert_eq!(split_heading_id("安装 {#install}"), ("安装", Some("install")));
+        assert_eq!(split_heading_id("标题\t{#a-b}  "), ("标题", Some("a-b")));
+        // 非尾缀 / 无空白分隔 / 空 id / 正文中的普通花括号均保留原样
+        assert_eq!(split_heading_id("安装"), ("安装", None));
+        assert_eq!(split_heading_id("安装{#install}"), ("安装{#install}", None));
+        assert_eq!(split_heading_id("安装 {#}"), ("安装 {#}", None));
+        assert_eq!(split_heading_id("{#install}"), ("{#install}", None));
     }
 
     #[test]

@@ -657,6 +657,7 @@ keys! {
     SettingsLangZhCn => "settings.lang_zh_cn", "中文";
     SettingsLangEnUs => "settings.lang_en_us", "English";
     SettingsDocFontSize => "settings.doc_font_size", "正文字号（10–32）";
+    SettingsDocLineHeight => "settings.doc_line_height", "正文行高（字号–3×字号）";
     SettingsDocFontFamily => "settings.doc_font_family", "正文字体族";
     SettingsDocMargin => "settings.doc_margin", "版心";
     SettingsMarginCompact => "settings.margin_compact", "紧凑";
@@ -1786,6 +1787,10 @@ fn main() {
     (Key::SettingsLangZhCn, "Chinese"),
     (Key::SettingsLangEnUs, "English"),
     (Key::SettingsDocFontSize, "Body Font Size (10–32)"),
+    (
+        Key::SettingsDocLineHeight,
+        "Body Line Height (font size–3×)",
+    ),
     (Key::SettingsDocFontFamily, "Body Font Family"),
     (Key::SettingsDocMargin, "Body Column"),
     (Key::SettingsMarginCompact, "Compact"),

@@ -241,6 +241,18 @@ impl SettingsForm {
                 read_only: false,
             },
             SettingsField {
+                label: Key::SettingsDocLineHeight,
+                kind: FieldKind::Number(NumberRange {
+                    min: 10.0,
+                    max: 96.0,
+                    step: 1.0,
+                    integers_only: true,
+                }),
+                value: FieldValue::Number(cfg.doc_line_height),
+                buffer: None,
+                read_only: false,
+            },
+            SettingsField {
                 label: Key::SettingsDocFontFamily,
                 kind: FieldKind::FontFamily,
                 value: selected.clone(),
@@ -559,6 +571,12 @@ impl SettingsForm {
                 Key::SettingsDocFontSize => {
                     if let FieldValue::Number(v) = f.value {
                         out.doc_font_size = v.clamp(10.0, 32.0);
+                    }
+                }
+                Key::SettingsDocLineHeight => {
+                    if let FieldValue::Number(v) = f.value {
+                        // 行高下限跟随字号、上限 3 倍字号；字号先于本行写入 out。
+                        out.doc_line_height = v.clamp(out.doc_font_size, out.doc_font_size * 3.0);
                     }
                 }
                 Key::SettingsDocFontFamily => {
@@ -2042,7 +2060,8 @@ mod tests {
     #[test]
     fn zh_labels_fit_and_control_column_stays_usable() {
         let form = default_form();
-        let layout = layout_for(viewport(1280.0, 800.0), &form);
+        // 新增「正文行高」后 14 行在 800 高下会触发滚动；用足够高的视口验证全部行。
+        let layout = layout_for(viewport(1280.0, 1000.0), &form);
         let mut text = FakeText;
         let mut widest_zh = 0.0f32;
         for (field, rects) in form.fields.iter().zip(&layout.fields) {
@@ -2673,6 +2692,49 @@ mod tests {
         assert_eq!(form.apply(&config).doc_margin_px, 4.0);
         form.fields[px_idx].value = FieldValue::Number(48.0);
         assert_eq!(form.apply(&config).doc_margin_px, 48.0);
+    }
+
+    /// 正文行高：设置表单可编辑 10..=96，apply 时按字号夹到 [字号, 3×字号]。
+    #[test]
+    fn doc_line_height_field_applies_clamped_to_font_size() {
+        let config = Config::default();
+        let mut form = SettingsForm::from_config(&config);
+        let idx = form
+            .fields
+            .iter()
+            .position(|f| f.label == Key::SettingsDocLineHeight)
+            .expect("正文行高字段存在");
+        assert!(
+            matches!(&form.fields[idx].kind, FieldKind::Number(r)
+                if r.min == 10.0 && r.max == 96.0 && r.step == 1.0 && r.integers_only),
+            "行高字段应为整数步进 10..=96"
+        );
+
+        // 默认 16 字号：低位夹到 16、高位夹到 48。
+        form.fields[idx].value = FieldValue::Number(5.0);
+        assert_eq!(form.apply(&config).doc_line_height, 16.0);
+        form.fields[idx].value = FieldValue::Number(96.0);
+        assert_eq!(form.apply(&config).doc_line_height, 48.0);
+        form.fields[idx].value = FieldValue::Number(24.0);
+        assert_eq!(form.apply(&config).doc_line_height, 24.0);
+
+        // 字号变大后下限跟随字号；字号先于行高写入 out。
+        let font_idx = form
+            .fields
+            .iter()
+            .position(|f| f.label == Key::SettingsDocFontSize)
+            .expect("正文字号字段存在");
+        form.fields[font_idx].value = FieldValue::Number(24.0);
+        form.fields[idx].value = FieldValue::Number(10.0);
+        assert_eq!(form.apply(&config).doc_line_height, 24.0);
+
+        // 未改动时保留配置原值（默认 22）。
+        assert_eq!(
+            SettingsForm::from_config(&Config::default())
+                .apply(&config)
+                .doc_line_height,
+            22.0
+        );
     }
 
     /// 界面语言：三档循环；apply 写回 Config（会话内不热切换，重启后生效）。

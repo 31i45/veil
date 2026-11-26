@@ -901,3 +901,17 @@ Get-FileHash target\release\veil.exe -Algorithm SHA256
 - 体积门禁余量按尺寸判定，不做逐字节回归；SHA 随重建变化，以本表为准。
 - 功能与限制：[accessibility-scope-and-limits.md](accessibility-scope-and-limits.md)。
 - UIA 实测：[evidence/ux/accesskit-uia-2026-11-26.md](evidence/ux/accesskit-uia-2026-11-26.md)。
+
+### 13.4 IME 锚点与用户反馈修复后的再称重（2026-11-26 追加）
+
+| 项 | 值 |
+|---|---|
+| 变更 | `ImeAnchor` 端口 + `imm32` 手写绑定（`crates/veil/src/platform/ime.rs`）；preedit 不透明底与强调色下划线；导出 CSS 去硬限高；任务框改同描边画法；无新增第三方 crate |
+| 产物 | `target\release\veil.exe` **14,363,648 B** |
+| 相较 §13.1 | **+1,024 B** |
+| 14 MiB 门禁 | 14,680,064 B |
+| 门禁余量 | **316,416 B**（309.0 KiB） |
+| SHA-256 | `1D0A11427C1CC8FD363F9C17B0FC8AC90FC46B1896E06D7BD30EC0AD3C30E475` |
+
+> `imm32` 为系统导入库，不增加 exe 体积；增量来自新增端口虚调用与绘制代码。
+

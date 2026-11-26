@@ -17,12 +17,15 @@
   - 模块：`buffer`、`callouts`、`history`、`link_safety`、`mermaid`、`range`、`session`、`slug`、`syntax`（block / inline / model）、`toc`
 - veil crate 中 **不存在** `core_strategy/` 模块；策略层完整收敛于 `veil-core`。
 
-策略层公开依赖 **仅限 std + 纯计算库**：`lapce-xi-rope`、`flate2`、`base64`、`serde`、`serde_json`。
-（扩展的策略层依赖候选：`pulldown-cmark`、`regex`、`latex-rust`、`pdf-writer`、`ttf-parser`、`subsetter`、`notify`、`resvg`——**注意**：`resvg` 同时被机制层使用；策略层只在 PDF 字体子集化时读 resvg 的 `usvg::Tree` 数据，不是光栅化）
+策略层公开依赖 **仅限 std + 纯计算库**，当前硬依赖精确为 **3 项**：`lapce-xi-rope`、`serde`、`serde_json`。
+（未启用的候选：`pulldown-cmark` 仅作为 dev-dependency 用于 CommonMark 一致性门禁，不进入生产依赖；`regex`、`latex-rust`、`pdf-writer`、`ttf-parser`、`subsetter`、`notify`、`resvg` 均为上层 crate 的依赖，策略层不引用）
 
 **禁止** GUI crate（`winit`、`cosmic-text`、`softbuffer`、`syntect` 在其渲染端）、异步运行时（`tokio`、`async-std`、`pollster`）、网络 IO、QuickJS。
 
-> 现行硬门禁见 `crates/veil-ui/tests/boundary_guard.rs`（`veil_core_dependencies_stay_minimal`、`veil_core_manifest_mentions_no_gui_or_async_crate`）。
+> 现行硬门禁见 `crates/veil-ui/tests/boundary_guard.rs`：
+> - `veil_core_dependencies_stay_minimal` — 白名单语义，出现未登记依赖即失败
+> - `allowed_core_dependencies_exclude_gui_and_async_crates` — 白名单自身不得收录 GUI/async crate
+> - `veil_core_manifest_mentions_no_gui_or_async_crate` — manifest 不得出现黑名单 crate 名
 
 ### 机制层 — veil-ui + veil-mermaid-offline + veil/platform
 - `crates/veil-ui/` — 整个 crate 及所有子模块
@@ -35,7 +38,7 @@
 
 **禁止** veil crate 的编排层类型（GUI 主循环、窗口事件、快捷键）。`veil/ui` 与 `veil-mermaid-offline` 的 Cargo.toml 不得 `path = "../veil"`。
 
-> 现行硬门禁见 `boundary_guard.rs` 中新增的 `veil_ui_does_not_depend_on_veil_crate` 测试。
+> 现行硬门禁见 `boundary_guard.rs`：`veil_ui_does_not_depend_on_veil_crate`、`veil_mermaid_offline_does_not_depend_on_veil_crate`、`veil_mermaid_offline_does_not_depend_on_veil_ui`（机制层 crate 之间不得反向依赖）。
 
 ### 编排层 — veil bin + 顶层协调
 - `crates/veil/src/main.rs` — 唯一发行产物 veil.exe 的启动 + wiring（默认含离线 Mermaid）
@@ -60,16 +63,36 @@
 ## 4. 关键 trait 边界
 
 - `veil_ui::MermaidRenderer` — 机制层对外暴露；编排层不感知内部实现（远程 vs 离线）
-- `veil_ui::LatexRenderer` — 同上（纯 Rust vs 外部 WebView2）
-- `veil_ui::SyntectHighlighter` — 语法高亮能力
-- `veil_ui::Ports` — 编排层传入的依赖集合；所有 UI 子系统通过它拿到策略层与机制层能力
+- `veil_ui::MathRenderer` — 同上（纯 Rust latex-rust 实现；替换面收敛为一个 trait 实现）
+- `veil_ui::Ports` — 依赖注入结构体（**不是 trait**），编排层用它把策略层与机制层能力传入 UI 子系统
+
+语法高亮没有对外 trait：`veil-ui` 的 `view::highlight` 在机制层内部直接使用 syntect，对编排层不可见。
 
 这些 trait 位于 `veil-ui` 顶层 `lib.rs` 的 `pub use` 区，属于 **编排 ↔ 机制** 的契约。任何新增渲染管线都必须走 trait，**不得** 在 `veil/bin` 中直接构造具体实现。
 
+> 硬门禁：`boundary_guard.rs` 的 `orchestration_layer_does_not_rasterize_svg_directly` 检查 `veil/src/lib.rs` 与 `veil/src/export.rs` 不出现 `resvg::` / `usvg::`。（`latex_rust` 不禁止：编排层是 `MathRenderer` 实现的构造方。）
+
 ## 5. 与既有架构守卫的关系
 
-- `crates/veil-ui/tests/boundary_guard.rs` 继续生效；本次扩展其检查范围，新增：
-  - `veil_ui_does_not_depend_on_veil_crate` — 机制层不得反向依赖编排层
+- `crates/veil-ui/tests/boundary_guard.rs` 为唯一编译期门禁，共 7 个测试：
+  1. `veil_core_dependencies_stay_minimal` — 策略层依赖白名单
+  2. `allowed_core_dependencies_exclude_gui_and_async_crates` — 白名单自检
+  3. `veil_core_manifest_mentions_no_gui_or_async_crate` — 策略层 GUI/async 黑名单
+  4. `veil_ui_does_not_depend_on_veil_crate` — 机制层不得反向依赖编排层
+  5. `veil_mermaid_offline_does_not_depend_on_veil_crate` — 同上（QuickJS crate）
+  6. `veil_mermaid_offline_does_not_depend_on_veil_ui` — 机制层横向不得反向依赖
+  7. `orchestration_layer_does_not_rasterize_svg_directly` — 编排层不得绕过 `MermaidRenderer` 直连光栅化
 - `veil-core` 顶部注释已声明"零 GUI、零异步运行时依赖"，与 `boundary_guard.rs` 互为表里。
 - 各 crate 顶部新增层级注释，使 `cargo doc` 与 `cargo metadata` 即可看出层级归属。
 - 未来新增 crate 必须先在本文档登记层级，再提交 `Cargo.toml`，避免边界从一开始就被破坏。
+
+## 6. 代码规模基线（2026-11-26）
+
+| Crate | 层级 | src 文件数 | src 行数 |
+|---|---|---|---|
+| veil-core | 策略 | 14 | 12,585 |
+| veil-ui | 机制 | 79 | 77,960 |
+| veil | 编排 + platform | 26 | 18,704 |
+| veil-mermaid-offline | 机制 | 2 | 2,339 |
+
+> 行数含各文件内联测试模块。该基线仅用于判断"代码量增长是否发生在正确层级"，不作为门禁。

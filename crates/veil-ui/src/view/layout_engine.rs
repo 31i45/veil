@@ -8,6 +8,13 @@ impl LayoutEngine {
             minimal,
         } = new_font_system();
         let (bg_tx, bg_rx) = crate::view::highlight_bg::spawn_background();
+        // 首帧前预热：syntect 的上下文正则在首次 parse_line 才编译（Rust 语法约
+        // 40 ms）。在窗口创建（纯 OS 调用）期间用后台线程预先编译常见围栏语言，
+        // 把这段成本移出首帧；首帧画完即停止（stop_syntax_prewarm），不占交互期 CPU。
+        // 单测里跳过：避免每个用例都额外编译一遍语法集、干扰时序断言。
+        if !cfg!(test) {
+            crate::view::highlight::prewarm_common_syntaxes();
+        }
         LayoutEngine {
             font_system,
             swash: SwashCache::new(),

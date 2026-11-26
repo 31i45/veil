@@ -99,6 +99,101 @@ pub(crate) fn lookup_syntax(lang: &str) -> Option<&'static str> {
     }
 }
 
+/// 首帧前预热：后台线程把常见围栏语言的语法正则预先编译好。
+///
+/// syntect 的语法集二进制装载很便宜（~1.5 ms），但每个上下文的正则要到首次
+/// `parse_line` 才编译：Rust 语法一次约 40 ms（fancy-regex），这笔开销原本
+/// 落在首帧的代码块布局上。这里按常见围栏语言顺序各解析一段代表性代码，
+/// 触发同一份 `'static` `SyntaxSet` 内的正则编译；主线程若仍撞上未编译的
+/// 上下文，只会等待剩余部分——终态与优化前一致（不少内容、不改配色、
+/// 不推迟 present）。
+const PREWARM_SAMPLE: &[(&str, &str)] = &[
+    (
+        "rust",
+        "//! doc comment\n// line comment\n/* block comment */\n#![allow(dead_code)]\n#[derive(Debug, Clone, PartialEq)]\npub struct S<'a, T: Clone> { pub f: &'a T, n: u32 }\npub enum E { A, B(u8), C { x: f32 } }\npub trait Tr { fn m(&self) -> Option<u8>; }\nimpl<'a, T: Clone> Tr for S<'a, T> {\n    fn m(&self) -> Option<u8> {\n        let v: Vec<u8> = vec![1, 2, 3];\n        match v.first() {\n            Some(x) if *x > 0 => Some(*x),\n            _ => None,\n        }\n    }\n}\nfn main() {\n    let s = \"escaped \\\"str\\\" \\n\";\n    let r = r#\"raw string\"#;\n    let c = 'x';\n    let n = 0xFF_u32 + 1_000.5e-3 as u32;\n    let f = |x: u32| -> u32 { x * 2 };\n    println!(\"{} {s} {r} {c} {n}\", f(1));\n}\n",
+    ),
+    (
+        "javascript",
+        "// comment\n/* block */\nimport { a } from \"./m\";\nclass C extends Object { constructor(x) { this.x = x; } async m() { return await a(1); } }\nconst obj = { a: 1, b: \"two\", c: `tpl ${1}` };\nexport function f(x) { return x > 0 ? obj.a : null; }\nconsole.log(42, /re+/g);\n",
+    ),
+    (
+        "python",
+        "import os\nfrom typing import Optional\n\n# comment\n'''docstring'''\nclass C:\n    def __init__(self, x: int = 0) -> None:\n        self.x = x\n\nasync def f(x: int) -> Optional[str]:\n    s = f\"v={x!r}\"\n    return [i for i in range(10) if i % 2]\n",
+    ),
+    (
+        "c",
+        "#include <stdio.h>\n// comment\nint main(void) { printf(\"%d\\n\", 42); return 0; }\n",
+    ),
+    (
+        "cpp",
+        "#include <string>\n// comment\nnamespace n { class C { public: std::string s; }; }\n",
+    ),
+    (
+        "go",
+        "package main\n\n// comment\nfunc main() { s := \"hi\"; println(s) }\n",
+    ),
+    (
+        "java",
+        "// comment\npublic class A { private int n = 42; public static void main(String[] a) {} }\n",
+    ),
+    ("json", "{\"a\": [1, true, null, \"s\"], \"b\": {\"c\": 2.5}}\n"),
+    ("yaml", "key: value\nlist:\n  - 1\n  - \"two\"\n# comment\n"),
+    ("html", "<div class=\"a\"><span>text</span></div>\n<!-- comment -->\n"),
+    (
+        "css",
+        "/* comment */\nbody > .a { color: red; margin: 0 auto; }\n",
+    ),
+    ("sh", "#!/bin/sh\nfor f in *.txt; do echo \"$f\"; done\n"),
+    ("sql", "SELECT id, name FROM users WHERE id = 1; -- comment\n"),
+];
+
+static PREWARM_STARTED: OnceLock<()> = OnceLock::new();
+static PREWARM_STOP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// 启动后台预热线程（每进程至多一次；重复调用直接返回）。
+pub(crate) fn prewarm_common_syntaxes() {
+    if PREWARM_STARTED.set(()).is_err() {
+        return;
+    }
+    let spawned = std::thread::Builder::new()
+        .name("veil-syntax-prewarm".to_string())
+        .spawn(|| {
+            for &(lang, sample) in PREWARM_SAMPLE {
+                if PREWARM_STOP.load(std::sync::atomic::Ordering::Relaxed) {
+                    return;
+                }
+                warm_syntax(lang, sample);
+            }
+        });
+    // 线程起不来就退化为「首次 parse 时同步编译」（原行为），不影响正确性。
+    let _ = spawned;
+}
+
+/// 首帧产出后停止预热（幂等、无锁）：剩余语言的编译不进入用户交互期。
+pub(crate) fn stop_syntax_prewarm() {
+    PREWARM_STOP.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// 解析一小段样例，触发该语言上下文正则的编译（结果丢弃，只为编译副作用）。
+fn warm_syntax(lang: &str, sample: &str) {
+    let Some(name) = lookup_syntax(lang) else {
+        return;
+    };
+    let ss = syntaxes();
+    let Some(syntax) = ss.find_syntax_by_name(name) else {
+        return;
+    };
+    let mut state = ParseState::new(syntax);
+    let mut stack = ScopeStack::new();
+    for line in sample.split_inclusive('\n') {
+        let text = line.strip_suffix('\n').unwrap_or(line);
+        let ops = state.parse_line(text, ss).unwrap_or_default();
+        for (_, op) in &ops {
+            let _ = stack.apply(op);
+        }
+    }
+}
+
 /// 围栏 info string → 语言标签文本：已注册语言用规范展示名，未知语言保留原文；
 /// 空 info string 返回 `None`（调用方隐藏标签）。
 pub fn language_label(info: &str) -> Option<String> {
@@ -596,6 +691,19 @@ mod tests {
         assert!(!got.is_empty(), "编辑后应走同步 parse 产出 spans");
         // bg_spans 旧条目已被比对失败自动移除
         assert!(!h.bg_spans.contains_key(&9), "编辑后旧 bg_spans 必须被丢弃");
+    }
+
+    #[test]
+    fn warm_syntax_does_not_change_highlight_result() {
+        let body = "// hi\nlet x = \"a\";\nfn f() {}\n";
+        let before = Highlighter::default().highlight(1, "rust", body);
+        warm_syntax("rust", PREWARM_SAMPLE[0].1);
+        let after = Highlighter::default().highlight(1, "rust", body);
+        assert_eq!(before, after, "预热只改变正则的编译时机，不改变 token 结果");
+        // 未注册语言静默跳过，不 panic。
+        warm_syntax("brainfuck", "++++");
+        stop_syntax_prewarm(); // 幂等
+        stop_syntax_prewarm();
     }
 
     #[test]

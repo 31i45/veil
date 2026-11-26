@@ -1218,8 +1218,11 @@ impl App {
         // 编辑路径已在 after_edit 末尾重算过，击键后的首帧直接跳过整篇累计。
         // 估算高度偏小可能让视口底部露出未排版块，故补排后最多再收敛一轮。
         self.ensure_layouts_visible();
+        crate::diag::perf_stage("render-ensure-layouts");
         self.ensure_math_visible();
+        crate::diag::perf_stage("render-ensure-math");
         self.ensure_tables_visible();
+        crate::diag::perf_stage("render-ensure-tables");
         // 估算高度欠估的块（典型：从未排版的图片块）在重算时展开为真实高度，
         // 文档变高会让原本可见的光标掉到视口下方。此处先记录重算前的可见性，
         // 收敛后仅在「可见 → 不可见」时把光标拉回，不做无条件每帧跟随，
@@ -1238,6 +1241,7 @@ impl App {
         if caret_visible_before && !self.caret_in_viewport() {
             self.scroll_to_caret();
         }
+        crate::diag::perf_stage("render-recompute");
         let base = self.base_key();
         let caret = self.effective_caret();
         // 帧缓冲跨帧复用：仅尺寸变化才重新分配（每帧只做一次底色填充）
@@ -1685,6 +1689,7 @@ impl App {
                 oversize.push((sy, l.height, l.full_len));
             }
         }
+        crate::diag::perf_stage("render-paint");
         // 专注模式（阶段 1）：非光标块整体压暗（背景色半透明覆盖，内容与装饰一并变淡）。
         // 只读视觉，不动真值与派生缓存；当前块保持原样，光标随后绘制仍清晰。打印不压暗。
         if self.window_state.print.is_none() && self.ui_state.writing.focus {
@@ -1792,6 +1797,8 @@ impl App {
         self.window_state.last_painted_caret = Some(self.editor.caret());
         // 归还缓冲供下一帧复用；返回 &mut Frame 供产品层 present() 与测试断言
         self.window_state.frame = Some(frame);
+        // 首帧已产出：停止后台语法预热，剩余语言的编译 CPU 不再进入交互期。
+        crate::view::highlight::stop_syntax_prewarm();
         self.window_state.frame.as_mut().unwrap()
     }
 
@@ -1829,6 +1836,7 @@ impl App {
         let started = std::time::Instant::now();
         let _ = self.render();
         let _ = self.present();
+        crate::diag::perf_stage("render-present");
         crate::perf::frame(started.elapsed());
     }
 }

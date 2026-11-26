@@ -1135,18 +1135,30 @@ impl App {
         let fg = self.input_state.theme.fg;
         let caret_color = [fg[0], fg[1], fg[2], 255];
         if let Some(pre) = self.editor.preedit() {
-            // preedit：排版小串 → 位图贴在光标处 + 下划线；光标移至组合串内光标位
-            // IME 组合期间强制显示光标（tick 也会保持 cursor_visible = true 兜底）。
+            // preedit：排版小串 → 先铺不透明底色再贴位图，避免组合串与下方正文
+            // 逐字混叠（微软五笔/拼音在正文中间组字时最明显）；下划线用强调色，
+            // 与正文文字区分。光标移到组合串内光标位。
             let text = pre.text.clone();
             let l = self.engine.layout_preedit(&text);
             let (px, w, h) = self.engine.rasterize(&l, fg);
-            frame.blit(&px, w, h, cx as i32, (cy + ch - h as f32).max(0.0) as i32);
+            let top = (cy + ch - h as f32).max(0.0);
+            let bg = crate::tokens::palette::surface_base(&self.input_state.theme);
             frame.fill_rect(
                 cx as i32,
-                (cy + ch) as i32 - 1,
+                top as i32,
                 w,
-                1,
-                [fg[0], fg[1], fg[2], 255],
+                h,
+                [bg[0], bg[1], bg[2], 255],
+            );
+            frame.blit(&px, w, h, cx as i32, top as i32);
+            let underline = (self.input_state.scale * 2.0).round().max(2.0) as u32;
+            let accent = self.input_state.theme.accent;
+            frame.fill_rect(
+                cx as i32,
+                (cy + ch) as i32 - underline as i32,
+                w,
+                underline,
+                [accent[0], accent[1], accent[2], 255],
             );
             let inner = pre.cursor.map(|(s, _)| s).unwrap_or(0);
             let (ix, _, _) = self.engine.caret_xy(&l, inner);

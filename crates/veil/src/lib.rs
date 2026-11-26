@@ -246,6 +246,7 @@ pub fn run() {
             persist_env: platform::persist_env(),
             print: platform::print(),
             url_opener: platform::url_opener(),
+            ime_anchor: platform::ime_anchor(),
         },
         // 非首窗创建失败（如第二窗口）：发布构建无控制台，必须弹可见错误框。
         platform::show_window_create_error,

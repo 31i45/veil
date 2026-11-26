@@ -9,6 +9,8 @@ use std::time::{Duration, Instant};
 
 use softbuffer::{Context, Surface};
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
+#[cfg(windows)]
+use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use winit::event::{ElementState, Ime, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::ActiveEventLoop;
 use winit::window::{Icon, Window, WindowId};
@@ -193,6 +195,36 @@ pub trait UrlOpener {
     fn open_url(&mut self, url: &str) -> Result<(), String>;
 }
 
+/// IME 组合窗/候选窗锚点纠正：实现由产品层（veil）注入，纯 UI 层不写 Win32。
+///
+/// 为什么需要：winit 0.30 把 `COMPOSITIONFORM.ptCurrentPos` 写在光标矩形底部
+/// （`y + height`），候选窗却用顶部；两者不一致会让系统组合窗低一行。
+/// `x/y` 是光标区域左上角，`w/h` 是区域尺寸（物理像素），与 `set_ime_cursor_area` 同语义。
+pub trait ImeAnchor {
+    fn correct(&mut self, hwnd: isize, x: f64, y: f64, w: f64, h: f64);
+}
+
+/// 默认空实现：headless 测试与不关心 IME 的平台无需改动。
+pub struct NoopImeAnchor;
+
+impl ImeAnchor for NoopImeAnchor {
+    fn correct(&mut self, _hwnd: isize, _x: f64, _y: f64, _w: f64, _h: f64) {}
+}
+
+/// 取窗口原生句柄（Win32 HWND）；非 Windows 或句柄不可用时返回 None。
+#[cfg(windows)]
+fn window_hwnd(w: &Window) -> Option<isize> {
+    match w.window_handle().ok()?.as_raw() {
+        RawWindowHandle::Win32(h) => Some(h.hwnd.get()),
+        _ => None,
+    }
+}
+
+#[cfg(not(windows))]
+fn window_hwnd(_w: &Window) -> Option<isize> {
+    None
+}
+
 /// 链接协议白名单：只放行 http/https/mailto/tel（大小写不敏感，允许前导空白）。
 /// 为什么：链接文本来自文档内容（不可信输入），相对路径、`file:`、`javascript:` 等
 /// 一旦交给系统 shell 就是任意本地程序/脚本执行入口，故一律拒绝。
@@ -345,6 +377,8 @@ pub struct Ports {
     pub persist_env: PersistEnv,
     pub print: Box<dyn Print>,
     pub url_opener: Box<dyn UrlOpener>,
+    /// IME 锚点纠正（Windows 产品层注入；测试用空实现）。
+    pub ime_anchor: Box<dyn ImeAnchor>,
 }
 
 pub(crate) enum ConfigSave {
@@ -905,6 +939,7 @@ pub(crate) struct AppPorts {
     pub(crate) snapshot: Box<dyn SnapshotStore>,
     pub(crate) print: Box<dyn Print>,
     pub(crate) url_opener: Box<dyn UrlOpener>,
+    pub(crate) ime_anchor: Box<dyn ImeAnchor>,
 }
 
 /// 启动文档决议（0b）：resume 模式下按「崩溃恢复 > 会话恢复 > 传入文档」重建。
@@ -1084,6 +1119,7 @@ impl App {
             snapshot,
             print: ports.print,
             url_opener: ports.url_opener,
+            ime_anchor: ports.ime_anchor,
         };
         let start = startup_doc(&mut ports, doc);
         crate::diag::perf_stage("app-startup-doc");
@@ -1696,13 +1732,25 @@ impl App {
         // 测试 hook：无论有没有窗口都记录坐标，供锚点正确性断言。
         #[cfg(test)]
         self.window_state.ime_area_calls.push((x, y, h));
-        // 生产路径：只有有窗口才下发。
+        // 生产路径：只有有窗口才向 winit 下发；锚点纠正端口始终收到调用
+        // （headless 无窗口时 hwnd = 0，产品实现直接返回），便于单测断言接线。
+        let hwnd = self
+            .window_state
+            .window
+            .as_ref()
+            .and_then(|w| window_hwnd(w))
+            .unwrap_or(0);
         if let Some(w) = self.window_state.window.clone() {
             w.set_ime_cursor_area(
                 PhysicalPosition::new(x as f64, y as f64),
                 PhysicalSize::new(2.0, h as f64),
             );
         }
+        // winit 把组合窗锚点写在光标矩形底部（y + height），候选窗却用顶部；
+        // 产品层在这里用 Imm* 把两者都拉回左上角。
+        self.ports
+            .ime_anchor
+            .correct(hwnd, x as f64, y as f64, 2.0, h as f64);
     }
 
     /// 打开/关闭模态时同步 IME：模态独占键盘，若 IME 仍启用，

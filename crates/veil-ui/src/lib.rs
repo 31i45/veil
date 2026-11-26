@@ -60,8 +60,8 @@ extern crate self as veil_ui;
 
 pub use app::{
     content_hash, format_unix_ms_utc, normalize_link_url, url_is_openable, Clipboard, Clock, Doc,
-    Exporter, FileDialog, FileEvent, FileStore, FileWatcher, PersistEnv, Ports, RecoveryStore,
-    SessionStore, SnapshotMeta, SnapshotStore, StartupError, UrlOpener,
+    Exporter, FileDialog, FileEvent, FileStore, FileWatcher, ImeAnchor, NoopImeAnchor, PersistEnv,
+    Ports, RecoveryStore, SessionStore, SnapshotMeta, SnapshotStore, StartupError, UrlOpener,
 };
 pub use chrome::path_label;
 pub use docio::decode;

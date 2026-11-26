@@ -1146,7 +1146,7 @@ fn settings_source_plain_lines_writes_back_and_persists() {
     let cfg = MemConfig::default();
     let saves = cfg.saves.clone();
     let mut a = app_theme(Box::new(cfg), Rc::new(Cell::new(Some(false))));
-    assert!(!a.config.source_plain_lines);
+    assert!(a.config.source_plain_lines, "默认开启纯文本行视图");
 
     a.open_settings();
     {
@@ -1160,16 +1160,16 @@ fn settings_source_plain_lines_writes_back_and_persists() {
         assert!(matches!(s.form.fields[idx].kind, FieldKind::Toggle));
         assert!(matches!(
             s.form.fields[idx].value,
-            FieldValue::Toggle(false)
+            FieldValue::Toggle(true)
         ));
-        s.form.fields[idx].value = FieldValue::Toggle(true);
+        s.form.fields[idx].value = FieldValue::Toggle(false);
     }
     a.resolve_settings(BTN_OK);
 
-    assert!(a.config.source_plain_lines, "OK 后必须写回 Config");
+    assert!(!a.config.source_plain_lines, "OK 后必须写回 Config");
     let saved = saves.borrow().last().cloned().expect("OK 必须写盘");
     let parsed = crate::theme::decode_config(saved.as_bytes()).expect("写盘内容可解析");
-    assert!(parsed.config.source_plain_lines, "开关必须落盘");
+    assert!(!parsed.config.source_plain_lines, "开关必须落盘");
 }
 
 #[test]
@@ -1264,8 +1264,7 @@ fn ime_disabled_clears_active_preedit() {
 /// 候选窗锚点正确性（CRTL）：`set_ime_area` 每次被调都记录坐标，
 /// 断言记录坐标与 `caret_screen()` 一致；换行后第二次调用坐标确实更新了。
 #[test]
-fn ime_candidate_window_anchor_updates_after_linebreak() {
-    use winit::event::{Ime, WindowEvent};
+fn ime_candidate_window_anchor_updates_after_linebreak() {    use winit::event::{Ime, WindowEvent};
     let store = MemStore::default();
     let mut a = app("第一行", None, false, &store);
     a.ensure_layouts_all();
@@ -1333,6 +1332,79 @@ fn ime_candidate_window_anchor_updates_after_linebreak() {
         "换行后锚点 y 必须大于 commit 前的 y（光标已下移）"
     );
     assert_eq!(doc_text(&a), "第一行中\n", "Enter 必须产生段尾换行");
+}
+
+/// IME 锚点纠正端口：headless 无窗口时 hwnd = 0，但坐标必须与 caret 行顶一致，
+/// 且高度是行高（组合窗纠正依赖这组左上角 + 尺寸，不允许再传底部坐标）。
+#[test]
+fn ime_anchor_port_receives_caret_top_left() {
+    struct Probe(Rc<RefCell<Vec<(isize, f64, f64, f64, f64)>>>);
+    impl ImeAnchor for Probe {
+        fn correct(&mut self, hwnd: isize, x: f64, y: f64, w: f64, h: f64) {
+            self.0.borrow_mut().push((hwnd, x, y, w, h));
+        }
+    }
+
+    let store = MemStore::default();
+    let log = Rc::new(RefCell::new(Vec::new()));
+    let mut p = ports(&store, no_url());
+    p.ime_anchor = Box::new(Probe(log.clone()));
+    let doc = Doc {
+        text: "第一行\n第二行".into(),
+        path: None,
+        bom: false,
+        resume: false,
+        open_error: None,
+    };
+    let mut a = App::new(doc, p);
+    a.ensure_layouts_all();
+    a.perform_action(Action::Doc(Intent::MoveDocEnd));
+    a.after_edit(Vec::new());
+    a.scroll_to_caret();
+    a.ensure_layouts_all();
+
+    log.borrow_mut().clear();
+    a.set_ime_area();
+    let (hwnd, x, y, w, h) = log
+        .borrow()
+        .last()
+        .copied()
+        .expect("锚点纠正端口必须被调用");
+    let caret = a.caret_screen();
+    let (cx, cy, ch) = (caret.0 as f64, caret.1 as f64, caret.2 as f64);
+    assert_eq!(hwnd, 0, "headless 无窗口时传入 0，由产品实现跳过");
+    assert!(
+        (x - cx).abs() < 0.5 && (y - cy).abs() < 0.5,
+        "锚点必须是光标区域左上角: port={x},{y} vs caret={caret:?}"
+    );
+    assert!(
+        y + h <= cy + ch + 0.5,
+        "锚点高度只能到该行行底，不能是行底再加一行: port_y={y} h={h}"
+    );
+    assert_eq!(w, 2.0, "宽度沿用 winit 调用处的 2px 插入点宽度");
+    assert!((h - ch).abs() < 0.5, "高度必须是行高");
+}
+
+/// 组合串下划线用强调色（旧实现用正文前景色，和文字混在一起难以分辨）。
+/// 同时锁定组合区先铺不透明底色：下划线所在行必须是强调色而不是正文像素。
+#[test]
+fn ime_preedit_draws_accent_underline() {
+    use winit::event::{Ime, WindowEvent};
+    let store = MemStore::default();
+    let mut a = app("abc\n", None, false, &store);
+    a.ensure_layouts_all();
+    assert!(a.editor.set_caret(0));
+    a.handle_window_event(WindowEvent::Ime(Ime::Preedit("zh".into(), Some((0, 2)))));
+    a.ensure_layouts_all();
+    let (cx, cy, ch) = a.caret_screen();
+    let accent = a.input_state.theme.accent;
+    let frame = a.render();
+    let px = frame.get((cx + 1.0) as u32, (cy + ch - 2.0) as u32);
+    assert_eq!(
+        [px[0], px[1], px[2]],
+        accent,
+        "组合串下划线必须使用主题强调色"
+    );
 }
 
 /// 移动光标后 preedit cursor 同步更新——编辑器 preedit 是 (text, cursor) 元组，

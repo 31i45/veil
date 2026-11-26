@@ -18,6 +18,8 @@ mod pdf_layout; // Wave 4：Markdown → PDF 版面（纯逻辑，可单测）
 #[cfg(windows)]
 mod pdf_media; // Wave 4：图片（WIC）/ 公式（latex-rust）→ RGB
 #[cfg(windows)]
+mod ime;
+#[cfg(windows)]
 mod print;
 #[cfg(windows)]
 mod shell;
@@ -97,6 +99,18 @@ pub fn url_opener() -> Box<dyn veil_ui::UrlOpener> {
     #[cfg(not(windows))]
     {
         Box::new(NoUrlOpener)
+    }
+}
+
+/// IME 锚点纠正装配：Windows 走 Imm32；其他平台为空实现。
+pub fn ime_anchor() -> Box<dyn veil_ui::ImeAnchor> {
+    #[cfg(windows)]
+    {
+        Box::new(ime::WinImeAnchor)
+    }
+    #[cfg(not(windows))]
+    {
+        Box::new(veil_ui::NoopImeAnchor)
     }
 }
 

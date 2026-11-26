@@ -806,3 +806,55 @@ cargo tree -e no-dev -p veil --prefix none           # 唯一包计数
 ```
 
 证据引用：`docs/review/evidence/perf/current-head-2026-11-26.md`（体积/SHA/门禁）、`docs/review/evidence/perf/perf-gate-2026-11-26.md`（自动门禁与固定基线）、`README.md:208`（14 MiB 门禁）。本节的 v2 对照数字来自 §3.1，未重新生成。
+
+---
+
+## 12. Phase 4 决策回写（2026-11-26）
+
+> 本节追加 Phase 4（Task 9 / 10 / 11）的决策，供后续集成与体积放行引用；§1–§11 不改写。基线仍是 Task 8 的 `14,170,112 B / 14 MiB 门禁 / 509,952 B 余量`。
+
+### 12.1 PDF 断行子模块：**NO-GO**，保留自定义断行
+
+| 项 | 结论 | 依据 |
+|---|---|---|
+| 候选 `unicode-linebreak` 0.1.5 | **NO-GO** | 8 组语料共 118 行，7 组逐行完全一致；仅 `mixed` 2 行差异（当前 28.82em 止于词边界，候选 42.82em 挤满），候选无质量净收益 |
+| 行为契约 | **不通过** | 候选只接受 `&str`，丢失 `LItem`（链接开闭/图片盒/样式）与 `last_space` 偏好；替代需重写行装配并重跑 Task 7 的 52 项回归 |
+| 体积 / 许可证 / 离线 / 无 webview | 通过但无意义 | 仅 dev-dependency，不进入 release；Apache-2.0、0 传递依赖；该 crate 已由 `cosmic-text` 进入生产依赖图 |
+| `icu_segmenter` 2.4.0 | **不引入** | 数据 crate `icu_segmenter_data` 压缩 3,141,236 B（≈3.14 MB），当前余量仅 509,952 B；至少 7 个必需 ICU4X crate；Unicode-3.0 兼容但需同步 notice/SBOM |
+
+- 已知缺口不因换候选而消失：`—` 在 UAX #14 属 B2（前后可断），当前与候选都会把它放到行首；屏幕靠 WJ 禁止，PDF 侧仍待裁决。
+- 处置：不修改生产代码；`pdf_layout.rs` 仅新增 `#[cfg(test)]` spike 挂载；保留 dev-dependency 与 2 个可复现测试（`cargo test -p veil pdf_linebreak_spike -- --nocapture`）。release 产物仍为 **14,170,112 B**；Task 9 重建的 SHA-256 与 Task 8 不同（PE 时间戳等构建元数据），门禁按尺寸判定，不做逐字节回归。
+- 再评估触发（任一）：① 需为泰/老/高棉/缅等无空格语言做词边界断行；② 决定用 UAX 断点统一屏幕与 PDF 的单一真值层；③ 需处理超过 2 个连续闭符号的避头或 UAX 数值语境；④ `cosmic-text` 升级导致屏幕 UAX 表变化、需要独立断行 oracle。
+- 证据：`docs/review/evidence/spike/pdf-linebreak.md` §3/§6/§7。
+
+### 12.2 `windows` / `image`：只观察，不引入
+
+| 组件 | 当前事实 | 决策 | 再评估触发（摘要） |
+|---|---|---|---|
+| `windows` / `windows-registry` | 依赖图中**没有** `windows` 包；生产手写 Win32/COM FFI：79 条 `extern "system"`、16 个 COM 槽位（`windows.rs` 9 + `wic.rs` 7）；`windows-sys` 0.52/0.59/0.61.2 仅为传递的原始绑定 | **不引入，只观察** | FFI 面积继续增长（>约 100 个 extern 或第 3 个 COM 接口族）；出现可归因于 vtable/`repr(C)`/生命周期的崩溃或 UB；需要成批新 API（UIA、DWM 扩展、Shell 扩展等）；Phase 5 AccessKit 把 `windows 0.62` 带入构建；需要跨版本/架构的 ABI 审计证据 |
+| `image` | `image` 0.25.10 **已由 `arboard 3.7.0` 传递引入**，但仅启用 `bmp` + `png` feature；PNG 走 `png` 0.18.1，非 PNG 走系统 WIC（JPEG/BMP/GIF/TIFF 由系统 codec 覆盖，WebP 依赖机器已装 codec；只取第 0 帧，上限 1 亿像素） | **不引入新 feature，只观察** | 产品要求不依赖系统 codec 的多格式确定性解码；WebP/AVIF/HEIC 在无 codec 机器打不开，或需要 GIF 动画；WIC 的 EXIF/颜色/alpha 缺陷无法在参数层修复；导出格式扩展 |
+
+- **订正**：此前的“仅 PNG 解码”只对**纯 Rust 路径**成立；非 PNG 实际已由系统 WIC 覆盖。`image` 的收益不是“从 1 种格式到 N 种”，而是把已支持的格式从系统 codec 换成进程内确定性解码。
+- 体积余量仅 509,952 B；任何替换先按六道门做独立 spike 称重，不直接进生产。
+- 证据：`docs/review/jobs-lens-observation-windows-image.md` §1/§2.3/§3.5/§4.3。
+
+### 12.3 B 类保留理由（Phase 4 定稿）
+
+| 项 | 决策 | 保留理由（摘要） |
+|---|---|---|
+| `quick_open` 排序 → `fuzzy-matcher` | **Keep** | 手写排序质量更高（`config` precision@10 5/10 vs 2/10），ADR-014；+24,576–92,160 B 无质量回报 |
+| `html.rs` → `html2md` | **Keep** | **GPL-3.0+** 许可证 + `panic=abort` 不兼容；+2,291,712 B 使余量变为 **−1,781,760 B** |
+| `theme` 读取 → `toml_edit` | **Keep** | 写回已用 `toml_edit`；整体替换会让非法值/重复键/旧 `[theme]` 段 3 条容错语义反转，未获产品批准 |
+| `i18n` → `fluent` | **Keep** | 单语言纯插值，无复数/日期需求；+224,256 B、24 包无收益 |
+| 字面搜索 → `regex` 替换 | **Keep** | 字面 `memchr` 路径仍是默认需求；`regex 1.13.2` 已作为可选正则模式直接链接（`README.md:108`），不是替换 |
+| `link_safety` → `url` | **Keep** | `url` 只覆盖 scheme 语法，实体/百分号去混淆与白名单仍须自留，安全判定反而更弱；+221,696 B |
+| `slug` → `slug` | **Keep** | deunicode 音译会把中文标题改成拼音，改变所有既有锚点身份；+6,144 B 但净收益为负 |
+| `cli` → `clap` | **Keep** | 仅 `--new-window`、`--`、单位位置参数；+293,376 B、16 包属过度 |
+| `callouts` → `serde_json` | **已完成（B-1 Done）** | 已删除手写 parser，补齐代理对、标准转义与可定位错误；保留 `validate` 薄封装 |
+
+- 体积口径仍以 §11 的 509,952 B 余量为分母；边际值沿用 v2 独立探针，本 HEAD 未复跑。B-2 是唯一超门禁项，B-9/B-7 替换后余量分别降至 216,576 B / 288,256 B，均属成本项而非首要否决理由。
+
+### 12.4 与 follow-ups 的一致性
+
+- **D3**：当前版本仍“不引入 AccessKit、不建 UIA 树”；本 program `converge-veil-under-jobs-lens` 的 **Phase 5** 会延后接入最小 chrome/菜单/模态语义树与 Narrator 流程，且不宣称完整屏幕阅读器兼容。两者不矛盾：Phase 1–4 不提前引入，Phase 5 接入前按当前 HEAD 重新称重。
+- **4.1** 已回写为 **NO-GO**；**4.2 / 4.3** 已标记观察备忘录完成、不引入（含 `image` 由 `arboard`/WIC 覆盖的订正）；**4.4 / 4.5** 保持已完成/已记录。详见 `.trae/specs/evaluate-veil-through-jobs-lens/follow-ups.md`（该目录被 `.gitignore` 忽略，不入库）。

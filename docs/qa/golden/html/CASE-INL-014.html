@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>veil</title>
+<style>
+body{max-width:44em;margin:2em auto;padding:0 1em;font:16px/1.6 system-ui,sans-serif;background:#ffffff;color:#1e1e1e;overflow-wrap:anywhere;word-break:break-word}
+a{color:#2b6cb0}
+code,pre{background:#f5f5f5;border:1px solid #dddddd;font-family:Consolas,Menlo,monospace}
+code{padding:.1em .3em}
+pre{padding:.8em;overflow-x:auto}
+pre code{padding:0;border:none}
+kbd{border:1px solid #dddddd;border-radius:3px;padding:.05em .35em;font-size:.9em;font-weight:600;background:#f5f5f5;box-shadow:0 1px 0 #dddddd}
+sub,sup{font-size:.75em;line-height:0}
+sub{vertical-align:-0.25em}
+sup{vertical-align:0.5em}
+mark{background:#fff799;color:inherit;padding:0 .1em;border-radius:2px}
+abbr[title]{text-decoration:underline dotted;cursor:help}
+details{margin:.8em 0;padding:.2em .6em;border-left:3px solid #dddddd}
+summary{cursor:pointer;font-weight:600}
+details[open] summary{margin-bottom:.4em}
+img{max-width:100%;height:auto}
+figure{margin:1em 0;text-align:left}
+figure.img-center{text-align:center}
+figure.img-right{text-align:right}
+figcaption{margin-top:.4em;color:#666666;font-size:.9em;overflow-wrap:anywhere;word-break:break-word}
+td img,th img{max-height:2.4em}
+blockquote{border-left:4px solid #dddddd;margin-left:0;padding-left:1em;color:#666666}
+table{border-collapse:collapse}
+th,td{border:1px solid #dddddd;padding:.4em .6em}
+hr{border:none;border-top:1px solid #dddddd}
+div.math{text-align:center;margin:1em 0}
+span.math-inline{display:inline-block;vertical-align:middle;line-height:0;max-width:100%}
+span.math-inline svg{display:block;max-width:100%;height:auto}
+pre.math-source{color:#a00;background:#fdf5f5}
+.fnref a{text-decoration:none}
+.footnotes{border-top:1px solid #dddddd;margin-top:2em;padding-top:.5em;color:#666666;font-size:.9em}
+</style>
+</head>
+<body>
+<p>质能方程 <span class="math-inline"><svg xmlns="http://www.w3.org/2000/svg" width="43.000266666666666666666666pt" height="10.1004pt" viewBox="-0.156 0.0 43.000266666666666666666666 10.1004"><g fill="currentColor"><path d="M 560.0 186.0 L 528.0 186.0 L 528.0 185.0 C 464.0 65.0 450.0 38.0 296.0 39.0 L 175.0 39.0 L 232.0 320.0 L 342.0 320.0 C 434.0 320.0 452.0 309.0 436.0 226.0 L 467.0 226.0 L 514.0 458.0 L 482.0 458.0 C 466.0 377.0 442.0 358.0 350.0 358.0 L 239.0 358.0 L 293.0 618.0 L 432.0 618.0 C 555.0 618.0 577.0 593.0 572.0 493.0 L 603.0 493.0 L 630.0 657.0 L 118.0 657.0 L 112.0 627.0 C 194.0 627.0 204.0 611.0 188.0 535.0 L 100.0 112.0 C 86.0 42.0 62.0 30.0 -7.0 30.0 L -13.0 0.0 L 506.0 0.0 Z" transform="translate(0.0 9.9564) scale(0.012 -0.012)"/><path d="M 658.0 327.0 L 658.0 395.0 L 62.0 395.0 L 62.0 327.0 Z M 658.0 123.0 L 658.0 190.0 L 62.0 190.0 L 62.0 123.0 Z" transform="translate(11.061333333333333333333333 9.9564) scale(0.012 -0.012)"/><path d="M 403.0 0.0 L 435.0 138.0 C 472.0 228.0 587.0 407.0 649.0 407.0 C 672.0 407.0 679.0 390.0 679.0 367.0 C 679.0 346.0 670.0 308.0 663.0 282.0 L 612.0 88.0 C 611.0 83.0 607.0 65.0 607.0 49.0 C 607.0 19.0 622.0 -10.0 673.0 -10.0 C 744.0 -10.0 784.0 60.0 810.0 97.0 L 790.0 112.0 C 774.0 93.0 750.0 60.0 715.0 60.0 C 702.0 60.0 696.0 68.0 696.0 79.0 C 696.0 91.0 699.0 103.0 699.0 103.0 L 754.0 334.0 C 757.0 348.0 764.0 382.0 764.0 408.0 C 764.0 444.0 750.0 479.0 700.0 479.0 C 596.0 479.0 514.0 346.0 471.0 270.0 L 463.0 270.0 L 480.0 334.0 C 481.0 339.0 489.0 379.0 489.0 408.0 C 489.0 444.0 476.0 479.0 426.0 479.0 C 312.0 479.0 227.0 338.0 185.0 259.0 L 177.0 259.0 L 227.0 476.0 L 204.0 476.0 L 66.0 465.0 L 66.0 438.0 C 66.0 438.0 85.0 440.0 98.0 440.0 C 122.0 440.0 130.0 430.0 130.0 413.0 C 130.0 398.0 127.0 380.0 127.0 380.0 L 47.0 0.0 L 129.0 0.0 L 160.0 137.0 C 210.0 250.0 309.0 407.0 375.0 407.0 C 398.0 407.0 405.0 390.0 405.0 367.0 C 405.0 351.0 400.0 328.0 399.0 325.0 C 375.0 215.0 349.0 107.0 320.0 0.0 Z" transform="translate(23.034666666666666666666666 9.9564) scale(0.012 -0.012)"/><path d="M 358.0 123.0 C 327.0 85.0 288.0 57.0 219.0 57.0 C 161.0 57.0 109.0 77.0 109.0 184.0 C 109.0 300.0 170.0 446.0 280.0 446.0 C 312.0 446.0 329.0 434.0 329.0 419.0 C 329.0 403.0 310.0 375.0 310.0 349.0 C 310.0 327.0 324.0 314.0 348.0 314.0 C 385.0 314.0 404.0 346.0 404.0 386.0 C 404.0 451.0 353.0 479.0 290.0 479.0 C 146.0 479.0 26.0 335.0 26.0 169.0 C 26.0 68.0 71.0 -12.0 179.0 -12.0 C 269.0 -12.0 334.0 44.0 375.0 108.0 Z" transform="translate(32.994666666666666666666666 9.9564) scale(0.012 -0.012)"/><path d="M 489.0 174.0 L 454.0 174.0 C 428.0 109.0 416.0 87.0 359.0 87.0 L 229.0 87.0 L 151.0 83.0 L 151.0 90.0 L 276.0 211.0 C 387.0 320.0 457.0 393.0 457.0 491.0 C 457.0 604.0 372.0 671.0 253.0 671.0 C 150.0 671.0 79.0 614.0 46.0 521.0 L 73.0 508.0 C 110.0 573.0 156.0 600.0 228.0 600.0 C 306.0 600.0 352.0 549.0 352.0 478.0 C 352.0 365.0 299.0 305.0 187.0 193.0 L 45.0 49.0 L 45.0 0.0 L 455.0 0.0 Z" transform="translate(37.962666666666666666666666 5.6364) scale(0.0084 -0.0084)"/></g></svg></span> 很著名。</p>
+</body>
+</html>

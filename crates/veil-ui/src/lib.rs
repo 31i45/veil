@@ -38,6 +38,9 @@ mod paint_overlay;
 mod paint_table;
 mod perf;
 mod print;
+// T5 语料 harness 专用只读门面（headless App 装配）；不参与产品路径。
+#[doc(hidden)]
+pub mod qa;
 mod shell;
 mod stats;
 mod theme;

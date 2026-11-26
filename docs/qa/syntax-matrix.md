@@ -37,6 +37,12 @@
 
 未写该字段时按 LF + 结尾换行处理。
 
+### 图片夹具
+
+图片类用例（`IMG` 全组、`TBL-007/012/013`、`EDGE-013/014`）由 harness 在临时目录写入真实夹具，并以 `base_dir=Some(临时目录)` 调用导出：`a.png`（1×1 PNG）、`empty.png`（0 字节）、`assets/a.png`、`../assets/a.png`（文档目录的兄弟目录）。
+
+相对路径按文档目录解析，**允许 `../` 上跳**：Veil 是本地编辑器，文档引用同仓兄弟目录的资产是常见合法用法；导出只读取本地文件且仅内嵌可识别的位图 MIME，不产生外发通道，故不做文档目录的硬边界。断言口径：命中真实位图则内嵌为 data URI；0 字节、缺失、非位图或超过体积预算的目标删除 `src`（保留 alt）。不得因 `base_dir=None` 放宽为保留外链。
+
 ### `- 检查：` 支持的 key
 
 | key | 值 | 语义 |
@@ -593,11 +599,11 @@ H<sub>2</sub>O
 ### CASE-INL-017 星号两侧有空格不构成强调
 - 源：
 ```md
-* 不强调 *
+这里 * 不强调 * 的星号
 ```
-- 期望：显示字面星号，不产生 em。
+- 期望：按 GFM，段落中间的星号两侧有空格时不构成强调，显示字面星号（源码不在行首，不触发列表）。
 - 表面：ALL
-- 检查：html_contains=* 不强调 *; html_not_contains=<em>
+- 检查：blocks=1; kinds=Paragraph; html_contains=* 不强调 *; html_not_contains=<em>
 
 ### CASE-INL-018 行内代码内的强调标记
 - 源：
@@ -691,9 +697,9 @@ H<sub>2</sub>O
 ```md
 [跳到安装](#install)
 
-## 安装
+## 安装 {#install}
 ```
-- 期望：锚点指向标题 id，点击可跳转。
+- 期望：锚点指向标题 id，点击可跳转；标题尾缀 `{#install}` 不显示。
 - 表面：ALL
 - 检查：blocks=2; html_contains=href="#install"; html_contains=id="install"
 
@@ -780,14 +786,14 @@ H<sub>2</sub>O
 - 表面：ALL
 - 检查：html_contains=alt="图"
 
-### CASE-IMG-008 图片居中容器
+### CASE-IMG-008 非白名单 HTML 容器
 - 源：
 ```md
 <p align="center">![图](a.png)</p>
 ```
-- 期望：居中容器保留，图片不被拆成独立块，容器内文字不消失。
+- 期望：`<p align>` 不在白名单内，按产品安全策略以源码/HTML 块卡呈现，不渲染图片；编辑器与导出一致（导出转义），不把内部 Markdown 当图片执行。
 - 表面：ALL
-- 检查：html_contains=align="center"; html_contains=<img
+- 检查：html_contains=align; html_not_contains=<img
 
 ### CASE-IMG-009 全角括号图片
 - 源：
@@ -977,9 +983,9 @@ A | B
 > | --- | --- |
 > | 1 | 2 |
 ```
-- 期望：引用容器内渲染完整表格，引用标记不进入单元格。
+- 期望：引用容器内渲染完整表格，引用标记不进入单元格；块类型为 Table，引用嵌套由渲染后的 `<blockquote>` 保留、不体现在块类型上。
 - 表面：ALL
-- 检查：blocks=1; kinds=BlockQuote; html_contains=<blockquote>; html_contains=<table>
+- 检查：blocks=1; kinds=Table; html_contains=<blockquote>; html_contains=<table>
 
 ### CASE-TBL-015 表格在提示块内
 - 源：
@@ -993,7 +999,7 @@ A | B
 - 表面：ALL
 - 检查：blocks=1; kinds=Admonition; html_contains=<table>; html_contains=<td>1</td>
 
-### CASE-TBL-016 表格后紧跟段落
+### CASE-TBL-016 表格后紧跟非空行
 - 源：
 ```md
 | A | B |
@@ -1001,9 +1007,9 @@ A | B
 | 1 | 2 |
 紧邻段落
 ```
-- 期望：表格与段落是两个块，段落不被吞进表格，也不并成表格行。
+- 期望：GFM tables-005：列数匹配的非空行并入表体；表格后紧跟的非空行是表体行，不是独立段落，也不另起表格；这是标准行为，Veil 不偏离。
 - 表面：ALL
-- 检查：blocks=2; kinds=Table,Paragraph; html_contains=<table>; html_contains=<p>紧邻段落</p>
+- 检查：blocks=1; kinds=Table; html_contains=<table>; html_contains=<td>紧邻段落</td>
 
 ### CASE-TBL-017 空表体
 - 源：
@@ -1659,9 +1665,9 @@ Veil 是 Rust 写的 Markdown 编辑器，启动快。
 ```md
 ![上级图](../assets/a.png)
 ```
-- 期望：相对路径按文档目录解析；越界或缺失时降级 alt，不读取目录外文件。
+- 期望：相对路径按文档目录解析，允许 `../` 上跳到兄弟目录；命中真实位图则内嵌为 data URI，不保留相对外链、不崩溃。
 - 表面：ALL
-- 检查：html_contains=alt="上级图"; html_not_contains=../assets/a.png
+- 检查：html_contains=alt="上级图"; html_contains=src="data:image/png; html_not_contains=../assets/a.png
 
 ### CASE-EDGE-015 Unicode emoji
 - 源：

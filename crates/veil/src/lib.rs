@@ -6,6 +6,10 @@
 mod cli;
 mod export;
 mod platform;
+// T5 语料 harness 专用只读门面（HTML/PDF 导出入口）；不参与产品路径。
+#[cfg(windows)]
+#[doc(hidden)]
+pub mod qa;
 
 // —— 机制层公开入口：供集成测试直接访问 ——
 // SVG 光栅化实现不外暴露：编排层只能经 `MermaidRenderer` trait 使用 Mermaid，

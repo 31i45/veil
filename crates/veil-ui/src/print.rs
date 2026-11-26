@@ -62,6 +62,17 @@ pub struct PrintSession<'a> {
     mermaid_imgs: HashMap<veil_core::BlockId, MermaidImage>,
 }
 
+impl<'a> PrintSession<'a> {
+    /// 仅测试 harness（T5）：无 Mermaid 缓存的打印会话，用于 headless 分页结构断言。
+    #[doc(hidden)]
+    pub(crate) fn for_qa(app: &'a mut App) -> Self {
+        Self {
+            app,
+            mermaid_imgs: HashMap::new(),
+        }
+    }
+}
+
 impl PrintSession<'_> {
     /// 进入打印：按页帧尺寸与 DPI 缩放重排全文（Reveal 全收），算好分页，返回页数。
     /// 页帧即「可打印区域」（产品层已扣除打印机硬边距）：宽 = w，高 = h（物理像素）。

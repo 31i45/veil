@@ -17,7 +17,7 @@
 
 当前 `#[ignore]` 计数：**18**（19 条源码测试中 `mindmap_viewbox_debug` 已晋级；Task 5 新增
 `perf_5000_headings` / `perf_history_5000` 两条性能探针）。
-`pathological_eval_child` 在门禁中以 `loop` / `microtask` 两种模式各运行一次，因此 probe-gate 的判定行数为 20。
+`pathological_eval_child` 在门禁中由测试自身以 `loop` / `microtask` 两种模式各拉起一次子进程；门禁整体按 cargo 退出码判定，不再逐条统计判定行。
 
 ## 判定方式：测试内断言 + 上限值
 

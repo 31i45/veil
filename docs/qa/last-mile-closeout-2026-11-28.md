@@ -1,35 +1,40 @@
 # 最后一公里收口（2026-11-28）
 
 > 规格：`.trae/specs/close-last-mile-and-ignored-gates/`（spec / tasks / checklist）。
-> 基线：`main` HEAD `d57be44`（Task 5），版本 `3.0.2`；本轮只改文档，未提交、未推送。
-> 本文件逐条给出 6 个任务的最终状态、证据位置、仍未完成的人工项，以及用户需要执行的最小命令。
+> 基线：`main` HEAD `85b0953`（Task 9），版本 `3.0.2`；Task 7–9 已提交，Task 10 的文档收口轮只改文档、未提交、未推送。
+> 本文件逐条给出 10 个任务的最终状态、证据位置、仍未完成的人工项，以及用户需要执行的最小命令。
 > 纪律：没有真实执行或真实输出的项一律写 **NOT RUN** / **PENDING**，不写成 PASS。
 
 ## 0. 一句话结论
 
-- 可自动化的部分全部闭合：18 条 `#[ignore]` 探针由一条 release 门禁覆盖（**PASS 20 / FAIL 0 / SKIP 0**），4 条代码差距（容器内 `<details>`、超高显示公式、Mermaid 加载态与就地允许远程、gitGraph 对比度）已修复并有测试锁定。
+- 可自动化的部分全部闭合：18 条 `#[ignore]` 探针由一条 release 门禁覆盖（本轮 **PASS，cargo exit 0，FAIL 0**），4 条代码差距（容器内 `<details>`、超高显示公式、Mermaid 加载态与就地允许远程、gitGraph 对比度）已修复并有测试锁定。
 - 仍需人在场的 3 项（DPI 100/125/200、实体打印机出纸、真机 IME）保持 **NOT RUN**，但已做成 assisted 流程：用户只做物理动作，脚本负责截图、落盘与判定表。
+- 直接修复轮（Task 7–10）已闭合：Callout 内 `<details>` 与普通引用统一提升（`2060da9`）；10 MB 单块首键 p95 **976.024 → 147.227 ms**（`67cdd8d`，预算 200 ms 写进测试）；ignored 门禁简化为探针自证（`85b0953`，`probe-gate.ps1` 694 → 153 行）。
 - 无「未处理且未解释」项：每项要么有测试/证据，要么有明确的人工命令与未执行原因。
 
-## 1. 六个任务的最终状态
+## 1. 十个任务的最终状态
 
 | 任务 | 状态 | 证据位置 | commit |
 |---|---|---|---|
-| Task 1 ignored 清单与 release 探针门禁 | **完成** | `docs/qa/ignored-tests-2026-11-27.md`；`tools/verify/probe-gate.ps1`；`docs/qa/probe-gate-2026-11-28.md`；`docs/qa/perf-baseline.json`；README 中英开发者章节 | `68846e9` |
+| Task 1 ignored 清单与 release 探针门禁 | **完成**（基线 JSON 已由 Task 9 删除） | `docs/qa/ignored-tests-2026-11-27.md`；`tools/verify/probe-gate.ps1`；`docs/qa/probe-gate-2026-11-28.md`；README 中英开发者章节 | `68846e9` |
 | Task 2 容器内 `<details>` 识别 | **完成** | `crates/veil-core/src/syntax/block.rs`；`crates/veil/tests/syntax_matrix.rs`（ADJX/ADJC 期望）；`crates/veil-ui/src/app_tests/blocks.rs`；`docs/qa/report-2026-11-27.md` | `370f522` |
 | Task 3 超高显示公式打印一致性 | **完成** | `crates/veil-ui/src/print.rs`；`crates/veil/src/platform/pdf_layout.rs`；单测 `print_scales_tall_display_math_to_one_page`、`tall_display_math_scales_to_single_page_content_height`；`docs/qa/perfect-surface-audit-2026-11-27.md` F-009 | `f89bb99` + `906934c`（规则文档更正） |
 | Task 4 Mermaid 视图态与 gitGraph 对比度 | **完成** | `crates/veil-ui/src/paint.rs`（「渲染中…」胶囊）；`crates/veil-ui/src/view/ctx_menu.rs`（就地允许远程）；`crates/veil-mermaid-offline/src/lib.rs`（gitGraph 描边）；`docs/qa/mermaid-dark-2026-11-27.md`；证据 `docs/qa/evidence/mermaid-dark-2026-11-27/gitgraph-dark.{png,svg}` | `66fe135` |
 | Task 5 人机协同与被动手册 | **自动化部分完成；人工项 NOT RUN** | `tools/verify/assisted/{dpi,print,ime}.ps1` + `README.md`；`docs/qa/perf-distribution-2026-11-27.md`；证据 `docs/qa/evidence/assisted-2026-11-27/` | `d57be44` |
-| Task 6 文档、门禁与收口 | **完成** | 本文件；`docs/qa/release-facts-2026-11-27.md`「最后一公里与 ignored 门禁（2026-11-28）」；README 中英已知限制/开发验证；`docs/qa/perfect-surface-audit-2026-11-27.md` | 本轮未提交 |
+| Task 6 文档、门禁与收口 | **完成** | 本文件；`docs/qa/release-facts-2026-11-27.md`「最后一公里与 ignored 门禁（2026-11-28）」；README 中英已知限制/开发验证；`docs/qa/perfect-surface-audit-2026-11-27.md` | `3ee2dcd` |
+| Task 7 Callout 内 `<details>` 与普通引用同规则 | **完成** | `crates/veil-core/src/syntax/block.rs`；`crates/veil/tests/syntax_matrix.rs`（`ADJC2-061/083`）；`docs/qa/golden/html/CASE-ADJC2-{061,083}.html`；`docs/qa/adjacency-digest.txt` | `2060da9` |
+| Task 8 10 MB 单块首键延迟 | **完成** | `crates/veil-ui/src/app_tests/render.rs`（`perf_huge_block` 内断言 70 / 80 / 200 ms）；`docs/qa/perf-distribution-2026-11-27.md` §1「修复后复测」；`docs/qa/probe-gate-2026-11-28.md` | `67cdd8d` |
+| Task 9 简化 ignored 门禁 | **完成** | `tools/verify/probe-gate.ps1`（694 → 153 行）；`docs/qa/ignored-tests-2026-11-27.md`；`docs/qa/perf-distribution-2026-11-27.md` §3；删除 `perf-baseline.json`、`perf-baseline-final.json` 与 3 份 stability 归档 | `85b0953` |
+| Task 10 文档与门禁收口 | **完成**（本轮文档收口，未提交） | 本文件；`docs/qa/release-facts-2026-11-27.md`「直接修复轮（2026-11-28）」；README 中英；`docs/qa/perf-distribution-2026-11-27.md`、`docs/qa/probe-gate-2026-11-28.md` | 本轮未提交 |
 
 ## 2. 逐任务要点与复核
 
 ### Task 1：ignored 可见且可回归
 
 - 源码 `#[ignore]` 真实计数 **18**（`rg -n "#\[ignore" crates --glob '*.rs'`）：13 条性能探针、4 条病态/超大单块探针、1 条 CJK PDF 证据生成器；另有 1 条诊断器 `mindmap_viewbox_debug` 已晋级为常规断言。
-- `pwsh -NoProfile -File tools/verify/probe-gate.ps1 -Repeat 9`：**判定行 20，PASS 20 / FAIL 0 / SKIP 0**，总耗时 **399.2 s**（`pathological_eval_child` 以 loop / microtask 各判定一次）。
-- 门禁按指标类型选择 p50/p95 并叠加测量噪声地板；产品预算硬性优先，超预算直接 FAIL，未放宽任何探针断言。
-- 三次连续稳定性：`docs/qa/evidence/assisted-2026-11-27/probe-gate-stability-{1,2,3}.md`，均 PASS 20 / FAIL 0 / SKIP 0。
+- `pwsh -NoProfile -File tools/verify/probe-gate.ps1 -Repeat 9`：**判定行 20，PASS 20 / FAIL 0 / SKIP 0**，总耗时 **399.2 s**（`pathological_eval_child` 以 loop / microtask 各判定一次）。（历史口径；`-Repeat` 与判定层已由 Task 9 简化。）
+- 门禁按指标类型选择 p50/p95 并叠加测量噪声地板；产品预算硬性优先，超预算直接 FAIL，未放宽任何探针断言。（已被 Task 9 取代：判定下沉到测试内自证上限，无外部基线、无噪声地板。）
+- 三次连续稳定性：`docs/qa/evidence/assisted-2026-11-27/probe-gate-stability-{1,2,3}.md`，均 PASS 20 / FAIL 0 / SKIP 0。（归档已随 `85b0953` 删除，此处仅保留历史记录。）
 - 如实记录：稳定性验证过程中曾有一次 `perf_after_edit_breakdown` `peak_total_ms` FAIL（p50 5.96 ms vs 阈值 5.613 ms）；单探针 9 次复测 p50 3.812 ms，随后三次连续 PASS。该次保留为宿主瞬时毛刺，未改写成 PASS。
 
 ### Task 2：容器内 `<details>`
@@ -61,6 +66,29 @@
 - README 中英「已知限制 / 开发与验证」：移除已闭合的容器内 details、超高公式打印差异、Mermaid 无加载态、无就地允许远程、gitGraph 3.35:1 旧值；人工项改为指向 assisted 脚本并写清「用户只做物理动作」；ignored 计数更新为 18；probe-gate 判定口径改为按指标类型选择 p50/p95。
 - `docs/qa/release-facts-2026-11-27.md` 新增「最后一公里与 ignored 门禁（2026-11-28）」：测试数、ignored 清单、探针门禁、性能分布引用、体积、SHA、依赖零变化、未推送、版本号与 commit 列表。
 - `docs/qa/perfect-surface-audit-2026-11-27.md`：F-004（容器内 details）与 F-009（超高公式）标为已闭合；F-015 / F-016 由 Task 5 测量闭合；§4 收口清单对应条已勾选；§5 残留说明已更正（gitGraph 3.35:1 → 5.04:1，历史面板与 5000 标题 p95 已测）。
+
+### Task 7：Callout 内 `<details>` 与普通引用同规则
+
+- 删除 `block.rs` 中 `(!is_callout).then_some(depth)` 的按容器特判，Callout 与普通 BlockQuote 走同一提升路径；前缀与内层块归属不变。
+- `ADJC2-061/083` 金样与 `docs/qa/adjacency-digest.txt`、`docs/qa/report-2026-11-27.md` 同步更新；Callout 标题只出现一次。`syntax_matrix` 5 项随本轮全量通过。
+
+### Task 8：10 MB 单块首键延迟
+
+- 归因：主因是每次击键把整块 10 MB 重新 inline 解析（约占 82%）；改为只解析需渲染前缀、把光栅限制在可见行带。
+- 实测：10 MB 首键 p95 **976.024 → 147.227 ms**、文末插入 975.732 → **153.297 ms**；1 MB 首键 160.465 → 46.436 ms（本轮 `probe-gate` 真实输出）。
+- 预算写进 `perf_huge_block`：1 / 2 / 10 MB = **70 / 80 / 200 ms**（regression ceiling），既有「前缀降级 / 不超上限 / 原文往返」断言保留。
+
+### Task 9：简化 ignored 门禁
+
+- 判定下沉到测试自证：每条性能探针在测试内断言回归上限，单次观测采 3 次取 p50，归因/诊断探针断言结构不变量。
+- `probe-gate.ps1` 由 **694 行降到 153 行**：只做 release 构建 + 一次 `cargo test --release -- --ignored` + 归档；删除 `perf-baseline.json`、`perf-baseline-final.json` 与 3 份 stability 归档。
+- 本轮门禁一次通过：PASS / FAIL 0，构建 2.2 s、运行 38.4 s，归档 `docs/qa/probe-gate-2026-11-28.md`。
+
+### Task 10：文档与门禁收口
+
+- `docs/qa/release-facts-2026-11-27.md` 新增「直接修复轮（2026-11-28）」：2269 / 0 / 18、probe-gate PASS、10 MB 前后、Callout details、14,312,448 B、SHA、commit 列表、未推送。
+- 本文件补齐 Task 7–10 状态与证据；README 中英核对「Callout 内 details 不提升」「10 MB 首键 ~1 s」「ignored 需基线 JSON」三类旧描述均已不存在，已知限制只剩真实未闭合项。
+- `docs/qa/perf-distribution-2026-11-27.md` 与 `docs/qa/probe-gate-2026-11-28.md` 措辞已与新机制一致（无外部基线 / 噪声地板）。
 
 ## 3. 仍未完成项（人工，NOT RUN）
 
@@ -96,22 +124,25 @@ pwsh -NoProfile -File tools/verify/assisted/ime.ps1
 pwsh -NoProfile -File tools/verify/assisted/print.ps1
 ```
 
-## 5. 本轮门禁快照（真实输出）
+## 5. 门禁快照（真实输出）
+
+直接修复轮（2026-11-28 07:21–07:33）：
 
 | 门禁 | 结果 |
 |---|---|
-| `cargo test --workspace` | **2269 passed / 0 failed / 18 ignored**（按套件汇总 2267，另 2 次为同一二进制的子进程探针） |
+| `cargo test --workspace` | **2269 passed / 0 failed / 18 ignored**（分套件汇总 2269；`veil-mermaid-offline` 子进程两次复跑同一二进制，输出另各 1 passed） |
 | `cargo clippy --workspace --all-targets -- -D warnings` | 0 warnings（exit 0） |
 | `cargo fmt --all --check` | 通过（exit 0） |
-| `pwsh -NoProfile -File tools/verify/probe-gate.ps1 -Repeat 9` | **PASS 20 / FAIL 0 / SKIP 0**，399.2 s |
-| `cargo build --release -p veil` | `target/release/veil.exe` = **14,309,888 B**（余量 370,176 B） |
-| SHA-256 | `7B5DD8596D95E90CEAEED68AC5FBCDE8CDCB69FAFA83A905C780C76957EDBC6E` |
-| 推送 / tag / 版本 / 依赖 | 未推送、未打 tag、版本仍 3.0.2、`Cargo.toml` / `Cargo.lock` 无改动 |
+| `pwsh -NoProfile -File tools/verify/probe-gate.ps1` | **PASS / FAIL 0**（构建 2.2 s、运行 38.4 s），一次通过 |
+| `cargo build --release -p veil` | `target/release/veil.exe` = **14,312,448 B**（余量 367,616 B） |
+| SHA-256 | `3B567E860AE2337393261502079140DEC6F316151F0B6236719165AED57928FC` |
+| 10 MB 单块首键 p95 | **147.227 ms**（文末插入 153.297 ms；修复前 976.024 / 975.732 ms） |
+| 推送 / tag / 版本 / 依赖 | 未推送、未打 tag、版本仍 3.0.2、`Cargo.toml` / `Cargo.lock` 自 `3ee2dcd` 起无改动 |
 
-环境性偶发：早前 `platform::http::tests::actual_loopback_peer_fails_closed` 的 WinHTTP 12152 在本轮全量与三次稳定性复跑中均未复现；`perf_after_edit_breakdown` 的一次宿主毛刺已如实保留（见 §2 Task 1）。
+Task 6 轮次旧值（已被本表取代）：2269 / 0 / 18（套件汇总 2267）、`-Repeat 9` PASS 20、14,309,888 B、SHA `7B5DD8…BC6E`。
 
 ## 6. 收口声明
 
-- 本规格 6 个任务均有最终状态与证据位置；没有「未处理且未解释」项。
-- 所有 PASS 均来自本轮真实命令输出；NOT RUN / PENDING 保持原状，未改写成 PASS。
-- 本轮只改文档，未修改源码/测试，未删除断言，未推送 GitHub，未执行 `git commit`。
+- 本规格 10 个任务均有最终状态与证据位置；没有「未处理且未解释」项。
+- 所有 PASS 均来自本轮真实命令输出；NOT RUN / PENDING 保持原状，未改写成 PASS；本轮门禁一次通过，无偶发失败。
+- Task 7–9 的源码改动已提交（`2060da9` / `67cdd8d` / `85b0953`）；Task 10 收口只改文档，未修改源码/测试，未删除断言，未推送 GitHub，未执行 `git commit`。

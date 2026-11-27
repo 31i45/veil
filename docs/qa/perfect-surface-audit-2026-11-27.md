@@ -224,7 +224,7 @@ Get-ChildItem $root -Directory | ForEach-Object {
 | F-012 | 物理打印机需要硬件与人工出纸 | Task 6.2 步骤执行并有样张 |
 | F-013 | DPI 100/125/200 需真实显示环境切换与截图 | Task 6.1 给出截图、首帧、命中与版心一致性 |
 | F-014 | 真机 IME 需人在场走微软拼音/五笔六步 | Task 6.3 六步走查通过并留证 |
-| F-015 | **已闭合（2026-11-28，Task 5）**：版本历史面板 5000 快照已同口径测量，打开 p95 10.738 ms、滚动 p95 3.642 ms、关闭 p95 0.423 ms | `docs/qa/perf-distribution-2026-11-27.md` §1；`probe-gate-stability-{1,2,3}.md` |
+| F-015 | **已闭合（2026-11-28，Task 5）**：版本历史面板 5000 快照已同口径测量，打开 p95 10.738 ms、滚动 p95 3.642 ms、关闭 p95 0.423 ms | `docs/qa/perf-distribution-2026-11-27.md` §1；`docs/qa/probe-gate-2026-11-28.md`（原 stability 归档已删除） |
 | F-016 | **已闭合（2026-11-28，Task 5）**：5000 标题 `open_ms` 为 n=9 分布，p95 96.463 ms（本轮 probe-gate 复跑 100.234 ms），登记预算 ≤200 ms | `docs/qa/perf-distribution-2026-11-27.md` §1；`docs/qa/probe-gate-2026-11-28.md` |
 | F-025 | README 与源码不一致（AccessKit 已移除仍在宣传） | 中英 README 更正为「不提供屏幕阅读器支持」并删除失效构建命令（本轮已执行） |
 | F-029 | 该边界随 AccessKit 移除而失效 | 登记为「无障碍是非目标」，不再保留 8000 字节快照的待办表述 |

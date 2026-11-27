@@ -2,8 +2,42 @@
 
 > 本页为人工维护的交付事实。`report-2026-11-27.md` 由语法矩阵测试生成，运行测试会覆写，请勿手工追加。
 
+## 直接修复轮（2026-11-28）
+
+> 以下数字来自 2026-11-28 07:21–07:33（Asia/Shanghai）的本机真实命令输出。
+> 源码改动为 `2060da9` / `67cdd8d` / `85b0953` 三个 commit；本轮文档收口本身未提交、未推送。
+
+### 全量门禁
+
+- `cargo test --workspace`：**2269 passed / 0 failed / 18 ignored**（分套件汇总 2269；`veil-mermaid-offline` 的病态 deadline 测试另以子进程两次复跑同一二进制，输出各多 1 passed，故结果行合计 2271 passed）。
+  - 分套件：`veil` lib 288（1 ignored）、`veil` bin 0、`docs_policy` 6、`syntax_matrix` 5（306.58 s，内部 2148 用例 × 7 表面）、`veil-core` lib 368（1 ignored）、`conformance` 1、`core` 86、`gfm_conformance` 1、`parser_differential` 2、`real_world_check` 1、`pathological` 0（1 ignored）、`veil-mermaid-offline` 29（1 ignored）、`veil-ui` lib 1475（14 ignored）、`boundary_guard` 7、doc-tests 0×4。
+- `cargo clippy --workspace --all-targets -- -D warnings`：**0 warnings**（exit 0）。
+- `cargo fmt --all --check`：**通过**（exit 0）。
+- `pwsh -NoProfile -File tools/verify/probe-gate.ps1`：**PASS / FAIL 0**，构建 2.2 s、运行 38.4 s；归档 `docs/qa/probe-gate-2026-11-28.md`。本轮一次通过，无偶发。
+
+### 探针实测（本轮门禁）
+
+- `perf_5000_headings`：打开 93.581 ms、滚动 p95 0.940 ms。
+- `perf_history_5000`：打开 4.914 ms、滚动 p95 3.322 ms、关闭 0.391 ms。
+- `perf_huge_block`（首键 p95 / 文末插入 p95）：1 MB **46.436 / 42.965 ms**（上限 70）、2 MB **53.256 / 50.864 ms**（上限 80）、10 MB **147.227 / 153.297 ms**（上限 200）。
+
+### 三项直接修复
+
+- **Callout 内 `<details>` 与普通引用同规则**（`2060da9`）：删除 `block.rs` 中 `(!is_callout).then_some(depth)` 的容器特判，Callout 与普通引用共用同一提升路径；`ADJC2-061/083` 金样、`adjacency-digest.txt`、`report-2026-11-27.md` 同步更新，Callout 标题只出现一次。
+- **10 MB 单块首键延迟**（`67cdd8d`）：归因显示主因是每次击键把整块 10 MB 重新 inline 解析（约占 82%）；改为只解析需渲染前缀、把光栅限制在可见行带。实测 10 MB 首键 p95 **976.024 ms → 147.227 ms**（文末插入 975.732 → 153.297 ms）；1 MB 首键 p95 160.465 → 46.436 ms。预算写进 `perf_huge_block` 测试内：1 / 2 / 10 MB = **70 / 80 / 200 ms**（regression ceiling，非目标值），既有不变量断言未弱化。
+- **ignored 门禁简化**（`85b0953`）：预算回归下沉到测试自证；`probe-gate.ps1` 由 **694 行降到 153 行**，只做 release 构建 + 一次 `--ignored` 运行 + 归档；删除 `perf-baseline.json`、`perf-baseline-final.json` 与 3 份 stability 归档。
+
+### 发布产物与不变量
+
+- `target/release/veil.exe` = **14,312,448 B**（门禁 14,680,064 B，余量 367,616 B）。
+- SHA-256 = `3B567E860AE2337393261502079140DEC6F316151F0B6236719165AED57928FC`。
+- 未推送 GitHub（`main` 领先 `origin/main` 140 个 commit）、未打 tag、版本号仍 **3.0.2**。
+- 未新增依赖：`Cargo.toml` / `Cargo.lock` 自 `3ee2dcd` 起无改动。
+- 本轮 commit（新→旧）：`85b0953`、`67cdd8d`、`2060da9`。
+
 ## 最后一公里与 ignored 门禁（2026-11-28）
 
+> 本节为 Task 1–6 轮次的历史记录；其中探针门禁口径、体积与 SHA 已被上方「直接修复轮（2026-11-28）」取代。
 > 以下数字全部来自 2026-11-28 02:04–02:31（Asia/Shanghai）的本机真实命令输出。
 
 ### 全量门禁
@@ -12,29 +46,29 @@
   - 分套件：`veil` lib 288（1 ignored）、`veil` bin 0、`docs_policy` 6、`syntax_matrix` 5（311.30 s，内部 2148 用例 × 7 表面）、`veil-core` lib 366（1 ignored）、`conformance` 1、`core` 86、`gfm_conformance` 1、`parser_differential` 2、`real_world_check` 1、`pathological` 0（1 ignored）、`veil-mermaid-offline` 29（1 ignored）、`veil-ui` lib 1475（14 ignored）、`boundary_guard` 7、doc-tests 0×4。
 - `cargo clippy --workspace --all-targets -- -D warnings`：**0 warnings**（exit 0）。
 - `cargo fmt --all --check`：**通过**（exit 0）。
-- `pwsh -NoProfile -File tools/verify/probe-gate.ps1 -Repeat 9`：**PASS 20 / FAIL 0 / SKIP 0**，探针总耗时 399.2 s；归档 `docs/qa/probe-gate-2026-11-28.md`。
+- `pwsh -NoProfile -File tools/verify/probe-gate.ps1 -Repeat 9`：**PASS 20 / FAIL 0 / SKIP 0**，探针总耗时 399.2 s；归档 `docs/qa/probe-gate-2026-11-28.md`。（历史口径：`-Repeat` 已随 `85b0953` 移除，现门禁一次跑完全部 ignored 探针。）
 - 环境性偶发：本轮全量与三次稳定性复跑均未复现早前 `platform::http::tests::actual_loopback_peer_fails_closed` 的 WinHTTP 12152；该历史记录保留在本页「测试」一节。稳定性验证中曾有一次 `perf_after_edit_breakdown` `peak_total_ms` FAIL（p50 5.96 ms vs 阈值 5.613 ms），单探针 9 次复测 p50 3.812 ms，随后连续三次 PASS；该次未改写成 PASS。
 
 ### ignored 清单
 
 - 源码 `#[ignore]` 真实计数：**18**（`rg -n "#\[ignore" crates --glob '*.rs'`）。
 - 名单：`pathological_eval_child`、`pathological_inputs_matrix`、`bench_edit_reparse_history_100k`、`perf_50mb_long_doc`、`perf_20k_blocks`、`perf_keystroke_path`、`perf_keystroke_attribution`、`perf_index_subsegments`、`perf_cold_first_edit`、`perf_cold_first_edit_prewarmed`、`perf_first_edit_after_first_frame`、`perf_huge_scroll`、`perf_huge_block`、`perf_peak_breakdown`、`perf_after_edit_breakdown`、`generate_wave4_sample_pdf`、`perf_5000_headings`、`perf_history_5000`。
-- `mindmap_viewbox_debug` 已晋级为常规断言（不再 ignore）；probe-gate 判定行 20（`pathological_eval_child` 以 loop / microtask 各一次）。
+- `mindmap_viewbox_debug` 已晋级为常规断言（不再 ignore）；probe-gate 判定行 20（`pathological_eval_child` 以 loop / microtask 各一次）。（历史口径；现门禁一次 `--ignored` 运行，按 cargo 退出码整体判定。）
 - 逐条「为何 ignore / 运行条件 / 判定方式」：`docs/qa/ignored-tests-2026-11-27.md`。
 
 ### 性能分布（引用 `docs/qa/perf-distribution-2026-11-27.md`）
 
 - 5000 标题：打开 p95 **96.463 ms**、单步滚动 p95 **1.098 ms**（n=9）。
 - 版本历史面板 5000 快照：打开 p95 **10.738 ms**、滚动 p95 **3.642 ms**、关闭 p95 **0.423 ms**（n=9）。
-- 本轮 probe-gate 复跑：5000 标题打开 p95 100.234 ms（阈值 115.755 ms）、历史面板打开 p95 10.213 ms、滚动 p50 3.615 ms。
-- 三次连续稳定性归档：`docs/qa/evidence/assisted-2026-11-27/probe-gate-stability-{1,2,3}.md`（均 PASS 20 / FAIL 0 / SKIP 0）。
+- 本轮 probe-gate 复跑：5000 标题打开 p95 100.234 ms（历史阈值 115.755 ms）、历史面板打开 p95 10.213 ms、滚动 p50 3.615 ms。（阈值口径已随 `85b0953` 删除，现由测试内自证上限。）
+- 三次连续稳定性归档：`docs/qa/evidence/assisted-2026-11-27/probe-gate-stability-{1,2,3}.md`（均 PASS 20 / FAIL 0 / SKIP 0）。（归档已随 `85b0953` 删除，仅保留本节历史记录。）
 - 完整 min/p50/p95/max 与口径修订说明见 `docs/qa/perf-distribution-2026-11-27.md`，本节不重抄。
 
 ### 发布产物与不变量
 
-- `target/release/veil.exe` = **14,309,888 B**（门禁 14,680,064 B，余量 370,176 B）。
-- SHA-256 = `7B5DD8596D95E90CEAEED68AC5FBCDE8CDCB69FAFA83A905C780C76957EDBC6E`。
-- 未推送 GitHub（`main` 领先 `origin/main` 6 个 commit）、未打 tag、版本号仍 **3.0.2**。
+- `target/release/veil.exe` = **14,309,888 B**（门禁 14,680,064 B，余量 370,176 B）。（已被顶部「直接修复轮」的 14,312,448 B 取代。）
+- SHA-256 = `7B5DD8596D95E90CEAEED68AC5FBCDE8CDCB69FAFA83A905C780C76957EDBC6E`。（已被顶部的新 SHA 取代。）
+- 未推送 GitHub（本轮统计时 `main` 领先 `origin/main` 6 个 commit）、未打 tag、版本号仍 **3.0.2**。
 - 未新增依赖：`Cargo.toml` / `Cargo.lock` 无改动。
 - 本轮 commit（新→旧）：`d57be44`、`68846e9`、`66fe135`、`f89bb99`、`370f522`、`906934c`。
 
@@ -43,7 +77,7 @@
 - 未推送 GitHub、未打 tag、未修改版本号。
 - 未新增任何依赖（工作区 Cargo.toml / Cargo.lock 无变化）。
 
-## 测试（2026-11-27 轮次；当前数字见顶部「最后一公里」一节）
+## 测试（2026-11-27 轮次；当前数字见顶部「直接修复轮」一节）
 
 - `cargo test --workspace`：**2258 passed / 0 failed / 17 ignored**（最终轮）。
 - 分套件：`veil` lib 286（1 ignored）、`docs_policy` 6、`syntax_matrix` 5（内部 **2148 用例 × 7 表面**）、`veil-core` lib 363（1 ignored）、`conformance` 1、`core` 86、`gfm_conformance` 1、`parser_differential` 2、`real_world_check` 1、`pathological` 0（1 ignored）、`veil-mermaid-offline` 27（2 ignored）、`veil-ui` lib 1471（12 ignored）、`boundary_guard` 7。

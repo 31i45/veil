@@ -2193,10 +2193,7 @@ mod tests {
         for marker in ["[TOC]", "[[TOC]]"] {
             let md = format!("{marker}\n\n# 第一章\n");
             let body = body_of(&md);
-            assert!(
-                !body.contains(marker),
-                "导出不得输出字面 {marker}：{body}"
-            );
+            assert!(!body.contains(marker), "导出不得输出字面 {marker}：{body}");
             assert!(!body.contains("<p>"), "TOC 标记段落不得产生 <p>：{body}");
             assert!(
                 body.contains("<h1 id=\"第一章\">第一章</h1>"),
@@ -2216,7 +2213,10 @@ mod tests {
         assert!(!body.contains("{#install}"), "{body}");
 
         let body = body_of("正文里的 {#keep} 保持原样\n\n# 标题 {#tid}\n");
-        assert!(body.contains("{#keep}"), "正文中的普通花括号不得被吞：{body}");
+        assert!(
+            body.contains("{#keep}"),
+            "正文中的普通花括号不得被吞：{body}"
+        );
         assert!(
             body.contains("<h1 id=\"tid\">标题</h1>"),
             "标题 id 应生效：{body}"
@@ -2227,7 +2227,10 @@ mod tests {
     #[test]
     fn toc_marker_inside_paragraph_is_kept() {
         let body = body_of("说明 [TOC] 的用法\n");
-        assert!(body.contains("[TOC]"), "普通段落中的标记文字不应被吞：{body}");
+        assert!(
+            body.contains("[TOC]"),
+            "普通段落中的标记文字不应被吞：{body}"
+        );
         assert!(body.contains("<p>"), "{body}");
     }
 

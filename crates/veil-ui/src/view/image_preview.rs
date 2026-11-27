@@ -51,11 +51,11 @@ pub(crate) fn paint(app: &mut App, frame: &mut Frame) {
         // 位图缺失：保留遮罩，居中显示中性提示（Esc/点击遮罩仍可关闭）。
         let message = t(Key::ImagePreviewUnavailable).to_string();
         let fg = unavailable_hint_color(&theme);
-        if let Some(lab) = app
-            .ui_state
-            .chrome
-            .labels
-            .get_or_insert(&mut app.engine, &message, fg, scale)
+        if let Some(lab) =
+            app.ui_state
+                .chrome
+                .labels
+                .get_or_insert(&mut app.engine, &message, fg, scale)
         {
             let x = ((win_w as f32 - lab.w as f32) * 0.5).max(0.0) as i32;
             let y = ((win_h as f32 - lab.h as f32) * 0.5).max(0.0) as i32;

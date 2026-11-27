@@ -59,7 +59,9 @@ const SURFACE_ORDER: [Surface; 7] = [
     Surface::Print,
 ];
 
-const GROUPS: [&str; 10] = ["BLK", "INL", "LNK", "IMG", "TBL", "CODE", "EXT", "CJK", "EDGE", "SEC"];
+const GROUPS: [&str; 10] = [
+    "BLK", "INL", "LNK", "IMG", "TBL", "CODE", "EXT", "CJK", "EDGE", "SEC",
+];
 
 const CHECK_KEYS: [&str; 7] = [
     "blocks",
@@ -164,9 +166,8 @@ impl Case {
 }
 
 fn load_matrix() -> Vec<Case> {
-    let text = std::fs::read_to_string(MATRIX).unwrap_or_else(|e| {
-        panic!("无法读取 {MATRIX}：{e}（测试 cwd 应为 crates/veil）")
-    });
+    let text = std::fs::read_to_string(MATRIX)
+        .unwrap_or_else(|e| panic!("无法读取 {MATRIX}：{e}（测试 cwd 应为 crates/veil）"));
     let lines: Vec<&str> = text
         .split('\n')
         .map(|l| l.strip_suffix('\r').unwrap_or(l))
@@ -188,12 +189,11 @@ fn load_matrix() -> Vec<Case> {
     let mut running: BTreeMap<&str, u32> = BTreeMap::new();
     for c in &cases {
         let slot = running.entry(c.group.as_str()).or_insert(0);
-        let num = c
-            .id
-            .rsplit('-')
-            .next()
-            .and_then(|n| n.parse::<u32>().ok())
-            .unwrap_or_else(|| panic!("{} 行 {}：无法解析编号", c.id, c.line));
+        let num =
+            c.id.rsplit('-')
+                .next()
+                .and_then(|n| n.parse::<u32>().ok())
+                .unwrap_or_else(|| panic!("{} 行 {}：无法解析编号", c.id, c.line));
         if num != *slot + 1 {
             panic!(
                 "{} 行 {}：同组编号不连续（期望 {}，实际 {}）",
@@ -232,9 +232,9 @@ fn load_matrix() -> Vec<Case> {
 fn parse_case(lines: &[&str], start: usize) -> (Case, usize) {
     let header = lines[start];
     let header_line = start + 1;
-    let rest = header.strip_prefix("### CASE-").unwrap_or_else(|| {
-        panic!("行 {header_line}：用例标题须为 `### CASE-...`")
-    });
+    let rest = header
+        .strip_prefix("### CASE-")
+        .unwrap_or_else(|| panic!("行 {header_line}：用例标题须为 `### CASE-...`"));
     let (tag, title) = match rest.split_once(' ') {
         Some((t, ti)) => (t, ti.trim().to_string()),
         None => (rest, String::new()),
@@ -279,8 +279,7 @@ fn parse_case(lines: &[&str], start: usize) -> (Case, usize) {
     let mut closed = false;
     while i < lines.len() {
         let l = lines[i];
-        let is_close =
-            l.chars().count() == ticks && l.chars().all(|c| c == '`');
+        let is_close = l.chars().count() == ticks && l.chars().all(|c| c == '`');
         if is_close {
             closed = true;
             i += 1;
@@ -423,9 +422,9 @@ fn parse_checks(raw: &str, id: &str, at: usize) -> Vec<(String, String)> {
         }
         match key {
             "blocks" | "pdf_pages" => {
-                value.parse::<usize>().unwrap_or_else(|_| {
-                    panic!("{id} 行 {at}：`{key}` 须为整数，实际 `{value}`")
-                });
+                value
+                    .parse::<usize>()
+                    .unwrap_or_else(|_| panic!("{id} 行 {at}：`{key}` 须为整数，实际 `{value}`"));
             }
             "kinds" => {
                 for name in value.split(',') {
@@ -634,8 +633,7 @@ fn ui_checks(app: &mut veil_ui::qa::QaApp) -> UiRes {
     app.toggle_focus();
     app.render();
     let focus_blocks = app.blocks();
-    let focus_kinds: Vec<&'static str> =
-        focus_blocks.iter().map(|b| kind_name(&b.kind)).collect();
+    let focus_kinds: Vec<&'static str> = focus_blocks.iter().map(|b| kind_name(&b.kind)).collect();
     let mut focus = Vec::new();
     if focus_kinds != base_kinds || focus_blocks.len() != base_len {
         focus.push(format!(
@@ -656,8 +654,7 @@ fn ui_checks(app: &mut veil_ui::qa::QaApp) -> UiRes {
     app.render();
     let c = app.caret();
     let mut typewriter = Vec::new();
-    let visible = c.y >= c.viewport_y - 1.0
-        && c.y + c.h <= c.viewport_y + c.viewport_h + 1.0;
+    let visible = c.y >= c.viewport_y - 1.0 && c.y + c.h <= c.viewport_y + c.viewport_h + 1.0;
     if !visible {
         typewriter.push(format!(
             "打字机模式光标不在视口：y={:.1} h={:.1}，视口 [{:.1},{:.1}]",
@@ -760,7 +757,10 @@ fn empty_ui_checks(app: &mut veil_ui::qa::QaApp, surface: Surface) -> Vec<String
             if app.text() != base_text {
                 problems.push("打字机模式改变了源文本（应仅为视觉开关）".to_string());
             }
-            if !c.y.is_finite() || !c.h.is_finite() || !c.scroll.is_finite() || !c.max_scroll.is_finite()
+            if !c.y.is_finite()
+                || !c.h.is_finite()
+                || !c.scroll.is_finite()
+                || !c.max_scroll.is_finite()
             {
                 problems.push(format!(
                     "空态光标几何非有限：y={} h={} scroll={} max={}",
@@ -844,8 +844,29 @@ fn norm(s: &str) -> String {
 ///
 /// 这些标签在导出时会附加 `id` / `style` / `open` 等属性，契约字面串只写标签名。
 const ATTR_TAGS: [&str; 23] = [
-    "h1", "h2", "h3", "h4", "h5", "h6", "details", "summary", "th", "td", "table", "thead",
-    "tbody", "tr", "ul", "ol", "li", "p", "pre", "code", "figure", "blockquote", "mark",
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    "details",
+    "summary",
+    "th",
+    "td",
+    "table",
+    "thead",
+    "tbody",
+    "tr",
+    "ul",
+    "ol",
+    "li",
+    "p",
+    "pre",
+    "code",
+    "figure",
+    "blockquote",
+    "mark",
 ];
 
 /// 若 `s`（以 `<` 开头）是待归一的开始标签，返回标签名长度。
@@ -940,11 +961,11 @@ fn body_html(html: &str) -> &str {
 
 /// 1×1 透明 PNG（导出侧只嗅探文件头判定 MIME，无需真实解码）。
 const TINY_PNG: [u8; 67] = [
-    0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44,
-    0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1F,
-    0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0A, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x63, 0x00,
-    0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00, 0x00, 0x00, 0x00, 0x49,
-    0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+    0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52,
+    0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1F, 0x15, 0xC4,
+    0x89, 0x00, 0x00, 0x00, 0x0A, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x63, 0x00, 0x01, 0x00, 0x00,
+    0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE,
+    0x42, 0x60, 0x82,
 ];
 
 /// 图片类用例的真实临时目录：`docs/` 为文档目录，`assets/` 与根下 `assets/`
@@ -993,7 +1014,12 @@ fn syntax_matrix_surfaces() {
         let text = match veil_ui::decode(&bytes) {
             Ok((t, _)) => t,
             Err(e) => {
-                rows.push(Row::new(case, Surface::Parse, vec![format!("源字节无法解码：{e}")], None));
+                rows.push(Row::new(
+                    case,
+                    Surface::Parse,
+                    vec![format!("源字节无法解码：{e}")],
+                    None,
+                ));
                 continue;
             }
         };
@@ -1045,13 +1071,20 @@ fn syntax_matrix_surfaces() {
         }
 
         // ---- 一次 headless App 供 UI 与 PRINT 共用 ----
-        let need_ui = case.applies(Surface::Wysiwyg) || case.applies(Surface::Focus) || case.applies(Surface::Typewriter);
+        let need_ui = case.applies(Surface::Wysiwyg)
+            || case.applies(Surface::Focus)
+            || case.applies(Surface::Typewriter);
         let need_print = case.applies(Surface::Print);
         let mut app = if need_ui || need_print {
             match catch_unwind(AssertUnwindSafe(|| veil_ui::qa::QaApp::new(&text))) {
                 Ok(a) => Some(a),
                 Err(_) => {
-                    for s in [Surface::Wysiwyg, Surface::Focus, Surface::Typewriter, Surface::Print] {
+                    for s in [
+                        Surface::Wysiwyg,
+                        Surface::Focus,
+                        Surface::Typewriter,
+                        Surface::Print,
+                    ] {
                         if case.applies(s) {
                             rows.push(Row::new(
                                 case,
@@ -1105,7 +1138,12 @@ fn syntax_matrix_surfaces() {
                                 rows.push(Row::new(case, Surface::Focus, res.focus, None));
                             }
                             if case.applies(Surface::Typewriter) {
-                                rows.push(Row::new(case, Surface::Typewriter, res.typewriter, None));
+                                rows.push(Row::new(
+                                    case,
+                                    Surface::Typewriter,
+                                    res.typewriter,
+                                    None,
+                                ));
                             }
                         }
                         Err(_) => {
@@ -1229,7 +1267,9 @@ fn syntax_matrix_surfaces() {
                     }
                     if case.flag("image_in_cell") {
                         let cell_img = html.split("<td").skip(1).any(|cell| {
-                            cell.split("</td>").next().is_some_and(|c| c.contains("<img"))
+                            cell.split("</td>")
+                                .next()
+                                .is_some_and(|c| c.contains("<img"))
                         });
                         if !cell_img {
                             problems.push(
@@ -1238,7 +1278,8 @@ fn syntax_matrix_surfaces() {
                         }
                         if !html.contains("td img,th img{max-height:2.4em}") {
                             problems.push(
-                                "image_in_cell：CSS 缺少 `td img,th img{max-height:2.4em}`".to_string(),
+                                "image_in_cell：CSS 缺少 `td img,th img{max-height:2.4em}`"
+                                    .to_string(),
                             );
                         }
                     }
@@ -1262,7 +1303,10 @@ fn syntax_matrix_surfaces() {
                     case,
                     Surface::Pdf,
                     Vec::new(),
-                    Some("未找到 CJK 字体（pdf::find_cjk_font 返回 None），PDF 导出入口不可运行".to_string()),
+                    Some(
+                        "未找到 CJK 字体（pdf::find_cjk_font 返回 None），PDF 导出入口不可运行"
+                            .to_string(),
+                    ),
                 ));
             } else {
                 match catch_unwind(AssertUnwindSafe(|| veil::qa::pdf_of_doc(&text))) {
@@ -1545,11 +1589,7 @@ fn write_report(rows: &[Row], total_cases: usize) {
     } else {
         out.push_str("| CASE | 表面 | 期望 / 实际片段（≤300 字符） |\n|---|---|---|\n");
         for r in fails {
-            let detail = r
-                .detail
-                .chars()
-                .take(600)
-                .collect::<String>();
+            let detail = r.detail.chars().take(600).collect::<String>();
             out.push_str(&format!(
                 "| {} | {} | {} |\n",
                 r.case,

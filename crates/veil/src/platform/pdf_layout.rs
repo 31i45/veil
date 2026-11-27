@@ -35,10 +35,8 @@ pub struct PageGeom {
 impl PageGeom {
     pub fn a4(margin_mm: f32) -> Self {
         // 与配置解析、设置 UI 共用同一区间：这里不再静默提升/压缩用户可见的取值范围。
-        let m = (margin_mm.clamp(
-            veil_ui::EXPORT_MARGIN_MM_MIN,
-            veil_ui::EXPORT_MARGIN_MM_MAX,
-        )) * 72.0
+        let m = (margin_mm.clamp(veil_ui::EXPORT_MARGIN_MM_MIN, veil_ui::EXPORT_MARGIN_MM_MAX))
+            * 72.0
             / 25.4;
         Self {
             width: A4_WIDTH,
@@ -2080,7 +2078,10 @@ fn push_chars(out: &mut Vec<LItem>, text: &str, base: usize, from: usize, to: us
                 _ => {}
             }
         }
-        out.push(LItem::Ch(if c == '\n' || c == '\t' { ' ' } else { c }, style));
+        out.push(LItem::Ch(
+            if c == '\n' || c == '\t' { ' ' } else { c },
+            style,
+        ));
     }
 }
 

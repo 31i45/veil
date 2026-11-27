@@ -223,10 +223,7 @@ fn math_render_failure_degrades_to_source() {
         Some(I18nKey::MathRenderFailedHint),
         "渲染失败必须给出界面提示，不再只写 stderr"
     );
-    assert_eq!(
-        t(I18nKey::MathRenderFailedHint),
-        "公式渲染失败，已显示源码"
-    );
+    assert_eq!(t(I18nKey::MathRenderFailedHint), "公式渲染失败，已显示源码");
     // 光标进入块内改源码时不再叠加提示（源码态是主动编辑，不是静默降级）。
     a.editor.set_caret(6);
     assert_eq!(a.math_failure_notice(id, &range), None);

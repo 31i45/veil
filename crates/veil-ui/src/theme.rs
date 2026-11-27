@@ -1649,7 +1649,10 @@ mod tests {
             5.0
         );
         assert_eq!(parse("export_margin_mm = 5\n").config.export_margin_mm, 5.0);
-        assert_eq!(parse("export_margin_mm = 50\n").config.export_margin_mm, 50.0);
+        assert_eq!(
+            parse("export_margin_mm = 50\n").config.export_margin_mm,
+            50.0
+        );
         assert_eq!(
             parse("export_margin_mm = 60\n").config.export_margin_mm,
             50.0

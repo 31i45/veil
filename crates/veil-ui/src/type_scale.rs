@@ -15,12 +15,12 @@ pub const PAPER_HEADING_PX: [f32; 6] = [22.0, 18.0, 15.5, 14.0, 13.0, 12.5];
 /// 屏幕 H1–H6 比值上限（契约 §3.2 的 cap 列，冻结）。
 pub const SCREEN_HEADING_CAP: [f32; 6] = [1.6, 1.4, 1.2, 1.1, 1.1, 1.1];
 
+/// 线宽 rail（3.0）：引用块左竖条、详情竖条。
+pub use crate::tokens::doc::QUOTE_RAIL as rail;
 /// 线宽 hairline（1.0）：分隔线、表格网格、边框、文字装饰线。
 pub use crate::tokens::stroke::HAIRLINE as hairline;
 /// 线宽 caret（2.0）：文本插入光标。
 pub use crate::tokens::surface::CARET_WIDTH as caret;
-/// 线宽 rail（3.0）：引用块左竖条、详情竖条。
-pub use crate::tokens::doc::QUOTE_RAIL as rail;
 
 /// 标题级别索引：1..=6 直接取；越界（含 0 与 7+）按 6 处理，
 /// 与既有 `heading_size` 的 `_ => 12.5` 一致。

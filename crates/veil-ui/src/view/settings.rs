@@ -2675,7 +2675,8 @@ mod tests {
 
     /// 正文行高：设置表单可编辑 10..=96，apply 时按字号夹到 [字号, 3×字号]。
     #[test]
-    fn doc_line_height_field_applies_clamped_to_font_size() {        let config = Config::default();
+    fn doc_line_height_field_applies_clamped_to_font_size() {
+        let config = Config::default();
         let mut form = SettingsForm::from_config(&config);
         let idx = form
             .fields

@@ -13,8 +13,8 @@ use veil_core::{BlockId, BlockKind, Session};
 /// `base_dir` 为 `Some` 时把该目录内的相对图片内嵌为 data URI。
 /// 返回 Err 仅表示公式字体不可用（此时无法构造导出所需字体）。
 pub fn html_of_doc(md: &str, base_dir: Option<&Path>) -> Result<String, String> {
-    let font = latex_rust::MathFont::stix_two_math()
-        .map_err(|_| "STIX 公式字体不可用".to_string())?;
+    let font =
+        latex_rust::MathFont::stix_two_math().map_err(|_| "STIX 公式字体不可用".to_string())?;
     let session = Session::open(md);
     Ok(crate::export::html_of_doc(
         &session,
@@ -33,8 +33,8 @@ pub fn html_of_doc(md: &str, base_dir: Option<&Path>) -> Result<String, String> 
 /// 而不是让 `mermaids=None` 静默降级成源码围栏。
 #[cfg(feature = "mermaid-offline")]
 pub fn html_of_doc_with_mermaid(md: &str, base_dir: Option<&Path>) -> Result<String, String> {
-    let font = latex_rust::MathFont::stix_two_math()
-        .map_err(|_| "STIX 公式字体不可用".to_string())?;
+    let font =
+        latex_rust::MathFont::stix_two_math().map_err(|_| "STIX 公式字体不可用".to_string())?;
     let session = Session::open(md);
     let mermaids = render_mermaids(&session)?;
     Ok(crate::export::html_of_doc(

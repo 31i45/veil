@@ -52,7 +52,9 @@ pub fn split_heading_id(text: &str) -> (&str, Option<&str>) {
         return (text, None);
     };
     if id.is_empty()
-        || id.chars().any(|c| c.is_whitespace() || c == '{' || c == '}')
+        || id
+            .chars()
+            .any(|c| c.is_whitespace() || c == '{' || c == '}')
         || !(before.ends_with(' ') || before.ends_with('\t'))
     {
         return (text, None);
@@ -129,7 +131,10 @@ mod tests {
 
     #[test]
     fn trailing_heading_id_is_split_from_visible_text() {
-        assert_eq!(split_heading_id("安装 {#install}"), ("安装", Some("install")));
+        assert_eq!(
+            split_heading_id("安装 {#install}"),
+            ("安装", Some("install"))
+        );
         assert_eq!(split_heading_id("标题\t{#a-b}  "), ("标题", Some("a-b")));
         // 非尾缀 / 无空白分隔 / 空 id / 正文中的普通花括号均保留原样
         assert_eq!(split_heading_id("安装"), ("安装", None));

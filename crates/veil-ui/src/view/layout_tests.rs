@@ -1623,4 +1623,3 @@ fn under_decor_stack_order_matches_visual_contract() {
         "图片占位几何不得压进行内底色之上"
     );
 }
-

@@ -92,7 +92,8 @@ impl QaApp {
     /// 文档源文本（Markdown 原文；模式开关是纯视觉，不应改变它）。
     pub fn text(&self) -> String {
         let s = self.app.editor.session();
-        s.text_slice(Range::new(0, s.text_len())).unwrap_or_default()
+        s.text_slice(Range::new(0, s.text_len()))
+            .unwrap_or_default()
     }
 
     pub fn toggle_focus(&mut self) {
@@ -177,7 +178,13 @@ impl Clock for QaClock {
 
 struct QaMath;
 impl MathRenderer for QaMath {
-    fn render(&mut self, _tex: &str, _display: bool, _scale: f32, _color: [u8; 3]) -> Result<MathImage, String> {
+    fn render(
+        &mut self,
+        _tex: &str,
+        _display: bool,
+        _scale: f32,
+        _color: [u8; 3],
+    ) -> Result<MathImage, String> {
         Err("qa matherer: 未注入公式渲染器".into())
     }
 }
@@ -302,7 +309,11 @@ impl SessionStore for QaSession {
 
 struct QaSnapshots;
 impl SnapshotStore for QaSnapshots {
-    fn save_snapshot(&mut self, _doc_key: u64, _snapshot_text: &str) -> Result<SnapshotMeta, String> {
+    fn save_snapshot(
+        &mut self,
+        _doc_key: u64,
+        _snapshot_text: &str,
+    ) -> Result<SnapshotMeta, String> {
         Err("qa snapshots: 只读".into())
     }
     fn list_snapshots(&mut self, _doc_key: u64) -> Result<Vec<SnapshotMeta>, String> {

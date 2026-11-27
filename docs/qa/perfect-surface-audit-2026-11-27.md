@@ -50,7 +50,7 @@ Get-ChildItem $root -Directory | ForEach-Object {
 
 - F 条目总数：**34**（F-001 … F-034）。
 - 严重度：**P0 = 0、P1 = 15、P2 = 14、P3 = 5**。
-- 归因：**已修复 7、本轮修复 13、接受并说明 9、延后并说明 5**（F-025/F-029 经复核由「延后」改判为「已修复：文档更正/非目标」）。
+- 归因：**已修复 7、本轮修复 13、接受并说明 9、延后并说明 3、测量闭合 2**（合计 34；F-025/F-029 经复核由「延后」改判为「已修复：文档更正/非目标」；F-015/F-016 于 2026-11-28 由 Task 5 测量闭合）。
 - P0 为 0 的含义：本轮未发现"已证实的数据丢失、崩溃或安全问题"；已知缺陷集中在分页一致性、矩阵覆盖与证据闭合，不把未取证项写成 P0。
 
 ---
@@ -64,7 +64,7 @@ Get-ChildItem $root -Directory | ForEach-Object {
 | F-001 | 块级相邻只覆盖空行边界 | ADJB 恒以 `A + "\n\n" + B` 构造，未枚举 `A + "\n" + B` 的单换行边界 | `docs/qa/report-2026-11-27.md:111`；`.trae/specs/cover-adjacent-pairs-and-deferred-items/spec.md:11` | P1 | 本轮修复 | Task 2.1 |
 | F-002 | 行内相邻只覆盖空格/无空格 | ADJI 为 12×12×2，边界只有 `A + " " + B` 与 `A + B`，未覆盖换行边界与 `。`、`，`、`）`、`.`、`,` 紧邻 | `docs/qa/report-2026-11-27.md:117`；`cover-adjacent-pairs-and-deferred-items/spec.md:11` | P1 | 本轮修复 | Task 2.2 |
 | F-003 | 容器内只测一个内层块 | ADJC 为 5 类容器 × 18 个块单元，每个用例只放一个内层块，未测两个内层块相邻 | `docs/qa/report-2026-11-27.md:106`；`cover-adjacent-pairs-and-deferred-items/spec.md:12` | P1 | 本轮修复 | Task 2.3 |
-| F-004 | 未枚举嵌套容器 | 现有组只有 ADJB/ADJI/ADJC，报告与规格均未登记"容器套容器"（ListItem/BlockQuote/Details 3×3）组合 | `docs/qa/report-2026-11-27.md:106-108`；`cover-adjacent-pairs-and-deferred-items/spec.md:11-13` | P1 | 本轮修复 | Task 2.4 |
+| F-004 | 未枚举嵌套容器 | 现有组只有 ADJB/ADJI/ADJC，报告与规格均未登记"容器套容器"（ListItem/BlockQuote/Details 3×3）组合。**已闭合（2026-11-28 复核）**：ADJX 9 条容器套容器用例全绿；其中嵌套 `<details>` 已由 Task 2 识别为 Details 块，不再锁定降级形态 | `docs/qa/report-2026-11-27.md:106-108`；`cover-adjacent-pairs-and-deferred-items/spec.md:11-13` | P1 | 本轮修复（已闭合） | Task 2.4 / 2.1 |
 
 ### 1.2 分页与输出一致性
 
@@ -74,7 +74,7 @@ Get-ChildItem $root -Directory | ForEach-Object {
 | F-006 | 超高表格行仍从行中间拆开 | 整行高度 ≤ 一页时优先整体移页；行高超过一页可用高时，`fit` 按行数切片跨页，行内文字被拆到两页 | `crates/veil/src/platform/pdf_layout.rs:1491-1514` | P2 | 本轮修复 | Task 3.1/3.2 |
 | F-007 | 打印路径把网格表格当原子块，长表硬切 | `compute_page_breaks` 对渲染态表格只保留块顶候选；无内部断点时执行 `breaks.push(limit)`，在页底硬切 | `crates/veil-ui/src/print.rs:322-324`、`336-339`、`371-378` | P1 | 本轮修复 | Task 3.2 |
 | F-008 | 打印与原生 PDF 表格分页规则不一致 | PDF 按表格行/行内切片分页并逐页重画边框；打印把表格视作原子块，只能整块移页或硬切 | `crates/veil/src/platform/pdf_layout.rs:1499-1587`；`crates/veil-ui/src/print.rs:336-339`、`371-378` | P1 | 本轮修复 | Task 3.2 |
-| F-009 | 超高原子块两条路径策略不一致 | 历史：PDF 对图片/公式/图表限高并等比缩放（图片上限 `content_h * 0.8`，Mermaid 上限 `content_h - 12pt`），对表格按行分页；打印对表格/公式图只保留块顶候选，超页硬切。**已修复（Task 3）**：显示公式在两条路径都等比缩放到一页可用高内（打印 80% 页帧高、PDF `content_h - 12pt`），块高/绘制/命中同口径；打印 `print_scales_tall_display_math_to_one_page`、PDF `tall_display_math_scales_to_single_page_content_height` 锁定 | `crates/veil/src/platform/pdf_layout.rs:1130-1163`；`crates/veil-ui/src/interaction.rs`（`math_display_size`/`math_print_scale`）、`crates/veil-ui/src/paint.rs:1345-1360`；`crates/veil-ui/src/print.rs`（R4） | P1 | 本轮修复 | Task 3.3 |
+| F-009 | 超高原子块两条路径策略不一致 | 历史：PDF 对图片/公式/图表限高并等比缩放（图片上限 `content_h * 0.8`，Mermaid 上限 `content_h - 12pt`），对表格按行分页；打印对表格/公式图只保留块顶候选，超页硬切。**已修复（Task 3）**：显示公式在两条路径都等比缩放到一页可用高内（打印 80% 页帧高、PDF `content_h - 12pt`），块高/绘制/命中同口径；打印 `print_scales_tall_display_math_to_one_page`、PDF `tall_display_math_scales_to_single_page_content_height` 锁定（2026-11-28 复核：两单测随 `cargo test --workspace` 通过） | `crates/veil/src/platform/pdf_layout.rs:1130-1163`；`crates/veil-ui/src/interaction.rs`（`math_display_size`/`math_print_scale`）、`crates/veil-ui/src/paint.rs:1345-1360`；`crates/veil-ui/src/print.rs`（R4） | P1 | 本轮修复 | Task 3.3 |
 
 ### 1.3 WYSIWYG 复杂内容
 
@@ -217,15 +217,15 @@ Get-ChildItem $root -Directory | ForEach-Object {
 | F-028 | AltGr 布局冲突是已记录的键盘取舍 | `docs/review/jobs-lens-report-v2.md:275` |
 | F-030 | 全量排版改称合成参考指标，不作发布门禁；真实交互脏块重排 271 µs | `docs/review/evidence/perf/current-head-2026-11-26.md:74-81` |
 
-### 3.4 延后并说明（7）
+### 3.4 延后与已闭合项（F-015 / F-016 已于 2026-11-28 闭合）
 
 | ID | 延后理由 | 重开判据 |
 |---|---|---|
 | F-012 | 物理打印机需要硬件与人工出纸 | Task 6.2 步骤执行并有样张 |
 | F-013 | DPI 100/125/200 需真实显示环境切换与截图 | Task 6.1 给出截图、首帧、命中与版心一致性 |
 | F-014 | 真机 IME 需人在场走微软拼音/五笔六步 | Task 6.3 六步走查通过并留证 |
-| F-015 | 历史面板未单独构造 5000 快照；风险量级与快速打开相近但未取证 | 补一次同口径测量并记录 p95 |
-| F-016 | 5000 标题 `Session::open` 只有单次 release 样本，未做 p95 | 同一机器、release、热缓存下多次采样并报 p95 |
+| F-015 | **已闭合（2026-11-28，Task 5）**：版本历史面板 5000 快照已同口径测量，打开 p95 10.738 ms、滚动 p95 3.642 ms、关闭 p95 0.423 ms | `docs/qa/perf-distribution-2026-11-27.md` §1；`probe-gate-stability-{1,2,3}.md` |
+| F-016 | **已闭合（2026-11-28，Task 5）**：5000 标题 `open_ms` 为 n=9 分布，p95 96.463 ms（本轮 probe-gate 复跑 100.234 ms），登记预算 ≤200 ms | `docs/qa/perf-distribution-2026-11-27.md` §1；`docs/qa/probe-gate-2026-11-28.md` |
 | F-025 | README 与源码不一致（AccessKit 已移除仍在宣传） | 中英 README 更正为「不提供屏幕阅读器支持」并删除失效构建命令（本轮已执行） |
 | F-029 | 该边界随 AccessKit 移除而失效 | 登记为「无障碍是非目标」，不再保留 8000 字节快照的待办表述 |
 
@@ -240,12 +240,12 @@ Get-ChildItem $root -Directory | ForEach-Object {
 - [x] **F-001**：`ADJN` 306 执行 / 18 N/A，逐对块序列见 `report-2026-11-27.md`；NOT RUN = 0。
 - [x] **F-002**：`ADJI2` 864 条（换行 + `。`、`，`、`）`、`.`、`,`），七表面与摘要均接入。
 - [x] **F-003**：`ADJC2` 110 条（5×18 自相邻 + 5×4 跨类型），断言互不吞并与容器归属。
-- [x] **F-004**：`ADJX` 9 条（3×3），层级/闭合/归属断言通过；其中 2 条嵌套 `<details>` 降级形态已登记为未修复项。
+- [x] **F-004**：`ADJX` 9 条（3×3），层级/闭合/归属断言通过；嵌套 `<details>` 已由 Task 2 修复为 Details 块，原「2 条降级形态」登记作废（2026-11-28 复核，`cargo test --workspace` 通过）。
 - [x] **F-005**：PDF `repeat_table_header` + `table_paginates_on_row_boundaries_and_repeats_header` 断言续页表头文字。
 - [x] **F-006**：两条路径都只在整行边界断页；单行自身高于一页时才允许行内硬切（规则与测试见 Task 3 单测）。
 - [x] **F-007**：打印 `compute_page_breaks` 加入表格行候选，`print_table_page_breaks_land_on_row_tops_and_reserve_header` 锁定。
 - [x] **F-008**：两路径同规则（整行断页 + 续页表头）；差异仅剩显式尺寸超页原子块的硬切，已在 `print.rs` R4 注释与 §3.3 书面登记。
-- [x] **F-009**：表格整行断页；独立图片/Mermaid 两路径都缩放到一页内（PDF 显式缩放，打印受 `image_max_height` 80% 页高上限）。**已闭合**：高于一页的显示公式改为两路径同规则等比缩放到一页可用高内（打印 80% 页帧高、PDF `content_h - 12pt`），不丢内容、不跨页硬切；单测 `print_scales_tall_display_math_to_one_page` 与 `tall_display_math_scales_to_single_page_content_height`。历史差异与重开判据保留在 register §2。
+- [x] **F-009**：表格整行断页；独立图片/Mermaid 两路径都缩放到一页内（PDF 显式缩放，打印受 `image_max_height` 80% 页高上限）。**已闭合**：高于一页的显示公式改为两路径同规则等比缩放到一页可用高内（打印 80% 页帧高、PDF `content_h - 12pt`），不丢内容、不跨页硬切；单测 `print_scales_tall_display_math_to_one_page` 与 `tall_display_math_scales_to_single_page_content_height`。历史差异与重开判据保留在 register §2。**2026-11-28 Task 6 复核通过**：两单测随 `cargo test --workspace` 执行，无失败。
 - [x] **F-010**：`Shift+滚轮` 可读宽表平移，`narrow_window_wide_table_readable_via_shift_wheel_pan` 锁定绘制/命中/光标一致性。
 - [x] **F-011**：22 类深色逐图目检 + 证据目录；`dark_corpus_renders_differs_and_rasterizes_opaque`；c4 `Rel` 已按 aria 限定覆盖；gitGraph 3.35:1 记为轻微限制。
 - [x] **F-022**：中英 README 已按「22 类目检 + 自动断言 + 两处轻微限制」重写，与 `lib.rs` 一致。
@@ -276,8 +276,8 @@ Get-ChildItem $root -Directory | ForEach-Object {
 - [x] **F-012**：已登记为人工项，步骤与判定见 `docs/review/deferred-and-manual-register-2026-11-27.md` §1.2；保持 NOT RUN。
 - [x] **F-013**：已登记为人工项，步骤与判定见 register §1.1；保持 NOT RUN。
 - [x] **F-014**：已登记为人工项，六步与判定见 register §1.3；保持 NOT RUN。
-- [x] **F-015**：延后并说明：需要 release 构建设置快照并用同一口径采样；本轮不测，理由见 §3.4。
-- [x] **F-016**：延后并说明：单次 148.385 ms 只作参考，p95 需多次 release 采样；本轮不测，理由见 §3.4。
+- [x] **F-015**：已闭合（2026-11-28）：版本历史面板 5000 快照同口径实测，打开 p95 10.738 ms、滚动 p95 3.642 ms、关闭 p95 0.423 ms，见 `docs/qa/perf-distribution-2026-11-27.md` §1。
+- [x] **F-016**：已闭合（2026-11-28）：5000 标题 `open_ms` n=9 分布 p95 96.463 ms（probe-gate 复跑 96.199 ms），低于 ≤200 ms 预算，见同上 §1。
 - [x] **F-025**：README 中英「无障碍」章节已改为「不提供屏幕阅读器 / UIA 支持（AccessKit 于 `3a6d72d` 移除）」，失效构建命令已删除。
 - [x] **F-029**：已改判为「无障碍是非目标」，不再作为证据缺口或待办。
 
@@ -285,15 +285,15 @@ Get-ChildItem $root -Directory | ForEach-Object {
 
 ## 5. 待验证与证据边界
 
-以下项目本轮**没有**取得足以写成结论的新证据，保持"待验证/NOT RUN"，不得在后续文档中改写成 PASS：
+以下项目在 2026-11-27 审计时**没有**取得足以写成结论的新证据，保持"待验证/NOT RUN"，不得在后续文档中改写成 PASS（2026-11-28 新增的测量与闭合已在对应条目注明）：
 
-1. ~~16 种 Mermaid 图型的深色观感与 c4 `Rel` 连线标签对比度~~：已由 Task 4.2 关闭（22 类逐图目检 + 证据目录 + 自动断言；c4 已按 aria 限定覆盖，gitGraph 3.35:1 为登记在案的轻微限制）。
+1. ~~16 种 Mermaid 图型的深色观感与 c4 `Rel` 连线标签对比度~~：已由 Task 4.2 关闭（22 类逐图目检 + 证据目录 + 自动断言；c4 已按 aria 限定覆盖）。**gitGraph 分支标签已于 2026-11-28 闭合**：原 3.35:1 经 `aria-roledescription="gitGraph"` 描边修复后实测 5.04:1（≥4.5），见 `docs/qa/mermaid-dark-2026-11-27.md` §2.2。
 2. 实体物理打印机出纸（人工项，register §1.2；保持 NOT RUN）。
 3. 系统 DPI 100/125/200 的真实首帧、命中与版心（人工项，register §1.1；保持 NOT RUN）。
 4. 真机中文 IME 组合、候选窗、上屏（人工项，register §1.3；保持 NOT RUN）。
 5. ~~Narrator/NVDA 语音流程~~：无障碍层已于 `3a6d72d` 移除，该项改判为「非目标」，不再是待验证证据。
-6. 版本历史面板 5000 快照的阻塞时长（`docs/qa/w11-load-state-measurement.md:66`）。
-7. 5000 标题 `Session::open` 的 p95（`docs/qa/w11-load-state-measurement.md:45`、`70`）。
+6. ~~版本历史面板 5000 快照的阻塞时长~~：已由 Task 5 测量（打开 p95 10.738 ms、滚动 p95 3.642 ms、关闭 p95 0.423 ms），见 `docs/qa/perf-distribution-2026-11-27.md` §1。
+7. ~~5000 标题 `Session::open` 的 p95~~：已由 Task 5 测量（n=9，p95 96.463 ms，预算 ≤200 ms），见同上 §1。
 8. 全量排版 281 ms 对真实用户"大文档滚动/重排"的体感影响（`docs/review/evidence/perf/current-head-2026-11-26.md:51`、`74-81`，属推断边界）。
 9. F-022 的"英文 README 与代码不一致"结论基于源码检索：未检索到 kanban/journey 的深色对比度断言，但存在浅色断言（`lib.rs:2024`、`2050`）；若后续新增未命名断言，需复核该条。
 

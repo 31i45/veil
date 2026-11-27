@@ -141,19 +141,18 @@ veil.exe /unregister   # 只撤销 /register 创建、且当前值仍属于自�
 Veil 不宣称所有 Markdown / Mermaid 语法在渲染模式、源码模式、HTML、PDF、打印五个面都 100% 一致。以下是已知限制，不是「即将支持」的承诺：
 
 - **Mermaid 可读性**：`gantt` 的任务与分节文字通过上游公开的 `gantt.fontSize` / `sectionFontSize` 从默认 11 px 提升到 14 px，由进程内渲染器设置。日期刻度字号与内部布局度量仍由 Mermaid 决定。**局限**：`c4context` 的 stereotype 文字由上游 c4 渲染器固定为约 12 px，没有安全的放大参数（放大 CSS 会超出按 12 px 量出的固定方框），因此记录为**已知降级**，不做假装修复。
-- **深色 Mermaid 对比度**：深色主题对所有 22 类 corpus 图型做了逐图目检，PNG/SVG 证据在 `docs/qa/evidence/mermaid-dark-2026-11-27/`（深色位图按 `#1e1e1e` 实际底色合成后检查）。自动断言覆盖：每类深色渲染成功、与浅色不同、可栅格化、非全透明；`mindmap`/`gantt`/`flowchart-v2`/`journey`/`radar`/`c4context`/`pie`/`packet` 另有 WCAG 对比度断言。仍有两处轻微限制：`gitGraph` 分支标签实测约 3.35:1（未改，避免破坏分支配色）；`c4context` 的 stereotype 字号由上游固定约 12 px，属已知降级。浅色主题下 `kanban`/`journey` 的 section 标签自动 override 为深色，但无对应深色 override。
-- **PDF / 打印表格**：单元格文字保留粗体、斜体、行内代码底色、链接颜色/下划线及链接注解；超长单元格跨页续排，不再截断。表格只在整行边界分页，续页顶部重复表头；只有单行自身高于一页时才允许行内硬切（续页仍重复表头）。分页按固定行高估算，极端高的行可能比浏览器多占几页。
-- **PDF / 打印超高显示公式**：单条显示公式高于一页时，两条路径都等比缩放到一页可用高内（打印取页帧高 × 80%，PDF 取内容高 − 12pt），不丢内容、不跨页硬切；块高度、绘制与命中都使用同一缩放后的几何。原「PDF 缩放 / 打印硬切续页」的差异已闭合。
+- **深色 Mermaid 对比度**：深色主题对所有 22 类 corpus 图型做了逐图目检，PNG/SVG 证据在 `docs/qa/evidence/mermaid-dark-2026-11-27/`（深色位图按 `#1e1e1e` 实际底色合成后检查）。自动断言覆盖：每类深色渲染成功、与浅色不同、可栅格化、非全透明；`mindmap`/`gantt`/`flowchart-v2`/`journey`/`radar`/`c4context`/`pie`/`packet` 另有 WCAG 对比度断言。`gitGraph` 分支标签原为 3.35:1，已按 `aria-roledescription="gitGraph"` 只给标签文字加细描边（不改分支配色与药丸底色），重新光栅采样为 5.04:1（≥4.5，AA 通过）；`c4context` 的 stereotype 字号由上游固定约 12 px，是唯一保留的已知降级。浅色主题下 `kanban`/`journey` 的 section 标签自动 override 为深色，但无对应深色 override。
+- **PDF / 打印表格**：单元格文字保留粗体、斜体、行内代码底色、链接颜色/下划线及链接注解；超长单元格跨页续排，不再截断。表格只在整行边界分页，续页顶部重复表头；只有单行自身高于一页时才允许行内硬切（续页仍重复表头）。分页按固定行高估算，极端高的行可能比浏览器多占几页。高于一页的显示公式同样等比缩放到一页可用高内（打印取页帧高 × 80%，PDF 取内容高 − 12pt），不丢内容、不跨页硬切，块高度、绘制与命中使用同一缩放后的几何。
 - **窄窗宽表**：默认把列宽压回版心，保证不横向溢出；需要读完整列时，把指针放在表格上按 `Shift+滚轮` 进入可读宽表并横向平移（表底有细指示条），命中、光标与列宽拖动使用同一平移量。打印与导出始终收纳到版心。
 - **PDF / 打印中文断行**：已加入简化禁则（闭符号不出现在行首、开符号不留在行尾），但不是完整的 UAX #14 断行与标点挤压，换行位置仍可能与渲染模式（cosmic-text）不同。
-- **远程图片**：渲染模式可按需显示，但 HTML 导出会删除远程 `src`（保证自包含），PDF/打印降级为 alt 文本或 `[图片]`；导出与 PDF 永不下载远程资源。远程图片在会话内存中缓存，默认总上限 200 MiB，超出后按 LRU 逐出最久未使用条目；切换文档时清空；缓存全部在进程内，不会落盘。远程图片抓取上限：单张响应体 20 MiB、超时 10 秒、最多 3 次重定向、拒绝 https→http 降级与 localhost/私网/数字型主机。
+- **远程图片**：渲染模式可按需显示（被全局策略阻止时，直接在图片上右键「允许远程图片（全局）」，确认后立即重排重试，无需进入设置页），但 HTML 导出会删除远程 `src`（保证自包含），PDF/打印降级为 alt 文本或 `[图片]`；导出与 PDF 永不下载远程资源。远程图片在会话内存中缓存，默认总上限 200 MiB，超出后按 LRU 逐出最久未使用条目；切换文档时清空；缓存全部在进程内，不会落盘。远程图片抓取上限：单张响应体 20 MiB、超时 10 秒、最多 3 次重定向、拒绝 https→http 降级与 localhost/私网/数字型主机。
 - **图片采样**：Mermaid 位图先还原 CSS 尺寸并限制在版心内再绘制，但使用最近邻缩放；超大图受版心宽度限制，不会按缩放级别重新光栅化。
 - **Details**：渲染模式默认折叠；HTML、PDF 与打印恒展开。这是有意行为，不是跨面缺陷。
 - **安全边界三态**（详见 [SECURITY.md](SECURITY.md) 与 [PRIVACY.md](PRIVACY.md)）：Veil 的安全边界按统一三态标签归类——**已复现并修复**两项（远程图片回环绕过、QuickJS 单次执行不受 deadline 控制）；**未复现但有测试**一项（URL 入口 / 重定向 / Mermaid 注入回归）；**仍未验证**三项（实际 peer 核验时机、DNS 切换 / rebinding / TLS 证书链、资源上限恶意实测）。处理不可信文档应保持远程图片关闭。
 
 除渲染与导出外，本节同时记录未验证项与既定产品决策：
 
-- **未验证项（沿用上一版 spec 的 Task 6 遗留人工验证，逐项均为 NOT RUN）**：真实中文 IME 组字与候选窗；100% / 125% / 200% DPI（150% 仅有自动首帧检查）；实体物理打印机（打印仅复用 PDF 分页路径验证，应用内无独立预览）；远端 GitHub Actions 与 Linux 桌面；真实断网抓包归因；无 CJK 字体的系统与只读导出目标。以上均未执行，因此均不构成 PASS。高对比度已有一次真实系统切换 PASS（228 ms）与强制高对比度复验截图（见 `docs/qa/release-facts-2026-11-27.md`），但极端主题的实际观感仍需人工确认。无障碍支持已移除，见下方「无障碍」章节。
+- **人工项（assisted 流程，用户只做物理动作）**：三项需人在场的验证已统一为「一条命令启动、分步提示、自动截图/落盘、自动生成判定表」，脚本在 `tools/verify/assisted/{dpi,print,ime}.ps1`，说明见 `tools/verify/assisted/README.md`。当前状态：系统 DPI 100/125/200 **NOT RUN**（150% 已真实抓图，脚本 `status=PASS`）；实体打印机出纸 **NOT RUN**（样张、驱动清单与六项核对表已自动生成）；真机中文 IME 六步 **NOT RUN**（代码侧锚点与 preedit 已有单测）。未执行项一律不构成 PASS。其余未验证项：远端 GitHub Actions 与 Linux 桌面；真实断网抓包归因；无 CJK 字体的系统与只读导出目标。高对比度已有一次真实系统切换 PASS（228 ms）与强制高对比度复验截图（见 `docs/qa/release-facts-2026-11-27.md`），但极端主题的实际观感仍需人工确认。无障碍支持已移除，见下方「无障碍」章节。
 - **断行依赖：`unicode-linebreak` 结论为 NO-GO（决策记录，不是待办）**：现有断行逻辑已覆盖 99%+ 的真实文本，评估后不引入 `unicode-linebreak`——收益不足以抵消新增依赖。这是已记录的决策，请勿理解为「即将支持」。
 - **字体来自系统，仓库不内嵌**：正文按 `fontdb` 枚举出的已安装字体排版；仓库与产物都不内嵌任何字体文件，因此字族选择不会改变 `veil.exe` 的体积。可在「设置 → 正文字体族」中选择任意已安装字族；所选字族缺少某个字形时（例如只含拉丁字形的字族用于中文），自动回退到系统 CJK 字体，不出现方块。
 - **源码模式的两种排版**：源码模式对同一份字节提供两种排版。默认是「块布局 + 显示标记」：块间空行不是独立可寻址行，按 ↑/↓ 会直接跳到相邻块（空行仍可删除：在下一段开头按 Backspace 删掉一个换行，`Ctrl+Z` 可恢复）。开启「设置 → 源码模式：纯文本行视图」（默认关）后，每个物理行（含空行）都是可寻址行，↑/↓ 会停在空行上。两种排版的保存字节完全相同。
@@ -184,14 +183,14 @@ cargo test -p veil-mermaid-offline
 
 历史发布门禁（v3.0.0 时期记录，**不是当前 v3.0.2 验收**）：串行 `cargo test --workspace --release -- --test-threads=1` 在 commit `0d229eb` 通过（`evidence/release/release-record.json`，`tests.status=passed`）；记录的 `veil-ui` lib 分项为 **1281 passed / 11 ignored**。此前 commit `97d3a60` 记录为 1919 passed / 0 failed / 15 ignored（远程 SVG mock 使用 20 ms 墙钟截止，并行执行可能假超时）；同一历史记录还列出默认特性下 `cargo test -p veil --lib` 为 221 passed / 1 ignored，`cargo clippy --workspace --all-targets -- -D warnings` 零警告。本轮文档纠偏未重建或复跑当前 v3.0.2 发布证据。
 
-`#[ignore]` 探针不再是没人解释的黑洞。现存 16 条 ignored 测试（11 条 release 优化级别性能探针、4 条病态/超大单块探针、1 条 CJK PDF 证据生成器）与 1 条已晋级的诊断器逐条登记在 `docs/qa/ignored-tests-2026-11-27.md`，写明为何 ignore、如何判定。一条命令即可对 release 构建跑完全部探针：
+`#[ignore]` 探针不再是没人解释的黑洞。现存 18 条 ignored 测试（13 条 release 优化级别性能探针、4 条病态/超大单块探针、1 条 CJK PDF 证据生成器）与 1 条已晋级的诊断器逐条登记在 `docs/qa/ignored-tests-2026-11-27.md`，写明为何 ignore、如何判定。一条命令即可对 release 构建跑完全部探针：
 
 ```powershell
 pwsh -NoProfile -File tools/verify/probe-gate.ps1                 # 首次运行写入 docs/qa/perf-baseline.json
-pwsh -NoProfile -File tools/verify/probe-gate.ps1 -Repeat 9        # 每条性能探针采样 9 次，按 p95 判定
+pwsh -NoProfile -File tools/verify/probe-gate.ps1 -Repeat 9        # 每条性能探针采样 9 次，按登记口径判定（峰值/p95 类用跨样本 p50，其余按基线 p95）
 ```
 
-结果写入 `docs/qa/probe-gate-<date>.md`，逐条给出 PASS / FAIL / SKIP。**FAIL 意味着：性能 p95 超过归档基线 20% 或超过探针自身预算，或者病态/证据不变量被破坏。** SKIP 只用于环境缺失（例如系统没有 CJK 字体），绝不记成 PASS。`mindmap_viewbox_debug` 已改为常规断言，只有设置 `VEIL_MINDMAP_DUMP=1` 时才落盘 SVG。
+结果写入 `docs/qa/probe-gate-<date>.md`，逐条给出 PASS / FAIL / SKIP。**FAIL 意味着：性能指标超过归档阈值（按指标类型取 p50 或 p95，并加测量噪声地板），或超过探针自身预算，或者病态/证据不变量被破坏。** SKIP 只用于环境缺失（例如系统没有 CJK 字体），绝不记成 PASS。`mindmap_viewbox_debug` 已改为常规断言，只有设置 `VEIL_MINDMAP_DUMP=1` 时才落盘 SVG。
 
 Release CI 在 `v*` tag push 与 `workflow_dispatch` 时运行。手动触发默认 `dry_run=true`，执行 Linux core check/test 以及 Windows 构建、测试、clippy、产物边界、冒烟、可选 Authenticode/RFC3161 签名与签名后的 SHA-256 校验，但不创建、不上传 GitHub Release；只有 `v*` tag push 可以发布。任何冒烟失败都不得用 `continue-on-error` 掩盖。
 
@@ -307,6 +306,9 @@ pwsh -File tools/smoke_launch.ps1 -ExePath target/release/veil.exe -ExpectedTitl
 - `docs/review/keystroke-attribution.md` — 击键到提交的延迟归因
 - `docs/qa/ignored-tests-2026-11-27.md` — 全部 `#[ignore]` 探针：文件、类型、为何忽略、判定方式、门禁覆盖
 - `docs/qa/probe-gate-<date>.md` — probe-gate 自动生成的结果（每条 PASS / FAIL / SKIP 与指标）
+- `docs/qa/perf-distribution-2026-11-27.md` — 关键路径 min/p50/p95/max 分布（含 5000 标题与版本历史面板 5000 快照）
+- `docs/qa/last-mile-closeout-2026-11-28.md` — 最后一公里收口：6 个任务状态、证据位置、未闭合人工项与一键命令
+- `tools/verify/assisted/README.md` — DPI / 实体打印 / 真机 IME 的 assisted 流程（用户只做物理动作）
 - `docs/adr/` — 架构决策记录：
   - ADR-001 rope 选型
   - ADR-002 公式渲染路径

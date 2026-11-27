@@ -2,23 +2,59 @@
 
 > 本页为人工维护的交付事实。`report-2026-11-27.md` 由语法矩阵测试生成，运行测试会覆写，请勿手工追加。
 
+## 最后一公里与 ignored 门禁（2026-11-28）
+
+> 以下数字全部来自 2026-11-28 02:04–02:31（Asia/Shanghai）的本机真实命令输出。
+
+### 全量门禁
+
+- `cargo test --workspace`：**2269 passed / 0 failed / 18 ignored**（按套件汇总为 2267 passed；`veil-mermaid-offline` 的病态 deadline 测试以子进程两次运行同一二进制，额外 2 passed）。
+  - 分套件：`veil` lib 288（1 ignored）、`veil` bin 0、`docs_policy` 6、`syntax_matrix` 5（311.30 s，内部 2148 用例 × 7 表面）、`veil-core` lib 366（1 ignored）、`conformance` 1、`core` 86、`gfm_conformance` 1、`parser_differential` 2、`real_world_check` 1、`pathological` 0（1 ignored）、`veil-mermaid-offline` 29（1 ignored）、`veil-ui` lib 1475（14 ignored）、`boundary_guard` 7、doc-tests 0×4。
+- `cargo clippy --workspace --all-targets -- -D warnings`：**0 warnings**（exit 0）。
+- `cargo fmt --all --check`：**通过**（exit 0）。
+- `pwsh -NoProfile -File tools/verify/probe-gate.ps1 -Repeat 9`：**PASS 20 / FAIL 0 / SKIP 0**，探针总耗时 399.2 s；归档 `docs/qa/probe-gate-2026-11-28.md`。
+- 环境性偶发：本轮全量与三次稳定性复跑均未复现早前 `platform::http::tests::actual_loopback_peer_fails_closed` 的 WinHTTP 12152；该历史记录保留在本页「测试」一节。稳定性验证中曾有一次 `perf_after_edit_breakdown` `peak_total_ms` FAIL（p50 5.96 ms vs 阈值 5.613 ms），单探针 9 次复测 p50 3.812 ms，随后连续三次 PASS；该次未改写成 PASS。
+
+### ignored 清单
+
+- 源码 `#[ignore]` 真实计数：**18**（`rg -n "#\[ignore" crates --glob '*.rs'`）。
+- 名单：`pathological_eval_child`、`pathological_inputs_matrix`、`bench_edit_reparse_history_100k`、`perf_50mb_long_doc`、`perf_20k_blocks`、`perf_keystroke_path`、`perf_keystroke_attribution`、`perf_index_subsegments`、`perf_cold_first_edit`、`perf_cold_first_edit_prewarmed`、`perf_first_edit_after_first_frame`、`perf_huge_scroll`、`perf_huge_block`、`perf_peak_breakdown`、`perf_after_edit_breakdown`、`generate_wave4_sample_pdf`、`perf_5000_headings`、`perf_history_5000`。
+- `mindmap_viewbox_debug` 已晋级为常规断言（不再 ignore）；probe-gate 判定行 20（`pathological_eval_child` 以 loop / microtask 各一次）。
+- 逐条「为何 ignore / 运行条件 / 判定方式」：`docs/qa/ignored-tests-2026-11-27.md`。
+
+### 性能分布（引用 `docs/qa/perf-distribution-2026-11-27.md`）
+
+- 5000 标题：打开 p95 **96.463 ms**、单步滚动 p95 **1.098 ms**（n=9）。
+- 版本历史面板 5000 快照：打开 p95 **10.738 ms**、滚动 p95 **3.642 ms**、关闭 p95 **0.423 ms**（n=9）。
+- 本轮 probe-gate 复跑：5000 标题打开 p95 100.234 ms（阈值 115.755 ms）、历史面板打开 p95 10.213 ms、滚动 p50 3.615 ms。
+- 三次连续稳定性归档：`docs/qa/evidence/assisted-2026-11-27/probe-gate-stability-{1,2,3}.md`（均 PASS 20 / FAIL 0 / SKIP 0）。
+- 完整 min/p50/p95/max 与口径修订说明见 `docs/qa/perf-distribution-2026-11-27.md`，本节不重抄。
+
+### 发布产物与不变量
+
+- `target/release/veil.exe` = **14,309,888 B**（门禁 14,680,064 B，余量 370,176 B）。
+- SHA-256 = `7B5DD8596D95E90CEAEED68AC5FBCDE8CDCB69FAFA83A905C780C76957EDBC6E`。
+- 未推送 GitHub（`main` 领先 `origin/main` 6 个 commit）、未打 tag、版本号仍 **3.0.2**。
+- 未新增依赖：`Cargo.toml` / `Cargo.lock` 无改动。
+- 本轮 commit（新→旧）：`d57be44`、`68846e9`、`66fe135`、`f89bb99`、`370f522`、`906934c`。
+
 ## 代码
 
 - 未推送 GitHub、未打 tag、未修改版本号。
 - 未新增任何依赖（工作区 Cargo.toml / Cargo.lock 无变化）。
 
-## 测试
+## 测试（2026-11-27 轮次；当前数字见顶部「最后一公里」一节）
 
 - `cargo test --workspace`：**2258 passed / 0 failed / 17 ignored**（最终轮）。
 - 分套件：`veil` lib 286（1 ignored）、`docs_policy` 6、`syntax_matrix` 5（内部 **2148 用例 × 7 表面**）、`veil-core` lib 363（1 ignored）、`conformance` 1、`core` 86、`gfm_conformance` 1、`parser_differential` 2、`real_world_check` 1、`pathological` 0（1 ignored）、`veil-mermaid-offline` 27（2 ignored）、`veil-ui` lib 1471（12 ignored）、`boundary_guard` 7。
 - 环境性偶发：`platform::http::tests::actual_loopback_peer_fails_closed` 在早前首次全量运行报 WinHTTP 12152，单独重跑与随后全量复跑均通过；未修改断言、未忽略用例。最终轮未复现。
 
-## 静态检查
+## 静态检查（2026-11-27 轮次；本轮结果见顶部「最后一公里」一节）
 
 - `cargo clippy --workspace --all-targets -- -D warnings`：0 warnings。
 - `cargo fmt --all --check`：通过。
 
-## 发布产物
+## 发布产物（2026-11-27 轮次；本轮体积与 SHA 见顶部「最后一公里」一节）
 
 - `target/release/veil.exe` = **14,299,648 B**（门禁 14,680,064 B，余量 380,416 B）。
 - SHA-256 = `52D82E5F9B905C8BCBB2E51E519B9DD40AEA7925FEC0FF95A38367EC72594FAB`。

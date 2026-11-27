@@ -13,6 +13,7 @@ use veil_core::{
     InlineNode, Range, Session,
 };
 use veil_ui::i18n::{tf, Key};
+use veil_ui::type_scale;
 use veil_ui::{ExportStyle, Exporter, FileStore};
 
 /// 文档外壳：最小自包含模板（无外部资源）。样式由当前主题快照生成，
@@ -43,6 +44,15 @@ fn head(style: &ExportStyle) -> String {
     let link = hex(style.link);
     let code_bg = hex(style.code_bg);
     let border = hex(style.border);
+    let mark_bg = hex(style.mark_bg);
+    let danger = hex(style.danger);
+    // 线宽与标题比值只从 `type_scale` 取（契约 §3.2 / §四），格式串里不再写数字。
+    let hairline = type_scale::hairline;
+    let rail = type_scale::rail;
+    // 六档屏幕比值一次算好；H4–H6 在屏幕档同为 1.1（由 `type_scale` 的字号测试钉死），
+    // 故合并为一条规则，仍用派生值而非字面量。
+    let heading = [1u8, 2, 3, 4, 5, 6].map(type_scale::screen_heading_scale);
+    let [h1, h2, h3, h4, ..] = heading;
     let body_font = css_font_stack(style.font_family);
     // 深色页面须声明 color-scheme：否则浏览器默认的滚动条/表单控件仍是浅色，观感割裂
     let scheme = if style.dark {
@@ -57,21 +67,25 @@ fn head(style: &ExportStyle) -> String {
          body{{max-width:44em;margin:2em auto;padding:0 1em;\
          font:16px/1.6 {body_font};background:{bg};color:{text};\
          overflow-wrap:anywhere;word-break:break-word}}\n\
+         h1{{font-size:{h1}em}}\n\
+         h2{{font-size:{h2}em}}\n\
+         h3{{font-size:{h3}em}}\n\
+         h4,h5,h6{{font-size:{h4}em}}\n\
          a{{color:{link}}}\n\
-         code,pre{{background:{code_bg};border:1px solid {border};\
+         code,pre{{background:{code_bg};border:{hairline}px solid {border};\
          font-family:Consolas,Menlo,monospace}}\n\
          code{{padding:.1em .3em}}\n\
          pre{{padding:.8em;overflow-x:auto}}\n\
          pre code{{padding:0;border:none}}\n\
-         kbd{{border:1px solid {border};border-radius:3px;padding:.05em .35em;\
+         kbd{{border:{hairline}px solid {border};border-radius:3px;padding:.05em .35em;\
          font-size:.9em;font-weight:600;background:{code_bg};\
-         box-shadow:0 1px 0 {border}}}\n\
+         box-shadow:0 {hairline}px 0 {border}}}\n\
          sub,sup{{font-size:.75em;line-height:0}}\n\
          sub{{vertical-align:-0.25em}}\n\
          sup{{vertical-align:0.5em}}\n\
-         mark{{background:#fff799;color:inherit;padding:0 .1em;border-radius:2px}}\n\
+         mark{{background:{mark_bg};color:inherit;padding:0 .1em;border-radius:2px}}\n\
          abbr[title]{{text-decoration:underline dotted;cursor:help}}\n\
-         details{{margin:.8em 0;padding:.2em .6em;border-left:3px solid {border}}}\n\
+         details{{margin:.8em 0;padding:.2em .6em;border-left:{rail}px solid {border}}}\n\
          summary{{cursor:pointer;font-weight:600}}\n\
          details[open] summary{{margin-bottom:.4em}}\n\
          img{{max-width:100%;height:auto}}\n\
@@ -81,16 +95,16 @@ fn head(style: &ExportStyle) -> String {
          figcaption{{margin-top:.4em;color:{muted};font-size:.9em;\
          overflow-wrap:anywhere;word-break:break-word}}\n\
          td img,th img{{max-height:2.4em}}\n\
-         blockquote{{border-left:4px solid {border};margin-left:0;padding-left:1em;color:{muted}}}\n\
+         blockquote{{border-left:{rail}px solid {border};margin-left:0;padding-left:1em;color:{muted}}}\n\
          table{{border-collapse:collapse}}\n\
-         th,td{{border:1px solid {border};padding:.4em .6em}}\n\
-         hr{{border:none;border-top:1px solid {border}}}\n\
+         th,td{{border:{hairline}px solid {border};padding:.4em .6em}}\n\
+         hr{{border:none;border-top:{hairline}px solid {border}}}\n\
          div.math{{text-align:center;margin:1em 0}}\n\
          span.math-inline{{display:inline-block;vertical-align:middle;line-height:0;max-width:100%}}\n\
          span.math-inline svg{{display:block;max-width:100%;height:auto}}\n\
-         pre.math-source{{color:#a00;background:#fdf5f5}}\n\
+         pre.math-source{{color:{danger};background:{code_bg}}}\n\
          .fnref a{{text-decoration:none}}\n\
-         .footnotes{{border-top:1px solid {border};margin-top:2em;\
+         .footnotes{{border-top:{hairline}px solid {border};margin-top:2em;\
          padding-top:.5em;color:{muted};font-size:.9em}}\n\
          </style>\n</head>\n<body>\n"
     )
@@ -2854,6 +2868,9 @@ mod tests {
             link: [127, 180, 245],
             code_bg: [40, 40, 40],
             border: [60, 64, 70],
+            // `Theme::dark()` 的 mark_bg 与 bg 合成后的呈现色（[122,96,0,210] over [30,30,30]）
+            mark_bg: [106, 84, 5],
+            danger: [255, 130, 130],
             font_family: None,
         }
     }
@@ -2954,9 +2971,9 @@ mod tests {
             "实际输出: {css}"
         );
         assert!(css.contains("sup{vertical-align:0.5em}"), "实际输出: {css}");
-        // mark：预览层同一高亮色 rgb(255,247,153)，文字保持正文色
+        // mark：主题 mark_bg src-over 到页面底后的不透明呈现色，文字保持正文色
         assert!(
-            css.contains("mark{background:#fff799;color:inherit;padding:0 .1em;border-radius:2px}"),
+            css.contains("mark{background:#fff9b7;color:inherit;padding:0 .1em;border-radius:2px}"),
             "实际输出: {css}"
         );
         // abbr：虚线下划线
@@ -3009,6 +3026,46 @@ mod tests {
             dark.contains("background:#282828;box-shadow:0 1px 0 #3c4046}"),
             "实际输出: {dark}"
         );
+        // 标题：比值来自唯一基准表的屏幕档（契约 §3.2），h5/h6 不得小于正文
+        let scale = type_scale::screen_heading_scale;
+        for (level, tag) in [(1u8, "h1"), (2, "h2"), (3, "h3")] {
+            let rule = format!("{tag}{{font-size:{}em}}", scale(level));
+            assert!(css.contains(&rule), "缺少派生标题规则 `{rule}`: {css}");
+        }
+        assert!(
+            css.contains(&format!("h4,h5,h6{{font-size:{}em}}", scale(4))),
+            "h4–h6 必须从派生比值生成: {css}"
+        );
+        assert!(
+            css.contains("h4,h5,h6{font-size:1.1em}"),
+            "h5/h6 不得小于正文: {css}"
+        );
+        // 引用竖条 = rail（3px），与屏幕侧同源；分隔线/表格/代码边框 = hairline（1px）
+        assert!(
+            css.contains("blockquote{border-left:3px solid #dddddd;margin-left:0;padding-left:1em;color:#666666}"),
+            "实际输出: {css}"
+        );
+        assert_eq!(type_scale::rail, 3.0);
+        assert_eq!(type_scale::hairline, 1.0);
+        // 公式渲染失败：危险色 + 主题代码底，不得复用浅色红/浅红
+        assert!(
+            css.contains("pre.math-source{color:#b22222;background:#f5f5f5}"),
+            "实际输出: {css}"
+        );
+        assert!(
+            dark.contains("pre.math-source{color:#ff8282;background:#282828}"),
+            "实际输出: {dark}"
+        );
+        assert!(
+            dark.contains("mark{background:#6a5405;"),
+            "深色 mark 必须用深色主题派生色: {dark}"
+        );
+        for banned in ["#fff799", "#a00", "#fdf5f5"] {
+            assert!(
+                !dark.contains(banned),
+                "深色导出不得保留写死浅色 `{banned}`: {dark}"
+            );
+        }
     }
 
     #[test]

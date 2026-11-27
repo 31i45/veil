@@ -1,7 +1,9 @@
 //! 绘制层颜色字面量静态扫描（防「浅色值写死在绘制层」回归）。
 //!
 //! 扫描范围：`paint.rs`、`paint_table.rs`、`paint_overlay.rs`、`chrome/`、`view/`
-//! 下所有 `.rs`（递归，含 `view/layout/`）。
+//! 下所有 `.rs`（递归，含 `view/layout/`），以及 `veil` crate 的 HTML 导出
+//! (`../veil/src/export.rs`)：导出的 `<style>` 也属于绘制层——导出件是另一块画布，
+//! 同样不得写死色值，否则深色主题会导出浅色眩光块。
 //!
 //! 匹配的颜色字面量（任一命中即失败）：
 //! 1. `#RRGGBB` / `#RGB`（含字符串里的 CSS 色值，如 `background-color:#ff0`）；
@@ -19,7 +21,9 @@
 //! - 生产文件内的 `#[cfg(test)]` 区域：这些是文件内联测试模块（`view/style.rs`、
 //!   `view/frame.rs`、`view/modal.rs`、`chrome/mod.rs` 等），理由同上，只是文件名
 //!   不带 `_tests`；跳过区间从 `#[cfg(test)]` 起，到被修饰项/模块闭合为止；
-//! - 行内 `//` 之后：注释里引用色值不是绘制代码（如「沿用浅色 [245,245,245]」）。
+//! - 行内 `//` 之后：注释里引用色值不是绘制代码（如「沿用浅色 [245,245,245]」）；
+//! - `ALLOWED_LITERALS`：逐条带理由核准的个例（见该常量的注释），不做正则放行，
+//!   条目一旦不再命中就会失败，迫使随代码一起清理。
 //!
 //! 失败信息格式：`路径:行号: 命中内容`，按路径排序，便于直接定位。
 
@@ -31,13 +35,38 @@ fn crate_src() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("src")
 }
 
-/// 收集扫描目标：三个 paint 文件 + `chrome/`、`view/` 递归下所有 `.rs`。
+/// HTML 导出实现：`<style>` 生成处与绘制层同属「颜色输出」一侧。
+fn export_src() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../veil/src/export.rs")
+}
+
+/// 逐条核准的生产色字面量：（相对路径, 该行必须包含的片段, 理由）。
+///
+/// 只接受「不是本仓库绘制的颜色」的个例；一旦片段不再出现，扫描会失败，
+/// 促使条目随代码删除，避免白名单变成永久后门。
+const ALLOWED_LITERALS: &[(&str, &str, &str)] = &[
+    (
+        "veil/src/export.rs",
+        "border:1px solid #d9a441",
+        "远程图片缺失警示条：固定 amber 警示语义，是独立于文档主题的提示块，\
+         不占正文彩色预算；改成 danger/代码底会被误读为错误态",
+    ),
+    (
+        "veil/src/export.rs",
+        "fill=\\\"#000000\\\"",
+        "latex-rust 默认黑色 fill 的替换目标串（命中后改为 currentColor），\
+         本身不是本仓库绘制的颜色",
+    ),
+];
+
+/// 收集扫描目标：三个 paint 文件 + `chrome/`、`view/` 递归下所有 `.rs` + HTML 导出。
 fn scan_targets() -> Vec<PathBuf> {
     let src = crate_src();
     let mut files = vec![
         src.join("paint.rs"),
         src.join("paint_table.rs"),
         src.join("paint_overlay.rs"),
+        export_src(),
     ];
     for dir in ["chrome", "view"] {
         collect_rs(&src.join(dir), &mut files);
@@ -195,15 +224,20 @@ fn no_color_literals_in_paint_layers() {
         targets
     );
     let mut hits: Vec<String> = Vec::new();
+    let mut used_allow = vec![false; ALLOWED_LITERALS.len()];
     for path in &targets {
         if is_test_file(path) {
             continue; // 白名单：测试文件的「期望色」。
         }
-        let rel = path
-            .strip_prefix(crate_src())
-            .unwrap_or(path)
-            .to_string_lossy()
-            .replace('\\', "/");
+        // 导出文件在另一个 crate，`strip_prefix(crate_src())` 不成立，显式给出相对名。
+        let rel = if path == &export_src() {
+            "veil/src/export.rs".to_string()
+        } else {
+            path.strip_prefix(crate_src())
+                .unwrap_or(path)
+                .to_string_lossy()
+                .replace('\\', "/")
+        };
         if rel == "theme.rs" {
             continue; // 白名单：调色板唯一定义处。
         }
@@ -236,10 +270,22 @@ fn no_color_literals_in_paint_layers() {
                 opened = false;
                 continue; // 白名单：文件内联测试区域。
             }
+            let allowed = ALLOWED_LITERALS
+                .iter()
+                .position(|(p, snippet, _)| *p == rel && raw.contains(snippet));
             for hit in line_hits(raw) {
-                hits.push(format!("{rel}:{}: {}  [命中 {hit}]", idx + 1, raw.trim()));
+                match allowed {
+                    Some(i) => used_allow[i] = true,
+                    None => hits.push(format!("{rel}:{}: {}  [命中 {hit}]", idx + 1, raw.trim())),
+                }
             }
         }
+    }
+    for (i, (path, snippet, reason)) in ALLOWED_LITERALS.iter().enumerate() {
+        assert!(
+            used_allow[i],
+            "白名单条目已失效（代码已改或片段写错），请删除：{path} `{snippet}`：{reason}"
+        );
     }
     assert!(
         hits.is_empty(),

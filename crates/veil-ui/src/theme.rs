@@ -582,13 +582,34 @@ pub struct ExportStyle {
     pub link: [u8; 3],
     pub code_bg: [u8; 3],
     pub border: [u8; 3],
+    /// `<mark>` 底色：`theme.mark_bg`（带 alpha）src-over 到 `theme.bg` 后的
+    /// 不透明呈现色。导出 CSS 不保留 alpha，必须在快照里先合成。
+    pub mark_bg: [u8; 3],
+    /// 危险/失败前景色（公式渲染失败源码等）：取 `theme.danger`。
+    pub danger: [u8; 3],
     /// 正文字族名（`None` = 导出沿用浏览器默认 `system-ui`）。
     /// 指向排版引擎内驻留的 `'static` 名字，避免导出端口持有所有权或复制。
     pub font_family: Option<&'static str>,
 }
 
+/// 半透明色 `top` src-over 到不透明底 `bottom` 的实际呈现色。
+///
+/// 导出 CSS 的底色必须是可独立渲染的不透明值（浏览器不会替我们合成到页底），
+/// 所以带 alpha 的主题色（如 `mark_bg`）要先在这里按主题底色算出 RGB。
+/// 主题底色恒为不透明（alpha = 255），故只取 `bottom` 的 RGB 分量。
+fn src_over(top: [u8; 4], bottom: [u8; 4]) -> [u8; 3] {
+    let a = top[3] as f32 / 255.0;
+    let ch = |t: u8, b: u8| (t as f32 * a + b as f32 * (1.0 - a)).round() as u8;
+    [
+        ch(top[0], bottom[0]),
+        ch(top[1], bottom[1]),
+        ch(top[2], bottom[2]),
+    ]
+}
+
 impl Default for ExportStyle {
-    /// 浅色默认：与改造前硬编码的导出样式逐色一致，未注入主题时视觉不回退。
+    /// 浅色默认：固定色与改造前硬编码的导出样式逐色一致；`mark_bg` / `danger`
+    /// 从浅色主题派生（颜色不再在导出侧另起一套）。
     fn default() -> Self {
         ExportStyle {
             dark: false,
@@ -598,6 +619,8 @@ impl Default for ExportStyle {
             link: [0x2b, 0x6c, 0xb0],
             code_bg: [0xf5, 0xf5, 0xf5],
             border: [0xdd, 0xdd, 0xdd],
+            mark_bg: src_over(Theme::light().mark_bg, Theme::light().bg),
+            danger: Theme::light().danger,
             font_family: None,
         }
     }
@@ -607,7 +630,9 @@ impl ExportStyle {
     /// 主题 → 导出样式。字段映射：
     /// - `bg`/`text`/`muted`/`link` 直接取同名主题字段（`text` 取 `fg`，正文前景）；
     /// - `code_bg` 复用主题 `code_bg`（编辑器代码块底色，导出与屏幕一致）；
-    /// - `border` 复用 `chrome_border`（主题里唯一通用的分界色，表格/引用/分隔线共用）。
+    /// - `border` 复用 `chrome_border`（主题里唯一通用的分界色，表格/引用/分隔线共用）；
+    /// - `mark_bg` 把主题 `mark_bg`（带 alpha）src-over 到 `bg`，得到不透明呈现色；
+    /// - `danger` 复用主题 `danger`（公式渲染失败等失败态前景）。
     ///
     /// 为什么 `pub(crate)`：产品层只消费导出的快照，不需要自己从 `Theme` 推颜色；
     /// 保持 `Theme` 不进入公共 API（ADR-009 S5 按实际使用收窄导出面）。
@@ -624,6 +649,8 @@ impl ExportStyle {
             link: t.link,
             code_bg: rgb(t.code_bg),
             border: rgb(t.chrome_border),
+            mark_bg: src_over(t.mark_bg, t.bg),
+            danger: t.danger,
             font_family: None,
         }
     }
@@ -2357,14 +2384,21 @@ mod tests {
         // code_bg / border 有对应主题字段：必须逐字节复用，不在导出侧另起一套色
         assert_eq!(light.code_bg, [245, 245, 245]);
         assert_eq!(light.border, [208, 213, 221]);
+        // mark 底与 danger 从主题派生：mark 先与页面底合成（导出 CSS 不留 alpha）
+        assert_eq!(light.mark_bg, [255, 249, 183]);
+        assert_eq!(light.danger, [178, 34, 34]);
         let dark = ExportStyle::from_theme(&Theme::dark());
         assert!(dark.dark);
         assert_eq!(dark.bg, [30, 30, 30]);
         assert_eq!(dark.text, [220, 220, 220]); // 取 fg（正文前景），非菜单文字色
         assert_eq!(dark.code_bg, [40, 40, 40]);
         assert_eq!(dark.border, [60, 64, 70]);
+        assert_eq!(dark.mark_bg, [106, 84, 5]);
+        assert_eq!(dark.danger, [255, 130, 130]);
         // Default 与主题无关：浅色兜底值固定，供未注入主题的调用方使用
         assert_eq!(ExportStyle::default().bg, [255, 255, 255]);
+        assert_eq!(ExportStyle::default().mark_bg, [255, 249, 183]);
+        assert_eq!(ExportStyle::default().danger, [178, 34, 34]);
         assert!(!ExportStyle::default().dark);
     }
 

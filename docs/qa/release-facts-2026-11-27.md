@@ -9,8 +9,8 @@
 
 ## 测试
 
-- `cargo test --workspace`：**2251 passed / 0 failed / 17 ignored**（最终轮）。
-- 分套件：`veil` lib 285（1 ignored）、`docs_policy` 6、`syntax_matrix` 5（内部 **859 用例 × 7 表面**）、`veil-core` lib 363（1 ignored）、`conformance` 1、`core` 86、`gfm_conformance` 1、`parser_differential` 2、`real_world_check` 1、`pathological` 0（1 ignored）、`veil-mermaid-offline` 26（2 ignored）、`veil-ui` lib 1466（12 ignored）、`boundary_guard` 7。
+- `cargo test --workspace`：**2258 passed / 0 failed / 17 ignored**（最终轮）。
+- 分套件：`veil` lib 286（1 ignored）、`docs_policy` 6、`syntax_matrix` 5（内部 **2148 用例 × 7 表面**）、`veil-core` lib 363（1 ignored）、`conformance` 1、`core` 86、`gfm_conformance` 1、`parser_differential` 2、`real_world_check` 1、`pathological` 0（1 ignored）、`veil-mermaid-offline` 27（2 ignored）、`veil-ui` lib 1471（12 ignored）、`boundary_guard` 7。
 - 环境性偶发：`platform::http::tests::actual_loopback_peer_fails_closed` 在早前首次全量运行报 WinHTTP 12152，单独重跑与随后全量复跑均通过；未修改断言、未忽略用例。最终轮未复现。
 
 ## 静态检查
@@ -20,16 +20,27 @@
 
 ## 发布产物
 
-- `target/release/veil.exe` = **14,291,456 B**（门禁 14,680,064 B，余量 388,608 B）。
-- SHA-256 = `0C03391B4EF8B92605D85AC8DD0A4CB514EE1F2A4F2A560AEFAD4CA37B33FAC8`。
+- `target/release/veil.exe` = **14,299,648 B**（门禁 14,680,064 B，余量 380,416 B）。
+- SHA-256 = `52D82E5F9B905C8BCBB2E51E519B9DD40AEA7925FEC0FF95A38367EC72594FAB`。
 
 ## 语法矩阵
 
-- **859 用例 / 6013 断言 / 0 FAIL / 0 NOT RUN**；`report-2026-11-27.md` 由测试生成。
-- 组成：语料 175 条 × 7 = 1225；生成式块级相邻 `ADJB` 306 条 × 7 = 2142（18 个 B=FrontMatter 对按理由 N/A）；行内相邻 `ADJI` 288 条 × 7 = 2016；容器内一级内容 `ADJC` 90 条 × 7 = 630。
-- 例外表（规范允许合并）逐条有依据：`ADJB-077/149/257`、`ADJI-002/028/054`；模型边界（非缺陷）：ADJB 默认配置无 Callout 块型、ADJC 容器内 Math/嵌套 Admonition 不独立成块。
-- 相邻矩阵发现并修复的真实缺陷：`ADJB-086/239`（HTML 导出 defs 前缀把缩进代码降级为段落）、`ADJI-184`（两个相邻高亮的 4 连等号边界被整段降级为字面文本）。修复后结构断言全量执行，无「暂缓/待修」。
-- 全量 HTML 摘要 `docs/qa/adjacency-digest.txt`（684 行）逐条重算比对；抽样全文金样 226 份。
+- **2148 用例 / 15036 断言 / 0 FAIL / 0 NOT RUN**；`report-2026-11-27.md` 由测试生成。
+- 组成：语料 175 条 × 7 = 1225；`ADJB` 306 × 7 = 2142；`ADJI` 288 × 7 = 2016；`ADJC` 90 × 7 = 630；`ADJN`（块级单换行）306 × 7 = 2142；`ADJI2`（换行 + 5 标点边界）864 × 7 = 6048；`ADJC2`（容器内两个内层块）110 × 7 = 770；`ADJX`（嵌套容器）9 × 7 = 63。
+- 例外表（规范允许合并）逐条有依据：`ADJB-077/149/257`、`ADJI-002/028/054`；模型边界（非缺陷）：ADJB/ADJN 默认配置无 Callout 块型、ADJC 容器内 Math/嵌套 Admonition 不独立成块。
+- 相邻矩阵发现并修复的真实缺陷：`ADJB-086/239`（HTML 导出 defs 前缀把缩进代码降级为段落）、`ADJI-184`（两个相邻高亮的 4 连等号边界被整段降级为字面文本）、`ADJN`（单换行段落 + 分隔行：core 曾整段判为段落，HTML 已是表格；已在 `scan_one` 复刻 cmark-gfm 的「分隔行提升段落末行为表头」）。
+- 已登记未修复：`ADJX-003/006`（ListItem / BlockQuote 内的 `<details>` 不被识别为 Details 块，容器展开只提升 Table/Mermaid；断言锁定当前降级形态，修复需扩展容器展开路径）。
+- 全量 HTML 摘要 `docs/qa/adjacency-digest.txt`（1973 行：306+288+90+306+864+110+9）逐条重算比对；抽样全文金样 295 份。
+
+## 完美表面收敛（converge-perfect-writing-surface，2026-11-27）
+
+- 事实底座：`docs/qa/perfect-surface-audit-2026-11-27.md`（34 条 F 台账：P0 0 / P1 15 / P2 14 / P3 5；101 个 spec 目录中 27 个历史目录含未勾选，逐目录裁决）。
+- 分页一致性：原生 PDF 与打印都只在表格整行边界断页，续页重复表头；单行高于一页才允许行内硬切。单测：PDF `table_paginates_on_row_boundaries_and_repeats_header`；打印 `print_table_page_breaks_land_on_row_tops_and_reserve_header`、`print_repeats_table_header_pixels_on_continuation_pages`、`print_hard_cuts_atomic_block_taller_than_page`。
+- WYSIWYG：窄窗宽表可 `Shift+滚轮` 横向平移读完（`narrow_window_wide_table_readable_via_shift_wheel_pan`，绘制/命中/光标/列宽拖动同口径）；22 类 Mermaid 深色逐图目检并留证据（`docs/qa/evidence/mermaid-dark-2026-11-27/`、`docs/qa/mermaid-dark-2026-11-27.md`），新增 `dark_corpus_renders_differs_and_rasterizes_opaque`；四态降级核对见 `docs/qa/wysiwyg-complex-content-2026-11-27.md`。
+- 全维度审计：`docs/review/full-dimension-audit-2026-11-27.md`（架构/十一维度/八原则，P0 = 0，P1 = 6，其中 4 条由本轮任务关闭、2 条为人工证据项）。
+- 文档真实性与证据：AccessKit/UIA 已于 `3a6d72d` 移除，中英 README 与组件清单已同步改为「不提供屏幕阅读器支持」；人工验证项与延后项见 `docs/review/deferred-and-manual-register-2026-11-27.md`。
+- 门禁：`cargo test --workspace` 2258 passed / 0 failed / 17 ignored；clippy 0 warnings；fmt 通过；`veil.exe` 14,299,648 B（余量 380,416 B）。
+- 本轮 6 个 commit（`db65ec8` → `aa39b8c`），未推送、未打 tag、未改版本号、未新增依赖。
 
 ## 相邻组合覆盖（cover-adjacent-pairs-and-deferred-items）
 

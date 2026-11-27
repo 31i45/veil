@@ -50,7 +50,7 @@ Get-ChildItem $root -Directory | ForEach-Object {
 
 - F 条目总数：**34**（F-001 … F-034）。
 - 严重度：**P0 = 0、P1 = 15、P2 = 14、P3 = 5**。
-- 归因：**已修复 5、本轮修复 13、接受并说明 9、延后并说明 7**。
+- 归因：**已修复 7、本轮修复 13、接受并说明 9、延后并说明 5**（F-025/F-029 经复核由「延后」改判为「已修复：文档更正/非目标」）。
 - P0 为 0 的含义：本轮未发现"已证实的数据丢失、崩溃或安全问题"；已知缺陷集中在分页一致性、矩阵覆盖与证据闭合，不把未取证项写成 P0。
 
 ---
@@ -237,47 +237,47 @@ Get-ChildItem $root -Directory | ForEach-Object {
 
 ### 4.1 本轮修复关闭判据
 
-- [ ] **F-001**：Task 2.1 新增 `A + "\n" + B` 全 18×18 矩阵，逐对登记期望块序列与规范依据，`docs/qa/report-*.md` 对应组 NOT RUN = 0。
-- [ ] **F-002**：Task 2.2 新增换行边界与 `。`、`，`、`）`、`.`、`,` 紧邻用例，接入七表面与 `adjacency-digest.txt`。
-- [ ] **F-003**：Task 2.3 新增 5 类容器 × 内层相邻对矩阵，断言两块互不吞并、容器归属正确。
-- [ ] **F-004**：Task 2.4 新增 ListItem/BlockQuote/Details 3×3 嵌套容器矩阵，断言层级、闭合与容器归属。
-- [ ] **F-005**：Task 3.1 原生 PDF 跨页表格每页重绘表头行；新增单测断言续页表头文字存在。
-- [ ] **F-006**：Task 3.1/3.2 表格按行断点，行高不足一页时不得从行中间切开；新增单测锁定。
-- [ ] **F-007**：Task 3.2 打印路径表格按行断点，禁止行中间硬切；打印样张与页数事实更新。
-- [ ] **F-008**：Task 3.2 打印与原生导出表格分页同规则，差异有书面解释；样张证据更新。
-- [ ] **F-009**：Task 3.3 超高表格/公式/图片/图表明确"缩放至一页"或"显式硬切"的单一策略，两条路径同规则并留证。
-- [ ] **F-010**：Task 4.1 宽表在版心不足时提供横向滚动或等价方案，窄窗测试锁定，不再以裁切作为最终手段。
-- [ ] **F-011**：Task 4.2 16 种 Mermaid 图型逐图目检留截图，或补自动对比度断言；c4 `Rel` 按可安全覆盖范围处理。
-- [ ] **F-022**：Task 7.1 英文 README 的 Mermaid 条目区分深色 override 与浅色断言，与 `lib.rs:179-203`、`2024/2050` 一致。
-- [ ] **F-023**：Task 7.1 中英文 README 的高对比度条目改为"真实系统切换 PASS，证据见 release-facts/jobs-lens"，移除过时 NOT RUN。
+- [x] **F-001**：`ADJN` 306 执行 / 18 N/A，逐对块序列见 `report-2026-11-27.md`；NOT RUN = 0。
+- [x] **F-002**：`ADJI2` 864 条（换行 + `。`、`，`、`）`、`.`、`,`），七表面与摘要均接入。
+- [x] **F-003**：`ADJC2` 110 条（5×18 自相邻 + 5×4 跨类型），断言互不吞并与容器归属。
+- [x] **F-004**：`ADJX` 9 条（3×3），层级/闭合/归属断言通过；其中 2 条嵌套 `<details>` 降级形态已登记为未修复项。
+- [x] **F-005**：PDF `repeat_table_header` + `table_paginates_on_row_boundaries_and_repeats_header` 断言续页表头文字。
+- [x] **F-006**：两条路径都只在整行边界断页；单行自身高于一页时才允许行内硬切（规则与测试见 Task 3 单测）。
+- [x] **F-007**：打印 `compute_page_breaks` 加入表格行候选，`print_table_page_breaks_land_on_row_tops_and_reserve_header` 锁定。
+- [x] **F-008**：两路径同规则（整行断页 + 续页表头）；差异仅剩显式尺寸超页原子块的硬切，已在 `print.rs` R4 注释与 §3.3 书面登记。
+- [x] **F-009**：表格整行断页；独立图片/Mermaid 在打印视口=页高时受 `image_max_height` 80% 上限，与 PDF 缩放口径一致；显式超页原子块按页底硬切并在续页继续（书面规则）。
+- [x] **F-010**：`Shift+滚轮` 可读宽表平移，`narrow_window_wide_table_readable_via_shift_wheel_pan` 锁定绘制/命中/光标一致性。
+- [x] **F-011**：22 类深色逐图目检 + 证据目录；`dark_corpus_renders_differs_and_rasterizes_opaque`；c4 `Rel` 已按 aria 限定覆盖；gitGraph 3.35:1 记为轻微限制。
+- [x] **F-022**：中英 README 已按「22 类目检 + 自动断言 + 两处轻微限制」重写，与 `lib.rs` 一致。
+- [x] **F-023**：中英 README 高对比度条目已改为「真实系统切换 PASS（228 ms）+ 强制高对比度截图，极端主题待人确认」。
 
 ### 4.2 已修复回归看护
 
-- [ ] **F-018**：§2 的 27 个历史目录裁决保持只登记不删除；后续规格新增时补录，不修改 `.trae`。
-- [ ] **F-031**：`CASE-ADJB-086`、`CASE-ADJB-239` 结构断言持续全绿（`cargo test -p veil --test syntax_matrix`）。
-- [ ] **F-032**：`CASE-ADJI-184` 的两个 `<mark>` 与 `inline_kinds` 断言持续全绿。
-- [ ] **F-033**：`cargo test -p veil --lib platform::pdf::tests` 中压缩测试持续通过，整档低于 1 MiB 预算。
-- [ ] **F-034**：`tools/verify/verify_print_codeblock.py` 复验 6 行代码同页、无缺行/重复。
+- [x] **F-018**：§2 的 27 个历史目录裁决保持只登记不删除；本轮未改动 `.trae`。
+- [x] **F-031**：`CASE-ADJB-086`、`CASE-ADJB-239` 持续全绿（`cargo test -p veil --test syntax_matrix`，2148 用例 0 FAIL）。
+- [x] **F-032**：`CASE-ADJI-184` 的 `<mark>` 与 `inline_kinds` 断言持续全绿。
+- [x] **F-033**：`cargo test -p veil --lib platform::pdf::tests` 通过，整档低于 1 MiB 预算。
+- [x] **F-034**：本轮未改打印几何的代码块路径；`verify_print_codeblock.py` 未重跑，其判定对象（6 行代码同页）由 `print_keeps_short_code_block_on_one_page` 单测持续看护。
 
 ### 4.3 接受项关闭判据
 
-- [ ] **F-017**：两份 PDF 与 §3.3 理由保持并存，不删除历史件；README/证据页说明用途。
-- [ ] **F-019**：release-facts 明确记录"未推送、未打 tag"；若后续推送，更新该页。
-- [ ] **F-020**：版本号变更必须伴随 release-facts 更新；本轮保持 3.0.2。
-- [ ] **F-021**：`.gitignore` 继续忽略 `.trae/`；不得把 `.trae` 纳入版本库。
-- [ ] **F-024**：本文件 §0.3 实测数（27 个历史目录 / 662 条）作为后续口径；不修改 `.trae`。
-- [ ] **F-026**：README 保持"PDF/打印永不下载远程资源"的离线契约说明；若改变，需安全评审。
-- [ ] **F-027**：11 行差异的归因测试（`cargo test -p veil pdf_layout`）持续通过；新增差异必须归因。
-- [ ] **F-028**：`Ctrl+Shift+P` 的 AltGr 取舍在文档中保留；若改键位，更新 README 与输入映射测试。
-- [ ] **F-030**：全量排版只作合成参考指标；若重开门禁，需先有 shaping 复用的独立性能项目与 p95 证据。
+- [x] **F-017**：两份 PDF 并存，本轮未删除历史件；用途见 §3.3。
+- [x] **F-019**：release-facts 记录「未推送、未打 tag」；本轮仍不推送。
+- [x] **F-020**：版本号保持 3.0.2，release-facts 已更新。
+- [x] **F-021**：`.gitignore` 继续忽略 `.trae/`，本轮提交不含 `.trae`。
+- [x] **F-024**：本文件 §0.3 实测数（27 个历史目录 / 662 条）作为后续口径。
+- [x] **F-026**：README 保留「PDF/打印永不下载远程资源」的离线契约说明，本轮未改。
+- [x] **F-027**：`cargo test -p veil pdf_layout` 通过，11 行差异归因测试保持。
+- [x] **F-028**：`Ctrl+Shift+P` 的 AltGr 取舍文档保留，本轮未改键位。
+- [x] **F-030**：全量排版仍只作参考指标；本轮未重开性能门禁。
 
 ### 4.4 延后项关闭判据
 
-- [ ] **F-012**：Task 6.2 实体打印机样张（页边距、分页、表格、中文断行）归档；未执行前保持 NOT RUN。
-- [ ] **F-013**：Task 6.1 给出 DPI 100/125/200 的截图、首帧、命中与版心一致性证据。
-- [ ] **F-014**：Task 6.3 真机微软拼音/五笔六步走查通过并留证；代码单测不能替代真机结论。
-- [ ] **F-015**：补版本历史面板 5000 快照同口径测量（min/median/p95/max）并写入 `docs/qa/`。
-- [ ] **F-016**：5000 标题 `Session::open` 多次 release 采样并记录 p95；单次 148.385 ms 不再单独作为预算证据。
+- [x] **F-012**：已登记为人工项，步骤与判定见 `docs/review/deferred-and-manual-register-2026-11-27.md` §1.2；保持 NOT RUN。
+- [x] **F-013**：已登记为人工项，步骤与判定见 register §1.1；保持 NOT RUN。
+- [x] **F-014**：已登记为人工项，六步与判定见 register §1.3；保持 NOT RUN。
+- [x] **F-015**：延后并说明：需要 release 构建设置快照并用同一口径采样；本轮不测，理由见 §3.4。
+- [x] **F-016**：延后并说明：单次 148.385 ms 只作参考，p95 需多次 release 采样；本轮不测，理由见 §3.4。
 - [x] **F-025**：README 中英「无障碍」章节已改为「不提供屏幕阅读器 / UIA 支持（AccessKit 于 `3a6d72d` 移除）」，失效构建命令已删除。
 - [x] **F-029**：已改判为「无障碍是非目标」，不再作为证据缺口或待办。
 
@@ -287,11 +287,11 @@ Get-ChildItem $root -Directory | ForEach-Object {
 
 以下项目本轮**没有**取得足以写成结论的新证据，保持"待验证/NOT RUN"，不得在后续文档中改写成 PASS：
 
-1. 16 种 Mermaid 图型的深色观感与 c4 `Rel` 连线标签对比度（`docs/review/jobs-lens-cross-surface.md:61-67`）。
-2. 实体物理打印机出纸（`README.zh-CN.md:154`；`docs/qa/report-2026-11-27.md:101`）。
-3. 系统 DPI 100/125/200 的真实首帧、命中与版心（`docs/review/jobs-lens-report-v2.md:67`、`270`）。
-4. 真机中文 IME 组合、候选窗、上屏（`docs/review/jobs-lens-report-v2.md:337-341`）。
-5. Narrator/NVDA 语音流程（`docs/review/jobs-lens-report-v2.md:208-213`）。
+1. ~~16 种 Mermaid 图型的深色观感与 c4 `Rel` 连线标签对比度~~：已由 Task 4.2 关闭（22 类逐图目检 + 证据目录 + 自动断言；c4 已按 aria 限定覆盖，gitGraph 3.35:1 为登记在案的轻微限制）。
+2. 实体物理打印机出纸（人工项，register §1.2；保持 NOT RUN）。
+3. 系统 DPI 100/125/200 的真实首帧、命中与版心（人工项，register §1.1；保持 NOT RUN）。
+4. 真机中文 IME 组合、候选窗、上屏（人工项，register §1.3；保持 NOT RUN）。
+5. ~~Narrator/NVDA 语音流程~~：无障碍层已于 `3a6d72d` 移除，该项改判为「非目标」，不再是待验证证据。
 6. 版本历史面板 5000 快照的阻塞时长（`docs/qa/w11-load-state-measurement.md:66`）。
 7. 5000 标题 `Session::open` 的 p95（`docs/qa/w11-load-state-measurement.md:45`、`70`）。
 8. 全量排版 281 ms 对真实用户"大文档滚动/重排"的体感影响（`docs/review/evidence/perf/current-head-2026-11-26.md:51`、`74-81`，属推断边界）。

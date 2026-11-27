@@ -109,6 +109,19 @@ cap = [1.6, 1.4, 1.2, 1.1, 1.1, 1.1]（H1..H6）
 - 屏幕把 H1–H6 逐级夹到 `cap`（`crates/veil-ui/src/view/layout.rs` 的 `block_scale`，SetextHeading(1)/(2) 与 AtxHeading(1)/(2) 同级）。
 - **两处必须从同一张基准表派生，禁止各写一套。** 现状两侧仍是字面量，属实现欠账：后续改为共享基准表 + 各自夹取，结果必须与本表逐格一致。
 
+### 3.3 纸面代码 / 表格字号（正文比值派生，冻结）
+
+纸面正文以外的两个专用字阶同样只由**正文字号乘固定比值**派生，不另立任意值：
+
+| 档 | 比值 | 纸面字号（× 11.0） | 唯一来源 |
+|---|---|---|---|
+| 纸面代码 | 0.875 | 9.625 | `type_scale::paper_code_size()`（`PAPER_CODE_RATIO`） |
+| 纸面表格 | 0.8 | 8.8 | `type_scale::paper_table_size()`（`PAPER_TABLE_RATIO`） |
+
+- 唯一来源是 `crates/veil-ui/src/type_scale.rs` 的 `paper_code_size` / `paper_table_size`；`crates/veil/src/platform/pdf_layout.rs` 的 `CODE_SIZE` / `TABLE_SIZE` 只能引用它们，不得再写字面量。
+- 行高随字号同比（`metrics.line_height(size)`），与 §3.1「行高只由字号乘固定比值得到」一致。
+- **纸面字号不再出现 9.3 一类任意值**：任何未在本节与 §3.1 / §3.2 登记的纸面字号都视为违规。
+
 ## 四、线宽语义族
 
 线宽只有三档，全部承载语义，不做自由取值。

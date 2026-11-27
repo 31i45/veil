@@ -71,7 +71,6 @@ G5 选型理由：保留 PDF 的 5 mm 下限（防止内容贴边/落入打印�
 | 编号 | 缺口 | 位置 | 延后理由 |
 |---|---|---|---|
 | G4 | 大纲/快速打开/历史面板无“加载”态，超大目录/快照列表会阻塞 UI | 见矩阵“加载”行 | 需要异步加载态（后台任务 + 进度/占位态），属功能增量而非视觉层修补；本轮只关闭成本可控的提示类缺口 |
-| G6 | PDF 代码/表格字号（9.3 / 8.8 pt）不从 `type_scale` 取 | `crates/veil/src/platform/pdf_layout.rs` 的 `CODE_SIZE` / `TABLE_SIZE` | 视觉契约 §3.1/§3.2 只定义屏幕代码比值与纸面标题比值，纸面代码/表格字阶未定义；需先裁决是否纳入契约字阶，再改版式 |
 
 除以上延后项外，矩阵中的“现有实现”与本规格一致。
 
@@ -79,7 +78,7 @@ G5 选型理由：保留 PDF 的 5 mm 下限（防止内容贴边/落入打印�
 
 | 项 | 规格 | 现状（已核验） | 结论 |
 |---|---|---|---|
-| 字号 | 标题与正文从 `veil_ui::type_scale` 派生 | 标题 `heading_size` → `type_scale::paper_heading_size`；正文本轮由本地 `11.0` 改为 `type_scale::PAPER_BODY_PX`；代码/表格为纸面专用 9.3/8.8 | 正文/标题同源；代码/表格见缺口 G6 |
+| 字号 | 标题与正文从 `veil_ui::type_scale` 派生 | 标题 `heading_size` → `type_scale::paper_heading_size`；正文由本地 `11.0` 改为 `type_scale::PAPER_BODY_PX`；代码/表格由 `type_scale::paper_code_size` / `paper_table_size` 派生（9.625 / 8.8，同源 `type_scale`） | 正文/标题/代码/表格全部同源 |
 | 页边距 | 来自配置 `export_margin_mm` | 打印与 PDF 均 `PageGeom::a4(session.export_margin_mm())`，`session.export_margin_mm()` 读 `config.export_margin_mm`；配置解析、设置 UI 与 `PageGeom` 共用 `EXPORT_MARGIN_MM_MIN/MAX = 5–50` | 一致（原 G5 已关闭） |
 | 页码 | 受配置开关控制 | `LayoutOpts.page_numbers = session.export_options().page_numbers`（读 `config.export_page_numbers`），`append_footers(opts.page_numbers)` 决定是否写 `n / total` | 一致（默认关闭） |
 | 线条 | 取 hairline / rail 语义 | 表格网格与分隔线由自由值 0.6/0.8 pt 改为 `HAIRLINE_PT = type_scale::hairline × 72/96 = 0.75 pt`；引用/Callout 竖条取 `type_scale::rail`（3.0，数值不变） | 已对齐语义；单位按 96 dpi→pt 换算，未改版式节奏 |

@@ -12,6 +12,22 @@ pub const PAPER_BODY_PX: f32 = 11.0;
 /// 纸面 H1–H6 字号（pt）：唯一基准表（契约 §3.2，冻结）。
 pub const PAPER_HEADING_PX: [f32; 6] = [22.0, 18.0, 15.5, 14.0, 13.0, 12.5];
 
+/// 纸面代码字号相对正文的比值（契约 §3.3：11.0 × 0.875 = 9.625）。
+pub const PAPER_CODE_RATIO: f32 = 0.875;
+
+/// 纸面表格字号相对正文的比值（契约 §3.3：11.0 × 0.8 = 8.8）。
+pub const PAPER_TABLE_RATIO: f32 = 0.8;
+
+/// 纸面代码字号（pt）：由正文乘固定比值派生，禁止另写任意字面量。
+pub const fn paper_code_size() -> f32 {
+    PAPER_BODY_PX * PAPER_CODE_RATIO
+}
+
+/// 纸面表格字号（pt）：由正文乘固定比值派生，禁止另写任意字面量。
+pub const fn paper_table_size() -> f32 {
+    PAPER_BODY_PX * PAPER_TABLE_RATIO
+}
+
 /// 屏幕 H1–H6 比值上限（契约 §3.2 的 cap 列，冻结）。
 pub const SCREEN_HEADING_CAP: [f32; 6] = [1.6, 1.4, 1.2, 1.1, 1.1, 1.1];
 
@@ -44,7 +60,10 @@ pub fn screen_heading_scale(level: u8) -> f32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{paper_heading_size, screen_heading_scale, PAPER_BODY_PX, PAPER_HEADING_PX};
+    use super::{
+        paper_code_size, paper_heading_size, paper_table_size, screen_heading_scale, PAPER_BODY_PX,
+        PAPER_CODE_RATIO, PAPER_HEADING_PX, PAPER_TABLE_RATIO,
+    };
     use crate::tokens::typography::BODY_SIZE;
 
     /// 屏幕比值必须精确等于重构前的字面量（H1–H6）。
@@ -96,5 +115,43 @@ mod tests {
             let px = BODY_SIZE * screen_heading_scale(level);
             assert_eq!(px, *want, "H{level} 屏幕像素必须保持 {want}");
         }
+    }
+
+    /// 纸面代码字号由正文乘固定比值派生（契约 §3.3：11.0 × 0.875 = 9.625）。
+    #[test]
+    fn paper_code_size_derives_from_body_ratio() {
+        assert_eq!(PAPER_BODY_PX, 11.0);
+        assert_eq!(PAPER_CODE_RATIO, 0.875);
+        assert_eq!(paper_code_size(), 9.625, "纸面代码字号必须精确等于 9.625pt");
+        assert_eq!(
+            paper_code_size(),
+            PAPER_BODY_PX * PAPER_CODE_RATIO,
+            "纸面代码字号必须等于正文 × 0.875"
+        );
+        assert_eq!(
+            paper_code_size() / PAPER_BODY_PX,
+            PAPER_CODE_RATIO,
+            "纸面代码字号 / 正文必须等于 0.875"
+        );
+    }
+
+    /// 纸面表格字号由正文乘固定比值派生（契约 §3.3：11.0 × 0.8 = 8.8）。
+    #[test]
+    fn paper_table_size_derives_from_body_ratio() {
+        assert_eq!(PAPER_BODY_PX, 11.0);
+        assert_eq!(PAPER_TABLE_RATIO, 0.8);
+        assert!(
+            (paper_table_size() - 8.8).abs() < 1e-4,
+            "纸面表格字号必须约为 8.8pt，实际 {}",
+            paper_table_size()
+        );
+        assert!(
+            (paper_table_size() - PAPER_BODY_PX * PAPER_TABLE_RATIO).abs() < 1e-6,
+            "纸面表格字号必须等于正文 × 0.8"
+        );
+        assert!(
+            (paper_table_size() / PAPER_BODY_PX - PAPER_TABLE_RATIO).abs() < 1e-6,
+            "纸面表格字号 / 正文必须等于 0.8"
+        );
     }
 }

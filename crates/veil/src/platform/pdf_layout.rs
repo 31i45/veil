@@ -113,10 +113,10 @@ pub trait MediaProvider {
 
 /// 纸面正文字号：单一来源为 `veil_ui::type_scale`（契约 §3.2 的标题比值除数）。
 const BODY_SIZE: f32 = veil_ui::type_scale::PAPER_BODY_PX;
-/// 纸面代码字号：契约只规定屏幕代码比值（§3.1），纸面沿用既有排版值。
-const CODE_SIZE: f32 = 9.3;
-/// 纸面表格字号：同上，既有排版值（非契约字阶）。
-const TABLE_SIZE: f32 = 8.8;
+/// 纸面代码字号：正文 × 0.875 = 9.625（契约 §3.3，唯一来源 `type_scale`）。
+const CODE_SIZE: f32 = veil_ui::type_scale::paper_code_size();
+/// 纸面表格字号：正文 × 0.8 = 8.8（契约 §3.3，唯一来源 `type_scale`）。
+const TABLE_SIZE: f32 = veil_ui::type_scale::paper_table_size();
 
 /// 纸面 hairline：按 96 dpi 逻辑像素换算到 PDF 的 pt（1 px = 72/96 pt）。
 /// 语义取 `type_scale::hairline`，数值换算后用于表格网格与分隔线（契约 §四）。
@@ -2989,6 +2989,32 @@ mod tests {
     #[test]
     fn paper_fonts_and_strokes_come_from_type_scale() {
         assert_eq!(BODY_SIZE, veil_ui::type_scale::PAPER_BODY_PX);
+        assert_eq!(
+            CODE_SIZE,
+            veil_ui::type_scale::paper_code_size(),
+            "纸面代码字号必须取自 type_scale"
+        );
+        assert!(
+            (CODE_SIZE - 9.625).abs() < 1e-6,
+            "纸面代码字号必须约为 9.625pt，实际 {CODE_SIZE}"
+        );
+        assert!(
+            (CODE_SIZE - BODY_SIZE * 0.875).abs() < 1e-6,
+            "纸面代码字号必须等于正文 × 0.875，实际 {CODE_SIZE}"
+        );
+        assert_eq!(
+            TABLE_SIZE,
+            veil_ui::type_scale::paper_table_size(),
+            "纸面表格字号必须取自 type_scale"
+        );
+        assert!(
+            (TABLE_SIZE - 8.8).abs() < 1e-4,
+            "纸面表格字号必须约为 8.8pt，实际 {TABLE_SIZE}"
+        );
+        assert!(
+            (TABLE_SIZE - BODY_SIZE * 0.8).abs() < 1e-6,
+            "纸面表格字号必须等于正文 × 0.8，实际 {TABLE_SIZE}"
+        );
         assert_eq!(
             HAIRLINE_PT,
             veil_ui::type_scale::hairline * 72.0 / 96.0,

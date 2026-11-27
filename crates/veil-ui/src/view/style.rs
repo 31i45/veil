@@ -80,19 +80,22 @@ pub fn style_spans(
                 st.mark_bg |= mst.mark_bg;
                 st.underline |= mst.underline;
                 st.overline |= mst.overline;
-                if st.bg.is_none() {
+                // 颜色类 Option 取**最内层**显式值（marks 为前序插入，后出现者更深）。
+                // 浏览器对嵌套 inline style 也是内层生效，导出侧因此天然是内层优先——
+                // 屏幕必须同规则，否则嵌套 `color` / `background-color` 会两侧不一致。
+                if mst.bg.is_some() {
                     st.bg = mst.bg;
                 }
-                // Option<f32> / Option<[u8;3]> 取第一个非 None（白名单 HTML 标签互斥，
-                // 同一段不会同时被 Sub 和 Sup 或 Mark 和 Abbr 覆盖）。
+                if mst.color.is_some() {
+                    st.color = mst.color;
+                }
+                // 几何类 Option 取最外层非 None，不做复合：sub/sup/small 的嵌套不属于
+                // 白名单语义（字号/基线不逐层相乘），取外层可避免字号被层层缩小。
                 if st.size_factor.is_none() {
                     st.size_factor = mst.size_factor;
                 }
                 if st.baseline_shift.is_none() {
                     st.baseline_shift = mst.baseline_shift;
-                }
-                if st.color.is_none() {
-                    st.color = mst.color;
                 }
             }
         }
@@ -411,5 +414,84 @@ mod tests {
         let sp = spans("==**x**==");
         let mid = find(&sp, 4);
         assert!(mid.mark_bg && mid.bold);
+    }
+
+    // ===== 契约 §6.2 的并存/优先级锁定（15 位样式位的可执行表） =====
+
+    /// `==` 与行内代码叠加：两个底层位都置位，绘制时 mark(3) 覆盖 code(2)。
+    #[test]
+    fn mark_and_code_both_set_with_mark_drawn_above() {
+        use crate::view::UnderKind;
+        let src = "==`c`==";
+        let sp = spans(src);
+        let content = find(&sp, src.find('c').unwrap());
+        assert!(content.mark_bg && content.code_bg && content.mono);
+        // 标记段同样两位置位（样式恒按整节点含标记产出）
+        let marker = find(&sp, 2);
+        assert!(marker.mark_bg && marker.code_bg);
+        assert!(
+            UnderKind::MarkBg.rank() > UnderKind::InlineCodeBg.rank(),
+            "契约 §6.2：mark 必须在 code 之上"
+        );
+    }
+
+    /// `<kbd><code>` 叠加：kbd 的粗体/边框与 code 的等宽/底色并存，kbd(4) 覆盖 code(2)。
+    #[test]
+    fn kbd_and_code_union_bold_mono_frame_and_bg() {
+        use crate::view::UnderKind;
+        let src = "<kbd><code>x</code></kbd>";
+        let st = find(&spans(src), src.find('x').unwrap());
+        assert!(st.bold, "kbd 自带粗体");
+        assert!(st.mono && st.code_bg, "code 自带等宽 + 底色");
+        assert!(st.kbd_frame);
+        assert!(!st.link);
+        assert!(
+            UnderKind::KbdFrame.rank() > UnderKind::InlineCodeBg.rank(),
+            "契约 §6.2：kbd 必须覆盖 code 底色"
+        );
+    }
+
+    /// 粗体 + 斜体：字形位可叠加，互不抑制。
+    #[test]
+    fn bold_and_italic_compose() {
+        for (src, at) in [
+            ("<strong><em>x</em></strong>", "<strong><em>".len()),
+            ("<b><i>x</i></b>", "<b><i>".len()),
+            ("**a *x* a**", "**a *".len()),
+        ] {
+            let st = find(&spans(src), at);
+            assert!(st.bold && st.italic, "{src} 应 bold+italic");
+        }
+    }
+
+    /// 删除线与下划线：两条装饰线各自独立绘制，互不抑制。
+    #[test]
+    fn strikethrough_and_underline_are_independent() {
+        let st = find(&spans("<s><u>x</u></s>"), "<s><u>".len());
+        assert!(st.strikethrough && st.underline);
+        let st = find(&spans("<del><ins>x</ins></del>"), "<del><ins>".len());
+        assert!(st.strikethrough && st.underline);
+    }
+
+    /// 作者底色：`bg` 与 `mark_bg` 同时置位、绘制时 bg(5) 在最上层；
+    /// 嵌套显式色取最内层（与 CSS / 导出一致）。
+    #[test]
+    fn background_color_with_mark_and_nested_precedence() {
+        use crate::view::UnderKind;
+        let src = "<mark style=\"background-color:#ff0\">x</mark>";
+        let st = find(&spans(src), src.find('x').unwrap());
+        assert!(st.mark_bg, "mark 位不因作者底色而丢失");
+        assert_eq!(st.bg, Some([255, 255, 0]), "作者底色按 #rgb 解析");
+        assert!(
+            UnderKind::StyleBg([0, 0, 0]).rank() > UnderKind::MarkBg.rank(),
+            "契约 §6.2：bg 在 mark 之上"
+        );
+
+        // 嵌套：内层 span 的 color / background-color 生效（外层被覆盖）
+        let src = "<span style=\"background-color:#ff0000;color:#00ff00\">\
+                   <span style=\"background-color:#0000ff;color:#000000\">x</span></span>";
+        let st = find(&spans(src), src.find('x').unwrap());
+        assert_eq!(st.bg, Some([0, 0, 255]), "内层底色优先");
+        assert_eq!(st.color, Some([0, 0, 0]), "内层前景色优先");
     }
 }

@@ -3173,6 +3173,31 @@ mod tests {
         }
     }
 
+    /// 契约 §6.3：`Style.bg`（作者 `background-color`）是内容色，导出必须保留。
+    /// 屏幕侧由 `view/layout_engine.rs` 产出 `UnderKind::StyleBg` 并以不透明色绘制
+    /// （`view/layout_inline_tests.rs::inline_html_style_bg_and_underline_decorations`
+    /// 锁定）。本用例锁定导出侧，两侧都保留才算「所见即所得」。
+    #[test]
+    fn inline_background_color_is_preserved_on_export() {
+        let body = body_of("<span style=\"background-color:#ff0000\">x</span>\n");
+        assert!(
+            body.contains("<span style=\"background-color:#ff0000\">x</span>"),
+            "作者底色必须在导出件中保留: {body}"
+        );
+        // 与 mark 叠加：导出侧 inline style 优先于 mark 的主题底色，底色不丢失
+        let body = body_of("<mark style=\"background-color:#00ff00\">m</mark>\n");
+        assert!(
+            body.contains("<mark style=\"background-color:#00ff00\">m</mark>"),
+            "mark 上的作者底色必须在导出件中保留: {body}"
+        );
+        // 与 markdown 高亮（== == → <mark>）叠加同样保留
+        let body = body_of("a <mark style=\"background-color:#0000ff\">b</mark> c\n");
+        assert!(
+            body.contains("<mark style=\"background-color:#0000ff\">b</mark>"),
+            "实际输出: {body}"
+        );
+    }
+
     #[test]
     fn mermaid_style_restore_keeps_user_html_sanitization() {
         let session = Session::open(

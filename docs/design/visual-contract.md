@@ -33,8 +33,9 @@
 
 1. 代码块内的 7 类语法色不占用正文区的 3 类预算，两块预算互不叠加、互不挪用。
 2. 灰阶、surface 底色、状态遮罩（`sel` / `hover`）、`kbd` 与表格网格不计入彩色预算。
-3. **颜色只用于区分层级，不做装饰。** 任何「为了好看」而新增的彩色即为违规；新增彩色必须同时说明它区分的是哪两个层级。
-4. 同一层级在同一屏内只允许一种颜色表达；`link` 与 `accent` 在浅色下同为 `[43,108,176]`，属同一族，不得视为两类。
+3. 作者内联 `background-color`（`Style.bg`，见 §6.3）是内容色而非主题层级色，同样不计入彩色预算。
+4. **颜色只用于区分层级，不做装饰。** 任何「为了好看」而新增的彩色即为违规；新增彩色必须同时说明它区分的是哪两个层级。
+5. 同一层级在同一屏内只允许一种颜色表达；`link` 与 `accent` 在浅色下同为 `[43,108,176]`，属同一族，不得视为两类。
 
 ## 二、灰阶与色相
 
@@ -151,6 +152,7 @@ cap = [1.6, 1.4, 1.2, 1.1, 1.1, 1.1]（H1..H6）
 | 170 | `state::focus_bg` | 66.7% | 70% |
 | 180 | `mark_bg`（浅色） | 70.6% | 70% |
 | 210 | `mark_bg`（深色） | 82.4% | 70%（待复验；若 §七 对比度不足则取 100%） |
+| 200 | `paint.rs` 的 `OverKind::DottedUnderline`（abbr 虚线） | 78.4% | 70%（179） |
 
 3. 阴影层的 alpha（`surface::SHADOW_LAYERS`）是叠层累积值，不属本阶梯，保持现状。
 
@@ -172,11 +174,13 @@ cap = [1.6, 1.4, 1.2, 1.1, 1.1, 1.1]（H1..H6）
 | `dotted_underline` | bool | 装饰线 | abbr 虚线下划线 | 绘制 | 输出 |
 | `kbd_frame` | bool | 底层 | kbd 底 + 1px 描边 | 绘制 | 输出 |
 | `code_bg` | bool | 底层 | 行内代码圆角底色 | 绘制 | 输出 |
-| `bg` | `Option<[u8;3]>` | 底层 | 作者 `background-color` | **待裁决**（见 6.3） | 保留 |
+| `bg` | `Option<[u8;3]>` | 底层 | 作者 `background-color`（**内容色**：不取主题色、不占彩色预算） | 绘制（rank 5，最上层） | 保留 |
 | `underline` | bool | 装饰线 | 实线下划线 | 绘制 | 输出 |
 | `overline` | bool | 装饰线 | 上划线 | 绘制 | 输出 |
 
 白名单外不得新增样式位；任何新装饰必须先进本表再实现。
+
+`bg` 是内容色（裁决见 §6.3）：不取主题色、不占 §一 彩色预算、不随主题变化、不担保对比度；解析层只接受 RGB，恒不透明，因而不涉 §五 alpha 阶梯。
 
 ### 6.2 叠加确定顺序（back → front，唯一顺序）
 
@@ -184,7 +188,7 @@ cap = [1.6, 1.4, 1.2, 1.1, 1.1, 1.1]（H1..H6）
 2. `code_bg`
 3. `mark_bg`
 4. `kbd_frame`（先 `kbd_bg` 填充，再 1px 描边）
-5. `bg`（作者底色；按 6.3 处置）
+5. `bg`（作者底色，内容色；见 §6.3）
 6. 字形光栅：`mono` → `italic` → `bold`（族选择/字形选择，可叠加）
 7. `strikethrough`
 8. `dotted_underline`
@@ -203,14 +207,51 @@ cap = [1.6, 1.4, 1.2, 1.1, 1.1, 1.1]（H1..H6）
 | `kbd_frame` 与任意底层同时为真 | `kbd_frame` 覆盖其下所有底层 |
 | `underline` 与 `dotted_underline` 同区间 | 实线后画（第 9 步）覆盖虚线（第 8 步），两线同基线位；禁止调换顺序 |
 | `overline` / `underline` / `strikethrough` 同时 | 三条线各自绘制，互不抑制，位置固定（上划线在字顶、下划线在基线下 1px、删除线在 x-height 中点） |
+| `bg` 与 `code_bg` / `mark_bg` / `kbd_frame` 同时为真 | `bg` 在 rank 5，不透明覆盖其下所有底色（`kbd` 的描边随之不可见）；导出侧 inline `background-color` 同样优先于这三者的主题底色 |
+| 嵌套显式 `color` / `background-color` | 取最内层（与 CSS 内联嵌套、导出件浏览器渲染一致） |
 | 装饰线与 `size_factor` / `baseline_shift` | 装饰线随字形度量走，不另立偏移 |
-| 任意叠加 | 不得产生 §四 之外的线宽，不得产生 §五 之外的 alpha |
+| 任意叠加 | 不得产生 §四 之外的线宽；alpha 只能取 §五 档位（abbr 虚线现用 200 为待收敛值，见 §五） |
 
-### 6.3 `Style.bg` 的唯一处置规定
+#### 6.2.1 15 个样式位的并存与优先级矩阵（可执行表）
 
-- **规定**：仅导出侧保留（HTML / PDF 输出 `background-color`），屏幕侧不绘制、不参与主题取色、不进入 §七 对比度矩阵。
-- **现状**：`layout_engine.rs` 仍把 `StyleBg` 压在最上层绘制，与本规定不一致。
-- **标注**：该项列为**待 W3 裁决项**。若 W3 裁定屏幕保留，则 `bg` 必须补 alpha 阶梯取值，并纳入 §七 的正文可读性校验（前景/背景 ≥ 7:1，否则降级为 mark 级 4.5:1 且不得与 `mark_bg` 叠加使用）。
+「锁定」列给出把它们钉在测试上的用例（`crates/veil-ui/src/view/style.rs` 的 `mod tests`、`view/layout_tests.rs`、`crates/veil/src/export.rs` 的测试模块）。
+
+| # | 样式位 | 允许并存的位 | 叠加时的确定行为 | 禁止 / 退化 | 锁定 |
+|---|---|---|---|---|---|
+| 1 | `bold` | 全部字形/装饰位 | 与 `italic` / `mono` 同开即三者叠加；不改字号与几何 | 无 | `bold_and_italic_compose` |
+| 2 | `italic` | 全部字形/装饰位 | 与 `bold` / `mono` 叠加；`<var>` = `italic` + `mono` | 无 | `bold_and_italic_compose`、`html_semantic_style_attr_maps_to_color_and_weights` |
+| 3 | `mono` | `bold` / `italic` / `size_factor` / 全部装饰位 | 只改字族，不改字号；字号恒由 `size_factor` 决定 | 不得用 `mono` 表达字号或字重 | `kbd_and_code_union_bold_mono_frame_and_bg`、`code_mono_math_plain` |
+| 4 | `link` | 全部 | 仅当 `color = None` 时以前景改用主题链接色；`link` 位本身不加下划线 | 与 `color` 同开时 `color` 胜出 | `link_marks_text_and_url_but_not_body` |
+| 5 | `color` | 全部（含 `bg`） | 显式前景色优先于 `link`；与底色分属前后景，互不抑制；嵌套取最内层 | 不得由 `bg` 反推或改写前景色 | `background_color_with_mark_and_nested_precedence` |
+| 6 | `strikethrough` | `underline` / `overline` / 字形位 | 独立绘制，位置在 x-height 中点；`~~` / `<s>` / `<del>` / `text-decoration:line-through` 同义 | 无 | `strikethrough_and_underline_are_independent`、`strikethrough_nests_with_strong` |
+| 7 | `size_factor` | `baseline_shift` / `mono` / 全部装饰位 | 只缩放字号（乘 `metrics.size`，行高同比）；装饰线随缩放后的字形度量 | 嵌套 `sub`/`sup`/`small` 不复合，取最外层显式值；不得据此改字号表（§3.2） | `html_semantic_style_attr_maps_to_color_and_weights` |
+| 8 | `baseline_shift` | `size_factor` / 全部 | `sub` 下移、`sup` 上移（±4 逻辑 px，按 scale 缩放） | 不得改行高之外的几何 | `inline_html_sub_sup_scaled_down` |
+| 9 | `mark_bg` | `code_bg` / 字形位 / 装饰线 | rank 3；与 `code_bg` 同区间时两者都画，`mark_bg` 覆盖 `code_bg` 底色 | 被 `kbd_frame`(4)、`bg`(5) 覆盖 | `mark_and_code_both_set_with_mark_drawn_above`、`highlight_uses_mark_bg_token` |
+| 10 | `dotted_underline` | `underline` / `overline` | rank 8；与实线同区间时实线后画（9）覆盖虚线（8），两线同基线位 | 禁止调换 8 / 9 两步 | `strikethrough_and_underline_are_independent` |
+| 11 | `kbd_frame` | `code_bg` / `mark_bg` / `bold` | rank 4；先填 `kbd_bg` 再 1px `kbd_border` 描边，覆盖其下主题底层 | 与 `bg` 同区间时填充被不透明 `bg` 覆盖 | `kbd_and_code_union_bold_mono_frame_and_bg`、`under_decor_stack_order_matches_visual_contract` |
+| 12 | `code_bg` | `mark_bg` / `kbd_frame` | rank 2，最底主题底层；Markdown/HTML `code` 同时置 `mono` | 不得反向覆盖 `mark_bg` / `kbd_frame` | `mark_and_code_both_set_with_mark_drawn_above` |
+| 13 | `bg` | 全部 | rank 5，最上层；不透明填充，恒不随主题变化；嵌套取最内层 | 不参与主题彩色预算 / 灰阶 / alpha，不得替代主题底色；不担保对比度（作者自负，§6.3） | `background_color_with_mark_and_nested_precedence`、`inline_background_color_is_preserved_on_export` |
+| 14 | `underline` | `dotted_underline` / `strikethrough` / `overline` | rank 9；与虚线同区间时覆盖虚线 | 无 | `strikethrough_and_underline_are_independent` |
+| 15 | `overline` | 全部装饰线 | rank 10；字顶 1px | 无 | `html_semantic_style_attr_maps_to_color_and_weights` |
+
+通用规则：
+
+1. 15 位的 bool 位一律按并集（OR）合并；`Option` 位按类别取值——颜色类（`color` / `bg`）取**最内层**，几何类（`size_factor` / `baseline_shift`）取**最外层**非 `None`（不复合）。
+2. 不存在互斥的位组合：15 位任意子集都可同时置位；约束来自**绘制顺序**（§6.2）与**取值域**（§四 线宽 / §五 alpha），而非组合禁止。
+3. 屏幕与导出一致：主题底层（`code_bg` / `mark_bg` / `kbd_frame`）在 HTML 导出侧由 `<code>` / `<mark>` / `<kbd>` 选择器生成、PDF 侧由 `Style.highlight` 表达，屏幕按 rank 绘制；作者 `bg` 三侧都保留（§6.3）。导出侧 `<kbd>` 的 `font-size:.9em`、`<code>` 的 1px 边框属导出盒模型细节，不改变样式位置位与叠放裁决。
+
+### 6.3 `Style.bg`（作者 `background-color`）的裁决
+
+- **结论（W3 裁决）**：**接受为内容色，屏幕与导出两侧都保留。** 方案 A 生效；不采用「删屏幕保主题纯度」的方案 B。
+- **事实依据**：屏幕侧 `view/layout_engine.rs` 产出 `UnderKind::StyleBg(rgb)`（rank 5），`paint.rs` 的 `paint_under_decor` 以 `[r,g,b,255]` 不透明填充（测试 `layout_inline_tests::inline_html_style_bg_and_underline_decorations`）；HTML 导出侧 `export.rs` 的 `collect_html_inlines` → `format_html_attrs` 原样输出净化后的 `style="background-color:#rrggbb"`（测试 `inline_background_color_is_preserved_on_export`）；PDF 侧 `platform/pdf_layout.rs` 把 `background_color` 写入 `Style.highlight`（覆盖 mark/code 的默认底色）。三侧都保留，符合「屏幕与导出必须一致」。
+- **约束（生效）**：
+  1. 不参与 §一 的正文彩色预算——它是内容色，不是主题层级色；
+  2. 不随主题变化：浅色 / 深色 / 高对比度三主题下显示同一个作者色；
+  3. 恒不透明：解析层（`veil_core::HtmlStyle`）只接受 RGB，无 alpha 通道，故不进 §五 阶梯；
+  4. 不进入 §七 对比度矩阵，**不做对比度担保**（作者自负）；只禁止它影响字形可读性以外的任何主题语义（不得借 `bg` 改写前景色、线宽、字号、主题色阶）；
+  5. 与主题底层叠加时排最上（rank 5），不透明覆盖 `code_bg` / `mark_bg` / `kbd_frame` 的填充；嵌套时取最内层。
+- **禁止**：把 `bg` 当作主题色使用（如用它替代 `mark_bg` / `code_bg` 表达语义），或在导出 CSS 中为它派生主题色。
+- **视觉影响说明**：该裁决不删除任何现有绘制。此前 §6.3 的「仅导出侧保留」是错误描述（屏幕早已绘制），本次修正的是文档而非视觉；唯一由此产生的行为变更是嵌套显式 `color` / `background-color` 改为内层优先（与导出一致），单层 `<span style="background-color:...">` 的外观不变。
 
 ## 七、对比度目标矩阵
 

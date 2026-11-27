@@ -158,13 +158,9 @@ Veil 不宣称所有 Markdown / Mermaid 语法在渲染模式、源码模式、H
 
 ## 无障碍
 
-Veil 提供一个范围明确的 AccessKit/UIA 层（`accessibility` feature，发行版默认开启）。**不宣称完整屏幕阅读器兼容。**
+Veil **不提供屏幕阅读器 / UIA 支持**。AccessKit/UIA 层已于提交 `3a6d72d`（`refactor(ui)!: 永久移除无障碍（AccessKit）能力`）永久移除：界面没有可访问性语义树，Narrator/NVDA 等读屏软件无法读取正文、菜单或对话框。
 
-- **可以做**：Windows UIA 无需展开菜单即可到达四个常驻顶层菜单与全部菜单项；菜单项与模态按钮支持 UIA Click/Focus，Click 走与鼠标相同的产品路径；正文暴露为一个 `Edit` 节点（名称「正文」）；设置/模态打开时只保留 Dialog 与按钮，后台控件从树中移除。
-- **不能做**：正文只有前 8000 字节的有界纯文本快照，没有 caret、选区或逐行语义；快速打开候选未逐项暴露；节点没有屏幕边界；AccessKit `Dialog` 在 UIA 下呈 `ControlType.Window`；Narrator/NVDA 语音流程与中文 IME 候选窗均为 **NOT RUN**。
-- 范围与限制：[docs/review/accessibility-scope-and-limits.md](docs/review/accessibility-scope-and-limits.md)；UIA 证据：[accesskit-uia-2026-11-26.md](docs/review/evidence/ux/accesskit-uia-2026-11-26.md)。
-
-关闭：`cargo build --release -p veil --no-default-features --features mermaid-offline`。
+这是明确的非目标，不是「即将支持」的承诺；如果无障碍是硬性需求，请勿选用 Veil。历史范围说明见 [docs/review/accessibility-scope-and-limits.md](docs/review/accessibility-scope-and-limits.md)（仅存档，描述的能力已不存在）。
 
 ## 构建 / 运行 / 测试
 

@@ -157,13 +157,9 @@ Beyond rendering and export, this section also records verification gaps and sta
 
 ## Accessibility
 
-Veil ships a deliberately narrow AccessKit/UIA layer (`accessibility` feature, enabled by default in release builds). **It does not claim full screen-reader compatibility.**
+Veil **does not provide screen-reader / UIA support**. The AccessKit/UIA layer was permanently removed in commit `3a6d72d` (`refactor(ui)!: 永久移除无障碍（AccessKit）能力`): the UI exposes no accessibility tree, so Narrator, NVDA and similar tools cannot read the body, menus or dialogs.
 
-- **Works**: Windows UIA reaches the four persistent top-level menus and all menu items without opening them; menu items and dialog buttons expose Invoke/Focus, and UIA clicks run the same product paths as mouse clicks; the body is exposed as one `Edit` node labelled "正文"; Settings/modal dialogs expose their buttons and remove background controls while open.
-- **Does not work**: the body is a bounded plain-text snapshot (first 8000 bytes) with no caret, selection or per-line semantics; Quick Open candidates are not exposed item by item; nodes carry no screen bounds; AccessKit `Dialog` appears as `ControlType.Window`; Narrator/NVDA voice flows and Chinese IME candidate windows are **NOT RUN**.
-- Scope and limits: [docs/review/accessibility-scope-and-limits.md](docs/review/accessibility-scope-and-limits.md); UIA evidence: [accesskit-uia-2026-11-26.md](docs/review/evidence/ux/accesskit-uia-2026-11-26.md).
-
-To build without it: `cargo build --release -p veil --no-default-features --features mermaid-offline`.
+This is an explicit non-goal, not a "coming soon" promise; do not choose Veil if accessibility is a hard requirement. The historical scope note in [docs/review/accessibility-scope-and-limits.md](docs/review/accessibility-scope-and-limits.md) is archived only — the capability it describes no longer exists.
 
 ## Build / Run / Test
 

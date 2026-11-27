@@ -110,7 +110,7 @@ Get-ChildItem $root -Directory | ForEach-Object {
 | F-022 | 英文 README 的 Mermaid 对比度条目混用深/浅色覆盖范围 | `README.md:144` 在 "Dark Mermaid contrast" 条目下称 WCAG 断言覆盖 mindmap、kanban、journey、gantt、c4context；代码中 kanban/journey 的对比度测试是**浅色**主题（`kanban_light_...`、`journey_light_...`），深色 `themeCSS` 不含这两类；中文 README 明确写了"浅色 override、无对应深色 override" | `README.md:144`；`README.zh-CN.md:144`；`crates/veil-mermaid-offline/src/lib.rs:197-203`、`2024`、`2050` | P2 | 本轮修复（文档收口） | Task 7.1 |
 | F-023 | README「高对比度」仍写 NOT RUN，与当前证据冲突 | 中英文 README 的未验证项仍称"真实高对比度主题下是否触发、观感"均未验证；但十维报告记录真实系统切换 PASS（228 ms），release-facts 记录强制高对比度复验截图 | `README.zh-CN.md:154`；`README.md:153`；`docs/review/jobs-lens-report-v2.md:145`；`docs/qa/release-facts-2026-11-27.md:64` | P2 | 本轮修复（文档收口） | Task 7.1 |
 | F-024 | Task 1.2 自述"41 个历史目录"与实测不符 | `tasks.md` 写"41 个含未勾选项的历史目录"；实测 101 个 spec 目录、28 个含未勾选、其中历史 27 个（当前规格另计）。不修改 `.trae`，以本文件 §0.3 实测为准 | `.trae/specs/converge-perfect-writing-surface/tasks.md:7`；本文件 §0.3 | P3 | 接受并说明 | 不修 |
-| F-025 | Narrator / NVDA 语音流程 NOT RUN | AccessKit 最小语义树有 UIA 证据，但真实语音流程未跑，Phase 5 出口 FAIL；不得宣称完整屏幕阅读器兼容 | `docs/review/jobs-lens-report-v2.md:208-213`、`268-269`；`README.zh-CN.md:164` | P1 | 延后并说明 | 不修 |
+| F-025 | README 仍宣称已移除的 AccessKit/UIA 能力 | AccessKit/UIA 层已于 `3a6d72d` 永久移除（删 `crates/veil-ui/src/accessibility.rs` 666 行，`Cargo.lock` 无 accesskit），但中英 README 的「无障碍」章节仍写 `accessibility` feature、UIA 能力清单与关闭命令，属文档失实 | `git show --stat 3a6d72d`；`rg -n "accesskit" Cargo.lock crates`（源码无命中）；修正前 `README.zh-CN.md:159-167`、`README.md:158-166` | P1 | 已修复（本轮 README 改为「不提供屏幕阅读器支持」，删除失效构建命令） | Task 5.4 / 7.1 |
 
 ### 1.7 已接受或延后的已知边界
 
@@ -119,7 +119,7 @@ Get-ChildItem $root -Directory | ForEach-Object {
 | F-026 | PDF/打印中的远程图片仍降级为 alt 或 `[图片]` | HTML 导出改为可见警告，但 PDF/打印不下载远程资源，仍 alt 降级；属离线契约下的已知降级 | `README.zh-CN.md:147`；`docs/review/jobs-lens-cross-surface.md:43`；`docs/review/jobs-lens-report-v2.md:271` | P2 | 接受并说明 | 不修 |
 | F-027 | 屏幕与 PDF 断行存在 11 行已归因差异 | 产品宽度下 4 组语料共 11 行内容不同，原因固定为容量、半角禁则表差、空格偏好、字宽；无丢字、越界、行首禁则违规 | `docs/review/evidence/layout-consistency-2026-11-26.md:13`、`66-75`、`89-98` | P2 | 接受并说明 | 不修 |
 | F-028 | `Ctrl+Shift+P` 在 AltGr 布局下可能与字符输入冲突 | 已知键盘布局取舍，已注明 | `docs/review/jobs-lens-report-v2.md:275`（引用 `crates/veil-ui/src/input.rs:125`） | P2 | 接受并说明 | 不修 |
-| F-029 | 无障碍正文只有 8000 字节快照，无 caret/选区/逐行 | 正文暴露为单个 `Edit` 节点，语义范围有界；README 已书面披露，不宣称完整兼容 | `README.zh-CN.md:164`；`docs/review/jobs-lens-report-v2.md:278` | P2 | 延后并说明 | 不修 |
+| F-029 | 无障碍正文 8000 字节快照的边界描述已失效 | 该边界属于已移除的 AccessKit 层；现产品不提供任何 UIA 语义树，原「快照范围」讨论不再适用，改为「无障碍为非目标」登记 | `git show --stat 3a6d72d`；`docs/review/deferred-and-manual-register-2026-11-27.md` §1.4 | P2 | 已修复（改判为非目标） | 不修 |
 | F-030 | 5005 块全量排版 296.55/281.10 ms 未达原 <100 ms 门禁 | 分段实测冷启动 281.10 ms，逐块 shaping 238.46 ms（占 84.8%）；已改称"合成参考指标"，不再作为发布门禁；真实交互脏块重排 271 µs | `docs/review/evidence/perf/current-head-2026-11-26.md:23`、`58-81`；`docs/review/jobs-lens-report-v2.md:344-346` | P2 | 接受并说明 | 不修 |
 
 ### 1.8 已修复项（保留在台账，防止回退）
@@ -226,8 +226,8 @@ Get-ChildItem $root -Directory | ForEach-Object {
 | F-014 | 真机 IME 需人在场走微软拼音/五笔六步 | Task 6.3 六步走查通过并留证 |
 | F-015 | 历史面板未单独构造 5000 快照；风险量级与快速打开相近但未取证 | 补一次同口径测量并记录 p95 |
 | F-016 | 5000 标题 `Session::open` 只有单次 release 样本，未做 p95 | 同一机器、release、热缓存下多次采样并报 p95 |
-| F-025 | Narrator/NVDA 真实语音需要人工环境 | 真实语音下走通"菜单打开→执行"与"模态打开→取消→焦点返回" |
-| F-029 | 正文 8000 字节快照是 AccessKit 的明确能力边界 | 扩大正文语义树范围并更新 README/无障碍范围文档 |
+| F-025 | README 与源码不一致（AccessKit 已移除仍在宣传） | 中英 README 更正为「不提供屏幕阅读器支持」并删除失效构建命令（本轮已执行） |
+| F-029 | 该边界随 AccessKit 移除而失效 | 登记为「无障碍是非目标」，不再保留 8000 字节快照的待办表述 |
 
 ---
 
@@ -278,8 +278,8 @@ Get-ChildItem $root -Directory | ForEach-Object {
 - [ ] **F-014**：Task 6.3 真机微软拼音/五笔六步走查通过并留证；代码单测不能替代真机结论。
 - [ ] **F-015**：补版本历史面板 5000 快照同口径测量（min/median/p95/max）并写入 `docs/qa/`。
 - [ ] **F-016**：5000 标题 `Session::open` 多次 release 采样并记录 p95；单次 148.385 ms 不再单独作为预算证据。
-- [ ] **F-025**：Narrator/NVDA 真实语音流程留证；未执行前 README 保持"不宣称完整屏幕阅读器兼容"。
-- [ ] **F-029**：无障碍正文语义范围扩大并更新 `docs/review/accessibility-scope-and-limits.md`；未扩大前保持 8000 字节披露。
+- [x] **F-025**：README 中英「无障碍」章节已改为「不提供屏幕阅读器 / UIA 支持（AccessKit 于 `3a6d72d` 移除）」，失效构建命令已删除。
+- [x] **F-029**：已改判为「无障碍是非目标」，不再作为证据缺口或待办。
 
 ---
 

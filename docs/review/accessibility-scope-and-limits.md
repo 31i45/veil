@@ -1,5 +1,7 @@
 # Veil 无障碍支持范围与限制（AccessKit / UIA）
 
+> **已归档（2026-11-27）**：AccessKit/UIA 层已于提交 `3a6d72d`（`refactor(ui)!: 永久移除无障碍（AccessKit）能力`）永久移除。本文描述的 `accessibility` feature、UIA 语义树与构建命令**均已不存在**，仅作历史记录；当前产品不提供屏幕阅读器支持，见 `README.md` / `README.zh-CN.md` 的「无障碍」章节。
+
 > 日期：2026-11-26
 > 适用版本：`feat(a11y)` 提交 `753c962` 起的发行产物（默认 feature 含 `accessibility`）
 > 关联证据：[accesskit-uia-2026-11-26.md](evidence/ux/accesskit-uia-2026-11-26.md)、[current-head-2026-11-26.md](evidence/ux/current-head-2026-11-26.md)

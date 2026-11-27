@@ -860,7 +860,7 @@ cargo tree -e no-dev -p veil --prefix none           # 唯一包计数
 
 ### 12.4 与 follow-ups 的一致性
 
-- **D3**：**2026-11-26 起已接入**。Phase 5 已加入最小 chrome/菜单/模态语义树与正文入口；`veil` 默认 feature 含 `accessibility`，可用 `--no-default-features --features mermaid-offline` 关闭。仍**不宣称完整屏幕阅读器兼容**；Narrator/NVDA 真实语音流程仍为 NOT RUN。限制见 [accessibility-scope-and-limits.md](accessibility-scope-and-limits.md)。
+- **D3**：**已于 2026-11-27 撤销**。AccessKit/UIA 层在提交 `3a6d72d` 被永久移除（删 666 行、`Cargo.lock` 不再含 `accesskit`），产品**不提供**屏幕阅读器 / UIA 支持；本节 §13 与 [accessibility-scope-and-limits.md](accessibility-scope-and-limits.md) 的「已接入」描述仅作历史记录。
 - **4.1** 已回写为 **NO-GO**；**4.2 / 4.3** 已标记观察备忘录完成、不引入（含 `image` 由 `arboard`/WIC 覆盖的订正）；**4.4 / 4.5** 保持已完成/已记录。详见 `.trae/specs/evaluate-veil-through-jobs-lens/follow-ups.md`（该目录被 `.gitignore` 忽略，不入库）。
 
 ---

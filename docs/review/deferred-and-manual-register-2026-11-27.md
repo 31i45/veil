@@ -44,11 +44,11 @@
   6. 输入中窗口失焦再回焦，确认候选窗位置与 preedit 状态一致。
 - 判定标准：六步均无丢字/重字/错位；任一失败记录输入法版本、文档位置与截图。
 
-### 1.4 Narrator / NVDA 语音流程
+### 1.4 Narrator / NVDA
 
-- 状态：**NOT RUN**（AccessKit/UIA 最小语义树有证据；真实语音流程未跑）
-- 为什么不能自动化：需要屏幕阅读器进程与真人听读判断。
-- 步骤与判定：见 `docs/review/accessibility-scope-and-limits.md`；本轮的结论仅是「不宣称完整屏幕阅读器兼容」，不升级为 PASS。
+- 状态：**不支持（已移除），不是 NOT RUN**
+- 事实：AccessKit/UIA 层已于 `3a6d72d`（`refactor(ui)!: 永久移除无障碍（AccessKit）能力`）永久移除；`Cargo.lock` 无 `accesskit`，源码无可访问性树。中英 README 已同步更正。
+- 结论：无障碍是明确非目标；不存在「待验证的语音流程」。历史范围文档 `docs/review/accessibility-scope-and-limits.md` 仅作存档，描述的能力已不存在。
 
 ### 1.5 其它沿用的人工项
 

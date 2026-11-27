@@ -1178,45 +1178,66 @@ impl<'a> Ctx<'a> {
             size: CODE_SIZE,
             ..Style::body()
         };
+        let st_label = Style {
+            size: 8.0,
+            color: COL_MUTED,
+            ..Style::body()
+        };
         let line_h = self.metrics.line_height(CODE_SIZE);
         let pad = 5.0;
         let bg_w = self.max_w() - 6.0;
         // DEF-T09-E1-005：代码语言标题不得与代码体分页（标题孤行）。
-        // 预留「间距 + 标题行 + 首行代码（含底色内边距）」后再落排版位置。
+        // 先按最终换行结果测量整块高度：整块 ≤ 一页可用高度时，页底放不下就
+        // 整体移到下一页，不在页底切成两段；超长代码块仍按行跨页。
+        let label_lines: Vec<Vec<LItem>> = lang
+            .as_deref()
+            .filter(|l| !l.is_empty())
+            .map(|l| {
+                let items = l.chars().map(|c| LItem::Ch(c, st_label)).collect();
+                fill_lines(items, self.max_w() - 10.0, self.metrics)
+            })
+            .unwrap_or_default();
+        let body_lines: Vec<Vec<Vec<LItem>>> = body
+            .lines()
+            .map(|raw| {
+                let mut chars: Vec<LItem> = raw.chars().map(|c| LItem::Ch(c, st)).collect();
+                if chars.is_empty() {
+                    chars.push(LItem::Ch(' ', st));
+                }
+                fill_lines(chars, bg_w - 2.0 * pad, self.metrics)
+            })
+            .collect();
+        // 整块高度 = 块前间距 + 语言标题 + 各行（行高 + 上下内边距）+ 块后间距。
+        let block_h = 5.0
+            + label_lines.len() as f32 * self.metrics.line_height(8.0)
+            + body_lines
+                .iter()
+                .map(|w| line_h * w.len() as f32 + pad * 2.0)
+                .sum::<f32>()
+            + 6.0;
+        if block_h <= self.geom.content_h()
+            && self.y + block_h > self.geom.bottom()
+            && self.y > self.geom.top() + 1.0
+        {
+            self.new_page();
+        }
+        // 超长代码块：预留「间距 + 标题行 + 首行代码（含底色内边距）」后再落排版位置。
         let label_h = lang
             .as_deref()
             .filter(|l| !l.is_empty())
             .map_or(0.0, |_| self.metrics.line_height(8.0));
-        let first_body_h = if body.lines().next().is_some() {
-            line_h + pad * 2.0
-        } else {
+        let first_body_h = if body_lines.is_empty() {
             0.0
+        } else {
+            line_h + pad * 2.0
         };
         self.ensure(5.0 + label_h + first_body_h);
         self.y += 5.0;
-        if let Some(l) = lang.as_deref().filter(|l| !l.is_empty()) {
-            let st_label = Style {
-                size: 8.0,
-                color: COL_MUTED,
-                ..Style::body()
-            };
-            let mut items = Vec::new();
-            for c in l.chars() {
-                items.push(LItem::Ch(c, st_label));
-            }
-            if !items.is_empty() {
-                for line in fill_lines(items, self.max_w() - 10.0, self.metrics) {
-                    self.emit_line(line, 10.0, 8.0, CellAlign::None, self.max_w() - 10.0);
-                }
-            }
+        for line in label_lines {
+            self.emit_line(line, 10.0, 8.0, CellAlign::None, self.max_w() - 10.0);
         }
 
-        for raw in body.lines() {
-            let mut chars: Vec<LItem> = raw.chars().map(|c| LItem::Ch(c, st)).collect();
-            if chars.is_empty() {
-                chars.push(LItem::Ch(' ', st));
-            }
-            let wrapped = fill_lines(chars, bg_w - 2.0 * pad, self.metrics);
+        for wrapped in body_lines {
             let n = wrapped.len() as f32;
             self.ensure(line_h * n + pad * 2.0);
             let top = self.y;
@@ -4033,6 +4054,152 @@ mod tests {
                 }
             }
             assert_eq!(label_page, body_page, "n={n}：代码标题与代码体被分页拆开");
+        }
+    }
+
+    // ===== Task 5：代码块跨页策略 =====
+
+    /// 每页除页脚外的正文文本条数（页脚形如 `1 / 3`）。
+    fn content_text_count(page: &[DrawOp]) -> usize {
+        page.iter()
+            .filter(|op| matches!(op, DrawOp::Text(t) if !t.text.contains(" / ")))
+            .count()
+    }
+
+    /// 短代码块（整块高度 ≤ 一页可用高度）在页底放不下时整体移到下一页，
+    /// 不得被页边界切成两段；并且移动不得产生空页。
+    #[test]
+    fn short_fenced_code_block_moves_whole_to_next_page() {
+        let body = ["let a = 1;", "let b = 2;", "let c = 3;", "let d = 4;"];
+        for n in 0..90 {
+            let mut md = String::new();
+            for i in 0..n {
+                md.push_str(&format!("段落 {i} 文本。\n\n"));
+            }
+            md.push_str("```rust\n");
+            for line in body {
+                md.push_str(line);
+                md.push('\n');
+            }
+            md.push_str("```\n");
+            let doc = lay(&md, false);
+
+            let mut line_pages = Vec::new();
+            for line in body {
+                let pages: Vec<usize> = doc
+                    .pages
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, page)| {
+                        page.iter()
+                            .any(|op| matches!(op, DrawOp::Text(t) if t.text == line))
+                    })
+                    .map(|(i, _)| i)
+                    .collect();
+                assert_eq!(
+                    pages.len(),
+                    1,
+                    "n={n}：代码行 `{line}` 应恰好出现一次，实际 {pages:?}"
+                );
+                line_pages.push(pages[0]);
+            }
+            assert!(
+                line_pages.windows(2).all(|w| w[0] == w[1]),
+                "n={n}：短代码块被页边界拆成多页 {line_pages:?}"
+            );
+            for (pi, page) in doc.pages.iter().enumerate() {
+                assert!(
+                    content_text_count(page) > 0,
+                    "n={n}：第 {} 页为空页（仅页脚）",
+                    pi + 1
+                );
+            }
+        }
+    }
+
+    /// 超长代码块（整块高度 > 一页可用高度）仍允许跨页：文本行顺序完整，
+    /// 无丢失、无重复，且确实落在至少两页。
+    #[test]
+    fn oversized_code_block_splits_across_pages_in_order() {
+        let lines: Vec<String> = (0..80).map(|i| format!("line {i:03}")).collect();
+        let mut md = String::from("```rust\n");
+        for line in &lines {
+            md.push_str(line);
+            md.push('\n');
+        }
+        md.push_str("```\n");
+        let doc = lay(&md, false);
+
+        let mut found = Vec::new();
+        for (pi, page) in doc.pages.iter().enumerate() {
+            for op in page {
+                if let DrawOp::Text(t) = op {
+                    if let Some(idx) = lines.iter().position(|l| l == &t.text) {
+                        found.push((idx, pi));
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            found.len(),
+            lines.len(),
+            "超长代码块文本行数量不符（丢失或重复）：{} / {}",
+            found.len(),
+            lines.len()
+        );
+        assert!(
+            found.iter().map(|(idx, _)| *idx).eq(0..lines.len()),
+            "超长代码块文本行顺序被打乱：{:?}",
+            found.iter().map(|(idx, _)| *idx).collect::<Vec<_>>()
+        );
+        let code_pages: HashSet<usize> = found.iter().map(|(_, pi)| *pi).collect();
+        assert!(
+            code_pages.len() >= 2,
+            "超长代码块应跨页，实际只占 {code_pages:?}"
+        );
+        for (pi, page) in doc.pages.iter().enumerate() {
+            assert!(
+                content_text_count(page) > 0,
+                "第 {} 页为空页（仅页脚）",
+                pi + 1
+            );
+        }
+    }
+
+    /// 非代码块内容的分页语义保持不变：页数固定、段落顺序完整，且无空页。
+    #[test]
+    fn non_code_blocks_keep_pagination_semantics() {
+        let mut md = String::from("# 分页回归\n\n");
+        for i in 0..80 {
+            md.push_str(&format!("第 {i} 段：用于回归非代码块分页。\n\n"));
+        }
+        let doc = lay(&md, false);
+        assert_eq!(doc.pages.len(), 3, "非代码块内容页数不应漂移");
+
+        let mut order = Vec::new();
+        for page in &doc.pages {
+            for op in page {
+                if let DrawOp::Text(t) = op {
+                    if let Some(rest) = t.text.strip_prefix("第 ") {
+                        if let Some(num) = rest.split(' ').next() {
+                            if let Ok(i) = num.parse::<usize>() {
+                                order.push(i);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            order.iter().copied().eq(0..80),
+            "段落数量/顺序应保持不变：{order:?}"
+        );
+        for (pi, page) in doc.pages.iter().enumerate() {
+            assert!(
+                content_text_count(page) > 0,
+                "第 {} 页为空页（仅页脚）",
+                pi + 1
+            );
         }
     }
 

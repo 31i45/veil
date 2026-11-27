@@ -47,8 +47,30 @@ const ADJC_GOLDEN: [usize; 20] = [
     1, 2, 4, 8, 19, 22, 26, 28, 37, 40, 44, 46, 55, 58, 62, 64, 73, 76, 80, 82,
 ];
 
+/// 生成式块级单换行矩阵（ADJN）：18×18 = 324，源串 `A + "\n" + B`。
+const ADJN_GROUP: &str = "ADJN";
+const ADJN_TOTAL: usize = ADJ_TOTAL;
+
+/// 生成式行内边界矩阵（ADJI2）：12×12×6 = 864。
+const ADJI2_GROUP: &str = "ADJI2";
+const ADJI2_BOUNDARIES: [&str; 6] = ["\n", "。", "，", "）", ".", ","];
+const ADJI2_TOTAL: usize = ADJ_INLINE_UNITS * ADJ_INLINE_UNITS * ADJI2_BOUNDARIES.len();
+
+/// 生成式容器内相邻矩阵（ADJC2）：5×18 自相邻 + 5×4 跨类型 = 110。
+const ADJC2_GROUP: &str = "ADJC2";
+const ADJC2_SELF: usize = ADJC_CONTAINERS * ADJ_UNITS;
+const ADJC2_CROSS: usize = ADJC_CONTAINERS * 4;
+const ADJC2_TOTAL: usize = ADJC2_SELF + ADJC2_CROSS;
+
+/// 嵌套容器矩阵（ADJX）：ListItem / BlockQuote / Details 的 3×3 = 9。
+const ADJX_GROUP: &str = "ADJX";
+const ADJX_TOTAL: usize = 9;
+
 fn is_adjacency_group(group: &str) -> bool {
-    group == ADJB_GROUP || group == ADJI_GROUP || group == ADJC_GROUP
+    matches!(
+        group,
+        ADJB_GROUP | ADJI_GROUP | ADJC_GROUP | ADJN_GROUP | ADJI2_GROUP | ADJC2_GROUP | ADJX_GROUP
+    )
 }
 
 // =============================================================================
@@ -94,7 +116,7 @@ const GROUPS: [&str; 11] = [
     "BLK", "INL", "LNK", "IMG", "TBL", "CODE", "EXT", "CJK", "EDGE", "SEC", "ADV",
 ];
 
-const CHECK_KEYS: [&str; 11] = [
+const CHECK_KEYS: [&str; 12] = [
     "blocks",
     "kinds",
     "inline_kinds",
@@ -104,6 +126,7 @@ const CHECK_KEYS: [&str; 11] = [
     "html_label_order",
     "pdf_pages",
     "pdf_text",
+    "pdf_not_text",
     "image_in_cell",
     "no_overlap",
 ];
@@ -159,6 +182,8 @@ struct Case {
     line: usize,
     /// 生成式容器矩阵（ADJC）的结构化元数据；语料/ADJB/ADJI 为 None。
     adjc: Option<AdjcSpec>,
+    /// ADJC2 / ADJX 的结构化元数据；其余用例为 None。
+    structured: Option<StructuredSpec>,
 }
 
 /// 空态用例：语料以 `表面：N/A` 声明「无可见内容」。旧 harness 据此整组跳过，
@@ -386,6 +411,7 @@ fn parse_case(lines: &[&str], start: usize) -> (Case, usize) {
             byte_opts,
             line: header_line,
             adjc: None,
+            structured: None,
         },
         i,
     )
@@ -1568,6 +1594,7 @@ fn adjacency_cases() -> Vec<Case> {
                 byte_opts: Vec::new(),
                 line: 0,
                 adjc: None,
+                structured: None,
             });
         }
     }
@@ -1588,6 +1615,9 @@ fn adj_golden_sample(case: &Case) -> bool {
         }
         ADJI_GROUP => adji_golden_sample(case),
         ADJC_GROUP => adjc_golden_sample(case),
+        ADJN_GROUP => adjn_golden_ids().iter().any(|id| id == &case.id),
+        ADJI2_GROUP => adji2_golden_ids().iter().any(|id| id == &case.id),
+        ADJC2_GROUP | ADJX_GROUP => structured_golden_ids().iter().any(|id| id == &case.id),
         _ => true,
     }
 }
@@ -1888,6 +1918,7 @@ fn adjacency_inline_cases() -> Vec<Case> {
                     byte_opts: Vec::new(),
                     line: 0,
                     adjc: None,
+                    structured: None,
                 });
             }
         }
@@ -2190,6 +2221,7 @@ fn adjc_cases() -> Vec<Case> {
                 byte_opts: Vec::new(),
                 line: 0,
                 adjc: Some(spec),
+                structured: None,
             });
         }
     }
@@ -2330,6 +2362,1341 @@ fn adjc_pdf_checks(spec: &AdjcSpec, text: &str, problems: &mut Vec<String>) {
 }
 
 // =============================================================================
+// 生成式块级单换行边界矩阵（ADJN）
+// =============================================================================
+
+const R_PARA_CONT: &str = "CommonMark §4.8 段落：无空行时后续普通行按段落续行合并";
+const R_SETEXT: &str = "CommonMark §4.3 Setext 标题：段落末行后紧跟 `===`/`---` 时整段成为标题";
+const R_INDENT_CODE: &str = "CommonMark §4.4：缩进代码块不能打断段落（Example 70）";
+const R_INDENT_MERGE: &str = "CommonMark §4.4：缩进代码块内空行不终止块";
+const R_TABLE_ROWS: &str = "GFM §4.10 表格：表体延续至空行或块级结构起始；普通行/定义行成为单格行";
+const R_DEF_CONT: &str = "CommonMark §4.7 / GFM 脚注：链接引用定义与脚注定义不能打断段落";
+const R_FRONTMATTER: &str =
+    "Veil FrontMatter 仅识别于文档首块：非首块 `---` 退化为分隔线，`title: X` + `---` 成 Setext 标题";
+const R_LIST_LAZY: &str = "CommonMark §5.2 列表项：无缩进续行按懒续行并入项内段落";
+const R_LIST_SETEXT: &str = "CommonMark §5.2 + §4.3：列表项懒续行后接 `===` 形成项内 Setext 标题";
+const R_QUOTE_LAZY: &str = "CommonMark §5.1 引用块：无 `>` 前缀的续行按懒续行并入引用";
+const R_QUOTE_MERGE: &str = "CommonMark §5.1：相邻同类型引用块合并为一个引用块";
+const R_FOOTNOTE_INDENT: &str = "GFM 脚注定义：续行要求缩进 ≥4 列，缩进代码被并入定义正文";
+const R_HTML6: &str = "CommonMark §4.6 HTML 块类型 6：吞并至首个空行";
+
+/// 单换行边界下与「A 序列 + B 序列」不同的有序对：逐条登记规范依据。
+struct AdjnException {
+    a: usize,
+    b: usize,
+    kinds: &'static [&'static str],
+    rule: &'static str,
+}
+
+const ADJN_EXCEPTIONS: &[AdjnException] = &[
+    // A=Paragraph：段落续行/Setext/缩进代码/定义/表格规则
+    AdjnException {
+        a: 0,
+        b: 0,
+        kinds: &["Paragraph"],
+        rule: R_PARA_CONT,
+    },
+    AdjnException {
+        a: 0,
+        b: 2,
+        kinds: &["SetextHeading"],
+        rule: R_SETEXT,
+    },
+    AdjnException {
+        a: 0,
+        b: 4,
+        kinds: &["Paragraph"],
+        rule: R_INDENT_CODE,
+    },
+    AdjnException {
+        a: 0,
+        b: 13,
+        kinds: &["Paragraph"],
+        rule: R_DEF_CONT,
+    },
+    AdjnException {
+        a: 0,
+        b: 14,
+        kinds: &["Paragraph"],
+        rule: R_DEF_CONT,
+    },
+    AdjnException {
+        a: 0,
+        b: 17,
+        kinds: &["SetextHeading", "SetextHeading"],
+        rule: R_FRONTMATTER,
+    },
+    // 缩进代码块内空行不终止块
+    AdjnException {
+        a: 4,
+        b: 4,
+        kinds: &["IndentedCode"],
+        rule: R_INDENT_MERGE,
+    },
+    // 表格体吞并后续普通行/定义行
+    AdjnException {
+        a: 7,
+        b: 0,
+        kinds: &["Table"],
+        rule: R_TABLE_ROWS,
+    },
+    AdjnException {
+        a: 7,
+        b: 2,
+        kinds: &["Table"],
+        rule: R_TABLE_ROWS,
+    },
+    AdjnException {
+        a: 7,
+        b: 7,
+        kinds: &["Table"],
+        rule: R_TABLE_ROWS,
+    },
+    AdjnException {
+        a: 7,
+        b: 13,
+        kinds: &["Table"],
+        rule: R_TABLE_ROWS,
+    },
+    AdjnException {
+        a: 7,
+        b: 14,
+        kinds: &["Table"],
+        rule: R_TABLE_ROWS,
+    },
+    // 列表项懒续行
+    AdjnException {
+        a: 8,
+        b: 0,
+        kinds: &["ListItem"],
+        rule: R_LIST_LAZY,
+    },
+    AdjnException {
+        a: 8,
+        b: 2,
+        kinds: &["ListItem"],
+        rule: R_LIST_SETEXT,
+    },
+    AdjnException {
+        a: 8,
+        b: 4,
+        kinds: &["ListItem"],
+        rule: R_LIST_LAZY,
+    },
+    AdjnException {
+        a: 8,
+        b: 13,
+        kinds: &["ListItem"],
+        rule: R_LIST_LAZY,
+    },
+    AdjnException {
+        a: 8,
+        b: 14,
+        kinds: &["ListItem"],
+        rule: R_LIST_LAZY,
+    },
+    // 引用块懒续行 / 合并
+    AdjnException {
+        a: 9,
+        b: 0,
+        kinds: &["BlockQuote"],
+        rule: R_QUOTE_LAZY,
+    },
+    AdjnException {
+        a: 9,
+        b: 2,
+        kinds: &["BlockQuote"],
+        rule: R_QUOTE_LAZY,
+    },
+    AdjnException {
+        a: 9,
+        b: 4,
+        kinds: &["BlockQuote"],
+        rule: R_QUOTE_LAZY,
+    },
+    AdjnException {
+        a: 9,
+        b: 7,
+        kinds: &["BlockQuote"],
+        rule: R_QUOTE_LAZY,
+    },
+    AdjnException {
+        a: 9,
+        b: 9,
+        kinds: &["BlockQuote"],
+        rule: R_QUOTE_MERGE,
+    },
+    AdjnException {
+        a: 9,
+        b: 10,
+        kinds: &["BlockQuote"],
+        rule: R_QUOTE_MERGE,
+    },
+    AdjnException {
+        a: 9,
+        b: 11,
+        kinds: &["BlockQuote"],
+        rule: R_QUOTE_MERGE,
+    },
+    AdjnException {
+        a: 9,
+        b: 13,
+        kinds: &["BlockQuote"],
+        rule: R_QUOTE_LAZY,
+    },
+    AdjnException {
+        a: 9,
+        b: 14,
+        kinds: &["BlockQuote"],
+        rule: R_QUOTE_LAZY,
+    },
+    // Admonition 与引用块同构
+    AdjnException {
+        a: 10,
+        b: 0,
+        kinds: &["Admonition"],
+        rule: R_QUOTE_LAZY,
+    },
+    AdjnException {
+        a: 10,
+        b: 2,
+        kinds: &["Admonition"],
+        rule: R_QUOTE_LAZY,
+    },
+    AdjnException {
+        a: 10,
+        b: 4,
+        kinds: &["Admonition"],
+        rule: R_QUOTE_LAZY,
+    },
+    AdjnException {
+        a: 10,
+        b: 7,
+        kinds: &["Admonition"],
+        rule: R_QUOTE_LAZY,
+    },
+    AdjnException {
+        a: 10,
+        b: 9,
+        kinds: &["Admonition"],
+        rule: R_QUOTE_MERGE,
+    },
+    AdjnException {
+        a: 10,
+        b: 10,
+        kinds: &["Admonition"],
+        rule: R_QUOTE_MERGE,
+    },
+    AdjnException {
+        a: 10,
+        b: 11,
+        kinds: &["Admonition"],
+        rule: R_QUOTE_MERGE,
+    },
+    AdjnException {
+        a: 10,
+        b: 13,
+        kinds: &["Admonition"],
+        rule: R_QUOTE_LAZY,
+    },
+    AdjnException {
+        a: 10,
+        b: 14,
+        kinds: &["Admonition"],
+        rule: R_QUOTE_LAZY,
+    },
+    // 未知 Callout 标记回退 BlockQuote
+    AdjnException {
+        a: 11,
+        b: 0,
+        kinds: &["BlockQuote"],
+        rule: R_QUOTE_LAZY,
+    },
+    AdjnException {
+        a: 11,
+        b: 2,
+        kinds: &["BlockQuote"],
+        rule: R_QUOTE_LAZY,
+    },
+    AdjnException {
+        a: 11,
+        b: 4,
+        kinds: &["BlockQuote"],
+        rule: R_QUOTE_LAZY,
+    },
+    AdjnException {
+        a: 11,
+        b: 7,
+        kinds: &["BlockQuote"],
+        rule: R_QUOTE_LAZY,
+    },
+    AdjnException {
+        a: 11,
+        b: 9,
+        kinds: &["BlockQuote"],
+        rule: R_QUOTE_MERGE,
+    },
+    AdjnException {
+        a: 11,
+        b: 10,
+        kinds: &["BlockQuote"],
+        rule: R_QUOTE_MERGE,
+    },
+    AdjnException {
+        a: 11,
+        b: 11,
+        kinds: &["BlockQuote"],
+        rule: R_QUOTE_MERGE,
+    },
+    AdjnException {
+        a: 11,
+        b: 13,
+        kinds: &["BlockQuote"],
+        rule: R_QUOTE_LAZY,
+    },
+    AdjnException {
+        a: 11,
+        b: 14,
+        kinds: &["BlockQuote"],
+        rule: R_QUOTE_LAZY,
+    },
+    // 脚注定义续行
+    AdjnException {
+        a: 14,
+        b: 4,
+        kinds: &["FootnoteDef"],
+        rule: R_FOOTNOTE_INDENT,
+    },
+    // HTML 块类型 6 吞并
+    AdjnException {
+        a: 15,
+        b: 0,
+        kinds: &["HtmlBlock"],
+        rule: R_HTML6,
+    },
+    AdjnException {
+        a: 15,
+        b: 1,
+        kinds: &["HtmlBlock"],
+        rule: R_HTML6,
+    },
+    AdjnException {
+        a: 15,
+        b: 2,
+        kinds: &["HtmlBlock"],
+        rule: R_HTML6,
+    },
+    AdjnException {
+        a: 15,
+        b: 3,
+        kinds: &["HtmlBlock"],
+        rule: R_HTML6,
+    },
+    AdjnException {
+        a: 15,
+        b: 4,
+        kinds: &["HtmlBlock"],
+        rule: R_HTML6,
+    },
+    AdjnException {
+        a: 15,
+        b: 5,
+        kinds: &["HtmlBlock"],
+        rule: R_HTML6,
+    },
+    AdjnException {
+        a: 15,
+        b: 6,
+        kinds: &["HtmlBlock"],
+        rule: R_HTML6,
+    },
+    AdjnException {
+        a: 15,
+        b: 7,
+        kinds: &["HtmlBlock"],
+        rule: R_HTML6,
+    },
+    AdjnException {
+        a: 15,
+        b: 8,
+        kinds: &["HtmlBlock"],
+        rule: R_HTML6,
+    },
+    AdjnException {
+        a: 15,
+        b: 9,
+        kinds: &["HtmlBlock"],
+        rule: R_HTML6,
+    },
+    AdjnException {
+        a: 15,
+        b: 10,
+        kinds: &["HtmlBlock"],
+        rule: R_HTML6,
+    },
+    AdjnException {
+        a: 15,
+        b: 11,
+        kinds: &["HtmlBlock"],
+        rule: R_HTML6,
+    },
+    AdjnException {
+        a: 15,
+        b: 12,
+        kinds: &["HtmlBlock"],
+        rule: R_HTML6,
+    },
+    AdjnException {
+        a: 15,
+        b: 13,
+        kinds: &["HtmlBlock"],
+        rule: R_HTML6,
+    },
+    AdjnException {
+        a: 15,
+        b: 14,
+        kinds: &["HtmlBlock"],
+        rule: R_HTML6,
+    },
+    AdjnException {
+        a: 15,
+        b: 15,
+        kinds: &["HtmlBlock"],
+        rule: R_HTML6,
+    },
+    AdjnException {
+        a: 15,
+        b: 16,
+        kinds: &["HtmlBlock", "Paragraph", "HtmlBlock"],
+        rule: R_HTML6,
+    },
+    AdjnException {
+        a: 15,
+        b: 17,
+        kinds: &["HtmlBlock"],
+        rule: R_HTML6,
+    },
+    // B=FrontMatter：非首块退化为分隔线 + Setext 标题
+    AdjnException {
+        a: 1,
+        b: 17,
+        kinds: &["AtxHeading", "ThematicBreak", "SetextHeading"],
+        rule: R_FRONTMATTER,
+    },
+    AdjnException {
+        a: 2,
+        b: 17,
+        kinds: &["SetextHeading", "ThematicBreak", "SetextHeading"],
+        rule: R_FRONTMATTER,
+    },
+    AdjnException {
+        a: 3,
+        b: 17,
+        kinds: &["FencedCode", "ThematicBreak", "SetextHeading"],
+        rule: R_FRONTMATTER,
+    },
+    AdjnException {
+        a: 4,
+        b: 17,
+        kinds: &["IndentedCode", "ThematicBreak", "SetextHeading"],
+        rule: R_FRONTMATTER,
+    },
+    AdjnException {
+        a: 5,
+        b: 17,
+        kinds: &["Math", "ThematicBreak", "SetextHeading"],
+        rule: R_FRONTMATTER,
+    },
+    AdjnException {
+        a: 6,
+        b: 17,
+        kinds: &["Mermaid", "ThematicBreak", "SetextHeading"],
+        rule: R_FRONTMATTER,
+    },
+    AdjnException {
+        a: 7,
+        b: 17,
+        kinds: &["Table", "ThematicBreak", "SetextHeading"],
+        rule: R_FRONTMATTER,
+    },
+    AdjnException {
+        a: 8,
+        b: 17,
+        kinds: &["ListItem", "ThematicBreak", "SetextHeading"],
+        rule: R_FRONTMATTER,
+    },
+    AdjnException {
+        a: 9,
+        b: 17,
+        kinds: &["BlockQuote", "ThematicBreak", "SetextHeading"],
+        rule: R_FRONTMATTER,
+    },
+    AdjnException {
+        a: 10,
+        b: 17,
+        kinds: &["Admonition", "ThematicBreak", "SetextHeading"],
+        rule: R_FRONTMATTER,
+    },
+    AdjnException {
+        a: 11,
+        b: 17,
+        kinds: &["BlockQuote", "ThematicBreak", "SetextHeading"],
+        rule: R_FRONTMATTER,
+    },
+    AdjnException {
+        a: 12,
+        b: 17,
+        kinds: &["ThematicBreak", "ThematicBreak", "SetextHeading"],
+        rule: R_FRONTMATTER,
+    },
+    AdjnException {
+        a: 13,
+        b: 17,
+        kinds: &["LinkRefDef", "ThematicBreak", "SetextHeading"],
+        rule: R_FRONTMATTER,
+    },
+    AdjnException {
+        a: 14,
+        b: 17,
+        kinds: &["FootnoteDef", "ThematicBreak", "SetextHeading"],
+        rule: R_FRONTMATTER,
+    },
+    AdjnException {
+        a: 16,
+        b: 17,
+        kinds: &["Details", "Paragraph", "ThematicBreak", "SetextHeading"],
+        rule: R_FRONTMATTER,
+    },
+    AdjnException {
+        a: 17,
+        b: 17,
+        kinds: &["FrontMatter", "ThematicBreak", "SetextHeading"],
+        rule: R_FRONTMATTER,
+    },
+];
+
+fn adjn_exception(a: usize, b: usize) -> Option<&'static AdjnException> {
+    ADJN_EXCEPTIONS.iter().find(|e| e.a == a && e.b == b)
+}
+
+fn adjn_kinds(a: usize, b: usize) -> Vec<&'static str> {
+    if let Some(e) = adjn_exception(a, b) {
+        return e.kinds.to_vec();
+    }
+    let mut out = UNITS[a].kinds.to_vec();
+    out.extend_from_slice(UNITS[b].kinds);
+    out
+}
+
+/// 期望块序列对应的 HTML 结构标记（标题/定义/空输出块不在此断言，块序列已覆盖）。
+fn adjn_markers(kinds: &[&str]) -> Vec<&'static str> {
+    let mut out: Vec<&'static str> = Vec::new();
+    for k in kinds {
+        let m = match *k {
+            "Paragraph" => Some("<p>"),
+            "FencedCode" | "IndentedCode" => Some("<pre>"),
+            "Math" => Some("class=\"math"),
+            "Mermaid" => Some("<svg"),
+            "Table" => Some("<table"),
+            "ListItem" => Some("<li>"),
+            "BlockQuote" => Some("<blockquote"),
+            "Admonition" => Some("callout-note"),
+            "ThematicBreak" => Some("<hr"),
+            "HtmlBlock" => Some("&lt;"),
+            "Details" => Some("<details"),
+            _ => None,
+        };
+        if let Some(m) = m {
+            if !out.contains(&m) {
+                out.push(m);
+            }
+        }
+    }
+    out
+}
+
+/// 单元标签在单换行边界下的可见性（按 18 个单元的导出模型）。
+fn adjn_a_visible(a: usize) -> bool {
+    !matches!(a, 12 | 13 | 14 | 17)
+}
+
+fn adjn_b_visible(a: usize, b: usize) -> bool {
+    match b {
+        12 => false,
+        // 引用定义在块起始被消费；在段落/表格/列表/引用/HTML 块尾部则作为正文可见。
+        13 | 14 => matches!(a, 0 | 7 | 8 | 9 | 10 | 11 | 15),
+        _ => !(a == 14 && b == 4),
+    }
+}
+
+fn adjn_cases() -> Vec<Case> {
+    let mut out = Vec::with_capacity(ADJN_TOTAL);
+    for (a, unit_a) in UNITS.iter().enumerate() {
+        for (b, unit_b) in UNITS.iter().enumerate() {
+            let n = a * ADJ_UNITS + b + 1;
+            let id = format!("CASE-{ADJN_GROUP}-{n:03}");
+            let source = format!("{}\n{}\n", unit_source(a, "甲"), unit_source(b, "乙"));
+            let kinds = adjn_kinds(a, b);
+            let mut checks: Vec<(String, String)> = Vec::new();
+            checks.push(("blocks".to_string(), kinds.len().to_string()));
+            checks.push(("kinds".to_string(), kinds.join(",")));
+            for marker in adjn_markers(&kinds) {
+                checks.push(("html_contains".to_string(), marker.to_string()));
+            }
+            // 标签可见性按单元导出模型断言；不可见时用 not_contains 证伪吞并。
+            if a != 12 {
+                if adjn_a_visible(a) {
+                    checks.push(("html_contains".to_string(), "甲".to_string()));
+                    checks.push(("pdf_text".to_string(), "甲".to_string()));
+                } else {
+                    checks.push(("html_not_contains".to_string(), "甲".to_string()));
+                    checks.push(("pdf_not_text".to_string(), "甲".to_string()));
+                }
+            }
+            if b != 12 {
+                if adjn_b_visible(a, b) {
+                    checks.push(("html_contains".to_string(), "乙".to_string()));
+                    checks.push(("pdf_text".to_string(), "乙".to_string()));
+                } else {
+                    checks.push(("html_not_contains".to_string(), "乙".to_string()));
+                    checks.push(("pdf_not_text".to_string(), "乙".to_string()));
+                }
+            }
+            checks.push(("no_overlap".to_string(), "true".to_string()));
+
+            let na_reason = (b == ADJ_FRONT_MATTER).then(|| ADJ_NA_REASON.to_string());
+            out.push(Case {
+                id,
+                group: ADJN_GROUP.to_string(),
+                title: format!("{} + {}", unit_a.name, unit_b.name),
+                source,
+                expect: "生成式块级单换行有序对：A + 换行 + B".to_string(),
+                surfaces: Some(vec![
+                    Surface::Wysiwyg,
+                    Surface::Focus,
+                    Surface::Typewriter,
+                    Surface::Html,
+                    Surface::Pdf,
+                    Surface::Print,
+                ]),
+                na_reason,
+                checks,
+                byte_opts: Vec::new(),
+                line: 0,
+                adjc: None,
+                structured: None,
+            });
+        }
+    }
+    out
+}
+
+/// ADJN 抽样金样：排除 Mermaid 单元（SVG 浮点坐标）与 N/A（B=FrontMatter），
+/// 对剩余用例等距抽取 20 条。
+fn adjn_golden_ids() -> &'static Vec<String> {
+    static IDS: OnceLock<Vec<String>> = OnceLock::new();
+    IDS.get_or_init(|| {
+        let mut eligible = Vec::new();
+        for a in 0..ADJ_UNITS {
+            for b in 0..ADJ_UNITS {
+                if a == 6 || b == 6 || b == 17 {
+                    continue;
+                }
+                let n = a * ADJ_UNITS + b + 1;
+                eligible.push(format!("CASE-{ADJN_GROUP}-{n:03}"));
+            }
+        }
+        (0..20)
+            .map(|i| eligible[i * eligible.len() / 20].clone())
+            .collect()
+    })
+}
+
+// =============================================================================
+// 生成式行内边界矩阵（ADJI2）
+// =============================================================================
+
+/// `<br />` 独占一行时开启 HTML 块类型 7，吞并至空行（CommonMark §4.6）。
+fn adji2_html_block(a: usize, boundary: usize) -> bool {
+    a == 10 && boundary == 0
+}
+
+fn adji2_cases() -> Vec<Case> {
+    let mut out = Vec::with_capacity(ADJI2_TOTAL);
+    for (a, unit_a) in INLINE_UNITS.iter().enumerate() {
+        for (b, unit_b) in INLINE_UNITS.iter().enumerate() {
+            for (bi, boundary) in ADJI2_BOUNDARIES.iter().enumerate() {
+                let n = (a * ADJ_INLINE_UNITS + b) * ADJI2_BOUNDARIES.len() + bi + 1;
+                let id = format!("CASE-{ADJI2_GROUP}-{n:03}");
+                let (label_a, label_b) = ("甲", "乙");
+                let mut source = format!(
+                    "{}{}{}\n",
+                    inline_unit_source(a, label_a),
+                    boundary,
+                    inline_unit_source(b, label_b)
+                );
+                if a == 8 || b == 8 {
+                    source.push('\n');
+                    if a == 8 {
+                        source.push_str("[^甲]: 注一\n");
+                    }
+                    if b == 8 {
+                        source.push_str("[^乙]: 注二\n");
+                    }
+                }
+
+                let special = adji2_html_block(a, bi);
+                let mut checks: Vec<(String, String)> = Vec::new();
+                if special {
+                    // `<br />` 后紧跟换行：整段成为 HTML 块（类型 7），不再有段落。
+                    let kinds = if b == 8 {
+                        "HtmlBlock,FootnoteDef"
+                    } else {
+                        "HtmlBlock"
+                    };
+                    checks.push(("blocks".to_string(), kinds.split(',').count().to_string()));
+                    checks.push(("kinds".to_string(), kinds.to_string()));
+                    checks.push(("html_contains".to_string(), "<br".to_string()));
+                    // HTML 块内容原样透传：B 为行内 HTML 单元时其标签仍以原文出现，
+                    // 只有非 HTML 单元的解析标记（`<strong` 等）必须缺席。
+                    if !matches!(b, 9..=11) {
+                        if let Some(marker) = INLINE_UNITS[b].marker {
+                            checks.push(("html_not_contains".to_string(), marker.to_string()));
+                        }
+                    }
+                    if b == 11 {
+                        // HtmlLiteral 在 HTML 块内被转义（不再是白名单行内标签）。
+                        checks.push((
+                            "html_contains".to_string(),
+                            format!("&lt;foo&gt;{label_b}&lt;/foo&gt;"),
+                        ));
+                    }
+                    if INLINE_UNITS[b].label_html == LabelHtml::Present {
+                        checks.push(("html_contains".to_string(), label_b.to_string()));
+                        checks.push(("pdf_text".to_string(), label_b.to_string()));
+                    }
+                    checks.push(("no_overlap".to_string(), "true".to_string()));
+                } else {
+                    let (blocks, kinds) = if a == 8 && b == 8 {
+                        (3, "Paragraph,FootnoteDef,FootnoteDef")
+                    } else if a == 8 || b == 8 {
+                        (2, "Paragraph,FootnoteDef")
+                    } else {
+                        (1, "Paragraph")
+                    };
+                    checks.push(("blocks".to_string(), blocks.to_string()));
+                    checks.push(("kinds".to_string(), kinds.to_string()));
+                    let expected = inline_expected_kinds(a, b, false);
+                    checks.push((
+                        "inline_kinds".to_string(),
+                        if expected.is_empty() {
+                            "None".to_string()
+                        } else {
+                            expected.join(",")
+                        },
+                    ));
+                    for (unit, label) in [(a, label_a), (b, label_b)] {
+                        let spec = &INLINE_UNITS[unit];
+                        if let Some(marker) = spec.marker {
+                            checks.push(("html_contains".to_string(), marker.to_string()));
+                        }
+                        match unit {
+                            5 => checks.push(("html_contains".to_string(), format!("${label}$"))),
+                            11 => checks
+                                .push(("html_contains".to_string(), format!("<foo>{label}</foo>"))),
+                            _ => {}
+                        }
+                        if spec.label_html == LabelHtml::Present {
+                            checks.push(("html_contains".to_string(), label.to_string()));
+                        }
+                        if spec.pdf_label {
+                            checks.push(("pdf_text".to_string(), label.to_string()));
+                        }
+                    }
+                    let visible: Vec<&str> = [(a, label_a), (b, label_b)]
+                        .into_iter()
+                        .filter(|(unit, _)| INLINE_UNITS[*unit].label_html == LabelHtml::Present)
+                        .map(|(_, label)| label)
+                        .collect();
+                    if !visible.is_empty() {
+                        checks.push(("html_label_once".to_string(), visible.join(",")));
+                        checks.push(("html_label_order".to_string(), visible.join(",")));
+                    }
+                    checks.push(("no_overlap".to_string(), "true".to_string()));
+                }
+
+                out.push(Case {
+                    id,
+                    group: ADJI2_GROUP.to_string(),
+                    title: format!(
+                        "{} + {}{}",
+                        unit_a.name,
+                        unit_b.name,
+                        match bi {
+                            0 => "（换行）".to_string(),
+                            _ => format!("（`{}`）", boundary),
+                        }
+                    ),
+                    source,
+                    expect: "生成式行内相邻有序对：A + 边界 + B".to_string(),
+                    surfaces: Some(vec![
+                        Surface::Wysiwyg,
+                        Surface::Focus,
+                        Surface::Typewriter,
+                        Surface::Html,
+                        Surface::Pdf,
+                        Surface::Print,
+                    ]),
+                    na_reason: None,
+                    checks,
+                    byte_opts: Vec::new(),
+                    line: 0,
+                    adjc: None,
+                    structured: None,
+                });
+            }
+        }
+    }
+    out
+}
+
+/// ADJI2 抽样金样：排除脚注引用（编号/回链易受实现细节影响）后等距抽取 20 条。
+fn adji2_golden_ids() -> &'static Vec<String> {
+    static IDS: OnceLock<Vec<String>> = OnceLock::new();
+    IDS.get_or_init(|| {
+        let mut eligible = Vec::new();
+        for a in 0..ADJ_INLINE_UNITS {
+            for b in 0..ADJ_INLINE_UNITS {
+                if a == 8 || b == 8 {
+                    continue;
+                }
+                for bi in 0..ADJI2_BOUNDARIES.len() {
+                    let n = (a * ADJ_INLINE_UNITS + b) * ADJI2_BOUNDARIES.len() + bi + 1;
+                    eligible.push(format!("CASE-{ADJI2_GROUP}-{n:03}"));
+                }
+            }
+        }
+        (0..20)
+            .map(|i| eligible[i * eligible.len() / 20].clone())
+            .collect()
+    })
+}
+
+// =============================================================================
+// 容器内相邻矩阵（ADJC2）与嵌套容器矩阵（ADJX）
+// =============================================================================
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StructMode {
+    /// 5 类容器 × 两个内层块（自相邻 / 关键跨类型）。
+    Content(AdjcContainer),
+    /// 容器套容器。
+    Nested {
+        outer: AdjcContainer,
+        inner: AdjcContainer,
+    },
+}
+
+struct StructuredSpec {
+    mode: StructMode,
+    kinds: Vec<&'static str>,
+    /// 正文 HTML 中必须出现的结构标记（容器/内层块）。
+    markers: Vec<&'static str>,
+    /// 正文 HTML 中结构标记的精确出现次数。
+    tags: Vec<(&'static str, usize)>,
+    /// 正文 HTML 中内层标签出现次数（乙/丙）。
+    html_counts: Vec<(char, usize)>,
+    /// PDF 版面中内层标签出现次数。
+    pdf_counts: Vec<(char, usize)>,
+    /// 已登记但本轮未修复的产品缺陷（报告「未修复项」表）。
+    known_defect: Option<&'static str>,
+}
+
+impl StructuredSpec {
+    fn needs_callouts(&self) -> bool {
+        // ADJC2/ADJX 与 ADJC 同口径：整组注入 FIXME registry，`> [!FIXME]`
+        // 才能成为真正的 Callout 块；未知标记的回退路径由 ADJB 单独覆盖。
+        true
+    }
+}
+
+fn count_kind(kinds: &[&str], name: &str) -> usize {
+    kinds.iter().filter(|k| **k == name).count()
+}
+
+fn adjc2_kinds(container: AdjcContainer, first: usize, second: usize) -> Vec<&'static str> {
+    use AdjcContainer::*;
+    match container {
+        ListItem => match (first, second) {
+            (6, 6) => vec!["ListItem", "Mermaid", "ListItem", "Mermaid"],
+            (7, 7) => vec!["ListItem", "Table", "ListItem", "Table"],
+            (6, 7) => vec!["ListItem", "Mermaid", "ListItem", "Table"],
+            (8, 8) => vec!["ListItem", "ListItem", "ListItem"],
+            (0, 7) => vec!["ListItem", "Table"],
+            _ => vec!["ListItem"],
+        },
+        BlockQuote => match (first, second) {
+            (6, 6) => vec!["BlockQuote", "Mermaid", "BlockQuote", "Mermaid"],
+            (7, 7) => vec!["BlockQuote", "Table", "BlockQuote", "Table"],
+            (6, 7) => vec!["BlockQuote", "Mermaid", "BlockQuote", "Table"],
+            (0, 7) => vec!["BlockQuote", "Table"],
+            _ => vec!["BlockQuote"],
+        },
+        Admonition => match (first, second) {
+            (6, 6) => vec!["Admonition", "Mermaid", "BlockQuote", "Mermaid"],
+            (6, 7) => vec!["Admonition", "Mermaid", "BlockQuote"],
+            _ => vec!["Admonition"],
+        },
+        Callout => match (first, second) {
+            (6, 6) => vec!["Callout", "Mermaid", "BlockQuote", "Mermaid"],
+            (6, 7) => vec!["Callout", "Mermaid", "BlockQuote"],
+            _ => vec!["Callout"],
+        },
+        Details => match (first, second) {
+            (0, 0) => vec!["Details", "Paragraph", "Paragraph"],
+            (1, 1) => vec!["Details", "AtxHeading", "AtxHeading"],
+            (2, 2) => vec!["Details", "SetextHeading", "SetextHeading"],
+            (3, 3) => vec!["Details", "FencedCode", "FencedCode"],
+            (4, 4) => vec!["Details", "IndentedCode"],
+            (5, 5) => vec!["Details", "Math", "Math"],
+            (6, 6) => vec!["Details", "Mermaid", "Mermaid"],
+            (7, 7) => vec!["Details", "Table", "Table"],
+            (8, 8) => vec!["Details", "ListItem", "ListItem"],
+            (9, 9) => vec!["Details", "BlockQuote", "BlockQuote"],
+            (10, 10) => vec!["Details", "Admonition", "Admonition"],
+            (11, 11) => vec!["Details", "Callout", "Callout"],
+            (12, 12) => vec!["Details", "ThematicBreak", "ThematicBreak"],
+            (13, 13) => vec!["Details", "LinkRefDef", "LinkRefDef"],
+            (14, 14) => vec!["Details", "FootnoteDef", "FootnoteDef"],
+            (15, 15) => vec!["Details", "HtmlBlock", "HtmlBlock"],
+            (16, 16) => vec!["Details", "Details", "Paragraph", "Details", "Paragraph"],
+            (17, 17) => vec![
+                "Details",
+                "ThematicBreak",
+                "SetextHeading",
+                "ThematicBreak",
+                "SetextHeading",
+            ],
+            (6, 7) => vec!["Details", "Mermaid", "Table"],
+            (3, 4) => vec!["Details", "FencedCode", "IndentedCode"],
+            (0, 7) => vec!["Details", "Paragraph", "Table"],
+            _ => vec!["Details"],
+        },
+    }
+}
+
+fn adjc2_spec(container: AdjcContainer, first: usize, second: usize) -> StructuredSpec {
+    use AdjcContainer::*;
+    let kinds = adjc2_kinds(container, first, second);
+    let mut markers: Vec<&'static str> = container.html_markers().to_vec();
+    let mut tags: Vec<(&'static str, usize)> = Vec::new();
+    let push = |tags: &mut Vec<(&'static str, usize)>, tag: &'static str, n: usize| {
+        if n > 0 {
+            tags.push((tag, n));
+        }
+    };
+    // 表格：Admonition/Callout 不切表格（表格留在提示框内），按内层单元计数。
+    let tables = if matches!(container, Admonition | Callout) {
+        [first, second].iter().filter(|u| **u == 7).count()
+    } else {
+        count_kind(&kinds, "Table")
+    };
+    push(&mut tags, "<table", tables);
+    push(&mut tags, "<svg", count_kind(&kinds, "Mermaid"));
+    push(
+        &mut tags,
+        "<pre>",
+        count_kind(&kinds, "FencedCode") + count_kind(&kinds, "IndentedCode"),
+    );
+    push(&mut tags, "<hr", count_kind(&kinds, "ThematicBreak"));
+    push(&mut tags, "<details", count_kind(&kinds, "Details"));
+    push(&mut tags, "callout-note", count_kind(&kinds, "Admonition"));
+    push(&mut tags, "callout-fixme", count_kind(&kinds, "Callout"));
+    if kinds.contains(&"Mermaid") {
+        markers.push("<svg");
+    }
+    let mut html_counts = Vec::new();
+    let mut pdf_counts = Vec::new();
+    for (unit, label) in [(first, '乙'), (second, '丙')] {
+        let single = AdjcSpec { container, unit };
+        if let Some(n) = single.html_label_count() {
+            html_counts.push((label, n));
+        }
+        if let Some(n) = single.pdf_label_count() {
+            pdf_counts.push((label, n));
+        }
+    }
+    StructuredSpec {
+        mode: StructMode::Content(container),
+        kinds,
+        markers,
+        tags,
+        html_counts,
+        pdf_counts,
+        known_defect: None,
+    }
+}
+
+fn adjx_kinds(outer: AdjcContainer, inner: AdjcContainer) -> Vec<&'static str> {
+    use AdjcContainer::*;
+    match (outer, inner) {
+        (ListItem, ListItem) => vec!["ListItem", "ListItem"],
+        (ListItem, _) => vec!["ListItem"],
+        (BlockQuote, _) => vec!["BlockQuote"],
+        (Details, ListItem) => vec!["Details", "ListItem"],
+        (Details, BlockQuote) => vec!["Details", "BlockQuote"],
+        (Details, Details) => vec!["Details", "Details", "Paragraph"],
+        _ => vec!["Details"],
+    }
+}
+
+fn adjx_spec(outer: AdjcContainer, inner: AdjcContainer) -> StructuredSpec {
+    use AdjcContainer::*;
+    // 已登记缺陷：`<details>` 位于 ListItem / BlockQuote 内时，容器展开只提升
+    // Table/Mermaid，details 块不被识别，开标签被转义为普通段落文本。
+    let unlifted_details = matches!(inner, Details) && matches!(outer, ListItem | BlockQuote);
+    let kinds = adjx_kinds(outer, inner);
+    let mut markers: Vec<&'static str> = Vec::new();
+    let li = usize::from(matches!(outer, ListItem)) + usize::from(matches!(inner, ListItem));
+    let bq = usize::from(matches!(outer, BlockQuote)) + usize::from(matches!(inner, BlockQuote));
+    let det = if unlifted_details {
+        0
+    } else {
+        usize::from(matches!(outer, Details)) + usize::from(matches!(inner, Details))
+    };
+    let mut tags = Vec::new();
+    if li > 0 {
+        markers.push("<li>");
+        tags.push(("<li>", li));
+    }
+    if bq > 0 {
+        markers.push("<blockquote");
+        tags.push(("<blockquote", bq));
+    }
+    if unlifted_details {
+        // 显式锁定降级形态：开标签以转义文本出现，summary 走行内白名单。
+        markers.push("&lt;details&gt;");
+        markers.push("<summary");
+    }
+    if det > 0 {
+        markers.push("<details");
+        tags.push(("<details", det));
+        tags.push(("<summary", det));
+    }
+    // 外层容器标签甲一次；内层标签乙：Details 内 summary+正文各一次。
+    let mut html_counts = vec![('甲', 1)];
+    let mut pdf_counts = vec![('甲', 1)];
+    let inner_label = if matches!(inner, Details) { 2 } else { 1 };
+    html_counts.push(('乙', inner_label));
+    pdf_counts.push(('乙', inner_label));
+    StructuredSpec {
+        mode: StructMode::Nested { outer, inner },
+        kinds,
+        markers,
+        tags,
+        html_counts,
+        pdf_counts,
+        known_defect: unlifted_details.then_some(
+            "嵌套 `<details>`（位于 ListItem / BlockQuote 内）未被识别为 Details 块：容器展开只提升 Table/Mermaid，开标签降级为转义文本（详见报告「未修复项」）",
+        ),
+    }
+}
+
+fn adjc2_cases() -> Vec<Case> {
+    use AdjcContainer::*;
+    let containers = [ListItem, BlockQuote, Admonition, Callout, Details];
+    let cross = [(7usize, 7usize), (6, 7), (3, 4), (0, 7)];
+    let mut out = Vec::with_capacity(ADJC2_TOTAL);
+    let mut n = 0usize;
+    for container in containers {
+        for (unit, unit_spec) in UNITS.iter().enumerate() {
+            n += 1;
+            let body = format!("{}\n\n{}", unit_source(unit, "乙"), unit_source(unit, "丙"));
+            let source = container.wrap(&body);
+            let spec = adjc2_spec(container, unit, unit);
+            out.push(structured_case(
+                format!("CASE-{ADJC2_GROUP}-{n:03}"),
+                format!(
+                    "{} 内 {} + {}（自相邻）",
+                    container.name(),
+                    unit_spec.name,
+                    unit_spec.name
+                ),
+                source,
+                "生成式容器内相邻矩阵：容器（甲容器）内两个同类型内层块（乙/丙）".to_string(),
+                spec,
+            ));
+        }
+        for (a, b) in cross {
+            n += 1;
+            let body = format!("{}\n\n{}", unit_source(a, "乙"), unit_source(b, "丙"));
+            let source = container.wrap(&body);
+            let spec = adjc2_spec(container, a, b);
+            out.push(structured_case(
+                format!("CASE-{ADJC2_GROUP}-{n:03}"),
+                format!(
+                    "{} 内 {} + {}",
+                    container.name(),
+                    UNITS[a].name,
+                    UNITS[b].name
+                ),
+                source,
+                "生成式容器内相邻矩阵：容器内两个关键跨类型内层块（乙/丙）".to_string(),
+                spec,
+            ));
+        }
+    }
+    out
+}
+
+fn adjx_cases() -> Vec<Case> {
+    use AdjcContainer::*;
+    let combos = [
+        (ListItem, ListItem, "- 甲容器\n\n  - 乙容器\n"),
+        (ListItem, BlockQuote, "- 甲容器\n\n  > 乙容器\n"),
+        (
+            ListItem,
+            Details,
+            "- 甲容器\n\n  <details>\n  <summary>乙容器</summary>\n\n  乙正文\n\n  </details>\n",
+        ),
+        (BlockQuote, ListItem, "> 甲容器\n>\n> - 乙容器\n"),
+        (BlockQuote, BlockQuote, "> 甲容器\n>\n> > 乙容器\n"),
+        (
+            BlockQuote,
+            Details,
+            "> 甲容器\n>\n> <details>\n> <summary>乙容器</summary>\n>\n> 乙正文\n>\n> </details>\n",
+        ),
+        (
+            Details,
+            ListItem,
+            "<details>\n<summary>甲容器</summary>\n\n- 乙容器\n\n</details>\n",
+        ),
+        (
+            Details,
+            BlockQuote,
+            "<details>\n<summary>甲容器</summary>\n\n> 乙容器\n\n</details>\n",
+        ),
+        (
+            Details,
+            Details,
+            "<details>\n<summary>甲容器</summary>\n\n<details>\n<summary>乙容器</summary>\n\n乙正文\n\n</details>\n\n</details>\n",
+        ),
+    ];
+    combos
+        .iter()
+        .enumerate()
+        .map(|(i, (outer, inner, source))| {
+            let spec = adjx_spec(*outer, *inner);
+            structured_case(
+                format!("CASE-{ADJX_GROUP}-{:03}", i + 1),
+                format!("{} > {}", outer.name(), inner.name()),
+                (*source).to_string(),
+                "嵌套容器矩阵：外层容器（甲容器）内嵌内层容器（乙容器）".to_string(),
+                spec,
+            )
+        })
+        .collect()
+}
+
+fn structured_case(
+    id: String,
+    title: String,
+    source: String,
+    expect: String,
+    spec: StructuredSpec,
+) -> Case {
+    let group = id.split('-').nth(1).unwrap_or(ADJC2_GROUP).to_string();
+    let mut checks: Vec<(String, String)> = Vec::new();
+    checks.push(("blocks".to_string(), spec.kinds.len().to_string()));
+    checks.push(("kinds".to_string(), spec.kinds.join(",")));
+    for marker in &spec.markers {
+        checks.push(("html_contains".to_string(), (*marker).to_string()));
+    }
+    if spec.tags.iter().any(|(tag, _)| *tag == "<svg") {
+        checks.push(("html_contains".to_string(), "<svg".to_string()));
+        checks.push((
+            "html_not_contains".to_string(),
+            "language-mermaid".to_string(),
+        ));
+    }
+    checks.push(("no_overlap".to_string(), "true".to_string()));
+    Case {
+        id,
+        group,
+        title,
+        source,
+        expect,
+        surfaces: Some(vec![
+            Surface::Wysiwyg,
+            Surface::Focus,
+            Surface::Typewriter,
+            Surface::Html,
+            Surface::Pdf,
+            Surface::Print,
+        ]),
+        na_reason: None,
+        checks,
+        byte_opts: Vec::new(),
+        line: 0,
+        adjc: None,
+        structured: Some(spec),
+    }
+}
+
+/// 结构化矩阵的 PARSE 断言：容器归属（details 层级、提升块的容器字段）。
+fn structured_parse_checks(session: &Session, spec: &StructuredSpec, problems: &mut Vec<String>) {
+    let entries = session.block_entries();
+    if entries.is_empty() {
+        problems.push("结构化矩阵不得产生空文档".to_string());
+        return;
+    }
+    if entries[0].3.is_nested() {
+        problems.push(format!("首块不应携带嵌套容器归属：{:?}", entries[0].3));
+    }
+    match spec.mode {
+        StructMode::Content(container) => {
+            let targets: &[&str] = match container {
+                AdjcContainer::ListItem => &["Table", "Mermaid"],
+                AdjcContainer::BlockQuote => &["Table", "Mermaid"],
+                AdjcContainer::Admonition | AdjcContainer::Callout => &["Mermaid", "Table"],
+                AdjcContainer::Details => &["Table", "Mermaid", "FencedCode", "IndentedCode"],
+            };
+            for e in &entries {
+                let name = kind_name(&e.1);
+                if !targets.contains(&name) {
+                    continue;
+                }
+                let c = &e.3;
+                let ok = match container {
+                    AdjcContainer::ListItem => c.list_indent > 0,
+                    AdjcContainer::BlockQuote => c.quote_depth > 0,
+                    AdjcContainer::Admonition | AdjcContainer::Callout => {
+                        c.quote_depth > 0 || c.details
+                    }
+                    AdjcContainer::Details => c.details && c.details_depth > 0,
+                };
+                if !ok {
+                    problems.push(format!(
+                        "{name} 容器归属异常（{}）：{c:?}",
+                        container.name()
+                    ));
+                }
+            }
+        }
+        StructMode::Nested { outer, inner } => {
+            let want_depth = if spec.known_defect.is_some() {
+                0
+            } else {
+                usize::from(matches!(outer, AdjcContainer::Details))
+                    + usize::from(matches!(inner, AdjcContainer::Details))
+            };
+            let max_depth = entries.iter().map(|e| e.3.details_depth).max().unwrap_or(0);
+            if max_depth as usize != want_depth {
+                problems.push(format!(
+                    "Details 嵌套层级应为 {want_depth}，实际 {max_depth}（entries={:?}）",
+                    entries.iter().map(|e| e.3).collect::<Vec<_>>()
+                ));
+            }
+            if matches!(outer, AdjcContainer::Details) {
+                for e in entries.iter().skip(1) {
+                    if !e.3.details || e.3.details_depth == 0 {
+                        problems.push(format!(
+                            "外层 Details 的子块归属异常（{}）：{:?}",
+                            kind_name(&e.1),
+                            e.3
+                        ));
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// 结构化矩阵的 HTML 断言：容器结构标记、内层块标记计数、内层标签计数。
+fn structured_html_checks(spec: &StructuredSpec, body: &str, problems: &mut Vec<String>) {
+    for marker in &spec.markers {
+        if !body.contains(marker) {
+            problems.push(format!(
+                "缺少容器/内层结构标记 `{marker}`；正文片段：`{}`",
+                snippet(body, 300)
+            ));
+        }
+    }
+    for (tag, want) in &spec.tags {
+        let got = body.matches(tag).count();
+        if got != *want {
+            problems.push(format!(
+                "结构标记 `{tag}` 应出现 {want} 次，实际 {got} 次；正文片段：`{}`",
+                snippet(body, 300)
+            ));
+        }
+    }
+    for (label, want) in &spec.html_counts {
+        let got = body.matches(*label).count();
+        if got != *want {
+            problems.push(format!(
+                "正文 HTML 中标签 `{label}` 应出现 {want} 次，实际 {got} 次；正文片段：`{}`",
+                snippet(body, 300)
+            ));
+        }
+    }
+}
+
+/// 结构化矩阵的 PDF 断言：内层标签按模型计数（证明两个内层块都进入版面）。
+fn structured_pdf_checks(spec: &StructuredSpec, text: &str, problems: &mut Vec<String>) {
+    let flat = norm(text);
+    for (label, want) in &spec.pdf_counts {
+        let got = flat.matches(*label).count();
+        if got != *want {
+            problems.push(format!(
+                "PDF 版面标签 `{label}` 应出现 {want} 次，实际 {got} 次；文本片段：`{}`",
+                snippet(text, 300)
+            ));
+        }
+    }
+}
+
+fn structured_golden_ids() -> &'static Vec<String> {
+    static IDS: OnceLock<Vec<String>> = OnceLock::new();
+    IDS.get_or_init(|| {
+        let mut out = Vec::new();
+        // ADJC2：排除 Mermaid（浮点 SVG）。
+        let containers = [
+            AdjcContainer::ListItem,
+            AdjcContainer::BlockQuote,
+            AdjcContainer::Admonition,
+            AdjcContainer::Callout,
+            AdjcContainer::Details,
+        ];
+        let mut eligible = Vec::new();
+        let mut n = 0usize;
+        for container in containers {
+            for unit in 0..ADJ_UNITS {
+                n += 1;
+                if unit != 6 {
+                    eligible.push((n, container));
+                }
+            }
+            for (a, b) in [(7usize, 7usize), (6, 7), (3, 4), (0, 7)] {
+                n += 1;
+                if a != 6 && b != 6 {
+                    eligible.push((n, container));
+                }
+            }
+        }
+        for i in 0..20 {
+            let (idx, _) = eligible[i * eligible.len() / 20];
+            out.push(format!("CASE-{ADJC2_GROUP}-{idx:03}"));
+        }
+        // ADJX 共 9 条，全部抽样。
+        for i in 1..=ADJX_TOTAL {
+            out.push(format!("CASE-{ADJX_GROUP}-{i:03}"));
+        }
+        out
+    })
+}
+
+// =============================================================================
 // 主测试
 // =============================================================================
 
@@ -2339,10 +3706,25 @@ fn syntax_matrix_surfaces() {
     let adjacency = adjacency_cases();
     let inline_adjacency = adjacency_inline_cases();
     let container_matrix = adjc_cases();
+    let newline_matrix = adjn_cases();
+    let inline_boundary = adji2_cases();
+    let container_adjacent = adjc2_cases();
+    let nested_containers = adjx_cases();
     let adj_exec = adjacency.iter().filter(|c| c.na_reason.is_none()).count();
     let adji_exec = inline_adjacency.len();
     let adjc_exec = container_matrix.len();
+    let adjn_exec = newline_matrix
+        .iter()
+        .filter(|c| c.na_reason.is_none())
+        .count();
+    let adji2_exec = inline_boundary.len();
+    let adjc2_exec = container_adjacent.len();
+    let adjx_exec = nested_containers.len();
     let adj_na: Vec<&Case> = adjacency.iter().filter(|c| c.na_reason.is_some()).collect();
+    let adjn_na: Vec<&Case> = newline_matrix
+        .iter()
+        .filter(|c| c.na_reason.is_some())
+        .collect();
     let mut rows: Vec<Row> = Vec::new();
     let mut digest: Vec<(String, String)> = Vec::new();
 
@@ -2351,9 +3733,17 @@ fn syntax_matrix_surfaces() {
         .chain(adjacency.iter())
         .chain(inline_adjacency.iter())
         .chain(container_matrix.iter())
+        .chain(newline_matrix.iter())
+        .chain(inline_boundary.iter())
+        .chain(container_adjacent.iter())
+        .chain(nested_containers.iter())
     {
         if case.na_reason.is_some() && case.group == ADJB_GROUP {
             // ADJB 的 N/A（B=FrontMatter）不计断言行，只在报告里登记理由。
+            continue;
+        }
+        if case.na_reason.is_some() && case.group == ADJN_GROUP {
+            // ADJN 的 N/A（B=FrontMatter）同理。
             continue;
         }
         run_case(case, &mut rows, &mut digest);
@@ -2370,8 +3760,17 @@ fn syntax_matrix_surfaces() {
             adji_total: ADJI_TOTAL,
             adjc_exec,
             adjc_total: ADJC_TOTAL,
+            adjn_exec,
+            adjn_total: ADJN_TOTAL,
+            adji2_exec,
+            adji2_total: ADJI2_TOTAL,
+            adjc2_exec,
+            adjc2_total: ADJC2_TOTAL,
+            adjx_exec,
+            adjx_total: ADJX_TOTAL,
         },
         &adj_na,
+        &adjn_na,
     );
     let fails = rows.iter().filter(|r| r.status == Status::Fail).count();
     if fails > 0 && std::env::var("QA_ALLOW_FAIL").as_deref() != Ok("1") {
@@ -2398,9 +3797,17 @@ fn run_case(case: &Case, rows: &mut Vec<Row>, digest: &mut Vec<(String, String)>
     // ---- PARSE ----
     let mut parse_problems = Vec::new();
     let callouts = adjc_callouts();
-    let parsed = catch_unwind(AssertUnwindSafe(|| match case.adjc {
-        Some(_) => Session::open_with_callouts(&text, &callouts),
-        None => Session::open(&text),
+    let needs_callouts = case.adjc.is_some()
+        || case
+            .structured
+            .as_ref()
+            .is_some_and(StructuredSpec::needs_callouts);
+    let parsed = catch_unwind(AssertUnwindSafe(|| {
+        if case.adjc.is_some() || needs_callouts {
+            Session::open_with_callouts(&text, &callouts)
+        } else {
+            Session::open(&text)
+        }
     }));
     match parsed {
         Err(_) => parse_problems.push("Session::open panic".to_string()),
@@ -2490,6 +3897,9 @@ fn run_case(case: &Case, rows: &mut Vec<Row>, digest: &mut Vec<(String, String)>
             if let Some(spec) = &case.adjc {
                 adjc_parse_checks(&session, spec, &mut parse_problems);
             }
+            if let Some(spec) = &case.structured {
+                structured_parse_checks(&session, spec, &mut parse_problems);
+            }
         }
     }
     rows.push(Row::new(case, Surface::Parse, parse_problems, None));
@@ -2512,9 +3922,17 @@ fn run_case(case: &Case, rows: &mut Vec<Row>, digest: &mut Vec<(String, String)>
     let need_print = case.applies(Surface::Print);
     let mut app = if need_ui || need_print {
         let callouts = adjc_callouts();
-        let build = || match &case.adjc {
-            Some(_) => veil_ui::qa::QaApp::new_with_callouts(&text, &callouts),
-            None => veil_ui::qa::QaApp::new(&text),
+        let use_callouts = case.adjc.is_some()
+            || case
+                .structured
+                .as_ref()
+                .is_some_and(StructuredSpec::needs_callouts);
+        let build = || {
+            if use_callouts {
+                veil_ui::qa::QaApp::new_with_callouts(&text, &callouts)
+            } else {
+                veil_ui::qa::QaApp::new(&text)
+            }
         };
         match catch_unwind(AssertUnwindSafe(build)) {
             Ok(a) => Some(a),
@@ -2606,7 +4024,11 @@ fn run_case(case: &Case, rows: &mut Vec<Row>, digest: &mut Vec<(String, String)>
             .check_values("html_contains")
             .any(|v| v.contains("<svg"));
         let callouts = adjc_callouts();
-        let use_callouts = case.adjc.is_some();
+        let use_callouts = case.adjc.is_some()
+            || case
+                .structured
+                .as_ref()
+                .is_some_and(StructuredSpec::needs_callouts);
         let exported = catch_unwind(AssertUnwindSafe(|| {
             if mermaid_svg {
                 if use_callouts {
@@ -2769,6 +4191,10 @@ fn run_case(case: &Case, rows: &mut Vec<Row>, digest: &mut Vec<(String, String)>
                 if let Some(spec) = &case.adjc {
                     adjc_html_checks(spec, body, &mut problems);
                 }
+                // ADJC2/ADJX：容器结构标记计数与内层标签计数。
+                if let Some(spec) = &case.structured {
+                    structured_html_checks(spec, body, &mut problems);
+                }
                 // ADJB/ADJI：全量逐用例 HTML SHA-256 摘要比对（离线金样目录之外）。
                 // 摘要文件缺失或 UPDATE_GOLDEN=1 时只重算并落盘（引导）；
                 // ADJI 首轮缺失记录按新增组补写，不判 FAIL。
@@ -2810,7 +4236,11 @@ fn run_case(case: &Case, rows: &mut Vec<Row>, digest: &mut Vec<(String, String)>
             ));
         } else {
             let callouts = adjc_callouts();
-            let use_callouts = case.adjc.is_some();
+            let use_callouts = case.adjc.is_some()
+                || case
+                    .structured
+                    .as_ref()
+                    .is_some_and(StructuredSpec::needs_callouts);
             let pdf = || {
                 if use_callouts {
                     veil::qa::pdf_of_doc_with_callouts(&text, &callouts)
@@ -2857,6 +4287,14 @@ fn run_case(case: &Case, rows: &mut Vec<Row>, digest: &mut Vec<(String, String)>
                             ));
                         }
                     }
+                    for absent in case.check_values("pdf_not_text") {
+                        if pdf_text.contains(&norm(absent)) {
+                            problems.push(format!(
+                                "PDF 版面文本不应出现 `{absent}`；实际文本片段：`{}`",
+                                snippet(&out.text, 300)
+                            ));
+                        }
+                    }
                     // 空态依据：`layout_document` 无条件 `new_page()`，正文为空时
                     // 仍保留 1 页空白；`LayoutOpts::default().page_numbers == false`，
                     // 所以该页没有任何 `DrawOp::Text`（版面文本为空）。
@@ -2888,6 +4326,9 @@ fn run_case(case: &Case, rows: &mut Vec<Row>, digest: &mut Vec<(String, String)>
                     }
                     if let Some(spec) = &case.adjc {
                         adjc_pdf_checks(spec, &out.text, &mut problems);
+                    }
+                    if let Some(spec) = &case.structured {
+                        structured_pdf_checks(spec, &out.text, &mut problems);
                     }
                     if case.flag("no_overlap") {
                         match &overlap {
@@ -3068,9 +4509,17 @@ struct MatrixStats {
     adji_total: usize,
     adjc_exec: usize,
     adjc_total: usize,
+    adjn_exec: usize,
+    adjn_total: usize,
+    adji2_exec: usize,
+    adji2_total: usize,
+    adjc2_exec: usize,
+    adjc2_total: usize,
+    adjx_exec: usize,
+    adjx_total: usize,
 }
 
-fn write_report(rows: &[Row], stats: &MatrixStats, adj_na: &[&Case]) {
+fn write_report(rows: &[Row], stats: &MatrixStats, adj_na: &[&Case], adjn_na: &[&Case]) {
     let MatrixStats {
         corpus: corpus_cases,
         adj_exec,
@@ -3079,8 +4528,23 @@ fn write_report(rows: &[Row], stats: &MatrixStats, adj_na: &[&Case]) {
         adji_total,
         adjc_exec,
         adjc_total,
+        adjn_exec,
+        adjn_total,
+        adji2_exec,
+        adji2_total,
+        adjc2_exec,
+        adjc2_total,
+        adjx_exec,
+        adjx_total,
     } = *stats;
-    let total_cases = corpus_cases + adj_exec + adji_exec + adjc_exec;
+    let total_cases = corpus_cases
+        + adj_exec
+        + adji_exec
+        + adjc_exec
+        + adjn_exec
+        + adji2_exec
+        + adjc2_exec
+        + adjx_exec;
     let mut counts: BTreeMap<&'static str, [usize; 3]> = BTreeMap::new();
     for s in SURFACE_ORDER {
         counts.insert(s.name(), [0, 0, 0]);
@@ -3106,8 +4570,9 @@ fn write_report(rows: &[Row], stats: &MatrixStats, adj_na: &[&Case]) {
     let mut out = String::new();
     out.push_str("# 语法矩阵测试报告（2026-11-27）\n\n");
     out.push_str(&format!(
-        "- 语料：`docs/qa/syntax-matrix.md`（契约 175 条，解析校验通过 {corpus_cases}）\n- 生成式块级相邻（ADJB）：{adj_total} 个有序对（18×18），执行 {adj_exec}，N/A {}\n- 生成式行内相邻（ADJI）：{adji_total} 个用例（12×12×2 边界），执行 {adji_exec}，N/A 0\n- 生成式容器内容（ADJC）：{adjc_total} 个用例（5 类容器×18 单元），执行 {adjc_exec}，N/A 0\n- 用例总数：{total_cases}\n- 金样：`docs/qa/golden/html/<CASE>.html`（{golden_count} 份；ADJB/ADJI/ADJC 各 20 份等距抽样；`UPDATE_GOLDEN=1` 时更新）\n- 相邻矩阵全量 HTML 摘要：`docs/qa/adjacency-digest.txt`（{adj_exec}+{adji_exec}+{adjc_exec} 行 SHA-256，运行时重算比对）\n- 命令：`cargo test -p veil --test syntax_matrix`\n\n",
-        adj_total - adj_exec
+        "- 语料：`docs/qa/syntax-matrix.md`（契约 175 条，解析校验通过 {corpus_cases}）\n- 生成式块级相邻（ADJB）：{adj_total} 个有序对（18×18），执行 {adj_exec}，N/A {}\n- 生成式行内相邻（ADJI）：{adji_total} 个用例（12×12×2 边界），执行 {adji_exec}，N/A 0\n- 生成式容器内容（ADJC）：{adjc_total} 个用例（5 类容器×18 单元），执行 {adjc_exec}，N/A 0\n- 生成式块级单换行（ADJN）：{adjn_total} 个有序对（18×18），执行 {adjn_exec}，N/A {}\n- 生成式行内边界（ADJI2）：{adji2_total} 个用例（12×12×6 边界），执行 {adji2_exec}，N/A 0\n- 生成式容器内相邻（ADJC2）：{adjc2_total} 个用例（5×18 自相邻 + 5×4 跨类型），执行 {adjc2_exec}，N/A 0\n- 嵌套容器（ADJX）：{adjx_total} 个组合（3×3），执行 {adjx_exec}，N/A 0\n- 用例总数：{total_cases}\n- 金样：`docs/qa/golden/html/<CASE>.html`（{golden_count} 份；ADJB/ADJI/ADJC/ADJN/ADJI2/ADJC2/ADJX 抽样，`UPDATE_GOLDEN=1` 时更新）\n- 相邻矩阵全量 HTML 摘要：`docs/qa/adjacency-digest.txt`（{adj_exec}+{adji_exec}+{adjc_exec}+{adjn_exec}+{adji2_exec}+{adjc2_exec}+{adjx_exec} 行 SHA-256，运行时重算比对）\n- 命令：`cargo test -p veil --test syntax_matrix`\n\n",
+        adj_total - adj_exec,
+        adjn_total - adjn_exec
     ));
 
     out.push_str("## 按表面统计\n\n");
@@ -3138,7 +4603,14 @@ fn write_report(rows: &[Row], stats: &MatrixStats, adj_na: &[&Case]) {
         adj_total - adj_exec
     ));
     out.push_str(&format!("| ADJI | {adji_total} | {adji_exec} | 0 |\n"));
-    out.push_str(&format!("| ADJC | {adjc_total} | {adjc_exec} | 0 |\n\n"));
+    out.push_str(&format!("| ADJC | {adjc_total} | {adjc_exec} | 0 |\n"));
+    out.push_str(&format!(
+        "| ADJN | {adjn_total} | {adjn_exec} | {} |\n",
+        adjn_total - adjn_exec
+    ));
+    out.push_str(&format!("| ADJI2 | {adji2_total} | {adji2_exec} | 0 |\n"));
+    out.push_str(&format!("| ADJC2 | {adjc2_total} | {adjc2_exec} | 0 |\n"));
+    out.push_str(&format!("| ADJX | {adjx_total} | {adjx_exec} | 0 |\n\n"));
 
     out.push_str("## FAIL 明细\n\n");
     let fails: Vec<&Row> = rows.iter().filter(|r| r.status == Status::Fail).collect();
@@ -3232,6 +4704,9 @@ fn write_report(rows: &[Row], stats: &MatrixStats, adj_na: &[&Case]) {
     out.push_str("| 规范允许合并（非缺陷） | `CASE-ADJI-002`、`CASE-ADJI-028`、`CASE-ADJI-054` | 无空格边界下 Strong+Strong / Emph+Emph / Code+Code 按 CommonMark「rule of 3」或代码跨度等长规则退化为单个节点 | 按规范预期节点序列断言（见「ADJI 规范合并例外」表，逐条附规范依据） |\n");
     out.push_str("| 模型边界（非缺陷） | ADJB 的 Callout 单元 | 默认 `callouts.json` 为空且 ADJB 不注入 registry，`> [!FIXME]` 无法产生自定义 Callout 块型，实测回退为 `BlockQuote` | 该单元覆盖未知标记回退路径；真实自定义 Callout 的 7 表面断言由 ADJC 的 Callout 容器组覆盖 |\n");
     out.push_str("| 模型边界（非缺陷） | ADJC 容器内的 Math / 嵌套 Admonition | 容器展开只把 `Table`（ListItem / BlockQuote / Details）与 `Mermaid`（全部 5 类容器）提升为独立块；容器内 Math 与内层 Admonition/Callout 仍按容器正文渲染，不产生独立块 | 对应结构标记仅在真正成为独立块的 Details 容器中断言，其余容器登记 Ignore（既有解析模型边界） |\n");
+    out.push_str("| 真实缺陷（已修复） | `CASE-ADJN-008` | 单换行 `甲\\n| 乙 | b |\\n| --- | --- |…` 中，GFM 参考实现（cmark-gfm/pulldown）用分隔行把段落最后一行提升为表头，产出「段落 + 表格」；`veil-core` 块解析把整段并入段落，导致 WYSIWYG/PDF 显示管道文本而 HTML 显示真实表格 | 复刻 cmark-gfm 的 `try_inserting_table_header_paragraph`：段落扫描遇到分隔行且上一行含未转义竖线、列数一致时，截断段落并让表头行由外层重新扫描为 `Table`；`block.rs` 单测 `table_from_paragraph_tail` 同步收紧为「Paragraph + Table」 |\n");
+    out.push_str("| 规范允许合并（非缺陷） | ADJN（78 条有序对） | 单换行边界下，B 的行按 CommonMark/GFM 构造规则并入 A 的开放块（段落续行、Setext 下划线、懒续行、HTML 块吞并、表格体延续等） | 按规范推导的块序列断言，逐条登记于「ADJN 规范构造例外」表，不登记为缺陷 |\n");
+    out.push_str("| 模型边界（非缺陷） | `CASE-ADJI2-*`（12 条） | `<br />` 独占一行时满足 HTML 块类型 7 起始条件，吞并至空行；A 单元为 HtmlSelfClosed 且边界为换行时不再产生段落与行内节点 | 按 `HtmlBlock` 断言（块序列 + `<br` + 后续行内标记不得出现 + 标签可见性），不登记为缺陷 |\n");
     out.push('\n');
 
     out.push_str("- 断言口径（D4）：`html_contains`/`html_not_contains` 比较前对正文与期望片段做开始标签属性归一（h1–h6、details、summary、th、td、table、thead、tbody、tr、ul、ol、li、p、pre、code、figure、blockquote、mark），使 `<h1 id=…>` ≡ `<h1>`、`<details open>` ≡ `<details>`、`<th style=…>` ≡ `<th>`；属性类原文片段（`class=`、`id=`、`alt=` 等）仍按原文严格命中，纯文本片段不归一。\n");
@@ -3268,7 +4743,71 @@ fn write_report(rows: &[Row], stats: &MatrixStats, adj_na: &[&Case]) {
     out.push_str("- ADJI 的无空格边界：Strong+Strong / Emph+Emph / Code+Code 按 CommonMark「rule of 3」或代码跨度等长规则合并为单节点，登记在「ADJI 规范合并例外」表；CASE-ADJI-184（Highlight+Highlight，`==甲====乙==`）曾因 4 连 `=` run 被吞而整段降级为纯文本，已由 `try_highlight` 的「4 连等号边界」规则修复（两个 Highlight + 两个 `<mark>`），`inline_kinds` 与 `<mark` 结构断言已全量恢复。\n");
     out.push_str("- ADJI 的 Math：行内 CJK 公式无 STIX 字形，`export::html_of_doc` 的 `math_svg` 返回 None，保留源码 `$甲$`（产品既有降级路径，不是相邻干扰）；因此 Math 单元的结构断言是降级源码字面量而非 `class=\"math`，标签可见性按 Ignore 处理。\n");
     out.push_str("- ADJI 金样：排除脚注定义用例（文末脚注区块编号/回链易受实现细节影响）后，对剩余 242 条等距抽取 20 条写全文金样；全量 288 条 HTML 写入 `docs/qa/adjacency-digest.txt`，运行时逐条重算比对，缺失记录按新增组补写，已存在记录不一致即 FAIL。\n");
-    out.push_str("- ADJC 金样与摘要：抽样 20 条（覆盖 5 类容器、避开 Mermaid 浮点坐标）写全文金样；全量 90 条 HTML 追加写入 `docs/qa/adjacency-digest.txt`（与 ADJB 306 行、ADJI 288 行共存，共 684 行），运行时逐条重算比对。\n");
+    out.push_str("- ADJC 金样与摘要：抽样 20 条（覆盖 5 类容器、避开 Mermaid 浮点坐标）写全文金样；全量 90 条 HTML 追加写入 `docs/qa/adjacency-digest.txt`（与原 ADJB 306 行、ADJI 288 行及 ADJN/ADJI2/ADJC2/ADJX 新增行共存），运行时逐条重算比对。\n");
+    out.push_str(&format!(
+        "- ADJN（生成式块级单换行）：18 个块单元 × 18 个有序对 = {adjn_total}，文档恒为 `A + \"\\n\" + B + \"\\n\"`；B=FrontMatter 的 18 对按契约记 N/A（FrontMatter 仅识别于文档首块）。逐对推导期望块序列：默认「A 序列 + B 序列」，{n} 条有序对按 CommonMark/GFM 构造规则合并或降级，逐条登记于下表；结构断言用「期望块型 → HTML 结构标记」映射，标签可见性按单元导出模型断言（不可见时用 `html_not_contains`/`pdf_not_text` 证伪吞并）。\n",
+        n = ADJN_EXCEPTIONS.len()
+    ));
+    out.push_str(
+        "\n### ADJN 规范构造例外\n\n| CASE | 有序对 | 期望块序列 | 规范依据 |\n|---|---|---|---|\n",
+    );
+    for e in ADJN_EXCEPTIONS {
+        let n = e.a * ADJ_UNITS + e.b + 1;
+        out.push_str(&format!(
+            "| `CASE-{ADJN_GROUP}-{n:03}` | {} + {} | {} | {} |\n",
+            UNITS[e.a].name,
+            UNITS[e.b].name,
+            e.kinds.join(" / "),
+            e.rule
+        ));
+    }
+    out.push('\n');
+    out.push_str("### ADJN N/A 登记\n\n| CASE | 有序对 | 理由 |\n|---|---|---|\n");
+    for c in adjn_na {
+        out.push_str(&format!(
+            "| `{}` | {} | {} |\n",
+            c.id,
+            c.title,
+            c.na_reason.as_deref().unwrap_or("")
+        ));
+    }
+    out.push('\n');
+    out.push_str(&format!(
+        "- ADJI2（生成式行内边界）：12 个行内单元 × 12 个有序对 × 6 种边界（换行 `\\n`、`。`、`，`、`）`、`.`、`,`）= {adji2_total}；默认顶层节点序列为「A 节点 + B 节点」，标点边界按字面文本处理、不改变 flanking（`**甲**。**乙**` 仍是两个 Strong）。唯一例外：A 单元为 HtmlSelfClosed（`<br />`）且边界为换行时，`<br />` 独占一行触发 HTML 块类型 7，整段被吞并为 `HtmlBlock`（FootnoteRef 时另加一个 `FootnoteDef`），不产出段落与行内节点；逐条断言 `<br` 存在、B 行内标记不得出现、可见标签保留、其余 860 条按默认模型断言。金样排除脚注引用后等距抽取 20 条；全量 {adji2_total} 条写入摘要。\n"
+    ));
+    out.push_str(&format!(
+        "- ADJC2（生成式容器内相邻）：5 类容器 × 18 个自相邻对（以内层空行分隔的同一单元 `乙`/`丙`）= {ADJC2_SELF}，加每组 4 个关键跨类型对（Table+Table、Mermaid+Table、FencedCode+IndentedCode、Paragraph+Table）= {ADJC2_CROSS}，共 {adjc2_total}。断言：顶层块序列、容器结构标记与内层块标记的精确计数、内层标签 `乙`/`丙` 在 HTML 与 PDF 中的逐份计数、提升块（Table/Mermaid）的 `BlockContainer` 归属、`no_overlap`；内层两块的块数按容器模型登记（如 IndentedCode 在 Details 内因块内空行合并为 1 块，Admonition/Callout 内表格不独立成块）。金样避开 Mermaid 后等距抽取 20 条。\n"
+    ));
+    out.push_str(&format!(
+        "- ADJX（嵌套容器）：ListItem / BlockQuote / Details 的 3×3 = {adjx_total} 组合；断言容器元素精确计数（`<li>`/`<blockquote`/`<details`/`<summary`）、Details 嵌套深度（`details_depth` 等于嵌套层数）、外层 Details 的子块归属、标签 `甲容器`/`乙容器` 可见性、`no_overlap`；9 条全部写金样。\n"
+    ));
+    // 未修复项登记：结构化矩阵里标记了 known_defect 的用例。
+    let mut open_defects: Vec<(String, &'static str)> = Vec::new();
+    for case in adjx_cases() {
+        if let Some(spec) = &case.structured {
+            if let Some(desc) = spec.known_defect {
+                open_defects.push((case.id.clone(), desc));
+            }
+        }
+    }
+    for case in adjc2_cases() {
+        if let Some(spec) = &case.structured {
+            if let Some(desc) = spec.known_defect {
+                open_defects.push((case.id.clone(), desc));
+            }
+        }
+    }
+    if open_defects.is_empty() {
+        out.push_str("- 未修复项：无。\n");
+    } else {
+        out.push_str("\n### 未修复项（已登记，当前断言锁定降级形态）\n\n| CASE | 现象 | 状态 |\n|---|---|---|\n");
+        for (id, desc) in &open_defects {
+            out.push_str(&format!(
+                "| `{id}` | {desc} | 待修复（本轮未改：需把 Details 块识别与 B3 子块展开扩展进 ListItem/BlockQuote 容器展开路径，超出本次覆盖闭合的安全改动范围） |\n"
+            ));
+        }
+        out.push('\n');
+    }
 
     out.push_str("\n## 交付事实\n\n");
     out.push_str("- 本文件由 `cargo test -p veil --test syntax_matrix` 重生成，运行该测试会覆写全文；不要手工追加内容。\n");

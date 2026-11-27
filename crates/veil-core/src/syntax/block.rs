@@ -285,7 +285,6 @@ pub(super) fn scan_one(buf: &Buffer, line: usize, total: usize) -> (BlockKind, u
         }
     }
     // 段落：直到空行 / 可打断段落的块起始（打断规则集中于 `interrupts_paragraph`）。
-    // 表格 v0 不打断段落——同 GFM，表头须位于块起始。
     // Setext 下划线（0c P0-2）优先于全部打断判定：`Foo\n---` 整体成 2 级标题。
     let mut n = 1;
     while line + n < total {
@@ -295,6 +294,20 @@ pub(super) fn scan_one(buf: &Buffer, line: usize, total: usize) -> (BlockKind, u
         }
         if let Some(level) = setext_underline(&l) {
             return (BlockKind::SetextHeading(level), n + 1);
+        }
+        // GFM 表格（cmark-gfm/pulldown 同规则）：分隔行可把进行中段落的最后一行
+        // 提升为表头——上一行须含未转义竖线且列数与分隔行一致；分隔行之前的段落
+        // 行保留为独立段落，表头行由外层重新扫描为 `Table`。表格不「打断」段落，
+        // 而是从段落尾部接管，故此处先于 `interrupts_paragraph` 判定。
+        if let Some(aligns) = parse_delim_row(&l) {
+            let prev = line_text(buf, line + n - 1);
+            if has_unescaped_pipe(&prev) && split_row(&prev).len() == aligns.len() {
+                if n == 1 {
+                    // 表头即块首行：块起始的 `table_rows` 已负责，这里兜底。
+                    return (BlockKind::Table, table_rows(buf, line, total).unwrap_or(2));
+                }
+                return (BlockKind::Paragraph, n - 1);
+            }
         }
         if interrupts_paragraph(&l) {
             break;
@@ -3824,10 +3837,14 @@ mod tests {
     }
 
     #[test]
-    fn table_does_not_interrupt_paragraph() {
-        // GFM：表头须位于块起始；段落后的表格行被并入段落
+    fn table_from_paragraph_tail() {
+        // GFM（cmark-gfm/pulldown 同规则）：分隔行把进行中段落的最后一行提升为
+        // 表头，之前的段落行保留；表格不是「打断」段落，而是从段落尾部接管。
         let b = Buffer::new("para\n| a |\n| --- |\n");
-        assert_eq!(kinds(&b), [(BlockKind::Paragraph, 0, 3)]);
+        assert_eq!(
+            kinds(&b),
+            [(BlockKind::Paragraph, 0, 1), (BlockKind::Table, 1, 3)]
+        );
     }
 
     // ===== B2：容器内表格（引用 / 列表项 / details） =====

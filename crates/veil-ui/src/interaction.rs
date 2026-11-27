@@ -2763,6 +2763,39 @@ impl App {
         (self.viewport().h * crate::tokens::doc::IMG_STANDALONE_VIEWPORT_RATIO).max(1.0)
     }
 
+    /// 打印态超高显示公式的等比缩放系数（1.0 = 不缩放；仅打印态且图像高于
+    /// 一页可用高时 < 1）。
+    ///
+    /// 「一页可用高」= 页帧高 × `IMG_STANDALONE_VIEWPORT_RATIO`：打印视口即页帧，
+    /// 与独立图片/Mermaid 共用同一上限。PDF 侧的对应规则在
+    /// `pdf_layout::push_math_image`：可用高 = `content_h - 12pt`（`content_h` 已
+    /// 扣除上下页边距，12pt 预留块前后间距）；打印页帧含页边距，故按视口比例取。
+    /// 屏幕常规编辑恒为 1.0，不因打印才出现的规则改变块高/命中。
+    pub(crate) fn math_print_scale(&self, img_h: f32) -> f32 {
+        if self.window_state.print.is_none() || img_h <= 0.0 {
+            return 1.0;
+        }
+        let avail = self.image_max_height();
+        if img_h > avail {
+            avail / img_h
+        } else {
+            1.0
+        }
+    }
+
+    /// 数学图的实际显示尺寸（物理像素）：屏幕态 = 原尺寸；打印态超高时等比缩小。
+    /// 块高度、blit 尺寸与命中几何都从这里取，保证三者同口径。
+    pub(crate) fn math_display_size(&self, img: &crate::math::MathImage) -> (u32, u32) {
+        let k = self.math_print_scale(img.height as f32);
+        if k >= 1.0 {
+            return (img.width, img.height);
+        }
+        (
+            ((img.width as f32) * k).round().max(1.0) as u32,
+            ((img.height as f32) * k).round().max(1.0) as u32,
+        )
+    }
+
     /// Front Matter 是否按「非活动态隐藏」处理（REN-SWEEP-001）。
     /// 源码模式恒显示原文；光标进入块内（WYSIWYM）显示原文可编辑；
     /// 打印/导出无光标语义，与 HTML 导出保持一致直接隐藏。
@@ -2920,7 +2953,7 @@ impl App {
             return self
                 .cache
                 .math(g.id, self.math_key(g.id))
-                .map_or(g.est_h, |m| m.height as f32);
+                .map_or(g.est_h, |m| self.math_display_size(m).1 as f32);
         }
         if g.kind == BlockKind::Table && self.table_shows_grid(g.id, &g.range) {
             return self

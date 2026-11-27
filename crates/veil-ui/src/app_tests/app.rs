@@ -487,20 +487,68 @@ fn print_collapses_all_reveal_markup() {
     assert_eq!(a.editor.caret(), bold, "打印不动真实光标");
 }
 
+/// (块顶, 缩放后块高, 公式范围起, 公式范围止)
+type MathGeomSample = (f32, f32, usize, usize);
+
+/// R4 探针：打印态采样超高公式的页数、块几何、命中落点与页帧像素。
+struct MathPrintProbe {
+    pages: Rc<Cell<usize>>,
+    breaks: Rc<RefCell<Vec<f32>>>,
+    math: Rc<RefCell<Option<MathGeomSample>>>,
+    carets: Rc<RefCell<Vec<usize>>>,
+    painted_red: Rc<Cell<bool>>,
+}
+
+impl Print for MathPrintProbe {
+    fn print(&mut self, s: &mut PrintSession) {
+        let pages = s.begin(300, 600, 1.0);
+        self.pages.set(pages);
+        *self.breaks.borrow_mut() = s.page_breaks().to_vec();
+        let (top, height, start, end) = s
+            .app
+            .index
+            .blocks
+            .iter()
+            .find(|g| g.kind == BlockKind::Math)
+            .map(|g| (g.top, g.height, g.range.start, g.range.end))
+            .expect("文档含公式块");
+        *self.math.borrow_mut() = Some((top, height, start, end));
+        // 命中：块内上半与最底部各点一次，落点都必须在公式范围内。
+        let vp = s.app.viewport();
+        let x = (s.app.content_x() + s.app.content_width() / 2.0) as f64;
+        for dy in [height * 0.5, (height - 1.0).max(0.0)] {
+            s.app.input_state.mouse =
+                PhysicalPosition::new(x, (vp.y + top + dy - s.app.window_state.scroll_y) as f64);
+            if let Some(c) = s.app.hit_offset() {
+                self.carets.borrow_mut().push(c);
+            }
+        }
+        let red = [255, 0, 0, 255];
+        self.painted_red.set({
+            let f = s.render_page(0);
+            (0..f.height).any(|y| (0..f.width).any(|x| f.get(x, y) == red))
+        });
+        s.end();
+    }
+}
+
 #[test]
-fn print_hard_cuts_atomic_block_taller_than_page() {
-    // 原子块（500px 数学图）超页高：无合法断点 → 硬切，不 panic、页数 > 1
-    let p = FakePrint {
-        w: 300,
-        h: 100,
-        scale: 1.0,
-        ..Default::default()
+fn print_scales_tall_display_math_to_one_page() {
+    // R4：100×2000px 显示公式在 300×600 页帧：等比压到一页可用高（600×80%=480），
+    // 不再按页底硬切；块高/绘制/命中同口径。
+    let probe = MathPrintProbe {
+        pages: Rc::new(Cell::new(0)),
+        breaks: Rc::new(RefCell::new(Vec::new())),
+        math: Rc::new(RefCell::new(None)),
+        carets: Rc::new(RefCell::new(Vec::new())),
+        painted_red: Rc::new(Cell::new(false)),
     };
-    let (pages, breaks, geoms, ended) = (
-        p.pages.clone(),
-        p.breaks.clone(),
-        p.geoms.clone(),
-        p.ended.clone(),
+    let (pages, breaks, math, carets, painted) = (
+        probe.pages.clone(),
+        probe.breaks.clone(),
+        probe.math.clone(),
+        probe.carets.clone(),
+        probe.painted_red.clone(),
     );
     let doc = Doc {
         text: "$$\nx\n$$\n".into(),
@@ -524,30 +572,29 @@ fn print_hard_cuts_atomic_block_taller_than_page() {
             watcher: Box::new(NoWatcher),
             theme_env: theme::test_support::env(),
             persist_env: persist_env(),
-            print: Box::new(p),
+            print: Box::new(probe),
             url_opener: no_url(),
             clock: fixed_clock(),
         },
     );
     a.perform_menu(MenuAction::Print);
-    assert!(ended.get());
+    assert_eq!(pages.get(), 1, "超高公式应缩放到一页内");
+    assert_eq!(*breaks.borrow(), vec![0.0], "单页无续页断点");
+    let (top, height, start, end) = math.borrow().expect("采样到公式块");
     assert!(
-        pages.get() >= 2,
-        "500px 原子块在 100px 页帧应多页: {}",
-        pages.get()
+        (height - 480.0).abs() < 1.0,
+        "2000px 图应缩到页帧 600 的 80%，实际 {height}"
     );
-    let bs = breaks.borrow();
-    let gs = geoms.borrow();
-    // 至少一个硬切断点（不在任何块顶/行顶）：块顶那次合法，其余页首都是硬切
-    let hard = bs[1..]
-        .iter()
-        .filter(|&&b| {
-            !gs.iter().any(|(top, lines)| {
-                (top - b).abs() < 0.5 || lines.iter().any(|&t| (top + t - b).abs() < 0.5)
-            })
-        })
-        .count();
-    assert!(hard >= 1, "超页原子块应产生硬切断点: {bs:?} vs {gs:?}");
+    assert!(top + height <= 600.0 + 0.5, "公式块不得越出页帧");
+    assert!(painted.get(), "缩放后的公式必须真实绘制在页内");
+    let cs = carets.borrow();
+    assert_eq!(cs.len(), 2, "两次命中都应成功");
+    for &c in cs.iter() {
+        assert!(
+            (start..=end).contains(&c),
+            "命中落点 {c} 应在公式范围 {start}..={end}"
+        );
+    }
 }
 
 #[test]

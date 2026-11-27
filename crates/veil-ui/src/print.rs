@@ -354,6 +354,9 @@ impl App {
     ///
     /// R1：表格只在整行边界断页；单个表格行自身高于该页可用高度时才允许行内硬切。
     /// R2：页首落在表格内部时，该页可用高度扣掉重复表头高度（表体不被表头遮挡）。
+    /// R4：高于一页的显示公式在打印与 PDF 都等比缩放到一页可用高内（打印 =
+    /// 页帧高 × 80%，PDF = `content_h - 12pt`），不丢内容、不跨页硬切；
+    /// 缩放值由 `App::math_display_size` 统一供块高/绘制/命中使用。
     fn compute_page_breaks(&self, frame_h: f32) -> Vec<f32> {
         let mut breaks = vec![0.0];
         let total_h = self.index.total_h;
@@ -374,11 +377,9 @@ impl App {
                 }
                 continue;
             }
-            // R4（接受并说明）：超高原子块（图片 / 渲染态公式 / Mermaid）在打印路径
-            // 不做缩放——打印几何复用屏幕排版，改图高会破坏与正文的行距对应；
-            // 单块高于一页时只能按页底硬切（见 `print_hard_cuts_atomic_block_taller_than_page`）。
-            // 原生 PDF 导出则在 `pdf_layout::push_image` / `push_mermaid_image` 等比
-            // 压到一页内、不产生硬切。两条路径此处是刻意保留的差异，规则以本注释为准。
+            // R4：渲染态公式是原子块，只留块顶候选；它已在布局期按
+            // `App::math_display_size` 缩放到一页可用高内（见 `block_height_with`），
+            // 因此页底不会切开公式，也不会产生续页。超高表格行仍可能硬切（R1）。
             let atomic = g.kind == BlockKind::Math && self.math_shows_image(g.id, &g.range);
             if atomic {
                 continue;

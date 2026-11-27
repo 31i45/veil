@@ -74,7 +74,7 @@ Get-ChildItem $root -Directory | ForEach-Object {
 | F-006 | 超高表格行仍从行中间拆开 | 整行高度 ≤ 一页时优先整体移页；行高超过一页可用高时，`fit` 按行数切片跨页，行内文字被拆到两页 | `crates/veil/src/platform/pdf_layout.rs:1491-1514` | P2 | 本轮修复 | Task 3.1/3.2 |
 | F-007 | 打印路径把网格表格当原子块，长表硬切 | `compute_page_breaks` 对渲染态表格只保留块顶候选；无内部断点时执行 `breaks.push(limit)`，在页底硬切 | `crates/veil-ui/src/print.rs:322-324`、`336-339`、`371-378` | P1 | 本轮修复 | Task 3.2 |
 | F-008 | 打印与原生 PDF 表格分页规则不一致 | PDF 按表格行/行内切片分页并逐页重画边框；打印把表格视作原子块，只能整块移页或硬切 | `crates/veil/src/platform/pdf_layout.rs:1499-1587`；`crates/veil-ui/src/print.rs:336-339`、`371-378` | P1 | 本轮修复 | Task 3.2 |
-| F-009 | 超高原子块两条路径策略不一致 | PDF 对图片/公式/图表限高并等比缩放（图片上限 `content_h * 0.8`，Mermaid 上限 `content_h - 12pt`），对表格按行分页；打印对表格/公式图只保留块顶候选，超页硬切 | `crates/veil/src/platform/pdf_layout.rs:1137-1141`、`1154-1157`；`crates/veil-ui/src/print.rs:336-339`、`371-378` | P1 | 本轮修复 | Task 3.3 |
+| F-009 | 超高原子块两条路径策略不一致 | 历史：PDF 对图片/公式/图表限高并等比缩放（图片上限 `content_h * 0.8`，Mermaid 上限 `content_h - 12pt`），对表格按行分页；打印对表格/公式图只保留块顶候选，超页硬切。**已修复（Task 3）**：显示公式在两条路径都等比缩放到一页可用高内（打印 80% 页帧高、PDF `content_h - 12pt`），块高/绘制/命中同口径；打印 `print_scales_tall_display_math_to_one_page`、PDF `tall_display_math_scales_to_single_page_content_height` 锁定 | `crates/veil/src/platform/pdf_layout.rs:1130-1163`；`crates/veil-ui/src/interaction.rs`（`math_display_size`/`math_print_scale`）、`crates/veil-ui/src/paint.rs:1345-1360`；`crates/veil-ui/src/print.rs`（R4） | P1 | 本轮修复 | Task 3.3 |
 
 ### 1.3 WYSIWYG 复杂内容
 
@@ -245,7 +245,7 @@ Get-ChildItem $root -Directory | ForEach-Object {
 - [x] **F-006**：两条路径都只在整行边界断页；单行自身高于一页时才允许行内硬切（规则与测试见 Task 3 单测）。
 - [x] **F-007**：打印 `compute_page_breaks` 加入表格行候选，`print_table_page_breaks_land_on_row_tops_and_reserve_header` 锁定。
 - [x] **F-008**：两路径同规则（整行断页 + 续页表头）；差异仅剩显式尺寸超页原子块的硬切，已在 `print.rs` R4 注释与 §3.3 书面登记。
-- [x] **F-009**：表格整行断页；独立图片/Mermaid 两路径都缩放到一页内（PDF 显式缩放，打印受 `image_max_height` 80% 页高上限）。**已登记差异**：高于一页的显示公式 PDF 缩放、打印硬切续页（不丢内容），理由与重开判据见 register §2「打印路径超高显示公式」。
+- [x] **F-009**：表格整行断页；独立图片/Mermaid 两路径都缩放到一页内（PDF 显式缩放，打印受 `image_max_height` 80% 页高上限）。**已闭合**：高于一页的显示公式改为两路径同规则等比缩放到一页可用高内（打印 80% 页帧高、PDF `content_h - 12pt`），不丢内容、不跨页硬切；单测 `print_scales_tall_display_math_to_one_page` 与 `tall_display_math_scales_to_single_page_content_height`。历史差异与重开判据保留在 register §2。
 - [x] **F-010**：`Shift+滚轮` 可读宽表平移，`narrow_window_wide_table_readable_via_shift_wheel_pan` 锁定绘制/命中/光标一致性。
 - [x] **F-011**：22 类深色逐图目检 + 证据目录；`dark_corpus_renders_differs_and_rasterizes_opaque`；c4 `Rel` 已按 aria 限定覆盖；gitGraph 3.35:1 记为轻微限制。
 - [x] **F-022**：中英 README 已按「22 类目检 + 自动断言 + 两处轻微限制」重写，与 `lib.rs` 一致。

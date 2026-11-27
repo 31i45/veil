@@ -2428,7 +2428,8 @@ impl Print for RevealProbe {
     }
 }
 
-/// 超高数学图渲染器（3b 硬切测试）：500px 图超 100px 页帧。
+/// 超高数学图渲染器（R4 打印缩放测试）：100×2000px 图，远高于测试页帧。
+/// 纯红不透明像素便于断言「整图确实被绘制在页内」。
 struct TallMath;
 impl MathRenderer for TallMath {
     fn render(
@@ -2439,9 +2440,9 @@ impl MathRenderer for TallMath {
         _color: [u8; 3],
     ) -> Result<MathImage, String> {
         Ok(MathImage {
-            pixels: vec![255; 10 * 500 * 4],
-            width: 10,
-            height: 500,
+            pixels: [255, 0, 0, 255].repeat(100 * 2000),
+            width: 100,
+            height: 2000,
             baseline: 0,
         })
     }

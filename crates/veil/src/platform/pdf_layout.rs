@@ -1138,7 +1138,31 @@ impl<'a> Ctx<'a> {
         }
         let m = media.as_deref_mut()?;
         let data = m.math(tex, display).ok()?;
-        Some(self.push_image(data))
+        // 显示公式与 Mermaid 同一限高规则；行内公式仍按行内图片上限。
+        if display {
+            Some(self.push_math_image(data))
+        } else {
+            Some(self.push_image(data))
+        }
+    }
+
+    /// 块级显示公式：宽度收纳到版心，高度等比压到一页内容高内。
+    /// R4：打印路径对应规则见 `veil-ui::interaction::App::math_print_scale`——
+    /// 打印可用高 = 页帧高 × 80%（页帧含页边距，打印视口即页帧）；PDF 的
+    /// `content_h` 已扣除上下页边距，故只需再减 12pt 预留块前后间距。
+    fn push_math_image(&mut self, mut data: ImageData) -> usize {
+        let max_w = self.max_w();
+        let w = data.pt_w();
+        if w > max_w && w > 0.0 {
+            data.px_to_pt *= max_w / w;
+        }
+        let h = data.pt_h();
+        let max_h = (self.geom.content_h() - 12.0).max(1.0);
+        if h > max_h && h > 0.0 {
+            data.px_to_pt *= max_h / h;
+        }
+        self.images.push(data);
+        self.images.len() - 1
     }
 
     fn push_image(&mut self, mut data: ImageData) -> usize {
@@ -1168,8 +1192,8 @@ impl<'a> Ctx<'a> {
         }
         let h = data.pt_h();
         // 块前 4pt、块后 8pt 也必须留在同一页内；不套用行内图片的两行限高。
-        // R4：与打印路径的差异见 `print.rs::compute_page_breaks` —— 打印不缩放、
-        // 超高图按页底硬切；PDF 在这里等比压到一页内，绝不硬切。
+        // R4：打印路径用同一思路（`App::math_print_scale` 等），把超高图片/
+        // Mermaid/显示公式缩到页帧高 × 80%；这条路径按 content_h - 12pt 压到一页内。
         let max_h = (self.geom.content_h() - 12.0).max(1.0);
         if h > max_h && h > 0.0 {
             data.px_to_pt *= max_h / h;
@@ -2756,6 +2780,44 @@ mod tests {
         assert!((h - (geom.content_h() - 12.0)).abs() < 0.01, "高度 {h}");
         assert!((w / h - 400.0 / 1400.0).abs() < 0.001, "限高仍须等比");
         assert!(y + h + 8.0 <= geom.bottom() + 0.01, "不得越出单页");
+    }
+
+    /// R4（PDF 侧）：高于一页的显示公式与 Mermaid 同规则——等比压到一页内容高。
+    #[test]
+    fn tall_display_math_scales_to_single_page_content_height() {
+        struct TallMathMedia;
+        impl MediaProvider for TallMathMedia {
+            fn image(&mut self, _path: &Path) -> Result<ImageData, String> {
+                Err("无图片".into())
+            }
+            fn math(&mut self, _tex: &str, _display: bool) -> Result<ImageData, String> {
+                Ok(ImageData {
+                    w: 100,
+                    h: 2000,
+                    rgb: vec![255; 100 * 2000 * 3],
+                    baseline_px: 0.0,
+                    px_to_pt: 1.0,
+                })
+            }
+        }
+
+        let geom = PageGeom::a4(20.0);
+        let doc = lay_media("$$\nx\n$$\n", &mut TallMathMedia);
+        let (y, w, h) = doc
+            .pages
+            .iter()
+            .flatten()
+            .find_map(|op| match op {
+                DrawOp::Image { y, w, h, .. } => Some((*y, *w, *h)),
+                _ => None,
+            })
+            .expect("显示公式应绘制为图片");
+        let cap = geom.content_h() - 12.0;
+        assert!(h <= cap + 0.01, "公式图高度 {h} 应 ≤ 一页可用高 {cap}");
+        assert!((h - cap).abs() < 0.01, "超高公式应压到上限，实际 {h}");
+        assert!((w / h - 100.0 / 2000.0).abs() < 0.001, "限高仍须等比");
+        assert!(y + h + 8.0 <= geom.bottom() + 0.01, "不得越出单页");
+        assert_eq!(doc.pages.len(), 1, "单条超高公式不得跨页");
     }
 
     /// 完整版 corpus 逐图走「本地 SVG → 高 DPI 位图 → 原生 PDF」；逐图释放位图以限制峰值内存。

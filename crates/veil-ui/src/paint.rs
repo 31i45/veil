@@ -1343,12 +1343,18 @@ impl App {
                 continue; // 视口外不画（布局已缓存，光栅按需）
             }
             if self.math_shows_image(id, &range) {
-                // 数学块渲染态：图整体替换文本光栅（display 公式居中）
+                // 数学块渲染态：图整体替换文本光栅（display 公式居中）。
+                // 打印态超高公式按 `math_display_size` 等比缩到一页可用高内，
+                // 与块高度/命中同一口径（屏幕态 k=1，等价原尺寸 blit）。
                 let img = &self.cache.math_imgs[&id].value;
-                let x = (self.content_x()
-                    + ((self.content_width() - img.width as f32) / 2.0).max(0.0))
-                    as i32;
-                frame.blit(&img.pixels, img.width, img.height, x, sy);
+                let (dw, dh) = self.math_display_size(img);
+                let x =
+                    (self.content_x() + ((self.content_width() - dw as f32) / 2.0).max(0.0)) as i32;
+                if dw == img.width && dh == img.height {
+                    frame.blit(&img.pixels, img.width, img.height, x, sy);
+                } else {
+                    frame.blit_scaled(&img.pixels, img.width, img.height, dw, dh, x, sy);
+                }
                 continue;
             }
             // 仅网格态才走表格绘制；源码模式（或光标落在结构字符上）必须落到

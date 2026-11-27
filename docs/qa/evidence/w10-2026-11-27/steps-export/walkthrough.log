@@ -1,0 +1,16 @@
+[11:34:34.333] INFO  exe=D:\VSCode\Veil\target\release\veil.exe doc=D:\VSCode\Veil\docs\qa\evidence\w10-2026-11-27\sample.md probe=False shots=D:\VSCode\Veil\docs\qa\evidence\w10-2026-11-27\steps-export
+[11:34:34.433] INFO  已启动 PID=17648
+[11:34:34.679] INFO  主窗口就绪：句柄=17500540，启动到窗口 324 ms
+[11:34:36.697] INFO  真实窗口 DPI=144（比例=1.5，物理像素=922x1106，句柄=17500540）
+[11:34:36.771] INFO  宽度 900px 截图：D:\VSCode\Veil\docs\qa\evidence\w10-2026-11-27\steps-export\01-w900-p0-20261127-113434.png（PrintWindow=True）
+[11:34:41.291] INFO  按键 ^e（前台=15010178，目标=17500540）
+[11:34:41.518] INFO  原生对话框就绪：HWND=15010178
+[11:34:42.148] INFO  输入文本（剪贴板粘贴）
+[11:34:42.584] INFO  SendKeys={ENTER} 前台窗口=15010178
+[11:34:44.594] INFO  按键 ^+e（前台=10225994，目标=17500540）
+[11:34:44.614] INFO  原生对话框就绪：HWND=10225994
+[11:34:45.249] INFO  输入文本（剪贴板粘贴）
+[11:34:45.685] INFO  SendKeys={ENTER} 前台窗口=10225994
+[11:34:48.702] INFO  交互步骤完成，前台与鼠标位置已还原
+[11:34:48.720] INFO  已结束 PID=17648
+[11:34:48.724] INFO  证据目录：D:\VSCode\Veil\docs\qa\evidence\w10-2026-11-27\steps-export

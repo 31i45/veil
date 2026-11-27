@@ -2809,6 +2809,8 @@ mod io;
 
 mod media;
 
+mod perf_task5;
+
 mod persist;
 
 mod render;

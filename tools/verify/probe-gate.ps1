@@ -1,5 +1,6 @@
-# Veil ignored 探针门禁：单命令在 release 构建下逐条运行 17 条 #[ignore] 探针
-# （其中 pathological_eval_child 以 loop / microtask 两种模式各跑一次），
+# Veil ignored 探针门禁：单命令在 release 构建下逐条运行 19 条 #[ignore] 探针
+# （原始 17 条 + Task 5 新增 perf_5000_headings / perf_history_5000；
+# 其中 pathological_eval_child 以 loop / microtask 两种模式各跑一次），
 # 解析探针输出的机器可读 `PROBE name=... metric=... value=... unit=...` 行，
 # 按归档基线与探针自身预算判定，并生成结果归档文档。
 #
@@ -9,9 +10,18 @@
 #   pwsh -NoProfile -File tools/verify/probe-gate.ps1 -Repeat 9       # Task 5 的分布口径
 #   pwsh -NoProfile -File tools/verify/probe-gate.ps1 -UpdateBaseline # 用本轮结果重写基线
 #
-# 判定：
-#   - 性能项：本轮 p95 > 归档基线 p95 × 1.2 或 > 探针登记预算 → FAIL；
-#     基线文件不存在（首次）或 -UpdateBaseline 时写入，不判 FAIL。
+# 判定（测量噪声地板与产品预算严格分开）：
+#   - 产品预算硬性优先：探针自身写死的预算（如打开 ≤5000 ms、击键 p95 ≤16 ms）先判，
+#     超预算立即 FAIL；噪声地板不能豁免产品预算，也不修改任何探针内断言。
+#   - 指标名含 peak/max（单次峰值类）：跨样本 p50 vs 基线 p50，
+#     阈值 max(2 ms, 基线 p50 × 1.5)。
+#   - 指标名含 p95（探针内部 p95）：跨样本 p50 vs 基线 p50，
+#     阈值 max(1 ms, 基线 p50 × 1.2)。
+#   - 其余指标：基线 p95 ≥ 5 ms → 本轮 p95 vs 基线 p95 × 1.2；
+#     基线 p95 < 5 ms → 本轮 p50 vs 基线 p50，阈值 max(2 ms, 基线 p50 × 1.5)。
+#   - 上述 max(…, 固定毫秒) 是「测量噪声地板」，只吸收计时分辨率/调度抖动，
+#     不是产品预算；p95 用线性插值（rank=(n-1)*q）。
+#   - 基线文件不存在（首次）或 -UpdateBaseline 时写入，不判 FAIL。
 #   - 非性能项：退出码 + 关键不变量（PROBE 指标 / 证据文件存在且非空）；
 #     缺少系统 CJK 字体等环境缺失记 SKIP 并写明原因，绝不记 PASS。
 #   - 任一探针超时（默认 10 分钟）记 FAIL 并保留日志摘要。
@@ -38,7 +48,32 @@ $timestamp = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss zzz')
 $archivePath = Join-Path $repoRoot "docs\qa\probe-gate-$dateStamp.md"
 $baselinePath = Join-Path $repoRoot 'docs\qa\perf-baseline.json'
 $cargo = (Get-Command cargo -ErrorAction Stop).Source
-$regressionFactor = 1.2
+$p95Relative = 0.2
+$regressionFactor = 1.0 + $p95Relative
+# 测量噪声地板（仅回归比较，不是产品预算）：
+#   - peak/max 类：max(2 ms, 基线 p50 × 1.5)
+#   - 指标名含 p95：max(1 ms, 基线 p50 × 1.2)
+#   - 其余且基线 p95 < 5 ms：max(2 ms, 基线 p50 × 1.5)
+$peakFactor = 1.5
+$peakFloorMs = 2.0
+$p95MetricFactor = 1.2
+$p95MetricFloorMs = 1.0
+$smallMetricFactor = 1.5
+$smallMetricFloorMs = 2.0
+$smallMetricThresholdMs = 5.0
+$policy = [ordered]@{
+    schema                     = 3
+    peak_metrics_stat          = 'p50'
+    peak_metrics_threshold     = 'max(2 ms, baseline_p50 * 1.5)'
+    p95_named_metrics_stat     = 'p50'
+    p95_named_metrics_threshold = 'max(1 ms, baseline_p50 * 1.2)'
+    other_metrics_large_stat   = 'p95 when baseline_p95 >= 5 ms'
+    other_metrics_large_limit  = 'baseline_p95 * 1.2'
+    other_metrics_small_stat   = 'p50 when baseline_p95 < 5 ms'
+    other_metrics_small_limit  = 'max(2 ms, baseline_p50 * 1.5)'
+    budget_priority            = 'probe budgets are hard; noise floors do not waive them'
+    p95_method                 = 'linear interpolation on sorted samples: rank=(n-1)*q'
+}
 $defaultTimeoutSec = 600
 
 # 探针清单。Test 为 cargo test 报告的全限定名（--exact 必须完全一致）。
@@ -87,6 +122,8 @@ $probes = @(
         Target = @('-p', 'veil-ui', '--lib'); Test = 'app_tests::render::perf_huge_block'
         Ignored = $true; TimeoutSec = 600; Env = @{}
         ExactMetrics = @{}; MinMetrics = @{}; GateMetrics = @(); Budgets = @{}
+        # 大块耗时（app_ms/edit_ms/tail_ms）需要分布，不能拿单次样本冒充分布。
+        Timed = $true
     },
     # ---------- 性能 ----------
     @{
@@ -156,6 +193,21 @@ $probes = @(
         Ignored = $true; TimeoutSec = 600; Env = @{}
         ExactMetrics = @{}; MinMetrics = @{}
         GateMetrics = @('peak_total_ms', 'p95_refresh_index_ms'); Budgets = @{}
+    },
+    # ---------- Task 5：5000 标题 / 版本历史面板 5000 快照 ----------
+    @{
+        Id = 'perf_5000_headings'; Kind = '性能'
+        Target = @('-p', 'veil-ui', '--lib'); Test = 'app_tests::perf_task5::perf_5000_headings'
+        Ignored = $true; TimeoutSec = 600; Env = @{}
+        ExactMetrics = @{}; MinMetrics = @{ headings = 5000 }
+        GateMetrics = @('open_ms', 'scroll_p95_ms'); Budgets = @{}
+    },
+    @{
+        Id = 'perf_history_5000'; Kind = '性能'
+        Target = @('-p', 'veil-ui', '--lib'); Test = 'app_tests::perf_task5::perf_history_5000'
+        Ignored = $true; TimeoutSec = 600; Env = @{}
+        ExactMetrics = @{}; MinMetrics = @{ entries = 5000 }
+        GateMetrics = @('open_ms', 'scroll_p95_ms', 'close_ms'); Budgets = @{}
     }
 )
 
@@ -163,10 +215,14 @@ function Get-Percentile {
     param([double[]]$Values, [double]$Q)
     if ($null -eq $Values -or $Values.Count -eq 0) { return $null }
     $sorted = @($Values | Sort-Object)
-    $idx = [int][math]::Ceiling($sorted.Count * $Q) - 1
-    if ($idx -lt 0) { $idx = 0 }
-    if ($idx -ge $sorted.Count) { $idx = $sorted.Count - 1 }
-    return [double]$sorted[$idx]
+    if ($sorted.Count -eq 1) { return [double]$sorted[0] }
+    # 线性插值分位数（rank=(n-1)*q），n=9 的 p95 不再退化为 max。
+    $rank = ($sorted.Count - 1) * $Q
+    $lo = [int][math]::Floor($rank)
+    $hi = [int][math]::Ceiling($rank)
+    if ($lo -eq $hi) { return [double]$sorted[$lo] }
+    $w = $rank - $lo
+    return [double]$sorted[$lo] * (1.0 - $w) + [double]$sorted[$hi] * $w
 }
 
 function Format-MetricValue {
@@ -268,9 +324,32 @@ Write-Host "构建完成：${buildSec}s"
 # ---------- 2/3 逐条运行 ----------
 $baselineExistedAtStart = Test-Path -LiteralPath $baselinePath
 $baseline = @{}
+$baselineMigrated = $false
 if ($baselineExistedAtStart) {
     $raw = Get-Content -LiteralPath $baselinePath -Raw | ConvertFrom-Json
-    foreach ($p in $raw.entries.PSObject.Properties) { $baseline[$p.Name] = $p.Value }
+    foreach ($p in $raw.entries.PSObject.Properties) {
+        $entry = $p.Value
+        $hasP50 = $entry.PSObject.Properties.Name -contains 'p50'
+        $p50 = if ($hasP50) {
+            [double]$entry.p50
+        } elseif (($entry.PSObject.Properties.Name -contains 'samples') -and ($null -ne $entry.samples) -and (@($entry.samples).Count -gt 0)) {
+            # schema 2 → 3：用既有真实样本补算 p50，不改动 value/p95/样本本身。
+            Get-Percentile -Values @($entry.samples | ForEach-Object { [double]$_ }) -Q 0.50
+        } else {
+            [double]$entry.value
+        }
+        if (-not $hasP50) { $baselineMigrated = $true }
+        $baseline[$p.Name] = [pscustomobject]@{
+            p50     = $p50
+            p95     = [double]$entry.value
+            value   = [double]$entry.value
+            unit    = $entry.unit
+            budget  = $entry.budget
+            samples = $entry.samples
+            repeat  = $entry.repeat
+            updated = $entry.updated
+        }
+    }
 }
 $baselineKeysAtStart = @($baseline.Keys)
 
@@ -280,7 +359,7 @@ $index = 0
 
 foreach ($probe in $probes) {
     $index++
-    $runCount = if ($probe.Kind -eq '性能') { $Repeat } else { 1 }
+    $runCount = if ($probe.Kind -eq '性能' -or ($probe.ContainsKey('Timed') -and $probe.Timed)) { $Repeat } else { 1 }
     $timeout = if ($probe.ContainsKey('TimeoutSec')) { $probe.TimeoutSec } else { $defaultTimeoutSec }
     Write-Host ("--- [{0}/{1}] {2}（{3}，{4} 次，超时 {5}s）---" -f $index, $probes.Count, $probe.Id, $probe.Kind, $runCount, $timeout)
 
@@ -375,7 +454,7 @@ foreach ($probe in $probes) {
         }
     }
 
-    # 性能项：与归档基线 / 探针预算比较。
+    # 性能项：产品预算（硬性优先）+ 归档基线的统计回归（测量噪声地板）。
     if ($status -eq 'PASS' -and $probe.GateMetrics.Count -gt 0) {
         foreach ($metricName in $probe.GateMetrics) {
             $keys = @($allProbeLines | Where-Object { $_.Metric -eq $metricName })
@@ -389,24 +468,82 @@ foreach ($probe in $probes) {
                 $values = @($group.Group | ForEach-Object { $_.Value })
                 $unit = $group.Group[0].Unit
                 $scope = $group.Name
+                $p50 = Get-Percentile -Values $values -Q 0.50
                 $p95 = Get-Percentile -Values $values -Q 0.95
                 $key = New-BaselineKey -Name $probe.Id -Metric $metricName -Scope $scope
                 $scopeLabel = if ($scope) { "$metricName@$scope" } else { $metricName }
 
                 $budget = if ($probe.Budgets.ContainsKey($metricName)) { [double]$probe.Budgets[$metricName] } else { $null }
                 $hadBaseline = $baselineKeysAtStart -contains $key
-                if ($null -ne $budget -and $p95 -gt $budget) {
+                $budgetFailed = ($null -ne $budget) -and ($p95 -gt $budget)
+
+                # 1) 产品预算硬性优先：不受任何噪声地板影响。
+                if ($budgetFailed) {
                     $status = 'FAIL'
-                    $reasons.Add("$scopeLabel p95=$(Format-MetricValue $p95) $unit 超过探针预算 $budget $unit")
-                } elseif ($hadBaseline -and -not $UpdateBaseline) {
-                    $baseValue = [double]$baseline[$key].value
-                    $limit = $baseValue * $regressionFactor
-                    if ($p95 -gt $limit) {
-                        $status = 'FAIL'
-                        $ratio = if ($baseValue -gt 0) { [math]::Round(($p95 / $baseValue - 1) * 100, 1) } else { 0 }
-                        $reasons.Add("$scopeLabel p95=$(Format-MetricValue $p95) $unit 超基线 $(Format-MetricValue $baseValue) $unit 的 20%（+$ratio%）")
+                    $reasons.Add("$scopeLabel p95=$(Format-MetricValue $p95) $unit 超过探针预算 $budget $unit（产品预算硬性优先，不适用噪声地板）")
+                }
+
+                # 2) 基线回归：按指标类型选择统计量与噪声地板；与预算独立判定。
+                if (-not $budgetFailed -and $hadBaseline -and -not $UpdateBaseline) {
+                    $baseP50 = [double]$baseline[$key].p50
+                    $baseP95 = [double]$baseline[$key].p95
+                    # 毫秒换算只用于噪声地板；单位未知时退回相对 p95 规则。
+                    $toMs = switch ($unit) { 'ms' { 1.0 } 'us' { 0.001 } 'µs' { 0.001 } 's' { 1000.0 } default { $null } }
+                    if ($null -eq $toMs) {
+                        $limit = $baseP95 * $regressionFactor
+                        if ($p95 -gt $limit) {
+                            $status = 'FAIL'
+                            $reasons.Add("$scopeLabel p95=$(Format-MetricValue $p95) $unit 超基线 p95 $(Format-MetricValue $baseP95) $unit ×1.2")
+                        } else {
+                            $reasons.Add("$scopeLabel p95=$(Format-MetricValue $p95) $unit 在基线 p95 $(Format-MetricValue $baseP95) $unit ×1.2 内")
+                        }
                     } else {
-                        $reasons.Add("$scopeLabel p95 在基线 $(Format-MetricValue $baseValue) $unit 的 +20% 内")
+                        $baseP50Ms = $baseP50 * $toMs
+                        $baseP95Ms = $baseP95 * $toMs
+                        $isPeak = $metricName -match '(?i)peak|max'
+                        $isP95Metric = (-not $isPeak) -and ($metricName -match '(?i)p95')
+
+                        if ($isPeak) {
+                            # 单次峰值类：p50 对抗离群，噪声地板 max(2 ms, 基线 p50 × 1.5)。
+                            $stat = $p50; $statName = 'p50'
+                            $factor = $peakFactor; $floorMs = $peakFloorMs; $hasFloor = $true
+                            $limitMs = [math]::Max($floorMs, $baseP50Ms * $factor)
+                            $baseRef = $baseP50; $baseRefName = 'p50'
+                            $classText = "峰值类 p50 vs 基线 p50，阈值 max(${floorMs} ms, 基线p50×$factor)"
+                        } elseif ($isP95Metric) {
+                            # 探针内部 p95 本身已是尾部统计：跨样本用 p50 对抗运行间抖动。
+                            $stat = $p50; $statName = 'p50'
+                            $factor = $p95MetricFactor; $floorMs = $p95MetricFloorMs; $hasFloor = $true
+                            $limitMs = [math]::Max($floorMs, $baseP50Ms * $factor)
+                            $baseRef = $baseP50; $baseRefName = 'p50'
+                            $classText = "探针内 p95 类 p50 vs 基线 p50，阈值 max(${floorMs} ms, 基线p50×$factor)"
+                        } elseif ($baseP95Ms -ge $smallMetricThresholdMs) {
+                            # 常规量级：p95 vs 基线 p95 × 1.2（无固定毫秒地板）。
+                            $stat = $p95; $statName = 'p95'
+                            $floorMs = 0.0; $hasFloor = $false
+                            $limitMs = $baseP95Ms * $regressionFactor
+                            $baseRef = $baseP95; $baseRefName = 'p95'
+                            $classText = "常规类 p95 vs 基线 p95×$regressionFactor"
+                        } else {
+                            # 小量级：p50 与噪声地板 max(2 ms, 基线 p50 × 1.5)。
+                            $stat = $p50; $statName = 'p50'
+                            $factor = $smallMetricFactor; $floorMs = $smallMetricFloorMs; $hasFloor = $true
+                            $limitMs = [math]::Max($floorMs, $baseP50Ms * $factor)
+                            $baseRef = $baseP50; $baseRefName = 'p50'
+                            $classText = "小量级 p50 vs 基线 p50，阈值 max(${floorMs} ms, 基线p50×$factor)"
+                        }
+
+                        $statMs = $stat * $toMs
+                        $floorActive = $hasFloor -and ([math]::Abs($limitMs - $floorMs) -lt 1e-9)
+                        $limitText = Format-MetricValue ($limitMs / $toMs)
+                        if ($statMs -gt $limitMs) {
+                            $status = 'FAIL'
+                            $reasons.Add("$scopeLabel $statName=$(Format-MetricValue $stat) $unit vs 基线 $baseRefName=$(Format-MetricValue $baseRef) $unit：$classText = $limitText $unit，超出")
+                        } elseif ($floorActive) {
+                            $reasons.Add("$scopeLabel $statName=$(Format-MetricValue $stat) $unit vs 基线 $baseRefName=$(Format-MetricValue $baseRef) $unit：$classText = $limitText $unit，噪声地板生效（非产品预算）")
+                        } else {
+                            $reasons.Add("$scopeLabel $statName=$(Format-MetricValue $stat) $unit vs 基线 $baseRefName=$(Format-MetricValue $baseRef) $unit：$classText = $limitText $unit，在阈值内")
+                        }
                     }
                 }
 
@@ -414,6 +551,8 @@ foreach ($probe in $probes) {
                 if ($status -ne 'FAIL') {
                     if ($UpdateBaseline -or -not $hadBaseline) {
                         $baselineUpdates[$key] = [ordered]@{
+                            p50     = [math]::Round($p50, 4)
+                            p95     = [math]::Round($p95, 4)
                             value   = [math]::Round($p95, 4)
                             unit    = $unit
                             budget  = $budget
@@ -439,11 +578,13 @@ foreach ($probe in $probes) {
 }
 
 # ---------- 基线落盘 ----------
-if ($baselineUpdates.Count -gt 0) {
+if ($baselineUpdates.Count -gt 0 -or $baselineMigrated) {
     $ordered = [ordered]@{}
     foreach ($key in ($baseline.Keys | Sort-Object)) {
         $entry = $baseline[$key]
         $ordered[$key] = [ordered]@{
+            p50     = $entry.p50
+            p95     = $entry.p95
             value   = $entry.value
             unit    = $entry.unit
             budget  = $entry.budget
@@ -453,18 +594,28 @@ if ($baselineUpdates.Count -gt 0) {
         }
     }
     $machine = (Get-CimInstance Win32_Processor | Select-Object -First 1).Name
+    # 顶层 repeat 表示基线分布的样本数；schema 2→3 迁移时取条目里的真实样本数（通常 9），
+    # 不能用触发迁移的本次 -Repeat（可能只是 3 次 smoke）冒充分布样本数。
+    $baselineRepeat = $Repeat
+    if ($baselineMigrated) {
+        $entryRepeats = @($baseline.Values | ForEach-Object { [int]$_.repeat })
+        if ($entryRepeats.Count -gt 0) {
+            $baselineRepeat = ($entryRepeats | Measure-Object -Maximum).Maximum
+        }
+    }
     $payload = [ordered]@{
-        schema    = 1
-        note      = '由 tools/verify/probe-gate.ps1 生成；性能项按 p95 与基线 ×1.2 或探针预算判定'
+        schema    = 3
+        note      = '由 tools/verify/probe-gate.ps1 生成；统计口径：peak/max 用跨样本 p50（阈值 max(2ms, 基线p50×1.5)），名称含 p95 的指标用 p50（阈值 max(1ms, 基线p50×1.2)），其余基线 p95≥5ms 用 p95×1.2、<5ms 用 p50（阈值 max(2ms, 基线p50×1.5)）；探针产品预算硬性优先。'
+        policy    = $policy
         updated   = $timestamp
-        repeat    = $Repeat
+        repeat    = $baselineRepeat
         machine   = $machine
         entries   = $ordered
     }
     $dir = Split-Path -Parent $baselinePath
     New-Item -ItemType Directory -Path $dir -Force | Out-Null
     [IO.File]::WriteAllText($baselinePath, ($payload | ConvertTo-Json -Depth 10), [Text.UTF8Encoding]::new($false))
-    Write-Host "基线已写入：$baselinePath（$($baselineUpdates.Count) 项）"
+    Write-Host "基线已写入：$baselinePath（$($baselineUpdates.Count) 项更新$(if ($baselineMigrated) { '；schema 2→3 补算 p50' } else { '' })）"
 }
 
 # ---------- 3/3 归档 ----------
@@ -495,15 +646,15 @@ $md = @"
 - 机器：$machineName / $osText
 - 工具链：$rustcVersion
 - 构建：``cargo test --workspace --release --no-run``（耗时 ${buildSec}s）
-- 采样：性能项 ``-Repeat $Repeat``；非性能项固定 1 次
+- 采样：性能项与 ``perf_huge_block``（大块耗时分布）``-Repeat $Repeat``；其余非性能项固定 1 次
 - 基线：``docs/qa/perf-baseline.json``（$(if ($baselineExistedAtStart) { '运行前已存在' } else { '运行前不存在' })$(if ($UpdateBaseline) { '；本轮 -UpdateBaseline 重写' } else { '' })）
 - 运行命令：``pwsh -NoProfile -File tools/verify/probe-gate.ps1 -Repeat $Repeat$(if ($UpdateBaseline) { ' -UpdateBaseline' } else { '' })``
 
 ## 汇总
 
-- 判定行：$($results.Count)（覆盖 17 条原始 ignored 探针：16 条仍为 ``#[ignore]``，``mindmap_viewbox_debug`` 已晋级为常规断言；``pathological_eval_child`` 在门禁中以 loop / microtask 两种模式各判定一次）
+- 判定行：$($results.Count)（覆盖原始 17 条 ignored 探针 + Task 5 新增 2 条：19 条源码测试中 18 条仍为 ``#[ignore]``，``mindmap_viewbox_debug`` 已晋级为常规断言；``pathological_eval_child`` 在门禁中以 loop / microtask 两种模式各判定一次）
 - PASS：$passCount / FAIL：$failCount / SKIP：$skipCount
-- 基线写入：$($baselineUpdates.Count) 项（首次运行或 ``-UpdateBaseline`` 时写入）
+- 基线写入：$($baselineUpdates.Count) 项（首次运行或 ``-UpdateBaseline`` 时写入）$(if ($baselineMigrated) { '；本轮将 schema 2 基线用既有真实样本补算 p50 升为 schema 3' } else { '' })
 - 探针总耗时：$([math]::Round($totalDuration, 1)) s
 - 结果：$(if ($failCount -eq 0) { '**PASS**（无 FAIL）' } else { '**FAIL**（见下表与失败日志）' })
 
@@ -515,8 +666,17 @@ $($rows -join "`n")
 
 ## 判定口径
 
-- 性能项：本轮 p95 > 基线 p95 × 1.2 或 > 探针登记预算 → FAIL。预算只登记探针自身已写死的断言
-  （``perf_50mb_long_doc`` 打开 ≤ 5000 ms、击键 p95 ≤ 16 ms），其余以基线回归为准。
+### 测量统计量（跨样本，p50/p95 均为线性插值 ``rank=(n-1)*q``）
+- 指标名含 ``peak``/``max``（单次峰值类）：本轮 **p50** vs 基线 **p50**，阈值 ``max(2 ms, 基线 p50 × 1.5)``。
+- 指标名含 ``p95``（探针内部 p95）：本轮 **p50** vs 基线 **p50**，阈值 ``max(1 ms, 基线 p50 × 1.2)``。
+- 其余指标：基线 p95 ≥ 5 ms → 本轮 **p95** vs 基线 p95 × 1.2；
+  基线 p95 < 5 ms → 本轮 **p50** vs 基线 p50，阈值 ``max(2 ms, 基线 p50 × 1.5)``。
+- 基线 ``docs/qa/perf-baseline.json`` 为 schema 3，同时保存 ``p50`` 与 ``p95``（``value`` 兼容保留为 p95）。
+
+### 测量噪声地板 ≠ 产品预算
+- 上述 ``max(…, 固定毫秒)`` 是**测量噪声地板**，只吸收计时分辨率与调度抖动，仅用于回归比较。
+- 探针自身写死的**产品预算**（``perf_50mb_long_doc`` 打开 ≤ 5000 ms、击键 p95 ≤ 16 ms）硬性优先：
+  超预算直接 FAIL，噪声地板不能豁免；本轮不修改任何产品预算或探针内断言。
 - 非性能项：退出码 0 + 关键不变量（``PROBE`` 指标等于/不低于下限、CJK 证据文件存在且非空）。
 - SKIP 仅用于环境缺失（缺少系统 CJK 字体、50MB 探针内存分配失败），必须写明原因，绝不记 PASS。
 - 每条命令超时 300–900 s（默认 600 s），超时记 FAIL 并保留输出摘要。

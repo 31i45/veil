@@ -2109,24 +2109,22 @@ fn expand_scan_level(
             }
             BlockKind::BlockQuote => {
                 let mark = out.len();
-                let is_callout = quote_callout_marker_line(&line_text(buf, s));
-                let split_tables = !is_callout;
-                // Task 2 范围：仅普通引用块内提升 `<details>`；Callout 保持原有正文形态。
-                let details_depth = (!is_callout).then_some(depth);
+                // 表格仍留在提示框容器内（B2 既有口径）；details 与普通引用同规则提升。
+                let split_tables = !quote_callout_marker_line(&line_text(buf, s));
                 split_quote_container(
                     buf,
                     s,
                     e,
                     BlockKind::BlockQuote,
                     split_tables,
-                    details_depth,
+                    Some(depth),
                     &mut out,
                 );
                 tag_details_depth(&mut out[mark..], depth);
             }
             BlockKind::Admonition(_) => {
                 let mark = out.len();
-                split_quote_container(buf, s, e, kind, false, None, &mut out);
+                split_quote_container(buf, s, e, kind, false, Some(depth), &mut out);
                 tag_details_depth(&mut out[mark..], depth);
             }
             BlockKind::ListItem { .. } => {
@@ -4309,6 +4307,82 @@ mod tests {
         assert_eq!(m[1].container.list_indent, 0);
         assert_eq!(m[2].container.quote_depth, 1);
         assert_eq!(m[2].container.details_depth, 1);
+    }
+
+    #[test]
+    fn details_inside_admonition_becomes_details_block() {
+        // `[!NOTE]` Callout 与普通引用同规则：内层 `<details>` 提升为独立块，
+        // 首段仍是 Admonition（`[!NOTE]` 标题只出现一次），后续 details 子块归属正确。
+        let b = Buffer::new(
+            "> [!NOTE] 甲容器\n>\n> <details>\n> <summary>乙容器</summary>\n>\n> 乙正文\n>\n> </details>\n",
+        );
+        let m = meta(&b);
+        assert_eq!(
+            m.iter()
+                .map(|b| (b.kind.clone(), b.start, b.end))
+                .collect::<Vec<_>>(),
+            vec![
+                (BlockKind::Admonition(AdmonitionType::Note), 0, 2),
+                (
+                    BlockKind::Details {
+                        summary: "乙容器".to_string(),
+                        open_default: false,
+                    },
+                    2,
+                    4,
+                ),
+                (BlockKind::Paragraph, 5, 6),
+            ],
+            "{m:?}"
+        );
+        assert_eq!(m[1].container.quote_depth, 1);
+        assert_eq!(m[1].container.details_depth, 0);
+        assert_eq!(m[2].container.quote_depth, 1);
+        assert_eq!(m[2].container.details_depth, 1);
+        assert_eq!(
+            m.iter()
+                .filter(|b| matches!(b.kind, BlockKind::Admonition(_)))
+                .count(),
+            1,
+            "`[!NOTE]` 标题不得重复成块：{m:?}"
+        );
+    }
+
+    #[test]
+    fn details_inside_callout_keeps_code_and_table_owned() {
+        // Callout（提示框）内 details 的 Code / Table 子块须归属 details 层级，
+        // 不得因容器类型退回正文形态。
+        let b = Buffer::new(
+            "> [!TIP]\n> <details>\n> <summary>明细</summary>\n>\n> ```rust\n> fn main() {}\n> ```\n>\n> | a | b |\n> | --- | --- |\n> | 1 | 2 |\n>\n> </details>\n",
+        );
+        let m = meta(&b);
+        assert_eq!(
+            m[0].kind,
+            BlockKind::Admonition(AdmonitionType::Tip),
+            "{m:?}"
+        );
+        assert_eq!((m[0].start, m[0].end), (0, 1), "{m:?}");
+        assert!(
+            matches!(m[1].kind, BlockKind::Details { .. }),
+            "details 未提升：{m:?}"
+        );
+        assert_eq!((m[1].start, m[1].end), (1, 3), "{m:?}");
+        let code = m
+            .iter()
+            .find(|b| matches!(b.kind, BlockKind::FencedCode(_)))
+            .unwrap_or_else(|| panic!("details 内代码块未识别：{m:?}"));
+        assert_eq!((code.start, code.end), (4, 7), "{m:?}");
+        assert!(code.container.details);
+        assert_eq!(code.container.details_depth, 1);
+        assert_eq!(code.container.quote_depth, 1);
+        let table = m
+            .iter()
+            .find(|b| b.kind == BlockKind::Table)
+            .unwrap_or_else(|| panic!("details 内表格未识别：{m:?}"));
+        assert_eq!((table.start, table.end), (8, 11), "{m:?}");
+        assert!(table.container.details);
+        assert_eq!(table.container.details_depth, 1);
+        assert_eq!(table.container.quote_depth, 1);
     }
 
     #[test]

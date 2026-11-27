@@ -87,7 +87,7 @@ Get-ChildItem $root -Directory | ForEach-Object {
 
 | ID | 标题 | 当前事实 | 证据位置 | 严重度 | 归因 | 归属任务 |
 |---|---|---|---|---|---|---|
-| F-012 | 物理打印机 NOT RUN | 打印只通过 Microsoft Print to PDF 与共用 PDF 分页路径验证，未在实体打印机出纸；矩阵报告明确物理打印不在断言口径内 | `README.zh-CN.md:154`；`docs/qa/report-2026-11-27.md:101`；`docs/qa/w10-output-pipeline-evidence.md:21` | P1 | 延后并说明 | Task 6.2 |
+| F-012 | 实体打印机出纸（可选冒烟） | `Microsoft Print to PDF` 是真实打印驱动，已覆盖应用侧分页正确性；实体出纸只额外验证驱动/介质差异，不作为发布门禁 | `README.zh-CN.md:155`；`docs/qa/report-2026-11-27.md:101`；`docs/qa/w10-output-pipeline-evidence.md:21` | P2 | 接受并说明 | 可选冒烟 |
 | F-013 | 系统 DPI 100/125/200 NOT RUN | 仅 150% 有自动首帧检查；100/125/200 未实测，`README` 与十维报告均记为 NOT RUN | `README.zh-CN.md:154`；`docs/review/jobs-lens-report-v2.md:67`、`270` | P1 | 延后并说明 | Task 6.1 |
 | F-014 | 真机中文 IME 组合与候选窗 NOT RUN | 代码已修 IME 锚点与 preedit 绘制（端口单测通过），但微软拼音/五笔真机六步走查未执行，不能宣称 PASS | `docs/review/jobs-lens-report-v2.md:337-341`、`357-358`；`README.zh-CN.md:164` | P1 | 延后并说明 | Task 6.3 |
 | F-015 | 版本历史面板未单独实测 | w11 只实测快速打开（5000 文件约 13 ms）与大纲（0.34 ms）；历史面板"未单独实测"，沿用"可能短暂阻塞"的表述 | `docs/qa/w11-load-state-measurement.md:62-66`、`74-75` | P2 | 延后并说明 | 不修 |
@@ -221,7 +221,7 @@ Get-ChildItem $root -Directory | ForEach-Object {
 
 | ID | 延后理由 | 重开判据 |
 |---|---|---|
-| F-012 | 物理打印机需要硬件与人工出纸 | Task 6.2 步骤执行并有样张 |
+| F-012 | **接受（不是延后）**：Print-to-PDF 已覆盖应用侧分页正确性；实体出纸只多验证驱动/介质差异 | 具体型号出纸遇到问题，或用户明确要求核对时做一次冒烟 |
 | F-013 | DPI 100/125/200 需真实显示环境切换与截图 | Task 6.1 给出截图、首帧、命中与版心一致性 |
 | F-014 | 真机 IME 需人在场走微软拼音/五笔六步 | Task 6.3 六步走查通过并留证 |
 | F-015 | **已闭合（2026-11-28，Task 5）**：版本历史面板 5000 快照已同口径测量，打开 p95 10.738 ms、滚动 p95 3.642 ms、关闭 p95 0.423 ms | `docs/qa/perf-distribution-2026-11-27.md` §1；`docs/qa/probe-gate-2026-11-28.md`（原 stability 归档已删除） |
@@ -288,7 +288,7 @@ Get-ChildItem $root -Directory | ForEach-Object {
 以下项目在 2026-11-27 审计时**没有**取得足以写成结论的新证据，保持"待验证/NOT RUN"，不得在后续文档中改写成 PASS（2026-11-28 新增的测量与闭合已在对应条目注明）：
 
 1. ~~16 种 Mermaid 图型的深色观感与 c4 `Rel` 连线标签对比度~~：已由 Task 4.2 关闭（22 类逐图目检 + 证据目录 + 自动断言；c4 已按 aria 限定覆盖）。**gitGraph 分支标签已于 2026-11-28 闭合**：原 3.35:1 经 `aria-roledescription="gitGraph"` 描边修复后实测 5.04:1（≥4.5），见 `docs/qa/mermaid-dark-2026-11-27.md` §2.2。
-2. 实体物理打印机出纸（人工项，register §1.2；保持 NOT RUN）。
+2. 实体物理打印机出纸（可选冒烟，不阻塞收口；register §1.2。Print-to-PDF 已覆盖分页正确性，实体出纸只多验证驱动/介质差异）。
 3. 系统 DPI 100/125/200 的真实首帧、命中与版心（人工项，register §1.1；保持 NOT RUN）。
 4. 真机中文 IME 组合、候选窗、上屏（人工项，register §1.3；保持 NOT RUN）。
 5. ~~Narrator/NVDA 语音流程~~：无障碍层已于 `3a6d72d` 移除，该项改判为「非目标」，不再是待验证证据。

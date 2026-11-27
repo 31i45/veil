@@ -8,7 +8,7 @@
 ## 0. 一句话结论
 
 - 可自动化的部分全部闭合：18 条 `#[ignore]` 探针由一条 release 门禁覆盖（本轮 **PASS，cargo exit 0，FAIL 0**），4 条代码差距（容器内 `<details>`、超高显示公式、Mermaid 加载态与就地允许远程、gitGraph 对比度）已修复并有测试锁定。
-- 仍需人在场的 3 项（DPI 100/125/200、实体打印机出纸、真机 IME）保持 **NOT RUN**，但已做成 assisted 流程：用户只做物理动作，脚本负责截图、落盘与判定表。
+- 仍需人在场的 2 项必测（DPI 100/125/200、真机 IME）保持 **NOT RUN**；实体打印为**可选冒烟**（NOT RUN，不阻塞收口，Print-to-PDF 已覆盖分页正确性）。三项均已做成 assisted 流程：用户只做物理动作，脚本负责截图、落盘与判定表。
 - 直接修复轮（Task 7–10）已闭合：Callout 内 `<details>` 与普通引用统一提升（`2060da9`）；10 MB 单块首键 p95 **976.024 → 147.227 ms**（`67cdd8d`，预算 200 ms 写进测试）；ignored 门禁简化为探针自证（`85b0953`，`probe-gate.ps1` 694 → 153 行）。
 - 无「未处理且未解释」项：每项要么有测试/证据，要么有明确的人工命令与未执行原因。
 
@@ -95,7 +95,7 @@
 | 项 | 状态 | 缺哪一步 | 证据文件 |
 |---|---|---|---|
 | 系统 DPI 100% / 125% / 200% | **NOT RUN**（150% 已抓图 PASS） | 在 Windows 设置切换缩放并重新登录/重启应用后重跑脚本 | `docs/qa/evidence/assisted-2026-11-27/dpi.jsonl`（100/125/200 各一行 `status=NOT_RUN`）；`dpi-150.png` |
-| 实体打印机出纸 | **NOT RUN**（六项 PENDING） | 装 A4 纸 → 应用内 `Ctrl+Alt+P` 选实体打印机 → 逐项核对出纸 | `docs/qa/evidence/assisted-2026-11-27/print-checklist.md`、`print-sample.md` |
+| 实体打印机出纸 | **NOT RUN（可选冒烟，不阻塞收口）** | 若你会直接从 Veil 实体打印：装 A4 纸 → `Ctrl+Alt+P` 选实体打印机 → 逐项核对出纸 | `docs/qa/evidence/assisted-2026-11-27/print-checklist.md`、`print-sample.md` |
 | 真机中文 IME（微软拼音 / 微软五笔） | **NOT RUN** | 切到微软拼音（五笔再跑一遍），按提示完成六步并回车 | `docs/qa/evidence/assisted-2026-11-27/ime-result.md` |
 | 远端 GitHub Actions 与 Linux 桌面 | **NOT RUN** | 推送/触发远端 CI（本规格明确不推送，故不做） | README 已知限制 |
 | 真实断网抓包归因 | **NOT RUN** | 在真实断网环境抓包复验 | README / `PRIVACY.md` |
@@ -118,7 +118,7 @@ pwsh -NoProfile -File tools/verify/assisted/print.ps1
 pwsh -NoProfile -File tools/verify/assisted/ime.ps1
 ```
 
-若只想先补一项，最小闭环是实体打印（一条命令即可生成样张、驱动清单与核对表并打开应用）：
+实体打印是**可选冒烟**，不是必测项：Print-to-PDF 已覆盖分页正确性；只有当你会直接从 Veil 打印到实体机时才值得做一次（一条命令生成样张、驱动清单与核对表并打开应用）：
 
 ```powershell
 pwsh -NoProfile -File tools/verify/assisted/print.ps1

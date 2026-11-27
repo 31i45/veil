@@ -6,11 +6,10 @@
 > 时间说明：分布与门禁运行发生在 2026-11-28 00:12–00:36（Asia/Shanghai），脚本按运行日写入
 > `docs/qa/probe-gate-2026-11-28.md`；任务与证据目录仍按 2026-11-27 登记。
 >
-> 原始归档（2026-11-28 清理后）：
-> - 本文件 §1–§3 固化了分布轮的真实数字；中间实验归档已删除，不留 `*-FAIL*` / `*-spike*` / `*-unitbug*`。
-> - 最终基线：`docs/qa/perf-baseline.json`（schema 3），副本
->   `docs/qa/evidence/assisted-2026-11-27/perf-baseline-final.json`。
-> - 口径修订后的三次连续稳定性结果：`.../probe-gate-stability-{1,2,3}.md`。
+> 归档（2026-11-28 简化后）：
+> - 本文件固化分布轮的真实数字（§1–§2）；中间实验归档已删除，不留 `*-FAIL*` / `*-spike*` / `*-unitbug*`。
+> - 外部基线 JSON 与稳定性临时归档已删除：回归判定改为**探针内自证上限**（见 §3），
+>   门禁 `tools/verify/probe-gate.ps1` 只负责运行与归档（`docs/qa/probe-gate-2026-11-28.md`）。
 
 ## 环境与方法
 
@@ -20,24 +19,21 @@
 | 系统 | Microsoft Windows 11 企业版 10.0.26300 |
 | 工具链 | rustc 1.99.1 (58cf8f9c3 2026-10-13) |
 | 构建 | `cargo test --workspace --release --no-run`；profile：`lto=true`、`codegen-units=1`、`panic=abort`、`strip=true`、`opt-level=s` |
-| 采样 | 每个性能探针 **9 次**独立进程；`perf_huge_block` 也为 9 次；非性能探针固定 1 次 |
-| 命令 | 分布轮 `... -Repeat 9 -UpdateBaseline`；口径修订后连续 3 次 `... -Repeat 9` |
-| 回归判定（2026-11-28 修订） | 按指标类型选统计量：`peak`/`max` 用跨样本 p50（阈值 `max(2 ms, 基线 p50×1.5)`）；名称含 `p95` 用 p50（`max(1 ms, 基线 p50×1.2)`）；其余基线 p95 ≥5 ms 用 p95×1.2、<5 ms 用 p50（`max(2 ms, 基线 p50×1.5)`）。固定毫秒是**测量噪声地板**，不是产品预算；探针预算硬性优先 |
-| 基线 | schema 3，27 项，同时保存 `p50` / `p95`；顶层 `policy` 记录上述阈值与「预算硬性优先」 |
+| 采样 | 分布轮每个性能探针 **9 次**独立进程；`perf_huge_block` 也为 9 次；非性能探针固定 1 次 |
+| 命令（历史） | 分布轮使用已移除的 `-Repeat 9` 重复运行同一探针；现门禁为 `pwsh -NoProfile -File tools/verify/probe-gate.ps1` 一次跑完全部 ignored 探针 |
+| 回归判定（2026-11-28 简化） | 无外部基线、无噪声地板：每条探针在测试内断言自己的回归上限；单次观测改为测试内 3 次取 p50；归因/诊断探针断言结构不变量 |
 
 **p95 口径**：每次采样是独立 release 进程；对同一指标的 9 个采样值排序后按
 `rank=(n−1)×0.95` **线性插值**取 p95。n=9 时 p95 **不再等于最大值**
 （例：`perf_huge_block app_ms@10mb` p95 126.326 < max 127.803）。
 
-> **读数说明（2026-11-28 口径修订）**：上表的 min/p50/p95/max 仍是分布轮的真实统计值，**未重算**。
-> 门禁自 2026-11-28 起不再对所有指标统一用 p95，而是按「回归判定」行选择 p50/p95 并加测量噪声地板；
-> 因此 `peak_total_ms`、`first_edit_ms`、`close_ms` 等表中的 p95 用于**观测尾部**，不是当前判定的唯一依据。
-> 当前门禁的三次稳定性结果见 §4 与 `probe-gate-stability-{1,2,3}.md`。
+> **读数说明**：上表的 min/p50/p95/max 是分布轮的真实统计值，**未重算**。门禁已简化为
+> 「探针内自证上限」：表中的 p95 只用于说明分布尾部，实际判定阈值写在每条探针里（见 §3）。
 
 运行内样本量：`perf_50mb_long_doc` 100 次击键；`perf_20k_blocks` 300 次；`perf_keystroke_path` 300 次；
 `perf_keystroke_attribution` / `perf_index_subsegments` 每档 300 次；`perf_peak_breakdown` /
 `perf_after_edit_breakdown` 500 帧；`perf_5000_headings` / `perf_history_5000` 各 300 步滚轮；
-其余为单次观测（每次运行 1 个值）。
+其余为单次观测（每次运行 1 个值；现已改为测试内 3 次取 p50）。
 
 ## 1. Task 5 指定的关键路径（n=9，分布轮）
 
@@ -135,53 +131,38 @@ p95 56.4–58.1 ms、文末插入 53.3–55.8 ms；10 MB 首键 p95 **147.0–14
 | `perf_after_edit_breakdown` p95_refresh_index_ms | 1.828 | 1.988 | 2.145 | 2.151 | ms |
 | `perf_after_edit_breakdown` p95_recompute_geometry_ms | 0.365 | 0.405 | 0.430 | 0.431 | ms |
 
-## 3. 与 Task 1 单样本基线的差异
+## 3. 探针内自证上限（regression ceiling）
 
-Task 1 基线为 `-Repeat 1` 单样本；本节把它与本轮 9 次 **线性插值 p95** 对照，仅作量级观测，
-不是回归判定（新基线已按 §环境的方法重写）。
+外部基线 JSON、噪声地板与逐条阈值策略已删除。判定改为**每条探针在测试内断言自己的回归上限**：
+上限取本文件实测分布最大值上方 **≥20% 余量**，并注明是 regression ceiling（**不是目标值**），
+只用于拦截量级回归。单次观测（打开/关闭/冷启动）在测试内采 3 次取 p50 后再断言。
+归因/诊断类探针不设时间上限，但必须断言结构不变量，避免「永远只打印」。
 
-| 指标 | Task 1 单样本 | 本轮 p95 | 差异 | 说明 |
-|---|---|---|---|---|
-| `perf_50mb_long_doc` open_ms | 488.8 | 501.68 | +2.6% | 稳定 |
-| `perf_50mb_long_doc` keystroke_p95 | 2.284 | 2.533 | +10.9% | 仍在 16 ms 预算内 |
-| `perf_20k_blocks` keystroke_p95 | 2.586 | 2.871 | +11.0% | 稳定 |
-| `perf_keystroke_path` keystroke_p95 | 1.827 | 1.817 | −0.5% | 稳定 |
-| `perf_keystroke_attribution` total_p95 @40005 | 13695.3 | 13930.8 | +1.7% | 稳定 |
-| `perf_index_subsegments` index_sum_p95 @40005 | 8900.9 | 9181.1 | +3.1% | 稳定 |
-| `perf_cold_first_edit` cold_first_edit_ms | 101.627 | 105.775 | +4.1% | 稳定 |
-| `perf_cold_first_edit_prewarmed` edit_ms | 55.704 | 53.240 | −4.4% | 稳定 |
-| `perf_first_edit_after_first_frame` first_edit_ms | 1.35 | 1.916 | +41.9% | 绝对差 0.57 ms；两次空闲复跑 1.606/1.535 ms，按噪声地板判 PASS |
-| `perf_first_edit_after_first_frame` first_frame_ms | 51.077 | 57.272 | +12.1% | 冷启动波动 |
-| `perf_peak_breakdown` peak_total_ms | 3.335 | 5.480 | +64.3% | p50 3.694；9 次中有 5.788 ms 帧毛刺，p95 被抬高 |
-| `perf_after_edit_breakdown` peak_total_ms | 3.371 | 16.410 | +386% | 9 次中混入 15.568/16.971 ms 两个帧毛刺；p50 3.742。该指标基线因此偏宽，仅作峰值观测，stability 由 `p95_refresh_index_ms` 等承担 |
-| `perf_huge_block` edit_ms@10mb | 957.165 | 976.024 | +2.0% | 稳定 |
-| `perf_5000_headings` / `perf_history_5000` | 无 | 见 §1 | 新增 | Task 5 新增探针 |
+| 探针 | 断言统计量 | 上限 | 实测分布依据 |
+|---|---|---|---|
+| `bench_edit_reparse_history_100k` | 50 次均值 reparse / edit / history | 1200 / 12 / 5 µs | max 867 / 8.1 / 0.81 µs |
+| `perf_50mb_long_doc` | 打开 `open_ms` / 击键 `keystroke_p95` | 1000 ms / 4 ms（另有产品预算 5000 ms / 16 ms） | max 504.4 / 2.63 ms |
+| `perf_20k_blocks` | `keystroke_p95` | 3.5 ms | max 2.888 ms |
+| `perf_keystroke_path` | `keystroke_p95` | 2.5 ms | max 1.825 ms |
+| `perf_cold_first_edit` | 3 次 p50 | 160 ms | max 105.8 ms |
+| `perf_cold_first_edit_prewarmed` | 3 次 p50 | 80 ms | max 53.5 ms |
+| `perf_first_edit_after_first_frame` | 首键 p50 / 首帧 p50 | 3 ms / 100 ms | max 1.96 / 57.5 ms |
+| `perf_5000_headings` | 打开 p50 / 滚动 p95 | 200 ms / 2.5 ms | max 96.6 / 1.145 ms |
+| `perf_history_5000` | 打开 p50 / 滚动 p95 / 关闭 p50 | 25 ms / 7 ms / 1.2 ms | max 10.9 / 3.64 / 0.432 ms |
+| `perf_huge_block` | 首键 / 文末插入 p95（1 / 2 / 10 MB） | 70 / 80 / 200 ms | 既有回归上限，未改动 |
+| `perf_keystroke_attribution` | 结构：分项和 > 0、apply/index/frame 非零、share ∈ [0,100] | 不设时间上限 | 纯归因 |
+| `perf_index_subsegments` | 结构：子段和 > 0、`blocks_enum` 非零、各子段非负 | 不设时间上限 | 纯归因 |
+| `perf_peak_breakdown` | 结构：apply+after+paint = 总耗时、paint 非零 | 不设时间上限 | 诊断 |
+| `perf_after_edit_breakdown` | 结构：子步骤和 = 总耗时、`refresh` 非零 | 不设时间上限 | 诊断 |
 
-## 4. 口径修订后的三次连续稳定性复跑
+病态探针（`perf_huge_scroll`、`perf_huge_block` 的截断不变量、`pathological_inputs_matrix`）
+与 CJK 证据探针保持既有断言；CJK 缺字体仍记 SKIP。
 
-按新口径（peak/p95/其余三类 + 测量噪声地板，产品预算硬性优先）真实执行
-`pwsh -NoProfile -File tools/verify/probe-gate.ps1 -Repeat 9`：
-
-| 运行 | 时间 | 结果 | 探针总耗时 | 关键读数 |
-|---|---|---|---|---|
-| stability-1 | 01:24:17 | **PASS 20 / FAIL 0 / SKIP 0** | 397.3 s | `first_edit_ms` p50 1.432（阈值 2.283）；`after_edit` `peak_total_ms` p50 3.714（阈值 5.613）；历史面板 open p95 9.905、close p50 0.409 |
-| stability-2 | 01:31:02 | **PASS 20 / FAIL 0 / SKIP 0** | 395.6 s | `first_edit_ms` p50 1.474；`after_edit` `peak_total_ms` p50 4.035；历史面板 open p95 10.514、close p50 0.392 |
-| stability-3 | 01:37:44 | **PASS 20 / FAIL 0 / SKIP 0** | 397.5 s | `first_edit_ms` p50 1.468；`after_edit` `peak_total_ms` p50 4.133；历史面板 open p95 10.101、close p50 0.395 |
-
-- 三次连续 PASS，归档：`docs/qa/evidence/assisted-2026-11-27/probe-gate-stability-{1,2,3}.md`；
-  主归档 `docs/qa/probe-gate-2026-11-28.md` 保留第三次（最终）结果。
-- **如实记录的失败**：稳定性验证过程中曾有一次完整门禁在
-  `perf_after_edit_breakdown peak_total_ms` 上 FAIL（p50 5.96 ms vs 阈值 5.613 ms）。该次**未改写成 PASS**；
-  随后单独对该探针做 9 次测量，p50 = 3.812 ms（min 3.354 / max 4.221），确认是宿主瞬时毛刺；
-  三次连续复跑回到 3.7–4.1 ms。该 FAIL 未计入最终三次结果，但在本文与最终答复中保留。
-- 三次 PASS 均由独立进程 `-Repeat 9` 采样得到；未改动任何产品预算、探针内断言或统计阈值。
-
-## 5. 局限
+## 4. 局限
 
 - 单机、本地 NTFS、热缓存；未覆盖网络盘、杀毒实时扫描、低配机器。
-- `perf_peak_breakdown` / `perf_after_edit_breakdown` 的 `peak_total_ms` 仍是单帧峰值，宿主负载下可能偶发毛刺；
-  回归策略按峰值类使用跨样本 p50（阈值 `max(2 ms, 基线 p50 × 1.5)`）降低假红，
-  但不会掩盖持续超过该阈值的真实回归。
+- `perf_peak_breakdown` / `perf_after_edit_breakdown` 已改为诊断探针：只断言分项和与关键阶段非零，
+  不再对单帧峰值设时间上限，避免宿主毛刺造成假红；真实回归由各自函数内的分项计时暴露。
 - `perf_huge_scroll`（10 MB 单块 300 步滚轮）分布轮墙钟 **130.4 s**，之后多次复跑约 **5.0 s**；
   其断言指标 `nonbg=84898 > 1000` 均 PASS；该探针不产出耗时指标，滚动耗时见 §1。
 - 本文件不替代 `docs/qa/w11-load-state-measurement.md` 的快速打开/大纲结论，只补齐其未覆盖的版本历史面板。

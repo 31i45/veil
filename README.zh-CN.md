@@ -186,11 +186,10 @@ cargo test -p veil-mermaid-offline
 `#[ignore]` 探针不再是没人解释的黑洞。现存 18 条 ignored 测试（13 条 release 优化级别性能探针、4 条病态/超大单块探针、1 条 CJK PDF 证据生成器）与 1 条已晋级的诊断器逐条登记在 `docs/qa/ignored-tests-2026-11-27.md`，写明为何 ignore、如何判定。一条命令即可对 release 构建跑完全部探针：
 
 ```powershell
-pwsh -NoProfile -File tools/verify/probe-gate.ps1                 # 首次运行写入 docs/qa/perf-baseline.json
-pwsh -NoProfile -File tools/verify/probe-gate.ps1 -Repeat 9        # 每条性能探针采样 9 次，按登记口径判定（峰值/p95 类用跨样本 p50，其余按基线 p95）
+pwsh -NoProfile -File tools/verify/probe-gate.ps1
 ```
 
-结果写入 `docs/qa/probe-gate-<date>.md`，逐条给出 PASS / FAIL / SKIP。**FAIL 意味着：性能指标超过归档阈值（按指标类型取 p50 或 p95，并加测量噪声地板），或超过探针自身预算，或者病态/证据不变量被破坏。** SKIP 只用于环境缺失（例如系统没有 CJK 字体），绝不记成 PASS。`mindmap_viewbox_debug` 已改为常规断言，只有设置 `VEIL_MINDMAP_DUMP=1` 时才落盘 SVG。
+门禁刻意保持很薄：构建 release 测试二进制、串行一次性跑完全部 ignored 探针、把输出 tee 到 `docs/qa/probe-gate-<date>.md`，并以 cargo 的退出码退出。**每条探针在测试内断言自己的回归上限或结构不变量**——单次观测在测试内采 3 次并按 p50 断言，归因/诊断探针必须给出非平凡的分项结果，而不是只打印。没有外部基线 JSON、指标正则解析、p50/p95 阈值策略或噪声地板。**FAIL 只意味着探针自身的断言失败。** SKIP 只用于环境缺失（例如系统没有 CJK 字体），绝不记成 PASS。`mindmap_viewbox_debug` 已改为常规断言，只有设置 `VEIL_MINDMAP_DUMP=1` 时才落盘 SVG。
 
 Release CI 在 `v*` tag push 与 `workflow_dispatch` 时运行。手动触发默认 `dry_run=true`，执行 Linux core check/test 以及 Windows 构建、测试、clippy、产物边界、冒烟、可选 Authenticode/RFC3161 签名与签名后的 SHA-256 校验，但不创建、不上传 GitHub Release；只有 `v*` tag push 可以发布。任何冒烟失败都不得用 `continue-on-error` 掩盖。
 
@@ -305,7 +304,7 @@ pwsh -File tools/smoke_launch.ps1 -ExePath target/release/veil.exe -ExpectedTitl
 - `docs/review/v1-2-implementation-log.md` — v1.2 实施记录：实测数字、探针、不做项裁定
 - `docs/review/keystroke-attribution.md` — 击键到提交的延迟归因
 - `docs/qa/ignored-tests-2026-11-27.md` — 全部 `#[ignore]` 探针：文件、类型、为何忽略、判定方式、门禁覆盖
-- `docs/qa/probe-gate-<date>.md` — probe-gate 自动生成的结果（每条 PASS / FAIL / SKIP 与指标）
+- `docs/qa/probe-gate-<date>.md` — probe-gate 自动生成的归档（命令、时间、各测试二进制 `test result` 行与输出尾部；判定即 cargo 退出码）
 - `docs/qa/perf-distribution-2026-11-27.md` — 关键路径 min/p50/p95/max 分布（含 5000 标题与版本历史面板 5000 快照）
 - `docs/qa/last-mile-closeout-2026-11-28.md` — 最后一公里收口：6 个任务状态、证据位置、未闭合人工项与一键命令
 - `tools/verify/assisted/README.md` — DPI / 实体打印 / 真机 IME 的 assisted 流程（用户只做物理动作）

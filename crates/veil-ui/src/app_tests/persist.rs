@@ -2078,10 +2078,20 @@ fn perf_50mb_long_doc() {
     assert!(text.len() >= 50 * 1024 * 1024, "探针文本应≥50MB");
     let store = MemStore::default();
 
-    let t = Instant::now();
-    let mut a = app(&text, Some("big50.md"), false, &store);
-    a.paint();
-    let open_ms = t.elapsed().as_secs_f64() * 1e3;
+    // 打开是单次观测：测试内采 3 次取 p50 再断言；击键已有 100 次分布。
+    const OPEN_SAMPLES: usize = 3;
+    let mut opens = Vec::with_capacity(OPEN_SAMPLES);
+    let mut keep = None;
+    for _ in 0..OPEN_SAMPLES {
+        let t = Instant::now();
+        let mut candidate = app(&text, Some("big50.md"), false, &store);
+        candidate.paint();
+        opens.push(t.elapsed().as_secs_f64() * 1e3);
+        keep = Some(candidate);
+    }
+    opens.sort_by(|x, y| x.partial_cmp(y).unwrap());
+    let open_ms = opens[OPEN_SAMPLES / 2];
+    let mut a = keep.expect("至少构造一次 App");
 
     a.editor.apply(Intent::MoveDocEnd).unwrap();
     let mut samples = Vec::with_capacity(100);
@@ -2105,6 +2115,7 @@ fn perf_50mb_long_doc() {
             .min(samples.len() - 1);
         samples[i]
     };
+    let keystroke_p95 = pick(0.95);
 
     let t = Instant::now();
     let expected = a.editor.session().serialize().into_bytes();
@@ -2120,7 +2131,7 @@ fn perf_50mb_long_doc() {
     println!("perf_50mb_blocks={}", a.index.blocks.len());
     println!("perf_50mb_open_ms={open_ms:.1}");
     println!("perf_50mb_keystroke_ms_p50={:.3}", pick(0.5));
-    println!("perf_50mb_keystroke_ms_p95={:.3}", pick(0.95));
+    println!("perf_50mb_keystroke_ms_p95={keystroke_p95:.3}");
     println!(
         "perf_50mb_keystroke_ms_max={:.3}",
         samples[samples.len() - 1]
@@ -2130,10 +2141,7 @@ fn perf_50mb_long_doc() {
         "PROBE name=perf_50mb_long_doc metric=keystroke_p50 value={:.3} unit=ms",
         pick(0.5)
     );
-    println!(
-        "PROBE name=perf_50mb_long_doc metric=keystroke_p95 value={:.3} unit=ms",
-        pick(0.95)
-    );
+    println!("PROBE name=perf_50mb_long_doc metric=keystroke_p95 value={keystroke_p95:.3} unit=ms");
     println!("PROBE name=perf_50mb_long_doc metric=open_ms value={open_ms:.1} unit=ms");
     println!("PROBE name=perf_50mb_long_doc metric=save_ms value={save_ms:.1} unit=ms");
     println!(
@@ -2141,8 +2149,21 @@ fn perf_50mb_long_doc() {
         a.index.blocks.len()
     );
 
+    // 产品预算（硬性）：打开 ≤5 s、击键 p95 ≤16 ms。
     assert!(open_ms <= 5_000.0, "50MB 打开超过 5s: {open_ms:.1}ms");
-    assert!(pick(0.95) <= 16.0, "50MB 击键 p95 超过 16ms");
+    assert!(keystroke_p95 <= 16.0, "50MB 击键 p95 超过 16ms");
+    // 回归上限（regression ceiling，不是目标值）：本机 9 轮实测 open p95 501.7 ms / max 504.4 ms，
+    // keystroke p95 max 2.63 ms；打开取 3 次 p50，上限取实测最大值上方 ≥20% 再留抖动余量：
+    // open ≤1000 ms、击键 p95 ≤4 ms。只拦「打开或击键随 50 MB 文档退化为秒级」级别的回归，
+    // 仍严于上面的产品预算（5000 ms / 16 ms）。
+    assert!(
+        open_ms <= 1000.0,
+        "50MB 打开 {open_ms:.1}ms 超回归上限 1000 ms（regression ceiling，非目标值）"
+    );
+    assert!(
+        keystroke_p95 <= 4.0,
+        "50MB 击键 p95 {keystroke_p95:.3}ms 超回归上限 4 ms（regression ceiling，非目标值）"
+    );
 }
 
 /// 20k+ 块大文档击键探针（默认忽略）：驱动真实 App 路径（editor apply + after_edit +
@@ -2182,10 +2203,11 @@ fn perf_20k_blocks() {
             .min(samples.len() - 1);
         samples[i]
     };
+    let keystroke_p95 = pick(0.95);
     println!("perf_20k_blocks={n}");
     println!("perf_20k_samples_n={}", samples.len());
     println!("perf_20k_keystroke_ms_p50={:.3}", pick(0.5));
-    println!("perf_20k_keystroke_ms_p95={:.3}", pick(0.95));
+    println!("perf_20k_keystroke_ms_p95={keystroke_p95:.3}");
     println!(
         "perf_20k_keystroke_ms_max={:.3}",
         samples[samples.len() - 1]
@@ -2194,11 +2216,14 @@ fn perf_20k_blocks() {
         "PROBE name=perf_20k_blocks metric=keystroke_p50 value={:.3} unit=ms",
         pick(0.5)
     );
-    println!(
-        "PROBE name=perf_20k_blocks metric=keystroke_p95 value={:.3} unit=ms",
-        pick(0.95)
-    );
+    println!("PROBE name=perf_20k_blocks metric=keystroke_p95 value={keystroke_p95:.3} unit=ms");
     println!("PROBE name=perf_20k_blocks metric=blocks value={n} unit=count");
+    // 回归上限（regression ceiling，不是目标值）：本机 9 轮实测 keystroke p95 2.61–2.89 ms；
+    // 上限取实测最大值上方 ≥20%：3.5 ms。只拦 21k 块下击键退化为数十毫秒级的回归。
+    assert!(
+        keystroke_p95 <= 3.5,
+        "21k 块击键 p95 {keystroke_p95:.3}ms 超回归上限 3.5 ms（regression ceiling，非目标值）"
+    );
     // 零丢字：300 次击键必须一字不少地落在文档里（Task 11 门禁）。
     let caret = a.editor.caret();
     let g = a

@@ -2358,6 +2358,20 @@ fn perf_peak_breakdown() {
         "PROBE name=perf_peak_breakdown metric=peak_paint_ms value={:.3} unit=ms",
         paint_ms[max_idx]
     );
+    // 诊断探针不设时间上限，但必须证明 500 帧真实跑过且分项自洽（不能只打印）。
+    let peak_total = total[max_idx];
+    let peak_parts = apply_ms[max_idx] + after_ms[max_idx] + paint_ms[max_idx];
+    assert!(peak_total > 0.0, "峰值帧总耗时应为正");
+    assert!(
+        peak_parts > 0.0,
+        "apply / after_edit / paint 分项之和须为正"
+    );
+    assert!(
+        (peak_total - peak_parts).abs() < 0.01,
+        "分项之和 {peak_parts:.3} ms 应与峰值帧总耗时 {peak_total:.3} ms 一致"
+    );
+    assert!(paint_ms.iter().any(|&x| x > 0.0), "paint 阶段应真实执行");
+    assert!(total.iter().all(|x| x.is_finite()), "所有帧耗时应为有限值");
 }
 
 /// after_edit 内部子步骤拆分探针（默认忽略）：定位 69ms 峰值具体来自哪个子步骤。
@@ -2543,6 +2557,22 @@ fn perf_after_edit_breakdown() {
         "PROBE name=perf_after_edit_breakdown metric=p95_recompute_geometry_ms value={:.3} unit=ms",
         p95(&recompute)
     );
+    // 诊断探针不设时间上限，但必须证明各子步骤真实跑过且分项自洽（不能只打印）。
+    let peak_total = total[max_idx];
+    let peak_parts = refresh[max_idx]
+        + ensure_vis[max_idx]
+        + ensure_block[max_idx]
+        + ensure_tbl[max_idx]
+        + recompute[max_idx]
+        + scroll[max_idx];
+    assert!(peak_total > 0.0, "峰值帧总耗时应为正");
+    assert!(peak_parts > 0.0, "after_edit 各子步骤之和须为正");
+    assert!(
+        (peak_total - peak_parts).abs() < 0.1,
+        "子步骤之和 {peak_parts:.3} ms 应与峰值帧总耗时 {peak_total:.3} ms 一致"
+    );
+    assert!(p95(&refresh) > 0.0, "refresh_index 阶段应真实计时");
+    assert!(total.iter().all(|x| x.is_finite()), "所有帧耗时应为有限值");
 }
 
 // ---- 阶段 1：中文口径字数 + 专注模式 ----

@@ -786,26 +786,40 @@ mod tests {
         }
 
         let per_iter = |total: u128| total as f64 / ITERS as f64 / 1000.0;
-        println!(
-            "bench 10万字 {ITERS} 次编辑：edit={:.2} µs/次  reparse={:.2} µs/次  history={:.2} µs/次（末次重扫 {} 行）",
+        let (edit_us, reparse_us, history_us) = (
             per_iter(edit_ns),
             per_iter(reparse_ns),
             per_iter(history_ns),
+        );
+        println!(
+            "bench 10万字 {ITERS} 次编辑：edit={edit_us:.2} µs/次  reparse={reparse_us:.2} µs/次  history={history_us:.2} µs/次（末次重扫 {} 行）",
             s.last_rescan_lines()
         );
+        println!("PROBE name=bench_edit_reparse_history metric=edit_us value={edit_us:.3} unit=us");
         println!(
-            "PROBE name=bench_edit_reparse_history metric=edit_us value={:.3} unit=us",
-            per_iter(edit_ns)
+            "PROBE name=bench_edit_reparse_history metric=reparse_us value={reparse_us:.3} unit=us"
         );
         println!(
-            "PROBE name=bench_edit_reparse_history metric=reparse_us value={:.3} unit=us",
-            per_iter(reparse_ns)
-        );
-        println!(
-            "PROBE name=bench_edit_reparse_history metric=history_us value={:.3} unit=us",
-            per_iter(history_ns)
+            "PROBE name=bench_edit_reparse_history metric=history_us value={history_us:.3} unit=us"
         );
         assert!(s.block_count() >= 2000, "bench 文档应产生大量块");
+
+        // 回归上限（regression ceiling），不是目标值：本机 9 轮 release 实测分布为
+        // reparse 785–867 µs（p95 857）、edit 4.9–8.1 µs、history 0.31–0.81 µs；
+        // 上限取实测最大值上方 ≥20%（并给计时抖动留量）：reparse 1200 µs、edit 12 µs、history 5 µs。
+        // 只拦「重解析/编辑成本随文档或历史线性膨胀」级别的回归。
+        assert!(
+            reparse_us <= 1200.0,
+            "10 万字重解析 {reparse_us:.1} µs/次 超回归上限 1200 µs（regression ceiling，非目标值）"
+        );
+        assert!(
+            edit_us <= 12.0,
+            "10 万字编辑 {edit_us:.2} µs/次 超回归上限 12 µs（regression ceiling，非目标值）"
+        );
+        assert!(
+            history_us <= 5.0,
+            "10 万字历史记录 {history_us:.2} µs/次 超回归上限 5 µs（regression ceiling，非目标值）"
+        );
     }
 
     /// 错误可统一打印并装进 `Box<dyn Error>`（上层消费契约）。

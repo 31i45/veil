@@ -1848,6 +1848,13 @@ fn perf_keystroke_path() {
         "PROBE name=perf_keystroke_path metric=keystroke_p95 value={:.3} unit=ms",
         pick(0.95)
     );
+    // 回归上限（regression ceiling，不是目标值）：本机 9 轮实测 keystroke p95 1.68–1.83 ms；
+    // 上限取实测最大值上方 ≥20% 并留抖动余量：2.5 ms。只拦真实装配路径退化为帧级卡顿的回归。
+    assert!(
+        pick(0.95) <= 2.5,
+        "真实击键路径 p95 {:.3}ms 超回归上限 2.5 ms（regression ceiling，非目标值）",
+        pick(0.95)
+    );
 }
 
 /// 分项归因探针（默认忽略）：三档文档规模下把每次击键拆成 5 段独立耗时。
@@ -1953,21 +1960,35 @@ fn perf_keystroke_attribution() {
         let (raster_p50, raster_p95) = (pick(&mut raster, 0.5), pick(&mut raster, 0.95));
         let (compose_p50, compose_p95) = (pick(&mut compose, 0.5), pick(&mut compose, 0.95));
         let total_p95 = core_p95 + index_p95 + layout_p95 + raster_p95 + compose_p95;
+        let index_share = index_p95 / total_p95 * 100.0;
+        // 归因探针不设时间上限，但必须证明各阶段真的跑过、分项和自洽（不能只打印）。
+        assert!(block_count > 0, "归因探针须有真实块");
+        assert!(total_p95 > 0.0, "总耗时应为正（各分项之和 > 0）");
+        assert!(
+            core_p95 > 0.0 && index_p95 > 0.0 && compose_p95 > 0.0,
+            "apply / index / frame 关键阶段须非零"
+        );
+        assert!(
+            layout_p95 >= 0.0 && raster_p95 >= 0.0,
+            "排版 / 光栅分项不得为负"
+        );
+        assert!(
+            (0.0..=100.0).contains(&index_share),
+            "index_share 应在 0–100%: {index_share}"
+        );
         println!(
             "{block_count},{core_p50:.2},{core_p95:.2},\
              {index_p50:.2},{index_p95:.2},\
              {layout_p50:.2},{layout_p95:.2},\
              {raster_p50:.2},{raster_p95:.2},\
              {compose_p50:.2},{compose_p95:.2},\
-             {total_p95:.2},{:.1}",
-            index_p95 / total_p95 * 100.0
+             {total_p95:.2},{index_share:.1}"
         );
         println!(
             "PROBE name=perf_keystroke_attribution metric=total_p95 value={total_p95:.2} unit=us scope={block_count}"
         );
         println!(
-            "PROBE name=perf_keystroke_attribution metric=index_share value={:.1} unit=pct scope={block_count}",
-            index_p95 / total_p95 * 100.0
+            "PROBE name=perf_keystroke_attribution metric=index_share value={index_share:.1} unit=pct scope={block_count}"
         );
     }
 }
@@ -2045,6 +2066,21 @@ fn perf_index_subsegments() {
         let (st_p50, st_p95) = (pick(&mut stats, 0.5), pick(&mut stats, 0.95));
         let sum_p50 = be_p50 + gf_p50 + rc_p50 + st_p50;
         let sum_p95 = be_p95 + gf_p95 + rc_p95 + st_p95;
+        // 子段归因探针不设时间上限，但各阶段必须真实计时且分项和自洽（不能只打印）。
+        assert!(block_count > 0, "子段探针须有真实块");
+        assert!(
+            sum_p50 > 0.0 && sum_p95 > 0.0,
+            "index 各子段之和须为正：p50={sum_p50:.2} p95={sum_p95:.2}"
+        );
+        assert!(be_p95 > 0.0, "blocks_enum 阶段须非零");
+        assert!(
+            gf_p95 >= 0.0 && rc_p95 >= 0.0 && st_p95 >= 0.0,
+            "geom / recompute / stats 子段不得为负"
+        );
+        assert!(
+            sum_p95 >= be_p95 && sum_p95 >= gf_p95 && sum_p95 >= rc_p95 && sum_p95 >= st_p95,
+            "子段之和应不小于任一子段"
+        );
         println!(
             "{block_count},{be_p50:.2},{be_p95:.2},\
              {gf_p50:.2},{gf_p95:.2},\
@@ -2069,24 +2105,36 @@ fn perf_index_subsegments() {
 #[ignore = "性能探针，不参与常规门禁"]
 fn perf_cold_first_edit() {
     let text = stress_doc();
-    let store = MemStore::default();
-    let t = Instant::now();
-    let mut a = app(&text, None, false, &store);
-    let app_ms = t.elapsed().as_secs_f64() * 1e3;
-    let t = Instant::now();
-    let dirty = a.editor.apply(Intent::InsertText("a".into())).unwrap();
-    a.after_edit(dirty);
-    let edit_ms = t.elapsed().as_secs_f64() * 1e3;
-    println!("perf_cold_first_edit_ms={:.3}", app_ms + edit_ms);
-    println!("perf_cold_app_ms={app_ms:.3}");
-    println!("perf_cold_edit_ms={edit_ms:.3}");
-    println!("perf_layouts_after_first_edit={}", a.cache.layouts.len());
-    println!(
-        "PROBE name=perf_cold_first_edit metric=cold_first_edit_ms value={:.3} unit=ms",
-        app_ms + edit_ms
+    // 冷启动单次测量噪声大：测试内采 3 次取 p50 再断言（原单样本口径保留为输出）。
+    const SAMPLES: usize = 3;
+    let mut cold_ms = Vec::with_capacity(SAMPLES);
+    let mut layouts = 0usize;
+    for _ in 0..SAMPLES {
+        let store = MemStore::default();
+        let t = Instant::now();
+        let mut a = app(&text, None, false, &store);
+        let app_ms = t.elapsed().as_secs_f64() * 1e3;
+        let t = Instant::now();
+        let dirty = a.editor.apply(Intent::InsertText("a".into())).unwrap();
+        a.after_edit(dirty);
+        let edit_ms = t.elapsed().as_secs_f64() * 1e3;
+        layouts = a.cache.layouts.len();
+        println!("perf_cold_run app_ms={app_ms:.3} edit_ms={edit_ms:.3}");
+        cold_ms.push(app_ms + edit_ms);
+    }
+    cold_ms.sort_by(|x, y| x.partial_cmp(y).unwrap());
+    let p50 = cold_ms[SAMPLES / 2];
+    let p95 = cold_ms[SAMPLES - 1];
+    println!("perf_cold_first_edit_ms_p50={p50:.3} p95={p95:.3}");
+    println!("perf_layouts_after_first_edit={layouts}");
+    println!("PROBE name=perf_cold_first_edit metric=cold_first_edit_ms value={p50:.3} unit=ms");
+    // 回归上限（regression ceiling，不是目标值）：本机 9 轮实测 cold_first_edit_ms 95.6–105.8 ms；
+    // 3 次采样取 p50，上限取实测最大值上方 ≥20% 再留冷启动抖动余量：160 ms。
+    assert!(layouts > 0, "首编辑后应产生布局缓存");
+    assert!(
+        p50 <= 160.0,
+        "冷首编辑 p50 {p50:.1}ms 超回归上限 160 ms（regression ceiling，非目标值）"
     );
-    println!("PROBE name=perf_cold_first_edit metric=app_ms value={app_ms:.3} unit=ms");
-    println!("PROBE name=perf_cold_first_edit metric=edit_ms value={edit_ms:.3} unit=ms");
 }
 
 /// 对照探针（默认忽略）：先完成一次极小排版（等价真实窗口的首帧），
@@ -2096,16 +2144,32 @@ fn perf_cold_first_edit() {
 #[ignore = "性能探针，不参与常规门禁"]
 fn perf_cold_first_edit_prewarmed() {
     let text = stress_doc();
-    let store = MemStore::default();
-    let mut a = app(&text, None, false, &store);
-    let _ = a.engine.layout_preedit("a");
-    let t = Instant::now();
-    let dirty = a.editor.apply(Intent::InsertText("a".into())).unwrap();
-    a.after_edit(dirty);
-    let edit_ms = t.elapsed().as_secs_f64() * 1e3;
-    println!("perf_cold_edit_prewarmed_ms={edit_ms:.3}");
-    println!("perf_cold_edit_prewarmed_layouts={}", a.cache.layouts.len());
-    println!("PROBE name=perf_cold_first_edit_prewarmed metric=edit_ms value={edit_ms:.3} unit=ms");
+    // 单次预热测量噪声大：测试内采 3 次取 p50 再断言。
+    const SAMPLES: usize = 3;
+    let mut edit_ms = Vec::with_capacity(SAMPLES);
+    let mut layouts = 0usize;
+    for _ in 0..SAMPLES {
+        let store = MemStore::default();
+        let mut a = app(&text, None, false, &store);
+        let _ = a.engine.layout_preedit("a");
+        let t = Instant::now();
+        let dirty = a.editor.apply(Intent::InsertText("a".into())).unwrap();
+        a.after_edit(dirty);
+        edit_ms.push(t.elapsed().as_secs_f64() * 1e3);
+        layouts = a.cache.layouts.len();
+    }
+    edit_ms.sort_by(|x, y| x.partial_cmp(y).unwrap());
+    let p50 = edit_ms[SAMPLES / 2];
+    println!("perf_cold_edit_prewarmed_ms_p50={p50:.3}");
+    println!("perf_cold_edit_prewarmed_layouts={layouts}");
+    println!("PROBE name=perf_cold_first_edit_prewarmed metric=edit_ms value={p50:.3} unit=ms");
+    // 回归上限（regression ceiling，不是目标值）：本机 9 轮实测 edit_ms 45.7–53.5 ms；
+    // 3 次采样取 p50，上限取实测最大值上方 ≥20% 再留抖动余量：80 ms。
+    assert!(layouts > 0, "预热后首编辑应产生布局缓存");
+    assert!(
+        p50 <= 80.0,
+        "预热首编辑 p50 {p50:.1}ms 超回归上限 80 ms（regression ceiling，非目标值）"
+    );
 }
 
 /// 真实生命周期的冷首编辑探针（默认忽略）：App 构造 → 首帧 paint（真实窗口启动必经）
@@ -2116,25 +2180,49 @@ fn perf_cold_first_edit_prewarmed() {
 #[ignore = "性能探针，不参与常规门禁"]
 fn perf_first_edit_after_first_frame() {
     let text = stress_doc();
-    let store = MemStore::default();
-    let t = Instant::now();
-    let mut a = app(&text, None, false, &store);
-    let app_ms = t.elapsed().as_secs_f64() * 1e3;
-    let t = Instant::now();
-    a.paint();
-    let first_frame_ms = t.elapsed().as_secs_f64() * 1e3;
-    let t = Instant::now();
-    let dirty = a.editor.apply(Intent::InsertText("a".into())).unwrap();
-    a.after_edit(dirty);
-    a.paint();
-    let first_edit_ms = t.elapsed().as_secs_f64() * 1e3;
-    println!("perf_first_edit_after_first_frame app_ms={app_ms:.3} first_frame_ms={first_frame_ms:.3} first_edit_ms={first_edit_ms:.3}");
-    println!("perf_first_edit_layouts={}", a.cache.layouts.len());
+    // 单次生命周期测量噪声大：测试内采 3 次取 p50 再断言。
+    const SAMPLES: usize = 3;
+    let mut frame_ms = Vec::with_capacity(SAMPLES);
+    let mut edit_ms = Vec::with_capacity(SAMPLES);
+    let mut layouts = 0usize;
+    for _ in 0..SAMPLES {
+        let store = MemStore::default();
+        let mut a = app(&text, None, false, &store);
+        let t = Instant::now();
+        a.paint();
+        frame_ms.push(t.elapsed().as_secs_f64() * 1e3);
+        let t = Instant::now();
+        let dirty = a.editor.apply(Intent::InsertText("a".into())).unwrap();
+        a.after_edit(dirty);
+        a.paint();
+        edit_ms.push(t.elapsed().as_secs_f64() * 1e3);
+        layouts = a.cache.layouts.len();
+    }
+    frame_ms.sort_by(|x, y| x.partial_cmp(y).unwrap());
+    edit_ms.sort_by(|x, y| x.partial_cmp(y).unwrap());
+    let frame_p50 = frame_ms[SAMPLES / 2];
+    let edit_p50 = edit_ms[SAMPLES / 2];
     println!(
-        "PROBE name=perf_first_edit_after_first_frame metric=first_frame_ms value={first_frame_ms:.3} unit=ms"
+        "perf_first_edit_after_first_frame first_frame_ms_p50={frame_p50:.3} first_edit_ms_p50={edit_p50:.3}"
+    );
+    println!("perf_first_edit_layouts={layouts}");
+    println!(
+        "PROBE name=perf_first_edit_after_first_frame metric=first_frame_ms value={frame_p50:.3} unit=ms"
     );
     println!(
-        "PROBE name=perf_first_edit_after_first_frame metric=first_edit_ms value={first_edit_ms:.3} unit=ms"
+        "PROBE name=perf_first_edit_after_first_frame metric=first_edit_ms value={edit_p50:.3} unit=ms"
+    );
+    // 回归上限（regression ceiling，不是目标值）：本机 9 轮实测 first_edit_ms 1.41–1.96 ms、
+    // first_frame_ms 51.5–57.5 ms；各取 3 次 p50，上限为实测最大值上方 ≥20% 再加抖动余量：
+    // 首键 p50 ≤3 ms、首帧 p50 ≤100 ms。只拦真实生命周期退化为帧级卡顿的回归。
+    assert!(layouts > 0, "首帧后应产生布局缓存");
+    assert!(
+        edit_p50 <= 3.0,
+        "首帧后首键 p50 {edit_p50:.3}ms 超回归上限 3 ms（regression ceiling，非目标值）"
+    );
+    assert!(
+        frame_p50 <= 100.0,
+        "首帧 p50 {frame_p50:.1}ms 超回归上限 100 ms（regression ceiling，非目标值）"
     );
 }
 

@@ -1,7 +1,7 @@
 #![cfg(windows)]
 //! T5：语料驱动测试 harness。
 //!
-//! 读取仓库已提交的 `docs/qa/syntax-matrix.md`（163 条用例），自行解析用例结构，
+//! 读取仓库已提交的 `docs/qa/syntax-matrix.md`（175 条用例），自行解析用例结构，
 //! 在 PARSE / HTML / PDF / PRINT / WYSIWYG / FOCUS / TYPEWRITER 表面执行断言，
 //! 并把汇总写入 `docs/qa/report-2026-11-26.md`；HTML 金样写入/比对
 //! `docs/qa/golden/html/<CASE>.html`（`UPDATE_GOLDEN=1` 时强制更新）。
@@ -59,8 +59,8 @@ const SURFACE_ORDER: [Surface; 7] = [
     Surface::Print,
 ];
 
-const GROUPS: [&str; 10] = [
-    "BLK", "INL", "LNK", "IMG", "TBL", "CODE", "EXT", "CJK", "EDGE", "SEC",
+const GROUPS: [&str; 11] = [
+    "BLK", "INL", "LNK", "IMG", "TBL", "CODE", "EXT", "CJK", "EDGE", "SEC", "ADV",
 ];
 
 const CHECK_KEYS: [&str; 7] = [
@@ -205,7 +205,7 @@ fn load_matrix() -> Vec<Case> {
         }
         *slot += 1;
     }
-    let expected: [(&str, usize); 10] = [
+    let expected: [(&str, usize); 11] = [
         ("BLK", 35),
         ("INL", 20),
         ("LNK", 9),
@@ -216,6 +216,7 @@ fn load_matrix() -> Vec<Case> {
         ("CJK", 15),
         ("EDGE", 15),
         ("SEC", 12),
+        ("ADV", 12),
     ];
     for (group, n) in expected {
         let got = running.get(group).copied().unwrap_or(0) as usize;
@@ -223,8 +224,8 @@ fn load_matrix() -> Vec<Case> {
             panic!("组 {group} 条数不符：契约 {n}，实际 {got}");
         }
     }
-    if cases.len() != 163 {
-        panic!("用例总数不符：契约 163，实际 {}", cases.len());
+    if cases.len() != 175 {
+        panic!("用例总数不符：契约 175，实际 {}", cases.len());
     }
     cases
 }
@@ -992,7 +993,12 @@ fn image_case_dir(id: &str) -> Option<&'static Path> {
     let wants = id.starts_with("CASE-IMG-")
         || matches!(
             id,
-            "CASE-TBL-007" | "CASE-TBL-012" | "CASE-TBL-013" | "CASE-EDGE-013" | "CASE-EDGE-014"
+            "CASE-TBL-007"
+                | "CASE-TBL-012"
+                | "CASE-TBL-013"
+                | "CASE-EDGE-013"
+                | "CASE-EDGE-014"
+                | "CASE-ADV-002"
         );
     wants.then(image_fixture_dir)
 }
@@ -1556,7 +1562,7 @@ fn write_report(rows: &[Row], total_cases: usize) {
     let mut out = String::new();
     out.push_str("# 语法矩阵测试报告（2026-11-27）\n\n");
     out.push_str(&format!(
-        "- 语料：`docs/qa/syntax-matrix.md`（契约 163 条，解析校验通过 163）\n- 用例总数：{total_cases}\n- 金样：`docs/qa/golden/html/<CASE>.html`（{golden_count} 份；`UPDATE_GOLDEN=1` 时更新）\n- 命令：`cargo test -p veil --test syntax_matrix`\n\n"
+        "- 语料：`docs/qa/syntax-matrix.md`（契约 175 条，解析校验通过 175）\n- 用例总数：{total_cases}\n- 金样：`docs/qa/golden/html/<CASE>.html`（{golden_count} 份；`UPDATE_GOLDEN=1` 时更新）\n- 命令：`cargo test -p veil --test syntax_matrix`\n\n"
     ));
 
     out.push_str("## 按表面统计\n\n");
@@ -1624,6 +1630,7 @@ fn write_report(rows: &[Row], total_cases: usize) {
     out.push_str("- HTML 中的 Mermaid：harness 经测试门面注入产品同一离线渲染器（`platform::mermaid_offline::OfflineMermaid`：进程内 QuickJS + mermaid.js → resvg，无网络；`OnceLock` 使整轮测试只初始化一次），`export::html_of_doc` 收到真实 `MermaidImage.svg_text`。断言要求正文出现 `<svg` 且不得同时保留 `language-mermaid` 源码围栏降级形态；单块渲染失败即判 FAIL，不降级断言。\n");
     out.push_str("- 空态用例（CASE-EDGE-001..003）：语料的 `表面：N/A` 只说明「无可见内容」，不等于不可测。harness 在六个表面执行空态断言：UI 0 块且几何有限、HTML `<body>` 为空、PDF 恰 1 页空白且无版面文本（依据 `layout_document` 无条件 `new_page()`、`LayoutOpts::default().page_numbers == false`）、PRINT 恰 1 页且断点为 `[0.0]`（依据 `compute_page_breaks` 恒以 `vec![0.0]` 起步）。\n");
     out.push_str("- Mermaid 用例不做全文金样：SVG 内的路径/弧坐标由 dagre 布局与字体度量共同决定，跨进程运行存在浮点级差异（classDiagram / stateDiagram 的 `d` 属性实测会变），全文金样必然 flaky；改由结构断言证伪「未渲染却算通过」：`<body>` 必须含真实 `<svg`，且不得残留 `language-mermaid` / 「渲染数据不可用」降级围栏。\n");
+    out.push_str("- 容器内 Mermaid：列表/引用容器里的 ```mermaid 围栏按容器内容原样保留为代码块（`<pre><code class=\"language-mermaid\">`），不提升为顶层 Mermaid 块、不自动出图；结构不丢失，限制登记为 G7。\n");
     out.push_str("- 金样首次缺失时自动写入（引导），之后普通运行全文比对。\n");
     out.push_str("\n## 交付事实\n\n");
     out.push_str("- 本文件由 `cargo test -p veil --test syntax_matrix` 重生成，运行该测试会覆写全文；不要手工追加内容。\n");

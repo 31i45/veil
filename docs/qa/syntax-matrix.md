@@ -10,7 +10,7 @@
 
 每个用例必须以如下标题行开始，且同组编号从 001 连续：`### CASE-<组>-<三位编号> <标题>`。
 
-组名取值：`BLK` 块级、`INL` 行内、`LNK` 链接、`IMG` 图片、`TBL` 表格、`CODE` 代码、`EXT` 扩展、`CJK` 中文与全角、`EDGE` 边界、`SEC` 安全。
+组名取值：`BLK` 块级、`INL` 行内、`LNK` 链接、`IMG` 图片、`TBL` 表格、`CODE` 代码、`EXT` 扩展、`CJK` 中文与全角、`EDGE` 边界、`SEC` 安全、`ADV` 对抗性组合。
 
 标题行之后必须依次出现：
 
@@ -76,7 +76,8 @@
 | CJK | 中文与全角 | 15 |
 | EDGE | 边界 | 15 |
 | SEC | 安全 | 12 |
-| 合计 | — | 163 |
+| ADV | 对抗性组合 | 12 |
+| 合计 | — | 175 |
 
 ---
 
@@ -1796,3 +1797,167 @@ Veil 是 Rust 写的 Markdown 编辑器，启动快。
 - 期望：三种绕过都不产生可执行链接，链接文字保留。
 - 表面：ALL
 - 检查：html_not_contains=JaVaScRiPt; html_not_contains=java%0ascript; html_not_contains=javascript&#58
+
+---
+
+## 11. 对抗性组合（ADV，12 条）
+
+### CASE-ADV-001 表格单元格内含行内代码与行内公式
+- 源：
+```md
+| 公式 | 命令 |
+| --- | --- |
+| $E=mc^2$ | `veil --help` |
+```
+- 期望：单个表格块；单元格内行内公式仍为公式节点（导出为内嵌 SVG 的 math-inline），行内代码仍为 code，表格结构不破裂、不把公式降级为字面美元符文本。
+- 表面：ALL
+- 检查：blocks=1; kinds=Table; html_contains=<table>; html_contains=<td>; html_contains=<code>veil --help</code>; html_contains=<span class="math-inline">
+
+### CASE-ADV-002 表格单元格内含图片与超长不可断 URL
+- 源：
+```md
+| 图片 | 链接 |
+| --- | --- |
+| ![小图](a.png) | https://example.com/assets/this-is-a-very-long-unbreakable-url-segment-0123456789-abcdefghij |
+```
+- 期望：需真实 `a.png`；图片保持在 td 内并内嵌为 data URI、不提升为块级；超长 URL 在单元格内成链，列宽受限时也不撑破表格；渲染页不重叠。
+- 表面：ALL
+- 检查：blocks=1; kinds=Table; html_contains=<table>; html_contains=<td>; html_contains=alt="小图"; html_contains=src="data:image/png; html_contains=href="https://example.com/assets/this-is-a-very-long-unbreakable-url-segment-0123456789-abcdefghij"; image_in_cell=true; no_overlap=true
+
+### CASE-ADV-003 引用块内嵌有序/无序列表与围栏代码
+- 源：
+````md
+> 引用内的列表
+>
+> 1. 第一项
+> 2. 第二项
+>
+> - 甲
+> - 乙
+>
+> ```rust
+> fn main() {}
+> ```
+````
+- 期望：整个引用为一个 BlockQuote 块；容器内有序列表、无序列表与围栏代码都完整保留，引用标记不泄漏为正文。
+- 表面：ALL
+- 检查：blocks=1; kinds=BlockQuote; html_contains=<blockquote>; html_contains=<ol>; html_contains=<ul>; html_contains=fn main; html_contains=引用内的列表
+
+### CASE-ADV-004 多脚注定义与正文引用
+- 源：
+```md
+正文引用[^1]与[^2]。
+
+[^1]: 第一条脚注
+[^2]: 第二条脚注
+```
+- 期望：正文角标按引用编号，文末生成脚注区且两条脚注都在；定义行不重复显示为正文。
+- 表面：ALL
+- 检查：blocks=3; kinds=Paragraph,FootnoteDef,FootnoteDef; html_contains=<sup; html_contains=<section class="footnotes">; html_contains=第一条脚注; html_contains=第二条脚注
+
+### CASE-ADV-005 Callout 内嵌列表与代码
+- 源：
+````md
+> [!TIP]
+> 提示内的列表：
+>
+> - 甲
+> - 乙
+>
+> ```rust
+> let x = 1
+> ```
+````
+- 期望：提示块为一个 Admonition 块并导出为 `callout` 容器；容器内列表与围栏代码都保留，标记文本 `[!TIP]` 不泄漏。
+- 表面：ALL
+- 检查：blocks=1; kinds=Admonition; html_contains=class="callout callout-tip"; html_contains=<ul>; html_contains=<li>甲</li>; html_contains=<pre>; html_contains=let x = 1; html_not_contains=[!TIP]
+
+### CASE-ADV-006 front matter 后接标题与正文
+- 源：
+```md
+---
+title: 对抗性组合
+author: 张三
+---
+
+# 正文标题
+
+正文内容。
+```
+- 期望：首块为 FrontMatter 且仅作元数据、不输出到正文；标题与正文正常渲染，元数据原文不得出现在版面文字中。
+- 表面：ALL
+- 检查：blocks=3; kinds=FrontMatter,AtxHeading,Paragraph; html_contains=<h1>正文标题</h1>; html_contains=正文内容; html_not_contains=title: 对抗性组合; html_not_contains=author: 张三
+
+### CASE-ADV-007 行内 HTML span 受控样式与脚本属性剥离
+- 源：
+```md
+这是 <span style="color:red" onclick="alert(1)">红色</span> 与正文混排。
+```
+- 期望：导出保留受控的 `style="color:red"`，事件属性与脚本内容整条剥离，正文文本不丢失。
+- 表面：ALL
+- 检查：blocks=1; kinds=Paragraph; html_contains=<span style="color:red">红色</span>; html_contains=红色; html_not_contains=onclick; html_not_contains=alert(1)
+
+### CASE-ADV-008 CJK 与 Latin 混排并含超长不可断 URL
+- 源：
+```md
+这是 CJK 与 Latin 混排的段落，链接为 https://example.com/very/long/unbreakable/abcdefghijklmnopqrstuvwxyz0123456789 结尾文字。
+```
+- 期望：同一段内中英混排不丢空格、英文单词不断裂；超长 URL 成链，排版换行不破坏内容。
+- 表面：ALL
+- 检查：blocks=1; kinds=Paragraph; html_contains=href="https://example.com/very/long/unbreakable/abcdefghijklmnopqrstuvwxyz0123456789"; html_contains=混排; html_contains=结尾文字
+
+### CASE-ADV-009 标题与正文中的 emoji 与 ZWJ 家庭组合
+- 源：
+```md
+# 家庭 👨‍👩‍👧‍👦 标题
+
+正文包含 👨‍👩‍👧‍👦 与 🇨🇳。
+```
+- 期望：emoji、ZWJ 家庭组合与区域旗帜在标题和正文中都完整显示，不被拆成乱码或替换符。
+- 表面：ALL
+- 检查：blocks=2; kinds=AtxHeading,Paragraph; html_contains=<h1>; html_contains=👨‍👩‍👧‍👦; html_contains=🇨🇳; html_contains=家庭
+
+### CASE-ADV-010 嵌套任务列表
+- 源：
+```md
+- [x] 已完成的父项
+  - [ ] 未完成的子项
+  - [x] 已完成的子项
+- [ ] 未完成的父项
+```
+- 期望：四个列表项，父项与子项各自保留勾选状态；嵌套层级正确，源码标记 `[x]`/`[ ]` 不显示。
+- 表面：ALL
+- 检查：blocks=4; kinds=ListItem,ListItem,ListItem,ListItem; html_contains=<ul>; html_contains=type="checkbox"; html_contains=checked; html_contains=<li>; html_contains=已完成
+
+### CASE-ADV-011 列表项内的 Mermaid 围栏
+- 源：
+````md
+- 图示：
+  ```mermaid
+  flowchart TD
+    A[开始] --> B[结束]
+  ```
+````
+- 期望：列表项内的 Mermaid 围栏在 HTML 中保持为列表项内的代码块（`<pre><code class="language-mermaid">`），列表结构（`<ul>/<li>`）不丢失；当前不提升为顶层 Mermaid 块、不自动渲染为 SVG，属已知限制 G7（见 `docs/design/exception-states.md`）。
+- 表面：ALL
+- 检查：blocks=1; kinds=ListItem; html_contains=<ul>; html_contains=<li>; html_contains=<pre><code class="language-mermaid">; html_contains=flowchart TD
+
+### CASE-ADV-012 details 内嵌表格与代码
+- 源：
+````md
+<details>
+<summary>折叠内容</summary>
+
+| A | B |
+| --- | --- |
+| 1 | 2 |
+
+```rust
+fn main() {}
+```
+
+</details>
+````
+- 期望：details 为一个可折叠块，内部表格与围栏代码按块序列保留；折叠容器的开合标签正确配对，块不逸出容器。
+- 表面：ALL
+- 检查：blocks=3; kinds=Details,Table,FencedCode; html_contains=<details>; html_contains=<summary>; html_contains=<table>; html_contains=<td>1</td>; html_contains=fn main

@@ -59,18 +59,26 @@ pub(super) fn scan_blocks(
                 // 带 `[!TYPE]` 首行的引用块是 Admonition / Callout 变体：只切
                 // Mermaid，不切表格（保持表格留在提示框内的既有行为）。
                 let split_tables = !quote_callout_marker_line(&line_text(buf, s));
-                split_quote_container(buf, s, e, BlockKind::BlockQuote, split_tables, &mut scanned);
+                split_quote_container(
+                    buf,
+                    s,
+                    e,
+                    BlockKind::BlockQuote,
+                    split_tables,
+                    None,
+                    &mut scanned,
+                );
                 out.extend(scanned.into_iter().map(|b| (b.kind, b.start, b.end)));
             }
             // GFM Admonition 是引用块首行变体：只切 Mermaid，不切表格。
             BlockKind::Admonition(_) => {
                 let mut scanned = Vec::new();
-                split_quote_container(buf, s, e, kind, false, &mut scanned);
+                split_quote_container(buf, s, e, kind, false, None, &mut scanned);
                 out.extend(scanned.into_iter().map(|b| (b.kind, b.start, b.end)));
             }
             BlockKind::ListItem { .. } => {
                 let mut scanned = Vec::new();
-                split_list_container(buf, s, e, kind, &mut scanned);
+                split_list_container(buf, s, e, kind, None, &mut scanned);
                 out.extend(scanned.into_iter().map(|b| (b.kind, b.start, b.end)));
             }
             other => out.push((other, s, e)),
@@ -1579,17 +1587,9 @@ const BLOCK_LEVEL_TAGS: &[&str] = &[
     "video",
 ];
 
-/// 尝试把 type6 `<details>` 开标签解析成 BlockKind::Details。
-/// 返回 None 说明不是合法 details 开标签（属性不合法等），调用方应回退 HtmlBlock。
-/// 成功则返回 `Some((BlockKind::Details { summary, open_default }, n_lines))`，
-/// n_lines = 块占行数（含开标签行、summary 行、内容、`</details>` 行）。
-fn try_details_block(
-    buf: &Buffer,
-    line: usize,
-    total: usize,
-    first_line: &str,
-) -> Option<(BlockKind, usize)> {
-    // 1) 首行必须是合法 `<details>` 开标签（标签名 + 属性 + `>` 或 `/>` 或 EOL）
+/// 校验单行是否以合法 `<details ...>` 开标签起始（属性极简解析）。
+/// 命中返回 `Some(open_default)`（是否含无值 `open` 属性）；否则 None（回退 HtmlBlock）。
+fn details_open_tag(first_line: &str) -> Option<bool> {
     let trimmed = first_line.trim_start();
     let lower = trimmed.to_ascii_lowercase();
     if !lower.starts_with("<details") {
@@ -1661,6 +1661,21 @@ fn try_details_block(
             open_default = true;
         }
     }
+    Some(open_default)
+}
+
+/// 尝试把 type6 `<details>` 开标签解析成 BlockKind::Details。
+/// 返回 None 说明不是合法 details 开标签（属性不合法等），调用方应回退 HtmlBlock。
+/// 成功则返回 `Some((BlockKind::Details { summary, open_default }, n_lines))`，
+/// n_lines = 块占行数（含开标签行、summary 行、内容、`</details>` 行）。
+fn try_details_block(
+    buf: &Buffer,
+    line: usize,
+    total: usize,
+    first_line: &str,
+) -> Option<(BlockKind, usize)> {
+    // 1) 首行必须是合法 `<details>` 开标签（标签名 + 属性 + `>` 或 `/>` 或 EOL）
+    let open_default = details_open_tag(first_line)?;
 
     // 2) 消耗行：直到配对的 `</details>`（B3：按嵌套深度配对，内层 details 不会
     //    提前终止外层块；不要求整行闭合——与 html_block_lines 类型 1 同源扫描）
@@ -2094,18 +2109,29 @@ fn expand_scan_level(
             }
             BlockKind::BlockQuote => {
                 let mark = out.len();
-                let split_tables = !quote_callout_marker_line(&line_text(buf, s));
-                split_quote_container(buf, s, e, BlockKind::BlockQuote, split_tables, &mut out);
+                let is_callout = quote_callout_marker_line(&line_text(buf, s));
+                let split_tables = !is_callout;
+                // Task 2 范围：仅普通引用块内提升 `<details>`；Callout 保持原有正文形态。
+                let details_depth = (!is_callout).then_some(depth);
+                split_quote_container(
+                    buf,
+                    s,
+                    e,
+                    BlockKind::BlockQuote,
+                    split_tables,
+                    details_depth,
+                    &mut out,
+                );
                 tag_details_depth(&mut out[mark..], depth);
             }
             BlockKind::Admonition(_) => {
                 let mark = out.len();
-                split_quote_container(buf, s, e, kind, false, &mut out);
+                split_quote_container(buf, s, e, kind, false, None, &mut out);
                 tag_details_depth(&mut out[mark..], depth);
             }
             BlockKind::ListItem { .. } => {
                 let mark = out.len();
-                split_list_container(buf, s, e, kind, &mut out);
+                split_list_container(buf, s, e, kind, Some(depth), &mut out);
                 tag_details_depth(&mut out[mark..], depth);
             }
             other => out.push(ScannedBlock {
@@ -2130,8 +2156,12 @@ fn depth_container(depth: u8) -> BlockContainer {
 }
 
 /// 给本层产出的块写入 details 归属（保留引用/列表容器字段）。
+/// 已经带有更深层级（容器内 details 的子块）的块不被外层覆盖。
 fn tag_details_depth(blocks: &mut [ScannedBlock], depth: u8) {
     for b in blocks {
+        if b.container.details_depth > depth {
+            continue;
+        }
         b.container.details_depth = depth;
         b.container.details = depth > 0;
     }
@@ -2403,8 +2433,147 @@ fn quote_callout_marker_line(line: &str) -> bool {
     inner.find(']').is_some()
 }
 
+/// 容器内容行上识别到的 `<details>` 块（相对起始行）。
+struct RowDetails {
+    /// 块占行数（含开标签行与闭标签行）。
+    span: usize,
+    /// 闭标签行是否配对成功。
+    closed: bool,
+    /// 开标签是否含无值 `open` 属性。
+    open_default: bool,
+    /// summary 可见文本（无则空串）。
+    summary: String,
+}
+
+/// 在已剥容器前缀的内容行上识别 `<details>` 块；`i` 为相对行下标。
+/// 起始行允许仍带本行列表标记（`- <details>`，嵌套列表项）。
+fn details_span_rows(rows: &[String], i: usize) -> Option<RowDetails> {
+    let first = rows.get(i)?;
+    let open_default = details_open_tag(first).or_else(|| {
+        let m = list_mark(first)?;
+        (m.indent_cols <= 3)
+            .then(|| details_open_tag(&first[m.content_start.min(first.len())..]))?
+    })?;
+    let mut depth = 1usize;
+    let mut n = 1usize;
+    let mut summary = String::new();
+    let mut summary_seen = false;
+    let mut closed = false;
+    while i + n < rows.len() {
+        let line = &rows[i + n];
+        let lower = line.to_ascii_lowercase();
+        depth += lower.matches("<details").count();
+        let closes = lower.matches("</details").count();
+        if closes > 0 {
+            depth = depth.saturating_sub(closes);
+            if depth == 0 {
+                n += 1;
+                closed = true;
+                break;
+            }
+        }
+        if !summary_seen {
+            if let Some(s) = summary_on_line(line) {
+                if !s.is_empty() {
+                    summary = s;
+                }
+                summary_seen = true;
+            }
+        }
+        n += 1;
+    }
+    Some(RowDetails {
+        span: n,
+        closed,
+        open_default,
+        summary,
+    })
+}
+
+/// 容器内容行 → 临时 Buffer（行号与容器区间一一对应），供内部子块按常规规则扫描。
+fn rows_buffer(rows: &[String]) -> Buffer {
+    let mut text = String::new();
+    for (k, line) in rows.iter().enumerate() {
+        text.push_str(line);
+        if !line.ends_with('\n') && k + 1 < rows.len() {
+            text.push('\n');
+        }
+    }
+    Buffer::new(&text)
+}
+
+/// 引用段内最后一个列表标记的内容列（含 `to` 行本身）；无列表标记时为 0。
+fn content_list_indent(content: &[String], from: usize, to: usize) -> u8 {
+    let mut indent = 0u8;
+    for line in &content[from..to.min(content.len())] {
+        if let Some(m) = list_mark(line) {
+            if m.indent_cols <= 3 {
+                indent = m.content_col.min(255) as u8;
+            }
+        }
+    }
+    indent
+}
+
+/// 容器（引用 / 列表项）内 details 展开（Task 2）：在已剥容器前缀的内容行上把
+/// `<details>…</details>` 识别为 Details 块，并沿用 B3 规则拆出「summary 头块 +
+/// 内部子块序列」。子块在临时 Buffer 上按常规规则扫描后，行号加 `base` 平移回
+/// 真实文档，并继承 `outer` 的引用 / 列表归属；`depth` 为 details 外层所处层级。
+/// 返回 details 占用的行数（未命中返回 None）。
+fn push_container_details(
+    content: &[String],
+    base: usize,
+    i: usize,
+    outer: BlockContainer,
+    depth: u8,
+    out: &mut Vec<ScannedBlock>,
+) -> Option<usize> {
+    let d = details_span_rows(content, i)?;
+    let close_rel = if d.closed { i + d.span - 1 } else { i + d.span };
+    let mut header_end = (i + 1).min(close_rel);
+    for (k, line) in content.iter().enumerate().take(close_rel).skip(i + 1) {
+        if line.trim().is_empty() {
+            continue;
+        }
+        if summary_on_line(line).is_some() {
+            header_end = k + 1;
+        }
+        break;
+    }
+    out.push(ScannedBlock {
+        kind: BlockKind::Details {
+            summary: d.summary,
+            open_default: d.open_default,
+        },
+        start: base + i,
+        end: base + header_end,
+        container: outer,
+        table_lines: None,
+    });
+    if header_end < close_rel {
+        let vbuf = rows_buffer(content);
+        let inner = scan_blocks_raw(&vbuf, header_end, close_rel);
+        let mut children = expand_scan_level(&vbuf, inner, depth.saturating_add(1));
+        for child in &mut children {
+            child.start += base;
+            child.end += base;
+            child.container.quote_depth = child
+                .container
+                .quote_depth
+                .saturating_add(outer.quote_depth);
+            child.container.list_indent = child
+                .container
+                .list_indent
+                .saturating_add(outer.list_indent);
+        }
+        out.extend(children);
+    }
+    Some(d.span)
+}
+
 /// 引用块 / Admonition 展开：内层 ```` ```mermaid ```` 围栏切成独立块；
 /// `split_tables` 为真时（仅普通 BlockQuote）内层表格也切成独立块。
+/// `details_depth` 为 Some 时（建块入口）内层 `<details>` 提升为 Details 块。
 /// Mermaid 携带 `quote_depth`（及嵌套列表的 `list_indent`）。
 fn split_quote_container(
     buf: &Buffer,
@@ -2412,6 +2581,7 @@ fn split_quote_container(
     end: usize,
     kind: BlockKind,
     split_tables: bool,
+    details_depth: Option<u8>,
     out: &mut Vec<ScannedBlock>,
 ) {
     let rows: Vec<Option<(u8, String)>> = (start..end)
@@ -2420,11 +2590,37 @@ fn split_quote_container(
             strip_quote_prefix(&line).map(|(d, _, content)| (d, content.to_string()))
         })
         .collect();
+    // 逐行剥 `>` 后的正文（懒续行原样保留），供 details 头块与内部子块扫描。
+    let content: Vec<String> = rows
+        .iter()
+        .enumerate()
+        .map(|(k, row)| match row {
+            Some((_, c)) => c.clone(),
+            None => line_text(buf, start + k),
+        })
+        .collect();
     let mut seg_start = 0usize;
     let mut i = 0usize;
     while i < rows.len() {
         let mut advanced = false;
-        if split_tables {
+        if let Some(outer_depth) = details_depth {
+            if let Some((depth, _)) = rows[i].as_ref() {
+                if details_span_rows(&content, i).is_some() {
+                    push_quote_segment(&kind, start, seg_start, i, out);
+                    let outer = BlockContainer {
+                        quote_depth: *depth,
+                        list_indent: content_list_indent(&content, seg_start, i + 1),
+                        ..Default::default()
+                    };
+                    let n = push_container_details(&content, start, i, outer, outer_depth, out)
+                        .unwrap_or(1);
+                    i += n;
+                    seg_start = i;
+                    advanced = true;
+                }
+            }
+        }
+        if !advanced && split_tables {
             if let Some((n, depth)) = quote_table_len_at(&rows, i) {
                 push_quote_segment(&kind, start, seg_start, i, out);
                 out.push(table_block(
@@ -2490,13 +2686,15 @@ fn list_fence_span(rows: &[String], i: usize, ch: u8, len: usize) -> usize {
     n
 }
 
-/// 列表项展开：内层表格与 ```` ```mermaid ```` 围栏切成独立块。
+/// 列表项展开：内层表格与 ```` ```mermaid ```` 围栏切成独立块；
+/// `details_depth` 为 Some 时（建块入口）内层 `<details>` 也提升为 Details 块。
 /// Mermaid 携带列表内容列 `list_indent`；普通围栏代码仍留在列表项内。
 fn split_list_container(
     buf: &Buffer,
     start: usize,
     end: usize,
     kind: BlockKind,
+    details_depth: Option<u8>,
     out: &mut Vec<ScannedBlock>,
 ) {
     let first = line_text(buf, start);
@@ -2540,23 +2738,53 @@ fn split_list_container(
         .collect();
     let mut seg_start = 0usize;
     let mut i = 0usize;
+    // details 视图：`rel` 已剥容器缩进，本行嵌套列表标记在识别时再剥；
+    // 内容列 = 容器缩进 + 本行相对内容列（用于 Details 头的 `list_indent`）。
+    let cols: Vec<u8> = rel
+        .iter()
+        .map(|line| {
+            let rel_col = match list_mark(line) {
+                Some(m) if m.indent_cols <= 3 => m.content_col,
+                _ => indent_info(line).0,
+            };
+            (usize::from(list_indent) + rel_col).min(255) as u8
+        })
+        .collect();
     while i < rel.len() {
         let mut advanced = false;
-        if let Some(n) = table_len_contents(&trimmed[i..]) {
-            if i > seg_start {
-                out.push(plain_block(kind.clone(), start + seg_start, start + i));
-            }
-            out.push(table_block(
-                start + i,
-                start + i + n,
-                BlockContainer {
-                    list_indent,
+        if let Some(outer_depth) = details_depth {
+            if details_span_rows(&rel, i).is_some() {
+                if i > seg_start {
+                    out.push(plain_block(kind.clone(), start + seg_start, start + i));
+                }
+                let outer = BlockContainer {
+                    list_indent: cols[i],
                     ..Default::default()
-                },
-            ));
-            i += n;
-            seg_start = i;
-            advanced = true;
+                };
+                let n =
+                    push_container_details(&rel, start, i, outer, outer_depth, out).unwrap_or(1);
+                i += n;
+                seg_start = i;
+                advanced = true;
+            }
+        }
+        if !advanced {
+            if let Some(n) = table_len_contents(&trimmed[i..]) {
+                if i > seg_start {
+                    out.push(plain_block(kind.clone(), start + seg_start, start + i));
+                }
+                out.push(table_block(
+                    start + i,
+                    start + i + n,
+                    BlockContainer {
+                        list_indent,
+                        ..Default::default()
+                    },
+                ));
+                i += n;
+                seg_start = i;
+                advanced = true;
+            }
         }
         if !advanced {
             if let Some((ch, len)) = list_mermaid_start(&rel[i]) {
@@ -4010,6 +4238,98 @@ mod tests {
         assert_eq!(m[1].kind, BlockKind::Mermaid);
         assert!(m[1].container.details);
         assert_eq!(m[1].container.details_depth, 1);
+    }
+
+    // ===== Task 2：容器内 `<details>` 识别 =====
+
+    #[test]
+    fn details_inside_list_item_becomes_details_block() {
+        let b = Buffer::new(
+            "- 甲容器\n\n  <details>\n  <summary>乙容器</summary>\n\n  乙正文\n\n  </details>\n",
+        );
+        let m = meta(&b);
+        assert_eq!(
+            m.iter()
+                .map(|b| (b.kind.clone(), b.start, b.end))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    BlockKind::ListItem {
+                        ordered: false,
+                        depth: 0,
+                        task: None,
+                    },
+                    0,
+                    2
+                ),
+                (
+                    BlockKind::Details {
+                        summary: "乙容器".to_string(),
+                        open_default: false,
+                    },
+                    2,
+                    4
+                ),
+                (BlockKind::Paragraph, 5, 6),
+            ],
+            "{m:?}"
+        );
+        assert_eq!(m[1].container.list_indent, 2);
+        assert_eq!(m[1].container.details_depth, 0);
+        assert_eq!(m[2].container.list_indent, 2);
+        assert!(m[2].container.details);
+        assert_eq!(m[2].container.details_depth, 1);
+    }
+
+    #[test]
+    fn details_inside_block_quote_becomes_details_block() {
+        let b = Buffer::new(
+            "> 甲容器\n>\n> <details>\n> <summary>乙容器</summary>\n>\n> 乙正文\n>\n> </details>\n",
+        );
+        let m = meta(&b);
+        assert_eq!(
+            m.iter()
+                .map(|b| (b.kind.clone(), b.start, b.end))
+                .collect::<Vec<_>>(),
+            vec![
+                (BlockKind::BlockQuote, 0, 2),
+                (
+                    BlockKind::Details {
+                        summary: "乙容器".to_string(),
+                        open_default: false,
+                    },
+                    2,
+                    4
+                ),
+                (BlockKind::Paragraph, 5, 6),
+            ],
+            "{m:?}"
+        );
+        assert_eq!(m[1].container.quote_depth, 1);
+        assert_eq!(m[1].container.list_indent, 0);
+        assert_eq!(m[2].container.quote_depth, 1);
+        assert_eq!(m[2].container.details_depth, 1);
+    }
+
+    #[test]
+    fn details_inside_nested_list_item_tracks_content_column() {
+        let b = Buffer::new(
+            "- 外层\n  - 乙项\n    <details>\n    <summary>乙容器</summary>\n    乙正文\n    </details>\n",
+        );
+        let m = meta(&b);
+        let pos = m
+            .iter()
+            .position(|b| matches!(b.kind, BlockKind::Details { .. }))
+            .unwrap_or_else(|| panic!("嵌套列表项内 details 未识别：{m:?}"));
+        assert_eq!((m[pos].start, m[pos].end), (2, 4), "{m:?}");
+        assert_eq!(m[pos].container.list_indent, 4);
+        let child = m
+            .iter()
+            .find(|b| b.kind == BlockKind::Paragraph)
+            .unwrap_or_else(|| panic!("details 正文应拆为段落子块：{m:?}"));
+        assert_eq!((child.start, child.end), (4, 5), "{m:?}");
+        assert_eq!(child.container.list_indent, 4);
+        assert_eq!(child.container.details_depth, 1);
     }
 
     #[test]

@@ -2035,9 +2035,10 @@ impl AdjcSpec {
     fn kinds(&self) -> Vec<&'static str> {
         match self.container {
             AdjcContainer::ListItem => match self.unit {
-                // Table / Mermaid 由容器展开切成独立块。
+                // Table / Mermaid / Details 由容器展开切成独立块。
                 7 => vec!["ListItem", "Table"],
                 6 => vec!["ListItem", "Mermaid"],
+                16 => vec!["ListItem", "Details", "Paragraph"],
                 // 嵌套列表项：父项 + 子项各为一块。
                 8 => vec!["ListItem", "ListItem"],
                 _ => vec!["ListItem"],
@@ -2045,6 +2046,7 @@ impl AdjcSpec {
             AdjcContainer::BlockQuote => match self.unit {
                 7 => vec!["BlockQuote", "Table"],
                 6 => vec!["BlockQuote", "Mermaid"],
+                16 => vec!["BlockQuote", "Details", "Paragraph"],
                 _ => vec!["BlockQuote"],
             },
             AdjcContainer::Admonition => match self.unit {
@@ -2099,10 +2101,12 @@ impl AdjcSpec {
                 AdjcContainer::Details => vec!["&lt;div"],
                 _ => vec!["<div"],
             },
-            // Details：仅 Details 容器内提升为独立块（`<details open>`）；其余容器
-            // 内开标签被 pulldown 转义，但 `<summary>` 结构仍原样保留。
+            // Details：ListItem / BlockQuote / Details 容器内提升为独立块；
+            // Callout / Admonition 内开标签仍被转义，但 `<summary>` 结构保留。
             16 => match self.container {
-                AdjcContainer::Details => vec!["<details"],
+                AdjcContainer::Details | AdjcContainer::ListItem | AdjcContainer::BlockQuote => {
+                    vec!["<details"]
+                }
                 _ => vec!["<summary"],
             },
             _ => UNITS[self.unit].markers.to_vec(),
@@ -3232,6 +3236,14 @@ fn adjc2_kinds(container: AdjcContainer, first: usize, second: usize) -> Vec<&'s
             (7, 7) => vec!["ListItem", "Table", "ListItem", "Table"],
             (6, 7) => vec!["ListItem", "Mermaid", "ListItem", "Table"],
             (8, 8) => vec!["ListItem", "ListItem", "ListItem"],
+            (16, 16) => vec![
+                "ListItem",
+                "Details",
+                "Paragraph",
+                "ListItem",
+                "Details",
+                "Paragraph",
+            ],
             (0, 7) => vec!["ListItem", "Table"],
             _ => vec!["ListItem"],
         },
@@ -3239,6 +3251,14 @@ fn adjc2_kinds(container: AdjcContainer, first: usize, second: usize) -> Vec<&'s
             (6, 6) => vec!["BlockQuote", "Mermaid", "BlockQuote", "Mermaid"],
             (7, 7) => vec!["BlockQuote", "Table", "BlockQuote", "Table"],
             (6, 7) => vec!["BlockQuote", "Mermaid", "BlockQuote", "Table"],
+            (16, 16) => vec![
+                "BlockQuote",
+                "Details",
+                "Paragraph",
+                "BlockQuote",
+                "Details",
+                "Paragraph",
+            ],
             (0, 7) => vec!["BlockQuote", "Table"],
             _ => vec!["BlockQuote"],
         },
@@ -3341,7 +3361,9 @@ fn adjx_kinds(outer: AdjcContainer, inner: AdjcContainer) -> Vec<&'static str> {
     use AdjcContainer::*;
     match (outer, inner) {
         (ListItem, ListItem) => vec!["ListItem", "ListItem"],
+        (ListItem, Details) => vec!["ListItem", "Details", "Paragraph"],
         (ListItem, _) => vec!["ListItem"],
+        (BlockQuote, Details) => vec!["BlockQuote", "Details", "Paragraph"],
         (BlockQuote, _) => vec!["BlockQuote"],
         (Details, ListItem) => vec!["Details", "ListItem"],
         (Details, BlockQuote) => vec!["Details", "BlockQuote"],
@@ -3352,18 +3374,11 @@ fn adjx_kinds(outer: AdjcContainer, inner: AdjcContainer) -> Vec<&'static str> {
 
 fn adjx_spec(outer: AdjcContainer, inner: AdjcContainer) -> StructuredSpec {
     use AdjcContainer::*;
-    // 已登记缺陷：`<details>` 位于 ListItem / BlockQuote 内时，容器展开只提升
-    // Table/Mermaid，details 块不被识别，开标签被转义为普通段落文本。
-    let unlifted_details = matches!(inner, Details) && matches!(outer, ListItem | BlockQuote);
     let kinds = adjx_kinds(outer, inner);
     let mut markers: Vec<&'static str> = Vec::new();
     let li = usize::from(matches!(outer, ListItem)) + usize::from(matches!(inner, ListItem));
     let bq = usize::from(matches!(outer, BlockQuote)) + usize::from(matches!(inner, BlockQuote));
-    let det = if unlifted_details {
-        0
-    } else {
-        usize::from(matches!(outer, Details)) + usize::from(matches!(inner, Details))
-    };
+    let det = usize::from(matches!(outer, Details)) + usize::from(matches!(inner, Details));
     let mut tags = Vec::new();
     if li > 0 {
         markers.push("<li>");
@@ -3372,11 +3387,6 @@ fn adjx_spec(outer: AdjcContainer, inner: AdjcContainer) -> StructuredSpec {
     if bq > 0 {
         markers.push("<blockquote");
         tags.push(("<blockquote", bq));
-    }
-    if unlifted_details {
-        // 显式锁定降级形态：开标签以转义文本出现，summary 走行内白名单。
-        markers.push("&lt;details&gt;");
-        markers.push("<summary");
     }
     if det > 0 {
         markers.push("<details");
@@ -3396,9 +3406,7 @@ fn adjx_spec(outer: AdjcContainer, inner: AdjcContainer) -> StructuredSpec {
         tags,
         html_counts,
         pdf_counts,
-        known_defect: unlifted_details.then_some(
-            "嵌套 `<details>`（位于 ListItem / BlockQuote 内）未被识别为 Details 块：容器展开只提升 Table/Mermaid，开标签降级为转义文本（详见报告「未修复项」）",
-        ),
+        known_defect: None,
     }
 }
 
@@ -3584,12 +3592,8 @@ fn structured_parse_checks(session: &Session, spec: &StructuredSpec, problems: &
             }
         }
         StructMode::Nested { outer, inner } => {
-            let want_depth = if spec.known_defect.is_some() {
-                0
-            } else {
-                usize::from(matches!(outer, AdjcContainer::Details))
-                    + usize::from(matches!(inner, AdjcContainer::Details))
-            };
+            let want_depth = usize::from(matches!(outer, AdjcContainer::Details))
+                + usize::from(matches!(inner, AdjcContainer::Details));
             let max_depth = entries.iter().map(|e| e.3.details_depth).max().unwrap_or(0);
             if max_depth as usize != want_depth {
                 problems.push(format!(
@@ -3602,6 +3606,27 @@ fn structured_parse_checks(session: &Session, spec: &StructuredSpec, problems: &
                     if !e.3.details || e.3.details_depth == 0 {
                         problems.push(format!(
                             "外层 Details 的子块归属异常（{}）：{:?}",
+                            kind_name(&e.1),
+                            e.3
+                        ));
+                    }
+                }
+            }
+            // 内层 Details 命中容器展开路径：头块与其子块必须携带外层容器归属。
+            if matches!(inner, AdjcContainer::Details) {
+                for e in &entries {
+                    if kind_name(&e.1) != "Details" && e.3.details_depth == 0 {
+                        continue;
+                    }
+                    let ok = match outer {
+                        AdjcContainer::ListItem => e.3.list_indent > 0,
+                        AdjcContainer::BlockQuote => e.3.quote_depth > 0,
+                        _ => true,
+                    };
+                    if !ok {
+                        problems.push(format!(
+                            "容器内 Details 的归属异常（{} → {}）：{:?}",
+                            outer.name(),
                             kind_name(&e.1),
                             e.3
                         ));
@@ -4719,10 +4744,10 @@ fn write_report(rows: &[Row], stats: &MatrixStats, adj_na: &[&Case], adjn_na: &[
     out.push_str("- 空态用例（CASE-EDGE-001..003）：语料的 `表面：N/A` 只说明「无可见内容」，不等于不可测。harness 在六个表面执行空态断言：UI 0 块且几何有限、HTML `<body>` 为空、PDF 恰 1 页空白且无版面文本（依据 `layout_document` 无条件 `new_page()`、`LayoutOpts::default().page_numbers == false`）、PRINT 恰 1 页且断点为 `[0.0]`（依据 `compute_page_breaks` 恒以 `vec![0.0]` 起步）。\n");
     out.push_str("- Mermaid 用例不做全文金样：SVG 内的路径/弧坐标由 dagre 布局与字体度量共同决定，跨进程运行存在浮点级差异（classDiagram / stateDiagram 的 `d` 属性实测会变），全文金样必然 flaky；改由结构断言证伪「未渲染却算通过」：`<body>` 必须含真实 `<svg`，且不得残留 `language-mermaid` / 「渲染数据不可用」降级围栏。\n");
     out.push_str("- 容器内 Mermaid（G7 已修复）：列表/引用/Admonition/Callout/Details 内的 ```` ```mermaid ```` 围栏已提升为独立 `BlockKind::Mermaid` 块（携带 `quote_depth` / `list_indent` / `details*` 归属），导出内嵌真实 `<svg>`，不再保留 `language-mermaid` 源码围栏。源码正文经容器前缀剥离：引用逐层剥 `>`（含一个可选空格），列表首行剥标记、续行只剥至多 `list_indent` 列缩进（图的相对缩进保留）。证据：`CASE-ADV-011` 与 `CASE-ADJC-001..090`。\n");
-    out.push_str("- ADJC（生成式容器内容）：5 类容器（ListItem / BlockQuote / Admonition / Callout / Details）× 18 个块单元 = 90；容器标记可见文本恒为「甲容器」，内层块沿用 ADJB 的 18 单元（标签「乙」）并逐行加容器前缀（空行同样加，保证多行块整体仍属容器）。Admonition / Callout 夹具按文档语法：`[!TYPE]` 独占一行，标题「甲容器」与正文放在后续 `>` 行（标记行后直接跟文本会渲染为缩进代码块，属非契约形态）。PARSE 断言容器块型出现、`Table`/`Mermaid` 为独立块（仅 ListItem / BlockQuote / Details 切表格；Admonition / Callout 只提升 Mermaid，表格留在提示框内），并用 `Session::block_entries()` 校验提升块的 `BlockContainer`（ListItem→`list_indent>0`；引用类→`quote_depth>0`；Details→`details=true` 且 `details_depth>0`）与 Mermaid 源码前缀已剥离。\n");
+    out.push_str("- ADJC（生成式容器内容）：5 类容器（ListItem / BlockQuote / Admonition / Callout / Details）× 18 个块单元 = 90；容器标记可见文本恒为「甲容器」，内层块沿用 ADJB 的 18 单元（标签「乙」）并逐行加容器前缀（空行同样加，保证多行块整体仍属容器）。Admonition / Callout 夹具按文档语法：`[!TYPE]` 独占一行，标题「甲容器」与正文放在后续 `>` 行（标记行后直接跟文本会渲染为缩进代码块，属非契约形态）。PARSE 断言容器块型出现、`Table`/`Mermaid` 为独立块（仅 ListItem / BlockQuote / Details 切表格；Admonition / Callout 只提升 Mermaid，表格留在提示框内），ListItem / BlockQuote 内的 `<details>` 亦提升为独立 Details 块（Callout 仍按正文形态），并用 `Session::block_entries()` 校验提升块的 `BlockContainer`（ListItem→`list_indent>0`；引用类→`quote_depth>0`；Details→`details=true` 且 `details_depth>0`；容器内 Details 头块与子块保留容器归属）与 Mermaid 源码前缀已剥离。\n");
     out.push_str("- ADJC 的 Callout 注入：harness 用 `veil_core::CalloutRegistry::from_json` 造 `FIXME` 条目，经新增门面 `veil_ui::qa::QaApp::new_with_callouts` / `veil::qa::html_of_doc_with_callouts`（含 `..._with_mermaid_and_callouts`）/ `pdf_of_doc_with_callouts` 注入解析与导出；产品默认入口签名与行为不变（默认 registry 仍为空）。\n");
     out.push_str("- ADJC 标签计数：统计对象是导出正文 HTML（含 `id=` / `href=` 等属性值，不是纯可见文本）；容器标签「甲」出现 1 次；内层「乙」按容器实际模型计数（Paragraph…Table/ListItem/BlockQuote/Admonition/Callout/HtmlBlock/FrontMatter = 1；Details = 2（summary + 正文）；ThematicBreak/LinkRefDef = 0；FootnoteDef 在 Details 内 = 0、其余容器 = 1）。Math 与 Mermaid 不做 HTML 标签计数（Math 正文形态不稳定、Mermaid 由 SVG 承载），PDF 侧 Mermaid 同样 Ignore。\n");
-    out.push_str("- ADJC 结构标记例外：容器展开只把 `Table`（ListItem / BlockQuote / Details）与 `Mermaid`（全部 5 类容器）提升为独立块；容器内的 Math 块与内层 Admonition/Callout 仍按容器正文渲染（不产生独立块），故这些单元的对应结构标记（`class=\"math` / `class=\"callout ...\"`）仅在其真正成为独立块的 Details 容器中断言，其余容器登记为 Ignore（不是 G7 行为，属既有解析模型边界）。FrontMatter 在非文档首块按分隔线/Setext 降级处理，仅在 Details 容器单独模拟（分隔线 + Setext 标题）。\n");
+    out.push_str("- ADJC 结构标记例外：容器展开把 `Table`（ListItem / BlockQuote / Details）、`Mermaid`（全部 5 类容器）与 `<details>`（ListItem / BlockQuote / Details）提升为独立块；容器内的 Math 块、内层 Admonition/Callout 与 Callout 内 `<details>` 仍按容器正文渲染（不产生独立块），故这些单元的对应结构标记（`class=\"math` / `class=\"callout ...\"`）仅在其真正成为独立块的 Details 容器中断言，其余容器登记为 Ignore（不是 G7 行为，属既有解析模型边界）。FrontMatter 在非文档首块按分隔线/Setext 降级处理，仅在 Details 容器单独模拟（分隔线 + Setext 标题）。\n");
     out.push_str("- 金样首次缺失时自动写入（引导），之后普通运行全文比对。\n");
     out.push_str("- ADJB（生成式块级相邻）：18 个块单元（Paragraph…FrontMatter）× 18 个有序对 = 324；文档恒为 `A + \"\\n\\n\" + B + \"\\n\"`，A 侧标签 `甲`、B 侧标签 `乙`。B=FrontMatter 的 18 对按契约记 N/A（FrontMatter 仅识别于文档首块），不执行表面断言。7 个表面全部执行：PARSE（`blocks` + 全序列 `kinds`）、WYSIWYG/FOCUS/TYPEWRITER（既有模型断言 + `no_overlap`）、HTML（每单元结构标记 + 可见标签存在/不可见标签不泄漏）、PDF（≥1 页 + 显式 `pdf_text` 可见标签）、PRINT（分页模型）。\n");
     out.push_str(&format!(
@@ -4776,10 +4801,10 @@ fn write_report(rows: &[Row], stats: &MatrixStats, adj_na: &[&Case], adjn_na: &[
         "- ADJI2（生成式行内边界）：12 个行内单元 × 12 个有序对 × 6 种边界（换行 `\\n`、`。`、`，`、`）`、`.`、`,`）= {adji2_total}；默认顶层节点序列为「A 节点 + B 节点」，标点边界按字面文本处理、不改变 flanking（`**甲**。**乙**` 仍是两个 Strong）。唯一例外：A 单元为 HtmlSelfClosed（`<br />`）且边界为换行时，`<br />` 独占一行触发 HTML 块类型 7，整段被吞并为 `HtmlBlock`（FootnoteRef 时另加一个 `FootnoteDef`），不产出段落与行内节点；逐条断言 `<br` 存在、B 行内标记不得出现、可见标签保留、其余 860 条按默认模型断言。金样排除脚注引用后等距抽取 20 条；全量 {adji2_total} 条写入摘要。\n"
     ));
     out.push_str(&format!(
-        "- ADJC2（生成式容器内相邻）：5 类容器 × 18 个自相邻对（以内层空行分隔的同一单元 `乙`/`丙`）= {ADJC2_SELF}，加每组 4 个关键跨类型对（Table+Table、Mermaid+Table、FencedCode+IndentedCode、Paragraph+Table）= {ADJC2_CROSS}，共 {adjc2_total}。断言：顶层块序列、容器结构标记与内层块标记的精确计数、内层标签 `乙`/`丙` 在 HTML 与 PDF 中的逐份计数、提升块（Table/Mermaid）的 `BlockContainer` 归属、`no_overlap`；内层两块的块数按容器模型登记（如 IndentedCode 在 Details 内因块内空行合并为 1 块，Admonition/Callout 内表格不独立成块）。金样避开 Mermaid 后等距抽取 20 条。\n"
+        "- ADJC2（生成式容器内相邻）：5 类容器 × 18 个自相邻对（以内层空行分隔的同一单元 `乙`/`丙`）= {ADJC2_SELF}，加每组 4 个关键跨类型对（Table+Table、Mermaid+Table、FencedCode+IndentedCode、Paragraph+Table）= {ADJC2_CROSS}，共 {adjc2_total}。断言：顶层块序列、容器结构标记与内层块标记的精确计数、内层标签 `乙`/`丙` 在 HTML 与 PDF 中的逐份计数、提升块（Table/Mermaid/Details）的 `BlockContainer` 归属、`no_overlap`；内层两块的块数按容器模型登记（如 IndentedCode 在 Details 内因块内空行合并为 1 块，Admonition/Callout 内表格不独立成块）。金样避开 Mermaid 后等距抽取 20 条。\n"
     ));
     out.push_str(&format!(
-        "- ADJX（嵌套容器）：ListItem / BlockQuote / Details 的 3×3 = {adjx_total} 组合；断言容器元素精确计数（`<li>`/`<blockquote`/`<details`/`<summary`）、Details 嵌套深度（`details_depth` 等于嵌套层数）、外层 Details 的子块归属、标签 `甲容器`/`乙容器` 可见性、`no_overlap`；9 条全部写金样。\n"
+        "- ADJX（嵌套容器）：ListItem / BlockQuote / Details 的 3×3 = {adjx_total} 组合；断言容器元素精确计数（`<li>`/`<blockquote`/`<details`/`<summary`）、Details 嵌套深度（`details_depth` 等于嵌套层数）、外层 Details 的子块归属、容器内 Details 的引用/列表归属（`quote_depth`/`list_indent`）、标签 `甲容器`/`乙容器` 可见性、`no_overlap`；9 条全部写金样。\n"
     ));
     // 未修复项登记：结构化矩阵里标记了 known_defect 的用例。
     let mut open_defects: Vec<(String, &'static str)> = Vec::new();

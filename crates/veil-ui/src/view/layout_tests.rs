@@ -61,7 +61,7 @@ pub(super) fn layout_with_captions(
     let inlines = s.block_inlines(id).unwrap();
     let mut eng = LayoutEngine::new();
     let block_text = &text[range.start..range.end];
-    let l = eng.layout_block_with_captions(
+    let l = eng.layout_block_with_captions_in_container(
         kind,
         block_text,
         range,
@@ -75,6 +75,7 @@ pub(super) fn layout_with_captions(
         None,
         false,
         captions,
+        0,
     );
     (eng, l)
 }

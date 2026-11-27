@@ -1832,7 +1832,32 @@ fn hard_break_subs(
 /// 块级替换（切片 12）：任务列表复选框（自绘方框占位）、无序列表符号 `•`、
 /// 引用行首 `>` → 空格、分隔线整行消隐；标题 `#` 与围栏 ` ``` ` 同规则消隐（B7）。
 /// 激活判据沿用块区间闭区间；引用块逐行判定（光标所在行显源码，其余行隐标记）。
+#[allow(clippy::too_many_arguments)] // 包装层比内部多一个容器归属参数
 fn block_subs(
+    kind: BlockKind,
+    body: &str,
+    block: Range,
+    caret: usize,
+    ordinal: Option<u32>,
+    toc_list: bool,
+    tasks: &mut Vec<TaskMark>,
+    quote_depth: u8,
+) -> Vec<Sub> {
+    let mut out = block_subs_kind(kind.clone(), body, block, caret, ordinal, toc_list, tasks);
+    // 容器内提升块（Details 头块及其子块等）：kind 不再是 BlockQuote，但正文仍带
+    // 引用前缀。与 BlockQuote 同一规则逐行等长消隐 `>`（保留缩进/行高）。
+    if quote_depth > 0
+        && !matches!(
+            kind,
+            BlockKind::BlockQuote | BlockKind::Callout(_) | BlockKind::Admonition(_)
+        )
+    {
+        out.extend(quote_line_subs(body, block, caret));
+    }
+    out
+}
+
+fn block_subs_kind(
     kind: BlockKind,
     body: &str,
     block: Range,

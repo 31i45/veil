@@ -1729,16 +1729,38 @@ fn list_item_nested_fence_renders_code_lines() {
 
 #[test]
 fn list_item_nested_details_tags_elided() {
-    // REN-SWEEP-002：列表项续行里的 details/summary 裸标签消隐，正文按行内语法排版。
+    // Task 2：列表项续行里的 `<details>` 现提升为独立 Details 块（前缀归属列表项），
+    // 裸标签由 Details 头块消隐，正文按原生子块排版。
     let src = "- 列表中的 details：\n  <details>\n  <summary>摘要</summary>\n\n  正文 **加粗**。\n  </details>\n";
-    let (_, l) = layout_doc_block(src, 0, usize::MAX, 400.0);
-    let lt = l.layout_text();
+    let (_, item) = layout_doc_block(src, 0, usize::MAX, 400.0);
+    let item_text = item.layout_text();
+    assert!(
+        !item_text.contains("<details") && !item_text.contains("</details"),
+        "列表项块不应含裸标签: {item_text:?}"
+    );
+    assert!(
+        !item_text.contains("摘要"),
+        "summary 应归属 Details 块: {item_text:?}"
+    );
+    let (_, header) = layout_doc_block(src, 1, usize::MAX, 400.0);
+    let header_text = header.layout_text();
     for raw in ["<details>", "</details>", "<summary>", "</summary>"] {
-        assert!(!lt.contains(raw), "裸标签 {raw} 必须消隐: {lt:?}");
+        assert!(
+            !header_text.contains(raw),
+            "裸标签 {raw} 必须消隐: {header_text:?}"
+        );
     }
-    assert!(!lt.contains("**"), "正文行内标记应消隐: {lt:?}");
-    assert!(lt.contains("摘要"), "summary 文本应可见: {lt:?}");
-    assert!(lt.contains("加粗"), "正文应可见: {lt:?}");
+    assert!(
+        header_text.contains("摘要"),
+        "summary 文本应可见: {header_text:?}"
+    );
+    let (_, body) = layout_doc_block(src, 2, usize::MAX, 400.0);
+    let body_text = body.layout_text();
+    assert!(
+        !body_text.contains("**"),
+        "正文行内标记应消隐: {body_text:?}"
+    );
+    assert!(body_text.contains("加粗"), "正文应可见: {body_text:?}");
 }
 
 #[test]

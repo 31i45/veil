@@ -1043,7 +1043,7 @@ impl App {
             let l = match toc_text {
                 Some(toc) => self.engine.layout_toc(&toc, width),
                 None => {
-                    let mut l = self.engine.layout_block_with_captions(
+                    let mut l = self.engine.layout_block_with_captions_in_container(
                         kind.clone(),
                         &text,
                         range,
@@ -1058,6 +1058,7 @@ impl App {
                         self.index.list_ordinals.get(&id).copied(),
                         toc_list,
                         &captions,
+                        container.quote_depth,
                     );
                     l.toc_source = toc_marker;
                     l

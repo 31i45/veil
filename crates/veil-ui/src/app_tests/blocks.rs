@@ -524,21 +524,42 @@ fn inline_details_collapses_body_and_summary_click_toggles() {
     assert!(!again.contains("隐藏正文"));
 }
 
-/// Task 8：引用容器内的 `<details>` 默认收起，点击 summary 展开/收起。
-/// 折叠是纯视图态：文档字节与撤销栈不变；块高与后续块顶偏移随折叠更新。
+/// Task 2/8：引用容器内的 `<details>` 现为独立 Details 块；折叠仍是纯视图态，
+/// 点击 summary 展开/收起，后续块顶偏移随折叠更新。
 #[test]
 fn quote_container_details_collapse_toggles_by_summary_click() {
     let store = MemStore::default();
-    let doc = "> <details>\n> <summary>更多</summary>\n> 隐藏正文XYZ\n> </details>\n\n尾\n";
+    let doc =
+        "> 甲\n>\n> <details>\n> <summary>更多</summary>\n> 隐藏正文XYZ\n> </details>\n\n尾\n";
     let mut a = app(doc, None, false, &store);
     a.refresh_index();
     // 光标放到容器外：容器各行按非激活态渲染。
     a.editor.set_caret(doc.find("尾").unwrap());
     a.ensure_layouts_all();
     a.recompute_geometry();
-    let id = block_id_of(&a, |k| *k == BlockKind::BlockQuote);
-    let next_id = block_id_of(&a, |k| *k == BlockKind::Paragraph);
+    let id = block_id_of(&a, |k| matches!(k, BlockKind::Details { .. }));
+    let at = |a: &App, needle: &str| -> BlockId {
+        let off = doc.find(needle).unwrap();
+        a.index
+            .blocks
+            .iter()
+            .find(|g| g.range.start <= off && off < g.range.end)
+            .map(|g| g.id)
+            .expect("目标块应存在")
+    };
+    let child_id = at(&a, "隐藏正文XYZ");
+    let next_id = at(&a, "尾");
+    let hidden = |a: &App, id: BlockId| {
+        let g = a
+            .index
+            .blocks
+            .iter()
+            .find(|g| g.id == id)
+            .expect("块应存在");
+        a.block_hidden(g)
+    };
     let undo_before = a.editor.session().undo_depth();
+    assert!(!a.ui_state.expanded_details.contains(&id), "默认应折叠");
 
     let collapsed = a.cache.layouts[&id].value.layout_text().to_string();
     assert!(
@@ -554,6 +575,7 @@ fn quote_container_details_collapse_toggles_by_summary_click() {
             && !collapsed.to_ascii_lowercase().contains("summary"),
         "不应露出裸标签：{collapsed:?}"
     );
+    assert!(hidden(&a, child_id), "收起态正文子块应隐藏");
 
     let geom = |a: &App, id: BlockId| {
         a.index
@@ -563,7 +585,7 @@ fn quote_container_details_collapse_toggles_by_summary_click() {
             .map(|g| (g.top, a.block_height(g), g.range.start))
             .expect("块应存在")
     };
-    let (top_c, h_c, start_c) = geom(&a, id);
+    let (top_c, _, start_c) = geom(&a, id);
     let (top_n, _, _) = geom(&a, next_id);
     let (cx, cy) = {
         let l = &a.cache.layouts[&id].value;
@@ -576,22 +598,16 @@ fn quote_container_details_collapse_toggles_by_summary_click() {
         (vp.y + top_c - a.window_state.scroll_y + cy) as f64,
     );
     a.on_left_click();
-    assert_eq!(
-        a.ui_state.expanded_inline_details.len(),
-        1,
+    assert!(
+        a.ui_state.expanded_details.contains(&id),
         "点击容器内 summary 应展开 details"
     );
     a.ensure_layouts_all();
     a.recompute_geometry();
-    let expanded = a.cache.layouts[&id].value.layout_text().to_string();
-    assert!(
-        expanded.contains("隐藏正文"),
-        "展开后正文应可见：{expanded:?}"
-    );
-    let (top_e, h_e, _) = geom(&a, id);
+    assert!(!hidden(&a, child_id), "展开后正文子块应可见");
+    let (top_e, _, _) = geom(&a, id);
     let (top_n_e, _, _) = geom(&a, next_id);
     assert_eq!(top_e, top_c, "块顶不应因展开而移动");
-    assert!(h_e > h_c, "展开后块高应增大：{h_c} → {h_e}");
     assert!(top_n_e > top_n, "后续块应随展开下移：{top_n} → {top_n_e}");
 
     // 再点 summary → 收起。
@@ -601,9 +617,8 @@ fn quote_container_details_collapse_toggles_by_summary_click() {
     );
     a.on_left_click();
     a.ensure_layouts_all();
-    assert!(a.ui_state.expanded_inline_details.is_empty());
-    let again = a.cache.layouts[&id].value.layout_text().to_string();
-    assert!(!again.contains("隐藏正文"), "收起后正文再次隐藏");
+    assert!(!a.ui_state.expanded_details.contains(&id));
+    assert!(hidden(&a, child_id), "收起后正文再次隐藏");
     assert_eq!(a.editor.session().serialize(), doc, "折叠/展开不改文档字节");
     assert_eq!(
         a.editor.session().undo_depth(),
@@ -612,7 +627,69 @@ fn quote_container_details_collapse_toggles_by_summary_click() {
     );
 }
 
-/// Task 8：列表项容器内的 `<details>` 同样收起正文并可点击 summary 展开。
+/// Task 2 跨表面：引用内 `<details>` 提升为独立块后，WYSIWYG 的 Details 头块与
+/// 正文子块行内容不得残留 `>` 前缀（缩进保留）；列表内 details 不受影响。
+#[test]
+fn promoted_container_details_elide_quote_markers_in_wysiwyg() {
+    let store = MemStore::default();
+    let doc =
+        "> 甲\n>\n> <details>\n> <summary>引用摘要</summary>\n> 引用正文\n> </details>\n\n尾\n";
+    let mut a = app(doc, None, false, &store);
+    a.refresh_index();
+    a.editor.set_caret(doc.find("尾").unwrap());
+    a.ensure_layouts_all();
+    let details_id = block_id_of(&a, |k| matches!(k, BlockKind::Details { .. }));
+    a.toggle_details(details_id);
+    a.ensure_layouts_all();
+    let at = |a: &App, needle: &str| -> BlockId {
+        let off = doc.find(needle).unwrap();
+        a.index
+            .blocks
+            .iter()
+            .find(|g| g.range.start <= off && off < g.range.end)
+            .map(|g| g.id)
+            .expect("目标块应存在")
+    };
+    let header = a.cache.layouts[&details_id].value.layout_text().to_string();
+    assert!(header.contains("引用摘要"), "summary 应可见：{header:?}");
+    assert!(
+        !header.contains('>'),
+        "Details 头块不得残留 `>`：{header:?}"
+    );
+    let body_id = at(&a, "引用正文");
+    let body = a.cache.layouts[&body_id].value.layout_text().to_string();
+    assert!(body.contains("引用正文"), "正文应可见：{body:?}");
+    assert!(
+        !body.contains('>'),
+        "Details 正文子块不得残留 `>`：{body:?}"
+    );
+
+    // 列表内 details：不受引用前缀消隐影响，正文正常可见且无 `>`。
+    let doc =
+        "- 列表项\n  <details>\n  <summary>列表摘要</summary>\n  列表正文\n  </details>\n\n尾\n";
+    let mut a = app(doc, None, false, &store);
+    a.refresh_index();
+    a.editor.set_caret(doc.find("尾").unwrap());
+    a.ensure_layouts_all();
+    let details_id = block_id_of(&a, |k| matches!(k, BlockKind::Details { .. }));
+    a.toggle_details(details_id);
+    a.ensure_layouts_all();
+    let body_id = {
+        let off = doc.find("列表正文").unwrap();
+        a.index
+            .blocks
+            .iter()
+            .find(|g| g.range.start <= off && off < g.range.end)
+            .map(|g| g.id)
+            .expect("正文块应存在")
+    };
+    let body = a.cache.layouts[&body_id].value.layout_text().to_string();
+    assert!(body.contains("列表正文"), "列表内正文应可见：{body:?}");
+    assert!(!body.contains('>'), "列表内 details 不应含 `>`：{body:?}");
+}
+
+/// Task 8：列表项容器内的 `<details>` 现为独立 Details 块，默认收起、展开后
+/// 正文子块可见；折叠是纯视图态。
 #[test]
 fn list_item_container_details_collapse_toggles() {
     let store = MemStore::default();
@@ -621,36 +698,49 @@ fn list_item_container_details_collapse_toggles() {
     a.refresh_index();
     a.editor.set_caret(doc.find("尾").unwrap());
     a.ensure_layouts_all();
-    let id = block_id_of(&a, |k| matches!(k, BlockKind::ListItem { .. }));
-    let collapsed = a.cache.layouts[&id].value.layout_text().to_string();
+    let item_id = block_id_of(&a, |k| matches!(k, BlockKind::ListItem { .. }));
+    let details_id = block_id_of(&a, |k| matches!(k, BlockKind::Details { .. }));
+    let at = |a: &App, needle: &str| -> BlockId {
+        let off = doc.find(needle).unwrap();
+        a.index
+            .blocks
+            .iter()
+            .find(|g| g.range.start <= off && off < g.range.end)
+            .map(|g| g.id)
+            .expect("目标块应存在")
+    };
+    let child_id = at(&a, "隐藏正文XYZ");
+    let hidden = |a: &App, id: BlockId| {
+        let g = a
+            .index
+            .blocks
+            .iter()
+            .find(|g| g.id == id)
+            .expect("块应存在");
+        a.block_hidden(g)
+    };
+    let item_text = a.cache.layouts[&item_id].value.layout_text().to_string();
     assert!(
-        collapsed.contains("更多"),
-        "收起态应显示 summary：{collapsed:?}"
+        !item_text.contains("更多") && !item_text.contains("隐藏正文"),
+        "列表项块不应再包含 details 内容：{item_text:?}"
+    );
+    let header = a.cache.layouts[&details_id].value.layout_text().to_string();
+    assert!(
+        header.contains("更多"),
+        "Details 头块应显示 summary：{header:?}"
     );
     assert!(
-        !collapsed.contains("隐藏正文"),
-        "收起态正文必须隐藏：{collapsed:?}"
+        !header.contains("隐藏正文"),
+        "收起态正文必须隐藏：{header:?}"
     );
-    // 直接写入折叠集合（点击路径已由引用容器用例覆盖），验证列表项同口径生效。
-    let start = a
-        .index
-        .blocks
-        .iter()
-        .find(|g| g.id == id)
-        .map(|g| g.range.start)
-        .unwrap();
-    let key = doc.find("<details>").unwrap() - start;
-    a.ui_state.expanded_inline_details.insert((id, key));
+    assert!(hidden(&a, child_id), "收起态正文子块应隐藏");
+    a.toggle_details(details_id);
     a.ensure_layouts_all();
-    let expanded = a.cache.layouts[&id].value.layout_text().to_string();
-    assert!(
-        expanded.contains("隐藏正文"),
-        "展开后正文应可见：{expanded:?}"
-    );
+    assert!(!hidden(&a, child_id), "展开后正文子块应可见");
     assert_eq!(a.editor.session().serialize(), doc, "折叠不改文档字节");
 }
 
-/// Task 8：光标进入容器内 details 的隐藏正文时自动展开；不同块的折叠状态互不串扰。
+/// Task 2/8：光标进入容器内 details 的隐藏正文时自动展开；不同块的折叠状态互不串扰。
 #[test]
 fn caret_inside_container_details_body_auto_expands_without_cross_block_leak() {
     let store = MemStore::default();
@@ -662,36 +752,42 @@ fn caret_inside_container_details_body_auto_expands_without_cross_block_leak() {
         .index
         .blocks
         .iter()
-        .filter(|g| matches!(g.kind, BlockKind::BlockQuote))
+        .filter(|g| matches!(g.kind, BlockKind::Details { .. }))
         .map(|g| g.id)
         .collect();
-    assert_eq!(ids.len(), 2, "两段引用应各自成块");
+    assert_eq!(ids.len(), 2, "两段引用内的 details 应各自成块");
+    let at = |a: &App, needle: &str| -> BlockId {
+        let off = doc.find(needle).unwrap();
+        a.index
+            .blocks
+            .iter()
+            .find(|g| g.range.start <= off && off < g.range.end)
+            .map(|g| g.id)
+            .expect("目标块应存在")
+    };
+    let child_a = at(&a, "甲正文");
+    let child_b = at(&a, "乙正文");
+    let hidden = |a: &App, id: BlockId| {
+        let g = a
+            .index
+            .blocks
+            .iter()
+            .find(|g| g.id == id)
+            .expect("块应存在");
+        a.block_hidden(g)
+    };
+    assert!(hidden(&a, child_a) && hidden(&a, child_b));
     // 光标落在正文首个字符（CJK 多字节，偏移必须是字符边界）。
     a.editor.set_caret(doc.find("甲正文").unwrap());
     a.sync_details_at_caret();
-    assert_eq!(a.ui_state.expanded_inline_details.len(), 1);
+    assert_eq!(a.ui_state.expanded_details.len(), 1);
     assert!(
-        a.ui_state
-            .expanded_inline_details
-            .iter()
-            .all(|(id, _)| *id == ids[0]),
-        "只应展开光标所属块"
+        a.ui_state.expanded_details.contains(&ids[0]),
+        "只应展开光标所属 details"
     );
     a.ensure_layouts_all();
-    assert!(
-        a.cache.layouts[&ids[0]]
-            .value
-            .layout_text()
-            .contains("甲正文"),
-        "光标进入后正文应展开"
-    );
-    assert!(
-        !a.cache.layouts[&ids[1]]
-            .value
-            .layout_text()
-            .contains("乙正文"),
-        "另一块的 details 不应被连带展开"
-    );
+    assert!(!hidden(&a, child_a), "光标进入后正文应展开");
+    assert!(hidden(&a, child_b), "另一块的 details 不应被连带展开");
     assert_eq!(a.editor.session().serialize(), doc, "自动展开不写文档");
 }
 

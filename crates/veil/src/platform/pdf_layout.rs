@@ -409,6 +409,9 @@ struct Ctx<'a> {
     open_link: Option<(u32, f32)>,
     /// Mermaid 渲染结果：BlockId → MermaidImage（SVG + 位图）。
     mermaids: &'a std::collections::HashMap<veil_core::BlockId, veil_ui::MermaidImage>,
+    /// 当前块在引用容器内（`container.quote_depth > 0` 且 kind 非引用类）：
+    /// 行首 `>` 按 BlockQuote 同一规则等长消隐，避免提升块把前缀带进版面。
+    blank_quote: bool,
 }
 
 impl<'a> Ctx<'a> {
@@ -433,6 +436,7 @@ impl<'a> Ctx<'a> {
             link_targets: Vec::new(),
             open_link: None,
             mermaids,
+            blank_quote: false,
         }
     }
 
@@ -623,6 +627,11 @@ impl<'a> Ctx<'a> {
             Some((l, t)) => (l, t),
             None => (level, String::new()),
         };
+        let text = if self.blank_quote {
+            blank_quote_markers(&text).into_owned()
+        } else {
+            text
+        };
         // 标题尾缀 `{#id}` 是锚点指令，不得进入版面可见文本/书签。
         let (text, _) = split_heading_id(&text);
         let size = heading_size(lvl);
@@ -656,6 +665,11 @@ impl<'a> Ctx<'a> {
         media: &mut Option<&mut dyn MediaProvider>,
     ) {
         let text = slice_text(s, start, end);
+        let text = if self.blank_quote {
+            blank_quote_markers(&text)
+        } else {
+            Cow::Borrowed(text.as_str())
+        };
         let visible = text.trim_end().len();
         let nodes = s.block_inlines(id).unwrap_or_default();
         // B4：段落含独立图片 → 放宽到 6 行（与编辑视图/HTML 导出同策略）。
@@ -1168,15 +1182,20 @@ impl<'a> Ctx<'a> {
         let code = if fenced {
             s.fenced_code_source(id).unwrap_or((None, String::new()))
         } else {
-            (
-                None,
-                s.text_slice(veil_core::Range { start, end })
-                    .unwrap_or_default()
-                    .lines()
+            (None, {
+                let raw = s
+                    .text_slice(veil_core::Range { start, end })
+                    .unwrap_or_default();
+                let raw = if self.blank_quote {
+                    blank_quote_markers(&raw).into_owned()
+                } else {
+                    raw
+                };
+                raw.lines()
                     .map(|l| l.strip_prefix("    ").unwrap_or(l))
                     .collect::<Vec<_>>()
-                    .join("\n"),
-            )
+                    .join("\n")
+            })
         };
         let (lang, body) = code;
         let st = Style {
@@ -1398,6 +1417,11 @@ impl<'a> Ctx<'a> {
     ) {
         let raw = slice_text(s, start, end);
         let text = blank_container_details_tags(&raw);
+        let text = if self.blank_quote {
+            blank_quote_markers(&text)
+        } else {
+            text
+        };
         let visible = text.trim_end().len();
         let (prefix, content_rel) = list_prefix(&text, ordered, task.is_some());
         let nodes = s.block_inlines(id).unwrap_or_default();
@@ -1927,6 +1951,11 @@ impl<'a> Ctx<'a> {
 
     fn raw_text(&mut self, s: &Session, start: usize, end: usize, size: f32) {
         let text = slice_text(s, start, end);
+        let text = if self.blank_quote {
+            blank_quote_markers(&text)
+        } else {
+            Cow::Borrowed(text.as_str())
+        };
         let st = Style {
             size,
             color: COL_MUTED,
@@ -2257,6 +2286,34 @@ fn slice_text(s: &Session, start: usize, end: usize) -> String {
     s.text_slice(Range::new(start, end)).unwrap_or_default()
 }
 
+/// 按字节等长把行首引用标记 `>` 替换为空格（保留缩进/行内节点偏移）：
+/// 容器内提升块（Details 头块及其子块）kind 不再是 BlockQuote，但正文仍带 `>` 前缀。
+fn blank_quote_markers(text: &str) -> Cow<'_, str> {
+    let mut out: Option<String> = None;
+    let mut line_off = 0usize;
+    for line in text.split_inclusive('\n') {
+        let bytes = line.as_bytes();
+        let mut j = 0usize;
+        loop {
+            while j < bytes.len() && matches!(bytes[j], b' ' | b'\t') {
+                j += 1;
+            }
+            if j < bytes.len() && bytes[j] == b'>' {
+                let buf = out.get_or_insert_with(|| text.to_string());
+                buf.replace_range(line_off + j..line_off + j + 1, " ");
+                j += 1;
+                if j < bytes.len() && matches!(bytes[j], b' ' | b'\t') {
+                    j += 1;
+                }
+            } else {
+                break;
+            }
+        }
+        line_off += line.len();
+    }
+    out.map_or(Cow::Borrowed(text), Cow::Owned)
+}
+
 /// 容器块（引用/提示/列表项）内的 `<details>` 开闭标签是结构标记，不得作为正文进 PDF。
 ///
 /// 屏幕层把这些区间折叠消隐，但容器块不是 Details 头块，标签夹在块文本里
@@ -2405,6 +2462,12 @@ pub fn layout_document(
 
     for (id, kind, range) in session.blocks() {
         let (start, end) = (range.start, range.end);
+        let container = session.block_container(id);
+        ctx.blank_quote = container.quote_depth > 0
+            && !matches!(
+                kind,
+                BlockKind::BlockQuote | BlockKind::Callout(_) | BlockKind::Admonition(_)
+            );
         match kind {
             BlockKind::Paragraph => {
                 // 纯 TOC 标记是编辑器视图指令（就地生成目录）；PDF/打印与 HTML
@@ -4074,6 +4137,44 @@ mod tests {
                 && !lower.contains("</details")
                 && !lower.contains("<summary"),
             "容器内 details 标签不得进 PDF: {text}"
+        );
+    }
+
+    /// Task 2 跨表面：引用内 `<details>` 提升为独立块后，PDF 可见文本不得残留
+    /// 行首 `>` 前缀（与 BlockQuote 同一等长消隐口径）；列表内 details 不受影响。
+    #[test]
+    fn promoted_container_details_elide_quote_markers_in_pdf() {
+        let quote_md = "> 甲\n\
+                        >\n\
+                        > <details>\n\
+                        > <summary>引用摘要</summary>\n\
+                        > 引用正文\n\
+                        > </details>\n\n\
+                        尾\n";
+        let text = all_text(&lay(quote_md, true));
+        assert!(
+            text.contains("引用摘要") && text.contains("引用正文"),
+            "引用内 details 内容必须进 PDF: {text}"
+        );
+        assert!(
+            !text.contains('>'),
+            "引用内 details 的 `>` 前缀不得进入 PDF: {text}"
+        );
+
+        let list_md = "- 列表项\n\
+                       \x20 <details>\n\
+                       \x20 <summary>列表摘要</summary>\n\
+                       \x20 列表正文\n\
+                       \x20 </details>\n\n\
+                       尾\n";
+        let text = all_text(&lay(list_md, true));
+        assert!(
+            text.contains("列表摘要") && text.contains("列表正文"),
+            "列表内 details 内容必须进 PDF: {text}"
+        );
+        assert!(
+            !text.contains('>'),
+            "列表内 details 不应出现 `>` 前缀: {text}"
         );
     }
 

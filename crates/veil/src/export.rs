@@ -373,6 +373,20 @@ pub fn html_of_doc(
         // 行内节点偏移不变），不得把裸标记文本带进导出件。
         let text = if kind == BlockKind::BlockQuote {
             blank_callout_marker(&text)
+        } else if session.block_container(id).quote_depth > 0
+            && matches!(
+                kind,
+                BlockKind::Paragraph
+                    | BlockKind::AtxHeading(_)
+                    | BlockKind::SetextHeading(_)
+                    | BlockKind::IndentedCode
+                    | BlockKind::ThematicBreak
+                    | BlockKind::ListItem { .. }
+            )
+        {
+            // 容器内 `<details>` 的子块仍带 `>` 前缀：换成等长空格（保持行内节点
+            // 偏移不变），避免 pulldown 再包一层 blockquote / 缩进成代码块。
+            blank_quote_markers(&text)
         } else {
             std::borrow::Cow::Borrowed(text.as_str())
         };
@@ -520,6 +534,35 @@ fn blank_callout_marker(text: &str) -> std::borrow::Cow<'_, str> {
         }
         None => std::borrow::Cow::Borrowed(text),
     }
+}
+
+/// 把每行行首的引用标记 `>` 替换为等长空格（保留行内节点绝对偏移）：
+/// 容器内 `<details>` 的子块仍带 `>` 前缀，若不消隐会再被 pulldown 包一层
+/// blockquote，或缩进成代码块。
+fn blank_quote_markers(text: &str) -> std::borrow::Cow<'_, str> {
+    let mut out: Option<String> = None;
+    let mut line_off = 0usize;
+    for line in text.split_inclusive('\n') {
+        let bytes = line.as_bytes();
+        let mut j = 0usize;
+        loop {
+            while j < bytes.len() && matches!(bytes[j], b' ' | b'\t') {
+                j += 1;
+            }
+            if j < bytes.len() && bytes[j] == b'>' {
+                let buf = out.get_or_insert_with(|| text.to_string());
+                buf.replace_range(line_off + j..line_off + j + 1, " ");
+                j += 1;
+                if j < bytes.len() && matches!(bytes[j], b' ' | b'\t') {
+                    j += 1;
+                }
+            } else {
+                break;
+            }
+        }
+        line_off += line.len();
+    }
+    out.map_or(std::borrow::Cow::Borrowed(text), std::borrow::Cow::Owned)
 }
 
 /// 把文档级链接定义前缀与待解析块源文拼接。

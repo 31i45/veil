@@ -397,12 +397,14 @@ impl LayoutEngine {
             ordinal,
             toc_list,
             &[],
+            0,
         )
     }
 
-    /// 带图片题注的排版入口：题注随图片视觉行之后插入一行（视图派生文本，不写回文档）。
+    /// 带容器归属的排版入口：`quote_depth > 0` 的提升块（容器内 Details 头块及其
+    /// 子块等）按 BlockQuote 同一规则消隐行首 `>` 标记（等长空格，保留缩进）。
     #[allow(clippy::too_many_arguments)] // 内部布局函数参数天然多
-    pub(crate) fn layout_block_with_captions(
+    pub(crate) fn layout_block_with_captions_in_container(
         &mut self,
         kind: BlockKind,
         text: &str,
@@ -417,10 +419,23 @@ impl LayoutEngine {
         ordinal: Option<u32>,
         toc_list: bool,
         captions: &[ImageCaption],
+        quote_depth: u8,
     ) -> BlockLayout {
         self.layout_block_full(
-            kind, text, block, inlines, width, caret, imgs, reveal_all, footnotes, folds, ordinal,
-            toc_list, captions,
+            kind,
+            text,
+            block,
+            inlines,
+            width,
+            caret,
+            imgs,
+            reveal_all,
+            footnotes,
+            folds,
+            ordinal,
+            toc_list,
+            captions,
+            quote_depth,
         )
     }
 
@@ -440,6 +455,7 @@ impl LayoutEngine {
         ordinal: Option<u32>,
         toc_list: bool,
         captions: &[ImageCaption],
+        quote_depth: u8,
     ) -> BlockLayout {
         let plain = self.plain_lines;
         let full = text.strip_suffix('\n').unwrap_or(text);
@@ -503,6 +519,7 @@ impl LayoutEngine {
                 ordinal,
                 toc_list,
                 &mut tasks,
+                quote_depth,
             )
         };
         // 容器内嵌套块标记（REN-SWEEP-002）：引用/提示/列表项里再出现的

@@ -350,7 +350,8 @@ impl App {
                 }
             }
         }
-        // 计数「i/n」：右对齐于输入区右缘；无命中用 danger 表达空态。
+        // 计数「i/n」：右对齐于输入区右缘；无命中用中性色表达空态
+        //（空态不是错误；danger 只留给非法正则等真错误）。
         if !count.is_empty() {
             let color = if search.no_matches() {
                 crate::tokens::state::empty_fg(&theme)

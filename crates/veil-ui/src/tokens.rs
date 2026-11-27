@@ -371,9 +371,13 @@ pub(crate) mod state {
         theme.accent
     }
 
-    /// empty：无结果/空态前景。
+    /// empty：无结果/空态前景（中性色）。
+    ///
+    /// 空态不是错误：`danger` 只用于危险操作（删除/清空）与真错误
+    /// （文件缺失、导出失败、非法正则、公式渲染失败）。「查无此项」表达的是
+    /// 此处暂无内容，用 `muted` 呈现；用红色会把空列表误读为故障。
     pub fn empty_fg(theme: &Theme) -> [u8; 3] {
-        theme.danger
+        theme.muted
     }
 }
 
@@ -634,7 +638,20 @@ mod tests {
         );
         assert_eq!(state::disabled_fg(&light), light.muted);
         assert_eq!(state::selected_fg(&light), light.accent);
-        assert_eq!(state::empty_fg(&light), light.danger);
+        // 空态（无结果/空列表）是中性语义：取 muted，且不得再取 danger。
+        for t in [
+            crate::theme::Theme::light(),
+            crate::theme::Theme::dark(),
+            crate::theme::Theme::high_contrast(),
+        ] {
+            assert_eq!(state::empty_fg(&t), t.muted, "空态必须取中性色 muted");
+            assert_ne!(
+                state::empty_fg(&t),
+                t.danger,
+                "空态不是错误，不得使用 danger（dark={}）",
+                t.dark
+            );
+        }
         assert_ne!(state::hover_bg(&dark), state::pressed_bg(&dark));
     }
 

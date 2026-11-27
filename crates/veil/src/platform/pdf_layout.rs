@@ -108,9 +108,16 @@ pub trait MediaProvider {
 // 样式与行内条目
 // =============================================================================
 
-const BODY_SIZE: f32 = 11.0;
+/// 纸面正文字号：单一来源为 `veil_ui::type_scale`（契约 §3.2 的标题比值除数）。
+const BODY_SIZE: f32 = veil_ui::type_scale::PAPER_BODY_PX;
+/// 纸面代码字号：契约只规定屏幕代码比值（§3.1），纸面沿用既有排版值。
 const CODE_SIZE: f32 = 9.3;
+/// 纸面表格字号：同上，既有排版值（非契约字阶）。
 const TABLE_SIZE: f32 = 8.8;
+
+/// 纸面 hairline：按 96 dpi 逻辑像素换算到 PDF 的 pt（1 px = 72/96 pt）。
+/// 语义取 `type_scale::hairline`，数值换算后用于表格网格与分隔线（契约 §四）。
+const HAIRLINE_PT: f32 = veil_ui::type_scale::hairline * 72.0 / 96.0;
 
 const COL_TEXT: [u8; 3] = [24, 28, 35];
 const COL_MUTED: [u8; 3] = [107, 114, 128];
@@ -1340,7 +1347,7 @@ impl<'a> Ctx<'a> {
             self.pages[self.page].push(DrawOp::Rect {
                 x: self.geom.margin_x + 1.0,
                 y: start_y + 2.0,
-                w: 3.0,
+                w: veil_ui::type_scale::rail,
                 h: h - 4.0,
                 color: rail_color,
             });
@@ -1526,7 +1533,7 @@ impl<'a> Ctx<'a> {
                         y1: yy,
                         x2: x0 + total_w,
                         y2: yy,
-                        width: 0.6,
+                        width: HAIRLINE_PT,
                         color: COL_RULE,
                     });
                 }
@@ -1544,7 +1551,7 @@ impl<'a> Ctx<'a> {
                         y1: top,
                         x2: vx,
                         y2: top + row_h,
-                        width: 0.6,
+                        width: HAIRLINE_PT,
                         color: COL_RULE,
                     });
                 }
@@ -1804,7 +1811,7 @@ impl<'a> Ctx<'a> {
             y1: y,
             x2: right,
             y2: y,
-            width: 0.8,
+            width: HAIRLINE_PT,
             color: COL_RULE,
         });
         self.y += 10.0;
@@ -2960,6 +2967,18 @@ mod tests {
             assert!(w[0] > w[1], "标题字号应严格递减：{sizes:?}");
         }
         assert!(*sizes.last().unwrap() >= BODY_SIZE);
+    }
+
+    /// 纸面字号/线宽必须从 `veil_ui::type_scale` 取语义值，不另立一套字面量。
+    #[test]
+    fn paper_fonts_and_strokes_come_from_type_scale() {
+        assert_eq!(BODY_SIZE, veil_ui::type_scale::PAPER_BODY_PX);
+        assert_eq!(
+            HAIRLINE_PT,
+            veil_ui::type_scale::hairline * 72.0 / 96.0,
+            "hairline 只做 96dpi→pt 换算，不得写自由线宽"
+        );
+        assert_eq!(veil_ui::type_scale::rail, 3.0);
     }
 
     #[test]

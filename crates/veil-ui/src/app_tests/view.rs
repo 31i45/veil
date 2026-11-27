@@ -2158,7 +2158,7 @@ fn search_bar_focus_uses_quiet_field_tint() {
 }
 
 #[test]
-fn search_bar_no_match_uses_danger_and_disabled_colors() {
+fn search_bar_no_match_uses_neutral_and_disabled_colors() {
     let store = MemStore::default();
     let mut a = app("alpha\n", None, false, &store);
     a.open_search();
@@ -2170,6 +2170,8 @@ fn search_bar_no_match_uses_danger_and_disabled_colors() {
     a.paint_search(&mut f);
     let theme = a.input_state.theme;
     let wanted = crate::tokens::state::empty_fg(&theme);
+    assert_eq!(wanted, theme.muted, "空态取中性色 muted");
+    assert_ne!(wanted, theme.danger, "空态不得使用 danger");
     let mut found = false;
     for x in (l.count_right - search::COUNT_W) as u32..l.count_right as u32 {
         for y in l.text.y as u32..(l.text.y + l.text.h) as u32 {
@@ -2179,7 +2181,7 @@ fn search_bar_no_match_uses_danger_and_disabled_colors() {
             }
         }
     }
-    assert!(found, "无命中计数使用 danger 色");
+    assert!(found, "无命中计数使用中性色（muted），不得使用 danger");
     // 翻页按钮字形应为禁用前景（置灰），不出现正文色
     let text = theme.text;
     let bg = theme.popup_bg;

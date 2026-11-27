@@ -59,9 +59,9 @@
 | 内容 | 失败 | 空内容 | 加载中 | 远程被阻止 | 结论 |
 |---|---|---|---|---|---|
 | 表格 | 不适用（同步解析）；语法不成立时不成网格，按普通段落继续编辑 | 表头 + 0 行表体：仅渲染表头网格，无额外提示（无需操作入口） | 不适用（同步排版） | 不适用（无网络） | 一致，无缺口 |
-| 图片 | 本地读取失败 → `[alt]` 占位 + 浅灰占位框；右键首项「图片文件缺失（当前显示替代文本）」、复制路径、重新加载；状态栏 `图片缺失` 提示 | `src` 为空/不可解析 → `[alt]` 或 `[图片]` 占位，可正常编辑源码 | 远程图首次出现 → 先显示 alt 占位，回包成功后替换；无独立 loading 文案/骨架 | 默认阻止 → alt 占位；全局入口「视图 → 允许远程图片」+ 设置项 + 切换状态栏提示 | 本次补一个小缺口（见下） |
+| 图片 | 本地读取失败 → `[alt]` 占位 + 浅灰占位框；右键首项「图片文件缺失（当前显示替代文本）」、复制路径、重新加载；状态栏 `图片缺失` 提示 | `src` 为空/不可解析 → `[alt]` 或 `[图片]` 占位，可正常编辑源码 | 远程图首次出现 → 先显示 alt 占位，回包成功后替换；无独立 loading 文案/骨架（远程请求通常极短） | 默认阻止 → alt 占位；**被阻止的图片块右键首项「允许远程图片（全局）…」**，先确认再放开并立即重排重试；全局入口「视图 → 允许远程图片」+ 设置项仍在 | 一致 |
 | 公式 | 渲染失败且非编辑态 → 显示源码 + 块级提示「公式渲染失败，已显示源码」；点入即编辑源码 | 空公式按渲染失败处理（`公式渲染为空`）→ 源码 + 同一提示 | 不适用（同步渲染） | 不适用（本地数学字体/渲染器，无网络） | 一致，无缺口 |
-| 图表（Mermaid 各图型） | 保留围栏源码 + `◈ 类型` 徽标；状态栏「图表渲染失败：{原因}；下一步：检查语法后重新预览」；同一源码连续失败 3 次停止自动重试；右键：mermaid.live / 预览源码图 / 复制源码 / 插入快照 | 空块提示「空 Mermaid 块 — 点击插入模板」，右键直接给流程图/时序图/类图模板 | 异步渲染期间显示源码与徽标，成功后替换；无独立 spinner | 离线渲染（QuickJS + 本地 mermaid.js），不发起网络请求；mermaid.live 仅复制源码，打开失败有明确指引 | 一致，无缺口；loading 无进度提示为已知轻微限制 |
+| 图表（Mermaid 各图型） | 保留围栏源码 + `◈ 类型` 徽标；状态栏「图表渲染失败：{原因}；下一步：检查语法后重新预览」；同一源码连续失败 3 次停止自动重试；右键：mermaid.live / 预览源码图 / 复制源码 / 插入快照 | 空块提示「空 Mermaid 块 — 点击插入模板」，右键直接给流程图/时序图/类图模板 | 异步渲染期间显示源码与徽标，**块右上角「渲染中…」轻量胶囊**（静态文字，非动画；回包成功/失败后自动消失） | 离线渲染（QuickJS + 本地 mermaid.js），不发起网络请求；mermaid.live 仅复制源码，打开失败有明确指引 | 一致 |
 
 ### 2.1 本次最小修复（远程图片被阻止时的可操作入口）
 
@@ -75,8 +75,16 @@
 
 测试：`reload_blocked_remote_image_points_to_allow_remote_images`（`app_tests/media.rs`）。
 
-仍未做（登记为后续）：右键菜单中的「就地允许远程图片」动作需要扩展 `CtxKind::Image`
-与上下文动作表，改动面大于本轮「最小修复」，保留全局菜单/设置入口。
+仍未做（本轮已补齐）：右键菜单「就地允许远程图片（全局）」已实现——
+`CtxKind::Image` 新增 `remote_blocked`，该状态下菜单首项为
+`CtxAllowRemoteImages`「允许远程图片（全局）…」；点击先弹一次确认
+（`ModalPurpose::RemoteImages`，说明会向外部服务器发起请求），确认后复用
+`toggle_remote_images()` 落盘配置、清远程失败记忆并把光标移出图片源码区间，
+立即重排重试。测试：`remote_blocked_image_menu_allows_in_place_and_retries`。
+
+Mermaid 加载态（本轮已补齐）：请求投递后块右上角显示「渲染中…」胶囊，
+回包（成功/失败）后消失；失败仍保留源码可重试/查看。测试：
+`mermaid_pending_block_shows_loading_hint_until_bitmap_arrives`。
 
 ## 3. 4.4 非目标登记（引用）
 
@@ -92,8 +100,8 @@
 
 | 命令 | 结果 |
 |---|---|
-| `cargo test -p veil-ui` | 1471 passed, 0 failed, 12 ignored；`boundary_guard` 7 passed |
-| `cargo test -p veil-mermaid-offline` | 27 passed, 0 failed, 2 ignored（另两组子进程用例各 1 passed） |
+| `cargo test -p veil-ui` | 1475 passed, 0 failed, 12 ignored；`boundary_guard` 7 passed |
+| `cargo test -p veil-mermaid-offline` | 28 passed, 0 failed, 2 ignored（另两组子进程用例各 1 passed） |
 | `cargo clippy --workspace --all-targets -- -D warnings` | 通过 |
 | `cargo fmt --all --check` | 通过 |
 
@@ -110,6 +118,11 @@
 - `crates/veil-ui/src/interaction.rs`（滚轮接管、列宽拖动坐标）
 - `crates/veil-ui/src/interaction_menu.rs`（远程图片阻止重载提示）
 - `crates/veil-ui/src/i18n.rs`（新增提示文案中/英）
+- `crates/veil-ui/src/view/ctx_menu.rs`（`CtxKind::Image.remote_blocked`、`CtxAction::AllowRemoteImages`）
+- `crates/veil-ui/src/interaction_menu.rs`（阻止态计算、就地允许确认入口）
+- `crates/veil-ui/src/document/doc_state.rs`（`ModalPurpose::RemoteImages` 结论、光标移出图片源码区间）
+- `crates/veil-ui/src/paint.rs`（Mermaid「渲染中…」胶囊）
+- `crates/veil-ui/src/app.rs`（`mermaid_block_loading`、`ModalPurpose::RemoteImages`）
 - `crates/veil-ui/src/app_tests/tables.rs`（4.1 验收测试）
 - `crates/veil-ui/src/app_tests/media.rs`（4.3 修复测试）
 - `crates/veil-mermaid-offline/src/lib.rs`（深色 corpus 证据、journey/c4 覆盖、新增自动断言）

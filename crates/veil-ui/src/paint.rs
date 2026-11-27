@@ -1725,6 +1725,22 @@ impl App {
                         }
                     }
                 }
+                BlockKind::Mermaid
+                    if self.window_state.print.is_none() && self.mermaid_block_loading(id) =>
+                {
+                    // 已排队/渲染中：块右上角轻量胶囊，回包后自动消失（失败态仍显示源码）。
+                    let (cx, cw) = (self.content_x(), self.content_width());
+                    paint_mermaid_loading(
+                        &mut frame,
+                        &mut self.engine,
+                        &mut self.ui_state.chrome.labels,
+                        &theme,
+                        scale,
+                        cx,
+                        cw,
+                        sy,
+                    );
+                }
                 _ => {}
             }
             if l.truncated {
@@ -2064,6 +2080,46 @@ fn mermaid_display_size(
     let nat_w = (bmp_w as f32 * css_per_bmp * ui).round().max(1.0) as u32;
     let nat_h = (bmp_h as f32 * css_per_bmp * ui).round().max(1.0) as u32;
     crate::view::image_display_size(nat_w, nat_h, (None, None), max_w, max_h)
+}
+
+/// Mermaid 块「已排队 / 渲染中」的轻量提示：块右上角一枚小胶囊（surface 底 + 次要文字）。
+/// 只在尚未出图时绘制，回包后（成功/失败）随 `mermaid_block_loading` 归 false 自然消失；
+/// 用静态文字而不是动画，避免每帧重绘引起闪烁。
+#[allow(clippy::too_many_arguments)] // 绘制辅助参数天然多
+fn paint_mermaid_loading(
+    frame: &mut Frame,
+    engine: &mut LayoutEngine,
+    labels: &mut crate::chrome::LabelCache,
+    theme: &crate::theme::Theme,
+    scale: f32,
+    x: f32,
+    width: f32,
+    y: i32,
+) {
+    let Some(lab) = labels.get_or_insert(engine, t(Key::MermaidLoading), theme.muted, scale) else {
+        return;
+    };
+    let pad_x = (6.0 * scale).round().max(2.0);
+    let pad_y = (2.0 * scale).round().max(1.0);
+    let w = lab.w as f32 + pad_x * 2.0;
+    let h = lab.h as f32 + pad_y * 2.0;
+    let bx = (x + width - w).round() as i32;
+    let by = y + (2.0 * scale).round() as i32;
+    frame.fill_rounded_rect(
+        bx,
+        by,
+        w.round() as u32,
+        h.round() as u32,
+        (h * 0.5).min(4.0 * scale),
+        theme.popup_bg,
+    );
+    frame.blit(
+        &lab.pixels,
+        lab.w,
+        lab.h,
+        bx + pad_x.round() as i32,
+        by + pad_y.round() as i32,
+    );
 }
 
 #[cfg(test)]

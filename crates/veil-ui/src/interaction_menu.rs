@@ -509,7 +509,7 @@ impl App {
             // 图片与链接共用同一份 inline 解析（原实现各解析一次整块）。
             let nodes = self.inlines_at_offset(off);
             match nodes.as_deref().and_then(|n| self.image_at_in(n, off)) {
-                Some((path, missing)) => {
+                Some((path, missing, remote_blocked)) => {
                     if missing {
                         // 缺失图片：菜单打开时给出可见提示（DEF-T67-E1-005）。
                         self.ui_state.chrome.notify_error(
@@ -517,7 +517,17 @@ impl App {
                                 .replace("{}", &path),
                         );
                     }
-                    (CtxKind::Image { path, missing }, None, None, None, None)
+                    (
+                        CtxKind::Image {
+                            path,
+                            missing,
+                            remote_blocked,
+                        },
+                        None,
+                        None,
+                        None,
+                        None,
+                    )
                 }
                 None => match nodes.as_deref().and_then(|n| self.link_at_in(n, off)) {
                     Some(url) => (CtxKind::Link, Some(url), None, None, None),
@@ -1069,10 +1079,11 @@ impl App {
     pub(crate) fn image_at(&self, offset: usize) -> Option<(String, bool)> {
         let nodes = self.inlines_at_offset(offset)?;
         self.image_at_in(&nodes, offset)
+            .map(|(path, missing, _)| (path, missing))
     }
 
-    /// 在已解析的 inline 节点中取图片源与缺失状态（右键与悬停共用单次解析）。
-    fn image_at_in(&self, nodes: &[InlineNode], offset: usize) -> Option<(String, bool)> {
+    /// 在已解析的 inline 节点中取图片源、缺失状态与「远程被阻止」状态（右键与悬停共用单次解析）。
+    fn image_at_in(&self, nodes: &[InlineNode], offset: usize) -> Option<(String, bool, bool)> {
         fn find(nodes: &[InlineNode], off: usize) -> Option<&InlineNode> {
             nodes.iter().find_map(|n| {
                 if n.range.start <= off && off < n.range.end {
@@ -1113,7 +1124,10 @@ impl App {
             Some(path) => !path.exists(),
             None => false,
         };
-        Some((src, missing))
+        // 远程图且全局安全策略阻止加载：右键菜单就地提供「允许远程图片（全局）」。
+        let remote_blocked =
+            crate::paint::is_remote_image_url(&src) && !self.config.allow_remote_images;
+        Some((src, missing, remote_blocked))
     }
 
     /// 在已解析的 inline 节点中取 `<abbr title="…">` 文本（悬停单次解析共用）。
@@ -1513,9 +1527,52 @@ impl App {
                 self.recompute_geometry();
                 self.request_redraw();
             }
+            CtxAction::AllowRemoteImages => self.confirm_allow_remote_images(),
             // 提示项无动作：文案已在菜单中可见。
             CtxAction::ImageMissingHint => {}
         }
+        self.request_redraw();
+    }
+
+    /// 就地允许远程图片（全局）：先弹一次确认（安全模型是全局开关），
+    /// 结论由 `resolve_modal` 落到 `resolve_allow_remote_images`。
+    fn confirm_allow_remote_images(&mut self) {
+        if self.config.allow_remote_images {
+            // 已经允许：本项理论上不再出现；直接按当前配置重排重试即可。
+            self.input_state.revs.remote_images += 1;
+            self.ensure_layouts_visible();
+            self.recompute_geometry();
+            self.request_redraw();
+            return;
+        }
+        if self.ui_state.modal.is_some() {
+            return; // 已有模态未决：不叠加
+        }
+        self.close_lite_overlays();
+        let spec = crate::view::modal::ModalSpec::new(
+            t(I18nKey::ConfirmAllowRemoteImagesTitle),
+            t(I18nKey::ConfirmAllowRemoteImagesBody),
+            vec![
+                crate::view::modal::ModalButton::new(
+                    1,
+                    t(I18nKey::BtnConfirm),
+                    crate::view::modal::ButtonRole::Primary,
+                ),
+                crate::view::modal::ModalButton::new(
+                    2,
+                    t(I18nKey::BtnCancel),
+                    crate::view::modal::ButtonRole::Secondary,
+                ),
+            ],
+        );
+        let state = crate::view::modal::ModalState::new(&spec);
+        self.ui_state.modal = Some(crate::app::ActiveModal {
+            spec,
+            state,
+            intent: None,
+            purpose: crate::app::ModalPurpose::RemoteImages,
+        });
+        self.sync_ime_for_modal();
         self.request_redraw();
     }
 

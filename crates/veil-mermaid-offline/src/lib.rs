@@ -199,7 +199,9 @@ impl Session {
              &[aria-roledescription=\"c4\"] line[stroke=\"#444444\"]{stroke:#8b949e !important;} \
              &[aria-roledescription=\"radar\"] .radarTitle, \
              &[aria-roledescription=\"radar\"] .radarAxisLabel, \
-             &[aria-roledescription=\"radar\"] .radarLegendText{fill:#ffffff !important;color:#ffffff !important;}', "
+             &[aria-roledescription=\"radar\"] .radarLegendText{fill:#ffffff !important;color:#ffffff !important;} \
+             &[aria-roledescription=\"gitGraph\"] .branchLabel text, \
+             &[aria-roledescription=\"gitGraph\"] .branchLabel tspan{paint-order:stroke;stroke:#000000;stroke-width:2.5px;stroke-linejoin:round !important;}', "
         } else {
             "themeCSS: '&[aria-roledescription=\"mindmap\"] .section-root>.label text{text-anchor:middle !important;} \
              .sections .cluster-label text,.sections .cluster-label tspan{fill:#333333 !important;} \
@@ -2312,6 +2314,100 @@ mod tests {
 
     /// 应用深色主题正文底色（veil-ui `Theme::dark().bg` = `GRAY_30` = `[30, 30, 30]`）。
     const DARK_EVIDENCE_BG: [u8; 3] = [30, 30, 30];
+
+    /// gitGraph 分支标签（`main`）的实际光栅对比度：隐藏同一标签文字后取真实药丸底色，
+    /// 逐像素比较「有字/无字」两帧，取最实心 10% 像素（字芯）的中位以外分位。
+    fn gitgraph_branch_label_pixel_contrast(svg: &str) -> (f64, [f64; 3], [f64; 3]) {
+        let marker = "<g class=\"branchLabel\">";
+        let label_start = svg.find(marker).expect("gitGraph branchLabel missing");
+        let text_start = label_start
+            + svg[label_start..]
+                .find("<text")
+                .expect("gitGraph branch label text missing");
+        let mut without_label = svg.to_string();
+        without_label.insert_str(text_start + "<text".len(), " style=\"display:none\"");
+
+        let (actual, _) = rasterize_svg(svg).expect("rasterize dark gitgraph");
+        let (background, _) = rasterize_svg(&without_label).expect("rasterize gitgraph bg");
+        assert_eq!(
+            (actual.width, actual.height),
+            (background.width, background.height)
+        );
+        let actual_pixels = actual.pixmap.data().as_chunks::<4>().0;
+        let background_pixels = background.pixmap.data().as_chunks::<4>().0;
+        let mut foreground_sum = [0.0; 3];
+        let mut background_sum = [0.0; 3];
+        let mut contrasts = Vec::new();
+        for (actual, background) in actual_pixels.iter().zip(background_pixels) {
+            if actual[3] == u8::MAX && background[3] == u8::MAX && actual[..3] != background[..3] {
+                for channel in 0..3 {
+                    foreground_sum[channel] += f64::from(actual[channel]);
+                    background_sum[channel] += f64::from(background[channel]);
+                }
+                let foreground_luminance = relative_luminance_rgb([
+                    f64::from(actual[0]),
+                    f64::from(actual[1]),
+                    f64::from(actual[2]),
+                ]);
+                let background_luminance = relative_luminance_rgb([
+                    f64::from(background[0]),
+                    f64::from(background[1]),
+                    f64::from(background[2]),
+                ]);
+                contrasts.push(
+                    (foreground_luminance.max(background_luminance) + 0.05)
+                        / (foreground_luminance.min(background_luminance) + 0.05),
+                );
+            }
+        }
+        assert!(
+            contrasts.len() >= 24,
+            "gitGraph 分支标签文字像素过少: {}",
+            contrasts.len()
+        );
+        let count = contrasts.len();
+        contrasts.sort_by(f64::total_cmp);
+        let ratio = contrasts[count * 9 / 10];
+        let foreground = foreground_sum.map(|sum| sum / count as f64);
+        let background = background_sum.map(|sum| sum / count as f64);
+        (ratio, foreground, background)
+    }
+
+    /// F-011 收口：gitGraph 分支标签深色对比度。
+    ///
+    /// 实测原状 `#2c2c2c` 压药丸 `#797d7d` = 3.35:1（低于 AA 4.5）。不重排分支配色，
+    /// 只按 `aria-roledescription="gitGraph"` 限定给标签文字加黑色描边（`paint-order:stroke`
+    /// 让描边在字芯之下），再对光栅结果重新采样字芯与药丸底色。
+    #[test]
+    fn dark_gitgraph_branch_label_meets_wcag_aa() {
+        let mut session = Session::new().expect("initialize Mermaid");
+        let (_, source) = corpus::MERMAID_11_12_CORPUS
+            .iter()
+            .find(|(name, _)| *name == "gitgraph")
+            .expect("gitgraph corpus entry");
+        let light = session.render(source, false).expect("light gitgraph");
+        let dark = session.render(source, true).expect("dark gitgraph");
+
+        let rule = last_css_rule(
+            &dark,
+            "[aria-roledescription=\"gitGraph\"] .branchLabel text",
+        );
+        assert_eq!(css_property(rule, "stroke"), "#000000");
+        assert_eq!(css_property(rule, "paint-order"), "stroke");
+        assert!(
+            !light.contains("aria-roledescription=\"gitGraph\"] .branchLabel"),
+            "浅色主题不得套用 gitGraph 描边覆盖"
+        );
+
+        let (ratio, foreground, background) = gitgraph_branch_label_pixel_contrast(&dark);
+        println!(
+            "dark gitGraph branch label: contrast={ratio:.2}, mean text RGB={foreground:?}, pill RGB={background:?}"
+        );
+        assert!(
+            ratio >= 4.5,
+            "gitGraph 分支标签对比度 {ratio:.2} 未达 AA 4.5（text {foreground:?} on pill {background:?}）"
+        );
+    }
 
     /// 证据 PNG：`bg = None` 保持透明（浅色对照）；`Some(rgb)` 时把 resvg 的透明画布
     /// 合成到不透明底色上——深色证据必须与应用内真实叠底（#1e1e1e）一致，

@@ -1118,6 +1118,7 @@ impl App {
             ModalPurpose::Unsaved => self.resolve_unsaved(id, active.intent),
             ModalPurpose::External => self.resolve_external(id),
             ModalPurpose::About => self.resolve_about(id),
+            ModalPurpose::RemoteImages => self.resolve_allow_remote_images(id),
             ModalPurpose::Error(purpose) => {
                 if !known {
                     self.ui_state.chrome.notice = t(Key::NoticeCancelled).into();
@@ -1165,6 +1166,58 @@ impl App {
             }
         }
         self.request_redraw();
+    }
+
+    /// 就地「允许远程图片（全局）」结论：1=确认放开（落盘 + 立即重排重试），
+    /// 其余/Esc=取消。清空远程失败记忆，保证此前失败过的图在本轮也能重试。
+    fn resolve_allow_remote_images(&mut self, id: u16) {
+        if id != 1 {
+            self.ui_state.chrome.notice = t(Key::NoticeCancelled).into();
+            self.request_redraw();
+            return;
+        }
+        if !self.config.allow_remote_images {
+            self.cache.remote_failed.clear();
+            // 右键把光标落进了图片源码区间（图片按源码显示）；允许后要立刻看到图，
+            // 先把光标移出该 inline 节点（node_active 为闭区间，需跨过 end）。
+            self.step_caret_out_of_active_image();
+            self.toggle_remote_images();
+        }
+        self.request_redraw();
+    }
+
+    /// 光标落在 inline 图片节点（闭区间）时移到节点之后一位，使图片退出源码态。
+    fn step_caret_out_of_active_image(&mut self) {
+        let caret = self.editor.caret();
+        let len = self.editor.session().text_len();
+        let Some(nodes) = self.inlines_at_offset(caret) else {
+            return;
+        };
+        fn image_end(nodes: &[veil_core::InlineNode], off: usize, len: usize) -> Option<usize> {
+            for n in nodes {
+                let is_image = matches!(n.kind, veil_core::InlineKind::Image)
+                    || matches!(
+                        n.kind,
+                        veil_core::InlineKind::HtmlSelfClosed {
+                            tag: veil_core::HtmlTag::Img,
+                            ..
+                        }
+                    );
+                if is_image && n.range.start <= off && off <= n.range.end {
+                    return Some(n.range.end.saturating_add(1).min(len));
+                }
+                if let Some(end) = image_end(&n.children, off, len) {
+                    return Some(end);
+                }
+            }
+            None
+        }
+        if let Some(target) = image_end(&nodes, caret, len) {
+            if target != caret {
+                self.editor.set_caret(target);
+                self.window_state.goal_x = None;
+            }
+        }
     }
 
     /// 外部变更选择结论：1=重新加载、2=保留当前、3=另存为、4/未知=取消。

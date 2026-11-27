@@ -199,6 +199,7 @@ keys! {
     CtxCopyImagePath => "ctx.copy_image_path", "复制图片路径";
     CtxCopyCode => "ctx.copy_code", "复制代码块";
     CtxReloadImage => "ctx.reload_image", "重新加载图片";
+    CtxAllowRemoteImages => "ctx.allow_remote_images", "允许远程图片（全局）…";
     CtxImageMissing => "ctx.image_missing", "图片文件缺失（当前显示替代文本）";
     CtxMermaidPreview => "ctx.mermaid.preview", "在 mermaid.live 打开（复制源码）";
     CtxMermaidPreviewImage => "ctx.mermaid.preview_image", "预览当前源码图";
@@ -237,6 +238,7 @@ keys! {
     MermaidUnknown => "mermaid.unknown", "mermaid";
     MermaidBadge => "mermaid.badge", "◈ {}";
     MermaidEmptyHint => "mermaid.empty_hint", "空 Mermaid 块 — 点击插入模板";
+    MermaidLoading => "mermaid.loading", "渲染中…";
 
     // ---- 正文降级提示 ----
     BlockOversizeNotice => "doc.block_oversize", "该块约 {} MB，超出单块渲染上限，后续内容未渲染；源码完整保留";
@@ -433,6 +435,9 @@ keys! {
     NoticeRemoteImageBlockedRetry => "notice.remote_image_blocked_retry",
         "已阻止远程图片；下一步：在「视图 → 允许远程图片」（或设置）中开启后重试";
     NoticeRemoteImagesAllowed => "notice.remote_images_allowed", "已允许远程图片";
+    ConfirmAllowRemoteImagesTitle => "confirm.allow_remote_images.title", "允许远程图片（全局）";
+    ConfirmAllowRemoteImagesBody => "confirm.allow_remote_images.body",
+        "允许后，文档中的远程图片会向外部服务器发起请求（可能暴露你的网络地址与访问时间）。\n\n这是一次全局设置；确定允许吗？";
     NoticeMermaidSourceTooLarge => "notice.mermaid_source_too_large", "Mermaid 源码超过 128 KiB，已跳过渲染";
     ToggleOn => "toggle.on", "开";
     ToggleOff => "toggle.off", "关";
@@ -982,6 +987,7 @@ fn main() {
     (Key::CtxCopyImagePath, "Copy Image Path"),
     (Key::CtxCopyCode, "Copy Code Block"),
     (Key::CtxReloadImage, "Reload Image"),
+    (Key::CtxAllowRemoteImages, "Allow Remote Images (Global)…"),
     (Key::CtxImageMissing, "Image file missing (showing alt text)"),
     (Key::CtxMermaidPreviewImage, "Preview Current Source Diagram"),
     (
@@ -1028,6 +1034,7 @@ fn main() {
         Key::MermaidEmptyHint,
         "Empty Mermaid block — click to insert a template",
     ),
+    (Key::MermaidLoading, "Rendering…"),
     // ---- 正文降级提示 ----
     (
         Key::BlockOversizeNotice,
@@ -1376,6 +1383,14 @@ fn main() {
         "Remote images are blocked; next: enable View → Allow Remote Images (or Settings) and retry",
     ),
     (Key::NoticeRemoteImagesAllowed, "Remote images allowed"),
+    (
+        Key::ConfirmAllowRemoteImagesTitle,
+        "Allow Remote Images (Global)",
+    ),
+    (
+        Key::ConfirmAllowRemoteImagesBody,
+        "Once allowed, remote images in the document will contact external servers (which may reveal your network address and access time).\n\nThis is a global setting. Allow it?",
+    ),
     (
         Key::NoticeMermaidSourceTooLarge,
         "Mermaid source exceeds 128 KiB; rendering skipped",

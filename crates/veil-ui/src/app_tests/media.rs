@@ -57,6 +57,61 @@ fn mermaid_auto_preview_requests_only_local_renderer() {
     );
 }
 
+/// 4.1：Mermaid 块在「已排队 / 渲染中」显示可见加载胶囊，回包后自然消失。
+#[test]
+fn mermaid_pending_block_shows_loading_hint_until_bitmap_arrives() {
+    let mermaid = RecordingMermaid::new();
+    let doc = "前文\n\n```mermaid\ngraph TD\nA-->B\n```\n";
+    let mut a = app_with_mermaid(doc, mermaid.clone());
+    a.ensure_layouts_all();
+    let id = block_id_of(&a, |k| matches!(k, BlockKind::Mermaid));
+    assert!(!a.mermaid_block_loading(id), "未投递时不应显示加载态");
+
+    a.trigger_mermaid_auto();
+    assert!(a.mermaid_block_loading(id), "已排队/渲染中应进入加载态");
+
+    // 绘制：块右上角出现次要文字色的「渲染中…」标签（源码态其余文字不用该色）。
+    a.ensure_layouts_all();
+    a.recompute_geometry();
+    let ink = a.input_state.theme.muted;
+    let line_h = (a.engine.doc_line_height() * a.input_state.scale).max(1.0);
+    let (rx, ry) = {
+        let g = geom(&a, id);
+        let vp = a.viewport();
+        let right = a.content_x() + a.content_width();
+        (
+            (right - 120.0).round() as i32,
+            (vp.y + g.top - a.window_state.scroll_y).round() as i32,
+        )
+    };
+    let frame = a.render();
+    assert!(
+        any_pixel(frame, rx, ry, 120, line_h.min(48.0) as u32, |p| {
+            p[0] == ink[0] && p[1] == ink[1] && p[2] == ink[2] && p[3] == 255
+        }),
+        "渲染中应在块右上角显示「渲染中…」加载提示"
+    );
+
+    // 回包成功：加载态消失、位图进入布局。
+    let url = mermaid.last_request_url().expect("应已投递请求");
+    mermaid
+        .poll_queue
+        .borrow_mut()
+        .push((url, Ok(test_mermaid_image(48, 32))));
+    a.poll_remote_images();
+    assert!(!a.mermaid_block_loading(id), "回包后加载态必须消失");
+    assert!(a.cache.mermaid_imgs.contains_key(&id), "位图应进入缓存");
+    a.ensure_layouts_all();
+    a.recompute_geometry();
+    let frame = a.render();
+    assert!(
+        !any_pixel(frame, rx, ry, 120, line_h.min(48.0) as u32, |p| {
+            p[0] == ink[0] && p[1] == ink[1] && p[2] == ink[2] && p[3] == 255
+        }),
+        "出图后不得残留加载提示"
+    );
+}
+
 /// 回归：投递的源码必须是围栏**内容**，不能带 ```mermaid 围栏行。
 #[test]
 fn mermaid_request_source_strips_fence() {
@@ -547,6 +602,7 @@ fn reload_image_invalidates_layout_and_refreshes_size() {
         ctx_menu::CtxKind::Image {
             path: "img/p.png".into(),
             missing: false,
+            remote_blocked: false,
         },
         None,
         None,
@@ -587,6 +643,7 @@ fn reload_blocked_remote_image_points_to_allow_remote_images() {
         ctx_menu::CtxKind::Image {
             path: REMOTE_URL.into(),
             missing: false,
+            remote_blocked: true,
         },
         None,
         None,
@@ -606,6 +663,82 @@ fn reload_blocked_remote_image_points_to_allow_remote_images() {
         a.ui_state.chrome.notice
     );
     assert!(!a.config.allow_remote_images, "提示不得擅自改变配置");
+}
+
+/// 4.2：被阻止的远程图右键菜单就地「允许远程图片（全局）」——
+/// 先弹确认、不动配置；确认后配置落盘并从阻止态进入请求/成功路径。
+#[test]
+fn remote_blocked_image_menu_allows_in_place_and_retries() {
+    let images = RemoteImages::default();
+    let requests = images.requests.clone();
+    let results = images.results.clone();
+    let cfg = MemConfig::default();
+    let saves = cfg.saves.clone();
+    let mut a = app_remote(&format!("![a]({REMOTE_URL})\n"), Box::new(cfg), images);
+    assert!(!a.config.allow_remote_images, "缺省阻止远程图片");
+    a.ensure_layouts_all();
+    // 右键落在整块图片上（图片节点覆盖块首）。
+    let id = block_id_of(&a, |k| matches!(k, BlockKind::Paragraph));
+    let scale = a.input_state.scale;
+    let vp = a.viewport();
+    let top = geom(&a, id).top;
+    a.input_state.mouse = PhysicalPosition::new(
+        (MARGIN * scale + 8.0) as f64,
+        (vp.y + top - a.window_state.scroll_y + BASE_LINE_HEIGHT * scale / 2.0) as f64,
+    );
+    a.on_right_click();
+    assert!(a.ui_state.ctx.open, "图片右键应打开菜单");
+    assert!(requests.borrow().is_empty(), "阻止态不得发起远程请求");
+    let i = a
+        .ui_state
+        .ctx
+        .items()
+        .iter()
+        .position(|&(_, act)| act == ctx_menu::CtxAction::AllowRemoteImages)
+        .expect("阻止态图片菜单应含就地允许入口");
+    a.ui_state.ctx.hover = Some(i);
+    a.route_key(Key::Enter);
+
+    // 触发后：先确认，不得擅自改配置。
+    assert!(
+        matches!(
+            a.ui_state.modal.as_ref().map(|m| &m.purpose),
+            Some(crate::app::ModalPurpose::RemoteImages)
+        ),
+        "就地允许必须先弹一次确认"
+    );
+    assert!(!a.config.allow_remote_images, "确认前不得改变配置");
+    assert!(requests.borrow().is_empty(), "确认前不得发起请求");
+
+    a.resolve_modal(1);
+    assert!(a.config.allow_remote_images, "确认后配置应变为允许");
+    let last = saves.borrow().last().cloned().unwrap_or_default();
+    assert!(
+        last.contains("allow_remote_images = true"),
+        "允许必须落盘: {last}"
+    );
+    assert_eq!(
+        requests.borrow().as_slice(),
+        &[REMOTE_URL.to_string()],
+        "允许后图片应立即进入请求/加载路径"
+    );
+    assert!(a.ui_state.chrome.notice.contains("已允许远程图片"));
+
+    // 成功回包后占用布局（进入成功路径，不再停留在 alt 占位）。
+    results
+        .borrow_mut()
+        .push((REMOTE_URL.to_string(), Ok(solid(8, 4))));
+    a.poll_remote_images();
+    a.ensure_layouts_all();
+    assert!(a.cache.remote_image(REMOTE_URL).is_some(), "成功回包入缓存");
+    assert!(
+        a.cache.layouts.values().any(|m| m
+            .value
+            .imgs
+            .iter()
+            .any(|im| matches!(&im.key, InlineAsset::Image(k) if k.as_str() == REMOTE_URL))),
+        "成功回包后布局应放置该远程图"
+    );
 }
 
 #[test]

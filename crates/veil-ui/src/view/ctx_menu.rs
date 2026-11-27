@@ -54,6 +54,8 @@ pub(crate) enum CtxAction {
     /// 图片专用动作（DEF-T67-E1-005）：复制源路径 / 清除失败缓存后重绘。
     CopyImagePath,
     ReloadImage,
+    /// 远程图片被全局安全策略阻止时，就地打开「允许远程图片（全局）」确认。
+    AllowRemoteImages,
     /// 缺失图片的可见提示项：不执行动作，仅说明当前为替代文本。
     ImageMissingHint,
 }
@@ -90,7 +92,12 @@ pub(crate) enum CtxKind {
     /// 菜单只列出与当前状态匹配的折叠/展开项（DEF-T07-001）。
     Details { id: BlockId, expanded: bool },
     /// 图片（Markdown `![]()` 或 `<img>`）：携带源与缺失状态（DEF-T67-E1-005）。
-    Image { path: String, missing: bool },
+    /// `remote_blocked`：远程 URL 且全局安全策略当前阻止加载——菜单就地提供允许入口。
+    Image {
+        path: String,
+        missing: bool,
+        remote_blocked: bool,
+    },
 }
 
 /// 提示与分隔线保持可见，但不参与 hover、命中或键盘执行。
@@ -201,11 +208,20 @@ pub(crate) fn items_for(kind: CtxKind) -> Vec<(Key, CtxAction)> {
             items.push((Key::MenuEditSelectAll, CtxAction::SelectAll));
             items
         }
-        // 图片：复制路径/重新加载；缺失时首项给出可见提示（DEF-T67-E1-005）。
-        CtxKind::Image { missing, .. } => {
+        // 图片：复制路径/重新加载；缺失时首项给出可见提示（DEF-T67-E1-005）；
+        // 远程图被全局阻止时就地给出「允许远程图片（全局）」入口，无需去设置页。
+        CtxKind::Image {
+            missing,
+            remote_blocked,
+            ..
+        } => {
             let mut items = Vec::new();
             if missing {
                 items.push((Key::CtxImageMissing, CtxAction::ImageMissingHint));
+                items.push((Key::Empty, CtxAction::Separator));
+            }
+            if remote_blocked {
+                items.push((Key::CtxAllowRemoteImages, CtxAction::AllowRemoteImages));
                 items.push((Key::Empty, CtxAction::Separator));
             }
             items.push((Key::CtxCopyImagePath, CtxAction::CopyImagePath));
@@ -531,6 +547,7 @@ mod tests {
         let normal = items_for(CtxKind::Image {
             path: "img/a.png".into(),
             missing: false,
+            remote_blocked: false,
         });
         assert!(normal.iter().any(|&(_, a)| a == CtxAction::CopyImagePath));
         assert!(normal.iter().any(|&(_, a)| a == CtxAction::ReloadImage));
@@ -541,6 +558,7 @@ mod tests {
         let missing = items_for(CtxKind::Image {
             path: "img/gone.png".into(),
             missing: true,
+            remote_blocked: false,
         });
         assert_eq!(missing[0].1, CtxAction::ImageMissingHint);
         assert!(missing.iter().any(|&(_, a)| a == CtxAction::CopyImagePath));
@@ -548,10 +566,40 @@ mod tests {
     }
 
     #[test]
+    fn blocked_remote_image_menu_offers_in_place_allow() {
+        let blocked = items_for(CtxKind::Image {
+            path: "https://example.com/a.png".into(),
+            missing: false,
+            remote_blocked: true,
+        });
+        assert!(
+            blocked
+                .iter()
+                .any(|&(_, a)| a == CtxAction::AllowRemoteImages),
+            "远程图被阻止时菜单必须就地给出允许入口"
+        );
+        assert_eq!(
+            t(Key::CtxAllowRemoteImages),
+            "允许远程图片（全局）…",
+            "菜单文案须说明这是全局开关"
+        );
+        // 未阻止时不出现：避免「允许」在已允许状态下成为误导项。
+        let normal = items_for(CtxKind::Image {
+            path: "img/a.png".into(),
+            missing: false,
+            remote_blocked: false,
+        });
+        assert!(!normal
+            .iter()
+            .any(|&(_, a)| a == CtxAction::AllowRemoteImages));
+    }
+
+    #[test]
     fn missing_image_hint_is_visible_but_not_actionable() {
         let items = items_for(CtxKind::Image {
             path: "img/gone.png".into(),
             missing: true,
+            remote_blocked: false,
         });
         let l = layout(&items, 100.0, 100.0, 800.0, 600.0, 1.0);
         let (hint, off) = l.rows[0];
@@ -623,6 +671,7 @@ mod tests {
             CtxKind::Image {
                 path: "img/a.png".into(),
                 missing: false,
+                remote_blocked: false,
             },
             None,
             None,
@@ -839,10 +888,17 @@ mod tests {
             CtxKind::Image {
                 path: "img/a.png".into(),
                 missing: false,
+                remote_blocked: false,
             },
             CtxKind::Image {
                 path: "img/gone.png".into(),
                 missing: true,
+                remote_blocked: false,
+            },
+            CtxKind::Image {
+                path: "https://example.com/x.png".into(),
+                missing: false,
+                remote_blocked: true,
             },
             CtxKind::Table(TableCtx {
                 body_row: Some(0),
@@ -922,6 +978,7 @@ mod tests {
             CtxAction::UnfoldDetails,
             CtxAction::CopyImagePath,
             CtxAction::ReloadImage,
+            CtxAction::AllowRemoteImages,
             CtxAction::TableInsertRowAbove,
             CtxAction::TableInsertRowBelow,
             CtxAction::TableDeleteRow,

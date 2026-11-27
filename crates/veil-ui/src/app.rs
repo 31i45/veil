@@ -441,6 +441,8 @@ pub(crate) enum ModalPurpose {
     External,
     /// 关于弹窗：任何按钮都只关闭；主按钮额外打开官方 Release 页。
     About,
+    /// 就地「允许远程图片（全局）」确认：主按钮放开全局开关并立即重排重试。
+    RemoteImages,
 }
 
 /// 官方唯一入口：关于弹窗「打开项目主页」与「检查更新」共用。
@@ -1466,6 +1468,13 @@ impl App {
             );
         }
         self.request_redraw();
+    }
+
+    /// 该 Mermaid 块是否处于「已排队 / 渲染中」：请求已投递、尚未回包且还没有位图。
+    /// 绘制层据此显示轻量加载提示；回包（成功/失败）后自然返回 false。
+    pub(crate) fn mermaid_block_loading(&self, id: BlockId) -> bool {
+        !self.cache.mermaid_imgs.contains_key(&id)
+            && self.pending_mermaid_auto.iter().any(|p| p.block_id == id)
     }
 
     /// 自动触发 Mermaid 实时预览：扫描所有 BlockKind::Mermaid 块，

@@ -69,6 +69,7 @@
 3. 色相只允许两类：严格中性（R=G=B），或单一的冷调偏移族（蓝分量最高）。禁止暖偏中性色与多彩中性色。
 4. 冷调偏移以现状最大值为上限：`thumb` 浅色 `B−R = 19`；`chrome_border` 浅色 `B−R = 13`；`grid` 浅色 `B−R = 12`；`modal_bg` 浅色 `B−R = 3`；`table_head_bg` 浅色 `B−R = 4`。新增中性色不得超过 `B−R = 19`。
 5. 层级分离：`modal_bg ≠ popup_bg ≠ chrome_bg`，两两可被人眼区分（见 §七 的分离口径）。
+6. **高对比度由统一来源派生**（`theme::Theme::high_contrast`，实现在 `theme::shared_palette`）：上表高对比度列的中性槽位全部取自统一灰阶登记档（`bg` L\*0、`popup_bg` [10,10,10]、`chrome_bg` [15,15,15]、`code_bg`/`modal_bg` [20,20,20]、`table_head_bg` [30,30,30]、`hover` [50,50,50]、`grid` [180,180,180]、`thumb` [200,200,200]），不再单独手写；`link`/`danger`/`accent` 由共享色相锚点（沿用浅色 `[43,108,176]` / `[178,34,34]`）向白色提亮至纯黑底 7:1；`mark_bg` 由 mark 色相 `[255,247,153]` 压暗至白字 7:1；7 个语法 token 由深色色板按 `code_bg` [20,20,20] 提亮至 4.5:1。派生结果由 `theme::tests` 与 `theme_matrix_tests` 逐 token 锁定。
 
 ## 三、字号与行高比值表
 

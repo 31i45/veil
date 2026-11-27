@@ -328,9 +328,9 @@ fn content_state_composition_is_deterministic() {
         (Theme::dark, [98, 79, 12], [61, 91, 136], [46, 70, 106]),
         (
             Theme::high_contrast,
-            [90, 75, 0],
-            [15, 71, 194],
-            [0, 56, 179],
+            [93, 90, 56],
+            [43, 92, 162],
+            [28, 77, 147],
         ),
     ];
     for (make, mark_on_code, sel_on_hit, sel_on_bg) in cases {

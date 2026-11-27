@@ -234,6 +234,112 @@ fn parse_hex_color(hex: &str) -> Option<[u8; 3]> {
     Some([r, g, b])
 }
 
+/// 共享调色板：三主题共用的中性灰阶登记表与色相锚点（唯一来源）。
+///
+/// 高对比度主题不再手写第二套色值：中性槽位取自 [`NEUTRAL_REGISTRY`]，彩色槽位由
+/// [`LINK`] / [`DANGER`] / [`ACCENT`] / [`MARK`] 等锚点按 WCAG 对比度门禁确定性派生。
+/// 亮度/对比度函数同样放在此处，测试直接复用，避免测试与实现各写一套公式。
+mod shared_palette {
+    /// 中性灰阶（R=G=B）登记表：三主题出现的每个纯中性值都在此逐字节登记。
+    pub(super) const GRAY_0: [u8; 3] = [0, 0, 0];
+    pub(super) const GRAY_10: [u8; 3] = [10, 10, 10];
+    pub(super) const GRAY_15: [u8; 3] = [15, 15, 15];
+    pub(super) const GRAY_20: [u8; 3] = [20, 20, 20];
+    pub(super) const GRAY_25: [u8; 3] = [25, 25, 25];
+    pub(super) const GRAY_30: [u8; 3] = [30, 30, 30];
+    pub(super) const GRAY_38: [u8; 3] = [38, 38, 38];
+    pub(super) const GRAY_40: [u8; 3] = [40, 40, 40];
+    pub(super) const GRAY_42: [u8; 3] = [42, 42, 42];
+    pub(super) const GRAY_45: [u8; 3] = [45, 45, 45];
+    pub(super) const GRAY_49: [u8; 3] = [49, 49, 49];
+    pub(super) const GRAY_50: [u8; 3] = [50, 50, 50];
+    pub(super) const GRAY_58: [u8; 3] = [58, 58, 58];
+    pub(super) const GRAY_110: [u8; 3] = [110, 110, 110];
+    pub(super) const GRAY_160: [u8; 3] = [160, 160, 160];
+    pub(super) const GRAY_180: [u8; 3] = [180, 180, 180];
+    pub(super) const GRAY_190: [u8; 3] = [190, 190, 190];
+    pub(super) const GRAY_200: [u8; 3] = [200, 200, 200];
+    pub(super) const GRAY_220: [u8; 3] = [220, 220, 220];
+    pub(super) const GRAY_225: [u8; 3] = [225, 225, 225];
+    pub(super) const GRAY_245: [u8; 3] = [245, 245, 245];
+    pub(super) const GRAY_248: [u8; 3] = [248, 248, 248];
+    pub(super) const GRAY_255: [u8; 3] = [255, 255, 255];
+
+    /// 登记表全集：测试据它校验「任何中性色都必须登记过」。
+    #[allow(dead_code)] // 运行时按名取常量，本表只服务于登记校验
+    pub(super) const NEUTRAL_REGISTRY: &[[u8; 3]] = &[
+        GRAY_0, GRAY_10, GRAY_15, GRAY_20, GRAY_25, GRAY_30, GRAY_38, GRAY_40, GRAY_42, GRAY_45,
+        GRAY_49, GRAY_50, GRAY_58, GRAY_110, GRAY_160, GRAY_180, GRAY_190, GRAY_200, GRAY_220,
+        GRAY_225, GRAY_245, GRAY_248, GRAY_255,
+    ];
+
+    /// 共享色相锚点（均取自浅色主题既有值）。
+    pub(super) const LINK: [u8; 3] = [43, 108, 176];
+    pub(super) const DANGER: [u8; 3] = [178, 34, 34];
+    pub(super) const ACCENT: [u8; 3] = [43, 108, 176];
+    pub(super) const SELECTION: [u8; 3] = [40, 110, 210];
+    pub(super) const MARK: [u8; 3] = [255, 247, 153];
+
+    /// 三字节色 → 四字节（含 alpha）。
+    pub(super) const fn rgba(rgb: [u8; 3], alpha: u8) -> [u8; 4] {
+        [rgb[0], rgb[1], rgb[2], alpha]
+    }
+
+    /// 三字节色 → 不透明四字节色。
+    pub(super) const fn opaque(rgb: [u8; 3]) -> [u8; 4] {
+        rgba(rgb, 255)
+    }
+
+    /// WCAG 2.x 相对亮度（sRGB → 线性）。
+    pub(super) fn luminance(rgb: [u8; 3]) -> f32 {
+        let ch = |v: u8| {
+            let u = v as f32 / 255.0;
+            if u <= 0.039_28 {
+                u / 12.92
+            } else {
+                ((u + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * ch(rgb[0]) + 0.7152 * ch(rgb[1]) + 0.0722 * ch(rgb[2])
+    }
+
+    /// WCAG 对比度 `(L1+0.05)/(L2+0.05)`，1.0（同色）~ 21.0（黑白）。
+    pub(super) fn contrast(a: [u8; 3], b: [u8; 3]) -> f32 {
+        let (l1, l2) = (luminance(a), luminance(b));
+        let (hi, lo) = if l1 > l2 { (l1, l2) } else { (l2, l1) };
+        (hi + 0.05) / (lo + 0.05)
+    }
+
+    /// 把 `fg` 按整数通道向白色混合 `step/255`：`step=0` 为原色，`step=255` 为纯白。
+    /// 全程整数运算（四舍五入），无浮点累积，跨平台逐字节一致。
+    pub(super) fn mix_toward_white(fg: [u8; 3], step: u32) -> [u8; 3] {
+        let blend = |v: u8| (((v as u32) * (255 - step) + 255 * step + 127) / 255) as u8;
+        [blend(fg[0]), blend(fg[1]), blend(fg[2])]
+    }
+
+    /// 向白色逐档提亮，返回第一个在 `bg` 上达到 `min_ratio` 的颜色。
+    ///
+    /// 按 `1/255` 步进，命中即返回，因此既确定性又「刚好够」——不会越过门禁太多。
+    pub(super) fn lift_on(fg: [u8; 3], bg: [u8; 3], min_ratio: f32) -> [u8; 3] {
+        (0..=255u32)
+            .map(|step| mix_toward_white(fg, step))
+            .find(|c| contrast(*c, bg) >= min_ratio)
+            .unwrap_or([255, 255, 255])
+    }
+
+    /// 由 [`MARK`] 向黑色等比压暗，返回白色前景压在其上 ≥ `white_ratio` 的最亮颜色。
+    pub(super) fn shade_mark_to(white_ratio: f32) -> [u8; 3] {
+        (0..=255u32)
+            .rev()
+            .map(|step| {
+                let dark = |v: u8| (((v as u32) * step + 127) / 255) as u8;
+                [dark(MARK[0]), dark(MARK[1]), dark(MARK[2])]
+            })
+            .find(|c| contrast([255, 255, 255], *c) >= white_ratio)
+            .unwrap_or([0, 0, 0])
+    }
+}
+
 /// 调色板：正文/ chrome / 交互态全套颜色。浅色值与原硬编码常量逐字节一致（视觉不回退）。
 ///
 /// **约束**：本结构体所有字段必须为颜色值（[u8; 3] / [u8; 4]）。几何令牌归 `tokens::surface`；
@@ -324,109 +430,110 @@ impl Theme {
     }
 
     pub fn light() -> Self {
+        use shared_palette as sp;
         Theme {
             mode: ThemeMode::System,
             dark: false,
-            bg: [255, 255, 255, 255],
-            fg: [30, 30, 30],
-            code_bg: [245, 245, 245, 255],
+            bg: sp::opaque(sp::GRAY_255),
+            fg: sp::GRAY_30,
+            code_bg: sp::opaque(sp::GRAY_245),
             // 原 alpha 80（31.4%）→ 契约 §5 的 28% 档。
-            sel: [40, 110, 210, crate::tokens::alpha::SELECT],
+            sel: sp::rgba(sp::SELECTION, crate::tokens::alpha::SELECT),
             table_head_bg: [246, 248, 250, 255],
             grid: [136, 141, 148, 255],
-            chrome_bg: [248, 248, 248, 255],
+            chrome_bg: sp::opaque(sp::GRAY_248),
             chrome_border: [208, 213, 221, 255],
             hover: [228, 236, 246, 255],
-            popup_bg: [255, 255, 255, 255],
+            popup_bg: sp::opaque(sp::GRAY_255),
             // modal_bg 必须与 popup_bg 有可感知色差（OKLab ΔE_OK ≈ 0.015，≈ CIELAB ΔE 1.5）：
             // 冷调灰 [249,250,252] 提供明度差 + 蓝调偏移，靠色彩差异增强弹起层级，
             // 又不过度偏离低干扰基调。
             modal_bg: [249, 250, 252, 255],
             thumb: [176, 184, 195, 255],
-            muted: [110, 110, 110],
-            text: [45, 45, 45],
-            kbd_bg: [245, 245, 245, 255],
-            kbd_border: [160, 160, 160],
+            muted: sp::GRAY_110,
+            text: sp::GRAY_45,
+            kbd_bg: sp::opaque(sp::GRAY_245),
+            kbd_border: sp::GRAY_160,
             // 原 alpha 180（70.6%）→ 契约 §5 的 70% 档；已复核 fg 在合成底上 ≥ 4.5:1。
-            mark_bg: [255, 247, 153, crate::tokens::alpha::MARK],
-            link: [43, 108, 176],
-            danger: [178, 34, 34],
-            accent: [43, 108, 176],
-            accent_text: [255, 255, 255],
+            mark_bg: sp::rgba(sp::MARK, crate::tokens::alpha::MARK),
+            link: sp::LINK,
+            danger: sp::DANGER,
+            accent: sp::ACCENT,
+            accent_text: sp::GRAY_255,
             syntax: light_syntax(),
         }
     }
 
     pub fn dark() -> Self {
+        use shared_palette as sp;
         Theme {
             mode: ThemeMode::System,
             dark: true,
-            bg: [30, 30, 30, 255],
-            fg: [220, 220, 220],
-            code_bg: [40, 40, 40, 255],
+            bg: sp::opaque(sp::GRAY_30),
+            fg: sp::GRAY_220,
+            code_bg: sp::opaque(sp::GRAY_40),
             // 原 alpha 110（43.1%）→ 契约 §5 的 40% 档。
             sel: [70, 130, 220, crate::tokens::alpha::SCRIM],
-            table_head_bg: [42, 42, 42, 255],
+            table_head_bg: sp::opaque(sp::GRAY_42),
             grid: [112, 116, 122, 255],
-            chrome_bg: [38, 38, 38, 255],
+            chrome_bg: sp::opaque(sp::GRAY_38),
             chrome_border: [60, 64, 70, 255],
             hover: [55, 65, 80, 255],
-            popup_bg: [45, 45, 45, 255],
+            popup_bg: sp::opaque(sp::GRAY_45),
             // 深主题靠明度差：modal 比 popup 再亮 3 级，与 popup 有 ΔL ≈ 3.5。
-            modal_bg: [49, 49, 49, 255],
+            modal_bg: sp::opaque(sp::GRAY_49),
             thumb: [96, 102, 110, 255],
-            muted: [160, 160, 160],
-            text: [225, 225, 225],
-            kbd_bg: [58, 58, 58, 255],
-            kbd_border: [110, 110, 110],
+            muted: sp::GRAY_160,
+            text: sp::GRAY_225,
+            kbd_bg: sp::opaque(sp::GRAY_58),
+            kbd_border: sp::GRAY_110,
             // 暗琥珀底：与 fg [220,220,220] 对比度 ≈ 5:1；黄底浅字会糊成一片。
             // 原 alpha 210（82.4%）→ 契约 §5 的 70% 档；已复核 fg 在合成底上 ≥ 4.5:1。
             mark_bg: [122, 96, 0, crate::tokens::alpha::MARK],
             link: [127, 180, 245],
             danger: [255, 130, 130],
             accent: [14, 99, 156],
-            accent_text: [255, 255, 255],
+            accent_text: sp::GRAY_255,
             syntax: dark_syntax(),
         }
     }
 
     /// 高对比度主题（veil-ui 内部预设，覆盖系统 light/dark 外观）。
-    /// 遵循 WCAG AAA：前景/底色对比度 ≥ 7:1，按钮/链接强调色对比度 ≥ 4.5:1。
-    /// 禁用态使用深灰文字而非半透明——避免灰色透明在高对比底下不可见。
+    /// 遵循 WCAG AAA：前景/底色对比度 ≥ 7:1，按钮/链接强调色对比度 ≥ 7:1。
+    ///
+    /// 不手写第二套色值：中性槽位全部取自 `shared_palette` 的统一灰阶登记表；
+    /// `link` / `danger` / `accent` 由共享色相锚点向白色提亮至纯黑底 7:1；
+    /// `mark_bg` 由 mark 色相压暗至白字 7:1；语法色由深色色板按 `code_bg` 4.5:1 提亮。
     pub fn high_contrast() -> Self {
+        use shared_palette as sp;
         Theme {
             mode: ThemeMode::System,
             dark: true,
-            // 纯黑底 + 纯白前景（30:1 对比度，远高于 AAA 7:1）
-            bg: [0, 0, 0, 255],
-            fg: [255, 255, 255],
-            code_bg: [20, 20, 20, 255],
-            // 原 alpha 180（70.6%）→ 契约 §5 的 70% 档。
-            sel: [0, 80, 255, crate::tokens::alpha::MARK],
-            table_head_bg: [30, 30, 30, 255],
-            grid: [180, 180, 180, 255],
-            chrome_bg: [15, 15, 15, 255],
-            chrome_border: [255, 255, 255, 255],
-            // 悬停：纯白边框 + 极浅灰底，保证可见性
-            hover: [50, 50, 50, 255],
-            popup_bg: [10, 10, 10, 255],
-            modal_bg: [20, 20, 20, 255],
-            thumb: [200, 200, 200, 255],
-            // 禁用态：深灰但在黑底上仍有足够对比度（≈ 5:1，接近 AA 4.5）
-            muted: [190, 190, 190],
-            text: [255, 255, 255],
-            kbd_bg: [25, 25, 25, 255],
-            kbd_border: [255, 255, 255],
-            // 暗黄底 + 纯白字 ≈ 8.6:1（AAA）
-            mark_bg: [90, 75, 0, crate::tokens::alpha::OPAQUE],
-            // 鲜艳蓝色链接（在黑底上 ≈ 10:1）
-            link: [80, 220, 255],
-            // 高饱和红色危险色
-            danger: [255, 80, 80],
-            // 高饱和绿色强调色
-            accent: [90, 220, 90],
-            accent_text: [0, 0, 0],
-            // 语法色：高饱和、各 token 可区分
+            // 纯黑底 + 纯白前景（21:1 对比度，远高于 AAA 7:1）
+            bg: sp::opaque(sp::GRAY_0),
+            fg: sp::GRAY_255,
+            code_bg: sp::opaque(sp::GRAY_20),
+            // 原 alpha 180（70.6%）→ 契约 §5 的 70% 档；共享选择色相 + 70% 档。
+            sel: sp::rgba(sp::SELECTION, crate::tokens::alpha::MARK),
+            table_head_bg: sp::opaque(sp::GRAY_30),
+            grid: sp::opaque(sp::GRAY_180),
+            chrome_bg: sp::opaque(sp::GRAY_15),
+            chrome_border: sp::opaque(sp::GRAY_255),
+            hover: sp::opaque(sp::GRAY_50),
+            popup_bg: sp::opaque(sp::GRAY_10),
+            modal_bg: sp::opaque(sp::GRAY_20),
+            thumb: sp::opaque(sp::GRAY_200),
+            // 禁用态：中性灰但按登记档取，黑底上仍有足够对比度。
+            muted: sp::GRAY_190,
+            text: sp::GRAY_255,
+            kbd_bg: sp::opaque(sp::GRAY_25),
+            kbd_border: sp::GRAY_255,
+            // mark 色相压暗至白字 ≥ 7:1（AAA），保持不透明。
+            mark_bg: sp::rgba(sp::shade_mark_to(7.0), crate::tokens::alpha::OPAQUE),
+            link: sp::lift_on(sp::LINK, sp::GRAY_0, 7.0),
+            danger: sp::lift_on(sp::DANGER, sp::GRAY_0, 7.0),
+            accent: sp::lift_on(sp::ACCENT, sp::GRAY_0, 7.0),
+            accent_text: sp::GRAY_0,
             syntax: high_contrast_syntax(),
         }
     }
@@ -454,17 +561,24 @@ fn dark_syntax() -> SyntaxColors {
     })
 }
 
-/// 高对比度语法色板：全部高饱和纯色，保证在纯黑底上各 token 可区分。
-/// 硬编码常量（不依赖 tmTheme 文件）。
+/// 高对比度语法色板：取深色色板的 7 个 token，按高对比度代码块底（`code_bg`，
+/// 即统一灰阶 `[20,20,20]`）逐个向白色提亮至 ≥ 4.5:1。
+///
+/// 不再手写第二套高饱和十六进制/十进制色值——色相沿自深色色板，只按对比度门禁
+/// 提亮，因此既保证可读又保持各 token 的原色相族。
 fn high_contrast_syntax() -> SyntaxColors {
+    use shared_palette as sp;
+    let base = dark_syntax();
+    let bg = sp::GRAY_20;
+    let lift = |c: [u8; 3]| sp::lift_on(c, bg, 4.5);
     SyntaxColors {
-        keyword: [255, 100, 100],     // 红色：关键词
-        string: [130, 255, 130],      // 绿色：字符串
-        comment: [200, 200, 200],     // 浅灰：注释（可读但不抢眼）
-        number: [255, 200, 80],       // 黄色：数字
-        function: [150, 200, 255],    // 淡蓝：函数
-        type_name: [255, 255, 130],   // 黄色偏亮：类型名
-        punctuation: [220, 220, 220], // 近白：标点
+        keyword: lift(base.keyword),
+        string: lift(base.string),
+        comment: lift(base.comment),
+        number: lift(base.number),
+        function: lift(base.function),
+        type_name: lift(base.type_name),
+        punctuation: lift(base.punctuation),
     }
 }
 
@@ -2173,23 +2287,9 @@ mod tests {
         assert_eq!(Theme::of(ThemeMode::Dark, false).mode, ThemeMode::Dark);
     }
 
-    /// WCAG 相对亮度（sRGB → 线性）。
-    fn luminance(rgb: [u8; 3]) -> f32 {
-        let ch = |v: u8| {
-            let u = v as f32 / 255.0;
-            if u <= 0.039_28 {
-                u / 12.92
-            } else {
-                ((u + 0.055) / 1.055).powf(2.4)
-            }
-        };
-        0.2126 * ch(rgb[0]) + 0.7152 * ch(rgb[1]) + 0.0722 * ch(rgb[2])
-    }
-
+    /// WCAG 对比度：复用实现侧公式，测试与派生同一口径。
     fn contrast(a: [u8; 3], b: [u8; 3]) -> f32 {
-        let (l1, l2) = (luminance(a), luminance(b));
-        let (hi, lo) = if l1 > l2 { (l1, l2) } else { (l2, l1) };
-        (hi + 0.05) / (lo + 0.05)
+        shared_palette::contrast(a, b)
     }
 
     /// 4 字节色（含 alpha）→ 不透明 RGB：绘制底均为不透明色，对比度只取决于 RGB。
@@ -2312,6 +2412,109 @@ mod tests {
                 edge >= 2.0,
                 "accent/popup 边界对比不足: dark={} {edge:.2}",
                 t.dark
+            );
+        }
+    }
+
+    /// `lift_on` 必须「刚好够」：返回色达到门禁，且往回退一档就低于门禁
+    /// （证明没有越过阈值太多，派生是确定性的最小命中档）。
+    #[test]
+    fn lift_on_hits_threshold_without_overshoot() {
+        use shared_palette as sp;
+        for (name, anchor) in [
+            ("link", sp::LINK),
+            ("danger", sp::DANGER),
+            ("accent", sp::ACCENT),
+        ] {
+            let lifted = sp::lift_on(anchor, sp::GRAY_0, 7.0);
+            assert!(
+                sp::contrast(lifted, sp::GRAY_0) >= 7.0,
+                "{name}: lift_on 未达到 7:1（{:.3}）",
+                sp::contrast(lifted, sp::GRAY_0)
+            );
+            let step = (0..=255u32)
+                .find(|&k| sp::contrast(sp::mix_toward_white(anchor, k), sp::GRAY_0) >= 7.0)
+                .expect("一定存在满足门禁的提亮档");
+            if step > 0 {
+                let prev = sp::mix_toward_white(anchor, step - 1);
+                assert!(
+                    sp::contrast(prev, sp::GRAY_0) < 7.0,
+                    "{name}: 上一步已达标，lift_on 越过阈值（step={step}）"
+                );
+            }
+            assert_eq!(lifted, sp::mix_toward_white(anchor, step));
+        }
+    }
+
+    /// 高对比度全部中性槽位必须是严格中性（R=G=B）且逐字节登记在统一灰阶表中。
+    #[test]
+    fn high_contrast_neutrals_come_from_gray_registry() {
+        use shared_palette as sp;
+        let hc = Theme::high_contrast();
+        let opaque_fields: [(&str, [u8; 4]); 11] = [
+            ("bg", hc.bg),
+            ("popup_bg", hc.popup_bg),
+            ("chrome_bg", hc.chrome_bg),
+            ("code_bg", hc.code_bg),
+            ("modal_bg", hc.modal_bg),
+            ("table_head_bg", hc.table_head_bg),
+            ("hover", hc.hover),
+            ("grid", hc.grid),
+            ("thumb", hc.thumb),
+            ("kbd_bg", hc.kbd_bg),
+            ("chrome_border", hc.chrome_border),
+        ];
+        let rgb_fields: [(&str, [u8; 3]); 5] = [
+            ("kbd_border", hc.kbd_border),
+            ("fg", hc.fg),
+            ("muted", hc.muted),
+            ("text", hc.text),
+            ("accent_text", hc.accent_text),
+        ];
+        let check = |name: &str, rgb: [u8; 3]| {
+            assert!(
+                rgb[0] == rgb[1] && rgb[1] == rgb[2],
+                "HC {name} 必须严格中性（R=G=B），实际 {rgb:?}"
+            );
+            assert!(
+                sp::NEUTRAL_REGISTRY.contains(&rgb),
+                "HC {name} {rgb:?} 未登记在灰阶表中"
+            );
+        };
+        for (name, c) in opaque_fields {
+            check(name, [c[0], c[1], c[2]]);
+        }
+        for (name, c) in rgb_fields {
+            check(name, c);
+        }
+    }
+
+    /// 高对比度语法色必须逐 token 等于「深色色板 token 在 HC code_bg 上提亮到 4.5:1」，
+    /// 证明语法色确实由深色色板派生，而不是另留一套手写色值。
+    #[test]
+    fn high_contrast_syntax_is_lifted_from_dark_palette() {
+        use shared_palette as sp;
+        let hc = Theme::high_contrast();
+        let dark = Theme::dark();
+        let bg = [hc.code_bg[0], hc.code_bg[1], hc.code_bg[2]];
+        let pairs: [(&str, [u8; 3], [u8; 3]); 7] = [
+            ("keyword", hc.syntax.keyword, dark.syntax.keyword),
+            ("string", hc.syntax.string, dark.syntax.string),
+            ("comment", hc.syntax.comment, dark.syntax.comment),
+            ("number", hc.syntax.number, dark.syntax.number),
+            ("function", hc.syntax.function, dark.syntax.function),
+            ("type_name", hc.syntax.type_name, dark.syntax.type_name),
+            (
+                "punctuation",
+                hc.syntax.punctuation,
+                dark.syntax.punctuation,
+            ),
+        ];
+        for (name, actual, base) in pairs {
+            assert_eq!(
+                actual,
+                sp::lift_on(base, bg, 4.5),
+                "HC 语法 token {name} 未按深色色板派生"
             );
         }
     }

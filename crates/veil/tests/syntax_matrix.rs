@@ -18,7 +18,7 @@ use veil_core::{BlockKind, Session};
 
 const MATRIX: &str = "../../docs/qa/syntax-matrix.md";
 const GOLDEN_DIR: &str = "../../docs/qa/golden/html";
-const REPORT: &str = "../../docs/qa/report-2026-11-26.md";
+const REPORT: &str = "../../docs/qa/report-2026-11-27.md";
 
 // =============================================================================
 // 用例模型与解析
@@ -106,9 +106,23 @@ struct Case {
     line: usize,
 }
 
+/// 空态用例：语料以 `表面：N/A` 声明「无可见内容」。旧 harness 据此整组跳过，
+/// 现按空态契约在所有可观察表面执行实质断言（0 块 / 空 body / 1 页空白等）。
+const EMPTY_STATE_CASES: [&str; 3] = ["CASE-EDGE-001", "CASE-EDGE-002", "CASE-EDGE-003"];
+
+fn empty_state(id: &str) -> bool {
+    EMPTY_STATE_CASES.contains(&id)
+}
+
 impl Case {
     fn has(&self, s: Surface) -> bool {
         self.surfaces.as_ref().is_some_and(|v| v.contains(&s))
+    }
+
+    /// 该表面是否执行断言。空态用例不受语料 `N/A` 限制：N/A 只说明「没有可见
+    /// 内容」，不等于「不可测」——六个表面都能对空态给出确定结论。
+    fn applies(&self, s: Surface) -> bool {
+        (s != Surface::Parse && empty_state(&self.id)) || self.has(s)
     }
 
     fn check_values<'a>(&'a self, key: &'a str) -> impl Iterator<Item = &'a str> + 'a {
@@ -683,6 +697,92 @@ fn ui_checks(app: &mut veil_ui::qa::QaApp) -> UiRes {
     }
 }
 
+/// 空态 UI 断言（WYSIWYG / FOCUS / TYPEWRITER 共用底座）。
+///
+/// 空文档（含仅空行、仅空格）的唯一合法表现是「没有任何块」：布局必须可执行、
+/// 几何必须有限，模式开关只能改变视觉而不能造出内容。`total_h` 允许为 0
+/// （无内容时没有可滚动高度），但不允许非有限或为负。
+fn empty_ui_checks(app: &mut veil_ui::qa::QaApp, surface: Surface) -> Vec<String> {
+    let mut problems = Vec::new();
+    app.render();
+    let blocks = app.blocks();
+    if !blocks.is_empty() {
+        problems.push(format!(
+            "空态文档不得产生块，实际 {}（kinds {:?}）",
+            blocks.len(),
+            blocks
+                .iter()
+                .map(|b| kind_name(&b.kind))
+                .collect::<Vec<_>>()
+        ));
+    }
+    let total = app.total_h();
+    if !total.is_finite() || total < 0.0 {
+        problems.push(format!("空态文档总高非法：{total}"));
+    }
+    // 可见块高度不变量（空态下不应有块，这里作为防御保留）。
+    for (i, b) in blocks.iter().enumerate() {
+        if !b.top.is_finite() || !b.height.is_finite() {
+            problems.push(format!("第 {i} 块几何非有限"));
+        } else if b.height <= 0.0 && !b.details_hidden {
+            problems.push(format!(
+                "第 {i} 块高度为 {:.2}（不可见）：kind={}",
+                b.height,
+                kind_name(&b.kind)
+            ));
+        }
+    }
+
+    let base_text = app.text();
+    match surface {
+        Surface::Focus => {
+            app.toggle_focus();
+            app.render();
+            if app.blocks().len() != blocks.len() {
+                problems.push(format!(
+                    "专注模式改变块数：{} → {}",
+                    blocks.len(),
+                    app.blocks().len()
+                ));
+            }
+            if app.text() != base_text {
+                problems.push("专注模式改变了源文本（应仅为视觉开关）".to_string());
+            }
+            app.toggle_focus();
+        }
+        Surface::Typewriter => {
+            app.set_caret_middle();
+            app.toggle_typewriter();
+            app.render();
+            app.scroll_to_caret();
+            app.render();
+            let c = app.caret();
+            if app.text() != base_text {
+                problems.push("打字机模式改变了源文本（应仅为视觉开关）".to_string());
+            }
+            if !c.y.is_finite() || !c.h.is_finite() || !c.scroll.is_finite() || !c.max_scroll.is_finite()
+            {
+                problems.push(format!(
+                    "空态光标几何非有限：y={} h={} scroll={} max={}",
+                    c.y, c.h, c.scroll, c.max_scroll
+                ));
+            } else if c.max_scroll <= 0.0 {
+                if c.scroll != 0.0 {
+                    problems.push(format!("空态不应发生位移，scroll={:.2}", c.scroll));
+                }
+            } else if c.scroll < -0.01 || c.scroll > c.max_scroll + 0.01 {
+                problems.push(format!(
+                    "空态滚动越界：scroll={:.2}，max={:.2}",
+                    c.scroll, c.max_scroll
+                ));
+            }
+            app.toggle_typewriter();
+        }
+        _ => {}
+    }
+    problems
+}
+
 fn golden_path(id: &str) -> PathBuf {
     Path::new(GOLDEN_DIR).join(format!("{id}.html"))
 }
@@ -933,22 +1033,26 @@ fn syntax_matrix_surfaces() {
         }
         rows.push(Row::new(case, Surface::Parse, parse_problems, None));
 
+        // 空态用例虽在语料里声明 N/A，但空态本身是可断言的确定行为，继续跑表面；
+        // 其余 N/A 用例仍按契约记为 NOT RUN。
         if let Some(reason) = &case.na_reason {
-            for s in SURFACE_ORDER.iter().skip(1) {
-                rows.push(Row::new(case, *s, Vec::new(), Some(reason.clone())));
+            if !empty_state(&case.id) {
+                for s in SURFACE_ORDER.iter().skip(1) {
+                    rows.push(Row::new(case, *s, Vec::new(), Some(reason.clone())));
+                }
+                continue;
             }
-            continue;
         }
 
         // ---- 一次 headless App 供 UI 与 PRINT 共用 ----
-        let need_ui = case.has(Surface::Wysiwyg) || case.has(Surface::Focus) || case.has(Surface::Typewriter);
-        let need_print = case.has(Surface::Print);
+        let need_ui = case.applies(Surface::Wysiwyg) || case.applies(Surface::Focus) || case.applies(Surface::Typewriter);
+        let need_print = case.applies(Surface::Print);
         let mut app = if need_ui || need_print {
             match catch_unwind(AssertUnwindSafe(|| veil_ui::qa::QaApp::new(&text))) {
                 Ok(a) => Some(a),
                 Err(_) => {
                     for s in [Surface::Wysiwyg, Surface::Focus, Surface::Typewriter, Surface::Print] {
-                        if case.has(s) {
+                        if case.applies(s) {
                             rows.push(Row::new(
                                 case,
                                 s,
@@ -966,137 +1070,193 @@ fn syntax_matrix_surfaces() {
 
         let mut overlap: Option<Vec<String>> = None;
         if need_ui {
-            match app.as_mut() {
-                None => {}
-                Some(app) => match catch_unwind(AssertUnwindSafe(|| ui_checks(app))) {
-                    Ok(res) => {
-                        overlap = Some(res.overlap);
-                        if case.has(Surface::Wysiwyg) {
-                            rows.push(Row::new(case, Surface::Wysiwyg, res.wysiwyg, None));
-                        }
-                        if case.has(Surface::Focus) {
-                            rows.push(Row::new(case, Surface::Focus, res.focus, None));
-                        }
-                        if case.has(Surface::Typewriter) {
-                            rows.push(Row::new(case, Surface::Typewriter, res.typewriter, None));
-                        }
-                    }
-                    Err(_) => {
+            if empty_state(&case.id) {
+                // 空态：0 块即不存在块间重叠，PDF 的 no_overlap 视为成立。
+                overlap = Some(Vec::new());
+                match app.as_mut() {
+                    None => {}
+                    Some(app) => {
                         for s in [Surface::Wysiwyg, Surface::Focus, Surface::Typewriter] {
-                            if case.has(s) {
-                                rows.push(Row::new(
+                            if !case.applies(s) {
+                                continue;
+                            }
+                            match catch_unwind(AssertUnwindSafe(|| empty_ui_checks(app, s))) {
+                                Ok(problems) => rows.push(Row::new(case, s, problems, None)),
+                                Err(_) => rows.push(Row::new(
                                     case,
                                     s,
-                                    vec!["UI 布局断言 panic".to_string()],
+                                    vec!["空态布局断言 panic".to_string()],
                                     None,
-                                ));
+                                )),
                             }
                         }
                     }
-                },
+                }
+            } else {
+                match app.as_mut() {
+                    None => {}
+                    Some(app) => match catch_unwind(AssertUnwindSafe(|| ui_checks(app))) {
+                        Ok(res) => {
+                            overlap = Some(res.overlap);
+                            if case.applies(Surface::Wysiwyg) {
+                                rows.push(Row::new(case, Surface::Wysiwyg, res.wysiwyg, None));
+                            }
+                            if case.applies(Surface::Focus) {
+                                rows.push(Row::new(case, Surface::Focus, res.focus, None));
+                            }
+                            if case.applies(Surface::Typewriter) {
+                                rows.push(Row::new(case, Surface::Typewriter, res.typewriter, None));
+                            }
+                        }
+                        Err(_) => {
+                            for s in [Surface::Wysiwyg, Surface::Focus, Surface::Typewriter] {
+                                if case.applies(s) {
+                                    rows.push(Row::new(
+                                        case,
+                                        s,
+                                        vec!["UI 布局断言 panic".to_string()],
+                                        None,
+                                    ));
+                                }
+                            }
+                        }
+                    },
+                }
             }
         }
 
         // ---- HTML ----
-        if case.has(Surface::Html) {
+        if case.applies(Surface::Html) {
+            // Mermaid 用例需要真实离线引擎（QuickJS + mermaid.js）；harness 只对
+            // 这些用例走带注入的导出入口，其余保持纯内存快速路径。
             let mermaid_svg = case
                 .check_values("html_contains")
                 .any(|v| v.contains("<svg"));
-            if mermaid_svg {
-                rows.push(Row::new(
+            let exported = catch_unwind(AssertUnwindSafe(|| {
+                if mermaid_svg {
+                    veil::qa::html_of_doc_with_mermaid(&text, image_case_dir(&case.id))
+                        .map(|html| (html, true))
+                } else {
+                    veil::qa::html_of_doc(&text, image_case_dir(&case.id)).map(|html| (html, false))
+                }
+            }));
+            match exported {
+                Err(_) => rows.push(Row::new(
                     case,
                     Surface::Html,
-                    Vec::new(),
-                    Some(
-                        "harness 未注入 Mermaid 渲染器：html_of_doc(mermaids=None) 会按产品降级为源码围栏，<svg 断言不可得"
-                            .to_string(),
-                    ),
-                ));
-            } else {
-                match catch_unwind(AssertUnwindSafe(|| {
-                    veil::qa::html_of_doc(&text, image_case_dir(&case.id))
-                })) {
-                    Err(_) => rows.push(Row::new(
-                        case,
-                        Surface::Html,
-                        vec!["HTML 导出 panic".to_string()],
-                        None,
-                    )),
-                    Ok(Err(e)) => rows.push(Row::new(
-                        case,
-                        Surface::Html,
-                        vec![format!("HTML 导出入口不可用：{e}")],
-                        None,
-                    )),
-                    Ok(Ok(html)) => {
-                        let mut problems = Vec::new();
-                        // 口径（D4）：比较前对正文与期望片段做开始标签属性归一，
-                        // 使 `<h1 id=…>` ≡ `<h1>`、`<details open>` ≡ `<details>`、
-                        // `<th style=…>` ≡ `<th>`；文本内容与结束标签不动。
-                        let norm_html = strip_tag_attrs(&html);
-                        let body = body_html(&html);
-                        let body_norm = strip_tag_attrs(body);
-                        for want in case.check_values("html_contains") {
-                            // 原文命中（属性类断言如 class=/id=/alt= 保持严格）或归一后命中。
-                            if !html.contains(want) && !norm_html.contains(&strip_tag_attrs(want)) {
-                                problems.push(format!(
-                                    "缺少片段 `{}`；实际正文片段：`{}`",
-                                    snippet(want, 120),
-                                    body_snippet(&html)
-                                ));
-                            }
+                    vec!["HTML 导出 panic".to_string()],
+                    None,
+                )),
+                Ok(Err(e)) => rows.push(Row::new(
+                    case,
+                    Surface::Html,
+                    vec![format!("HTML 导出入口不可用：{e}")],
+                    None,
+                )),
+                Ok(Ok((html, rendered_mermaid))) => {
+                    let mut problems = Vec::new();
+                    // 口径（D4）：比较前对正文与期望片段做开始标签属性归一，
+                    // 使 `<h1 id=…>` ≡ `<h1>`、`<details open>` ≡ `<details>`、
+                    // `<th style=…>` ≡ `<th>`；文本内容与结束标签不动。
+                    let norm_html = strip_tag_attrs(&html);
+                    let body = body_html(&html);
+                    let body_norm = strip_tag_attrs(body);
+                    for want in case.check_values("html_contains") {
+                        // 原文命中（属性类断言如 class=/id=/alt= 保持严格）或归一后命中。
+                        if !html.contains(want) && !norm_html.contains(&strip_tag_attrs(want)) {
+                            problems.push(format!(
+                                "缺少片段 `{}`；实际正文片段：`{}`",
+                                snippet(want, 120),
+                                body_snippet(&html)
+                            ));
                         }
-                        for banned in case.check_values("html_not_contains") {
-                            // 口径（D4）：仅在 <body>…</body> 内检查，避免 head 里的
-                            // <style>/<title> 被误判为正文泄漏。
-                            let banned_norm = strip_tag_attrs(banned);
-                            if body.contains(banned) || body_norm.contains(&banned_norm) {
+                    }
+                    // Mermaid 断言口径：正文必须来自真实 SVG，且不得同时残留
+                    // 「渲染数据不可用」的源码围栏降级形态（否则 <svg 可能来自
+                    // 别处，降级也会被误判为通过）。
+                    if rendered_mermaid {
+                        if !body.contains("<svg") {
+                            problems.push(format!(
+                                "Mermaid 未渲染为内嵌 SVG；实际正文片段：`{}`",
+                                body_snippet(&html)
+                            ));
+                        }
+                        for banned in [
+                            "language-mermaid",
+                            "Mermaid 渲染数据不可用",
+                            "Mermaid render data unavailable",
+                        ] {
+                            if body.contains(banned) {
                                 problems.push(format!(
-                                    "出现禁止片段 `{}`（正文范围内）；上下文：`{}`",
-                                    snippet(banned, 120),
+                                    "Mermaid 仍处于源码围栏降级形态：`{banned}`；上下文：`{}`",
                                     around(&html, banned)
                                 ));
                             }
                         }
-                        if html.contains("<script") {
-                            problems.push(format!(
-                                "通用不变量失败：出现未转义 `<script`；上下文：`{}`",
-                                around(&html, "<script")
-                            ));
-                        }
-                        let source_has_fence = case.source.contains("```");
-                        if !source_has_fence && html.contains("```") {
-                            problems.push(format!(
-                                "通用不变量失败：导出泄漏围栏标记 ```；上下文：`{}`",
-                                around(&html, "```")
-                            ));
-                        }
-                        if case.flag("image_in_cell") {
-                            let cell_img = html
-                                .split("<td")
-                                .skip(1)
-                                .any(|cell| cell.split("</td>").next().is_some_and(|c| c.contains("<img")));
-                            if !cell_img {
-                                problems.push(
-                                    "image_in_cell：未找到任何包含 <img 的 <td>…</td>".to_string(),
-                                );
-                            }
-                            if !html.contains("td img,th img{max-height:2.4em}") {
-                                problems.push(
-                                    "image_in_cell：CSS 缺少 `td img,th img{max-height:2.4em}`"
-                                        .to_string(),
-                                );
-                            }
-                        }
-                        compare_golden(case, &html, &mut problems);
-                        rows.push(Row::new(case, Surface::Html, problems, None));
                     }
+                    // 空态口径：导出骨架（head/style）允许存在，<body> 内必须
+                    // 没有任何可见内容。
+                    if empty_state(&case.id) && !body.trim().is_empty() {
+                        problems.push(format!(
+                            "空态文档的 <body> 应为空，实际：`{}`",
+                            snippet(body.trim(), 300)
+                        ));
+                    }
+                    for banned in case.check_values("html_not_contains") {
+                        // 口径（D4）：仅在 <body>…</body> 内检查，避免 head 里的
+                        // <style>/<title> 被误判为正文泄漏。
+                        let banned_norm = strip_tag_attrs(banned);
+                        if body.contains(banned) || body_norm.contains(&banned_norm) {
+                            problems.push(format!(
+                                "出现禁止片段 `{}`（正文范围内）；上下文：`{}`",
+                                snippet(banned, 120),
+                                around(&html, banned)
+                            ));
+                        }
+                    }
+                    if html.contains("<script") {
+                        problems.push(format!(
+                            "通用不变量失败：出现未转义 `<script`；上下文：`{}`",
+                            around(&html, "<script")
+                        ));
+                    }
+                    let source_has_fence = case.source.contains("```");
+                    if !source_has_fence && html.contains("```") {
+                        problems.push(format!(
+                            "通用不变量失败：导出泄漏围栏标记 ```；上下文：`{}`",
+                            around(&html, "```")
+                        ));
+                    }
+                    if case.flag("image_in_cell") {
+                        let cell_img = html.split("<td").skip(1).any(|cell| {
+                            cell.split("</td>").next().is_some_and(|c| c.contains("<img"))
+                        });
+                        if !cell_img {
+                            problems.push(
+                                "image_in_cell：未找到任何包含 <img 的 <td>…</td>".to_string(),
+                            );
+                        }
+                        if !html.contains("td img,th img{max-height:2.4em}") {
+                            problems.push(
+                                "image_in_cell：CSS 缺少 `td img,th img{max-height:2.4em}`".to_string(),
+                            );
+                        }
+                    }
+                    // Mermaid 用例不做全文金样：SVG 内的路径/弧坐标由 dagre 布局
+                    // 与字体度量共同决定，跨进程运行会出现浮点级差异（实测
+                    // classDiagram / stateDiagram 的 `d` 属性每次略有不同），
+                    // 全文金样必然 flaky。改为上面的结构断言（真实 `<svg>` +
+                    // 禁止降级围栏），同样能证伪「没渲染却算通过」。
+                    if !rendered_mermaid {
+                        compare_golden(case, &html, &mut problems);
+                    }
+                    rows.push(Row::new(case, Surface::Html, problems, None));
                 }
             }
         }
 
         // ---- PDF ----
-        if case.has(Surface::Pdf) {
+        if case.applies(Surface::Pdf) {
             if !veil::qa::pdf_available() {
                 rows.push(Row::new(
                     case,
@@ -1132,6 +1292,23 @@ fn syntax_matrix_surfaces() {
                             problems.push("PDF 字节为空".to_string());
                         }
                         let pdf_text = norm(&out.text);
+                        // 空态依据：`layout_document` 无条件 `new_page()`，正文为空时
+                        // 仍保留 1 页空白；`LayoutOpts::default().page_numbers == false`，
+                        // 所以该页没有任何 `DrawOp::Text`（版面文本为空）。
+                        if empty_state(&case.id) {
+                            if out.page_count != 1 {
+                                problems.push(format!(
+                                    "空态 PDF 应为 1 页空白，实际 {} 页",
+                                    out.page_count
+                                ));
+                            }
+                            if !pdf_text.is_empty() {
+                                problems.push(format!(
+                                    "空态 PDF 不应有版面文本，实际：`{}`",
+                                    snippet(&out.text, 300)
+                                ));
+                            }
+                        }
                         for want in case.check_values("html_contains") {
                             if !plain_key(want) {
                                 continue;
@@ -1160,7 +1337,7 @@ fn syntax_matrix_surfaces() {
         }
 
         // ---- PRINT（仅分页模型；物理打印统一 NOT RUN，见报告） ----
-        if case.has(Surface::Print) {
+        if case.applies(Surface::Print) {
             match app.as_mut() {
                 None => {}
                 Some(app) => {
@@ -1203,6 +1380,16 @@ fn syntax_matrix_surfaces() {
                                         last, pm.total_h
                                     ));
                                 }
+                            }
+                            // 空态依据：`compute_page_breaks` 恒以 `vec![0.0]` 起步，
+                            // 文档总高 ≤ 页高时直接返回，故空文档恰为 1 页、断点 0。
+                            if empty_state(&case.id)
+                                && (pm.pages != 1 || pm.breaks.as_slice() != [0.0])
+                            {
+                                problems.push(format!(
+                                    "空态打印模型应为 1 页且断点为 [0.0]，实际页数 {}、断点 {:?}",
+                                    pm.pages, pm.breaks
+                                ));
                             }
                             rows.push(Row::new(case, Surface::Print, problems, None));
                         }
@@ -1315,11 +1502,19 @@ fn write_report(rows: &[Row], total_cases: usize) {
         }
     }
 
-    let html_ran = counts["HTML"][0] + counts["HTML"][1];
+    // 金样文件数按落盘实际计数：Mermaid 用例不做全文金样（见下）。
+    let golden_count = std::fs::read_dir(GOLDEN_DIR)
+        .map(|entries| {
+            entries
+                .filter_map(|e| e.ok())
+                .filter(|e| e.path().extension().is_some_and(|ext| ext == "html"))
+                .count()
+        })
+        .unwrap_or(0);
     let mut out = String::new();
-    out.push_str("# 语法矩阵测试报告（2026-11-26）\n\n");
+    out.push_str("# 语法矩阵测试报告（2026-11-27）\n\n");
     out.push_str(&format!(
-        "- 语料：`docs/qa/syntax-matrix.md`（契约 163 条，解析校验通过 163）\n- 用例总数：{total_cases}\n- 金样：`docs/qa/golden/html/<CASE>.html`（{html_ran} 份；`UPDATE_GOLDEN=1` 时更新）\n- 命令：`cargo test -p veil --test syntax_matrix`\n\n"
+        "- 语料：`docs/qa/syntax-matrix.md`（契约 163 条，解析校验通过 163）\n- 用例总数：{total_cases}\n- 金样：`docs/qa/golden/html/<CASE>.html`（{golden_count} 份；`UPDATE_GOLDEN=1` 时更新）\n- 命令：`cargo test -p veil --test syntax_matrix`\n\n"
     ));
 
     out.push_str("## 按表面统计\n\n");
@@ -1388,7 +1583,9 @@ fn write_report(rows: &[Row], total_cases: usize) {
     out.push_str("- `no_overlap`：PDF 版面未暴露块级包围盒，改用 headless UI 的块几何（`top`/`height`，容差 0）判断相邻块不相交；该断言记在 PDF 表面。\n");
     out.push_str("- PDF 关键文本：PDF 字节流中文本为字形 CID，无法直接检索 Unicode；关键文本取自同一次 `layout_document` 的 `DrawOp::Text`（与 `render_pages` 同一版面数据）。\n");
     out.push_str("- PRINT：仅断言打印分页模型（页数/断点单调/首断点为 0）；物理打印需要 GDI 设备上下文，全部记为 NOT RUN。\n");
-    out.push_str("- HTML 中的 Mermaid：harness 不启动 QuickJS 离线引擎，`mermaids=None` 按产品既定策略降级为源码围栏，故 `<svg` 断言记 NOT RUN（不伪造通过）。\n");
+    out.push_str("- HTML 中的 Mermaid：harness 经测试门面注入产品同一离线渲染器（`platform::mermaid_offline::OfflineMermaid`：进程内 QuickJS + mermaid.js → resvg，无网络；`OnceLock` 使整轮测试只初始化一次），`export::html_of_doc` 收到真实 `MermaidImage.svg_text`。断言要求正文出现 `<svg` 且不得同时保留 `language-mermaid` 源码围栏降级形态；单块渲染失败即判 FAIL，不降级断言。\n");
+    out.push_str("- 空态用例（CASE-EDGE-001..003）：语料的 `表面：N/A` 只说明「无可见内容」，不等于不可测。harness 在六个表面执行空态断言：UI 0 块且几何有限、HTML `<body>` 为空、PDF 恰 1 页空白且无版面文本（依据 `layout_document` 无条件 `new_page()`、`LayoutOpts::default().page_numbers == false`）、PRINT 恰 1 页且断点为 `[0.0]`（依据 `compute_page_breaks` 恒以 `vec![0.0]` 起步）。\n");
+    out.push_str("- Mermaid 用例不做全文金样：SVG 内的路径/弧坐标由 dagre 布局与字体度量共同决定，跨进程运行存在浮点级差异（classDiagram / stateDiagram 的 `d` 属性实测会变），全文金样必然 flaky；改由结构断言证伪「未渲染却算通过」：`<body>` 必须含真实 `<svg`，且不得残留 `language-mermaid` / 「渲染数据不可用」降级围栏。\n");
     out.push_str("- 金样首次缺失时自动写入（引导），之后普通运行全文比对。\n");
 
     if let Some(dir) = Path::new(REPORT).parent() {

@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use veil_core::Session;
+use veil_core::{BlockId, BlockKind, Session};
 
 /// 导出 HTML 全文（与产品导出同源：`html_of_doc(base_dir)`）。
 /// `base_dir` 为 `Some` 时把该目录内的相对图片内嵌为 data URI。
@@ -23,6 +23,66 @@ pub fn html_of_doc(md: &str, base_dir: Option<&Path>) -> Result<String, String> 
         base_dir,
         None,
     ))
+}
+
+/// 同 [`html_of_doc`]，但先为每个 Mermaid 块注入真实离线渲染结果。
+///
+/// 渲染走产品同一实现（`platform::mermaid_offline::OfflineMermaid`：进程内
+/// QuickJS + mermaid.js → resvg，无网络），再把 `BlockId → MermaidImage` 交给
+/// 同一条 `export::html_of_doc`。任何一块渲染失败都返回 Err——调用方据此判 FAIL，
+/// 而不是让 `mermaids=None` 静默降级成源码围栏。
+#[cfg(feature = "mermaid-offline")]
+pub fn html_of_doc_with_mermaid(md: &str, base_dir: Option<&Path>) -> Result<String, String> {
+    let font = latex_rust::MathFont::stix_two_math()
+        .map_err(|_| "STIX 公式字体不可用".to_string())?;
+    let session = Session::open(md);
+    let mermaids = render_mermaids(&session)?;
+    Ok(crate::export::html_of_doc(
+        &session,
+        &veil_ui::ExportStyle::default(),
+        &font,
+        base_dir,
+        (!mermaids.is_empty()).then_some(&mermaids),
+    ))
+}
+
+/// 进程内复用的离线 Mermaid 渲染器。
+///
+/// QuickJS 首次初始化需解析约 3 MB JS，逐用例重建代价高；用 `OnceLock` 让整个
+/// 测试进程只初始化一次，后续用例复用同一工作线程/引擎。
+#[cfg(feature = "mermaid-offline")]
+fn render_mermaids(session: &Session) -> Result<HashMap<BlockId, veil_ui::MermaidImage>, String> {
+    use std::sync::{Mutex, OnceLock};
+
+    use veil_ui::MermaidRenderer;
+
+    let ids: Vec<BlockId> = session
+        .blocks()
+        .into_iter()
+        .filter_map(|(id, kind, _)| (kind == BlockKind::Mermaid).then_some(id))
+        .collect();
+    if ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    static RENDERER: OnceLock<Mutex<crate::platform::mermaid_offline::OfflineMermaid>> =
+        OnceLock::new();
+    let mut renderer = RENDERER
+        .get_or_init(|| Mutex::new(crate::platform::mermaid_offline::OfflineMermaid::new()))
+        .lock()
+        .map_err(|_| "Mermaid 渲染器锁中毒".to_string())?;
+
+    let mut out = HashMap::new();
+    for id in ids {
+        // block range 含 ``` 围栏行；导出/预览都只吃围栏**内容**。
+        let source = session
+            .fenced_code_source(id)
+            .map(|(_, body)| body)
+            .unwrap_or_default();
+        let image = renderer.render_blocking(format!("case-{}", id.0), source, false)?;
+        out.insert(id, image);
+    }
+    Ok(out)
 }
 
 /// PDF 版面/渲染产物：页数、按绘制顺序拼接的文本、PDF 字节长度。

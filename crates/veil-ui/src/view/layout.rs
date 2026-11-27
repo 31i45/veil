@@ -21,6 +21,7 @@ use crate::geometry::{BASE_FONT_SIZE, BASE_LINE_HEIGHT};
 use crate::i18n::{t, tf, Key};
 use crate::theme::{DocFontFamily, DocMargin, SyntaxColors, Theme};
 use crate::tokens::typography;
+use crate::type_scale;
 
 /// 行内资源键：占位图与位图缓存之间的寻址键（切片 8/13 共用占位机制）。
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -100,12 +101,12 @@ pub struct ImageCaption {
 }
 
 /// 块级字号倍率（标题）。样式语义见 style.rs 头注。
+/// 标题比值统一由 `type_scale::screen_heading_scale` 派生（纸面基准表 + 屏幕夹取）。
 fn block_scale(kind: BlockKind) -> f32 {
     match kind {
-        BlockKind::AtxHeading(1) | BlockKind::SetextHeading(1) => 1.6,
-        BlockKind::AtxHeading(2) | BlockKind::SetextHeading(2) => 1.4,
-        BlockKind::AtxHeading(3) => 1.2,
-        BlockKind::AtxHeading(_) | BlockKind::SetextHeading(_) => 1.1,
+        BlockKind::AtxHeading(level) | BlockKind::SetextHeading(level) => {
+            type_scale::screen_heading_scale(level)
+        }
         _ => 1.0,
     }
 }

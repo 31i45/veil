@@ -45,6 +45,7 @@ mod shell;
 mod stats;
 mod theme;
 mod tokens;
+pub mod type_scale;
 mod view;
 
 #[cfg(test)]

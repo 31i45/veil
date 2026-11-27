@@ -2184,14 +2184,7 @@ fn footnote_plain_text(md: &str) -> String {
 }
 
 fn heading_size(level: u8) -> f32 {
-    match level {
-        1 => 22.0,
-        2 => 18.0,
-        3 => 15.5,
-        4 => 14.0,
-        5 => 13.0,
-        _ => 12.5,
-    }
+    veil_ui::type_scale::paper_heading_size(level)
 }
 
 /// 列表前缀与内容起点（相对块文本的字节偏移）。

@@ -32,7 +32,6 @@ pub(crate) use history::History;
 pub(crate) use layout::fit_size_box;
 pub(crate) use layout::image_display_size;
 pub(crate) use layout::toc_display_text;
-#[cfg(test)]
 pub(crate) use layout::MAX_BLOCK_BYTES;
 pub(crate) use layout::{
     block_details_spans, cell_image_alt_spans, cell_math_spans, node_active, oversize_notice,

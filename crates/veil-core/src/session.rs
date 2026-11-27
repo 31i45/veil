@@ -263,6 +263,16 @@ impl Session {
         self.syntax.inlines(&self.buf, block)
     }
 
+    /// 块内 inline 节点前缀（只解析块首 `max_bytes`）：供排版按可渲染前缀取节点，
+    /// 超限单块不再为每次击键解析整块文本。偏移仍为绝对字节偏移。
+    pub fn block_inlines_within(
+        &self,
+        block: BlockId,
+        max_bytes: usize,
+    ) -> Option<Vec<InlineNode>> {
+        self.syntax.inlines_within(&self.buf, block, max_bytes)
+    }
+
     /// 数学块的 TeX 源码（剥开闭 `$$` 标记）。非数学块/未知 id 返回 None。
     pub fn math_source(&self, block: BlockId) -> Option<String> {
         self.syntax.math_source(&self.buf, block)

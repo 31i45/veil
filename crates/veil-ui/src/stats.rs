@@ -7,6 +7,23 @@ use crate::app::App;
 
 /// 中文口径字数：CJK 逐字 + 非 CJK 字母数字串按词。
 pub(crate) fn count_words(text: &str) -> usize {
+    // ASCII 快路径：纯 ASCII 按字节扫描（大块单段可达 10 MB，逐 char 解码是
+    // 每次击键重复计数的主要成本之一）；语义与下面逐字符口径逐字等价。
+    if text.is_ascii() {
+        let mut words = 0;
+        let mut in_word = false;
+        for &b in text.as_bytes() {
+            if b.is_ascii_alphanumeric() {
+                if !in_word {
+                    words += 1;
+                    in_word = true;
+                }
+            } else {
+                in_word = false; // 空白/标点/标记符既不计字也不续词
+            }
+        }
+        return words;
+    }
     let mut words = 0;
     let mut in_word = false;
     for c in text.chars() {

@@ -1234,6 +1234,25 @@ impl LayoutEngine {
         self.rasterize_buffer_scripts(&layout.buffer, layout.height, color, &layout.script_ranges)
     }
 
+    /// 只光栅化块内行窗口 `[y0, y1)`（物理像素，块内坐标）：缓冲区仍为整块高，
+    /// 窗口外的字形不写入（透明）。超高块绘制时只处理可见行带，避免每次击键
+    /// 为整块 64 KiB 前缀逐字光栅化。
+    pub(crate) fn rasterize_windowed(
+        &mut self,
+        layout: &BlockLayout,
+        color: [u8; 3],
+        y0: u32,
+        y1: u32,
+    ) -> (Vec<u8>, u32, u32) {
+        self.rasterize_buffer_scripts_window(
+            &layout.buffer,
+            layout.height,
+            color,
+            &layout.script_ranges,
+            Some((y0, y1)),
+        )
+    }
+
     /// 光栅化任意已排版 buffer（表格单元格复用同一 path）。`height` 为排版高（物理像素）。
     /// 悬挂标点 v0 在此生效：满行末字为闭标点时光栅右移半字宽（排版几何不变，
     /// caret/命中/选区仍按未位移坐标——光标落在标点之后恰与位移后墨缘对齐）。
@@ -1245,6 +1264,18 @@ impl LayoutEngine {
         height: f32,
         color: [u8; 3],
         scripts: &[(usize, usize, f32)],
+    ) -> (Vec<u8>, u32, u32) {
+        self.rasterize_buffer_scripts_window(buffer, height, color, scripts, None)
+    }
+
+    /// `window = Some((y0, y1))`：只写入块内纵坐标落在该区间的字形（物理像素）。
+    fn rasterize_buffer_scripts_window(
+        &mut self,
+        buffer: &Buffer,
+        height: f32,
+        color: [u8; 3],
+        scripts: &[(usize, usize, f32)],
+        window: Option<(u32, u32)>,
     ) -> (Vec<u8>, u32, u32) {
         let width_opt = buffer.size().0;
         let mut max_w: f32 = 0.0;
@@ -1267,6 +1298,8 @@ impl LayoutEngine {
             h
         };
         let mut px = vec![0u8; w * h * 4];
+        // 窗口外留两行余量：字形升部/降部不得在窗口边缘被切掉（可见行本身恒在窗口内）。
+        let win_margin = 64.0f32;
         for run in buffer.layout_runs() {
             let (dx, hi) = hang_shift(&run, width_opt);
             for (i, g) in run.glyphs.iter().enumerate() {
@@ -1277,6 +1310,11 @@ impl LayoutEngine {
                     .find(|(s, e, _)| *s <= g.start && g.start < *e)
                     .map_or(0.0, |&(_, _, dy)| dy);
                 let baseline = (run.line_y + script_dy).round();
+                if let Some((y0, y1)) = window {
+                    if baseline < y0 as f32 - win_margin || baseline >= y1 as f32 + win_margin {
+                        continue;
+                    }
+                }
                 let physical = g.physical((shift, baseline), 1.0);
                 let fs = &mut self.font_system;
                 let key_color = Color::rgb(base[0], base[1], base[2]);

@@ -10,6 +10,7 @@ use crate::i18n::{t, Key};
 use crate::view::{
     block_details_spans, image_is_standalone, node_active, oversize_notice, Frame, ImageCaption,
     InlineAsset, InlineFold, InlineImg, LayoutEngine, LayoutKey, Memo, OverKind, UnderKind,
+    MAX_BLOCK_BYTES,
 };
 use softbuffer::Surface;
 use std::collections::HashSet;
@@ -781,7 +782,11 @@ impl App {
             } else {
                 None
             };
-            let inlines = self.editor.session().block_inlines(id).unwrap_or_default();
+            let inlines = self
+                .editor
+                .session()
+                .block_inlines_within(id, MAX_BLOCK_BYTES)
+                .unwrap_or_default();
             let mut maths: Vec<(Range, String)> = Vec::new(); // (节点区间, tex)
                                                               // (节点区间, url, 显式宽高)：Markdown 图片无显式尺寸（None, None），
                                                               // HTML `<img width height>` 由解析层白名单收集后带下来。
@@ -1374,11 +1379,23 @@ impl App {
             else {
                 continue;
             };
-            if self.cache.raster(id, lk).is_none() {
-                let r = self
-                    .engine
-                    .rasterize(&self.cache.layouts[&id].value, theme.fg);
+            // 光栅只覆盖当前可见行带（块内高清坐标），并对齐到一屏高度：
+            // 超高单块（10 MB 只排 64 KiB 前缀，块高可达上万像素）不再为每次击键
+            // 逐字光栅化整块；滚动在同一带内复用，跨带时按带重生。
+            let h_px = {
+                let l = &self.cache.layouts[&id].value;
+                l.height.ceil().max(1.0) as u32
+            };
+            let v0 = (-sy).max(0) as u32;
+            let v1 = ((frame.height as i32 - sy).max(0) as u32).min(h_px);
+            let band = (vp.h.round() as u32).max(1);
+            let win_y0 = (v0 / band) * band;
+            let win_y1 = (win_y0 + 2 * band).min(h_px).max(v1.min(h_px));
+            if self.cache.raster(id, lk).is_none() || !self.cache.raster_covers(id, v0, v1) {
+                let l = &self.cache.layouts[&id].value;
+                let r = self.engine.rasterize_windowed(l, theme.fg, win_y0, win_y1);
                 self.cache.rasters.insert(id, Memo { key: lk, value: r });
+                self.cache.set_raster_window(id, (win_y0, win_y1));
             }
             let l = &self.cache.layouts[&id].value;
             if matches!(

@@ -260,16 +260,33 @@ impl Syntax {
     /// FencedCode/IndentedCode/Math/Table/ThematicBreak 恒为空（无 inline）；未知 id 返回 None。
     /// 列表/引用仅解析标记（`- ` / `> `）之后的内容，标记本身不得被 inline 误认。
     pub fn inlines(&self, buf: &Buffer, block: BlockId) -> Option<Vec<InlineNode>> {
+        self.inlines_within(buf, block, usize::MAX)
+    }
+
+    /// `inlines` 的前缀版本：只解析块首起 `max_bytes` 以内的 inline 节点（绝对偏移）。
+    /// 排版只消费可渲染前缀（超限块仅排前缀），调用方据此避免每次击键解析整块
+    /// 10 MB 文本；命中范围之外的节点本就不会进入排版，语义不变。
+    pub fn inlines_within(
+        &self,
+        buf: &Buffer,
+        block: BlockId,
+        max_bytes: usize,
+    ) -> Option<Vec<InlineNode>> {
         let b = self.get_block(block)?;
         if b.kind.has_no_inlines() {
             return Some(Vec::new());
         }
         let start = buf.offset_of_line(b.start_line);
-        let end = if b.end_line < buf.line_count() {
+        let block_end = if b.end_line < buf.line_count() {
             buf.offset_of_line(b.end_line)
         } else {
             buf.len()
         };
+        let mut end = start.saturating_add(max_bytes).min(block_end);
+        while end > start && !buf.is_char_boundary(end) {
+            end -= 1;
+        }
+        let truncated = end < block_end;
         let text = buf.slice(start, end);
         Some(match b.kind {
             BlockKind::ListItem { .. } => {
@@ -303,8 +320,13 @@ impl Syntax {
             }
             // Setext：inline 仅解析内容行，下划线行不参与（0c P0-2）
             BlockKind::SetextHeading(_) => {
-                let ul = buf.offset_of_line(b.end_line - 1);
-                parse_inlines(&buf.slice(start, ul), start, &self.refs)
+                if truncated {
+                    // 前缀不含下划线行：按普通行内容解析，避免为取末行再切整块。
+                    parse_inlines(&text, start, &self.refs)
+                } else {
+                    let ul = buf.offset_of_line(b.end_line - 1);
+                    parse_inlines(&buf.slice(start, ul), start, &self.refs)
+                }
             }
             _ => parse_inlines(&text, start, &self.refs),
         })

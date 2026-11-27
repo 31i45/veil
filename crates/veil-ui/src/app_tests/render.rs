@@ -2174,44 +2174,79 @@ fn perf_huge_scroll() {
 }
 
 /// 0a 验收探针（默认忽略）：1/2/10MB 单块只排前缀，不再整块成形。
+/// 首键/文末插入各采样 9 次（每次新建 App，等价真实「打开→首键」）。
+/// 预算是**回归上限（regression ceiling）**，不是目标值：只拦 O(块字节) 级回归，
+/// 不用于评价产品目标延迟。1MB ≤ 70ms、2MB ≤ 80ms、10MB ≤ 200ms。
+/// 1MB 上限按实测取值：编辑路径已无 O(块字节) 重复工作，残余成本是
+/// **与文档规模无关** 的「64 KiB 可渲染前缀」成本——cosmic-text shaping 18–20ms、
+/// 布局其余 ~7ms、可见行带光栅 ~3.4ms、脏块增量重解析/索引 ~6ms；
+/// 实测 p95 约 50–60ms（多次采样曾见 59.854ms），70ms 留 ≥15% 抖动余量。
+/// 低预算（如 50/60ms）会因运行抖动偶发变红而过失真回归；70ms 仍显著低于
+/// 旧路径 1MB 实测 143–161ms 与「整块 inline 解析」约 79ms，2/10MB 上限不变。
 /// cargo test -p veil-ui --release -- --ignored --nocapture perf_huge_block
 #[test]
 #[ignore = "性能探针，不参与常规门禁"]
 fn perf_huge_block() {
-    for mb in [1usize, 2, 10] {
+    const SAMPLES: usize = 9;
+    for (mb, budget_ms) in [(1usize, 70.0f64), (2, 80.0), (10, 200.0)] {
         let text = "a".repeat(mb * 1024 * 1024);
         let store = MemStore::default();
-        let t = Instant::now();
-        let mut a = app(&text, None, false, &store);
-        let app_ms = t.elapsed().as_secs_f64() * 1e3;
-        let t = Instant::now();
-        let dirty = a.editor.apply(Intent::InsertText("b".into())).unwrap();
-        a.after_edit(dirty);
-        a.paint();
-        let edit_ms = t.elapsed().as_secs_f64() * 1e3;
-        let t = Instant::now();
-        a.editor.apply(Intent::MoveDocEnd).unwrap();
-        let dirty = a.editor.apply(Intent::InsertText("c".into())).unwrap();
-        a.after_edit(dirty);
-        a.paint();
-        let tail_ms = t.elapsed().as_secs_f64() * 1e3;
-        let l = &a.cache.layouts[&a.index.blocks[0].id];
+        let mut edit_samples = Vec::with_capacity(SAMPLES);
+        let mut tail_samples = Vec::with_capacity(SAMPLES);
+        let mut app_ms = 0.0;
+        for _ in 0..SAMPLES {
+            let t = Instant::now();
+            let mut a = app(&text, None, false, &store);
+            app_ms = t.elapsed().as_secs_f64() * 1e3;
+            let t = Instant::now();
+            let dirty = a.editor.apply(Intent::InsertText("b".into())).unwrap();
+            a.after_edit(dirty);
+            a.paint();
+            edit_samples.push(t.elapsed().as_secs_f64() * 1e3);
+            let t = Instant::now();
+            a.editor.apply(Intent::MoveDocEnd).unwrap();
+            let dirty = a.editor.apply(Intent::InsertText("c".into())).unwrap();
+            a.after_edit(dirty);
+            a.paint();
+            tail_samples.push(t.elapsed().as_secs_f64() * 1e3);
+            // 既有不变量：前缀降级、排版文本不超上限、正文真值完整往返。
+            let l = &a.cache.layouts[&a.index.blocks[0].id];
+            assert!(l.truncated);
+            assert!(l.layout_text().len() <= MAX_BLOCK_BYTES);
+            assert_eq!(a.editor.session().serialize().len(), text.len() + 2);
+        }
+        edit_samples.sort_by(|x, y| x.partial_cmp(y).unwrap());
+        tail_samples.sort_by(|x, y| x.partial_cmp(y).unwrap());
+        let pick = |v: &[f64], q: f64| {
+            let i = ((v.len() as f64 * q).ceil() as usize)
+                .saturating_sub(1)
+                .min(v.len() - 1);
+            v[i]
+        };
+        let (e_p50, e_p95, t_p50, t_p95) = (
+            pick(&edit_samples, 0.5),
+            pick(&edit_samples, 0.95),
+            pick(&tail_samples, 0.5),
+            pick(&tail_samples, 0.95),
+        );
         println!(
-            "huge_mb={mb} app_ms={app_ms:.3} edit_ms={edit_ms:.3} tail_ms={tail_ms:.3} prefix={} truncated={} height={:.1}",
-            l.layout_text().len(),
-            l.truncated,
-            l.height
+            "huge_mb={mb} app_ms={app_ms:.3} edit_p50={e_p50:.3} edit_p95={e_p95:.3} tail_p50={t_p50:.3} tail_p95={t_p95:.3} budget={budget_ms:.0}"
         );
         println!("PROBE name=perf_huge_block metric=app_ms value={app_ms:.3} unit=ms scope={mb}mb");
         println!(
-            "PROBE name=perf_huge_block metric=edit_ms value={edit_ms:.3} unit=ms scope={mb}mb"
+            "PROBE name=perf_huge_block metric=edit_p95 value={e_p95:.3} unit=ms scope={mb}mb"
         );
         println!(
-            "PROBE name=perf_huge_block metric=tail_ms value={tail_ms:.3} unit=ms scope={mb}mb"
+            "PROBE name=perf_huge_block metric=tail_p95 value={t_p95:.3} unit=ms scope={mb}mb"
         );
-        assert!(l.truncated);
-        assert!(l.layout_text().len() <= MAX_BLOCK_BYTES);
-        assert_eq!(a.editor.session().serialize().len(), text.len() + 2);
+        assert!(
+            e_p95 <= budget_ms,
+            "{mb}MB 首键 p95 {e_p95:.1}ms 超回归上限 {budget_ms}ms（regression ceiling，非目标值）"
+        );
+        assert!(
+            t_p95 <= budget_ms,
+            "{mb}MB 文末插入 p95 {t_p95:.1}ms 超回归上限 {budget_ms}ms（regression ceiling，非目标值）"
+        );
     }
 }
 

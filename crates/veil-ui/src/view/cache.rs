@@ -219,6 +219,10 @@ pub(crate) struct Cache {
     pub(crate) layouts: HashMap<BlockId, Memo<LayoutKey, BlockLayout>>,
     /// 文本光栅：键与布局键一致（光栅由该次布局生成、按前景色光栅化）。
     pub(crate) rasters: HashMap<BlockId, Memo<LayoutKey, Raster>>,
+    /// 光栅实际覆盖的块内行窗口 `[y0, y1)`（物理像素）。仅光栅化可见行带，
+    /// 超高块（如 10 MB 单块只排 64 KiB 前缀）不再为每次击键光栅化整块。
+    /// 无条目视为全覆盖（外部注入的光栅/测试路径）。
+    pub(crate) raster_windows: HashMap<BlockId, (u32, u32)>,
     /// 数学块渲染图与失败记忆。
     pub(crate) math_imgs: HashMap<BlockId, Memo<MathKey, MathImage>>,
     pub(crate) math_failed: HashMap<BlockId, Memo<MathFailKey, ()>>,
@@ -260,6 +264,7 @@ impl Default for Cache {
         Self {
             layouts: HashMap::new(),
             rasters: HashMap::new(),
+            raster_windows: HashMap::new(),
             math_imgs: HashMap::new(),
             math_failed: HashMap::new(),
             inline_math: HashMap::new(),
@@ -436,6 +441,19 @@ impl Cache {
             .map(|m| &m.value)
     }
 
+    /// 记录某块光栅实际覆盖的块内行窗口 `[y0, y1)`。
+    pub(crate) fn set_raster_window(&mut self, id: BlockId, win: (u32, u32)) {
+        self.raster_windows.insert(id, win);
+    }
+
+    /// 现有光栅是否已覆盖块内行区间 `[v0, v1)`；无窗口记录视为全覆盖。
+    pub(crate) fn raster_covers(&self, id: BlockId, v0: u32, v1: u32) -> bool {
+        match self.raster_windows.get(&id) {
+            None => true,
+            Some(&(y0, y1)) => y0 <= v0 && v1 <= y1,
+        }
+    }
+
     pub(crate) fn math(&self, id: BlockId, key: MathKey) -> Option<&MathImage> {
         self.math_imgs
             .get(&id)
@@ -528,6 +546,7 @@ impl Cache {
             .retain(|id, m| alive(*id) && m.key.base == *base);
         self.rasters
             .retain(|id, m| alive(*id) && m.key.base == *base);
+        self.raster_windows.retain(|id, _| alive(*id));
         self.tables
             .retain(|id, m| alive(*id) && m.key.base == *base);
         self.math_imgs.retain(|id, m| {
@@ -558,6 +577,7 @@ impl Cache {
             .retain(|id, m| keep.contains(id) && m.key.base == *base);
         self.rasters
             .retain(|id, m| keep.contains(id) && m.key.base == *base);
+        self.raster_windows.retain(|id, _| keep.contains(id));
         self.tables
             .retain(|id, m| keep.contains(id) && m.key.base == *base);
     }

@@ -25,7 +25,7 @@
 
 - **Callout 内 `<details>` 与普通引用同规则**（`2060da9`）：删除 `block.rs` 中 `(!is_callout).then_some(depth)` 的容器特判，Callout 与普通引用共用同一提升路径；`ADJC2-061/083` 金样、`adjacency-digest.txt`、`report-2026-11-27.md` 同步更新，Callout 标题只出现一次。
 - **10 MB 单块首键延迟**（`67cdd8d`）：归因显示主因是每次击键把整块 10 MB 重新 inline 解析（约占 82%）；改为只解析需渲染前缀、把光栅限制在可见行带。实测 10 MB 首键 p95 **976.024 ms → 147.227 ms**（文末插入 975.732 → 153.297 ms）；1 MB 首键 p95 160.465 → 46.436 ms。预算写进 `perf_huge_block` 测试内：1 / 2 / 10 MB = **70 / 80 / 200 ms**（regression ceiling，非目标值），既有不变量断言未弱化。
-- **ignored 门禁简化**（`85b0953`）：预算回归下沉到测试自证；`probe-gate.ps1` 由 **694 行降到 153 行**，只做 release 构建 + 一次 `--ignored` 运行 + 归档；删除 `perf-baseline.json`、`perf-baseline-final.json` 与 3 份 stability 归档。
+- **ignored 门禁简化**（`85b0953`）：预算回归下沉到测试自证；`probe-gate.ps1` 由 **694 行降到 123 行**，只做 release 构建 + 一次 `--ignored` 运行 + 归档；删除 `perf-baseline.json`、`perf-baseline-final.json` 与 3 份 stability 归档。
 
 ### 发布产物与不变量
 
@@ -34,6 +34,12 @@
 - 未推送 GitHub（`main` 领先 `origin/main` 140 个 commit）、未打 tag、版本号仍 **3.0.2**。
 - 未新增依赖：`Cargo.toml` / `Cargo.lock` 自 `3ee2dcd` 起无改动。
 - 本轮 commit（新→旧）：`85b0953`、`67cdd8d`、`2060da9`。
+
+### 人工证据（2026-11-28）
+
+- **系统 DPI 100% / 125% / 200%**：真实切换系统缩放后逐档抓首帧，四档均 `status=PASS`；窗口物理尺寸 916×739 / 1143×922 / 1372×1106 / 1826×1335，随缩放线性变化；首帧文字清晰、无空白/半屏/裁切。逐档点按/拖选命中 **未执行**，不冒充通过。证据：`docs/qa/evidence/assisted-2026-11-27/dpi-{100,125,150,200}.png`、`dpi.jsonl`。
+- **真机微软拼音六步**：真实按键驱动，预编辑/空格上屏「你好」/`zhongguo` 第 2 候选「中过」/行首行尾/表格单元格/`Esc` 哈希不变均通过；微软五笔未安装 → NOT RUN。观察：组合中失焦会把原始串 `nihao` 提交进文档（系统 IME 语义，不丢字、不重复）。证据：`ime-result.md` 与 `ime-*.png`、`ime2-*.png`、`ime3-*.png`。
+- **实体打印**：可选冒烟，NOT RUN；Print-to-PDF 已覆盖应用侧分页正确性。
 
 ## 最后一公里与 ignored 门禁（2026-11-28）
 

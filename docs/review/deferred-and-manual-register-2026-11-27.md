@@ -10,10 +10,10 @@
 
 ### 1.1 系统 DPI 100% / 125% / 150% / 200%
 
-- 状态：**150% 已真实抓图（CAPTURED，脚本 `status=PASS`）**；**100% / 125% / 200% NOT RUN**（未切换系统缩放，未伪造截图）。
-  说明：判定标准中的点按/拖选命中与页边距仍需人工按截图核对，本节不把「抓图成功」冒充「全部判定项通过」。
-- 证据：`docs/qa/evidence/assisted-2026-11-27/dpi-150.png`（1372×1106，142,585 B，PrintWindow）与
-  `docs/qa/evidence/assisted-2026-11-27/dpi.jsonl`（150% `status=PASS`；100/125/200 各一行 `status=NOT_RUN`，原因为实测 150%）
+- 状态：**100% / 125% / 150% / 200% 四档首帧全部 PASS（2026-11-28，真实切换系统缩放）**；**逐档点按/拖选命中 NOT RUN**（未逐档做人工命中核对，不把「首帧完整」冒充「全部判定项通过」）。
+  四档窗口物理尺寸 916×739 / 1143×922 / 1372×1106 / 1826×1335，随缩放线性变化；首帧文字清晰、无空白/半屏/裁切。打印/导出页边距为毫米制、不随屏幕 DPI 变，已有 PDF 断言。
+- 证据：`docs/qa/evidence/assisted-2026-11-27/dpi-100.png`、`dpi-125.png`、`dpi-150.png`、`dpi-200.png` 与
+  `docs/qa/evidence/assisted-2026-11-27/dpi.jsonl`（四档均 `status=PASS`）
 - 为什么不能自动化：DPI 是 Windows 显示设置的系统级状态，切换会改变所有进程的物理像素映射，通常需要注销/重启，且会干扰同一台机器上的其它工作；headless 测试只能改逻辑缩放因子，不能证明系统 DPI 切换后的真实首帧、命中与版心。
 - 协同方式（步骤已改为 assisted 脚本驱动，用户只做物理切换）：
   1. `pwsh -NoProfile -File tools/verify/assisted/dpi.ps1` 查看当前档位；
@@ -40,8 +40,11 @@
 
 ### 1.3 真机中文 IME（微软拼音 / 微软五笔）
 
-- 状态：**NOT RUN**（代码侧 IME 锚点与 preedit 绘制已有端口单测；真机六步走查本轮未执行）
-- 证据：`docs/qa/evidence/assisted-2026-11-27/ime-result.md`（六步均 `NOT RUN`，含用户侧唯一命令；未伪造截图）
+- 状态：**微软拼音六步 PASS（2026-11-28，真实按键驱动）**；**微软五笔 NOT RUN（系统未安装）**。
+  已证实：预编辑下划线跟随光标且候选窗不越出版心；空格上屏「你好」无重复；`zhongguo` 选第 2 候选得「中过」；
+  行首/行尾与表格单元格内输入均正确落位；`Esc` 取消后文件哈希与基线完全一致。
+  行为记录（P2 观察，未当缺陷关闭）：组合未上屏时失焦，IME 把原始串 `nihao` 提交进文档（系统语义，不丢字、不重复）。
+- 证据：`docs/qa/evidence/assisted-2026-11-27/ime-result.md` 与 `ime-step1-preedit.png`、`ime-step2-commit.png`、`ime-step3-candidates.png`、`ime3-table-commit.png`、`ime2-esc-after.png`、`ime2-focus-*.png`
 - 为什么不能自动化：候选窗由系统 IME 进程绘制，自动化无法稳定注入真实按键序列与选词。
 - 协同方式（步骤已改为 assisted 脚本驱动，用户只输入/切输入法）：
   1. `pwsh -NoProfile -File tools/verify/assisted/ime.ps1`：启动 release `veil.exe` 并逐步提示；

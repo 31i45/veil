@@ -88,8 +88,8 @@ Get-ChildItem $root -Directory | ForEach-Object {
 | ID | 标题 | 当前事实 | 证据位置 | 严重度 | 归因 | 归属任务 |
 |---|---|---|---|---|---|---|
 | F-012 | 实体打印机出纸（可选冒烟） | `Microsoft Print to PDF` 是真实打印驱动，已覆盖应用侧分页正确性；实体出纸只额外验证驱动/介质差异，不作为发布门禁 | `README.zh-CN.md:155`；`docs/qa/report-2026-11-27.md:101`；`docs/qa/w10-output-pipeline-evidence.md:21` | P2 | 接受并说明 | 可选冒烟 |
-| F-013 | 系统 DPI 100/125/200 NOT RUN | 仅 150% 有自动首帧检查；100/125/200 未实测，`README` 与十维报告均记为 NOT RUN | `README.zh-CN.md:154`；`docs/review/jobs-lens-report-v2.md:67`、`270` | P1 | 延后并说明 | Task 6.1 |
-| F-014 | 真机中文 IME 组合与候选窗 NOT RUN | 代码已修 IME 锚点与 preedit 绘制（端口单测通过），但微软拼音/五笔真机六步走查未执行，不能宣称 PASS | `docs/review/jobs-lens-report-v2.md:337-341`、`357-358`；`README.zh-CN.md:164` | P1 | 延后并说明 | Task 6.3 |
+| F-013 | 系统 DPI 四档首帧；逐档命中未执行 | 2026-11-28 真实切换 100/125/150/200，四档首帧完整、窗口物理尺寸线性变化；逐档点按/拖选命中未执行（PDF 页边距为毫米制，不随屏幕 DPI 变，有断言） | `docs/qa/evidence/assisted-2026-11-27/dpi-{100,125,150,200}.png`、`dpi.jsonl`；`docs/review/deferred-and-manual-register-2026-11-27.md` §1.1 | P2 | 首帧已闭合；命中登记 | Task 6.1 |
+| F-014 | 真机中文 IME（微软拼音） | 2026-11-28 真实按键六步：预编辑/上屏/第 2 候选/行首行尾/表格单元格/Esc 哈希不变均 PASS；微软五笔未安装 → NOT RUN；失焦提交原始串已记录为行为观察 | `docs/qa/evidence/assisted-2026-11-27/ime-result.md` 与 `ime-*.png` | P3 | 已闭合（五笔除外） | Task 6.3 |
 | F-015 | 版本历史面板未单独实测 | w11 只实测快速打开（5000 文件约 13 ms）与大纲（0.34 ms）；历史面板"未单独实测"，沿用"可能短暂阻塞"的表述 | `docs/qa/w11-load-state-measurement.md:62-66`、`74-75` | P2 | 延后并说明 | 不修 |
 | F-016 | 5000 标题解析预算只有单次 release 样本，无 p95 | `Session::open(5000 headings)` release 只有 148.385 ms 单次样本；目录枚举/候选构建有 n=20 与 p95，但该路径没有；预算登记为 ≤200 ms | `docs/qa/w11-load-state-measurement.md:40-47`、`68-70` | P2 | 延后并说明 | 不修 |
 
@@ -222,8 +222,8 @@ Get-ChildItem $root -Directory | ForEach-Object {
 | ID | 延后理由 | 重开判据 |
 |---|---|---|
 | F-012 | **接受（不是延后）**：Print-to-PDF 已覆盖应用侧分页正确性；实体出纸只多验证驱动/介质差异 | 具体型号出纸遇到问题，或用户明确要求核对时做一次冒烟 |
-| F-013 | DPI 100/125/200 需真实显示环境切换与截图 | Task 6.1 给出截图、首帧、命中与版心一致性 |
-| F-014 | 真机 IME 需人在场走微软拼音/五笔六步 | Task 6.3 六步走查通过并留证 |
+| F-013 | **首帧已闭合（2026-11-28）**：四档真实切换并抓图；逐档点按/拖选命中仍未执行 | 需要逐档人工命中核对时补做 |
+| F-014 | **已闭合（2026-11-28）**：微软拼音六步真实按键通过；五笔未安装 | 安装五笔后执行同一六步 |
 | F-015 | **已闭合（2026-11-28，Task 5）**：版本历史面板 5000 快照已同口径测量，打开 p95 10.738 ms、滚动 p95 3.642 ms、关闭 p95 0.423 ms | `docs/qa/perf-distribution-2026-11-27.md` §1；`docs/qa/probe-gate-2026-11-28.md`（原 stability 归档已删除） |
 | F-016 | **已闭合（2026-11-28，Task 5）**：5000 标题 `open_ms` 为 n=9 分布，p95 96.463 ms（本轮 probe-gate 复跑 100.234 ms），登记预算 ≤200 ms | `docs/qa/perf-distribution-2026-11-27.md` §1；`docs/qa/probe-gate-2026-11-28.md` |
 | F-025 | README 与源码不一致（AccessKit 已移除仍在宣传） | 中英 README 更正为「不提供屏幕阅读器支持」并删除失效构建命令（本轮已执行） |
@@ -289,8 +289,8 @@ Get-ChildItem $root -Directory | ForEach-Object {
 
 1. ~~16 种 Mermaid 图型的深色观感与 c4 `Rel` 连线标签对比度~~：已由 Task 4.2 关闭（22 类逐图目检 + 证据目录 + 自动断言；c4 已按 aria 限定覆盖）。**gitGraph 分支标签已于 2026-11-28 闭合**：原 3.35:1 经 `aria-roledescription="gitGraph"` 描边修复后实测 5.04:1（≥4.5），见 `docs/qa/mermaid-dark-2026-11-27.md` §2.2。
 2. 实体物理打印机出纸（可选冒烟，不阻塞收口；register §1.2。Print-to-PDF 已覆盖分页正确性，实体出纸只多验证驱动/介质差异）。
-3. 系统 DPI 100/125/200 的真实首帧、命中与版心（人工项，register §1.1；保持 NOT RUN）。
-4. 真机中文 IME 组合、候选窗、上屏（人工项，register §1.3；保持 NOT RUN）。
+3. 系统 DPI 100/125/200：**四档首帧已于 2026-11-28 真实抓图 PASS**（register §1.1）；逐档点按/拖选命中仍 NOT RUN。
+4. 真机中文 IME：**微软拼音六步已于 2026-11-28 真实按键 PASS**（register §1.3）；微软五笔未安装，NOT RUN。
 5. ~~Narrator/NVDA 语音流程~~：无障碍层已于 `3a6d72d` 移除，该项改判为「非目标」，不再是待验证证据。
 6. ~~版本历史面板 5000 快照的阻塞时长~~：已由 Task 5 测量（打开 p95 10.738 ms、滚动 p95 3.642 ms、关闭 p95 0.423 ms），见 `docs/qa/perf-distribution-2026-11-27.md` §1。
 7. ~~5000 标题 `Session::open` 的 p95~~：已由 Task 5 测量（n=9，p95 96.463 ms，预算 ≤200 ms），见同上 §1。

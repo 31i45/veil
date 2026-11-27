@@ -77,7 +77,7 @@ keys! {
     MenuEditReplace => "menu.edit.replace", "替换";
     MenuEditInsertImage => "menu.edit.insert_image", "插入图片…";
 
-    MenuViewOutline => "menu.view.outline", "大纲面板";
+    MenuViewOutline => "menu.view.outline", "大纲";
     MenuViewZoomIn => "menu.view.zoom_in", "放大";
     MenuViewZoomOut => "menu.view.zoom_out", "缩小";
     MenuViewZoomReset => "menu.view.zoom_reset", "还原缩放";
@@ -262,7 +262,7 @@ keys! {
     NoticeWatchUnavailable => "notice.watch_unavailable",
         "文件监听不可用: {}；下一步：重新打开该文件即可再次尝试";
     NoticeConflictNameExhausted => "notice.conflict_name_exhausted",
-        "冲突副本名已耗尽；下一步：清理同目录下的冲突副本，或另存为到其他位置";
+        "冲突副本名已耗尽；下一步：清理同目录下的冲突副本，或另存到其他位置";
     NoticeExternalBackupFailed => "notice.external_backup_failed",
         "外部版本备份失败：取消保存 {}；下一步：可检查磁盘空间或权限后重试保存，或另存为";
     NoticeSaved => "notice.saved", "已保存：{}";
@@ -850,7 +850,7 @@ fn main() {
     (Key::MenuEditFind, "Find"),
     (Key::MenuEditReplace, "Replace"),
     (Key::MenuEditInsertImage, "Insert Image…"),
-    (Key::MenuViewOutline, "Outline Panel"),
+    (Key::MenuViewOutline, "Outline"),
     (Key::MenuViewZoomIn, "Zoom In"),
     (Key::MenuViewZoomOut, "Zoom Out"),
     (Key::MenuViewZoomReset, "Reset Zoom"),
@@ -1056,7 +1056,7 @@ fn main() {
     ),
     (
         Key::NoticeExternalBackupFailed,
-        "External version backup failed: save cancelled for {}. Next: check disk space or permissions, then save again, or use Save As.",
+        "External version backup failed: save canceled for {}. Next: check disk space or permissions, then save again, or use Save As.",
     ),
     (Key::NoticeSaved, "Saved: {}"),
     (
@@ -1070,7 +1070,7 @@ fn main() {
     ),
     (
         Key::ModalExternalBackupFailBody,
-        "{}\n\nReason: external version backup failed ({}).\n\nNext: to avoid overwriting the external change, this save was cancelled; retry or use Save As to write elsewhere.",
+        "{}\n\nReason: external version backup failed ({}).\n\nNext: to avoid overwriting the external change, this save was canceled; retry or use Save As to write elsewhere.",
     ),
     (
         Key::NoticeRecoveryWriteFailed,
@@ -1104,9 +1104,9 @@ fn main() {
     ),
     (
         Key::NoticeExternalDismissed,
-        "Cancelled: the external change is still pending.",
+        "Canceled: the external change is still pending.",
     ),
-    (Key::NoticeExportCancelled, "Export cancelled"),
+    (Key::NoticeExportCancelled, "Export canceled"),
     (
         Key::NoticeOutputEmptyDocument,
         "An empty document has nothing to export or print.",
@@ -1125,7 +1125,7 @@ fn main() {
         Key::ModalExportFailedBody,
         "{}\n\nReason: {}\n\nNext: retry the export, or cancel and check that the target folder is writable.",
     ),
-    (Key::NoticeSaveAsCancelled, "Save As cancelled"),
+    (Key::NoticeSaveAsCancelled, "Save As canceled"),
     (Key::NoticeSavedAs, "Saved as: {}"),
     (
         Key::NoticeHistoryMigrationFailed,
@@ -1158,19 +1158,19 @@ fn main() {
         Key::ModalUnsavedBody,
         "\"Save\": write these changes back to the original file.\n\"Don't Save\": discard these changes; they cannot be recovered after closing.\n\"Cancel\": return to the document and keep editing.",
     ),
-    (Key::NoticeCancelled, "Cancelled"),
-    (Key::NoticeCancelledWhat, "Cancelled: {}"),
+    (Key::NoticeCancelled, "Canceled"),
+    (Key::NoticeCancelledWhat, "Canceled: {}"),
     (Key::ActionOpen, "Open"),
     (Key::ActionExportHtml, "Export HTML"),
     (Key::ActionExportPdf, "Export PDF"),
     (Key::ActionPrint, "Print"),
     (
         Key::NoticeSaveIncomplete,
-        "Save did not complete (failed or cancelled), so the action was cancelled. Next: retry the save, or check the failure reason and try again.",
+        "Save did not complete (failed or canceled), so the action was canceled. Next: retry the save, or check the failure reason and try again.",
     ),
     (
         Key::NoticeCancelDirty,
-        "Cancelled: the document still has unsaved changes.",
+        "Canceled: the document still has unsaved changes.",
     ),
     (
         Key::NoticeOpenFailed,
@@ -1435,7 +1435,7 @@ fn main() {
         Key::PrintSentPagesScreen,
         "Sent {} pages to the printer (screen rendering)",
     ),
-    (Key::PrintExportCancelled, "Export cancelled"),
+    (Key::PrintExportCancelled, "Export canceled"),
     (
         Key::PrintErrStartJob,
         "Print failed: could not start the print job",
@@ -2704,6 +2704,113 @@ mod tests {
             assert!(
                 !text.contains("下一步"),
                 "B/C 类不应混入下一步 ({key:?}): {text}"
+            );
+        }
+    }
+
+    /// 双语布局预算门禁：英文词条不得宽于弹窗能提供的单行宽度。
+    ///
+    /// 预算来源（与 `tokens::surface`、`view/settings.rs::layout` 同源）：
+    /// - 弹窗最大宽 `DIALOG_MAX_WIDTH = 760`，左右内边距 `2 × DIALOG_PADDING(20)`
+    ///   → 内宽 720px；
+    /// - 标签列硬顶 320px（内宽 50%），控件列 380px + 列间距 10px，合计 710 ≤ 720。
+    ///
+    /// 字宽估算：13px UI 字号（`typography::UI_SIZE`）下，Segoe UI 混合大小写英文的
+    /// 平均前进宽度按 0.62 em 计（≈ 8.06px/字符）。系数依据：`view/settings.rs` 实测
+    /// 最长英文标签「Include Table of Contents in PDF Export」（39 字符）约占 312px，
+    /// 折合 8.0px/字符 ≈ 0.615em；向上取 0.62em 作保守上界，高分屏回退到更宽字体时
+    /// 仍不越界。
+    #[test]
+    fn longest_english_strings_fit_dialog_budget() {
+        use crate::tokens::surface;
+        use crate::tokens::typography;
+
+        // zh-CN / en-US 的 key 集合一致性由既有穷举用例保证：直接复用，不重复造断言。
+        every_key_has_en_us_entry_with_placeholder_parity();
+
+        const AVG_CHAR_EM: f32 = 0.62;
+        const LABEL_COL_BUDGET_PX: f32 = 320.0;
+        let avg_char_px = typography::UI_SIZE * AVG_CHAR_EM;
+        let label_budget: usize = (LABEL_COL_BUDGET_PX / avg_char_px).floor() as usize;
+        // 320 / (13 × 0.62) = 39.7 → 39 字符。预算基准变化时必须同步更新
+        // docs/design/terminology.md 的「双语布局预算」一节。
+        assert_eq!(label_budget, 39, "标签列字符预算基准变化，需同步文档");
+
+        // 设置弹窗标签列的全部字段（与 view/settings.rs::SettingsForm::new 的 label 一一对应）。
+        const DIALOG_LABELS: &[Key] = &[
+            Key::SettingsThemeMode,
+            Key::SettingsUiLanguage,
+            Key::SettingsDocFontSize,
+            Key::SettingsDocLineHeight,
+            Key::SettingsDocFontFamily,
+            Key::SettingsDocMargin,
+            Key::SettingsDocMarginPx,
+            Key::SettingsAllowRemoteImages,
+            Key::SettingsSourcePlainLines,
+            Key::SettingsWindowGeom,
+            Key::SettingsExportPageNumbers,
+            Key::SettingsExportToc,
+            Key::SettingsExportMarginMm,
+            Key::SettingsTabWidth,
+        ];
+        let mut widest = (0usize, Key::Empty);
+        for &key in DIALOG_LABELS {
+            let en = lookup(EN_US, key).expect("en-US 全量词条");
+            let n = en.chars().count();
+            assert!(
+                n <= label_budget,
+                "英文标签超出弹窗标签列预算（{} 字符 > {}）：{} = {:?}",
+                n,
+                label_budget,
+                key.id(),
+                en
+            );
+            if n > widest.0 {
+                widest = (n, key);
+            }
+        }
+        let widest_px = widest.0 as f32 * avg_char_px;
+        assert!(
+            widest_px <= LABEL_COL_BUDGET_PX,
+            "最长英文标签 {} 需 {:.1}px，超出标签列 {}px",
+            widest.1.id(),
+            widest_px,
+            LABEL_COL_BUDGET_PX
+        );
+
+        // 单行控件文案（菜单 / 右键菜单 / 按钮 / 历史动作 / 查找 / 大纲 / 开关 / 设置）
+        // 允许占满弹窗内宽（720px），同样不得折行；提示与错误正文由绘制层换行，不在本预算内。
+        let inner_budget: usize = ((surface::DIALOG_MAX_WIDTH - 2.0 * surface::DIALOG_PADDING)
+            / avg_char_px)
+            .floor() as usize;
+        assert_eq!(inner_budget, 89, "内宽字符预算基准变化，需同步文档");
+        const SINGLE_LINE_PREFIXES: &[&str] = &[
+            "common.",
+            "menu.",
+            "button.",
+            "ctx.",
+            "history.action.",
+            "search.",
+            "outline.",
+            "toggle.",
+            "settings.",
+            "disabled.",
+        ];
+        for &(key, en) in EN_US {
+            if !SINGLE_LINE_PREFIXES
+                .iter()
+                .any(|prefix| key.id().starts_with(prefix))
+            {
+                continue;
+            }
+            let n = en.chars().count();
+            assert!(
+                n <= inner_budget,
+                "英文单行控件文案超出弹窗内宽预算（{} 字符 > {}）：{} = {:?}",
+                n,
+                inner_budget,
+                key.id(),
+                en
             );
         }
     }

@@ -1931,6 +1931,39 @@ fn quick_open_lists_recent_and_directory_then_opens() {
 }
 
 #[test]
+fn quick_open_surfaces_directory_read_failure() {
+    let store = MemStore {
+        fail_list: true,
+        ..Default::default()
+    };
+    let mut a = app("x", Some("dir/x.md"), false, &store);
+    a.input_state.mods.ctrl = true;
+    a.route_key(Key::P);
+    a.input_state.mods.ctrl = false;
+
+    assert!(a.ui_state.quick.open, "Ctrl+P 打开浮层");
+    assert!(
+        a.ui_state.quick.read_failed,
+        "目录读取失败必须记录，不能折叠成「无候选」"
+    );
+    assert!(a.ui_state.quick.items.is_empty());
+    let (key, is_error) = crate::view::quick_open::empty_notice(
+        crate::view::quick_open::QuickKind::Files,
+        "",
+        true,
+        a.ui_state.quick.read_failed,
+    );
+    assert_eq!(key, I18nKey::QuickOpenReadFailed);
+    assert!(is_error, "读取失败按真错误提示（危险色）");
+    assert_eq!(t(key), "无法读取目录；按 Esc 关闭后重试");
+
+    // 仍可返回：Esc 关闭并清掉失败态。
+    a.route_key(Key::Escape);
+    assert!(!a.ui_state.quick.open);
+    assert!(!a.ui_state.quick.read_failed);
+}
+
+#[test]
 fn quick_open_refuses_dirty_document_and_esc_closes() {
     let store = MemStore::default();
     store

@@ -24,7 +24,7 @@ pub(crate) enum FieldKind {
     ThemeMode,
     /// 界面语言：三选一（自动/中文/English），改动重启后生效。
     UiLanguage,
-    /// 数字输入（字号 10..=32 / 页边距 0..=50 / tab 宽 2/4）。
+    /// 数字输入（字号 10..=32 / 页边距 5..=50 / tab 宽 2/4）。
     Number(NumberRange),
     /// 开关：布尔 toggle。
     Toggle,
@@ -292,8 +292,8 @@ impl SettingsForm {
             SettingsField {
                 label: Key::SettingsExportMarginMm,
                 kind: FieldKind::Number(NumberRange {
-                    min: 0.0,
-                    max: 50.0,
+                    min: crate::theme::EXPORT_MARGIN_MM_MIN,
+                    max: crate::theme::EXPORT_MARGIN_MM_MAX,
                     step: 1.0,
                     integers_only: false,
                 }),
@@ -587,7 +587,10 @@ impl SettingsForm {
                 }
                 Key::SettingsExportMarginMm => {
                     if let FieldValue::Number(v) = f.value {
-                        out.export_margin_mm = v.clamp(0.0, 50.0);
+                        out.export_margin_mm = v.clamp(
+                            crate::theme::EXPORT_MARGIN_MM_MIN,
+                            crate::theme::EXPORT_MARGIN_MM_MAX,
+                        );
                     }
                 }
                 Key::SettingsTabWidth => {
@@ -2647,10 +2650,32 @@ mod tests {
         assert_eq!(form.apply(&config).doc_margin_px, 48.0);
     }
 
+    /// PDF 页边距字段与配置/PDF 共用 5–50mm：UI 不提供会被排版静默修正的值。
+    #[test]
+    fn export_margin_field_range_matches_pdf_interval() {
+        let config = Config::default();
+        let mut form = SettingsForm::from_config(&config);
+        let idx = form
+            .fields
+            .iter()
+            .position(|f| f.label == Key::SettingsExportMarginMm)
+            .expect("PDF 页边距字段存在");
+        assert!(
+            matches!(&form.fields[idx].kind, FieldKind::Number(r)
+                if r.min == 5.0 && r.max == 50.0),
+            "页边距可选范围必须与 PDF 排版一致（5–50mm）"
+        );
+        form.fields[idx].value = FieldValue::Number(0.0);
+        assert_eq!(form.apply(&config).export_margin_mm, 5.0);
+        form.fields[idx].value = FieldValue::Number(80.0);
+        assert_eq!(form.apply(&config).export_margin_mm, 50.0);
+        form.fields[idx].value = FieldValue::Number(20.0);
+        assert_eq!(form.apply(&config).export_margin_mm, 20.0);
+    }
+
     /// 正文行高：设置表单可编辑 10..=96，apply 时按字号夹到 [字号, 3×字号]。
     #[test]
-    fn doc_line_height_field_applies_clamped_to_font_size() {
-        let config = Config::default();
+    fn doc_line_height_field_applies_clamped_to_font_size() {        let config = Config::default();
         let mut form = SettingsForm::from_config(&config);
         let idx = form
             .fields

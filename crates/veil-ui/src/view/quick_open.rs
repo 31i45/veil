@@ -68,6 +68,8 @@ pub(crate) struct QuickOpen {
     pub(crate) hover: Option<usize>,
     /// 悬停过渡（S6）：候选行高亮淡入/淡出。
     pub(crate) fade: crate::anim::Fade,
+    /// 当前目录列表读取失败：与「无候选」区分，空结果显示错误提示。
+    pub(crate) read_failed: bool,
 }
 
 impl QuickOpen {
@@ -79,6 +81,7 @@ impl QuickOpen {
         self.selected = 0;
         self.top = 0;
         self.hover = None;
+        self.read_failed = false;
     }
 
     /// 查询变化后重算过滤并回到首项。命令面板用大小写不敏感子串匹配，
@@ -291,6 +294,21 @@ pub(crate) fn empty_message_for(kind: QuickKind, query: &str, items_empty: bool)
     match kind {
         QuickKind::Files => empty_message(query, items_empty),
         QuickKind::Commands => Key::CommandPaletteEmpty,
+    }
+}
+
+/// 空结果提示与语义：目录读取失败是真错误（返回 true → 危险色），
+/// 优先于「无候选 / 查询不命中」的中性空态；命令面板不受目录失败影响。
+pub(crate) fn empty_notice(
+    kind: QuickKind,
+    query: &str,
+    items_empty: bool,
+    read_failed: bool,
+) -> (Key, bool) {
+    if kind == QuickKind::Files && read_failed {
+        (Key::QuickOpenReadFailed, true)
+    } else {
+        (empty_message_for(kind, query, items_empty), false)
     }
 }
 
@@ -588,5 +606,24 @@ mod tests {
         );
         assert_eq!(t(empty_message("abc", true)), "无匹配文件");
         assert_eq!(t(empty_message("abc", false)), "无匹配文件");
+    }
+
+    /// 目录读取失败必须与「无候选」区分，并标记为错误语义（危险色）；
+    /// 命令面板与正常空态保持中性。
+    #[test]
+    fn read_failure_is_distinct_from_empty_and_marked_as_error() {
+        use crate::i18n::t;
+        let (key, is_error) = empty_notice(QuickKind::Files, "", true, true);
+        assert_eq!(key, Key::QuickOpenReadFailed);
+        assert!(is_error, "读取失败是真错误，使用危险色");
+        assert_eq!(t(key), "无法读取目录；按 Esc 关闭后重试");
+
+        let (key, is_error) = empty_notice(QuickKind::Files, "", true, false);
+        assert_eq!(key, Key::QuickOpenEmptyNoCandidates);
+        assert!(!is_error, "无候选是中性空态");
+
+        let (key, is_error) = empty_notice(QuickKind::Commands, "", true, true);
+        assert_eq!(key, Key::CommandPaletteEmpty);
+        assert!(!is_error, "命令面板不受目录读取失败影响");
     }
 }

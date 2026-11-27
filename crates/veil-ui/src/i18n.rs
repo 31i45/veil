@@ -154,6 +154,7 @@ keys! {
     QuickOpenPlaceholder => "quick_open.placeholder", "快速打开：输入文件名，回车打开";
     QuickOpenEmptyNoCandidates => "quick_open.empty.no_candidates", "暂无最近文件或同目录 Markdown";
     QuickOpenEmptyNoMatch => "quick_open.empty.no_match", "无匹配文件";
+    QuickOpenReadFailed => "quick_open.read_failed", "无法读取目录；按 Esc 关闭后重试";
     QuickOpenRecent => "quick_open.recent", "最近";
 
     // ---- 命令面板（Ctrl+Shift+P）：与快速打开共用浮层 ----
@@ -447,6 +448,7 @@ keys! {
     ImagePreviewTitle => "image.preview_title", "图片预览 · {} · {}";
     ImagePreviewHint => "image.preview_hint",
         "滚轮/方向键平移 · Ctrl+滚轮或 +/- 缩放 · 0 适应窗口 · Esc 或点击遮罩关闭";
+    ImagePreviewUnavailable => "image.preview_unavailable", "图片无法显示";
     PrintTocTitle => "print.toc_title", "目录";
     ExportUntitledPdf => "export.untitled_pdf", "未命名.pdf";
     ExportUntitledHtml => "export.untitled_html", "未命名.html";
@@ -592,6 +594,7 @@ keys! {
     ErrMathRendererUnavailable => "error.math_renderer_unavailable", "公式渲染器不可用";
     ErrMathRendererInternal => "error.math_renderer_internal", "公式渲染器内部错误";
     ErrMathRenderEmpty => "error.math_render_empty", "公式渲染为空";
+    MathRenderFailedHint => "math.render_failed_hint", "公式渲染失败，已显示源码";
     WicCreateFactory => "wic.create_factory", "创建 WIC 工厂";
     WicComInit => "wic.com_init", "COM 初始化";
     WicFactoryNull => "wic.factory_null", "创建 WIC 工厂返回空指针";
@@ -683,7 +686,7 @@ keys! {
     SettingsResetWindowGeom => "settings.reset_window_geom", "清除（下次启动重置）";
     SettingsExportPageNumbers => "settings.export_page_numbers", "导出 PDF 时显示页码";
     SettingsExportToc => "settings.export_toc", "导出 PDF 时包含目录页";
-    SettingsExportMarginMm => "settings.export_margin_mm", "导出 PDF 页边距（毫米，0–50）";
+    SettingsExportMarginMm => "settings.export_margin_mm", "导出 PDF 页边距（毫米，5–50）";
     SettingsTabWidth => "settings.tab_width", "制表符宽度（2 或 4）";
     SettingsSourcePlainLines => "settings.source_plain_lines", "源码模式：纯文本行视图";
     NoticeSettingsSaved => "notice.settings_saved", "设置已保存";
@@ -928,6 +931,7 @@ fn main() {
         "No recent files or Markdown files in this folder",
     ),
     (Key::QuickOpenEmptyNoMatch, "No matching files"),
+    (Key::QuickOpenReadFailed, "Could not read folder; Esc to retry"),
     (Key::QuickOpenRecent, "Recent"),
     (
         Key::CommandPalettePlaceholder,
@@ -1395,6 +1399,7 @@ fn main() {
         Key::ImagePreviewHint,
         "Scroll wheel/arrow keys to pan · Ctrl+wheel or +/- to zoom · 0 to fit window · Esc or click the backdrop to close",
     ),
+    (Key::ImagePreviewUnavailable, "Image cannot be displayed"),
     (Key::PrintTocTitle, "Table of Contents"),
     (Key::ExportUntitledPdf, "Untitled.pdf"),
     (Key::ExportUntitledHtml, "Untitled.html"),
@@ -1663,6 +1668,7 @@ fn main() {
     (Key::ErrMathRendererUnavailable, "Math renderer unavailable"),
     (Key::ErrMathRendererInternal, "Internal math renderer error"),
     (Key::ErrMathRenderEmpty, "Math render is empty"),
+    (Key::MathRenderFailedHint, "Math render failed; showing source"),
     // ---- 平台层（WIC 图片解码） ----
     (Key::WicCreateFactory, "Create WIC factory"),
     (Key::WicComInit, "COM initialization"),
@@ -1841,7 +1847,7 @@ fn main() {
     ),
     (
         Key::SettingsExportMarginMm,
-        "PDF Export Margin (mm, 0–50)",
+        "PDF Export Margin (mm, 5–50)",
     ),
     (Key::SettingsTabWidth, "Tab Width (2 or 4)"),
     (

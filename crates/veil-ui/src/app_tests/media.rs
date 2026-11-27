@@ -218,6 +218,18 @@ fn math_render_failure_degrades_to_source() {
     let (id, _, range) = a.editor.session().blocks()[1].clone();
     assert!(a.cache.math_failed.contains_key(&id));
     assert!(!a.math_shows_image(id, &range));
+    assert_eq!(
+        a.math_failure_notice(id, &range),
+        Some(I18nKey::MathRenderFailedHint),
+        "渲染失败必须给出界面提示，不再只写 stderr"
+    );
+    assert_eq!(
+        t(I18nKey::MathRenderFailedHint),
+        "公式渲染失败，已显示源码"
+    );
+    // 光标进入块内改源码时不再叠加提示（源码态是主动编辑，不是静默降级）。
+    a.editor.set_caret(6);
+    assert_eq!(a.math_failure_notice(id, &range), None);
     let h = a.cache.layouts.get(&id).unwrap().height;
     assert_eq!(a.block_height(geom(&a, id)), h); // 降级为源码显示
 }

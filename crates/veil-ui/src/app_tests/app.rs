@@ -2695,6 +2695,28 @@ fn image_preview_renders_overlay_frame() {
     assert!(sum(after) < sum(before), "预览覆盖层应压暗背景");
 }
 
+/// 位图缺失：遮罩保留、绘制中性提示（不 panic、不静默消失）。
+#[test]
+fn image_preview_missing_bitmap_draws_neutral_hint() {
+    let (mut a, _calls, _files) = app_with_images(
+        "前文\n\n![示例](img/p.png)",
+        Some("dir/doc.md"),
+        &[("dir/img/p.png", 120, 60)],
+    );
+    a.ensure_layouts_all();
+    a.recompute_geometry();
+    let before = a.render().pixels[0];
+    a.ui_state.image_preview = Some(ImagePreview {
+        key: "dir/img/missing.png".into(),
+        title: "示例".into(),
+        zoom: 1.0,
+        pan: (0.0, 0.0),
+    });
+    let after = a.render().pixels[0];
+    let sum = |p: u32| (p & 0xff) + ((p >> 8) & 0xff) + ((p >> 16) & 0xff);
+    assert!(sum(after) < sum(before), "位图缺失时仍应保留遮罩");
+}
+
 // ===== 源码模式纯文本行视图（source_plain_lines 灰度开关） =====
 
 /// 灰度开启：段间 1 个空行成为可停光标的一行；上下移按行推进。

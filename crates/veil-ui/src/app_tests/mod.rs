@@ -1150,6 +1150,7 @@ fn exec_table_ctx(a: &mut App, tc: ctx_menu::TableCtx, action: ctx_menu::CtxActi
 pub(crate) struct MemStore {
     files: Rc<RefCell<HashMap<PathBuf, Vec<u8>>>>,
     fail_save: bool,
+    fail_list: bool,
     fail_paths: Rc<RefCell<Vec<PathBuf>>>,
 }
 
@@ -1171,6 +1172,9 @@ impl FileStore for MemStore {
         Ok(())
     }
     fn list_files(&mut self, dir: &Path) -> Result<Vec<PathBuf>, String> {
+        if self.fail_list {
+            return Err("模拟目录读取失败".to_string());
+        }
         // 内存实现：目录内容即已登记文件的父目录匹配（打开时必然可 load）
         Ok(self
             .files

@@ -34,7 +34,12 @@ pub struct PageGeom {
 
 impl PageGeom {
     pub fn a4(margin_mm: f32) -> Self {
-        let m = (margin_mm.clamp(5.0, 60.0)) * 72.0 / 25.4;
+        // 与配置解析、设置 UI 共用同一区间：这里不再静默提升/压缩用户可见的取值范围。
+        let m = (margin_mm.clamp(
+            veil_ui::EXPORT_MARGIN_MM_MIN,
+            veil_ui::EXPORT_MARGIN_MM_MAX,
+        )) * 72.0
+            / 25.4;
         Self {
             width: A4_WIDTH,
             height: A4_HEIGHT,
@@ -2418,6 +2423,16 @@ mod tests {
             None,
             &mermaids,
         )
+    }
+
+    /// 页边距夹取与配置/设置 UI 共用同一区间（5–50mm），不再高于 50。
+    #[test]
+    fn page_margin_clamps_to_shared_interval() {
+        let mm = |g: PageGeom| g.margin_x * 25.4 / 72.0;
+        assert!((mm(PageGeom::a4(0.0)) - 5.0).abs() < 0.01);
+        assert!((mm(PageGeom::a4(2.5)) - 5.0).abs() < 0.01);
+        assert!((mm(PageGeom::a4(60.0)) - 50.0).abs() < 0.01);
+        assert!((mm(PageGeom::a4(20.0)) - 20.0).abs() < 0.01);
     }
 
     fn lay_with(session: &Session, toc: bool) -> DocLayout {

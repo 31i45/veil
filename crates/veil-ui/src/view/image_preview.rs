@@ -35,12 +35,32 @@ pub(crate) fn image_rect(app: &App) -> Option<Rect> {
     })
 }
 
+/// 位图缺失时的提示色：缺失不是错误操作，取中性空态色（`state::empty_fg`），
+/// 不使用危险色；绘制与测试共用同一取色点。
+pub(crate) fn unavailable_hint_color(theme: &crate::theme::Theme) -> [u8; 3] {
+    crate::tokens::state::empty_fg(theme)
+}
+
 /// 覆盖整窗绘制：背景压暗 + 图影 + 位图 + 顶部标题/缩放 + 底部操作提示。
 pub(crate) fn paint(app: &mut App, frame: &mut Frame) {
     let (win_w, win_h) = app.win_size();
     let scale = app.input_state.scale;
+    let theme = app.input_state.theme;
     frame.fill_rect(0, 0, win_w, win_h, [0, 0, 0, 220]);
     let Some(r) = image_rect(app) else {
+        // 位图缺失：保留遮罩，居中显示中性提示（Esc/点击遮罩仍可关闭）。
+        let message = t(Key::ImagePreviewUnavailable).to_string();
+        let fg = unavailable_hint_color(&theme);
+        if let Some(lab) = app
+            .ui_state
+            .chrome
+            .labels
+            .get_or_insert(&mut app.engine, &message, fg, scale)
+        {
+            let x = ((win_w as f32 - lab.w as f32) * 0.5).max(0.0) as i32;
+            let y = ((win_h as f32 - lab.h as f32) * 0.5).max(0.0) as i32;
+            frame.blit(&lab.pixels, lab.w, lab.h, x, y);
+        }
         return;
     };
     let Some(pv) = app.ui_state.image_preview.as_ref() else {
@@ -84,5 +104,29 @@ pub(crate) fn paint(app: &mut App, frame: &mut Frame) {
         let x = ((win_w as f32 - lab.w as f32) * 0.5).max(0.0) as i32;
         let y = (win_h as f32 - pad * 0.4 - lab.h as f32).round() as i32;
         frame.blit(&lab.pixels, lab.w, lab.h, x, y);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::theme::Theme;
+
+    /// 位图缺失提示必须存在且取中性色（缺失不是错误操作，不得用危险色）。
+    #[test]
+    fn missing_bitmap_hint_is_neutral_and_localized() {
+        for theme in [Theme::light(), Theme::dark(), Theme::high_contrast()] {
+            assert_eq!(
+                unavailable_hint_color(&theme),
+                theme.muted,
+                "缺失提示取中性空态色"
+            );
+            assert_ne!(
+                unavailable_hint_color(&theme),
+                theme.danger,
+                "缺失不是错误操作，不得使用危险色"
+            );
+        }
+        assert_eq!(t(Key::ImagePreviewUnavailable), "图片无法显示");
     }
 }

@@ -726,6 +726,11 @@ fn clamp_line_height(v: f32, size: f32) -> f32 {
     v.clamp(size, size * 3.0)
 }
 
+/// PDF 页边距的合法区间（毫米）：配置解析、设置 UI 与 PDF 排版共用，
+/// 避免 UI 提供会被排版层静默修正的值。
+pub const EXPORT_MARGIN_MM_MIN: f32 = 5.0;
+pub const EXPORT_MARGIN_MM_MAX: f32 = 50.0;
+
 /// 配置内容：主题模式 + PDF 导出设置 + 正文排版 + 窗口几何。
 ///
 /// 因 `doc_font_face` 承载任意字族名，本结构不再 `Copy`（改为 `Clone`）。
@@ -1007,7 +1012,10 @@ pub fn parse_config(text: &str) -> ConfigParse {
                     .as_float()
                     .or_else(|| value.as_integer().map(|i| i as f64));
                 match v {
-                    Some(v) if v.is_finite() && v >= 0.0 => out.config.export_margin_mm = v as f32,
+                    Some(v) if v.is_finite() && v >= 0.0 => {
+                        out.config.export_margin_mm =
+                            (v as f32).clamp(EXPORT_MARGIN_MM_MIN, EXPORT_MARGIN_MM_MAX)
+                    }
                     _ => out.ignored += 1,
                 }
             }
@@ -1630,6 +1638,22 @@ mod tests {
         let p = parse("doc_margin = \"relaxed\"\ndoc_margin_px = 48\n");
         assert_eq!(p.config.export_margin_mm, 20.0);
         assert_eq!(p.config.doc_margin.margin_px(p.config.doc_margin_px), 32.0);
+    }
+
+    /// 配置解析、设置 UI 与 PDF 排版共用同一区间：0–5 → 5，>50 → 50。
+    #[test]
+    fn export_margin_clamps_to_shared_pdf_interval() {
+        assert_eq!(parse("export_margin_mm = 0\n").config.export_margin_mm, 5.0);
+        assert_eq!(
+            parse("export_margin_mm = 2.5\n").config.export_margin_mm,
+            5.0
+        );
+        assert_eq!(parse("export_margin_mm = 5\n").config.export_margin_mm, 5.0);
+        assert_eq!(parse("export_margin_mm = 50\n").config.export_margin_mm, 50.0);
+        assert_eq!(
+            parse("export_margin_mm = 60\n").config.export_margin_mm,
+            50.0
+        );
     }
 
     #[test]
@@ -2648,7 +2672,7 @@ mod tests {
     #[test]
     fn config_roundtrip_numeric_edges_through_file() {
         let file = TempConfig::new("numeric-edges");
-        for margin_mm in [0.0_f32, 12.5, 13.7, 20.0, 50.0] {
+        for margin_mm in [5.0_f32, 12.5, 13.7, 20.0, 50.0] {
             for margin_px in [4.0_f32, 28.5, 200.0] {
                 for (font_size, line_height) in [
                     (10.0_f32, 10.0_f32),

@@ -920,18 +920,21 @@ impl App {
                 );
             }
         }
-        // 空态提示：占首行，水平/垂直居中；文案区分「无候选」与「查询不命中」。
+        // 空态提示：占首行，水平/垂直居中；文案区分「无候选 / 查询不命中 / 目录读取失败」，
+        // 读取失败是真错误，用危险色而非中性空态色。
         if empty {
             if let Some(row) = l.rows.first() {
-                let message = quick_open::empty_message_for(
+                let (message, is_error) = quick_open::empty_notice(
                     kind,
                     &self.ui_state.quick.query,
                     self.ui_state.quick.items.is_empty(),
+                    self.ui_state.quick.read_failed,
                 );
+                let color = if is_error { theme.danger } else { theme.muted };
                 if let Some(lab) = self.ui_state.chrome.labels.get_or_insert(
                     &mut self.engine,
                     t(message),
-                    theme.muted,
+                    color,
                     scale,
                 ) {
                     let x = row.x + (row.w - lab.w as f32) / 2.0;

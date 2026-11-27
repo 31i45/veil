@@ -2011,6 +2011,7 @@ impl App {
         self.editor.clear_preedit();
         self.ui_state.quick.open = true;
         self.ui_state.quick.kind = quick_open::QuickKind::Commands;
+        self.ui_state.quick.read_failed = false;
         self.ui_state.quick.query.clear();
         self.ui_state.quick.items = quick_open::command_items();
         self.ui_state.quick.refilter();
@@ -2028,7 +2029,8 @@ impl App {
     }
 
     /// 重建候选：最近文件（去重）在前，当前文档所在目录的 Markdown 文件其后。
-    /// 无关联路径的草稿只有最近文件；目录读取失败按空处理（浮层仍可用）。
+    /// 无关联路径的草稿只有最近文件；目录读取失败记录到 `read_failed`，
+    /// 由浮层显示错误提示（不折叠成「无候选」）。
     pub(crate) fn refresh_quick(&mut self) {
         let dir = self
             .doc
@@ -2036,10 +2038,14 @@ impl App {
             .as_ref()
             .and_then(|p| p.parent())
             .map(|d| d.to_path_buf());
-        let files = dir
-            .as_ref()
-            .and_then(|d| self.ports.store.list_files(d).ok())
-            .unwrap_or_default();
+        let (files, read_failed) = match dir.as_ref() {
+            Some(d) => match self.ports.store.list_files(d) {
+                Ok(files) => (files, false),
+                Err(_) => (Vec::new(), true),
+            },
+            None => (Vec::new(), false),
+        };
+        self.ui_state.quick.read_failed = read_failed;
         self.ui_state.quick.items = quick_open::candidates(
             &self.persist_state.recent,
             &files,

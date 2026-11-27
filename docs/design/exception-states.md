@@ -13,14 +13,14 @@
 | 正文文档区 | 空 | `doc.empty_hint`（空文档首行引导） | 中性（`muted`） | 直接输入；`Ctrl+O` 打开已有文件 | 否（提示不落盘；正文内容随保存写入） | `crates/veil-ui/src/paint.rs::paint_empty_hint`（`render` 调用） |
 | 正文文档区 | 加载 | 不适用（打开/保存为同步 I/O，无分片加载态） | 不适用 | 不适用 | 不适用 | `crates/veil-ui/src/document/doc_state.rs::open_path_now` |
 | 正文文档区 | 错误 | `modal.open_failed.title/body`、`modal.save_failed.*`、`modal.save_as_failed.*`（按操作区分） | 危险（错误模态标题/徽标） | 模态按钮：重试（R）/ 重新选择 / 取消（Esc） | 否（失败不写目标文件；修改仍留在编辑器） | `crates/veil-ui/src/document/doc_state.rs::show_open_error`、`show_error_modal` |
-| 正文文档区 | 降级 | 图片失败/远程被阻止 → alt 文本；公式失败 → TeX 源码（无提示，见缺口 G1）；`Ctrl+/` 源码模式 | 中性（alt/源码按正文色） | `Ctrl+/` 切源码模式；点击图片可重新加载 | 否（源码模式为会话态，不写配置） | `crates/veil-ui/src/paint.rs::ensure_layouts_range`、`ensure_math_range`；`crates/veil-ui/src/view/layout.rs::fenced_subs` |
+| 正文文档区 | 降级 | 图片失败/远程被阻止 → alt 文本；公式失败 → TeX 源码 + 块右上角 `math.render_failed_hint`；`Ctrl+/` 源码模式 | 中性（alt/源码按正文色）+ 危险（公式失败提示） | `Ctrl+/` 切源码模式；点击图片可重新加载 | 否（源码模式为会话态，不写配置） | `crates/veil-ui/src/paint.rs::ensure_layouts_range`、`ensure_math_range`、`math_failure_notice`；`crates/veil-ui/src/view/layout.rs::fenced_subs` |
 | 查找/替换 | 空 | 无命中计数 `i/n`（`empty_fg`）；空查询占位 `search.placeholder` / `search.replace_placeholder` | 中性（`muted`；无命中时 ‹/› 用 `disabled_fg` 置灰） | 继续输入；Esc 关闭；无命中时翻页按钮禁用 | 否（查询串与开关为会话态） | `crates/veil-ui/src/view/search_view.rs::paint_search` |
 | 查找/替换 | 加载 | 不适用（每次输入同步扫描，无异步加载） | 不适用 | 不适用 | 不适用 | `crates/veil-ui/src/view/search_strategy.rs::find_all` / `find_all_regex` |
 | 查找/替换 | 错误 | `search.regex_error`（计数区）+ 查询串危险色 | 危险（`theme.danger`） | 点击 `.*` 关闭正则，或修正模式；Esc 关闭 | 否（`regex`/`case_sensitive` 为会话态） | `crates/veil-ui/src/view/search_view.rs::paint_search` |
 | 查找/替换 | 降级 | 不适用（扫描只有“非法正则”一种失败，已归入错误态） | 不适用 | 不适用 | 不适用 | — |
 | 快速打开 | 空 | `quick_open.empty.no_candidates` / `quick_open.empty.no_match` / `command_palette.empty` | 中性（`muted`） | 继续输入；Esc 关闭 | 否（候选为临时态） | `crates/veil-ui/src/paint_overlay.rs::paint_quick` + `crates/veil-ui/src/view/quick_open.rs::empty_message_for` |
 | 快速打开 | 加载 | 不适用（打开时同步列目录，无索引/异步加载态） | 不适用 | 不适用 | 不适用 | `crates/veil-ui/src/interaction.rs::refresh_quick` |
-| 快速打开 | 错误 | 无（目录读取失败被 `.ok()` 折叠为空列表，与“无候选”同貌 → 已知缺口 G2） | 中性（沿用空态） | 继续输入 / Esc；无重试入口 | 否 | `crates/veil-ui/src/interaction.rs::refresh_quick` |
+| 快速打开 | 错误 | `quick_open.read_failed`（目录列表读取失败） | 危险（`theme.danger`） | Esc 关闭后重新打开（`Ctrl+P`）重试 | 否（失败态随浮层关闭清空） | `crates/veil-ui/src/interaction.rs::refresh_quick` + `crates/veil-ui/src/paint_overlay.rs::paint_quick` |
 | 快速打开 | 降级 | 不适用（无降级通道；草稿无目录时只列最近文件属正常子集） | 不适用 | 不适用 | 不适用 | `crates/veil-ui/src/interaction.rs::refresh_quick` |
 | 大纲 | 空 | `outline.empty` | 中性（`muted`） | `Ctrl+Shift+O` 关闭；Esc | 否 | `crates/veil-ui/src/paint_overlay.rs::paint_outline` |
 | 大纲 | 加载 | 不适用（条目从已解析块派生，无独立 I/O） | 不适用 | 不适用 | 不适用 | 文档索引（`document` 解析产物） |
@@ -32,7 +32,7 @@
 | 版本历史 | 降级 | 不适用（只读面板，无自动降级） | 不适用 | 不适用 | 不适用 | — |
 | 图片预览 | 空 | 不适用（无 `image_preview` 时不绘制遮罩） | 不适用 | 不适用 | 不适用 | `crates/veil-ui/src/view/image_preview.rs::paint` |
 | 图片预览 | 加载 | 无（仅压暗遮罩；位图未就绪时不画标题/提示） | 中性 | Esc / 点击遮罩关闭 | 否 | `crates/veil-ui/src/view/image_preview.rs::paint` |
-| 图片预览 | 错误 | 无（位图缺失时静默返回，只剩遮罩 → 已知缺口 G3） | 中性 | Esc 关闭 | 否 | `crates/veil-ui/src/view/image_preview.rs::paint` / `image_rect` |
+| 图片预览 | 错误 | `image.preview_unavailable`（位图缺失） | 中性（`tokens::state::empty_fg`） | Esc / 点击遮罩关闭 | 否 | `crates/veil-ui/src/view/image_preview.rs::paint` |
 | 图片预览 | 降级 | 不适用（`zoom ≤ 0` 视为适应窗口，属正常路径） | 不适用 | 不适用 | 不适用 | `crates/veil-ui/src/view/image_preview.rs::image_rect` |
 | 设置弹窗 | 空 | `settings.font_no_match`（字体候选弹层无匹配） | 中性（`muted`） | 继续输入；Esc 关闭候选弹层 | 否（候选为临时态） | `crates/veil-ui/src/view/settings.rs::paint_font_picker` |
 | 设置弹窗 | 加载 | 不适用（字体列表与字段值均本地同步构造） | 不适用 | 不适用 | 不适用 | `crates/veil-ui/src/view/settings.rs::paint` |
@@ -52,34 +52,41 @@
 | Mermaid（正文内） | 降级 | `notice.mermaid_source_too_large`（源码 >128 KiB 跳过渲染，保留源码） | 危险（错误 notice） | 精简源码后自动重试 | 否 | `crates/veil-ui/src/app.rs::trigger_mermaid_auto` |
 | 公式（正文内） | 空 | 不适用（空公式无内容，按源码空块显示，无专门空态文案） | 不适用 | 不适用 | 不适用 | — |
 | 公式（正文内） | 加载 | 不适用（`ensure_math_range` 同步渲染；未就绪即显示源码） | 不适用 | 不适用 | 不适用 | `crates/veil-ui/src/paint.rs::ensure_math_range` |
-| 公式（正文内） | 错误 | 无界面提示（仅 stderr + 源码降级 → 已知缺口 G1） | 中性（源码按正文色） | 无按钮；改源码或删除公式后自动重试 | 否（`math_failed` 为内存缓存） | `crates/veil-ui/src/paint.rs::ensure_math_range` |
+| 公式（正文内） | 错误 | `math.render_failed_hint`（块右上角小字，不改布局） | 危险（`theme.danger`） | 改源码或删除公式后自动重试 | 否（`math_failed` 为内存缓存） | `crates/veil-ui/src/paint.rs::ensure_math_range` + `math_failure_notice` |
 | 公式（正文内） | 降级 | 无（TeX 源码即降级形态）；光标进入公式块或源码模式时显示源码 | 中性 | 移动光标出块，或 `Ctrl+/` 切源码模式 | 否（源码模式为会话态） | `crates/veil-ui/src/paint.rs::math_shows_image`、`render` |
 
-## 二、已知缺口（未在本任务修复）
+## 二、已实现（本轮关闭的缺口）
 
-| 编号 | 缺口 | 位置 | 未修复理由 |
+| 编号 | 原缺口 | 修复 | 位置 | 测试 |
+|---|---|---|---|---|
+| G1 | 公式渲染失败只写 stderr 并降级源码，无界面提示 | 失败块右上角绘制一行 `math.render_failed_hint`（`theme.danger` 小字），不新增弹窗、不改布局高度；光标进入块内按源码编辑时不叠加提示 | `crates/veil-ui/src/paint.rs::math_failure_notice`（渲染循环 `BlockKind::Math` 分支） | `app_tests/media.rs::math_render_failure_degrades_to_source` |
+| G2 | 快速打开的目录读取失败被 `.ok()` 吞掉，与“无候选”同貌 | `refresh_quick` 记录 `read_failed`；浮层空结果改用 `quick_open.read_failed`（危险色），Esc 关闭后重新打开即重试 | `crates/veil-ui/src/interaction.rs::refresh_quick`、`paint_overlay.rs::paint_quick`、`view/quick_open.rs::empty_notice` | `view/quick_open.rs::read_failure_is_distinct_from_empty_and_marked_as_error`、`app_tests/persist.rs::quick_open_surfaces_directory_read_failure` |
+| G3 | 图片预览位图缺失时静默只剩遮罩 | 保留遮罩并居中绘制 `image.preview_unavailable`，取 `tokens::state::empty_fg` 中性色（缺失非错误操作，不用危险色） | `crates/veil-ui/src/view/image_preview.rs::paint` | `view/image_preview.rs::missing_bitmap_hint_is_neutral_and_localized`、`app_tests/app.rs::image_preview_missing_bitmap_draws_neutral_hint` |
+| G5 | PDF 页边距：PDF 夹取 5–60 mm，配置/设置允许 0–50 mm，0–5 mm 被静默提升 | 统一为 **5–50 mm**：`EXPORT_MARGIN_MM_MIN/MAX` 单一常量，配置解析夹取、设置字段范围与 apply 夹取、`PageGeom::a4` 全部共用；设置弹窗标签同步为 5–50 | `crates/veil-ui/src/theme.rs`、`view/settings.rs`、`crates/veil/src/platform/pdf_layout.rs::PageGeom::a4` | `theme.rs::export_margin_clamps_to_shared_pdf_interval`、`view/settings.rs::export_margin_field_range_matches_pdf_interval`、`pdf_layout.rs::page_margin_clamps_to_shared_interval` |
+
+G5 选型理由：保留 PDF 的 5 mm 下限（防止内容贴边/落入打印机不可打印区），把配置与设置 UI 的下限从 0 提升到 5；若允许 0 mm，则多数打印机实际无法输出，等于放开无效版式。
+
+## 三、延后缺口（未在本轮修复）
+
+| 编号 | 缺口 | 位置 | 延后理由 |
 |---|---|---|---|
-| G1 | 公式渲染失败只写 stderr 并降级源码，无界面提示、无操作入口 | `crates/veil-ui/src/paint.rs::ensure_math_range` | 需新增 i18n key（中英 + parity 测试）与按块去重/节流，避免每帧报错刷屏；超出本次“空态去红”范围 |
-| G2 | 快速打开的目录读取失败被 `.ok()` 吞掉，与“无候选”同貌 | `crates/veil-ui/src/interaction.rs::refresh_quick` | 需新增 quick 的 error 状态字段与专属文案 key；当前注释明确“按空处理”，属设计取舍，改为契约需产品决策 |
-| G3 | 图片预览位图缺失时静默只剩遮罩，无文案 | `crates/veil-ui/src/view/image_preview.rs::paint` | 触发路径稀少（预览入口通常已确认位图存在）；补文案需新增 key，收益低 |
-| G4 | 大纲/快速打开/历史面板无“加载”态，超大目录/快照列表会阻塞 UI | 见矩阵“加载”行 | 属同步 I/O 架构问题，需异步任务与进度态，非视觉层可独立修复 |
-| G5 | PDF 页边距安全下限：`PageGeom::a4` 夹取 5–60 mm，而配置/设置允许 0–50 mm，0–5 mm 会被提升到 5 mm | `crates/veil/src/platform/pdf_layout.rs::PageGeom::a4` | 有意下限（防内容贴边/打印机不可打印区），与契约“0–50”存在 0–5 的显示差异；未改以免放开无效版式 |
-| G6 | PDF 代码/表格字号（9.3 / 8.8 pt）不从 `type_scale` 取 | `crates/veil/src/platform/pdf_layout.rs` 的 `CODE_SIZE` / `TABLE_SIZE` | 视觉契约 §3.1/§3.2 只定义屏幕代码比值与纸面标题比值，纸面代码/表格字阶未定义；保持现值避免无依据改版式 |
+| G4 | 大纲/快速打开/历史面板无“加载”态，超大目录/快照列表会阻塞 UI | 见矩阵“加载”行 | 需要异步加载态（后台任务 + 进度/占位态），属功能增量而非视觉层修补；本轮只关闭成本可控的提示类缺口 |
+| G6 | PDF 代码/表格字号（9.3 / 8.8 pt）不从 `type_scale` 取 | `crates/veil/src/platform/pdf_layout.rs` 的 `CODE_SIZE` / `TABLE_SIZE` | 视觉契约 §3.1/§3.2 只定义屏幕代码比值与纸面标题比值，纸面代码/表格字阶未定义；需先裁决是否纳入契约字阶，再改版式 |
 
-除以上缺口外，矩阵中的“现有实现”与本规格一致。
+除以上延后项外，矩阵中的“现有实现”与本规格一致。
 
-## 三、PDF 视觉对齐核验结论
+## 四、PDF 视觉对齐核验结论
 
 | 项 | 规格 | 现状（已核验） | 结论 |
 |---|---|---|---|
 | 字号 | 标题与正文从 `veil_ui::type_scale` 派生 | 标题 `heading_size` → `type_scale::paper_heading_size`；正文本轮由本地 `11.0` 改为 `type_scale::PAPER_BODY_PX`；代码/表格为纸面专用 9.3/8.8 | 正文/标题同源；代码/表格见缺口 G6 |
-| 页边距 | 来自配置 `export_margin_mm` | 打印与 PDF 均 `PageGeom::a4(session.export_margin_mm())`，`session.export_margin_mm()` 读 `config.export_margin_mm` | 一致；安全下限差异见缺口 G5 |
+| 页边距 | 来自配置 `export_margin_mm` | 打印与 PDF 均 `PageGeom::a4(session.export_margin_mm())`，`session.export_margin_mm()` 读 `config.export_margin_mm`；配置解析、设置 UI 与 `PageGeom` 共用 `EXPORT_MARGIN_MM_MIN/MAX = 5–50` | 一致（原 G5 已关闭） |
 | 页码 | 受配置开关控制 | `LayoutOpts.page_numbers = session.export_options().page_numbers`（读 `config.export_page_numbers`），`append_footers(opts.page_numbers)` 决定是否写 `n / total` | 一致（默认关闭） |
 | 线条 | 取 hairline / rail 语义 | 表格网格与分隔线由自由值 0.6/0.8 pt 改为 `HAIRLINE_PT = type_scale::hairline × 72/96 = 0.75 pt`；引用/Callout 竖条取 `type_scale::rail`（3.0，数值不变） | 已对齐语义；单位按 96 dpi→pt 换算，未改版式节奏 |
 
 对应测试：`crates/veil/src/platform/pdf_layout.rs::paper_fonts_and_strokes_come_from_type_scale`。
 
-## 四、空态去红验收点
+## 五、空态去红验收点
 
 | 位置 | 改动 | 测试 |
 |---|---|---|

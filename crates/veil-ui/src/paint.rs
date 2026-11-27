@@ -1189,6 +1189,15 @@ impl App {
             && self.cache.math(id, self.math_key(id)).is_some()
     }
 
+    /// 公式块渲染失败且当前不是按源码编辑时，返回失败提示 key（失败不再静默）。
+    /// 只在块级提示一次，不新增弹窗、不改布局高度。
+    pub(crate) fn math_failure_notice(&self, id: BlockId, range: &Range) -> Option<Key> {
+        (!self.math_shows_image(id, range)
+            && self.cache.math_failed(id, self.math_fail_key(id))
+            && !node_active(*range, self.effective_caret()))
+        .then_some(Key::MathRenderFailedHint)
+    }
+
     /// 渲染纯化（ADR-009 决策五）：产出完整帧缓冲，只读真值、只填派生缓存。
     /// 无 surface（headless）时仍能运行——`win_size()` 兜底尺寸，供幂等断言与真实像素路径测试。
     /// surface 存在性只影响 present() 侧的外部副作用。
@@ -1675,6 +1684,21 @@ impl App {
                         1,
                         theme.grid,
                     );
+                }
+                BlockKind::Math => {
+                    // 渲染失败降级源码：在块右上角补一行次要提示（失败不再静默）。
+                    if let Some(hint) = self.math_failure_notice(id, &range) {
+                        let right = self.content_x() + self.content_width();
+                        if let Some(lab) = self.ui_state.chrome.labels.get_or_insert(
+                            &mut self.engine,
+                            t(hint),
+                            theme.danger,
+                            scale,
+                        ) {
+                            let x = (right - lab.w as f32).round() as i32;
+                            frame.blit(&lab.pixels, lab.w, lab.h, x, sy);
+                        }
+                    }
                 }
                 _ => {}
             }

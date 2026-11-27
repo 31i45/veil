@@ -79,6 +79,8 @@ fn pathological_inputs_matrix() {
         "{:<24} {:>10} {:>10} {:>9} {:>7}",
         "case", "bytes", "ms", "blocks", "roundtrip"
     );
+    let mut passed = 0usize;
+    let mut max_ms = 0.0f64;
     for (name, text) in cases() {
         let bytes = text.len();
         let t = Instant::now();
@@ -89,6 +91,7 @@ fn pathological_inputs_matrix() {
             (blocks, rt)
         });
         let ms = t.elapsed().as_secs_f64() * 1e3;
+        max_ms = max_ms.max(ms);
         match result {
             Ok((blocks, rt)) => {
                 let ok = rt.as_deref() == Some(text.as_str()) || text.is_empty();
@@ -97,8 +100,11 @@ fn pathological_inputs_matrix() {
                     if ok { "是" } else { "否" }
                 );
                 assert!(ok, "{name}: 往返不一致");
+                passed += 1;
             }
             Err(_) => panic!("{name}: 解析 panic"),
         }
     }
+    println!("PROBE name=pathological_inputs_matrix metric=cases_passed value={passed} unit=count");
+    println!("PROBE name=pathological_inputs_matrix metric=max_ms value={max_ms:.2} unit=ms");
 }

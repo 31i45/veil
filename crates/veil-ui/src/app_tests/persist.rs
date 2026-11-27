@@ -2126,6 +2126,20 @@ fn perf_50mb_long_doc() {
         samples[samples.len() - 1]
     );
     println!("perf_50mb_save_ms={save_ms:.1}");
+    println!(
+        "PROBE name=perf_50mb_long_doc metric=keystroke_p50 value={:.3} unit=ms",
+        pick(0.5)
+    );
+    println!(
+        "PROBE name=perf_50mb_long_doc metric=keystroke_p95 value={:.3} unit=ms",
+        pick(0.95)
+    );
+    println!("PROBE name=perf_50mb_long_doc metric=open_ms value={open_ms:.1} unit=ms");
+    println!("PROBE name=perf_50mb_long_doc metric=save_ms value={save_ms:.1} unit=ms");
+    println!(
+        "PROBE name=perf_50mb_long_doc metric=blocks value={} unit=count",
+        a.index.blocks.len()
+    );
 
     assert!(open_ms <= 5_000.0, "50MB 打开超过 5s: {open_ms:.1}ms");
     assert!(pick(0.95) <= 16.0, "50MB 击键 p95 超过 16ms");
@@ -2176,6 +2190,15 @@ fn perf_20k_blocks() {
         "perf_20k_keystroke_ms_max={:.3}",
         samples[samples.len() - 1]
     );
+    println!(
+        "PROBE name=perf_20k_blocks metric=keystroke_p50 value={:.3} unit=ms",
+        pick(0.5)
+    );
+    println!(
+        "PROBE name=perf_20k_blocks metric=keystroke_p95 value={:.3} unit=ms",
+        pick(0.95)
+    );
+    println!("PROBE name=perf_20k_blocks metric=blocks value={n} unit=count");
     // 零丢字：300 次击键必须一字不少地落在文档里（Task 11 门禁）。
     let caret = a.editor.caret();
     let g = a

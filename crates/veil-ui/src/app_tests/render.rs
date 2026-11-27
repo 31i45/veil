@@ -1840,6 +1840,14 @@ fn perf_keystroke_path() {
     println!("perf_keystroke_ms_p50={:.3}", pick(0.5));
     println!("perf_keystroke_ms_p95={:.3}", pick(0.95));
     println!("perf_keystroke_ms_max={:.3}", samples[samples.len() - 1]);
+    println!(
+        "PROBE name=perf_keystroke_path metric=keystroke_p50 value={:.3} unit=ms",
+        pick(0.5)
+    );
+    println!(
+        "PROBE name=perf_keystroke_path metric=keystroke_p95 value={:.3} unit=ms",
+        pick(0.95)
+    );
 }
 
 /// 分项归因探针（默认忽略）：三档文档规模下把每次击键拆成 5 段独立耗时。
@@ -1954,6 +1962,13 @@ fn perf_keystroke_attribution() {
              {total_p95:.2},{:.1}",
             index_p95 / total_p95 * 100.0
         );
+        println!(
+            "PROBE name=perf_keystroke_attribution metric=total_p95 value={total_p95:.2} unit=us scope={block_count}"
+        );
+        println!(
+            "PROBE name=perf_keystroke_attribution metric=index_share value={:.1} unit=pct scope={block_count}",
+            index_p95 / total_p95 * 100.0
+        );
     }
 }
 
@@ -2042,6 +2057,9 @@ fn perf_index_subsegments() {
             rc_p95 / sum_p95 * 100.0,
             st_p95 / sum_p95 * 100.0
         );
+        println!(
+            "PROBE name=perf_index_subsegments metric=index_sum_p95 value={sum_p95:.2} unit=us scope={block_count}"
+        );
     }
 }
 
@@ -2063,6 +2081,12 @@ fn perf_cold_first_edit() {
     println!("perf_cold_app_ms={app_ms:.3}");
     println!("perf_cold_edit_ms={edit_ms:.3}");
     println!("perf_layouts_after_first_edit={}", a.cache.layouts.len());
+    println!(
+        "PROBE name=perf_cold_first_edit metric=cold_first_edit_ms value={:.3} unit=ms",
+        app_ms + edit_ms
+    );
+    println!("PROBE name=perf_cold_first_edit metric=app_ms value={app_ms:.3} unit=ms");
+    println!("PROBE name=perf_cold_first_edit metric=edit_ms value={edit_ms:.3} unit=ms");
 }
 
 /// 对照探针（默认忽略）：先完成一次极小排版（等价真实窗口的首帧），
@@ -2081,6 +2105,7 @@ fn perf_cold_first_edit_prewarmed() {
     let edit_ms = t.elapsed().as_secs_f64() * 1e3;
     println!("perf_cold_edit_prewarmed_ms={edit_ms:.3}");
     println!("perf_cold_edit_prewarmed_layouts={}", a.cache.layouts.len());
+    println!("PROBE name=perf_cold_first_edit_prewarmed metric=edit_ms value={edit_ms:.3} unit=ms");
 }
 
 /// 真实生命周期的冷首编辑探针（默认忽略）：App 构造 → 首帧 paint（真实窗口启动必经）
@@ -2105,6 +2130,12 @@ fn perf_first_edit_after_first_frame() {
     let first_edit_ms = t.elapsed().as_secs_f64() * 1e3;
     println!("perf_first_edit_after_first_frame app_ms={app_ms:.3} first_frame_ms={first_frame_ms:.3} first_edit_ms={first_edit_ms:.3}");
     println!("perf_first_edit_layouts={}", a.cache.layouts.len());
+    println!(
+        "PROBE name=perf_first_edit_after_first_frame metric=first_frame_ms value={first_frame_ms:.3} unit=ms"
+    );
+    println!(
+        "PROBE name=perf_first_edit_after_first_frame metric=first_edit_ms value={first_edit_ms:.3} unit=ms"
+    );
 }
 
 /// 0a 验收探针（默认忽略）：10MB 单块连续滚轮 300 格后仍须有内容像素。
@@ -2137,6 +2168,8 @@ fn perf_huge_scroll() {
         "huge_scroll vp={}x{} doc_h={doc_h} block_h={block_h} scroll={scroll} nonbg={nonbg}",
         vp.w, vp.h
     );
+    println!("PROBE name=perf_huge_scroll metric=nonbg value={nonbg} unit=px");
+    println!("PROBE name=perf_huge_scroll metric=doc_height value={doc_h:.1} unit=px");
     assert!(nonbg > 1000, "滚到 10MB 单块末尾仍须有内容");
 }
 
@@ -2168,6 +2201,13 @@ fn perf_huge_block() {
             l.layout_text().len(),
             l.truncated,
             l.height
+        );
+        println!("PROBE name=perf_huge_block metric=app_ms value={app_ms:.3} unit=ms scope={mb}mb");
+        println!(
+            "PROBE name=perf_huge_block metric=edit_ms value={edit_ms:.3} unit=ms scope={mb}mb"
+        );
+        println!(
+            "PROBE name=perf_huge_block metric=tail_ms value={tail_ms:.3} unit=ms scope={mb}mb"
         );
         assert!(l.truncated);
         assert!(l.layout_text().len() <= MAX_BLOCK_BYTES);

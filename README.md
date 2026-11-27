@@ -183,6 +183,15 @@ cargo test -p veil-mermaid-offline
 
 Historical release gate (v3.0.0-era records, **not current v3.0.2 acceptance**): serial `cargo test --workspace --release -- --test-threads=1` passed at commit `0d229eb` (`evidence/release/release-record.json`, `tests.status=passed`); the recorded `veil-ui` lib breakdown is **1281 passed / 11 ignored**. Earlier, commit `97d3a60` recorded 1919 passed / 0 failed / 15 ignored (the remote-SVG mock uses a 20 ms wall-clock deadline, so parallel runs can produce false timeouts). The same historical record lists `cargo test -p veil --lib` as 221 passed / 1 ignored with the default feature set and `cargo clippy --workspace --all-targets -- -D warnings` at zero warnings. Current v3.0.2 release evidence was not rebuilt or rerun in this wording review.
 
+`#[ignore]` probes are no longer an unexplained gap. The 16 remaining ignored tests (11 release-optimised performance probes, 4 pathological / huge-block probes, 1 CJK-PDF evidence generator) plus one promoted diagnostic are listed in `docs/qa/ignored-tests-2026-11-27.md` with why each is ignored and how it is judged. Run them all against a release build with:
+
+```powershell
+pwsh -NoProfile -File tools/verify/probe-gate.ps1                 # first run writes docs/qa/perf-baseline.json
+pwsh -NoProfile -File tools/verify/probe-gate.ps1 -Repeat 9        # 9 samples per performance probe, judged on p95
+```
+
+Results land in `docs/qa/probe-gate-<date>.md` as PASS / FAIL / SKIP per probe. **FAIL means a performance p95 rose more than 20% above the archived baseline or exceeded the probe's own budget, or a pathological/evidence invariant broke.** SKIP is reserved for missing environment (for example no system CJK font) and is never reported as PASS. `mindmap_viewbox_debug` is now a normal assertion; its SVG dump requires `VEIL_MINDMAP_DUMP=1`.
+
 Release CI runs on `v*` tag pushes and through `workflow_dispatch`. Manual dispatch defaults to `dry_run=true` and runs Linux core check/test plus the Windows build, tests, clippy, artifact boundary, smoke, optional Authenticode/RFC3161 signing and post-signing SHA-256 validation without creating or uploading a GitHub Release. Only a `v*` tag push can publish. Smoke failures are never hidden with `continue-on-error`.
 
 ## Tier-0 Gate: Real Launch Smoke
@@ -295,6 +304,8 @@ Status baseline for this wording review: **source version 3.0.2, 2026-11-24**. T
 
 - `docs/review/v1-2-implementation-log.md` — v1.2 implementation record: measured numbers, probes, decisions
 - `docs/review/keystroke-attribution.md` — keystroke-to-commit latency attribution
+- `docs/qa/ignored-tests-2026-11-27.md` — every `#[ignore]` probe: file, type, why ignored, how judged, gate coverage
+- `docs/qa/probe-gate-<date>.md` — generated probe-gate result (PASS / FAIL / SKIP per probe, with metrics)
 - `docs/adr/` — Architecture Decision Records:
   - ADR-001 rope selection
   - ADR-002 formula rendering path

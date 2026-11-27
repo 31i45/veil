@@ -1,0 +1,229 @@
+{
+  "schema": 1,
+  "note": "由 tools/verify/probe-gate.ps1 生成；性能项按 p95 与基线 ×1.2 或探针预算判定",
+  "updated": "2026-11-27 23:23:14 +08:00",
+  "repeat": 1,
+  "machine": "Intel(R) Core(TM) i9-14900HX",
+  "entries": {
+    "bench_edit_reparse_history_100k/edit_us": {
+      "value": 5.09,
+      "unit": "us",
+      "budget": null,
+      "samples": [
+        5.09
+      ],
+      "repeat": 1,
+      "updated": "2026-11-27 23:23:14 +08:00"
+    },
+    "bench_edit_reparse_history_100k/reparse_us": {
+      "value": 827.258,
+      "unit": "us",
+      "budget": null,
+      "samples": [
+        827.258
+      ],
+      "repeat": 1,
+      "updated": "2026-11-27 23:23:14 +08:00"
+    },
+    "perf_20k_blocks/keystroke_p95": {
+      "value": 2.586,
+      "unit": "ms",
+      "budget": null,
+      "samples": [
+        2.586
+      ],
+      "repeat": 1,
+      "updated": "2026-11-27 23:23:14 +08:00"
+    },
+    "perf_50mb_long_doc/keystroke_p95": {
+      "value": 2.284,
+      "unit": "ms",
+      "budget": 16.0,
+      "samples": [
+        2.284
+      ],
+      "repeat": 1,
+      "updated": "2026-11-27 23:23:14 +08:00"
+    },
+    "perf_50mb_long_doc/open_ms": {
+      "value": 488.8,
+      "unit": "ms",
+      "budget": 5000.0,
+      "samples": [
+        488.8
+      ],
+      "repeat": 1,
+      "updated": "2026-11-27 23:23:14 +08:00"
+    },
+    "perf_after_edit_breakdown/p95_refresh_index_ms": {
+      "value": 2.13,
+      "unit": "ms",
+      "budget": null,
+      "samples": [
+        2.13
+      ],
+      "repeat": 1,
+      "updated": "2026-11-27 23:23:14 +08:00"
+    },
+    "perf_after_edit_breakdown/peak_total_ms": {
+      "value": 3.371,
+      "unit": "ms",
+      "budget": null,
+      "samples": [
+        3.371
+      ],
+      "repeat": 1,
+      "updated": "2026-11-27 23:23:14 +08:00"
+    },
+    "perf_cold_first_edit_prewarmed/edit_ms": {
+      "value": 55.704,
+      "unit": "ms",
+      "budget": null,
+      "samples": [
+        55.704
+      ],
+      "repeat": 1,
+      "updated": "2026-11-27 23:23:14 +08:00"
+    },
+    "perf_cold_first_edit/cold_first_edit_ms": {
+      "value": 101.627,
+      "unit": "ms",
+      "budget": null,
+      "samples": [
+        101.627
+      ],
+      "repeat": 1,
+      "updated": "2026-11-27 23:23:14 +08:00"
+    },
+    "perf_first_edit_after_first_frame/first_edit_ms": {
+      "value": 1.35,
+      "unit": "ms",
+      "budget": null,
+      "samples": [
+        1.35
+      ],
+      "repeat": 1,
+      "updated": "2026-11-27 23:23:14 +08:00"
+    },
+    "perf_index_subsegments/index_sum_p95@10003": {
+      "value": 2334.0,
+      "unit": "us",
+      "budget": null,
+      "samples": [
+        2334.0
+      ],
+      "repeat": 1,
+      "updated": "2026-11-27 23:23:14 +08:00"
+    },
+    "perf_index_subsegments/index_sum_p95@19999": {
+      "value": 4670.5,
+      "unit": "us",
+      "budget": null,
+      "samples": [
+        4670.5
+      ],
+      "repeat": 1,
+      "updated": "2026-11-27 23:23:14 +08:00"
+    },
+    "perf_index_subsegments/index_sum_p95@2002": {
+      "value": 304.3,
+      "unit": "us",
+      "budget": null,
+      "samples": [
+        304.3
+      ],
+      "repeat": 1,
+      "updated": "2026-11-27 23:23:14 +08:00"
+    },
+    "perf_index_subsegments/index_sum_p95@40005": {
+      "value": 8900.9,
+      "unit": "us",
+      "budget": null,
+      "samples": [
+        8900.9
+      ],
+      "repeat": 1,
+      "updated": "2026-11-27 23:23:14 +08:00"
+    },
+    "perf_index_subsegments/index_sum_p95@5005": {
+      "value": 1268.2,
+      "unit": "us",
+      "budget": null,
+      "samples": [
+        1268.2
+      ],
+      "repeat": 1,
+      "updated": "2026-11-27 23:23:14 +08:00"
+    },
+    "perf_keystroke_attribution/total_p95@10003": {
+      "value": 4708.2,
+      "unit": "us",
+      "budget": null,
+      "samples": [
+        4708.2
+      ],
+      "repeat": 1,
+      "updated": "2026-11-27 23:23:14 +08:00"
+    },
+    "perf_keystroke_attribution/total_p95@19999": {
+      "value": 6991.9,
+      "unit": "us",
+      "budget": null,
+      "samples": [
+        6991.9
+      ],
+      "repeat": 1,
+      "updated": "2026-11-27 23:23:14 +08:00"
+    },
+    "perf_keystroke_attribution/total_p95@2002": {
+      "value": 2004.4,
+      "unit": "us",
+      "budget": null,
+      "samples": [
+        2004.4
+      ],
+      "repeat": 1,
+      "updated": "2026-11-27 23:23:14 +08:00"
+    },
+    "perf_keystroke_attribution/total_p95@40005": {
+      "value": 13695.3,
+      "unit": "us",
+      "budget": null,
+      "samples": [
+        13695.3
+      ],
+      "repeat": 1,
+      "updated": "2026-11-27 23:23:14 +08:00"
+    },
+    "perf_keystroke_attribution/total_p95@5005": {
+      "value": 2926.2,
+      "unit": "us",
+      "budget": null,
+      "samples": [
+        2926.2
+      ],
+      "repeat": 1,
+      "updated": "2026-11-27 23:23:14 +08:00"
+    },
+    "perf_keystroke_path/keystroke_p95": {
+      "value": 1.827,
+      "unit": "ms",
+      "budget": null,
+      "samples": [
+        1.827
+      ],
+      "repeat": 1,
+      "updated": "2026-11-27 23:23:14 +08:00"
+    },
+    "perf_peak_breakdown/peak_total_ms": {
+      "value": 3.335,
+      "unit": "ms",
+      "budget": null,
+      "samples": [
+        3.335
+      ],
+      "repeat": 1,
+      "updated": "2026-11-27 23:23:14 +08:00"
+    }
+  }
+}

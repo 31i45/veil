@@ -768,6 +768,9 @@ mod tests {
             .with(|ctx| ctx.eval("21 * 2"))
             .expect("runtime remains usable after interruption");
         assert_eq!(answer, 42);
+        println!(
+            "PROBE name=pathological_eval_child metric=answer value={answer} unit=int scope={mode}"
+        );
     }
 
     #[test]
@@ -2480,9 +2483,9 @@ mod tests {
         std::fs::write(dir.join("index.html"), html).expect("write corpus browser index");
     }
 
-    /// 有持续诊断价值的 viewBox 检查：路径可移植，且只在显式运行时写临时目录。
+    /// 有持续诊断价值的 viewBox 检查：常规门禁断言 viewBox 可解析且尺寸合理；
+    /// 设置 `VEIL_MINDMAP_DUMP=1` 时额外写出临时 SVG 供目检（默认不落盘）。
     #[test]
-    #[ignore]
     fn mindmap_viewbox_debug() {
         let mut session = Session::new().expect("initialize Mermaid");
         let svg = session
@@ -2491,12 +2494,25 @@ mod tests {
                 false,
             )
             .expect("should render");
-        let path = std::env::temp_dir().join(format!("veil-mindmap-{}.svg", std::process::id()));
-        std::fs::write(&path, &svg).expect("write diagnostic SVG");
-        println!("SVG: {} ({} bytes)", path.display(), svg.len());
+        let doc = roxmltree::Document::parse(&svg).expect("mindmap SVG 可解析");
+        let view_box = svg_view_box(&doc).expect("mindmap viewBox 必须可解析且尺寸合理");
+        println!(
+            "PROBE name=mindmap_viewbox_debug metric=viewbox_width value={:.1} unit=px",
+            view_box[2]
+        );
+        println!(
+            "PROBE name=mindmap_viewbox_debug metric=viewbox_height value={:.1} unit=px",
+            view_box[3]
+        );
         if let Some(start) = svg.find("viewBox=") {
             let end = svg[start..].find('>').unwrap_or(svg.len() - start) + start;
             println!("{}", &svg[start..end]);
+        }
+        if std::env::var_os("VEIL_MINDMAP_DUMP").is_some() {
+            let path =
+                std::env::temp_dir().join(format!("veil-mindmap-{}.svg", std::process::id()));
+            std::fs::write(&path, &svg).expect("write diagnostic SVG");
+            println!("SVG: {} ({} bytes)", path.display(), svg.len());
         }
     }
 }

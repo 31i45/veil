@@ -184,6 +184,15 @@ cargo test -p veil-mermaid-offline
 
 历史发布门禁（v3.0.0 时期记录，**不是当前 v3.0.2 验收**）：串行 `cargo test --workspace --release -- --test-threads=1` 在 commit `0d229eb` 通过（`evidence/release/release-record.json`，`tests.status=passed`）；记录的 `veil-ui` lib 分项为 **1281 passed / 11 ignored**。此前 commit `97d3a60` 记录为 1919 passed / 0 failed / 15 ignored（远程 SVG mock 使用 20 ms 墙钟截止，并行执行可能假超时）；同一历史记录还列出默认特性下 `cargo test -p veil --lib` 为 221 passed / 1 ignored，`cargo clippy --workspace --all-targets -- -D warnings` 零警告。本轮文档纠偏未重建或复跑当前 v3.0.2 发布证据。
 
+`#[ignore]` 探针不再是没人解释的黑洞。现存 16 条 ignored 测试（11 条 release 优化级别性能探针、4 条病态/超大单块探针、1 条 CJK PDF 证据生成器）与 1 条已晋级的诊断器逐条登记在 `docs/qa/ignored-tests-2026-11-27.md`，写明为何 ignore、如何判定。一条命令即可对 release 构建跑完全部探针：
+
+```powershell
+pwsh -NoProfile -File tools/verify/probe-gate.ps1                 # 首次运行写入 docs/qa/perf-baseline.json
+pwsh -NoProfile -File tools/verify/probe-gate.ps1 -Repeat 9        # 每条性能探针采样 9 次，按 p95 判定
+```
+
+结果写入 `docs/qa/probe-gate-<date>.md`，逐条给出 PASS / FAIL / SKIP。**FAIL 意味着：性能 p95 超过归档基线 20% 或超过探针自身预算，或者病态/证据不变量被破坏。** SKIP 只用于环境缺失（例如系统没有 CJK 字体），绝不记成 PASS。`mindmap_viewbox_debug` 已改为常规断言，只有设置 `VEIL_MINDMAP_DUMP=1` 时才落盘 SVG。
+
 Release CI 在 `v*` tag push 与 `workflow_dispatch` 时运行。手动触发默认 `dry_run=true`，执行 Linux core check/test 以及 Windows 构建、测试、clippy、产物边界、冒烟、可选 Authenticode/RFC3161 签名与签名后的 SHA-256 校验，但不创建、不上传 GitHub Release；只有 `v*` tag push 可以发布。任何冒烟失败都不得用 `continue-on-error` 掩盖。
 
 ## 零级门禁：真实启动冒烟
@@ -296,6 +305,8 @@ pwsh -File tools/smoke_launch.ps1 -ExePath target/release/veil.exe -ExpectedTitl
 
 - `docs/review/v1-2-implementation-log.md` — v1.2 实施记录：实测数字、探针、不做项裁定
 - `docs/review/keystroke-attribution.md` — 击键到提交的延迟归因
+- `docs/qa/ignored-tests-2026-11-27.md` — 全部 `#[ignore]` 探针：文件、类型、为何忽略、判定方式、门禁覆盖
+- `docs/qa/probe-gate-<date>.md` — probe-gate 自动生成的结果（每条 PASS / FAIL / SKIP 与指标）
 - `docs/adr/` — 架构决策记录：
   - ADR-001 rope 选型
   - ADR-002 公式渲染路径

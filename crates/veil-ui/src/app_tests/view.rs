@@ -2350,6 +2350,14 @@ fn perf_peak_breakdown() {
     println!("peak_paint_ms={:.3}", paint_ms[max_idx]);
     println!("paint_spikes_gt5ms={paint_spikes}/500");
     println!("after_edit_spikes_gt5ms={after_spikes}/500");
+    println!(
+        "PROBE name=perf_peak_breakdown metric=peak_total_ms value={:.3} unit=ms",
+        total[max_idx]
+    );
+    println!(
+        "PROBE name=perf_peak_breakdown metric=peak_paint_ms value={:.3} unit=ms",
+        paint_ms[max_idx]
+    );
 }
 
 /// after_edit 内部子步骤拆分探针（默认忽略）：定位 69ms 峰值具体来自哪个子步骤。
@@ -2523,6 +2531,18 @@ fn perf_after_edit_breakdown() {
     println!("p95_refresh_index_ms={:.3}", p95(&refresh));
     println!("p95_ensure_layouts_visible_ms={:.3}", p95(&ensure_vis));
     println!("p95_recompute_geometry_ms={:.3}", p95(&recompute));
+    println!(
+        "PROBE name=perf_after_edit_breakdown metric=peak_total_ms value={:.3} unit=ms",
+        total[max_idx]
+    );
+    println!(
+        "PROBE name=perf_after_edit_breakdown metric=p95_refresh_index_ms value={:.3} unit=ms",
+        p95(&refresh)
+    );
+    println!(
+        "PROBE name=perf_after_edit_breakdown metric=p95_recompute_geometry_ms value={:.3} unit=ms",
+        p95(&recompute)
+    );
 }
 
 // ---- 阶段 1：中文口径字数 + 专注模式 ----

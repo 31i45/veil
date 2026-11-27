@@ -783,6 +783,18 @@ mod tests {
             per_iter(history_ns),
             s.last_rescan_lines()
         );
+        println!(
+            "PROBE name=bench_edit_reparse_history metric=edit_us value={:.3} unit=us",
+            per_iter(edit_ns)
+        );
+        println!(
+            "PROBE name=bench_edit_reparse_history metric=reparse_us value={:.3} unit=us",
+            per_iter(reparse_ns)
+        );
+        println!(
+            "PROBE name=bench_edit_reparse_history metric=history_us value={:.3} unit=us",
+            per_iter(history_ns)
+        );
         assert!(s.block_count() >= 2000, "bench 文档应产生大量块");
     }
 

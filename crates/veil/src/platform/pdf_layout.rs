@@ -4290,6 +4290,18 @@ mod tests {
             doc.images.len(),
             bytes.len()
         );
+        println!(
+            "PROBE name=generate_wave4_sample_pdf metric=pages value={} unit=count",
+            doc.pages.len()
+        );
+        println!(
+            "PROBE name=generate_wave4_sample_pdf metric=bytes value={} unit=byte",
+            bytes.len()
+        );
+        println!(
+            "PROBE name=generate_wave4_sample_pdf metric=outline value={} unit=count",
+            doc.outline.len()
+        );
         assert!(doc.pages.len() >= 3, "样例应跨多页");
         assert!(!doc.outline.is_empty(), "样例应有书签");
     }

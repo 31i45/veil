@@ -754,7 +754,14 @@ impl App {
             }
             let tx = x0 + c.x.round() as i32;
             // 前置装饰（code/mark/kbd 底色）画在文本位图之下，与正文同一套绘制规则。
-            for &(rx, ry, rw, rh, ref kind) in &c.under {
+            // 叠放顺序由 `UnderKind::rank()` 决定（契约 §6.2），稳定排序保留同层构造顺序。
+            let mut under: Vec<(f32, f32, f32, f32, &UnderKind)> = c
+                .under
+                .iter()
+                .map(|(rx, ry, rw, rh, kind)| (*rx, *ry, *rw, *rh, kind))
+                .collect();
+            under.sort_by_key(|(_, _, _, _, kind)| kind.rank());
+            for (rx, ry, rw, rh, kind) in under {
                 crate::paint::paint_under_decor(
                     frame,
                     tx + (rx - 1.0) as i32,

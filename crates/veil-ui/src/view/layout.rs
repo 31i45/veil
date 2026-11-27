@@ -498,6 +498,33 @@ pub enum UnderKind {
     StyleBg([u8; 3]),
 }
 
+/// 前置装饰的唯一叠加顺序（back → front），与视觉契约 §6.2 逐条对应：
+/// `code_bg`(2) → `mark_bg`(3) → `kbd_frame`(4) → `bg`(5)；几何解析不产生绘制。
+/// `ImagePlaceholder` 是图片占位几何，永远在最底层（契约未单列，按“几何最底”处置）。
+///
+/// 绘制层必须按 `rank()` 稳定排序后再画，不得依赖 `decorations_under` 的构造顺序。
+#[allow(dead_code)] // 顺序契约的显式声明：绘制层按 rank 排序，本表供测试逐条锁定
+pub const STACK_ORDER: &[UnderKind] = &[
+    UnderKind::ImagePlaceholder,
+    UnderKind::InlineCodeBg,
+    UnderKind::MarkBg,
+    UnderKind::KbdFrame,
+    UnderKind::StyleBg([0, 0, 0]),
+];
+
+impl UnderKind {
+    /// 叠放层级（越大越靠前）。数值即契约 §6.2 的步骤号；同一 rank 内保持构造顺序。
+    pub fn rank(&self) -> u8 {
+        match self {
+            UnderKind::ImagePlaceholder => 1,
+            UnderKind::InlineCodeBg => 2,
+            UnderKind::MarkBg => 3,
+            UnderKind::KbdFrame => 4,
+            UnderKind::StyleBg(_) => 5,
+        }
+    }
+}
+
 /// Sub/Sup 基线偏移物理像素：±4 逻辑像素按 DPI 缩放（正数下移 = sub，负数上移 = sup）。
 pub(crate) fn script_shift_px(shift: f32, scale: f32) -> f32 {
     shift * 4.0 * scale

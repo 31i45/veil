@@ -2868,8 +2868,8 @@ mod tests {
             link: [127, 180, 245],
             code_bg: [40, 40, 40],
             border: [60, 64, 70],
-            // `Theme::dark()` 的 mark_bg 与 bg 合成后的呈现色（[122,96,0,210] over [30,30,30]）
-            mark_bg: [106, 84, 5],
+            // `Theme::dark()` 的 mark_bg 与 bg 合成后的呈现色（[122,96,0,179] over [30,30,30]）
+            mark_bg: [95, 76, 9],
             danger: [255, 130, 130],
             font_family: None,
         }
@@ -3057,7 +3057,7 @@ mod tests {
             "实际输出: {dark}"
         );
         assert!(
-            dark.contains("mark{background:#6a5405;"),
+            dark.contains("mark{background:#5f4c09;"),
             "深色 mark 必须用深色主题派生色: {dark}"
         );
         for banned in ["#fff799", "#a00", "#fdf5f5"] {

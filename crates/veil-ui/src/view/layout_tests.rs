@@ -1588,3 +1588,39 @@ fn source_mode_and_preview_use_same_custom_family() {
     );
     assert!(cjk_family_names(&preview, db).contains(&family));
 }
+
+/// 前置装饰叠放顺序（视觉契约 §6.2）：rank 唯一、严格递增，且与契约步骤逐条一致。
+#[test]
+fn under_decor_stack_order_matches_visual_contract() {
+    // 契约 §6.2 的可绘制底层：code_bg(2) → mark_bg(3) → kbd_frame(4) → bg(5)。
+    let contract = [
+        (UnderKind::InlineCodeBg, 2u8),
+        (UnderKind::MarkBg, 3),
+        (UnderKind::KbdFrame, 4),
+        (UnderKind::StyleBg([1, 2, 3]), 5),
+    ];
+    for (kind, rank) in contract {
+        assert_eq!(kind.rank(), rank, "{kind:?} 的 rank 必须等于契约步骤号");
+    }
+
+    // STACK_ORDER 必须按 rank 严格递增（back → front），且覆盖全部变体。
+    let ranks: Vec<u8> = STACK_ORDER.iter().map(UnderKind::rank).collect();
+    let mut sorted = ranks.clone();
+    sorted.sort_unstable();
+    assert_eq!(ranks, sorted, "STACK_ORDER 必须按 rank 升序排列");
+    for pair in ranks.windows(2) {
+        assert!(pair[0] < pair[1], "rank 必须唯一且严格递增: {ranks:?}");
+    }
+    assert_eq!(
+        STACK_ORDER.len(),
+        5,
+        "STACK_ORDER 必须列出全部 UnderKind 变体"
+    );
+    // 几何占位永远在最底层（契约：几何与代码块底色在最底层）。
+    assert_eq!(STACK_ORDER[0], UnderKind::ImagePlaceholder);
+    assert!(
+        UnderKind::ImagePlaceholder.rank() < UnderKind::InlineCodeBg.rank(),
+        "图片占位几何不得压进行内底色之上"
+    );
+}
+

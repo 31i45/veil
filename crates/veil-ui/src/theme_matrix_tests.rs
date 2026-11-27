@@ -237,6 +237,92 @@ fn selection_follows_theme_and_keeps_text_readable() {
     }
 }
 
+/// 半透明色 alpha 必须来自契约 §5 的阶梯（禁止残留 80/110/120/170/180/210 裸数字）。
+#[test]
+fn semi_transparent_alphas_come_from_ladder() {
+    use crate::tokens::alpha::AlphaStep;
+    use crate::tokens::{state, surface};
+
+    let ladder: Vec<u8> = AlphaStep::ALL.iter().map(|s| s.byte()).collect();
+    for (name, make) in MODES {
+        let t = make();
+        let fields = [
+            ("sel", t.sel[3]),
+            ("mark_bg", t.mark_bg[3]),
+            ("scrim", surface::scrim_alpha(t.dark)),
+            ("focus_bg", state::focus_bg(&t)[3]),
+        ];
+        for (field, a) in fields {
+            assert!(
+                ladder.contains(&a),
+                "{name}: {field} alpha {a} 不在阶梯 {ladder:?}"
+            );
+        }
+    }
+
+    // 收敛后的具体档位（真机复评对照表）。
+    let light = Theme::light();
+    let dark = Theme::dark();
+    let hc = Theme::high_contrast();
+    assert_eq!(light.sel[3], 71, "浅色选区 → 28% 档");
+    assert_eq!(dark.sel[3], 102, "深色选区 → 40% 档");
+    assert_eq!(hc.sel[3], 179, "高对比度选区 → 70% 档");
+    assert_eq!(light.mark_bg[3], 179, "浅色 mark → 70% 档");
+    assert_eq!(dark.mark_bg[3], 179, "深色 mark → 70% 档");
+    assert_eq!(surface::SCRIM_ALPHA_LIGHT, 71, "浅色遮罩 → 28% 档");
+    assert_eq!(surface::SCRIM_ALPHA_DARK, 102, "深色遮罩 → 40% 档");
+    assert_eq!(state::focus_bg(&light)[3], 179, "焦点底 → 70% 档");
+}
+
+/// 同区间多状态（src-over）合成结果唯一：3 组具体组合，期望色逐字节钉死。
+///
+/// 顺序沿用绘制层实际层序：不透明行内代码底 → 半透明 mark 底；
+/// 不透明搜索命中底 → 半透明选区；半透明选区 → 页面底。
+#[test]
+fn content_state_composition_is_deterministic() {
+    type Case = (fn() -> Theme, [u8; 3], [u8; 3], [u8; 3]);
+    let cases: [Case; 3] = [
+        // (主题, mark over code_bg, sel over hover, sel over bg)
+        (
+            Theme::light,
+            [252, 246, 180],
+            [176, 201, 236],
+            [195, 215, 242],
+        ),
+        (Theme::dark, [98, 79, 12], [61, 91, 136], [46, 70, 106]),
+        (
+            Theme::high_contrast,
+            [90, 75, 0],
+            [15, 71, 194],
+            [0, 56, 179],
+        ),
+    ];
+    for (make, mark_on_code, sel_on_hit, sel_on_bg) in cases {
+        let t = make();
+        // 1) mark_bg（半透明）覆盖行内代码底（不透明）：rank code_bg < mark_bg。
+        assert_eq!(
+            over(t.mark_bg, rgb(t.code_bg)),
+            mark_on_code,
+            "mark/code_bg 合成色不符（dark={}）",
+            t.dark
+        );
+        // 2) 选区（半透明）覆盖搜索命中（hover 不透明）：搜索命中 < 当前命中/选区。
+        assert_eq!(
+            over(t.sel, over(t.hover, rgb(t.bg))),
+            sel_on_hit,
+            "选区/搜索命中合成色不符（dark={}）",
+            t.dark
+        );
+        // 3) 选区直接压页面底。
+        assert_eq!(
+            over(t.sel, rgb(t.bg)),
+            sel_on_bg,
+            "选区/页面底合成色不符（dark={}）",
+            t.dark
+        );
+    }
+}
+
 /// 图片占位块：`paint.rs` 的 `UnderKind::ImagePlaceholder` 取 `theme.chrome_border`
 /// （深色下浅灰块等同亮斑，所以必须来自主题）。
 #[test]

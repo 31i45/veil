@@ -1415,9 +1415,16 @@ impl App {
             // 前置装饰：行内代码底色 / mark 底色 / kbd 圆角边框。在文本光栅之下绘制，
             // 折行 span 按 selection_rects 分段画，每段独立底色/边框。
             // 选区可能覆盖装饰 — 装饰在选区高亮之后、文本 blit 之前，保持可见。
+            // 叠放顺序由 `UnderKind::rank()` 决定（契约 §6.2），稳定排序保留同层构造顺序。
             let cx0 = self.content_x() as i32;
             // 装饰区间已是块相对 doc 坐标（与 strikes 同源），直接交给 selection_rects。
-            for &(s, e, ref kind) in &l.decorations_under {
+            let mut under: Vec<(usize, usize, &UnderKind)> = l
+                .decorations_under
+                .iter()
+                .map(|(s, e, kind)| (*s, *e, kind))
+                .collect();
+            under.sort_by_key(|(_, _, kind)| kind.rank());
+            for (s, e, kind) in under {
                 for (rx, ry, rw2, rh2) in self.engine.selection_rects(l, s, e) {
                     paint_under_decor(
                         &mut frame,

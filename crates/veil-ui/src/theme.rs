@@ -330,7 +330,8 @@ impl Theme {
             bg: [255, 255, 255, 255],
             fg: [30, 30, 30],
             code_bg: [245, 245, 245, 255],
-            sel: [40, 110, 210, 80],
+            // 原 alpha 80（31.4%）→ 契约 §5 的 28% 档。
+            sel: [40, 110, 210, crate::tokens::alpha::SELECT],
             table_head_bg: [246, 248, 250, 255],
             grid: [136, 141, 148, 255],
             chrome_bg: [248, 248, 248, 255],
@@ -346,7 +347,8 @@ impl Theme {
             text: [45, 45, 45],
             kbd_bg: [245, 245, 245, 255],
             kbd_border: [160, 160, 160],
-            mark_bg: [255, 247, 153, 180],
+            // 原 alpha 180（70.6%）→ 契约 §5 的 70% 档；已复核 fg 在合成底上 ≥ 4.5:1。
+            mark_bg: [255, 247, 153, crate::tokens::alpha::MARK],
             link: [43, 108, 176],
             danger: [178, 34, 34],
             accent: [43, 108, 176],
@@ -362,7 +364,8 @@ impl Theme {
             bg: [30, 30, 30, 255],
             fg: [220, 220, 220],
             code_bg: [40, 40, 40, 255],
-            sel: [70, 130, 220, 110],
+            // 原 alpha 110（43.1%）→ 契约 §5 的 40% 档。
+            sel: [70, 130, 220, crate::tokens::alpha::SCRIM],
             table_head_bg: [42, 42, 42, 255],
             grid: [112, 116, 122, 255],
             chrome_bg: [38, 38, 38, 255],
@@ -377,7 +380,8 @@ impl Theme {
             kbd_bg: [58, 58, 58, 255],
             kbd_border: [110, 110, 110],
             // 暗琥珀底：与 fg [220,220,220] 对比度 ≈ 5:1；黄底浅字会糊成一片。
-            mark_bg: [122, 96, 0, 210],
+            // 原 alpha 210（82.4%）→ 契约 §5 的 70% 档；已复核 fg 在合成底上 ≥ 4.5:1。
+            mark_bg: [122, 96, 0, crate::tokens::alpha::MARK],
             link: [127, 180, 245],
             danger: [255, 130, 130],
             accent: [14, 99, 156],
@@ -397,7 +401,8 @@ impl Theme {
             bg: [0, 0, 0, 255],
             fg: [255, 255, 255],
             code_bg: [20, 20, 20, 255],
-            sel: [0, 80, 255, 180],
+            // 原 alpha 180（70.6%）→ 契约 §5 的 70% 档。
+            sel: [0, 80, 255, crate::tokens::alpha::MARK],
             table_head_bg: [30, 30, 30, 255],
             grid: [180, 180, 180, 255],
             chrome_bg: [15, 15, 15, 255],
@@ -413,7 +418,7 @@ impl Theme {
             kbd_bg: [25, 25, 25, 255],
             kbd_border: [255, 255, 255],
             // 暗黄底 + 纯白字 ≈ 8.6:1（AAA）
-            mark_bg: [90, 75, 0, 255],
+            mark_bg: [90, 75, 0, crate::tokens::alpha::OPAQUE],
             // 鲜艳蓝色链接（在黑底上 ≈ 10:1）
             link: [80, 220, 255],
             // 高饱和红色危险色
@@ -2393,7 +2398,8 @@ mod tests {
         assert_eq!(dark.text, [220, 220, 220]); // 取 fg（正文前景），非菜单文字色
         assert_eq!(dark.code_bg, [40, 40, 40]);
         assert_eq!(dark.border, [60, 64, 70]);
-        assert_eq!(dark.mark_bg, [106, 84, 5]);
+        // 深色 mark 的 alpha 由 210 收敛到 70% 档（179），合成呈现色随之变暗一档。
+        assert_eq!(dark.mark_bg, [95, 76, 9]);
         assert_eq!(dark.danger, [255, 130, 130]);
         // Default 与主题无关：浅色兜底值固定，供未注入主题的调用方使用
         assert_eq!(ExportStyle::default().bg, [255, 255, 255]);

@@ -3,6 +3,77 @@
 //! 颜色继续由 `theme::Theme` 承担；本模块只收敛与主题无关的标量几何、字阶与时间常量。
 //! `surface` 为浮层几何令牌，自 `theme` 原样迁入，调用点经 `theme::surface` 零改动沿用。
 
+/// alpha 阶梯（视觉契约 §5）：所有半透明色的 alpha 分量只能取下列离散档。
+///
+/// 字节值 = `round(percent × 255 / 100)`。散落的 80/110/120/170/180/210 一律就近
+/// 收敛到本阶梯（`sel` / `mark_bg` / 遮罩 / 焦点底），不得再写裸数字。
+/// 阴影层（`surface::SHADOW_LAYERS`）是叠层累积值，不属本阶梯。
+#[allow(dead_code)] // 阶梯需完整暴露：当前消费 SELECT/SCRIM/MARK/OPAQUE，其余档位留给后续半透明色
+pub(crate) mod alpha {
+    /// 阶梯档位（百分比 → alpha 字节）。
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum AlphaStep {
+        /// 8%：最轻底色偏移（极浅 tint）。
+        P8,
+        /// 12%：悬停/焦点最轻档。
+        P12,
+        /// 20%：选中底色轻档。
+        P20,
+        /// 28%：选中底色、遮罩最低档。
+        P28,
+        /// 40%：遮罩、深色选区。
+        P40,
+        /// 55%：半透明强调、mark 底轻档。
+        P55,
+        /// 70%：mark 底、高存在感半透明。
+        P70,
+        /// 100%：不透明。
+        P100,
+    }
+
+    impl AlphaStep {
+        /// 阶梯全部档位，自轻到重（测试与遍历的唯一枚举点）。
+        pub const ALL: &'static [AlphaStep] = &[
+            AlphaStep::P8,
+            AlphaStep::P12,
+            AlphaStep::P20,
+            AlphaStep::P28,
+            AlphaStep::P40,
+            AlphaStep::P55,
+            AlphaStep::P70,
+            AlphaStep::P100,
+        ];
+
+        /// 档位百分比（契约表左列）。
+        pub const fn percent(self) -> u8 {
+            match self {
+                AlphaStep::P8 => 8,
+                AlphaStep::P12 => 12,
+                AlphaStep::P20 => 20,
+                AlphaStep::P28 => 28,
+                AlphaStep::P40 => 40,
+                AlphaStep::P55 => 55,
+                AlphaStep::P70 => 70,
+                AlphaStep::P100 => 100,
+            }
+        }
+
+        /// alpha 字节 = `round(percent × 255 / 100)`；整数四舍五入，避免浮点差异。
+        pub const fn byte(self) -> u8 {
+            ((self.percent() as u32 * 255 + 50) / 100) as u8
+        }
+    }
+
+    /// 28% 档：选中底色、遮罩最低档（原 `sel` 浅色 80 / 浅色遮罩 80 就近收敛）。
+    pub const SELECT: u8 = AlphaStep::P28.byte();
+    /// 40% 档：遮罩、深色选区（原 `sel` 深色 110 / 深色遮罩 120 就近收敛）。
+    pub const SCRIM: u8 = AlphaStep::P40.byte();
+    /// 70% 档：mark 底、高存在感半透明（原焦点底 170 / `mark_bg` 浅色 180 / 深色 210）。
+    pub const MARK: u8 = AlphaStep::P70.byte();
+    /// 100% 档：不透明。
+    pub const OPAQUE: u8 = AlphaStep::P100.byte();
+}
+
 /// surface 设计令牌（不可配置）：浮层（右键菜单 / 快速打开 / 大纲 / 搜索条）共用几何。
 /// 所有长度以 1.0× scale 为基准，经取值函数按 scale 线性放大；深/浅主题共用几何，
 /// 仅阴影 alpha 按主题微调（阴影是半透明黑叠加，深底下需稍强才有同等存在感）。
@@ -77,9 +148,11 @@ pub(crate) mod surface {
     /// 模态卡片距视口边缘的最小留白（px）
     pub const DIALOG_MARGIN: f32 = 24.0;
     /// 浅色主题遮罩 alpha（黑）：足以压暗正文又把弹窗推前。
-    pub const SCRIM_ALPHA_LIGHT: u8 = 80;
+    /// 原 80（31.4%）按契约 §5 就近收敛到 28% 档。
+    pub const SCRIM_ALPHA_LIGHT: u8 = super::alpha::SELECT;
     /// 深色主题遮罩 alpha（黑）：深底需更重才有分离感。
-    pub const SCRIM_ALPHA_DARK: u8 = 120;
+    /// 原 120（47.1%）按契约 §5 就近收敛到 40% 档。
+    pub const SCRIM_ALPHA_DARK: u8 = super::alpha::SCRIM;
 
     /// 浮层圆角（物理像素）：乘完 scale 后吸附到整数物理像素，
     /// 避免 1.25× 时 6 × 1.25 = 7.5 让四角落在半像素上。
@@ -282,9 +355,10 @@ pub(crate) mod state {
     }
 
     /// focus：输入焦点所在字段的安静底色（比 hover 更轻，不额外画线）。
+    /// 原 alpha 170（66.7%）按契约 §5 就近收敛到 70% 档。
     pub fn focus_bg(theme: &Theme) -> [u8; 4] {
         let h = theme.hover;
-        [h[0], h[1], h[2], 170]
+        [h[0], h[1], h[2], super::alpha::MARK]
     }
 
     /// disabled：不可用控件的前景。
@@ -399,7 +473,42 @@ pub(crate) mod motion {
 mod tests {
     use std::time::Duration;
 
-    use super::{motion, space, state, stroke, typography};
+    use super::{alpha, motion, space, state, stroke, typography};
+
+    /// alpha 阶梯（契约 §5）：百分比 → alpha 字节必须逐档等于 `round(p × 255 / 100)`，
+    /// 且自轻到重严格递增、互不相同。
+    #[test]
+    fn alpha_ladder_matches_percent_to_byte_mapping() {
+        let expected = [
+            (alpha::AlphaStep::P8, 8, 20),
+            (alpha::AlphaStep::P12, 12, 31),
+            (alpha::AlphaStep::P20, 20, 51),
+            (alpha::AlphaStep::P28, 28, 71),
+            (alpha::AlphaStep::P40, 40, 102),
+            (alpha::AlphaStep::P55, 55, 140),
+            (alpha::AlphaStep::P70, 70, 179),
+            (alpha::AlphaStep::P100, 100, 255),
+        ];
+        assert_eq!(alpha::AlphaStep::ALL.len(), expected.len());
+        let mut prev_byte = 0u8;
+        for (i, (step, percent, byte)) in expected.into_iter().enumerate() {
+            assert_eq!(step.percent(), percent, "第 {i} 档百分比不符");
+            assert_eq!(step.byte(), byte, "第 {i} 档 alpha 字节不符");
+            assert_eq!(
+                step.byte(),
+                (percent as f32 * 255.0 / 100.0).round() as u8,
+                "第 {i} 档必须等于 round(p × 255 / 100)"
+            );
+            assert!(step.byte() > prev_byte, "阶梯必须严格递增");
+            prev_byte = step.byte();
+            assert_eq!(alpha::AlphaStep::ALL[i], step, "ALL 的档位顺序不符");
+        }
+        // 命名常量必须逐档对应，禁止另起一套数值。
+        assert_eq!(alpha::SELECT, 71);
+        assert_eq!(alpha::SCRIM, 102);
+        assert_eq!(alpha::MARK, 179);
+        assert_eq!(alpha::OPAQUE, 255);
+    }
 
     #[test]
     #[allow(clippy::assertions_on_constants)] // 令牌为编译期常量，仍按运行时断言校验
@@ -518,7 +627,11 @@ mod tests {
         let dark = crate::theme::Theme::dark();
         assert_eq!(state::hover_bg(&light), light.hover);
         assert_eq!(state::pressed_bg(&light), light.sel);
-        assert_eq!(state::focus_bg(&light)[3], 170, "focus 比 hover 更轻");
+        assert_eq!(
+            state::focus_bg(&light)[3],
+            super::alpha::MARK,
+            "focus 取 70% 阶梯档（原 170 就近收敛）"
+        );
         assert_eq!(state::disabled_fg(&light), light.muted);
         assert_eq!(state::selected_fg(&light), light.accent);
         assert_eq!(state::empty_fg(&light), light.danger);

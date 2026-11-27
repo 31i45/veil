@@ -245,7 +245,7 @@ Get-ChildItem $root -Directory | ForEach-Object {
 - [x] **F-006**：两条路径都只在整行边界断页；单行自身高于一页时才允许行内硬切（规则与测试见 Task 3 单测）。
 - [x] **F-007**：打印 `compute_page_breaks` 加入表格行候选，`print_table_page_breaks_land_on_row_tops_and_reserve_header` 锁定。
 - [x] **F-008**：两路径同规则（整行断页 + 续页表头）；差异仅剩显式尺寸超页原子块的硬切，已在 `print.rs` R4 注释与 §3.3 书面登记。
-- [x] **F-009**：表格整行断页；独立图片/Mermaid 在打印视口=页高时受 `image_max_height` 80% 上限，与 PDF 缩放口径一致；显式超页原子块按页底硬切并在续页继续（书面规则）。
+- [x] **F-009**：表格整行断页；独立图片/Mermaid 两路径都缩放到一页内（PDF 显式缩放，打印受 `image_max_height` 80% 页高上限）。**已登记差异**：高于一页的显示公式 PDF 缩放、打印硬切续页（不丢内容），理由与重开判据见 register §2「打印路径超高显示公式」。
 - [x] **F-010**：`Shift+滚轮` 可读宽表平移，`narrow_window_wide_table_readable_via_shift_wheel_pan` 锁定绘制/命中/光标一致性。
 - [x] **F-011**：22 类深色逐图目检 + 证据目录；`dark_corpus_renders_differs_and_rasterizes_opaque`；c4 `Rel` 已按 aria 限定覆盖；gitGraph 3.35:1 记为轻微限制。
 - [x] **F-022**：中英 README 已按「22 类目检 + 自动断言 + 两处轻微限制」重写，与 `lib.rs` 一致。

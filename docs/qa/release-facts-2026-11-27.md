@@ -35,7 +35,7 @@
 ## 完美表面收敛（converge-perfect-writing-surface，2026-11-27）
 
 - 事实底座：`docs/qa/perfect-surface-audit-2026-11-27.md`（34 条 F 台账：P0 0 / P1 15 / P2 14 / P3 5；101 个 spec 目录中 27 个历史目录含未勾选，逐目录裁决）。
-- 分页一致性：原生 PDF 与打印都只在表格整行边界断页，续页重复表头；单行高于一页才允许行内硬切。单测：PDF `table_paginates_on_row_boundaries_and_repeats_header`；打印 `print_table_page_breaks_land_on_row_tops_and_reserve_header`、`print_repeats_table_header_pixels_on_continuation_pages`、`print_hard_cuts_atomic_block_taller_than_page`。
+- 分页一致性：原生 PDF 与打印都只在表格整行边界断页，续页重复表头；单行高于一页才允许行内硬切。单测：PDF `table_paginates_on_row_boundaries_and_repeats_header`；打印 `print_table_page_breaks_land_on_row_tops_and_reserve_header`、`print_repeats_table_header_pixels_on_continuation_pages`、`print_hard_cuts_atomic_block_taller_than_page`。图片/Mermaid 两路径都缩放到一页内；高于一页的显示公式仍有 PDF 缩放 / 打印硬切续页的差异，已登记（`docs/review/deferred-and-manual-register-2026-11-27.md` §2）。
 - WYSIWYG：窄窗宽表可 `Shift+滚轮` 横向平移读完（`narrow_window_wide_table_readable_via_shift_wheel_pan`，绘制/命中/光标/列宽拖动同口径）；22 类 Mermaid 深色逐图目检并留证据（`docs/qa/evidence/mermaid-dark-2026-11-27/`、`docs/qa/mermaid-dark-2026-11-27.md`），新增 `dark_corpus_renders_differs_and_rasterizes_opaque`；四态降级核对见 `docs/qa/wysiwyg-complex-content-2026-11-27.md`。
 - 全维度审计：`docs/review/full-dimension-audit-2026-11-27.md`（架构/十一维度/八原则，P0 = 0，P1 = 6，其中 4 条由本轮任务关闭、2 条为人工证据项）。
 - 文档真实性与证据：AccessKit/UIA 已于 `3a6d72d` 移除，中英 README 与组件清单已同步改为「不提供屏幕阅读器支持」；人工验证项与延后项见 `docs/review/deferred-and-manual-register-2026-11-27.md`。

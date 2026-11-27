@@ -433,10 +433,8 @@ fn parse_checks(raw: &str, id: &str, at: usize) -> Vec<(String, String)> {
                     }
                 }
             }
-            "image_in_cell" | "no_overlap" => {
-                if value != "true" {
-                    panic!("{id} 行 {at}：`{key}` 只接受 true");
-                }
+            "image_in_cell" | "no_overlap" if value != "true" => {
+                panic!("{id} 行 {at}：`{key}` 只接受 true");
             }
             _ => {}
         }

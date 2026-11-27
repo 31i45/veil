@@ -274,6 +274,42 @@ fn semi_transparent_alphas_come_from_ladder() {
     assert_eq!(state::focus_bg(&light)[3], 179, "焦点底 → 70% 档");
 }
 
+/// 专注/拖放压暗层：`paint.rs` 的 `FOCUS_DIM_ALPHA` 与 `DROP_DIM_ALPHA` 以主题底色
+/// 半透明覆盖正文（`paint.rs` 的专注模式分支、`paint_overlay.rs::paint_drop_hint`）。
+///
+/// 压暗属于「内容压制态」：被压暗正文按次要文字档 ≥ 3:1 验收，不适用正文 7:1。
+/// 真实缺陷来源：专注压暗原用 alpha 160（62.7%），浅色主题下压暗后正文仅约 2.2:1，
+/// 低于可读下限；且该值不在契约 §5 阶梯内。此处把两个压暗 alpha 一并钉在阶梯上并
+/// 断言合成后对比度。
+#[test]
+fn dim_overlay_keeps_text_above_secondary_contrast() {
+    use crate::paint::{DROP_DIM_ALPHA, FOCUS_DIM_ALPHA};
+    use crate::tokens::alpha::AlphaStep;
+
+    let ladder: Vec<u8> = AlphaStep::ALL.iter().map(|s| s.byte()).collect();
+    let dims = [("focus", FOCUS_DIM_ALPHA), ("drop", DROP_DIM_ALPHA)];
+    for (dim_name, alpha) in dims {
+        assert!(
+            ladder.contains(&alpha),
+            "{dim_name} 压暗 alpha {alpha} 不在契约 §5 阶梯 {ladder:?}"
+        );
+        for (name, make) in MODES {
+            let t = make();
+            let bg = rgb(t.bg);
+            // 压暗层：主题底色 + 阶梯 alpha，src-over 到已绘制的文字像素上。
+            let dim = [bg[0], bg[1], bg[2], alpha];
+            for (fg_name, fg) in [("fg", t.fg), ("text", t.text)] {
+                let shown = over(dim, fg);
+                let ratio = contrast(shown, bg);
+                assert!(
+                    ratio >= 3.0,
+                    "{name}/{dim_name}/{fg_name}: 被压暗正文对比度 {ratio:.2} 低于 3.0（呈现色 {shown:?}，alpha={alpha}）"
+                );
+            }
+        }
+    }
+}
+
 /// 同区间多状态（src-over）合成结果唯一：3 组具体组合，期望色逐字节钉死。
 ///
 /// 顺序沿用绘制层实际层序：不透明行内代码底 → 半透明 mark 底；

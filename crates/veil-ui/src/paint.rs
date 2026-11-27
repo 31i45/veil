@@ -29,7 +29,10 @@ pub(crate) use crate::paint_table::{
 };
 
 /// 专注模式压暗强度：背景色以该 alpha 覆盖非光标块（越大越暗，255 = 全遮）。
-const FOCUS_DIM_ALPHA: u8 = 160;
+///
+/// 取契约 §5 阶梯的 40% 档（原 160，62.7%，不在阶梯内）：被压暗正文按次要文字档
+/// 验收 ≥ 3:1（浅色正文 3.90:1、深色 5.43:1），压暗层不再把正文压到可读下限之下。
+pub(crate) const FOCUS_DIM_ALPHA: u8 = crate::tokens::alpha::SCRIM;
 
 /// 待排版图片：(节点区间, url, 显式宽高, 对齐)。显式宽高仅来自 HTML
 /// `<img width height>`，对齐仅来自 `<img align>`；Markdown 图片两者皆无。
@@ -41,7 +44,10 @@ struct PendingImage {
 }
 
 /// 拖放悬停压暗强度（阶段 1）：内容区背景覆盖，突出居中提示条。
-pub(crate) const DROP_DIM_ALPHA: u8 = 120;
+///
+/// 取契约 §5 阶梯的 40% 档（原 120，47.1%，不在阶梯内）：与专注压暗同一档，
+/// 被压暗正文 ≥ 3:1；提示条自身由不透明 popup 底绘制，40% 已足够突出。
+pub(crate) const DROP_DIM_ALPHA: u8 = crate::tokens::alpha::SCRIM;
 
 /// 链接悬停浮层（N5）：视口边留白 / 锚点上方间距（逻辑像素，乘 scale）。
 const LINK_TIP_EDGE: f32 = 8.0;
@@ -453,7 +459,13 @@ pub(crate) fn paint_over_decor(
 ) {
     match kind {
         OverKind::DottedUnderline => {
-            let color = [theme.muted[0], theme.muted[1], theme.muted[2], 200];
+            // 原 alpha 200（78.4%）→ 契约 §5 的 70% 档。
+            let color = [
+                theme.muted[0],
+                theme.muted[1],
+                theme.muted[2],
+                crate::tokens::alpha::MARK,
+            ];
             let uy = y_top + h as i32 - 2; // 行底往上 2px，恒 1px 厚
                                            // 点线：x 方向每 `step` 画 `dash` 段（1–2px），随 DPI 缩放。
             let step = (3.0 * scale).round().max(3.0) as i32;
@@ -601,7 +613,13 @@ fn paint_frontmatter_collapsed(
                 cy,
                 lw as u32,
                 1,
-                [theme.muted[0], theme.muted[1], theme.muted[2], 64],
+                // 原 alpha 64（25.1%）→ 契约 §5 的 28% 档。
+                [
+                    theme.muted[0],
+                    theme.muted[1],
+                    theme.muted[2],
+                    crate::tokens::alpha::SELECT,
+                ],
             );
         }
     }

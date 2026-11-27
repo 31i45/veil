@@ -193,7 +193,13 @@ impl Session {
              &[aria-roledescription=\"gantt\"] .taskTextOutside0,&[aria-roledescription=\"gantt\"] .taskTextOutside1, \
              &[aria-roledescription=\"gantt\"] .taskTextOutside2,&[aria-roledescription=\"gantt\"] .taskTextOutside3{fill:#ffffff !important;} \
              &[aria-roledescription=\"gantt\"] .grid .tick{stroke:#8c8c8c !important;opacity:0.8 !important;} \
-             &[aria-roledescription=\"gantt\"] .grid .tick text{fill:#ffffff !important;}', "
+             &[aria-roledescription=\"gantt\"] .grid .tick text{fill:#ffffff !important;} \
+             &[aria-roledescription=\"journey\"] text[fill=\"\"]{fill:#ffffff !important;} \
+             &[aria-roledescription=\"c4\"] text[fill=\"#444444\"]{fill:#ffffff !important;} \
+             &[aria-roledescription=\"c4\"] line[stroke=\"#444444\"]{stroke:#8b949e !important;} \
+             &[aria-roledescription=\"radar\"] .radarTitle, \
+             &[aria-roledescription=\"radar\"] .radarAxisLabel, \
+             &[aria-roledescription=\"radar\"] .radarLegendText{fill:#ffffff !important;color:#ffffff !important;}', "
         } else {
             "themeCSS: '&[aria-roledescription=\"mindmap\"] .section-root>.label text{text-anchor:middle !important;} \
              .sections .cluster-label text,.sections .cluster-label tspan{fill:#333333 !important;} \
@@ -2118,6 +2124,32 @@ mod tests {
             }
         }
 
+        // 深色主题：同一 corpus 全部图型逐个渲染，作为 F-011「16 图型深色补齐」证据。
+        // 只校验成功、与浅色不同、可栅格化且非全透明；观感（深字压深底/裁切）另做目检。
+        let mut dark_rendered = Vec::new();
+        for &(name, source) in corpus::MERMAID_11_12_CORPUS {
+            match session.render(source, true) {
+                Ok(svg) => match validate_corpus_svg(name, &svg) {
+                    Ok(check) => {
+                        let light = rendered
+                            .iter()
+                            .find(|(n, _)| *n == name)
+                            .map(|(_, s)| s)
+                            .expect("light svg must precede dark");
+                        if light == &svg {
+                            failures.push(format!("{name}: dark SVG identical to light"));
+                        } else if check.non_transparent_pixels == 0 {
+                            failures.push(format!("{name}: dark SVG raster is fully transparent"));
+                        } else {
+                            dark_rendered.push((name, svg));
+                        }
+                    }
+                    Err(error) => failures.push(format!("{name} (dark): {error}")),
+                },
+                Err(error) => failures.push(format!("{name} (dark): {error}")),
+            }
+        }
+
         if let Err(error) = session.render("graph TD\n  A -->", false) {
             assert!(!error.is_empty(), "syntax error must remain readable");
         } else {
@@ -2137,6 +2169,11 @@ mod tests {
             failures.join("\n")
         );
         assert_eq!(rendered.len(), corpus::MERMAID_11_12_CORPUS.len());
+        assert_eq!(
+            dark_rendered.len(),
+            corpus::MERMAID_11_12_CORPUS.len(),
+            "每个 corpus 图型都必须产出可栅格化的深色 SVG"
+        );
 
         let (_, mindmap_source) = corpus::MERMAID_11_12_CORPUS
             .iter()
@@ -2184,12 +2221,113 @@ mod tests {
         );
 
         if let Some(dir) = std::env::var_os("VEIL_MERMAID_EVIDENCE_DIR") {
-            write_corpus_evidence(std::path::Path::new(&dir), &rendered, &dark, &dark_kanban);
+            write_corpus_evidence(std::path::Path::new(&dir), &rendered, &dark_rendered);
         }
     }
 
-    fn write_png_evidence(dir: &std::path::Path, name: &str, svg: &str) {
-        let (raster, _) = rasterize_svg(svg).expect("rasterize Mermaid evidence");
+    /// F-011：corpus 全部图型深色渲染成功、与浅色不同、可栅格化且非全透明。
+    /// 对已确认 fill 规则稳定的图型追加深底对比度断言（journey 标题 / pie 图例 /
+    /// packet 字段标签 / c4 Rel / radar 轴标签）；其余图型靠逐图目检（证据 PNG
+    /// 已合成到应用深色底）留档。
+    #[test]
+    fn dark_corpus_renders_differs_and_rasterizes_opaque() {
+        /// 深色主题正文底色（veil-ui `Theme::dark().bg` = GRAY_30）。
+        const PAGE: &str = "#1e1e1e";
+        let mut session = Session::new().expect("initialize Mermaid 11.12.0");
+        let mut checked = 0usize;
+        for &(name, source) in corpus::MERMAID_11_12_CORPUS {
+            let light = session
+                .render(source, false)
+                .unwrap_or_else(|e| panic!("{name} light: {e}"));
+            let dark = session
+                .render(source, true)
+                .unwrap_or_else(|e| panic!("{name} dark: {e}"));
+            assert_ne!(dark, light, "{name}: 深色 SVG 必须与浅色不同");
+            assert!(
+                !dark.contains("<foreignObject"),
+                "{name}: 深色 SVG 不得包含 resvg 无法栅格化的 foreignObject"
+            );
+            let check = validate_corpus_svg(name, &dark)
+                .unwrap_or_else(|e| panic!("{name} 深色 SVG 校验失败: {e}"));
+            assert!(
+                check.non_transparent_pixels >= 16,
+                "{name}: 深色 SVG 栅格化后近全透明（{} 像素）",
+                check.non_transparent_pixels
+            );
+            match name {
+                // Mermaid 的 journey 标题是 fill=""（无效值），resvg 会按黑色绘制；
+                // 该图型限定覆盖保证标题在深底上为白色。
+                "journey" => {
+                    let fill = css_property(last_css_rule(&dark, "text[fill=\"\"]"), "fill");
+                    let ratio = contrast_ratio_css(fill, PAGE);
+                    assert!(
+                        ratio >= 4.5,
+                        "journey 标题对比度 {ratio:.2}（{fill} on {PAGE}）"
+                    );
+                }
+                // pie 图例文字 fill 由 Mermaid dark 主题固定为浅色。
+                "pie" => {
+                    let fill = css_property(last_css_rule(&dark, ".legend text"), "fill");
+                    let ratio = contrast_ratio_css(fill, PAGE);
+                    assert!(
+                        ratio >= 4.5,
+                        "pie 图例对比度 {ratio:.2}（{fill} on {PAGE}）"
+                    );
+                }
+                // packet 字段标签落在实心 packetBlock（fill #333）上。
+                "packet" => {
+                    let fill = css_property(last_css_rule(&dark, ".packetLabel"), "fill");
+                    let ratio = contrast_ratio_css(fill, "#333333");
+                    assert!(
+                        ratio >= 4.5,
+                        "packet 字段标签对比度 {ratio:.2}（{fill} on #333333）"
+                    );
+                }
+                // c4 Rel 标签/连线由 Mermaid 固定写死 #444444；深色下按 aria 限定
+                // 精确覆盖（本语料中 #444444 只出现在 Rel 元素上）。
+                "c4context" => {
+                    let fill = css_property(last_css_rule(&dark, "text[fill=\"#444444\"]"), "fill");
+                    let ratio = contrast_ratio_css(fill, PAGE);
+                    assert!(
+                        ratio >= 4.5,
+                        "c4 Rel 标签对比度 {ratio:.2}（{fill} on {PAGE}）"
+                    );
+                }
+                // radar 轴标签原为 lightgrey（`color` 不影响 fill，实际继承 #ccc），
+                // 压在半透明浅色网格上合成约 #585858；改为白字后对比度约 7:1。
+                "radar" => {
+                    let fill = css_property(last_css_rule(&dark, ".radarAxisLabel"), "fill");
+                    let ratio = contrast_ratio_css(fill, "#585858");
+                    assert!(
+                        ratio >= 4.5,
+                        "radar 轴标签对比度 {ratio:.2}（{fill} on 网格合成 #585858）"
+                    );
+                }
+                _ => {}
+            }
+            checked += 1;
+        }
+        assert_eq!(checked, corpus::MERMAID_11_12_CORPUS.len());
+    }
+
+    /// 应用深色主题正文底色（veil-ui `Theme::dark().bg` = `GRAY_30` = `[30, 30, 30]`）。
+    const DARK_EVIDENCE_BG: [u8; 3] = [30, 30, 30];
+
+    /// 证据 PNG：`bg = None` 保持透明（浅色对照）；`Some(rgb)` 时把 resvg 的透明画布
+    /// 合成到不透明底色上——深色证据必须与应用内真实叠底（#1e1e1e）一致，
+    /// 否则在查看器里会被白底渲染，对比度结论失真。
+    fn write_png_evidence(dir: &std::path::Path, name: &str, svg: &str, bg: Option<[u8; 3]>) {
+        let (mut raster, _) = rasterize_svg(svg).expect("rasterize Mermaid evidence");
+        if let Some(bg) = bg {
+            for px in raster.pixmap.data_mut().as_chunks_mut::<4>().0 {
+                let alpha = u32::from(px[3]);
+                let inv = 255 - alpha;
+                for (channel, base) in px.iter_mut().zip(bg) {
+                    *channel = (u32::from(*channel) + u32::from(base) * inv / 255) as u8;
+                }
+                px[3] = 255;
+            }
+        }
         let png = raster
             .pixmap
             .encode_png()
@@ -2200,35 +2338,40 @@ mod tests {
     fn write_corpus_evidence(
         dir: &std::path::Path,
         rendered: &[(&str, String)],
-        dark_mindmap: &str,
-        dark_kanban: &str,
+        dark_rendered: &[(&str, String)],
     ) {
         std::fs::create_dir_all(dir).expect("create Mermaid evidence directory");
         let mut html = String::from(
             "<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\"><title>Veil Mermaid 11.12.0 corpus</title>\
              <style>body{font:16px system-ui;margin:24px;background:#eee;color:#222}section{background:white;margin:16px 0;padding:16px}\
-             img{max-width:100%;height:auto;border:1px solid #ccc}.pair{display:grid;grid-template-columns:1fr 1fr;gap:16px}.dark{background:#1b1b1f}</style></head><body>\
+             img{max-width:100%;height:auto;border:1px solid #ccc}.pair{display:grid;grid-template-columns:1fr 1fr;gap:16px}.dark{background:#1e1e1e}</style></head><body>\
              <h1>Mermaid 11.12.0 离线 corpus</h1><p>本地 SVG；本页不加载任何脚本或远程资源。</p>",
         );
         for (name, svg) in rendered {
             let filename = format!("{name}.svg");
             std::fs::write(dir.join(&filename), svg).expect("write corpus SVG");
-            write_png_evidence(dir, name, svg);
+            // 浅色证据保持透明画布；深色证据合成到应用深色底。
+            write_png_evidence(dir, name, svg, None);
             html.push_str(&format!(
                 "<section><h2>{name}</h2><p><a href=\"{filename}\">SVG</a> · <a href=\"{name}.png\">PNG</a></p><img src=\"{filename}\" alt=\"{name}\"></section>\n"
             ));
+            // 深色证据：每个图型同时落盘 `<name>-dark.svg/png`（F-011 逐图目检输入）。
+            let dark_name = format!("{name}-dark");
+            let dark_filename = format!("{dark_name}.svg");
+            if let Some((_, dark_svg)) = dark_rendered.iter().find(|(n, _)| *n == *name) {
+                std::fs::write(dir.join(&dark_filename), dark_svg).expect("write dark corpus SVG");
+                write_png_evidence(dir, &dark_name, dark_svg, Some(DARK_EVIDENCE_BG));
+                html.push_str(&format!(
+                    "<section><h2>{name} 深色</h2><p><a href=\"{dark_filename}\">Dark SVG</a> · <a href=\"{dark_name}.png\">Dark PNG</a></p><div class=\"dark\"><img src=\"{dark_filename}\" alt=\"{name} dark\"></div></section>\n"
+                ));
+            }
             if *name == "mindmap" {
-                std::fs::write(dir.join("mindmap-dark.svg"), dark_mindmap)
-                    .expect("write dark mindmap SVG");
-                write_png_evidence(dir, "mindmap-dark", dark_mindmap);
                 html.push_str(
                     "<section><h2>mindmap 主题并排</h2><p><a href=\"mindmap-dark.svg\">Dark SVG</a> · <a href=\"mindmap-dark.png\">Dark PNG</a></p><div class=\"pair\"><div><h3>Light</h3><img src=\"mindmap.svg\"></div>\
                      <div class=\"dark\"><h3>Dark</h3><img src=\"mindmap-dark.svg\"></div></div></section>\n",
                 );
             }
         }
-        std::fs::write(dir.join("kanban-dark.svg"), dark_kanban).expect("write dark kanban SVG");
-        write_png_evidence(dir, "kanban-dark", dark_kanban);
         html.push_str(
             "<section><h2>kanban 主题并排</h2><p><a href=\"kanban-dark.svg\">Dark SVG</a> · <a href=\"kanban-dark.png\">Dark PNG</a></p><div class=\"pair\"><div><h3>Light</h3><img src=\"kanban.svg\"></div>\
              <div class=\"dark\"><h3>Dark</h3><img src=\"kanban-dark.svg\"></div></div></section>\n",

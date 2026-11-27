@@ -1492,6 +1492,15 @@ impl App {
                 let Some(src) = self.ui_state.ctx.image_path.clone() else {
                     return;
                 };
+                // 远程图片被阻止时，「重新加载」无法生效：明确提示可操作入口，
+                // 避免用户反复点击却看不到任何变化。
+                if crate::paint::is_remote_image_url(&src) && !self.config.allow_remote_images {
+                    self.ui_state.chrome.notify_error(
+                        crate::i18n::t(crate::i18n::Key::NoticeRemoteImageBlockedRetry).to_string(),
+                    );
+                    self.request_redraw();
+                    return;
+                }
                 let key = match crate::paint::local_image_path(&src, self.doc.path.as_deref()) {
                     Some(path) => path.to_string_lossy().into_owned(),
                     None => src,

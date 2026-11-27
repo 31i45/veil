@@ -1002,8 +1002,8 @@ impl App {
         let Some(t) = self.cache.tables.get(&id) else {
             return false;
         };
-        // 容器内表格：列边界相对网格原点，命中前扣除缩进。
-        let lx = x - t.x;
+        // 容器内表格：列边界相对网格原点，命中前扣除缩进；宽表再抵消平移量。
+        let lx = x + t.pan - t.x;
         let ly = y - top;
         if ly > t.height || t.cols.len() < 2 {
             return false;
@@ -1035,8 +1035,13 @@ impl App {
         };
         let x = self.input_state.mouse.x as f32 - self.content_x();
         let min = crate::view::table::MIN_COL_WIDTH * self.input_state.scale;
-        let indent = self.cache.tables.get(&id).map_or(0.0, |m| m.value.x);
-        let x = x - indent;
+        // 网格坐标 = 视口 x - 缩进 + 可读宽表平移量（与绘制/命中同口径）。
+        let (indent, pan) = self
+            .cache
+            .tables
+            .get(&id)
+            .map_or((0.0, 0.0), |m| (m.value.x, m.value.pan));
+        let x = x - indent + pan;
         let w = (base_w + (x - x0)).max(min);
         if let Some(ws) = self.ui_state.tables.widths.get_mut(&id) {
             if let Some(slot) = ws.get_mut(col) {
@@ -1951,6 +1956,12 @@ impl App {
                 self.request_redraw();
                 return;
             }
+        }
+        // Shift+滚轮：指针位于溢出表格上时横向平移该表（不改光标、不滚正文）。
+        // 表格不需要平移时交回正文滚动（返回 false）。
+        if self.input_state.mods.shift && self.try_pan_table(-d) {
+            self.set_ime_area();
+            return;
         }
         let vp = self.viewport();
         // 正文滚动：光标位置不变，但用户已开始操作文档，隐藏半周期应被打断。

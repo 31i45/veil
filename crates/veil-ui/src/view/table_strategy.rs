@@ -6,7 +6,9 @@
 //! - 非活动单元格内的行内公式 `$x^2$`：可见文本替换为 NBSP 占位（宽≈公式图宽），
 //!   排版后按占位首字形定位，绘制期由视图层取图 blit（与正文行内公式同一缓存）。
 //! - 表宽超出版心时按比例收缩列宽（下限 `MIN_COL_WIDTH`），单元格内按字形折行；
-//!   触底仍超宽时表格向右溢出，由 frame 裁剪（v1 不做横向滚动）。
+//!   极窄窗口 + 多列再压一次（绝对下限 `0.4×MIN_COL_WIDTH`），默认保证不横向溢出。
+//! - 「可读宽表」模式（`wide`）：不压缩列宽（每列仍不低于 `MIN_COL_WIDTH`），
+//!   表宽可超出版心；由视图层用 `pan` 横向平移，绘制/命中/光标共用同一坐标口径。
 //! - 网格点击落点 = 所在单元格内容起点（进入源码态，随后由既有块排版显示源码）。
 //! - 已知简化（同数学块）：跨渲染态表格的选区无高亮。
 //! - 已知简化（公式单元格 v0）：含公式的单元格降级为纯文本样式（不做粗体/斜体等
@@ -275,6 +277,9 @@ pub struct TableLayout {
     pub height: f32,
     /// 容器（引用条/列表项/details）内的水平缩进（物理像素，相对版心原点）。
     pub x: f32,
+    /// 「可读宽表」横向平移量（物理像素，网格坐标，0 = 左缘对齐）。
+    /// 仅当 `width > 版心可用宽` 时非零；绘制、命中、光标都必须使用同一值。
+    pub pan: f32,
     /// 活动单元格 flat 索引（源码态文本）；None = 全部富文本。
     pub active: Option<usize>,
 }
@@ -286,8 +291,8 @@ impl TableLayout {
         if self.cells.is_empty() || self.cols.is_empty() {
             return 0;
         }
-        // 容器内表格整体右移：命中先把坐标换回网格原点。
-        let x = (x - self.x).max(0.0);
+        // 容器内表格整体右移 + 可读宽表左移：命中先把坐标换回网格原点。
+        let x = (x + self.pan - self.x).max(0.0);
         let row = self
             .rows
             .iter()
@@ -592,6 +597,25 @@ impl LayoutEngine {
         widths: Option<&[f32]>,
         images: Option<&HashMap<usize, Vec<CellImgAsset>>>,
     ) -> TableLayout {
+        self.layout_table_opts_wide(
+            table, width, color, active, raw_cells, maths, widths, images, false,
+        )
+    }
+
+    /// `layout_table_opts` + 可读宽表开关（`wide` = 不压缩列宽，允许超出可用宽）。
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn layout_table_opts_wide(
+        &mut self,
+        table: &Table,
+        width: f32,
+        color: [u8; 3],
+        active: Option<(usize, &str)>,
+        raw_cells: Option<&HashMap<usize, String>>,
+        maths: Option<&HashMap<usize, Vec<CellMath>>>,
+        widths: Option<&[f32]>,
+        images: Option<&HashMap<usize, Vec<CellImgAsset>>>,
+        wide: bool,
+    ) -> TableLayout {
         let scale = self.scale_factor();
         let metrics = Metrics::new(self.doc_font_size() * scale, self.doc_line_height() * scale);
         let pad_x = CELL_PAD_X * scale;
@@ -743,33 +767,41 @@ impl LayoutEngine {
             *w += 2.0 * pad_x;
         }
         let total: f32 = cols.iter().sum();
-        if total > width && total > 0.0 {
-            let k = width / total;
+        // 可读宽表：保留内在列宽（仅保证不低于 MIN_COL_WIDTH），允许超出可用宽；
+        // 视图层用 pan 平移，保证每列内容都能读到，而不是把列压到无法阅读。
+        if wide {
             for w in &mut cols {
-                *w = (*w * k).max(MIN_COL_WIDTH * scale);
+                *w = w.max(MIN_COL_WIDTH * scale);
             }
-        }
-        // 极窄窗口 + 多列：MIN_COL_WIDTH 地板可能仍让总宽超出可用宽。再按比例压一次
-        // （绝对下限 0.4×MIN_COL_WIDTH），保证表格不横向溢出、后续块不被压住；
-        // 列宽变窄只增加折行，不改变表格语义。
-        let hard_min = MIN_COL_WIDTH * scale * 0.4;
-        let sum: f32 = cols.iter().sum();
-        if sum > width && sum > 0.0 {
-            let k = width / sum;
-            for w in &mut cols {
-                *w = (*w * k).max(hard_min);
+        } else {
+            if total > width && total > 0.0 {
+                let k = width / total;
+                for w in &mut cols {
+                    *w = (*w * k).max(MIN_COL_WIDTH * scale);
+                }
             }
+            // 极窄窗口 + 多列：MIN_COL_WIDTH 地板可能仍让总宽超出可用宽。再按比例压一次
+            // （绝对下限 0.4×MIN_COL_WIDTH），保证表格不横向溢出、后续块不被压住；
+            // 列宽变窄只增加折行，不改变表格语义。
+            let hard_min = MIN_COL_WIDTH * scale * 0.4;
+            let sum: f32 = cols.iter().sum();
+            if sum > width && sum > 0.0 {
+                let k = width / sum;
+                for w in &mut cols {
+                    *w = (*w * k).max(hard_min);
+                }
+            }
+            protect_short_atomic_columns(&mut cols, hard_min, &atomic_min);
         }
-        protect_short_atomic_columns(&mut cols, hard_min, &atomic_min);
         // 用户拖动列宽（B2，纯视图态）：长度匹配即覆盖内在宽；
-        // 总宽超出可用宽时按比例压回（无横向滚动，避免裁切）。
+        // 默认模式总宽超出可用宽时按比例压回；可读宽表保留覆盖宽并由 pan 平移。
         if let Some(ov) = widths {
             if ov.len() == ncols {
                 for (w, o) in cols.iter_mut().zip(ov) {
                     *w = o.max(MIN_COL_WIDTH * scale);
                 }
                 let t: f32 = cols.iter().sum();
-                if t > width && t > 0.0 {
+                if !wide && t > width && t > 0.0 {
                     let k = width / t;
                     for w in &mut cols {
                         *w *= k;
@@ -945,6 +977,7 @@ impl LayoutEngine {
             width: table_w,
             height: y,
             x: 0.0,
+            pan: 0.0,
             active: active.map(|(idx, _)| idx),
         }
     }

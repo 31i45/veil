@@ -843,3 +843,121 @@ fn tab_outside_table_is_normal_indent() {
 }
 
 // ---- 列表 / 引用 / 分隔线 Reveal（切片 12）：块级重排与块高 ----
+
+/// 窄窗 + 8 列宽表「可读完」（F-010）：默认收纳到版心；Shift+滚轮进入可读宽表后，
+/// 表宽超出版心，最右列可通过横向平移到达，且绘制 / 命中 / 光标使用同一 pan。
+#[test]
+fn narrow_window_wide_table_readable_via_shift_wheel_pan() {
+    let doc = "前\n\n\
+        | 列一 | 列二 | 列三 | 列四 | 列五 | 列六 | 列七 | 列八 |\n\
+        | --- | --- | --- | --- | --- | --- | --- | --- |\n\
+        | 甲乙丙丁 | 甲乙丙丁 | 甲乙丙丁 | 甲乙丙丁 | 甲乙丙丁 | 甲乙丙丁 | 甲乙丙丁 | 最右列为可读内容 |\n\n\
+        后\n";
+    let (mut a, _) = app_math(doc, false);
+    a.window_state.test_size = Some((520, 700));
+    a.editor.set_caret(doc.len());
+    a.refresh_index();
+    a.ensure_layouts_all();
+    a.ensure_tables();
+    a.recompute_geometry();
+    let (id, kind, range, top) = {
+        let g = a
+            .index
+            .blocks
+            .iter()
+            .find(|g| g.kind == BlockKind::Table)
+            .expect("应有表格块");
+        (g.id, g.kind.clone(), g.range, g.top)
+    };
+    let content_w = a.content_width();
+    let (fit_width, indent) = {
+        let t = a.cache.tables.get(&id).expect("默认网格已排版");
+        (t.width, t.x)
+    };
+    assert!(
+        fit_width <= content_w + 0.5,
+        "默认网格必须收纳到版心：{fit_width} > {content_w}"
+    );
+
+    // 指针放进表格内部，Shift+滚轮向下（d<0）→ 表格向右平移。
+    let vp = a.viewport();
+    let scroll = a.window_state.scroll_y;
+    a.input_state.mouse = PhysicalPosition::new(
+        (a.content_x() + 20.0) as f64,
+        (vp.y + top + 8.0 - scroll) as f64,
+    );
+    let last = a.editor.session().table(id).unwrap().rows[0][7].range.start;
+    a.input_state.mods.shift = true;
+    a.on_wheel(-10_000.0);
+    a.input_state.mods.shift = false;
+
+    let (wide_w, pan, last_x, last_y, last_h, last_w) = {
+        let t = a.cache.tables.get(&id).expect("宽表网格已排版");
+        let cell = &t.cells[15]; // 表体第 8 列
+        (t.width, t.pan, cell.x, cell.y, cell.h, cell.w)
+    };
+    assert!(
+        wide_w > content_w + 0.5,
+        "可读宽表必须超出版心（这是可平移的前提）：{wide_w} <= {content_w}"
+    );
+    let avail = content_w - indent;
+    assert!(
+        (pan - (wide_w - avail)).abs() < 1.0,
+        "平移量应夹在 [0, 表宽-可用宽]：pan={pan}, max={}",
+        wide_w - avail
+    );
+    // 最右列：平移后绘制矩形完整落在版心内，可被读到。
+    let painted_left = a.content_x() + indent - pan + last_x;
+    let painted_right = painted_left + last_w;
+    assert!(
+        painted_left >= a.content_x() - 0.5 && painted_right <= a.content_x() + content_w + 0.5,
+        "最右列绘制区间应落在版心内：[{painted_left}, {painted_right}] vs [0, {content_w}]"
+    );
+    assert!(
+        painted_left < a.content_x() + content_w,
+        "最右列必须进入可见版心"
+    );
+
+    // 命中测试：点最右列内容起点 → 落在该单元格（同一 pan 口径）。
+    a.input_state.mouse = PhysicalPosition::new(
+        (painted_left + 0.25) as f64,
+        (vp.y + top - scroll + last_y + last_h * 0.5) as f64,
+    );
+    assert_eq!(a.hit_offset(), Some(last), "平移后命中必须落在最右列单元格");
+    assert!(a.cache.tables.contains_key(&id));
+    assert_eq!(
+        a.hit_block(
+            id,
+            kind,
+            &range,
+            indent - pan + last_x + 0.25,
+            last_y + last_h * 0.5
+        ),
+        Some(last),
+        "网格命中与绘制共用 pan"
+    );
+
+    // 光标：活动格（最右列）的光标矩形与单元格内容原点一致。
+    a.editor.set_caret(last);
+    a.ensure_tables();
+    let (t_pan, t_x, cell_x, cell_y, active) = {
+        let t = a.cache.tables.get(&id).expect("活动格网格已重建");
+        let cell = &t.cells[15];
+        (t.pan, t.x, cell.x, cell.y, t.active)
+    };
+    assert_eq!(active, Some(15), "活动单元格应为最右列");
+    let (cx, cy, _) = a.caret_screen();
+    assert!(
+        (cx - (a.content_x() + t_x - t_pan + cell_x)).abs() < 1.0,
+        "光标 x 应等于最右列内容左缘：{cx} vs {}",
+        a.content_x() + t_x - t_pan + cell_x
+    );
+    assert!(
+        (cy - (vp.y + top - scroll + cell_y)).abs() < 1.0,
+        "光标 y 应等于最右列内容上缘"
+    );
+    assert!(
+        cx >= a.content_x() - 0.5 && cx <= a.content_x() + content_w + 0.5,
+        "光标必须落在版心内：{cx}"
+    );
+}

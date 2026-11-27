@@ -524,6 +524,7 @@ impl App {
         // 表格列宽覆盖按块 id 生效：整篇替换即整体失效（纯视图态，无副作用）
         self.ui_state.tables.widths.clear();
         self.ui_state.tables.drag = None;
+        self.ui_state.tables.pan.clear();
         self.refresh_index();
         if self.ui_state.outline.open {
             self.refresh_outline();
@@ -1295,6 +1296,7 @@ impl App {
         // 表格列宽覆盖按块 id 生效：换文档即整体失效（纯视图态，无副作用）
         self.ui_state.tables.widths.clear();
         self.ui_state.tables.drag = None;
+        self.ui_state.tables.pan.clear();
         self.ui_state.outline.scroll = 0.0;
         self.ui_state.outline.hover = None;
         // 新文档：旧查询的命中偏移全部失效（栏保持打开，查询清空）
@@ -1348,6 +1350,7 @@ impl App {
         // 表格列宽覆盖按块 id 生效：换文档即整体失效（纯视图态，无副作用）
         self.ui_state.tables.widths.clear();
         self.ui_state.tables.drag = None;
+        self.ui_state.tables.pan.clear();
         self.ui_state.outline.scroll = 0.0;
         self.ui_state.outline.hover = None;
         // 新文档：旧查询的命中偏移全部失效（栏保持打开，查询清空）

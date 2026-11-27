@@ -140,15 +140,18 @@ pub(crate) struct BaseKey {
 }
 
 /// 表格网格键 = 基础键 + 活动单元格 flat 索引（`u32::MAX` = 无活动格）
-/// + 列宽覆盖指纹（0 = 无覆盖）。
+/// + 列宽覆盖指纹（0 = 无覆盖）+ 可读宽表模式。
 ///
-/// 活动格切换会改变单元格文本来源（源码 vs 剥标记），必须换键重建。
+/// 活动格切换会改变单元格文本来源（源码 vs 剥标记），必须换键重建；
+/// 宽表模式改变列宽策略（不压缩，允许超出版心），也必须换键重建。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) struct TableKey {
     pub(crate) base: BaseKey,
     pub(crate) active: u32,
     /// 用户拖动列宽（B2）内容的 FNV-1a 指纹：拖动即换键重建网格。
     pub(crate) widths: u64,
+    /// 可读宽表模式：列宽不压回版心，由视图层横向平移。
+    pub(crate) wide: bool,
 }
 
 /// 布局键 = 基础键 + Reveal 激活指纹（0 = 无激活，其余为块结构的激活状态哈希）。

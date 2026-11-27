@@ -580,7 +580,7 @@ impl Default for UIState {
     }
 }
 
-/// 表格视图态（B2）：列宽覆盖 + 拖动会话。键为块 id，文档切换即清空。
+/// 表格视图态（B2）：列宽覆盖 + 拖动会话 + 可读宽表平移。键为块 id，文档切换即清空。
 /// 覆盖只在视图层生效：不写回 Markdown，不进入撤销栈。
 #[derive(Default)]
 pub(crate) struct TableView {
@@ -588,6 +588,9 @@ pub(crate) struct TableView {
     pub(crate) widths: HashMap<veil_core::BlockId, Vec<f32>>,
     /// 拖动会话：(块 id, 列下标, 起始鼠标 x, 起始列宽)。
     pub(crate) drag: Option<(veil_core::BlockId, usize, f32, f32)>,
+    /// 可读宽表平移：块 id → 横向平移量（物理像素）。出现即表示该表进入
+    /// 「不压缩列宽 + 横向平移」模式；值为 `[0, 表宽 - 可用宽]`。
+    pub(crate) pan: HashMap<veil_core::BlockId, f32>,
 }
 
 impl TableView {

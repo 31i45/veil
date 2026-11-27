@@ -107,7 +107,7 @@ impl App {
         let cell = grid.cells.get(idx)?;
         let scale = self.input_state.scale;
         let vp = self.viewport();
-        let base_x = self.content_x() + grid.x;
+        let base_x = self.content_x() + grid.x - grid.pan;
         let base_y = vp.y + doc_top - self.window_state.scroll_y;
         let (dx, dy, h) = match cell.caret_map.as_ref() {
             Some(map) => {
@@ -178,7 +178,8 @@ impl App {
             let indent = self.table_indent(container);
             let width =
                 (width - indent).max(crate::view::table::MIN_COL_WIDTH * self.input_state.scale);
-            let mut l = self.engine.layout_table_opts(
+            let wide = key.wide;
+            let mut l = self.engine.layout_table_opts_wide(
                 &t,
                 width,
                 fg,
@@ -187,11 +188,88 @@ impl App {
                 (!maths.is_empty()).then_some(&maths),
                 widths.as_deref(),
                 (!img_assets.is_empty()).then_some(&img_assets),
+                wide,
             );
             l.x = indent;
+            // 可读宽表：平移量夹在 [0, 表宽 - 可用宽]，并把夹取结果写回视图态，
+            // 保证绘制 / 命中 / 光标读到同一个 pan。
+            if wide {
+                let max_pan = (l.width - width).max(0.0);
+                let pan = self
+                    .ui_state
+                    .tables
+                    .pan
+                    .get(&id)
+                    .copied()
+                    .unwrap_or(0.0)
+                    .clamp(0.0, max_pan);
+                l.pan = pan;
+                self.ui_state.tables.pan.insert(id, pan);
+            }
             self.cache.tables.insert(id, Memo { key, value: l });
             self.index.geometry_stale = true;
         }
+    }
+
+    /// Shift+滚轮：把指针下的表格切入「可读宽表」模式并横向平移。
+    /// 表格本身不需要平移（内在宽不超版心）时返回 false，交回正文滚动。
+    pub(crate) fn try_pan_table(&mut self, dx: f32) -> bool {
+        if self.source_mode() || self.window_state.print.is_some() {
+            return false;
+        }
+        let vp = self.viewport();
+        let y = (self.input_state.mouse.y as f32 - vp.y + self.window_state.scroll_y).max(0.0);
+        let Some(idx) = self
+            .index
+            .blocks
+            .iter()
+            .rposition(|g| !self.block_hidden(g) && g.top <= y)
+        else {
+            return false;
+        };
+        let (id, kind, top, range) = {
+            let g = &self.index.blocks[idx];
+            (g.id, g.kind.clone(), g.top, g.range)
+        };
+        if kind != BlockKind::Table || !self.table_shows_grid(id, &range) {
+            return false;
+        }
+        let was_wide = self.table_is_wide(id);
+        if !was_wide {
+            // 先进入宽表模式建立网格；若内在宽并不超版心则回退，避免无意义的重排。
+            self.ui_state.tables.pan.insert(id, 0.0);
+            self.ensure_tables_range(idx..idx + 1);
+        }
+        let Some(t) = self.cache.tables.get(&id) else {
+            if !was_wide {
+                self.ui_state.tables.pan.remove(&id);
+            }
+            return false;
+        };
+        if y > top + t.height {
+            if !was_wide {
+                self.ui_state.tables.pan.remove(&id);
+            }
+            return false;
+        }
+        let avail = (self.content_width() - t.x).max(1.0);
+        let max_pan = (t.width - avail).max(0.0);
+        if max_pan <= 0.5 {
+            if !was_wide {
+                // 不需要平移：撤掉宽表模式，按默认（收纳到版心）重新排版。
+                self.ui_state.tables.pan.remove(&id);
+                self.ensure_tables_range(idx..idx + 1);
+            }
+            return false;
+        }
+        let cur = self.ui_state.tables.pan.get(&id).copied().unwrap_or(0.0);
+        let next = (cur + dx).clamp(0.0, max_pan);
+        self.ui_state.tables.pan.insert(id, next);
+        if let Some(m) = self.cache.tables.get_mut(&id) {
+            m.value.pan = next;
+        }
+        self.request_redraw();
+        true
     }
 
     /// 表格单元格内联公式：渲染（复用 inline_math 缓存）并整理成排版输入。
@@ -315,7 +393,13 @@ impl App {
             base: self.base_key(),
             active,
             widths: self.ui_state.tables.fingerprint(id),
+            wide: self.table_is_wide(id),
         }
+    }
+
+    /// 该表当前是否处于「可读宽表 + 横向平移」模式（打印态恒 false）。
+    pub(crate) fn table_is_wide(&self, id: BlockId) -> bool {
+        self.window_state.print.is_none() && self.ui_state.tables.pan.contains_key(&id)
     }
 
     /// 仅排版视口内（含 overscan）的表格网格。

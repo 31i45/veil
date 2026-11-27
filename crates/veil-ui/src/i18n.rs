@@ -430,6 +430,8 @@ keys! {
     NoticeMermaidImageInserted => "notice.mermaid_image_inserted",
         "已插入本地图片快照；上方 Mermaid 源码块仍是活预览，快照不会随源码更新：{}";
     NoticeRemoteImagesBlocked => "notice.remote_images_blocked", "已阻止远程图片";
+    NoticeRemoteImageBlockedRetry => "notice.remote_image_blocked_retry",
+        "已阻止远程图片；下一步：在「视图 → 允许远程图片」（或设置）中开启后重试";
     NoticeRemoteImagesAllowed => "notice.remote_images_allowed", "已允许远程图片";
     NoticeMermaidSourceTooLarge => "notice.mermaid_source_too_large", "Mermaid 源码超过 128 KiB，已跳过渲染";
     ToggleOn => "toggle.on", "开";
@@ -1369,6 +1371,10 @@ fn main() {
         "Inserted a local image snapshot; the Mermaid source block above remains a live preview and the snapshot will not update with the source: {}",
     ),
     (Key::NoticeRemoteImagesBlocked, "Remote images blocked"),
+    (
+        Key::NoticeRemoteImageBlockedRetry,
+        "Remote images are blocked; next: enable View → Allow Remote Images (or Settings) and retry",
+    ),
     (Key::NoticeRemoteImagesAllowed, "Remote images allowed"),
     (
         Key::NoticeMermaidSourceTooLarge,

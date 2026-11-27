@@ -727,7 +727,8 @@ impl App {
         let Some(t) = self.cache.table(id, self.table_key(id)) else {
             return;
         };
-        let x0 = (self.content_x() + t.x) as i32;
+        // 可读宽表：网格整体左移 pan（pan 与命中/光标同一坐标口径）。
+        let x0 = (self.content_x() + t.x - t.pan) as i32;
         let theme = self.input_state.theme;
 
         // 活动单元格：排版键已记录 caret 命中的格（源码态显示），画选中色底色
@@ -768,6 +769,34 @@ impl App {
                 theme.grid,
             );
         }
+        self.paint_table_pan_indicator(frame, top, t);
+    }
+
+    /// 溢出表格底部的极简横向滚动指示：轨道 = 版心可用宽，滑块比例 = 可见宽/表宽。
+    /// 只提示「可 Shift+滚轮平移」，不是可拖拽控件；打印态与不溢出时不画。
+    fn paint_table_pan_indicator(
+        &self,
+        frame: &mut Frame,
+        top: i32,
+        t: &crate::view::table::TableLayout,
+    ) {
+        if self.window_state.print.is_some() {
+            return;
+        }
+        let avail = (self.content_width() - t.x).max(1.0);
+        if t.width <= avail + 0.5 {
+            return;
+        }
+        let max_pan = t.width - avail;
+        let theme = self.input_state.theme;
+        let track_x = (self.content_x() + t.x).round() as i32;
+        let track_w = avail.round().max(1.0) as u32;
+        let y = top + t.height.ceil() as i32;
+        let thumb_w = ((avail * avail / t.width).max(24.0)).min(avail).round() as u32;
+        let travel = (track_w as f32 - thumb_w as f32).max(0.0);
+        let thumb_x = track_x + (t.pan / max_pan).clamp(0.0, 1.0).mul_add(travel, 0.0) as i32;
+        frame.fill_rect(track_x, y, track_w, 2, theme.grid);
+        frame.fill_rect(thumb_x, y, thumb_w, 2, theme.thumb);
     }
 
     /// 画给定单元格的文本位图 + 行内装饰 / 公式 / 图片（网格线由调用方负责）。

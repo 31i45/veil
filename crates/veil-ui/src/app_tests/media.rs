@@ -573,6 +573,42 @@ fn reload_image_invalidates_layout_and_refreshes_size() {
 }
 
 #[test]
+fn reload_blocked_remote_image_points_to_allow_remote_images() {
+    let mut a = app_remote(
+        &format!("x ![a]({REMOTE_URL})"),
+        Box::new(MemConfig::default()),
+        RemoteImages::default(),
+    );
+    assert!(!a.config.allow_remote_images, "缺省阻止远程图片");
+    a.ensure_layouts_all();
+    a.ui_state.ctx.open_at(
+        10.0,
+        20.0,
+        ctx_menu::CtxKind::Image {
+            path: REMOTE_URL.into(),
+            missing: false,
+        },
+        None,
+        None,
+    );
+    let i = a
+        .ui_state
+        .ctx
+        .items()
+        .iter()
+        .position(|&(_, act)| act == ctx_menu::CtxAction::ReloadImage)
+        .expect("图片菜单应含重新加载");
+    a.ui_state.ctx.hover = Some(i);
+    a.route_key(Key::Enter);
+    assert!(
+        a.ui_state.chrome.notice.contains("允许远程图片"),
+        "被阻止时重载应提示可操作入口: {}",
+        a.ui_state.chrome.notice
+    );
+    assert!(!a.config.allow_remote_images, "提示不得擅自改变配置");
+}
+
+#[test]
 fn image_wider_than_content_scales_proportionally() {
     // 前缀 "x "：默认光标 0 不在图片节点区间内（否则进入源码态不加载）
     // 宽 1600 且高 45（低于 2 行限高），确保本用例仍由「宽度上限」触发缩放。

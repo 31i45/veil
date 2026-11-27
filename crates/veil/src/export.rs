@@ -2202,6 +2202,20 @@ mod tests {
         }
     }
 
+    /// Admonition 文档语法：`[!NOTE]` 独占一行，标题/正文在后续 `>` 行。
+    /// 标记行后直接写标题会被 CommonMark 当作缩进代码（`<pre><code>    标题`），
+    /// 这里锁死正确形态，防止夹具/解析回归。
+    #[test]
+    fn admonition_marker_on_own_line_keeps_title_paragraph() {
+        let body = body_of("> [!NOTE]\n> 标题\n>\n> 正文\n");
+        assert!(body.contains("<p>标题</p>"), "标题应为段落：{body}");
+        assert!(body.contains("<p>正文</p>"), "正文应为段落：{body}");
+        assert!(
+            !body.contains("<pre><code>"),
+            "标题/正文不得被渲染为缩进代码块：{body}"
+        );
+    }
+
     /// 标题尾缀 `{#id}`：作为标题 id，且不出现在可见文本；正文中的 `{#…}` 不受影响。
     #[test]
     fn heading_trailing_id_becomes_anchor_and_stays_hidden() {

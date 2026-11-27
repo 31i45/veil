@@ -52,6 +52,12 @@ pub struct QaApp {
 
 impl QaApp {
     pub fn new(text: &str) -> Self {
+        Self::new_with_callouts(text, &veil_core::CalloutRegistry::default())
+    }
+
+    /// 带自定义 Callout 配置的 headless App（harness 的 ADJC Callout 用例使用）：
+    /// 只影响 `> [!NAME]` 的解析分类，不改变任何产品默认行为。
+    pub fn new_with_callouts(text: &str, callouts: &veil_core::CalloutRegistry) -> Self {
         Self {
             app: App::new(
                 Doc {
@@ -61,7 +67,7 @@ impl QaApp {
                     resume: false,
                     open_error: None,
                 },
-                qa_ports(),
+                qa_ports(callouts),
             ),
         }
     }
@@ -336,7 +342,7 @@ impl SnapshotStore for QaSnapshots {
     }
 }
 
-fn qa_ports() -> Ports {
+fn qa_ports(callouts: &veil_core::CalloutRegistry) -> Ports {
     Ports {
         clipboard: Box::new(QaClipboard),
         store: Box::new(QaStore),
@@ -352,7 +358,7 @@ fn qa_ports() -> Ports {
             config: Box::new(QaConfig),
             system: Box::new(QaSystem),
             effects: Box::new(QaEffects),
-            callouts: veil_core::CalloutRegistry::default(),
+            callouts: callouts.clone(),
         },
         persist_env: crate::app::PersistEnv {
             recovery: Box::new(QaRecovery),

@@ -31,7 +31,7 @@ use block::{
     fence_close, fence_open, heading_content_span, indent_info, is_thematic_break, line_text,
     list_mark, normalize_label, parse_delim_row, parse_footnote_def, parse_link_ref_def,
     parse_table_cells, quote_def_lines, quote_link_ref_defs, quote_marker_pos, scan_blocks_meta,
-    scan_next_meta, visible_text, RefMap, ScannedBlock,
+    scan_next_meta, strip_container_line, visible_text, RefMap, ScannedBlock,
 };
 use inline::parse_inlines;
 
@@ -386,9 +386,13 @@ impl Syntax {
         let text = buf.slice(start, end);
         let mut lines = text.lines();
         lines.next(); // 开围栏行（```mermaid）
-        let mut body: Vec<&str> = lines.collect();
+                      // 容器内代码块的每行带容器前缀（`>` / 列表缩进）；逐行剥离后才是正文。
+                      // 顶层块容器为默认值，剥离函数原样返回，不改变既有行为。
+        let mut body: Vec<String> = lines
+            .map(|l| strip_container_line(l, b.container, false).to_string())
+            .collect();
         // 闭围栏行（```）只有 trim 后才等于 ```，未闭合围栏不会被吞进来
-        if let Some(last) = body.last().copied() {
+        if let Some(last) = body.last() {
             let trimmed = last.trim_start_matches([' ', '\t']);
             let is_fence = (trimmed.starts_with("```") && !trimmed[3..].contains('`'))
                 || (trimmed.starts_with("~~~") && !trimmed[3..].contains('~'));
@@ -2002,6 +2006,95 @@ mod tests {
         assert!(
             matches!(&s.blocks()[0].kind, BlockKind::Callout(c) if c.name == "fixme"),
             "重解析后仍为自定义 Callout"
+        );
+    }
+
+    // ===== G7：容器内 Mermaid 围栏提升 + 源码前缀剥离 =====
+
+    /// 取文档中唯一的 Mermaid 块源码正文（`fenced_code_source` 的 body）。
+    fn mermaid_body(b: &Buffer, s: &Syntax) -> String {
+        let block = s
+            .blocks()
+            .iter()
+            .find(|blk| blk.kind == BlockKind::Mermaid)
+            .expect("应提升出独立 Mermaid 块");
+        s.fenced_code_source(b, block.id).expect("围栏源码").1
+    }
+
+    #[test]
+    fn quote_mermaid_source_strips_quote_layers() {
+        let b = Buffer::new("> ```mermaid\n> flowchart TD\n>     A[x] --> B[y]\n> ```\n");
+        let s = Syntax::new(&b);
+        assert_eq!(mermaid_body(&b, &s), "flowchart TD\n    A[x] --> B[y]");
+    }
+
+    #[test]
+    fn nested_quote_mermaid_source_strips_all_layers() {
+        let b = Buffer::new("> > ```mermaid\n> > flowchart TD\n> >     A[x] --> B[y]\n> > ```\n");
+        let s = Syntax::new(&b);
+        assert_eq!(mermaid_body(&b, &s), "flowchart TD\n    A[x] --> B[y]");
+    }
+
+    #[test]
+    fn list_mermaid_source_strips_only_container_indent() {
+        let b = Buffer::new("- 前文\n\n  ```mermaid\n  flowchart TD\n      A[x] --> B[y]\n  ```\n");
+        let s = Syntax::new(&b);
+        assert_eq!(mermaid_body(&b, &s), "flowchart TD\n    A[x] --> B[y]");
+    }
+
+    #[test]
+    fn nested_quote_list_mermaid_source_strips_both_prefixes() {
+        let b = Buffer::new(
+            "> - 项目\n>   ```mermaid\n>   flowchart TD\n>     A[x] --> B[y]\n>   ```\n",
+        );
+        let s = Syntax::new(&b);
+        assert_eq!(mermaid_body(&b, &s), "flowchart TD\n  A[x] --> B[y]");
+    }
+
+    #[test]
+    fn admonition_mermaid_source_strips_quote_prefix() {
+        let b = Buffer::new(
+            "> [!NOTE] 标题\n> ```mermaid\n> flowchart TD\n>     A[x] --> B[y]\n> ```\n",
+        );
+        let s = Syntax::new(&b);
+        assert_eq!(mermaid_body(&b, &s), "flowchart TD\n    A[x] --> B[y]");
+    }
+
+    #[test]
+    fn callout_mermaid_source_and_block_kind() {
+        let b = Buffer::new(
+            "> [!FIXME] 标题\n> ```mermaid\n> flowchart TD\n>     A[x] --> B[y]\n> ```\n",
+        );
+        let s = Syntax::new_with_callouts(&b, &registry());
+        let kinds: Vec<BlockKind> = s.blocks().iter().map(|blk| blk.kind.clone()).collect();
+        assert!(matches!(kinds[0], BlockKind::Callout(_)), "{kinds:?}");
+        assert_eq!(kinds[1], BlockKind::Mermaid);
+        assert_eq!(mermaid_body(&b, &s), "flowchart TD\n    A[x] --> B[y]");
+        assert_eq!(s.blocks()[1].container.quote_depth, 1);
+    }
+
+    #[test]
+    fn details_mermaid_source_keeps_relative_indent() {
+        let b = Buffer::new(
+            "<details>\n<summary>S</summary>\n\n```mermaid\nflowchart TD\n    A[x] --> B[y]\n```\n\n</details>\n",
+        );
+        let s = Syntax::new(&b);
+        assert!(matches!(s.blocks()[0].kind, BlockKind::Details { .. }));
+        assert_eq!(mermaid_body(&b, &s), "flowchart TD\n    A[x] --> B[y]");
+    }
+
+    #[test]
+    fn top_level_fenced_code_source_is_unchanged() {
+        // 顶层围栏代码块的现有行为不得被容器前缀剥离改变。
+        let b = Buffer::new("```mermaid\nflowchart TD\n    A[x] --> B[y]\n```\n");
+        let s = Syntax::new(&b);
+        assert_eq!(mermaid_body(&b, &s), "flowchart TD\n    A[x] --> B[y]");
+        let b = Buffer::new("```rust\n    fn f() {}\n```\n");
+        let s = Syntax::new(&b);
+        let block = &s.blocks()[0];
+        assert_eq!(
+            s.fenced_code_source(&b, block.id).unwrap().1,
+            "    fn f() {}"
         );
     }
 }

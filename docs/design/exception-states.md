@@ -68,9 +68,11 @@ G5 选型理由：保留 PDF 的 5 mm 下限（防止内容贴边/落入打印�
 
 ## 三、延后缺口（未在本轮修复）
 
-| 编号 | 缺口 | 位置 | 延后理由 |
-|---|---|---|---|
-| G7 | 列表/引用等容器内的 ```` ```mermaid ```` 围栏不提升为 Mermaid 块，导出保持为容器内代码块，不自动出图 | `crates/veil-core/src/syntax/block.rs::split_list_tables` / `split_quote_tables`（容器展开目前只切表格） | 需要扩展容器展开并把容器内容行重新归属为独立块，同时剥离列表/引用前缀后再提取围栏源码；属解析模型功能增量，本轮 spec 只做测试覆盖 |
+当前无未修复的延后缺口。原 G7 已在本轮修复并关闭（见下）；G4 已实测关闭。
+
+### G7（已修复：本轮关闭）
+
+列表 / 引用 / Admonition / Callout / Details 容器内的 ```` ```mermaid ```` 围栏现已提升为独立 `BlockKind::Mermaid` 块（`crates/veil-core/src/syntax/block.rs::split_quote_container` / `split_list_container`，Details 由递归扫描自然提升），并携带 `BlockContainer`（`quote_depth` / `list_indent` / `details*`）；`crates/veil-core/src/syntax/mod.rs::fenced_code_source` 在提取源码前剥离容器前缀（引用逐层剥 `>`，列表续行只剥至多 `list_indent` 列），导出为内嵌 `<svg>`，不再保留 `language-mermaid` 源码围栏。证据：`CASE-ADV-011` 与生成式容器内容矩阵 `CASE-ADJC-001..090`（`cargo test -p veil --test syntax_matrix`）；详见 `docs/qa/report-2026-11-27.md`。
 
 ### G4 实测裁决（关闭：不引入加载态）
 

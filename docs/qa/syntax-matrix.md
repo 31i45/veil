@@ -998,7 +998,7 @@ A | B
 ```
 - 期望：提示块内渲染完整表格，提示正文不丢。
 - 表面：ALL
-- 检查：blocks=1; kinds=Admonition; html_contains=<table>; html_contains=<td>1</td>
+- 检查：blocks=1; kinds=Admonition; html_contains=class="callout callout-note"; html_contains=<table>; html_contains=<td>1</td>
 
 ### CASE-TBL-016 表格后紧跟非空行
 - 源：
@@ -1938,9 +1938,9 @@ author: 张三
     A[开始] --> B[结束]
   ```
 ````
-- 期望：列表项内的 Mermaid 围栏在 HTML 中保持为列表项内的代码块（`<pre><code class="language-mermaid">`），列表结构（`<ul>/<li>`）不丢失；当前不提升为顶层 Mermaid 块、不自动渲染为 SVG，属已知限制 G7（见 `docs/design/exception-states.md`）。
+- 期望：列表项内的 Mermaid 围栏提升为独立 Mermaid 块并导出为内嵌 `<svg>`；列表结构（`<ul>/<li>`）仍保留，不再出现 `language-mermaid` 源码围栏（G7 已修复，见 `docs/design/exception-states.md`）。
 - 表面：ALL
-- 检查：blocks=1; kinds=ListItem; html_contains=<ul>; html_contains=<li>; html_contains=<pre><code class="language-mermaid">; html_contains=flowchart TD
+- 检查：blocks=2; kinds=ListItem,Mermaid; html_contains=<ul>; html_contains=<li>; html_contains=<svg; html_not_contains=language-mermaid; pdf_pages=1
 
 ### CASE-ADV-012 details 内嵌表格与代码
 - 源：

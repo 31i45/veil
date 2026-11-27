@@ -56,12 +56,21 @@ pub(super) fn scan_blocks(
         match kind {
             BlockKind::BlockQuote => {
                 let mut scanned = Vec::new();
-                split_quote_tables(buf, s, e, &mut scanned);
+                // 带 `[!TYPE]` 首行的引用块是 Admonition / Callout 变体：只切
+                // Mermaid，不切表格（保持表格留在提示框内的既有行为）。
+                let split_tables = !quote_callout_marker_line(&line_text(buf, s));
+                split_quote_container(buf, s, e, BlockKind::BlockQuote, split_tables, &mut scanned);
+                out.extend(scanned.into_iter().map(|b| (b.kind, b.start, b.end)));
+            }
+            // GFM Admonition 是引用块首行变体：只切 Mermaid，不切表格。
+            BlockKind::Admonition(_) => {
+                let mut scanned = Vec::new();
+                split_quote_container(buf, s, e, kind, false, &mut scanned);
                 out.extend(scanned.into_iter().map(|b| (b.kind, b.start, b.end)));
             }
             BlockKind::ListItem { .. } => {
                 let mut scanned = Vec::new();
-                split_list_tables(buf, s, e, kind, &mut scanned);
+                split_list_container(buf, s, e, kind, &mut scanned);
                 out.extend(scanned.into_iter().map(|b| (b.kind, b.start, b.end)));
             }
             other => out.push((other, s, e)),
@@ -2072,12 +2081,18 @@ fn expand_scan_level(
             }
             BlockKind::BlockQuote => {
                 let mark = out.len();
-                split_quote_tables(buf, s, e, &mut out);
+                let split_tables = !quote_callout_marker_line(&line_text(buf, s));
+                split_quote_container(buf, s, e, BlockKind::BlockQuote, split_tables, &mut out);
+                tag_details_depth(&mut out[mark..], depth);
+            }
+            BlockKind::Admonition(_) => {
+                let mark = out.len();
+                split_quote_container(buf, s, e, kind, false, &mut out);
                 tag_details_depth(&mut out[mark..], depth);
             }
             BlockKind::ListItem { .. } => {
                 let mark = out.len();
-                split_list_tables(buf, s, e, kind, &mut out);
+                split_list_container(buf, s, e, kind, &mut out);
                 tag_details_depth(&mut out[mark..], depth);
             }
             other => out.push(ScannedBlock {
@@ -2244,8 +2259,148 @@ fn quote_table_len_at(rows: &[Option<(u8, String)>], i: usize) -> Option<(usize,
     Some((n, *depth))
 }
 
-/// 引用块展开：表格行切成独立 Table 块（同层 `>` 深度入容器），其余保留引用块。
-fn split_quote_tables(buf: &Buffer, start: usize, end: usize, out: &mut Vec<ScannedBlock>) {
+/// 剥除最多 `max_cols` 列的前导缩进（tab 按 4 列制表位展开；跨越列宽的 tab 整块保留）。
+/// 容器展开与 `fenced_code_source` 共用同一口径：列表续行只剥容器自身的缩进，
+/// 更深缩进（图源码的相对缩进）留给正文。
+pub(super) fn strip_indent_columns(s: &str, max_cols: usize) -> &str {
+    let mut col = 0usize;
+    let mut idx = 0usize;
+    for (i, ch) in s.char_indices() {
+        if col >= max_cols {
+            break;
+        }
+        match ch {
+            ' ' => {
+                col += 1;
+                idx = i + 1;
+            }
+            '\t' => {
+                let adv = 4 - col % 4;
+                if col + adv > max_cols {
+                    break;
+                }
+                col += adv;
+                idx = i + 1;
+            }
+            _ => break,
+        }
+    }
+    &s[idx..]
+}
+
+/// 按块的容器归属剥离单行前缀：先逐层剥 `>`（各自后随一个可选空白），
+/// 首行再剥列表标记；列表续行只剥至多 `list_indent` 列缩进。
+/// 顶层块（无容器）原样返回，保证既有围栏代码块行为不变。
+pub(super) fn strip_container_line(line: &str, container: BlockContainer, is_first: bool) -> &str {
+    let mut rest = line;
+    for _ in 0..container.quote_depth {
+        let Some(p) = quote_marker_pos(rest) else {
+            break;
+        };
+        let mut e = p + 1;
+        if matches!(rest.as_bytes().get(e), Some(b' ') | Some(b'\t')) {
+            e += 1;
+        }
+        rest = &rest[e..];
+    }
+    if container.list_indent > 0 {
+        if is_first {
+            if let Some(m) = list_mark(rest) {
+                rest = &rest[m.content_start..];
+            }
+        }
+        rest = strip_indent_columns(rest, usize::from(container.list_indent));
+    }
+    rest
+}
+
+/// 引用行内容（已剥全部 `>`）以 Mermaid 围栏开启时返回 (层数, 围栏字符, 长度)。
+fn quote_mermaid_start(rows: &[Option<(u8, String)>], i: usize) -> Option<(u8, u8, usize)> {
+    let (depth, content) = rows.get(i)?.as_ref()?;
+    let (ch, len, lang) = fence_open(content)?;
+    lang.as_deref()
+        .is_some_and(|l| l.eq_ignore_ascii_case("mermaid"))
+        .then_some((*depth, ch, len))
+}
+
+/// 引用内围栏消耗行数：只在同层 `>` 行上闭合；未闭合时吞到容器末尾。
+fn quote_fence_span(
+    rows: &[Option<(u8, String)>],
+    i: usize,
+    depth: u8,
+    ch: u8,
+    len: usize,
+) -> usize {
+    let mut n = 1usize;
+    while i + n < rows.len() {
+        if let Some((d, content)) = rows[i + n].as_ref() {
+            if *d == depth && fence_close(content, ch, len) {
+                return n + 1;
+            }
+        }
+        n += 1;
+    }
+    n
+}
+
+/// 引用段落内最后一个列表标记的内容列（嵌套「引用套列表」时作为 Mermaid 的
+/// `list_indent`）；无列表标记时为 0。
+fn quote_inner_list_indent(rows: &[Option<(u8, String)>], from: usize, to: usize) -> u8 {
+    let mut indent = 0u8;
+    for (_, content) in rows[from..to.min(rows.len())].iter().flatten() {
+        if let Some(m) = list_mark(content) {
+            if m.indent_cols <= 3 {
+                indent = m.content_col.min(255) as u8;
+            }
+        }
+    }
+    indent
+}
+
+/// 引用段切分：首段沿用容器块型（引用块 / Admonition），Mermaid 之后的续段
+/// 回落为普通引用块（Admonition 标题只出现一次）。
+fn push_quote_segment(
+    kind: &BlockKind,
+    base: usize,
+    seg_start: usize,
+    seg_end: usize,
+    out: &mut Vec<ScannedBlock>,
+) {
+    if seg_start >= seg_end {
+        return;
+    }
+    let k = if seg_start == 0 && matches!(kind, BlockKind::Admonition(_) | BlockKind::Callout(_)) {
+        kind.clone()
+    } else {
+        BlockKind::BlockQuote
+    };
+    out.push(plain_block(k, base + seg_start, base + seg_end));
+}
+
+/// 引用块首行是否为 `[!TYPE]` 形式（Admonition / Callout 变体）。
+/// 此类块只提升 Mermaid，不切表格：表格须留在提示框容器内。
+fn quote_callout_marker_line(line: &str) -> bool {
+    let Some((_, _, content)) = strip_quote_prefix(line) else {
+        return false;
+    };
+    let content = content.trim_start();
+    let Some(inner) = content.strip_prefix("[!") else {
+        return false;
+    };
+    inner.find(']').is_some()
+}
+
+/// 引用块 / Admonition 展开：内层 ```` ```mermaid ```` 围栏切成独立块；
+/// `split_tables` 为真时（仅普通 BlockQuote）内层表格也切成独立块。
+/// Mermaid 携带 `quote_depth`（及嵌套列表的 `list_indent`）。
+fn split_quote_container(
+    buf: &Buffer,
+    start: usize,
+    end: usize,
+    kind: BlockKind,
+    split_tables: bool,
+    out: &mut Vec<ScannedBlock>,
+) {
     let rows: Vec<Option<(u8, String)>> = (start..end)
         .map(|i| {
             let line = line_text(buf, i);
@@ -2255,35 +2410,76 @@ fn split_quote_tables(buf: &Buffer, start: usize, end: usize, out: &mut Vec<Scan
     let mut seg_start = 0usize;
     let mut i = 0usize;
     while i < rows.len() {
-        if let Some((n, depth)) = quote_table_len_at(&rows, i) {
-            if i > seg_start {
-                out.push(plain_block(
-                    BlockKind::BlockQuote,
-                    start + seg_start,
+        let mut advanced = false;
+        if split_tables {
+            if let Some((n, depth)) = quote_table_len_at(&rows, i) {
+                push_quote_segment(&kind, start, seg_start, i, out);
+                out.push(table_block(
                     start + i,
+                    start + i + n,
+                    BlockContainer {
+                        quote_depth: depth,
+                        ..Default::default()
+                    },
                 ));
+                i += n;
+                seg_start = i;
+                advanced = true;
             }
-            out.push(table_block(
-                start + i,
-                start + i + n,
-                BlockContainer {
-                    quote_depth: depth,
-                    ..Default::default()
-                },
-            ));
-            i += n;
-            seg_start = i;
-        } else {
+        }
+        if !advanced {
+            if let Some((depth, ch, len)) = quote_mermaid_start(&rows, i) {
+                let n = quote_fence_span(&rows, i, depth, ch, len);
+                let list_indent = quote_inner_list_indent(&rows, seg_start, i);
+                push_quote_segment(&kind, start, seg_start, i, out);
+                out.push(ScannedBlock {
+                    kind: BlockKind::Mermaid,
+                    start: start + i,
+                    end: start + i + n,
+                    container: BlockContainer {
+                        quote_depth: depth,
+                        list_indent,
+                        ..Default::default()
+                    },
+                    table_lines: None,
+                });
+                i += n;
+                seg_start = i;
+                advanced = true;
+            }
+        }
+        if !advanced {
             i += 1;
         }
     }
     if seg_start < rows.len() {
-        out.push(plain_block(BlockKind::BlockQuote, start + seg_start, end));
+        push_quote_segment(&kind, start, seg_start, rows.len(), out);
     }
 }
 
-/// 列表项展开：表格行切成独立 Table 块（内容缩进列入容器）。
-fn split_list_tables(
+/// 已剥列表容器缩进的行以 Mermaid 围栏开启时返回 (围栏字符, 长度)。
+fn list_mermaid_start(line: &str) -> Option<(u8, usize)> {
+    let (ch, len, lang) = fence_open(line)?;
+    lang.as_deref()
+        .is_some_and(|l| l.eq_ignore_ascii_case("mermaid"))
+        .then_some((ch, len))
+}
+
+/// 列表项内围栏消耗行数：闭合须同字符且长度 ≥ 开围栏；未闭合时吞到项末尾。
+fn list_fence_span(rows: &[String], i: usize, ch: u8, len: usize) -> usize {
+    let mut n = 1usize;
+    while i + n < rows.len() {
+        if fence_close(&rows[i + n], ch, len) {
+            return n + 1;
+        }
+        n += 1;
+    }
+    n
+}
+
+/// 列表项展开：内层表格与 ```` ```mermaid ```` 围栏切成独立块。
+/// Mermaid 携带列表内容列 `list_indent`；普通围栏代码仍留在列表项内。
+fn split_list_container(
     buf: &Buffer,
     start: usize,
     end: usize,
@@ -2296,12 +2492,17 @@ fn split_list_tables(
         .as_ref()
         .map_or_else(|| indent_info(&first).0, |m| m.content_col)
         .min(255) as u8;
-    let contents: Vec<String> = (start..end)
-        .map(|i| {
-            let line = line_text(buf, i);
-            if i == start {
+    let raw: Vec<String> = (start..end).map(|i| line_text(buf, i)).collect();
+    // 表格沿用既有口径：逐行 trim 后识别（首行先剥列表标记）。
+    let trimmed: Vec<String> = raw
+        .iter()
+        .enumerate()
+        .map(|(idx, line)| {
+            if idx == 0 {
                 match &mark {
-                    Some(m) => line[m.content_start.min(line.len())..].to_string(),
+                    Some(m) => line[m.content_start.min(line.len())..]
+                        .trim_start()
+                        .to_string(),
                     None => line.trim_start().to_string(),
                 }
             } else {
@@ -2309,10 +2510,26 @@ fn split_list_tables(
             }
         })
         .collect();
+    // 围栏识别需保留项内相对缩进：首行剥列表标记，续行剥至多 list_indent 列。
+    let rel: Vec<String> = raw
+        .iter()
+        .enumerate()
+        .map(|(idx, line)| {
+            if idx == 0 {
+                match &mark {
+                    Some(m) => line[m.content_start.min(line.len())..].to_string(),
+                    None => line.trim_start().to_string(),
+                }
+            } else {
+                strip_indent_columns(line, usize::from(list_indent)).to_string()
+            }
+        })
+        .collect();
     let mut seg_start = 0usize;
     let mut i = 0usize;
-    while i < contents.len() {
-        if let Some(n) = table_len_contents(&contents[i..]) {
+    while i < rel.len() {
+        let mut advanced = false;
+        if let Some(n) = table_len_contents(&trimmed[i..]) {
             if i > seg_start {
                 out.push(plain_block(kind.clone(), start + seg_start, start + i));
             }
@@ -2326,11 +2543,34 @@ fn split_list_tables(
             ));
             i += n;
             seg_start = i;
-        } else {
+            advanced = true;
+        }
+        if !advanced {
+            if let Some((ch, len)) = list_mermaid_start(&rel[i]) {
+                let n = list_fence_span(&rel, i, ch, len);
+                if i > seg_start {
+                    out.push(plain_block(kind.clone(), start + seg_start, start + i));
+                }
+                out.push(ScannedBlock {
+                    kind: BlockKind::Mermaid,
+                    start: start + i,
+                    end: start + i + n,
+                    container: BlockContainer {
+                        list_indent,
+                        ..Default::default()
+                    },
+                    table_lines: None,
+                });
+                i += n;
+                seg_start = i;
+                advanced = true;
+            }
+        }
+        if !advanced {
             i += 1;
         }
     }
-    if seg_start < contents.len() {
+    if seg_start < rel.len() {
         out.push(plain_block(kind, start + seg_start, end));
     }
 }
@@ -3675,6 +3915,114 @@ mod tests {
         // details 内非表格内容保持整块
         let b = Buffer::new("<details>\n<summary>S</summary>\nplain\n</details>\n");
         assert!(matches!(kinds(&b)[0].0, BlockKind::Details { .. }));
+    }
+
+    // ===== G7：容器内 Mermaid 围栏提升 =====
+
+    #[test]
+    fn quote_inner_mermaid_becomes_mermaid_block() {
+        let b =
+            Buffer::new("> 前文\n>\n> ```mermaid\n> flowchart TD\n>     A[x] --> B[y]\n> ```\n");
+        let m = meta(&b);
+        assert_eq!(m.len(), 2, "{m:?}");
+        assert_eq!(m[0].kind, BlockKind::BlockQuote);
+        assert_eq!((m[0].start, m[0].end), (0, 2));
+        assert_eq!(m[1].kind, BlockKind::Mermaid);
+        assert_eq!((m[1].start, m[1].end), (2, 6));
+        assert_eq!(m[1].container.quote_depth, 1);
+        assert_eq!(m[1].container.list_indent, 0);
+    }
+
+    #[test]
+    fn list_item_inner_mermaid_becomes_mermaid_block() {
+        let b = Buffer::new(
+            "- 前文\n\n  ```mermaid\n  flowchart TD\n      A[x] --> B[y]\n  ```\n\n  后文\n",
+        );
+        let m = meta(&b);
+        assert_eq!(
+            m.iter()
+                .map(|b| (b.kind.clone(), b.start, b.end))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    BlockKind::ListItem {
+                        ordered: false,
+                        depth: 0,
+                        task: None,
+                    },
+                    0,
+                    2
+                ),
+                (BlockKind::Mermaid, 2, 6),
+                (
+                    BlockKind::ListItem {
+                        ordered: false,
+                        depth: 0,
+                        task: None,
+                    },
+                    6,
+                    8
+                ),
+            ]
+        );
+        assert_eq!(m[1].container.list_indent, 2);
+        assert_eq!(m[1].container.quote_depth, 0);
+    }
+
+    #[test]
+    fn admonition_inner_mermaid_becomes_mermaid_block() {
+        let b = Buffer::new(
+            "> [!NOTE] 标题\n> ```mermaid\n> flowchart TD\n>     A[x] --> B[y]\n> ```\n",
+        );
+        let m = meta(&b);
+        assert_eq!(m.len(), 2, "{m:?}");
+        assert_eq!(m[0].kind, BlockKind::Admonition(AdmonitionType::Note));
+        assert_eq!((m[0].start, m[0].end), (0, 1));
+        assert_eq!(m[1].kind, BlockKind::Mermaid);
+        assert_eq!(m[1].container.quote_depth, 1);
+    }
+
+    #[test]
+    fn details_inner_mermaid_becomes_child_mermaid_block() {
+        let b = Buffer::new(
+            "<details>\n<summary>S</summary>\n\n```mermaid\nflowchart TD\n    A[x] --> B[y]\n```\n\n</details>\n",
+        );
+        let m = meta(&b);
+        assert_eq!(m.len(), 2, "{m:?}");
+        assert!(matches!(m[0].kind, BlockKind::Details { .. }));
+        assert_eq!(m[1].kind, BlockKind::Mermaid);
+        assert!(m[1].container.details);
+        assert_eq!(m[1].container.details_depth, 1);
+    }
+
+    #[test]
+    fn non_mermaid_fence_stays_inside_container() {
+        // 普通围栏代码块不提升（容器内代码块行为不变）。
+        let quote = Buffer::new("> ```rust\n> fn main() {}\n> ```\n");
+        assert_eq!(meta(&quote).len(), 1);
+        assert_eq!(meta(&quote)[0].kind, BlockKind::BlockQuote);
+        let list = Buffer::new("- 前文\n\n  ```rust\n  fn main() {}\n  ```\n");
+        assert_eq!(meta(&list).len(), 1);
+        assert!(matches!(meta(&list)[0].kind, BlockKind::ListItem { .. }));
+        let admonition = Buffer::new("> [!TIP]\n> ```rust\n> fn main() {}\n> ```\n");
+        assert_eq!(meta(&admonition).len(), 1);
+        assert!(matches!(
+            meta(&admonition)[0].kind,
+            BlockKind::Admonition(_)
+        ));
+    }
+
+    #[test]
+    fn nested_quote_list_mermaid_tracks_both_containers() {
+        let b = Buffer::new(
+            "> - 项目\n>   ```mermaid\n>   flowchart TD\n>     A[x] --> B[y]\n>   ```\n",
+        );
+        let m = meta(&b);
+        assert_eq!(m.len(), 2, "{m:?}");
+        assert_eq!(m[0].kind, BlockKind::BlockQuote);
+        assert_eq!(m[1].kind, BlockKind::Mermaid);
+        assert_eq!(m[1].container.quote_depth, 1);
+        assert_eq!(m[1].container.list_indent, 2);
     }
 
     // ===== 链接引用定义（0c P0-1）：识别边界 =====

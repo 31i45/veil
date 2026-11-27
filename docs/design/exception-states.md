@@ -19,11 +19,11 @@
 | 查找/替换 | 错误 | `search.regex_error`（计数区）+ 查询串危险色 | 危险（`theme.danger`） | 点击 `.*` 关闭正则，或修正模式；Esc 关闭 | 否（`regex`/`case_sensitive` 为会话态） | `crates/veil-ui/src/view/search_view.rs::paint_search` |
 | 查找/替换 | 降级 | 不适用（扫描只有“非法正则”一种失败，已归入错误态） | 不适用 | 不适用 | 不适用 | — |
 | 快速打开 | 空 | `quick_open.empty.no_candidates` / `quick_open.empty.no_match` / `command_palette.empty` | 中性（`muted`） | 继续输入；Esc 关闭 | 否（候选为临时态） | `crates/veil-ui/src/paint_overlay.rs::paint_quick` + `crates/veil-ui/src/view/quick_open.rs::empty_message_for` |
-| 快速打开 | 加载 | 不适用（打开时同步列目录，无索引/异步加载态） | 不适用 | 不适用 | 不适用 | `crates/veil-ui/src/interaction.rs::refresh_quick` |
+| 快速打开 | 加载 | 不适用（打开时同步列目录；5000 文件实测约 13 ms，release，见 `docs/qa/w11-load-state-measurement.md`） | 不适用 | 不适用 | 不适用 | `crates/veil-ui/src/interaction.rs::refresh_quick` |
 | 快速打开 | 错误 | `quick_open.read_failed`（目录列表读取失败） | 危险（`theme.danger`） | Esc 关闭后重新打开（`Ctrl+P`）重试 | 否（失败态随浮层关闭清空） | `crates/veil-ui/src/interaction.rs::refresh_quick` + `crates/veil-ui/src/paint_overlay.rs::paint_quick` |
 | 快速打开 | 降级 | 不适用（无降级通道；草稿无目录时只列最近文件属正常子集） | 不适用 | 不适用 | 不适用 | `crates/veil-ui/src/interaction.rs::refresh_quick` |
 | 大纲 | 空 | `outline.empty` | 中性（`muted`） | `Ctrl+Shift+O` 关闭；Esc | 否 | `crates/veil-ui/src/paint_overlay.rs::paint_outline` |
-| 大纲 | 加载 | 不适用（条目从已解析块派生，无独立 I/O） | 不适用 | 不适用 | 不适用 | 文档索引（`document` 解析产物） |
+| 大纲 | 加载 | 不适用（条目从已解析块派生，无独立 I/O；5000 标题块枚举 0.34 ms） | 不适用 | 不适用 | 不适用 | 文档索引（`document` 解析产物） |
 | 大纲 | 错误 | 不适用（无 I/O，纯派生不会失败；解析异常由正文区错误态承接） | 不适用 | 不适用 | 不适用 | — |
 | 大纲 | 降级 | 不适用（无降级路径） | 不适用 | 不适用 | 不适用 | — |
 | 版本历史 | 空 | `history.empty` + `history.empty_hint` | 中性（正文色 + `muted`） | Esc / 底部“关闭”按钮 | 否（只读面板） | `crates/veil-ui/src/paint_overlay.rs::paint_history` |
@@ -70,8 +70,16 @@ G5 选型理由：保留 PDF 的 5 mm 下限（防止内容贴边/落入打印�
 
 | 编号 | 缺口 | 位置 | 延后理由 |
 |---|---|---|---|
-| G4 | 大纲/快速打开/历史面板无“加载”态，超大目录/快照列表会阻塞 UI | 见矩阵“加载”行 | 需要异步加载态（后台任务 + 进度/占位态），属功能增量而非视觉层修补；本轮只关闭成本可控的提示类缺口 |
 | G7 | 列表/引用等容器内的 ```` ```mermaid ```` 围栏不提升为 Mermaid 块，导出保持为容器内代码块，不自动出图 | `crates/veil-core/src/syntax/block.rs::split_list_tables` / `split_quote_tables`（容器展开目前只切表格） | 需要扩展容器展开并把容器内容行重新归属为独立块，同时剥离列表/引用前缀后再提取围栏源码；属解析模型功能增量，本轮 spec 只做测试覆盖 |
+
+### G4 实测裁决（关闭：不引入加载态）
+
+2026-11-27 在 **release** 构建下实测（临时 ignored 测试，测后已移除；方法与原始输出见 `docs/qa/w11-load-state-measurement.md`）：
+
+- 5000 文件目录：目录枚举中位 **10.96 ms**（冷启 11.50 ms），候选构建 **1.93 ms**，查询重排 **0.49 ms**，合计约 **13 ms**；
+- 5000 标题文档：大纲块枚举 **0.34 ms**（`Session::open` 解析 148.39 ms）。
+
+结论：快速打开与大纲面板均远低于 100 ms 阈值，**G4 关闭，不引入异步加载态**。附注：5000 标题文档的打开解析约 148 ms，属文档打开路径而非本缺口，本轮同样不引入加载态；该数字如实记录，未据此声称“大文档打开流畅”。
 
 除以上延后项外，矩阵中的“现有实现”与本规格一致。
 

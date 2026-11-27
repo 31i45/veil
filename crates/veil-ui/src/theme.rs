@@ -123,15 +123,16 @@ pub struct SyntaxColors {
     pub punctuation: [u8; 3],
 }
 
-/// plist 解析失败时的硬编码兜底值（与原始硬编码版本同值，确保对比度门禁不退化）。
+/// plist 解析失败时的兜底色板：与 `nord_light.tmTheme` 的浅色取值逐 token 同源，
+/// 避免兜底路径与正常路径出现两套色（一致性由测试锁定）。
 const SYNTAX_FALLBACK: SyntaxColors = SyntaxColors {
-    keyword: [173, 107, 169],
-    string: [86, 141, 64],
-    comment: [128, 128, 128],
-    number: [181, 106, 31],
-    function: [47, 105, 174],
-    type_name: [78, 136, 195],
-    punctuation: [100, 100, 100],
+    keyword: [47, 107, 138],
+    string: [76, 122, 79],
+    comment: [97, 110, 136],
+    number: [122, 90, 140],
+    function: [44, 122, 134],
+    type_name: [44, 122, 112],
+    punctuation: [59, 66, 82],
 };
 
 impl SyntaxColors {
@@ -150,7 +151,7 @@ impl SyntaxColors {
     ///
     /// 我们的 tmTheme 只包含恰好 7 条规则（keyword/comment/string/constant.numeric/
     /// entity.name.function/entity.name.type/punctuation），所以用 plist 匹配 key 前缀即可。
-    /// 未匹配到的字段保留硬编码兜底值（确保对比度门禁不退化）。
+    /// 未匹配到的字段保留兜底值（与浅色 tmTheme 取值一致的常量）。
     pub(crate) fn from_tmtheme_bytes(bytes: &[u8]) -> Self {
         let mut out = SYNTAX_FALLBACK;
 
@@ -287,7 +288,9 @@ pub struct Theme {
 /// 代码块底色（code_bg）与表头底色（table_head_bg）是 Card 档的特化，
 /// 不归本枚举直接映射——调用方按需经 `tokens::palette::code_bg` / `table_head_bg` 取。
 ///
-/// 层级约束：modal_bg ≠ popup_bg ≠ chrome_bg，两两可被人眼区分（ΔE ≥ 2）。
+/// 层级约束：card 与 popup 的 OKLab 色差 ΔE_OK ≥ 0.02（≈ CIELAB ΔE 2），modal 与
+/// popup/card 之一 ≥ 0.01，且 modal_bg ≠ popup_bg；门禁见 `tokens` 的
+/// `surface_hierarchy_is_perceptually_separated`。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[allow(dead_code)] // API 预留：paint 层仍经 palette 模块消费，SurfaceLevel 后续批次会有更多使用点（当前仅测试锁定四档映射）
 pub enum SurfaceLevel {
@@ -334,8 +337,9 @@ impl Theme {
             chrome_border: [208, 213, 221, 255],
             hover: [228, 236, 246, 255],
             popup_bg: [255, 255, 255, 255],
-            // modal_bg 必须与 popup_bg 有可感知色差（ΔE ≥ 2）：冷调灰 [249,250,252] 提供明度差 +
-            // 蓝调偏移，靠色彩差异增强弹起层级，又不过度偏离低干扰基调。
+            // modal_bg 必须与 popup_bg 有可感知色差（OKLab ΔE_OK ≈ 0.015，≈ CIELAB ΔE 1.5）：
+            // 冷调灰 [249,250,252] 提供明度差 + 蓝调偏移，靠色彩差异增强弹起层级，
+            // 又不过度偏离低干扰基调。
             modal_bg: [249, 250, 252, 255],
             thumb: [176, 184, 195, 255],
             muted: [110, 110, 110],
@@ -424,6 +428,10 @@ impl Theme {
 }
 
 /// 浅色语法色板：从 embed 的 nord_light.tmTheme 加载（OnceLock 缓存，进程内只 parse 一次）。
+///
+/// 该 asset 不是 Nord 原版：Nord 的极光色是为深底（#2E3440）设计的前景色，直接搬到
+/// 近白代码块底（#F5F5F5）上只有 1.83~2.60:1。浅色色板因此在保持色相族不变的前提下
+/// 只降明度，从深底方案重推导为浅底可读方案（7 个 token 对 code_bg 全部 ≥ 4.5:1）。
 fn light_syntax() -> SyntaxColors {
     static CACHE: OnceLock<SyntaxColors> = OnceLock::new();
     *CACHE.get_or_init(|| {
@@ -2209,10 +2217,12 @@ mod tests {
                 t.dark
             );
         }
-        // 无主题兜底色板与浅色主题同值，避免两条路径出现不同注释色。
+        // 兜底色板必须与浅色 tmTheme 解析结果逐 token 一致：plist 解析失败时会直接用
+        // SYNTAX_FALLBACK，若两者漂移就会出现两套浅色语法色。
         assert_eq!(
-            SyntaxColors::default_light().comment,
-            Theme::light().syntax.comment
+            SyntaxColors::default_light(),
+            SYNTAX_FALLBACK,
+            "SYNTAX_FALLBACK 必须与 nord_light.tmTheme 的浅色取值一致"
         );
     }
 

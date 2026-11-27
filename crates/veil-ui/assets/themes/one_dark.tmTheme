@@ -45,7 +45,7 @@
         <dict>
             <key>scope</key>
             <string>punctuation, punctuation.separator, punctuation.definition</string>
-            <key>settings</key><dict><key>foreground</key><string>#5C6370</string></dict>
+            <key>settings</key><dict><key>foreground</key><string>#8A93A6</string></dict>
         </dict>
     </array>
 </dict>

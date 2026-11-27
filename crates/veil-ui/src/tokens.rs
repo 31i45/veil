@@ -215,7 +215,10 @@ pub(crate) mod stroke {
 /// | Popup | popup_bg | 浮层/弹出（Low 档阴影弹起） |
 /// | Modal | modal_bg | 模态对话框（High 档阴影弹起，最深一层） |
 ///
-/// 层级约束：modal 档底色 ≠ popup 档底色 ≠ card 档底色，两两可被人眼区分（ΔE ≥ 2）。
+/// 层级约束：card 与 popup 的 OKLab 色差 ΔE_OK ≥ 0.02（≈ CIELAB ΔE 2），modal 与
+/// popup/card 之一 ΔE_OK ≥ 0.01，且 modal 档底色 ≠ popup 档底色；门禁见
+/// `surface_hierarchy_is_perceptually_separated`。此处比较的是含 a/b 轴的真实
+/// 感知色差，不是只看明度差。
 pub(crate) mod palette {
     use crate::theme::Theme;
 
@@ -580,43 +583,65 @@ mod tests {
         }
     }
 
-    /// Surface 四档底色层级分离（S5/S7）：card / popup / modal 两两必须有可感知色差。
-    /// 用 ΔE CIE2000 近似（简化 Lab 欧氏距离：对于灰色调 + 微弱色偏，简化足够精准）。
+    /// sRGB 分量（0..255）→ 线性光（0..1），IEC 61966-2-1 分段函数。
+    fn srgb_to_linear(v: u8) -> f32 {
+        let u = v as f32 / 255.0;
+        if u <= 0.040_45 {
+            u / 12.92
+        } else {
+            ((u + 0.055) / 1.055).powf(2.4)
+        }
+    }
+
+    /// sRGB 色 → OKLab（Björn Ottosson, 2020）：线性 RGB → LMS → 立方根 → Lab。
+    /// alpha 被忽略（surface 底色均为不透明）。
+    fn oklab(c: [u8; 4]) -> [f32; 3] {
+        let (r, g, b) = (
+            srgb_to_linear(c[0]),
+            srgb_to_linear(c[1]),
+            srgb_to_linear(c[2]),
+        );
+        let l = 0.412_221_47 * r + 0.536_332_54 * g + 0.051_445_99 * b;
+        let m = 0.211_903_5 * r + 0.680_699_5 * g + 0.107_396_96 * b;
+        let s = 0.088_302_46 * r + 0.281_718_84 * g + 0.629_978_7 * b;
+        let (l, m, s) = (l.cbrt(), m.cbrt(), s.cbrt());
+        [
+            0.210_454_26 * l + 0.793_617_8 * m - 0.004_072_047 * s,
+            1.977_998_5 * l - 2.428_592_2 * m + 0.450_593_7 * s,
+            0.025_904_037 * l + 0.782_771_77 * m - 0.808_675_77 * s,
+        ]
+    }
+
+    /// OKLab 欧氏色差 ΔE_OK：0 = 同色；灰阶下 0.02 ≈ CIELAB ΔE 2（可感知阈值）。
+    fn de_ok(a: [u8; 4], b: [u8; 4]) -> f32 {
+        let (x, y) = (oklab(a), oklab(b));
+        ((x[0] - y[0]).powi(2) + (x[1] - y[1]).powi(2) + (x[2] - y[2]).powi(2)).sqrt()
+    }
+
+    /// Surface 四档底色层级分离（S5/S7）：用 OKLab ΔE（含明度与色度三轴），不是只看 L。
+    ///
+    /// 阈值按 CIELAB「可感知」2 单位换算：ΔE_OK ≈ 0.02（灰阶下两者近似 100:1）。
+    /// card 与 popup 是同屏相邻的两档（chrome 条带 vs 浮起卡片），要求 ΔE_OK ≥ 0.02；
+    /// modal 与 popup/card 之一 ΔE_OK ≥ 0.01，另加 modal ≠ popup 的硬门禁。
     #[test]
     fn surface_hierarchy_is_perceptually_separated() {
         use super::palette;
         use crate::theme::Theme;
-        let f = |v: u8| {
-            let v = v as f32 / 255.0;
-            if v <= 0.03928 {
-                v / 12.92
-            } else {
-                ((v + 0.055) / 1.055).powf(2.4)
-            }
-        };
-        let lab = |c: [u8; 4]| {
-            let (r, g, b) = (f(c[0]), f(c[1]), f(c[2]));
-            let y = 0.2126 * r + 0.7152 * g + 0.0722 * b;
-            let y_c = if y > 0.008856 {
-                y.cbrt()
-            } else {
-                7.787 * y + 16.0 / 116.0
-            };
-            (116.0 * y_c - 16.0) as i32
-        };
-        // 每对 Lab 距离 ≥ 2（亮/暗主题各自检查）
         for t in [Theme::light(), Theme::dark()] {
-            let card = lab(palette::surface_card(&t));
-            let popup = lab(palette::surface_popup(&t));
-            let modal = lab(palette::surface_modal(&t));
+            let card = palette::surface_card(&t);
+            let popup = palette::surface_popup(&t);
+            let modal = palette::surface_modal(&t);
+            let card_popup = de_ok(card, popup);
+            let popup_modal = de_ok(popup, modal);
+            let card_modal = de_ok(card, modal);
             assert!(
-                (card - popup).abs() >= 2,
-                "card-popup 层级不可感知: dark={} card L={card} popup L={popup}",
+                card_popup >= 0.02,
+                "card-popup 层级不可感知: dark={} ΔE_OK={card_popup:.4} < 0.02",
                 t.dark
             );
             assert!(
-                (popup - modal).abs() >= 1 || (card - modal).abs() >= 1,
-                "modal 应至少与 popup 或 card 有分离: dark={} popup L={popup} modal L={modal} card L={card}",
+                popup_modal >= 0.01 || card_modal >= 0.01,
+                "modal 应至少与 popup 或 card 有感知分离: dark={} ΔE_OK popup-modal={popup_modal:.4} card-modal={card_modal:.4}（阈值 0.01）",
                 t.dark
             );
             // modal ≠ popup（硬门禁）

@@ -354,3 +354,38 @@ fn high_contrast_meets_readability_floor() {
         contrast(hc.fg, rgb(hc.code_bg))
     );
 }
+
+/// 语法高亮 7 个 token 在各自代码块底色（`theme.code_bg`）上的可读性门禁。
+///
+/// 真实缺陷来源：浅色色板原先直接采用 Nord 的极光色，而那是为深底（#2E3440）设计的
+/// 前景色——落到近白 code_bg [245,245,245] 上时 keyword 2.47:1、number 2.60:1、
+/// function 1.83:1、type 1.91:1，语法高亮反而让代码更难读。`nord_light.tmTheme`
+/// 已按「保持色相族、只降明度」重推导为浅底方案；深色侧则修掉了 punctuation 的
+/// 2.44:1。本测试把三主题 × 7 token 全部钉在 ≥ 4.5:1，防止再退回深底色板。
+#[test]
+fn syntax_tokens_meet_contrast_on_code_bg() {
+    for (name, make) in MODES {
+        let t = make();
+        let bg = rgb(t.code_bg);
+        let s = t.syntax;
+        let tokens: [(&str, [u8; 3]); 7] = [
+            ("keyword", s.keyword),
+            ("string", s.string),
+            ("comment", s.comment),
+            ("number", s.number),
+            ("function", s.function),
+            ("type_name", s.type_name),
+            ("punctuation", s.punctuation),
+        ];
+        for (token, color) in tokens {
+            let ratio = contrast(color, bg);
+            assert!(
+                ratio >= 4.5,
+                "{name}: 语法 token {token} #{:02X}{:02X}{:02X} 在 code_bg {bg:?} 上对比度 {ratio:.2} 低于 4.5",
+                color[0],
+                color[1],
+                color[2]
+            );
+        }
+    }
+}

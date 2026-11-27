@@ -136,6 +136,9 @@ fn tint_on_white(accent: [u8; 3], ratio: f32) -> [u8; 3] {
 }
 const COL_HEAD_BG: [u8; 3] = [249, 250, 251];
 
+/// 表格单元格水平内边距（pt）；行高额外留 `TABLE_PAD * 1.4` 的上下留白。
+const TABLE_PAD: f32 = 4.5;
+
 #[derive(Clone, Copy, PartialEq)]
 struct Style {
     size: f32,
@@ -1151,6 +1154,8 @@ impl<'a> Ctx<'a> {
         }
         let h = data.pt_h();
         // 块前 4pt、块后 8pt 也必须留在同一页内；不套用行内图片的两行限高。
+        // R4：与打印路径的差异见 `print.rs::compute_page_breaks` —— 打印不缩放、
+        // 超高图按页底硬切；PDF 在这里等比压到一页内，绝不硬切。
         let max_h = (self.geom.content_h() - 12.0).max(1.0);
         if h > max_h && h > 0.0 {
             data.px_to_pt *= max_h / h;
@@ -1426,7 +1431,6 @@ impl<'a> Ctx<'a> {
         let x0 = self.geom.margin_x + indent;
         let max_w = (self.max_w() - indent).max(40.0);
         let ncols = t.aligns.len().max(1);
-        let pad = 4.5;
         let line_h = self.metrics.line_height(TABLE_SIZE);
 
         // 自然列宽
@@ -1440,7 +1444,7 @@ impl<'a> Ctx<'a> {
             }
         }
         for w in nat.iter_mut() {
-            *w += pad * 2.0;
+            *w += TABLE_PAD * 2.0;
         }
         let total: f32 = nat.iter().sum();
         let k = if total > max_w { max_w / total } else { 1.0 };
@@ -1452,142 +1456,261 @@ impl<'a> Ctx<'a> {
             rows.push(r);
         }
 
+        // 表头只排版一次：首页正常绘制，续页重绘时复用同一批 LItem（R2）。
+        let (header_cells, header_max_lines) =
+            self.layout_table_row(s, &t.header, &widths, true, media);
+
         for (ri, row) in rows.iter().enumerate() {
             // 单元格按 inlines 排版（粗体/斜体/行内代码/链接与正文同源），
             // 不再截断到 6 行：内容按页拆分完整输出（行可跨页，续页继续）。
-            let base_style = Style {
-                size: TABLE_SIZE,
-                bold: ri == 0,
-                ..Style::body()
+            let owned;
+            let (cell_lines, max_lines): (&[Vec<Vec<LItem>>], usize) = if ri == 0 {
+                (header_cells.as_slice(), header_max_lines)
+            } else {
+                owned = self.layout_table_row(s, row, &widths, false, media);
+                (owned.0.as_slice(), owned.1)
             };
-            let mut cell_lines: Vec<Vec<Vec<LItem>>> = Vec::new();
-            let mut max_lines = 1usize;
-            for (ci, &cw) in widths.iter().enumerate() {
-                let inner_w = (cw - 2.0 * pad).max(12.0);
-                let mut items: Vec<LItem> = Vec::new();
-                if let Some(cell) = row.get(ci) {
-                    let raw = s.text_slice(cell.range).unwrap_or_default();
-                    // 单元格源码是文档切片，base = cell.range.start：
-                    // `emit_inlines` 的节点区间是文档绝对偏移，两者口径一致。
-                    self.emit_inlines(
-                        &raw,
-                        cell.range.start,
-                        cell.range.start,
-                        cell.range.end,
-                        &cell.inlines,
-                        base_style,
-                        &mut items,
-                        media,
-                    );
-                }
-                let mut lines = fill_lines(items, inner_w, self.metrics);
-                if lines.is_empty() {
-                    lines.push(Vec::new());
-                }
-                max_lines = max_lines.max(lines.len());
-                cell_lines.push(lines);
-            }
 
-            let full_h = line_h * max_lines as f32 + pad * 1.4;
-            // 整行能放进一页时，尽量不拆行（避免表格行孤悬）。
+            let full_h = line_h * max_lines as f32 + TABLE_PAD * 1.4;
+            // R1：整行能放进一页时绝不拆行。
+            // 本页页首若在表格内部，可用高度还要扣掉重复表头高（R2）；
+            // 只有单行自身超过「整页可用高度」时才允许行内硬切（R1 的例外）。
+            let mut header_fresh = false;
             if full_h <= self.geom.content_h()
                 && self.y + full_h > self.geom.bottom()
                 && self.y > self.geom.top() + 1.0
             {
                 self.new_page();
+                if ri > 0 {
+                    self.repeat_table_header(
+                        x0,
+                        &widths,
+                        &t.aligns,
+                        &header_cells,
+                        header_max_lines,
+                    );
+                    header_fresh = true;
+                }
             }
-            // 跨页拆行：续页从下一行继续，表头边框在每页重画。
             let mut drawn = 0usize;
             let mut first_chunk = true;
             let mut cell_links: Vec<Option<(u32, f32)>> = vec![None; ncols];
             while drawn < max_lines {
-                // 行放不下就换页再画：避免页底只剩几 pt 时 fit 被强制为 1，
-                // 使基线越过正文底（文字被裁切或压到页脚）。每页重画边框。
-                if self.y + line_h + pad * 1.4 > self.geom.bottom()
+                // 页底放不下下一视觉行就换页；续页先重绘表头再继续。
+                // `header_fresh` 防止「表头 + 一行」本身超过一页时反复换页死循环。
+                if !header_fresh
+                    && self.y + line_h + TABLE_PAD * 1.4 > self.geom.bottom()
                     && self.y > self.geom.top() + 1.0
                 {
                     self.new_page();
+                    if ri > 0 {
+                        self.repeat_table_header(
+                            x0,
+                            &widths,
+                            &t.aligns,
+                            &header_cells,
+                            header_max_lines,
+                        );
+                    }
                 }
-                let avail = (self.geom.bottom() - self.y - pad * 1.4).max(0.0);
+                let avail = (self.geom.bottom() - self.y - TABLE_PAD * 1.4).max(0.0);
                 let fit = ((avail / line_h).floor() as usize)
                     .max(1)
                     .min(max_lines - drawn);
-                let row_h = line_h * fit as f32 + pad * 1.4;
                 let top = self.y;
-                if ri == 0 && first_chunk {
-                    self.pages[self.page].push(DrawOp::Rect {
-                        x: x0,
-                        y: top,
-                        w: widths.iter().sum(),
-                        h: row_h,
-                        color: COL_HEAD_BG,
-                    });
-                }
-
-                // 单元格文本（保留样式与链接矩形）
-                let mut x = x0;
-                for ci in 0..ncols {
-                    let align = t.aligns.get(ci).copied().unwrap_or_default();
-                    let inner = widths[ci] - 2.0 * pad;
-                    let mut cy = top + pad * 0.7;
-                    for k in 0..fit {
-                        let line: &[LItem] = cell_lines[ci]
-                            .get(drawn + k)
-                            .map(Vec::as_slice)
-                            .unwrap_or(&[]);
-                        self.emit_cell_line(
-                            line,
-                            x + pad,
-                            inner,
-                            cy,
-                            line_h,
-                            align,
-                            &mut cell_links[ci],
-                        );
-                        cy += line_h;
-                    }
-                    x += widths[ci];
-                }
-
-                // 横线
-                let total_w: f32 = widths.iter().sum();
-                for yy in [top, top + row_h] {
-                    self.pages[self.page].push(DrawOp::Line {
-                        x1: x0,
-                        y1: yy,
-                        x2: x0 + total_w,
-                        y2: yy,
-                        width: HAIRLINE_PT,
-                        color: COL_RULE,
-                    });
-                }
-                // 竖线
-                let mut xs = Vec::with_capacity(widths.len() + 1);
-                let mut vx = x0;
-                xs.push(vx);
-                for &cw in &widths {
-                    vx += cw;
-                    xs.push(vx);
-                }
-                for vx in xs {
-                    self.pages[self.page].push(DrawOp::Line {
-                        x1: vx,
-                        y1: top,
-                        x2: vx,
-                        y2: top + row_h,
-                        width: HAIRLINE_PT,
-                        color: COL_RULE,
-                    });
-                }
+                let row_h = self.draw_table_chunk(
+                    x0,
+                    &widths,
+                    &t.aligns,
+                    cell_lines,
+                    drawn,
+                    fit,
+                    top,
+                    ri == 0 && first_chunk,
+                    &mut cell_links,
+                );
                 self.y += row_h;
                 drawn += fit;
                 first_chunk = false;
+                header_fresh = false;
                 if drawn < max_lines {
                     self.new_page();
+                    if ri > 0 {
+                        self.repeat_table_header(
+                            x0,
+                            &widths,
+                            &t.aligns,
+                            &header_cells,
+                            header_max_lines,
+                        );
+                        header_fresh = true;
+                    }
                 }
             }
         }
         self.y += 8.0;
+    }
+
+    /// 排版表格一行：每个单元格按列宽贪心折行，返回 (每列视觉行, 最大视觉行数)。
+    fn layout_table_row(
+        &mut self,
+        s: &Session,
+        row: &[veil_core::TableCell],
+        widths: &[f32],
+        header: bool,
+        media: &mut Option<&mut dyn MediaProvider>,
+    ) -> (Vec<Vec<Vec<LItem>>>, usize) {
+        let base_style = Style {
+            size: TABLE_SIZE,
+            bold: header,
+            ..Style::body()
+        };
+        let mut cell_lines: Vec<Vec<Vec<LItem>>> = Vec::new();
+        let mut max_lines = 1usize;
+        for (ci, &cw) in widths.iter().enumerate() {
+            let inner_w = (cw - 2.0 * TABLE_PAD).max(12.0);
+            let mut items: Vec<LItem> = Vec::new();
+            if let Some(cell) = row.get(ci) {
+                let raw = s.text_slice(cell.range).unwrap_or_default();
+                // 单元格源码是文档切片，base = cell.range.start：
+                // `emit_inlines` 的节点区间是文档绝对偏移，两者口径一致。
+                self.emit_inlines(
+                    &raw,
+                    cell.range.start,
+                    cell.range.start,
+                    cell.range.end,
+                    &cell.inlines,
+                    base_style,
+                    &mut items,
+                    media,
+                );
+            }
+            let mut lines = fill_lines(items, inner_w, self.metrics);
+            if lines.is_empty() {
+                lines.push(Vec::new());
+            }
+            max_lines = max_lines.max(lines.len());
+            cell_lines.push(lines);
+        }
+        (cell_lines, max_lines)
+    }
+
+    /// 画一行表格的 `[drawn, drawn + fit)` 视觉行，返回本 chunk 高度（不推进 `y`）。
+    /// `header_bg` 为真时先铺表头底色；网格线每 chunk 重画。
+    #[allow(clippy::too_many_arguments)]
+    fn draw_table_chunk(
+        &mut self,
+        x0: f32,
+        widths: &[f32],
+        aligns: &[CellAlign],
+        cell_lines: &[Vec<Vec<LItem>>],
+        drawn: usize,
+        fit: usize,
+        top: f32,
+        header_bg: bool,
+        cell_links: &mut [Option<(u32, f32)>],
+    ) -> f32 {
+        let line_h = self.metrics.line_height(TABLE_SIZE);
+        let row_h = line_h * fit as f32 + TABLE_PAD * 1.4;
+        let total_w: f32 = widths.iter().sum();
+        if header_bg {
+            self.pages[self.page].push(DrawOp::Rect {
+                x: x0,
+                y: top,
+                w: total_w,
+                h: row_h,
+                color: COL_HEAD_BG,
+            });
+        }
+
+        // 单元格文本（保留样式与链接矩形）
+        let mut x = x0;
+        for (ci, &cw) in widths.iter().enumerate() {
+            let align = aligns.get(ci).copied().unwrap_or_default();
+            let inner = cw - 2.0 * TABLE_PAD;
+            let mut cy = top + TABLE_PAD * 0.7;
+            for k in 0..fit {
+                let line: &[LItem] = cell_lines
+                    .get(ci)
+                    .and_then(|c| c.get(drawn + k))
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]);
+                self.emit_cell_line(
+                    line,
+                    x + TABLE_PAD,
+                    inner,
+                    cy,
+                    line_h,
+                    align,
+                    &mut cell_links[ci],
+                );
+                cy += line_h;
+            }
+            x += cw;
+        }
+
+        // 横线
+        for yy in [top, top + row_h] {
+            self.pages[self.page].push(DrawOp::Line {
+                x1: x0,
+                y1: yy,
+                x2: x0 + total_w,
+                y2: yy,
+                width: HAIRLINE_PT,
+                color: COL_RULE,
+            });
+        }
+        // 竖线
+        let mut xs = Vec::with_capacity(widths.len() + 1);
+        let mut vx = x0;
+        xs.push(vx);
+        for &cw in widths {
+            vx += cw;
+            xs.push(vx);
+        }
+        for vx in xs {
+            self.pages[self.page].push(DrawOp::Line {
+                x1: vx,
+                y1: top,
+                x2: vx,
+                y2: top + row_h,
+                width: HAIRLINE_PT,
+                color: COL_RULE,
+            });
+        }
+        row_h
+    }
+
+    /// R2：续页顶部重绘表头行（底色 + 单元格文本 + 上下横线 + 竖线）。
+    /// 仅在当前页页首开始（`y` 位于正文顶）时调用；表头自身高于一页时跳过
+    /// （此时只能继续拆表头，见 `table` 中的 R1 例外）。
+    fn repeat_table_header(
+        &mut self,
+        x0: f32,
+        widths: &[f32],
+        aligns: &[CellAlign],
+        header_cells: &[Vec<Vec<LItem>>],
+        header_max_lines: usize,
+    ) {
+        let line_h = self.metrics.line_height(TABLE_SIZE);
+        let row_h = line_h * header_max_lines as f32 + TABLE_PAD * 1.4;
+        if row_h > self.geom.content_h() {
+            return;
+        }
+        let top = self.y;
+        let mut cell_links: Vec<Option<(u32, f32)>> = vec![None; widths.len()];
+        self.draw_table_chunk(
+            x0,
+            widths,
+            aligns,
+            header_cells,
+            0,
+            header_max_lines,
+            top,
+            true,
+            &mut cell_links,
+        );
+        self.y = top + row_h;
     }
 
     /// 在表格单元格内画一行（不推进全局 `y`）。
@@ -3256,6 +3379,65 @@ mod tests {
         );
     }
 
+    /// R2：表格断页落在整行边界（表头算第 0 行），续页顶部必须重绘表头。
+    /// 单行自身高于整页可用高度时才允许行内硬切（R1 例外，另见
+    /// `table_long_cell_is_not_truncated_and_paginates`）。
+    #[test]
+    fn table_paginates_on_row_boundaries_and_repeats_header() {
+        let mut md = String::from("| 列A | 列B |\n| --- | --- |\n");
+        for i in 0..120 {
+            md.push_str(&format!("| r{i:03} | v{i:03} |\n"));
+        }
+        let doc = lay(&md, false);
+        let geom = PageGeom::a4(20.0);
+        let line_h = FakeMetrics.line_height(TABLE_SIZE);
+        let row_h = line_h + TABLE_PAD * 1.4;
+        let header_baseline = geom.top() + TABLE_PAD * 0.7 + FakeMetrics.ascent(TABLE_SIZE);
+        assert!(
+            doc.pages.len() >= 3,
+            "120 行表格应跨多页: {}",
+            doc.pages.len()
+        );
+        for (pi, page) in doc.pages.iter().enumerate() {
+            let mut runs: Vec<&TextRun> = page
+                .iter()
+                .filter_map(|op| match op {
+                    DrawOp::Text(t) if (t.size - TABLE_SIZE).abs() < 0.01 => Some(t),
+                    _ => None,
+                })
+                .collect();
+            // 每页页首都必须是表头（首页原表头，续页重绘）。
+            let head = runs
+                .iter()
+                .find(|r| r.text.contains("列A"))
+                .unwrap_or_else(|| panic!("第 {pi} 页缺少表头文本"));
+            assert!(head.bold, "第 {pi} 页表头应为粗体: {head:?}");
+            assert!(
+                (head.y - header_baseline).abs() < 0.5,
+                "第 {pi} 页表头不在页首: y={} vs {header_baseline}",
+                head.y
+            );
+            // R1：每页所有单元格基线都落在行网格上（没有行被从中间切开）。
+            // 同一视觉行有多个单元格：先按 y 去重成「行」再校验。
+            runs.sort_by(|a, b| a.y.total_cmp(&b.y));
+            let mut row_ys: Vec<f32> = Vec::new();
+            for r in &runs {
+                if row_ys.last().is_none_or(|&y| (r.y - y).abs() >= 0.5) {
+                    row_ys.push(r.y);
+                }
+            }
+            for (k, &y) in row_ys.iter().enumerate() {
+                let expect = header_baseline + k as f32 * row_h;
+                assert!(
+                    (y - expect).abs() < 0.5,
+                    "第 {pi} 页第 {k} 个视觉行不在行边界: y={y} vs {expect}"
+                );
+            }
+        }
+    }
+
+    /// R1 例外（登记规则）：单个表格行自身高于一页可用高度时无法整行不拆，
+    /// 允许在该行内部按视觉行硬切，续页重绘表头；其余行一律只在行边界断页。
     #[test]
     fn table_long_cell_is_not_truncated_and_paginates() {
         // 旧实现把单元格截断到 6 行并追加 `…`；现在必须完整输出并跨页。

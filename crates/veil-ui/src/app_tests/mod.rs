@@ -2291,6 +2291,9 @@ type PrintFrames = Rc<RefCell<Vec<(u32, u32, [[u8; 4]; 4])>>>;
 
 /// 打印端口 mock：按注入页帧跑完整 begin→逐页→end 流程，采样页数/断点/
 /// 各块行顶/页帧尺寸与四角像素，供测试断言（真实 Win32 粘合在产品层）。
+/// 渲染态表格采样：(块顶, 各行行顶偏移, 表头行高)。
+type PrintTableRows = Rc<RefCell<Vec<(f32, Vec<f32>, f32)>>>;
+
 #[derive(Clone, Default)]
 struct FakePrint {
     w: u32,
@@ -2301,6 +2304,7 @@ struct FakePrint {
     geoms: PrintGeoms,
     frames: PrintFrames,
     ended: Rc<Cell<bool>>,
+    table_rows: PrintTableRows,
 }
 
 impl Print for FakePrint {
@@ -2328,6 +2332,20 @@ impl Print for FakePrint {
             gs.push((g.top, tops));
         }
         *self.geoms.borrow_mut() = gs;
+        // 渲染态表格行几何：分页候选与续页表头高都来自同一份 TableLayout。
+        let mut trs = Vec::new();
+        for g in &s.app.index.blocks {
+            if g.kind == BlockKind::Table && s.app.table_shows_grid(g.id, &g.range) {
+                if let Some(tl) = s.app.cache.table(g.id, s.app.table_key(g.id)) {
+                    trs.push((
+                        g.top,
+                        tl.rows.iter().map(|r| r.top).collect::<Vec<_>>(),
+                        tl.rows.first().map_or(0.0, |r| r.height),
+                    ));
+                }
+            }
+        }
+        *self.table_rows.borrow_mut() = trs;
         for i in 0..pages {
             let f = s.render_page(i);
             self.frames.borrow_mut().push((

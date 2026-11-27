@@ -370,6 +370,93 @@ fn print_keeps_short_code_block_on_one_page() {
     }
 }
 
+/// R1/R2（打印路径）：表格只在整行边界断页，续页可用高度扣除重复表头高。
+#[test]
+fn print_table_page_breaks_land_on_row_tops_and_reserve_header() {
+    let mut text = String::from("| 列A | 列B |\n| --- | --- |\n");
+    for i in 0..120 {
+        text.push_str(&format!("| r{i:03} | v{i:03} |\n"));
+    }
+    let p = FakePrint {
+        w: 300,
+        h: 200,
+        scale: 1.0,
+        ..Default::default()
+    };
+    let (pages, breaks, tables) = (p.pages.clone(), p.breaks.clone(), p.table_rows.clone());
+    let mut a = app_print(&text, Box::new(p));
+    a.perform_menu(MenuAction::Print);
+    assert!(pages.get() >= 3, "120 行表格应多页: {}", pages.get());
+    let bs = breaks.borrow();
+    let trs = tables.borrow();
+    assert_eq!(trs.len(), 1, "应采样单张渲染态表格");
+    let (table_top, row_tops, header_h) = &trs[0];
+    assert!(*header_h > 0.0, "表头行高应大于 0");
+    for &b in bs.iter().skip(1) {
+        assert!(
+            row_tops.iter().any(|&t| (table_top + t - b).abs() < 0.5),
+            "断点 {b} 必须落在表格行顶（整行边界）: top={table_top} rows={row_tops:?}"
+        );
+    }
+    // 页首落在表格内部的页（第 2 页起）：可用高度 = 页高 - 表头高。
+    for w in bs.windows(2) {
+        if w[0] > table_top + 0.5 {
+            assert!(
+                w[1] - w[0] <= 200.0 - header_h + 0.5,
+                "续页可用高度未扣除表头: {}-{} > {}",
+                w[1],
+                w[0],
+                200.0 - header_h
+            );
+        }
+    }
+}
+
+/// 续页表头像素：第 2 页起页帧顶部必须出现表头底色（而非正文纸色）。
+#[test]
+fn print_repeats_table_header_pixels_on_continuation_pages() {
+    struct HeaderProbe {
+        w: u32,
+        h: u32,
+        rows: Rc<RefCell<Vec<Vec<[u8; 4]>>>>,
+    }
+    impl Print for HeaderProbe {
+        fn print(&mut self, s: &mut PrintSession) {
+            let pages = s.begin(self.w, self.h, 1.0);
+            let mut out = Vec::new();
+            for i in 0..pages {
+                let f = s.render_page(i);
+                let y = 1.min(f.height.saturating_sub(1));
+                out.push((0..f.width).map(|x| f.get(x, y)).collect());
+            }
+            *self.rows.borrow_mut() = out;
+            s.end();
+        }
+    }
+
+    let mut text = String::from("| 列A | 列B |\n| --- | --- |\n");
+    for i in 0..120 {
+        text.push_str(&format!("| r{i:03} | v{i:03} |\n"));
+    }
+    let probe = HeaderProbe {
+        w: 300,
+        h: 200,
+        rows: Rc::new(RefCell::new(Vec::new())),
+    };
+    let rows = probe.rows.clone();
+    let mut a = app_print(&text, Box::new(probe));
+    a.perform_menu(MenuAction::Print);
+    let frames = rows.borrow();
+    assert!(frames.len() >= 3, "应多页: {}", frames.len());
+    let head_bg = a.input_state.theme.table_head_bg;
+    for (i, row) in frames.iter().enumerate().skip(1) {
+        assert!(
+            row.contains(&head_bg),
+            "第 {i} 页顶部缺少重复表头底色: {head_bg:?}"
+        );
+    }
+}
+
 #[test]
 fn print_collapses_all_reveal_markup() {
     // 光标停在 **粗体** 内：屏幕态该块显源码（含 **）；打印必须收拢为纯文本
@@ -611,6 +698,8 @@ fn zoom_ignored_during_print() {
         saved_scale: 1.0,
         saved_scroll: 0.0,
         breaks: vec![0.0],
+        headers: Vec::new(),
+        resume: None,
     });
     a.set_user_zoom(1.5);
     assert_eq!(a.input_state.user_zoom, 1.0, "打印页帧语义独占 scale");

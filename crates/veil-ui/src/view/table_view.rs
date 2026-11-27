@@ -19,6 +19,7 @@ use super::layout::{
 };
 use super::linebreak;
 use super::style::Style;
+use super::table_strategy::TableCellLayout;
 use crate::app::App;
 use crate::document::block_index::BlockGeom;
 use crate::view::Frame;
@@ -747,7 +748,33 @@ impl App {
                 crate::tokens::palette::table_head_bg(&theme),
             );
         }
-        for c in &t.cells {
+        self.paint_table_cells(frame, x0, top, &t.cells);
+        let w = t.width.ceil().max(1.0) as u32;
+        let h = t.height.ceil().max(1.0) as u32;
+        let mut x: f32 = 0.0;
+        for cw in &t.cols {
+            frame.fill_rect(x0 + x.round() as i32, top, 1, h, theme.grid);
+            x += cw;
+        }
+        let right = t.width.round().max(1.0) as i32;
+        frame.fill_rect(x0 + right - 1, top, 1, h, theme.grid);
+        frame.fill_rect(x0, top, w, 1, theme.grid);
+        for r in &t.rows {
+            frame.fill_rect(
+                x0,
+                top + (r.top + r.height).round() as i32 - 1,
+                w,
+                1,
+                theme.grid,
+            );
+        }
+    }
+
+    /// 画给定单元格的文本位图 + 行内装饰 / 公式 / 图片（网格线由调用方负责）。
+    fn paint_table_cells(&self, frame: &mut Frame, x0: i32, top: i32, cells: &[TableCellLayout]) {
+        let theme = self.input_state.theme;
+        let inline_key = self.inline_key();
+        for c in cells {
             let cy = top + c.y.round() as i32;
             if cy + c.pixel_h as i32 <= 0 || cy >= frame.height as i32 {
                 continue; // 行在视口外
@@ -787,10 +814,7 @@ impl App {
                     self.input_state.scale,
                 );
             }
-        }
-        // 单元格内联公式：叠在文本位图之上、网格线之下（与正文 PlacedImg 同层序）。
-        let inline_key = self.inline_key();
-        for c in &t.cells {
+            // 单元格内联公式：叠在文本位图之上、网格线之下（与正文 PlacedImg 同层序）。
             for m in &c.maths {
                 if let Some(img) = self.cache.inline_math(&m.tex, inline_key) {
                     frame.blit(
@@ -802,13 +826,7 @@ impl App {
                     );
                 }
             }
-        }
-        // 单元格内联图片：按原 alt 占位位置叠在文本位图之上（与公式同层序）。
-        for c in &t.cells {
-            if c.images.is_empty() {
-                continue;
-            }
-            let cy_top = top + c.y.round() as i32;
+            // 单元格内联图片：按原 alt 占位位置叠在文本位图之上（与公式同层序）。
             for img in &c.images {
                 frame.blit_scaled(
                     &img.pixels,
@@ -817,12 +835,31 @@ impl App {
                     img.w,
                     img.h,
                     x0 + (c.x + img.x).round() as i32,
-                    cy_top + img.y.round() as i32,
+                    cy + img.y.round() as i32,
                 );
             }
         }
+    }
+
+    /// 打印续页表头重绘（R2）：在页帧顶部重画该表的表头行（底色 + 单元格 + 边线）。
+    /// 调用方先把整页宽铺成纸色，盖住内容下移后露出的上一行残影。
+    pub(crate) fn paint_repeated_table_header(&self, frame: &mut Frame, id: BlockId, top: i32) {
+        let Some(t) = self.cache.table(id, self.table_key(id)) else {
+            return;
+        };
+        let Some(first) = t.rows.first() else {
+            return;
+        };
+        let x0 = (self.content_x() + t.x) as i32;
+        let theme = self.input_state.theme;
         let w = t.width.ceil().max(1.0) as u32;
-        let h = t.height.ceil().max(1.0) as u32;
+        let h = first.height.ceil().max(1.0) as u32;
+        frame.fill_rect(x0, top, w, h, crate::tokens::palette::table_head_bg(&theme));
+        let ncols = t.cols.len().min(t.cells.len());
+        self.paint_table_cells(frame, x0, top, &t.cells[..ncols]);
+        // 上下边线 + 竖线，与完整网格的分隔线同色同粗。
+        frame.fill_rect(x0, top, w, 1, theme.grid);
+        frame.fill_rect(x0, top + h as i32 - 1, w, 1, theme.grid);
         let mut x: f32 = 0.0;
         for cw in &t.cols {
             frame.fill_rect(x0 + x.round() as i32, top, 1, h, theme.grid);
@@ -830,16 +867,6 @@ impl App {
         }
         let right = t.width.round().max(1.0) as i32;
         frame.fill_rect(x0 + right - 1, top, 1, h, theme.grid);
-        frame.fill_rect(x0, top, w, 1, theme.grid);
-        for r in &t.rows {
-            frame.fill_rect(
-                x0,
-                top + (r.top + r.height).round() as i32 - 1,
-                w,
-                1,
-                theme.grid,
-            );
-        }
     }
 }
 

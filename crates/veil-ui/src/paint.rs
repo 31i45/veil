@@ -1724,6 +1724,19 @@ impl App {
                 oversize.push((sy, l.height, l.full_len));
             }
         }
+        // 打印续页（R2）：页首落在表格内部时，整页内容已按 scroll_y 下移表头高；
+        // 顶部先铺整页宽纸色盖住上一行残影，再重绘该表表头行（表宽可能窄于页宽）。
+        if let Some(r) = self
+            .window_state
+            .print
+            .as_ref()
+            .and_then(|p| p.resume.clone())
+        {
+            let bg = crate::tokens::palette::surface_base(&theme);
+            let band = r.height.ceil().max(1.0) as u32;
+            frame.fill_rect(0, 0, frame.width, band, bg);
+            self.paint_repeated_table_header(&mut frame, r.table, 0);
+        }
         // 专注模式（阶段 1）：非光标块整体压暗（背景色半透明覆盖，内容与装饰一并变淡）。
         // 只读视觉，不动真值与派生缓存；当前块保持原样，光标随后绘制仍清晰。打印不压暗。
         if self.window_state.print.is_none() && self.ui_state.writing.focus {

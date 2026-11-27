@@ -11,7 +11,7 @@ use crate::i18n::{t, tf, Key};
 use crate::mermaid_renderer::MermaidImage;
 use crate::theme::NativeWindow;
 use crate::view::Frame;
-use veil_core::{BlockKind, Range};
+use veil_core::{BlockId, BlockKind, Range};
 
 /// PDF 导出选项（页边距由产品层读取 `Config` 后自行换算）。
 #[derive(Clone, Copy, PartialEq, Debug, Default)]
@@ -40,6 +40,14 @@ impl Print for NoPrint {
     }
 }
 
+/// 续页表头（R2）：页首落在表格内部时，本页顶部需要重绘该表的表头行。
+/// `height` 是表头行高（物理像素），页面内容整体下移同等高度。
+#[derive(Clone)]
+pub(crate) struct ResumeHeader {
+    pub(crate) table: BlockId,
+    pub(crate) height: f32,
+}
+
 /// 打印中的瞬态状态（`WindowState.print`）：页帧尺寸 + 分页结果 + 被打断前的屏幕态。
 /// 存在即表示「正在打印」：win_size/viewport/content_width/绘制全部切换到页帧语义。
 pub(crate) struct PrintState {
@@ -52,6 +60,10 @@ pub(crate) struct PrintState {
     pub(crate) saved_scroll: f32,
     /// 页首 y 坐标序列（文档坐标，物理像素）：breaks[0] = 0.0，页数 = len。
     pub(crate) breaks: Vec<f32>,
+    /// 与 `breaks` 一一对应：该页页首落在表格内部时要重绘的表头（否则 None）。
+    pub(crate) headers: Vec<Option<ResumeHeader>>,
+    /// 当前页（`render_page` 设置）需要重绘的续页表头，供 paint 收尾使用。
+    pub(crate) resume: Option<ResumeHeader>,
 }
 
 /// 打印会话：产品层 Print 实现与 App 之间的唯一通道。
@@ -88,6 +100,8 @@ impl PrintSession<'_> {
             saved_scale: app.input_state.scale,
             saved_scroll: app.window_state.scroll_y,
             breaks: Vec::new(),
+            headers: Vec::new(),
+            resume: None,
         });
         app.input_state.scale = scale.max(0.1);
         app.window_state.scroll_y = 0.0;
@@ -101,21 +115,35 @@ impl PrintSession<'_> {
         let frame_h = app.window_state.print.as_ref().unwrap().h as f32;
         let breaks = app.compute_page_breaks(frame_h);
         let pages = breaks.len();
-        app.window_state.print.as_mut().unwrap().breaks = breaks;
+        // R2：预先判定每页页首是否落在表格内部，render_page 据此下移内容并重绘表头。
+        let headers: Vec<Option<ResumeHeader>> =
+            breaks.iter().map(|&b| app.resume_table_header(b)).collect();
+        let state = app.window_state.print.as_mut().unwrap();
+        state.breaks = breaks;
+        state.headers = headers;
         pages
     }
 
     /// 渲染第 i 页（0-based，i < begin 返回值）：返回整页帧。
     /// 滚动到页首，逐页重建光栅（跨页累积会让长文档打印的内存随页数线性增长）。
+    /// 页首落在表格内部时 `scroll_y = 页首 - 表头高`（内容整体下移表头高，R2），
+    /// 顶部空出的表头区由 paint 用重复表头覆盖。
     pub fn render_page(&mut self, i: usize) -> &Frame {
         let app = &mut *self.app;
-        let scroll = app
-            .window_state
-            .print
-            .as_ref()
-            .and_then(|p| p.breaks.get(i).copied())
-            .unwrap_or(0.0);
-        app.window_state.scroll_y = scroll;
+        let (page_break, resume) = {
+            let Some(p) = app.window_state.print.as_ref() else {
+                return app.render();
+            };
+            (
+                p.breaks.get(i).copied().unwrap_or(0.0),
+                p.headers.get(i).cloned().flatten(),
+            )
+        };
+        let shift = resume.as_ref().map_or(0.0, |r| r.height);
+        app.window_state.scroll_y = (page_break - shift).max(0.0);
+        if let Some(p) = app.window_state.print.as_mut() {
+            p.resume = resume;
+        }
         app.cache.rasters.clear();
         app.render()
     }
@@ -319,9 +347,13 @@ impl App {
         }
     }
 
-    /// 分页（3b）：候选断点 = 各块 top + 文本块各视觉行行顶（渲染态数学图/表格
-    /// 作原子块，只取块 top；高度不足一页的代码块同样整块不拆）。贪心取页内最深
-    /// 候选；无候选（单块/单行超页）硬切页底。返回页首 y 序列（首项恒 0.0，项数即页数）。
+    /// 分页（3b）：候选断点 = 各块 top + 文本块各视觉行行顶 + 渲染态表格各行行顶
+    /// （表头算第 0 行，行顶即断页点）；渲染态数学图/源码态表格作原子块，只取块顶；
+    /// 高度不足一页的代码块同样整块不拆。贪心取页内最深候选；无候选（单块/单行/
+    /// 单个表格行超页）硬切页底。返回页首 y 序列（首项恒 0.0，项数即页数）。
+    ///
+    /// R1：表格只在整行边界断页；单个表格行自身高于该页可用高度时才允许行内硬切。
+    /// R2：页首落在表格内部时，该页可用高度扣掉重复表头高度（表体不被表头遮挡）。
     fn compute_page_breaks(&self, frame_h: f32) -> Vec<f32> {
         let mut breaks = vec![0.0];
         let total_h = self.index.total_h;
@@ -333,8 +365,21 @@ impl App {
         let mut cands: Vec<f32> = Vec::new();
         for g in &self.index.blocks {
             cands.push(g.top);
-            let atomic = (g.kind == BlockKind::Math && self.math_shows_image(g.id, &g.range))
-                || (g.kind == BlockKind::Table && self.table_shows_grid(g.id, &g.range));
+            // 渲染态表格不原子：每行行顶都是合法的页首（表头行顶 = 块顶，已入列）。
+            if g.kind == BlockKind::Table && self.table_shows_grid(g.id, &g.range) {
+                if let Some(tl) = self.cache.table(g.id, self.table_key(g.id)) {
+                    for r in &tl.rows {
+                        cands.push(g.top + r.top);
+                    }
+                }
+                continue;
+            }
+            // R4（接受并说明）：超高原子块（图片 / 渲染态公式 / Mermaid）在打印路径
+            // 不做缩放——打印几何复用屏幕排版，改图高会破坏与正文的行距对应；
+            // 单块高于一页时只能按页底硬切（见 `print_hard_cuts_atomic_block_taller_than_page`）。
+            // 原生 PDF 导出则在 `pdf_layout::push_image` / `push_mermaid_image` 等比
+            // 压到一页内、不产生硬切。两条路径此处是刻意保留的差异，规则以本注释为准。
+            let atomic = g.kind == BlockKind::Math && self.math_shows_image(g.id, &g.range);
             if atomic {
                 continue;
             }
@@ -364,7 +409,9 @@ impl App {
         const EPS: f32 = 0.5;
         loop {
             let start = *breaks.last().unwrap();
-            let limit = start + frame_h;
+            // R2：续页页首要重绘表头，先把这页的可用高度扣减表头高。
+            let reserved = self.resume_table_header(start).map_or(0.0, |h| h.height);
+            let limit = start + (frame_h - reserved).max(1.0);
             if limit >= total_h {
                 break;
             }
@@ -378,6 +425,30 @@ impl App {
             }
         }
         breaks
+    }
+
+    /// `y` 落在某个渲染态表格的内部（严格在表顶之后、表底之前）时，返回续页表头。
+    /// 用于 R2：该页内容下移表头高并在顶部重绘表头行。
+    fn resume_table_header(&self, y: f32) -> Option<ResumeHeader> {
+        for g in &self.index.blocks {
+            if g.kind != BlockKind::Table || !self.table_shows_grid(g.id, &g.range) {
+                continue;
+            }
+            if y <= g.top + 0.5 {
+                continue; // 页首在该表顶端：表头本身就在本页正常绘制
+            }
+            let Some(tl) = self.cache.table(g.id, self.table_key(g.id)) else {
+                continue;
+            };
+            if y >= g.top + tl.height - 0.5 {
+                continue; // 已经越过表底
+            }
+            return tl.rows.first().map(|head| ResumeHeader {
+                table: g.id,
+                height: head.height,
+            });
+        }
+        None
     }
 }
 

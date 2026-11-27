@@ -338,7 +338,7 @@ pub fn html_of_doc(
                     render_block_inlines(session, &mut fn_occurrences, font, &text, start, &nodes);
                 pulldown_cmark::html::push_html(
                     &mut body,
-                    pulldown_cmark::Parser::new_ext(&format!("{defs}{rendered}"), opts),
+                    pulldown_cmark::Parser::new_ext(&with_defs(&defs, &rendered), opts),
                 );
             }
             i = j;
@@ -426,7 +426,7 @@ pub fn html_of_doc(
         let mut html = String::new();
         pulldown_cmark::html::push_html(
             &mut html,
-            pulldown_cmark::Parser::new_ext(&format!("{defs}{rendered}"), opts),
+            pulldown_cmark::Parser::new_ext(&with_defs(&defs, &rendered), opts),
         );
         if caption.is_some() || standalone_align.is_some() {
             let inner = html
@@ -522,6 +522,20 @@ fn blank_callout_marker(text: &str) -> std::borrow::Cow<'_, str> {
     }
 }
 
+/// 把文档级链接定义前缀与待解析块源文拼接。
+///
+/// 定义行本身是段落级构造：若直接紧贴正文（`[乙]: url\n    甲`），紧随其后的
+/// 4 空格缩进行会被 pulldown 当作该段落的懒续行（缩进代码不能打断段落），使
+/// `IndentedCode` 降级为 `<p>`。`defs` 非空时在定义与正文之间补一个空行终止
+/// 定义段落；`defs` 为空时输出与正文完全一致（不引入多余空行）。
+fn with_defs(defs: &str, body: &str) -> String {
+    if defs.is_empty() {
+        body.to_string()
+    } else {
+        format!("{defs}\n{body}")
+    }
+}
+
 /// Callout 块 → 自包含 `<div class="callout callout-<name>">`（内联样式）。
 /// 正文仍交 pulldown 渲染，去掉外层 `<blockquote>` 包裹（`>` 缩进语义由原源码保留）。
 fn callout_html(
@@ -552,7 +566,7 @@ fn callout_html(
     let mut html = String::new();
     pulldown_cmark::html::push_html(
         &mut html,
-        pulldown_cmark::Parser::new_ext(&format!("{defs}{rendered}"), opts),
+        pulldown_cmark::Parser::new_ext(&with_defs(defs, &rendered), opts),
     );
     let inner = html.strip_prefix("<blockquote>\n").unwrap_or(&html);
     let inner = inner.strip_suffix("</blockquote>\n").unwrap_or(inner);
@@ -650,7 +664,7 @@ fn atx_content_span(line: &str) -> (usize, usize) {
 /// `defs` 为文档级链接定义前缀，须放在包裹行之前（定义行自身不能进标题内容）。
 fn inline_html(defs: &str, content: &str, opts: pulldown_cmark::Options) -> String {
     let mut src = String::with_capacity(defs.len() + content.len() + 16);
-    src.push_str(defs);
+    src.push_str(&with_defs(defs, ""));
     for line in content.split('\n') {
         src.push_str("# ");
         src.push_str(line);
@@ -3587,6 +3601,30 @@ mod tests {
         assert!(!body.contains("<hr"), "实际输出: {body}");
         assert!(!body.contains("tags:"), "实际输出: {body}");
         assert!(body.contains("<p>正文</p>"), "正文须保留: {body}");
+    }
+
+    #[test]
+    fn link_ref_defs_prefix_keeps_indented_code_block() {
+        // DEF/CASE-ADJB-086/239：跨块引用定义被收集为 `defs` 前缀时，若与缩进代码
+        // 行直接拼接（`[乙]: url\n    甲`），pulldown 会把 `    甲` 当作定义段落的
+        // 懒续行（缩进代码不能打断段落），IndentedCode 降级为 `<p>`。修复后定义与
+        // 正文之间补空行，缩进代码仍是独立块。
+        let body = body_of("[乙]: https://e.test/乙\n\n    甲\n");
+        assert!(body.contains("<pre>"), "缩进代码须保留 <pre>：{body}");
+        assert!(body.contains("<code>"), "缩进代码须保留 <code>：{body}");
+        let pre = body.find("<pre>").expect("应有 <pre>");
+        let label = body.find('甲').expect("应有可见文本 甲");
+        assert!(label > pre, "甲 须落在代码块内：{body}");
+        assert!(!body.contains("<p>甲</p>"), "不得降级为段落：{body}");
+    }
+
+    #[test]
+    fn adjacent_highlights_export_two_marks() {
+        // CASE-ADJI-184：4 连等号边界修复后，`==甲====乙==` 应导出两个 `<mark>`。
+        let body = body_of("==甲====乙==\n");
+        assert_eq!(body.matches("<mark>").count(), 2, "应为两个 <mark>：{body}");
+        assert!(body.contains("<mark>甲</mark>"), "甲 应在 mark 内：{body}");
+        assert!(body.contains("<mark>乙</mark>"), "乙 应在 mark 内：{body}");
     }
 
     #[test]

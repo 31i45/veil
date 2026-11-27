@@ -46,6 +46,7 @@ pub(super) fn parse_inlines(text: &str, base: usize, refs: &RefMap) -> Vec<Inlin
         bracket_pairs: Vec::new(),
         resolved_prefix: Vec::new(),
         backtick_runs: Vec::new(),
+        adjacent_highlight_open: None,
     }
     .parse_until(None, true, 0);
     link_bare_urls(text, base, nodes)
@@ -1132,6 +1133,10 @@ struct InlineParser<'a> {
     /// **不可按本层 stop 裁剪**：代码段优先级高于删除线（`` ~~a `b~~` c~~ `` 的首个
     /// `~~` 属于代码段内容），裁剪后闭 run 找不到，会误判删除线闭标记。
     backtick_runs: Vec<(usize, usize)>,
+    /// 两个相邻高亮的 4 连等号边界：高亮以 4 连 `=` 的前两个闭合并前进后，
+    /// 记录剩余的 `==` 起点，允许该位置无视「前导 `=`」豁免开标记判定。
+    /// 仅此一处使用；位置单调递增，过期值（< 当前 pos）不会再次命中。
+    adjacent_highlight_open: Option<usize>,
 }
 
 impl<'a> InlineParser<'a> {
@@ -1457,6 +1462,7 @@ impl<'a> InlineParser<'a> {
             bracket_pairs: Vec::new(),
             resolved_prefix: Vec::new(),
             backtick_runs: Vec::new(),
+            adjacent_highlight_open: None,
         };
         let children = sub.parse_until(None, true, depth + 1);
         self.pos = close_gt;
@@ -1599,14 +1605,21 @@ impl<'a> InlineParser<'a> {
     /// `==text==`（高亮，等价 `<mark>`）：最近闭标记成节点，内容非空，子节点递归。
     /// `===` 不作为开标记；闭标记若属于更长的 `=` run（`===`）同样不承认，
     /// 避免把 `===x===` 的边界错切。转义 `\==` 由通用转义扫描消费。
+    ///
+    /// 唯一例外是「两个相邻高亮的 4 连等号边界」：`==甲====乙==` 中间 `=` run
+    /// 恰为 4 时，前两个作前一个高亮的闭标记、后两个作后一个高亮的开标记，
+    /// 得到 `Highlight(甲)` + `Highlight(乙)`。该豁免只认长度恰为 4 的 run，
+    /// 长度 3 或 ≥5 的 run 仍不可开/不可闭（`===x===` 整体保持字面文本）。
     fn try_highlight(&mut self, depth: usize) -> Option<InlineNode> {
         let rest = &self.s[self.pos..];
         if !rest.starts_with("==") {
             return None;
         }
-        // 开标记必须是长度恰为 2 的 `=` run（`===` 的任一位置都不开）。
+        // 开标记必须是长度恰为 2 的 `=` run（`===` 的任一位置都不开）；唯一放行
+        // 的是上一高亮以 4 连 run 的前两个 `=` 闭合后、剩余 `==` 所在的位置。
         let prev_eq = self.pos > 0 && self.s.as_bytes()[self.pos - 1] == b'=';
-        if prev_eq || rest.as_bytes().get(2) == Some(&b'=') {
+        let after_adjacent_close = self.adjacent_highlight_open == Some(self.pos);
+        if (prev_eq && !after_adjacent_close) || rest.as_bytes().get(2) == Some(&b'=') {
             return None;
         }
         let start = self.pos;
@@ -1620,11 +1633,16 @@ impl<'a> InlineParser<'a> {
         self.backtick_runs = saved_runs;
         let content_end = self.pos;
         let content = &self.s[start + 2..content_end];
-        // 闭标记同为长度恰为 2 的 run；跨行（含 `\n`）不识别。
+        // 闭标记须为长度恰为 2 的 run；跨行（含 `\n`）不识别。4 连 run 特例：
+        // 前两个闭合并，后两个留给下一个高亮开启（见函数注释）。
         let close_prev_eq = content_end > 0 && self.s.as_bytes()[content_end - 1] == b'=';
-        let closed = self.s[content_end..].starts_with("==")
-            && !close_prev_eq
-            && self.s.as_bytes().get(content_end + 2) != Some(&b'=')
+        let run = self.s[content_end..]
+            .bytes()
+            .take_while(|&b| b == b'=')
+            .count();
+        let four_run = run == 4;
+        let closed = !close_prev_eq
+            && (run == 2 || four_run)
             && content_end > start + 2
             && !content.contains('\n');
         if !closed {
@@ -1632,6 +1650,10 @@ impl<'a> InlineParser<'a> {
             return None;
         }
         self.pos = content_end + 2;
+        if four_run {
+            // 剩余两个 `=` 成为下一个高亮的开标记（位置豁免「前导 `=`」约束）。
+            self.adjacent_highlight_open = Some(self.pos);
+        }
         Some(self.node(
             InlineKind::Highlight,
             start,
@@ -1766,6 +1788,7 @@ impl<'a> InlineParser<'a> {
             bracket_pairs: Vec::new(),
             resolved_prefix: Vec::new(),
             backtick_runs: Vec::new(),
+            adjacent_highlight_open: None,
         };
         sub.parse_until(None, false, depth + 1)
     }
@@ -2608,6 +2631,29 @@ mod tests {
             sexp(&parse("==a [b c== d](url)==")),
             "Highlight[0..10 c=2..8]"
         );
+    }
+
+    #[test]
+    fn highlight_adjacent_four_equals_splits_into_two() {
+        // 两个相邻高亮的 4 连等号边界：前两个 `=` 闭合前一个高亮、后两个开启后一个。
+        let text = "==甲====乙==";
+        let ns = parse(text);
+        assert_eq!(sexp(&ns), "Highlight[0..7 c=2..5] Highlight[7..14 c=9..12]");
+        assert_eq!(ns.len(), 2);
+        assert!(ns.iter().all(|n| n.kind == InlineKind::Highlight));
+        assert_eq!(&text[ns[0].content.start..ns[0].content.end], "甲");
+        assert_eq!(&text[ns[1].content.start..ns[1].content.end], "乙");
+        // 区间互不重叠（首尾相接）。
+        assert!(ns[0].range.end <= ns[1].range.start);
+    }
+
+    #[test]
+    fn highlight_triple_equals_boundaries_stay_literal() {
+        // 4 连 run 是唯一豁免：长度 3 的 run 既不开也不闭。
+        assert_eq!(sexp(&parse("===x===")), "");
+        // `==x===` 的闭标记落在长度 3 的 run 上，维持「不可闭」→ 整体字面文本，
+        // 不拆出 `Highlight("x")` + 字面 `=`。
+        assert_eq!(sexp(&parse("==x===")), "");
     }
 
     // ===== Strikethrough（P3-4）：`~~del~~` =====

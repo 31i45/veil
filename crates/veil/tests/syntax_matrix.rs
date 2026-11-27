@@ -1462,9 +1462,6 @@ fn pair_adjust(a: usize, b: usize) -> PairAdjust {
             adj.label_html[1] = Some(LabelHtml::Absent);
             adj.pdf_label[1] = Some(false);
         }
-        // 真实缺陷（Task 4）：link ref defs 前缀使缩进代码在 HTML 导出中降级为段落。
-        (4, 13) => adj.skip_markers[0] = true,
-        (13, 4) => adj.skip_markers[1] = true,
         _ => {}
     }
     adj
@@ -1495,15 +1492,17 @@ const ADJ_MERGES: [(usize, &str); 3] = [
     ),
 ];
 
-/// 真实跨表面缺陷（不计 FAIL，登记为 Task 4 待修；证据见报告）。
-const ADJ_DEFECTS: [(usize, &str); 2] = [
+/// 真实跨表面缺陷（Task 4 已修复，保留证据 CASE 号）：link-ref defs 前缀曾使
+/// 缩进代码在 HTML 导出中降级为 `<p>`（见报告「已修复」条目与 `export.rs`
+/// `link_ref_defs_prefix_keeps_indented_code_block`）。
+const ADJ_FIXED_DEFECTS: [(usize, &str); 2] = [
     (
         86,
-        "IndentedCode + LinkRefDef：PARSE/PDF 为 IndentedCode，HTML 导出把跨块引用定义收集成 defs 前缀（`[乙]: …` 紧贴 `    甲`），缩进代码被 pulldown 降级为 <p>，结构标记 <pre> 消失",
+        "IndentedCode + LinkRefDef：HTML 导出把跨块引用定义收集成 defs 前缀（`[乙]: …` 紧贴 `    甲`），缩进代码被 pulldown 降级为 <p>；已在 `defs` 与正文间补空行修复",
     ),
     (
         239,
-        "LinkRefDef + IndentedCode：同上（LinkRefDef 在 A 侧），HTML 的 `    乙` 被 defs 前缀降级为 <p>，<pre> 消失",
+        "LinkRefDef + IndentedCode：同上（LinkRefDef 在 A 侧），HTML 的 `    乙` 曾被 defs 前缀降级为 <p>；已修复",
     ),
 ];
 
@@ -1776,12 +1775,12 @@ fn inline_expected_kinds(a: usize, b: usize, no_space: bool) -> Vec<&'static str
     out
 }
 
-/// 真实缺陷（Task 4 待修）：`==甲====乙==` 的高亮开闭标记扫描拒绝长度 4 的 `=` run，
-/// 整段回退为纯文本，Highlight 节点与 `<mark>` 结构标记同时消失。
-/// 本轮仅暂缓该用例的 `inline_kinds` 与 `<mark` 两条结构断言，其余断言照常执行。
-const ADJ_INLINE_DEFECTS: [(usize, &str); 1] = [(
+/// 真实缺陷（Task 4 已修复，保留证据 CASE 号）：`==甲====乙==` 中长度 4 的 `=` run
+/// 曾是「既不开也不闭」的死区，整段降级为纯文本；`try_highlight` 现允许该 4 连 run
+/// 的前两个闭合、后两个开启，解析为两个 Highlight（见报告「已修复」条目）。
+const ADJI_FIXED_DEFECTS: [(usize, &str); 1] = [(
     184,
-    "Highlight + Highlight（无空格，`==甲====乙==`）：`=` run 长度 4 既不能作为开标记也不能作为闭标记，整段降级为纯文本；PARSE 顶层节点为空（期望两个 Highlight），HTML 无 `<mark>`（实际 `==甲====乙==`）。仅暂缓该用例的 `inline_kinds` 与 `<mark` 断言，HTML 可见标签/PDF/UI/PRINT 仍执行",
+    "Highlight + Highlight（无空格，`==甲====乙==`）：`=` run 长度 4 曾既不能开也不能闭，整段降级为纯文本；`try_highlight` 的 4 连等号边界规则已修复，现解析出两个 Highlight 并导出两个 `<mark>`",
 )];
 
 fn adjacency_inline_cases() -> Vec<Case> {
@@ -1894,18 +1893,6 @@ fn adjacency_inline_cases() -> Vec<Case> {
         }
     }
     out
-}
-
-/// 该用例命中的真实缺陷序号（仅 ADJI 有）。
-fn inline_defect_n(case: &Case) -> Option<usize> {
-    if case.group != ADJI_GROUP {
-        return None;
-    }
-    let n: usize = case.id.rsplit('-').next()?.parse().ok()?;
-    ADJ_INLINE_DEFECTS
-        .iter()
-        .find(|(m, _)| *m == n)
-        .map(|(m, _)| *m)
 }
 
 /// ADJI 抽样金样：先排除脚注定义用例（文末脚注区块的编号/回链不稳定），
@@ -2393,7 +2380,6 @@ fn syntax_matrix_surfaces() {
 }
 
 fn run_case(case: &Case, rows: &mut Vec<Row>, digest: &mut Vec<(String, String)>) {
-    let inline_defect = inline_defect_n(case);
     // ---- 源字节 → 文本（与产品打开路径一致：BOM 由 decode 剥离） ----
     let bytes = case.encoded();
     let text = match veil_ui::decode(&bytes) {
@@ -2445,7 +2431,7 @@ fn run_case(case: &Case, rows: &mut Vec<Row>, digest: &mut Vec<(String, String)>
                 }
             }
             // ADJI：顶层行内节点序列 + 区间不变量（落在段落块区间、字符边界、
-            // 按起点有序且互不重叠）。缺陷用例只暂缓序列比较，不变量照常检查。
+            // 按起点有序且互不重叠）。
             for want in case.check_values("inline_kinds") {
                 let expected: Vec<&str> = if want == "None" {
                     Vec::new()
@@ -2463,16 +2449,14 @@ fn run_case(case: &Case, rows: &mut Vec<Row>, digest: &mut Vec<(String, String)>
                     parse_problems.push("inline_kinds：block_inlines 返回 None".to_string());
                     continue;
                 };
-                if inline_defect.is_none() {
-                    let actual: Vec<&'static str> =
-                        nodes.iter().map(|n| inline_kind_name(&n.kind)).collect();
-                    if expected != actual {
-                        parse_problems.push(format!(
-                            "inline_kinds 期望 [{}]，实际 [{}]",
-                            expected.join(","),
-                            actual.join(",")
-                        ));
-                    }
+                let actual: Vec<&'static str> =
+                    nodes.iter().map(|n| inline_kind_name(&n.kind)).collect();
+                if expected != actual {
+                    parse_problems.push(format!(
+                        "inline_kinds 期望 [{}]，实际 [{}]",
+                        expected.join(","),
+                        actual.join(",")
+                    ));
                 }
                 for (i, node) in nodes.iter().enumerate() {
                     let r = node.range;
@@ -2665,11 +2649,6 @@ fn run_case(case: &Case, rows: &mut Vec<Row>, digest: &mut Vec<(String, String)>
                 let body = body_html(&html);
                 let body_norm = strip_tag_attrs(body);
                 for want in case.check_values("html_contains") {
-                    // ADJI 缺陷 CASE-ADJI-184：高亮分隔符被吞并导致 `<mark>` 缺失，
-                    // 仅暂缓该条结构断言（报告登记），其余片段照常检查。
-                    if inline_defect.is_some() && want == "<mark" {
-                        continue;
-                    }
                     // 原文命中（属性类断言如 class=/id=/alt= 保持严格）或归一后命中。
                     if !html.contains(want) && !norm_html.contains(&strip_tag_attrs(want)) {
                         problems.push(format!(
@@ -3210,16 +3189,11 @@ fn write_report(rows: &[Row], stats: &MatrixStats, adj_na: &[&Case]) {
         out.push('\n');
     }
 
-    out.push_str(
-        "## ADJB 真实缺陷（Task 4 待修；本轮为保证 0 FAIL 未对这些对的 HTML 结构标记断言）\n\n",
-    );
-    for (n, why) in ADJ_DEFECTS {
+    out.push_str("## 真实缺陷（Task 4 已修复，结构断言已全量恢复）\n\n");
+    for (n, why) in ADJ_FIXED_DEFECTS {
         out.push_str(&format!("- `CASE-ADJB-{n:03}`：{why}\n"));
     }
-    out.push('\n');
-
-    out.push_str("## ADJI 真实缺陷（Task 4 待修）\n\n");
-    for (n, why) in ADJ_INLINE_DEFECTS {
+    for (n, why) in ADJI_FIXED_DEFECTS {
         out.push_str(&format!("- `CASE-ADJI-{n:03}`：{why}\n"));
     }
     out.push('\n');
@@ -3250,6 +3224,16 @@ fn write_report(rows: &[Row], stats: &MatrixStats, adj_na: &[&Case]) {
     out.push('\n');
 
     out.push_str("## 降级与边界说明\n\n");
+    out.push_str("### 矩阵缺陷分流表\n\n");
+    out.push_str("| 类别 | CASE | 现象 | 处置 |\n|---|---|---|---|\n");
+    out.push_str("| 真实缺陷（已修复） | `CASE-ADJB-086`、`CASE-ADJB-239` | HTML 导出把跨块 link-ref 定义收集为 `defs` 前缀并紧贴正文，紧随的 4 空格缩进行被 pulldown 当作定义段落的懒续行（缩进代码不能打断段落），`IndentedCode` 降级为 `<p>`、`<pre>` 消失 | `export.rs` 新增 `with_defs()`：`defs` 非空时与正文之间补一个空行（定义段落终止），覆盖普通块 / 列表项 / Callout / 标题四处拼接点；`defs` 为空时输出不变。结构断言已全量恢复 |\n");
+    out.push_str("| 真实缺陷（已修复） | `CASE-ADJI-184` | `==甲====乙==` 中长度 4 的 `=` run 既不可作开标记也不可作闭标记，整段降级为纯文本，`Highlight` 节点与 `<mark>` 同时消失 | `veil-core` 的 `try_highlight` 增加「4 连等号边界」规则：run 恰为 4 时前两个闭合当前高亮、后两个开启下一个，解析出两个 `Highlight` 并导出两个 `<mark>`；长度 3 或 ≥5 的 run 维持原行为 |\n");
+    out.push_str("| 规范允许合并（非缺陷） | `CASE-ADJB-077`、`CASE-ADJB-149`、`CASE-ADJB-257` | 两单元在块边界无空行时按 CommonMark 合并为单块：缩进代码+缩进代码因块内空行不终止缩进代码而合并；列表项+缩进代码因 4 列行仅比内容列多 2 列按项内段落续块；脚注定义+缩进代码因定义续行要求缩进 ≥4 列被并入定义正文 | 按解析器真实块序列断言（见「ADJB 规范合并」条目），不登记为缺陷 |\n");
+    out.push_str("| 规范允许合并（非缺陷） | `CASE-ADJI-002`、`CASE-ADJI-028`、`CASE-ADJI-054` | 无空格边界下 Strong+Strong / Emph+Emph / Code+Code 按 CommonMark「rule of 3」或代码跨度等长规则退化为单个节点 | 按规范预期节点序列断言（见「ADJI 规范合并例外」表，逐条附规范依据） |\n");
+    out.push_str("| 模型边界（非缺陷） | ADJB 的 Callout 单元 | 默认 `callouts.json` 为空且 ADJB 不注入 registry，`> [!FIXME]` 无法产生自定义 Callout 块型，实测回退为 `BlockQuote` | 该单元覆盖未知标记回退路径；真实自定义 Callout 的 7 表面断言由 ADJC 的 Callout 容器组覆盖 |\n");
+    out.push_str("| 模型边界（非缺陷） | ADJC 容器内的 Math / 嵌套 Admonition | 容器展开只把 `Table`（ListItem / BlockQuote / Details）与 `Mermaid`（全部 5 类容器）提升为独立块；容器内 Math 与内层 Admonition/Callout 仍按容器正文渲染，不产生独立块 | 对应结构标记仅在真正成为独立块的 Details 容器中断言，其余容器登记 Ignore（既有解析模型边界） |\n");
+    out.push('\n');
+
     out.push_str("- 断言口径（D4）：`html_contains`/`html_not_contains` 比较前对正文与期望片段做开始标签属性归一（h1–h6、details、summary、th、td、table、thead、tbody、tr、ul、ol、li、p、pre、code、figure、blockquote、mark），使 `<h1 id=…>` ≡ `<h1>`、`<details open>` ≡ `<details>`、`<th style=…>` ≡ `<th>`；属性类原文片段（`class=`、`id=`、`alt=` 等）仍按原文严格命中，纯文本片段不归一。\n");
     out.push_str("- `html_not_contains` 仅在 `<body>…</body>` 范围内检查，head 内的 `<style>`/`<title>` 不计为正文泄漏。\n");
     out.push_str("- 金样比较保持原文严格，不受上述归一影响。\n");
@@ -3281,7 +3265,7 @@ fn write_report(rows: &[Row], stats: &MatrixStats, adj_na: &[&Case]) {
     out.push_str("- ADJI（生成式行内相邻）：12 个行内单元（Strong…HtmlLiteral）× 12 个有序对 × 2 种边界（`A + \" \" + B` / `A + B`）= 288；文档为单段落，末尾恒加 `\\n`。A 侧标签 `甲`、B 侧标签 `乙`；任一单元为 FootnoteRef 时附对应脚注定义（`[^甲]: 注一` / `[^乙]: 注二`，不含标签，避免污染可见标签断言）。PARSE 新增 `inline_kinds` 断言顶层节点序列，并检查每个节点区间落在段落块区间内、位于 UTF-8 字符边界、按起点有序且互不重叠（相邻首尾可相接）。\n");
     out.push_str("- ADJI 的 HTML/PDF 断言：每个单元断言结构标记（`<strong`/`<em`/`<code`/`<a href=`/`<img`/`<del`/`<mark`/`<sup`/`<kbd`/`<br`；Math 断言降级源码 `$甲$`，HtmlLiteral 断言字面文本 `<foo>甲</foo>`）；可见标签（Strong/Emph/Code/Link/Strikethrough/Highlight/Html/HtmlLiteral）在正文按顺序各出现一次，PDF `pdf_text` 同样断言；不可见单元按上表 Ignore。\n");
     out.push_str("- ADJI 的 HtmlLiteral：`<foo>甲</foo>` 不是行内白名单标签，既有解析语义把它当纯文本，故不产出 inline 节点（`inline_kinds=None` 或仅另一单元的节点）；导出件按字面输出 `<foo>甲</foo>`，标签断言仍覆盖。这是既有语义，不是节点丢失。\n");
-    out.push_str("- ADJI 的无空格边界：Strong+Strong / Emph+Emph / Code+Code 按 CommonMark「rule of 3」或代码跨度等长规则合并为单节点，登记在「ADJI 规范合并例外」表；CASE-ADJI-184（Highlight+Highlight）实测为真实缺陷（`=` run 被吞、节点与 `<mark>` 同时消失），只暂缓该用例的 `inline_kinds` 与 `<mark` 两条结构断言，其余断言照常执行并在「ADJI 真实缺陷」登记。\n");
+    out.push_str("- ADJI 的无空格边界：Strong+Strong / Emph+Emph / Code+Code 按 CommonMark「rule of 3」或代码跨度等长规则合并为单节点，登记在「ADJI 规范合并例外」表；CASE-ADJI-184（Highlight+Highlight，`==甲====乙==`）曾因 4 连 `=` run 被吞而整段降级为纯文本，已由 `try_highlight` 的「4 连等号边界」规则修复（两个 Highlight + 两个 `<mark>`），`inline_kinds` 与 `<mark` 结构断言已全量恢复。\n");
     out.push_str("- ADJI 的 Math：行内 CJK 公式无 STIX 字形，`export::html_of_doc` 的 `math_svg` 返回 None，保留源码 `$甲$`（产品既有降级路径，不是相邻干扰）；因此 Math 单元的结构断言是降级源码字面量而非 `class=\"math`，标签可见性按 Ignore 处理。\n");
     out.push_str("- ADJI 金样：排除脚注定义用例（文末脚注区块编号/回链易受实现细节影响）后，对剩余 242 条等距抽取 20 条写全文金样；全量 288 条 HTML 写入 `docs/qa/adjacency-digest.txt`，运行时逐条重算比对，缺失记录按新增组补写，已存在记录不一致即 FAIL。\n");
     out.push_str("- ADJC 金样与摘要：抽样 20 条（覆盖 5 类容器、避开 Mermaid 浮点坐标）写全文金样；全量 90 条 HTML 追加写入 `docs/qa/adjacency-digest.txt`（与 ADJB 306 行、ADJI 288 行共存，共 684 行），运行时逐条重算比对。\n");

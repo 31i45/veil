@@ -336,6 +336,40 @@ fn print_breaks_inside_tall_block_at_line_tops() {
     assert_breaks_on_boundaries(&breaks.borrow(), &geoms.borrow());
 }
 
+/// 短代码块（高度 ≤ 一页）在打印分页中整块不拆，与原生 PDF 导出同规则。
+#[test]
+fn print_keeps_short_code_block_on_one_page() {
+    // 40 段填充把 4 行代码块推到不同页底位置；每档页高都不得从代码块中间切开。
+    let filler: String = (0..40).map(|i| format!("段{i}\n\n")).collect();
+    let text = format!("{filler}```rust\nfn main() {{\n    let x = 1;\n}}\n```\n");
+    // 页高均高于代码块自身高度：只有此时「整块不拆」才是可兑现的承诺。
+    for h in [120u32, 150, 180, 210, 240, 270] {
+        let p = FakePrint {
+            w: 300,
+            h,
+            scale: 1.0,
+            ..Default::default()
+        };
+        let (breaks, geoms) = (p.breaks.clone(), p.geoms.clone());
+        let mut a = app_print(&text, Box::new(p));
+        a.perform_menu(MenuAction::Print);
+        let bs = breaks.borrow();
+        let gs = geoms.borrow();
+        let (top, lines) = gs.last().expect("至少一个块");
+        let line_h = lines.get(1).copied().unwrap_or(0.0);
+        let block_h = lines.last().copied().unwrap_or(0.0) + line_h;
+        assert!(block_h <= h as f32, "h={h}: 页高应高于代码块高度 {block_h}");
+        for &b in bs.iter().skip(1) {
+            for &t in lines.iter().skip(1) {
+                assert!(
+                    (top + t - b).abs() >= 0.5,
+                    "h={h}: 短代码块被页内行切断（break={b}, 块顶={top}, 行顶={lines:?}）"
+                );
+            }
+        }
+    }
+}
+
 #[test]
 fn print_collapses_all_reveal_markup() {
     // 光标停在 **粗体** 内：屏幕态该块显源码（含 **）；打印必须收拢为纯文本

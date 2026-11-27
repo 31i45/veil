@@ -320,8 +320,8 @@ impl App {
     }
 
     /// 分页（3b）：候选断点 = 各块 top + 文本块各视觉行行顶（渲染态数学图/表格
-    /// 作原子块，只取块 top）。贪心取页内最深候选；无候选（单块/单行超页）硬切页底。
-    /// 返回页首 y 序列（首项恒 0.0，项数即页数）。
+    /// 作原子块，只取块 top；高度不足一页的代码块同样整块不拆）。贪心取页内最深
+    /// 候选；无候选（单块/单行超页）硬切页底。返回页首 y 序列（首项恒 0.0，项数即页数）。
     fn compute_page_breaks(&self, frame_h: f32) -> Vec<f32> {
         let mut breaks = vec![0.0];
         let total_h = self.index.total_h;
@@ -336,6 +336,14 @@ impl App {
             let atomic = (g.kind == BlockKind::Math && self.math_shows_image(g.id, &g.range))
                 || (g.kind == BlockKind::Table && self.table_shows_grid(g.id, &g.range));
             if atomic {
+                continue;
+            }
+            // 短代码块整块不拆：与原生 PDF 导出（`pdf_layout::code`）同一规则。
+            // 块高 ≤ 一页时只保留块顶候选，页底放不下就整体移到下一页；
+            // 超高代码块仍按行跨页，不做无意义的整页浪费。
+            let short_code = matches!(&g.kind, BlockKind::FencedCode(_) | BlockKind::IndentedCode)
+                && g.height <= frame_h;
+            if short_code {
                 continue;
             }
             if let Some(l) = self.cache.layout(

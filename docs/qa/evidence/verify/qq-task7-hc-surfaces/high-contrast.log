@@ -1,0 +1,21 @@
+[16:32:18.606] INFO  原值：Flags(注册表)=126 Flags(SPI)=126
+[16:32:18.675] INFO  预置快照：C:\Users\31i45\AppData\Local\Temp\veil-hc-surfaces-20261127-163218-4452\home\snapshots\df683a03bbcc686c
+[16:32:19.072] INFO  已启动 Veil：PID=4492 文档=C:\Users\31i45\AppData\Local\Temp\veil-hc-surfaces-20261127-163218-4452\hc-surfaces.md
+[16:32:19.295] INFO  主窗口：HWND=11995674 标题=veil — hc-surfaces.md
+[16:32:25.568] INFO  已开启高对比度：SPI=127（返回 True）注册表=127
+[16:32:28.410] PASS  已保存 hc-editor.png（平均亮度 30.4）
+[16:32:28.490] INFO  等待命令面板/删除确认截图完成：最多 300s（done 文件 D:\VSCode\Veil\evidence\verify\qq-task7-hc-surfaces\hc-done.txt）
+[16:37:28.789] WARN  等待超时（300s），按计划恢复
+[16:37:34.757] PASS  已恢复原值：Flags=126 注册表=126
+[16:37:36.519] INFO  恢复后窗口平均亮度=44.3
+[16:47:55.814] INFO  原值：Flags(注册表)=126 Flags(SPI)=126
+[16:47:55.884] INFO  预置快照：C:\Users\31i45\AppData\Local\Temp\veil-hc-surfaces-20261127-164755-21324\home\snapshots\6af6a0980515f81c
+[16:47:55.982] INFO  已启动 Veil：PID=18060 文档=C:\Users\31i45\AppData\Local\Temp\veil-hc-surfaces-20261127-164755-21324\hc-surfaces.md
+[16:47:56.196] INFO  主窗口：HWND=6031404 标题=veil — hc-surfaces.md
+[16:48:02.521] INFO  已开启高对比度：SPI=127（返回 True）注册表=127
+[16:48:05.376] PASS  已保存 hc-editor.png（平均亮度 27.1）
+[16:48:07.872] PASS  已打开版本历史并保存 hc-history.png
+[16:48:07.960] INFO  等待命令面板/删除确认截图完成：最多 600s（done 文件 D:\VSCode\Veil\evidence\verify\qq-task7-hc-surfaces\hc-done.txt）
+[16:58:08.201] WARN  等待超时（600s），按计划恢复
+[16:58:15.085] PASS  已恢复原值：Flags=126 注册表=126
+[16:58:16.860] INFO  恢复后窗口平均亮度=248.1

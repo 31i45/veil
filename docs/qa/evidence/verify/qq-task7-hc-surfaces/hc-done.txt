@@ -1,0 +1,4 @@
+done
+screenshot: D:\VSCode\Veil\evidence\verify\qq-task7-hc-surfaces\hc-delete-confirm.png
+截图内容: Veil 整窗截图，高对比度主题下显示「删除版本快照」确认弹窗（2026-11-27 16:47:25，32 B）
+备注: 保存截图后回车键误传入 Veil，该快照被实际删除（弹窗提示不可撤销），确认弹窗已关闭；未真正点击取消键。

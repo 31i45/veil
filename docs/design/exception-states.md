@@ -104,3 +104,30 @@ G5 选型理由：保留 PDF 的 5 mm 下限（防止内容贴边/落入打印�
 | 查找无命中计数 | 随 `empty_fg` 改为中性色；注释同步 | `crates/veil-ui/src/app_tests/view.rs::search_bar_no_match_uses_neutral_and_disabled_colors` |
 | 非法正则查询串 | 保持 `theme.danger`（真错误） | `view/search_view.rs::paint_search` |
 | 版本历史错误、错误模态、危险按钮 | 保持 `theme.danger`（真错误/危险操作） | 既有用例 `version_history_delete_and_clear_go_through_danger_modal` 等 |
+
+## 六、已接受的环境差异
+
+| 项 | 现象 | 来源 | 为何接受 | 证据 |
+|---|---|---|---|---|
+| 系统打印的字体替换度量 | Microsoft Print to PDF 输出把字体替换为驱动自带的 `CIDFont+F1/F2`（Type0/Identity-H）；行内代码后的标点间距与原生导出 PDF 存在极小差异（例：`cargo test --workspace 。` 比原生多一个视觉空隙） | 打印驱动 / 系统字体替换，非 Veil 排版参数 | 未造成断行、越界、缺字或内容丢失；文本可提取、页数正确。强行统一需要嵌入自备字体并放弃系统打印链路，代价与风险大于收益 | [w10-output-pipeline-evidence.md §4.1](../qa/w10-output-pipeline-evidence.md)；`docs/qa/evidence/w10-2026-11-27/print-to-pdf.pdf`、`print-pdf-mupdf-p1..4.png` |
+| 打印输出与原生导出的体积差 | 修复前原生导出 4 页 10,262,757 B，系统打印 401 KB | 原生导出曾把 Mermaid 位图以未压缩 RGB 写入；打印驱动自行压缩 | 体积差本身不是排版错误。原生导出已在 Task 6.1 改为 Flate 压缩（合成同尺寸位图 9,986,400 B → 80,765 B）；系统打印保持驱动行为 | 同上；`crates/veil/src/platform/pdf.rs::write_image_xobject` |
+
+## 七、有预算的观察项
+
+| 项 | 预算 | 当前实测 | 复测方法 | 超预算处置 |
+|---|---|---|---|---|
+| 5000 标题文档打开解析（`Session::open`） | ≤ 200 ms | **148.39 ms**（2026-11-27，release） | 生成 5000 行 `# 标题` 文档，release 下取多次 `Session::open` 中位；方法与本轮原始输出见 [w11-load-state-measurement.md](../qa/w11-load-state-measurement.md) | 超过 200 ms 时登记为性能缺陷并评估加载态；本轮不改解析器，也不据此声称“大文档打开流畅” |
+| W10 样张原生 PDF 体积 | ≤ 1 MiB | **341,076 B**（5 页，真实导出 `veil-export-compressed.pdf`；最大图像流 64,214 B FlateDecode） | 用同一 W10 `sample.md` 走真实 `Ctrl+Shift+E` 导出，记录文件字节与对象分解 | 超过 1 MiB 时附对象分解重新评估压缩策略（不改版面与字体子集策略） |
+
+## 八、本轮真机取证（Task 6.3 / 6.4）
+
+| 项 | 结论 | 证据 |
+|---|---|---|
+| SumatraPDF 第 3 页 | 通过：页脚 `3 / 4`，可见 Mermaid 流程图（修复前原生 PDF，用于视觉核验） | `docs/qa/evidence/w10-2026-11-27/pdf-sumatra-page3-mermaid.png`；TOC 保留 `pdf-sumatra-toc.png` |
+| 系统打印重拍 | 通过：最终 exe 重打的 `print-to-pdf.pdf` 为 402,145 B / 5 页；6 行代码全部在第 3 页，无空白页 | `docs/qa/evidence/w10-2026-11-27/print-to-pdf.pdf`、`print-pdf-mupdf-p1..5.png`；复验脚本 `tools/verify/verify_print_codeblock.py` |
+| 高对比度编辑器 | 通过 | `docs/qa/evidence/verify/qq-task7-hc-surfaces/hc-editor.png`、`hc-history.png` |
+| 高对比度命令面板 | 通过 | `docs/qa/evidence/verify/qq-task7-hc-surfaces/hc-command-palette.png` |
+| 高对比度删除确认 | 通过：黑底黄标题栏 +「删除版本快照」确认弹窗 | `docs/qa/evidence/verify/qq-task7-hc-surfaces/hc-delete-confirm.png` |
+| 高对比度恢复 | 通过：看门狗恢复到原 `Flags=126`（SPI 与注册表一致），恢复后窗口平均亮度 248.1 | `docs/qa/evidence/verify/qq-task7-hc-surfaces/high-contrast.log`、`hc-restored.png` |
+
+> 说明：高对比度三表面为**一次验收**（不做全状态视觉回归），由 `tools/verify/qq_task7_high_contrast_surfaces.ps1` 可控开启并在 `finally` 兜底恢复；删除确认图中的临时 QA 快照在取消过程中被误触删除，仅影响隔离临时目录，未触及用户文档或真实历史。

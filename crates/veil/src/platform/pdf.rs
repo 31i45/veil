@@ -11,8 +11,9 @@
 use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
 
+use pdf_writer::types::Predictor;
 use pdf_writer::types::{ActionType, AnnotationFlags, AnnotationType, CidFontType, FontFlags};
-use pdf_writer::{Name, Pdf, Rect, Ref, Str};
+use pdf_writer::{Filter, Name, Pdf, Rect, Ref, Str};
 
 use super::pdf_layout::{LinkAnnot, LinkTarget};
 
@@ -320,6 +321,87 @@ impl ImageData {
 
     pub fn baseline_pt(&self) -> f32 {
         self.baseline_px * self.px_to_pt
+    }
+}
+
+/// 图像样本 Flate 压缩阈值：原始 RGB ≥ 64 KiB 才压缩，小图保持原始写入避免无谓 CPU。
+const IMAGE_COMPRESS_MIN_BYTES: usize = 64 * 1024;
+
+/// 拼接 PNG 中所有 IDAT 块的数据。PNG 的 IDAT 是单一 zlib 流的连续切片，
+/// 拼接结果可直接交给 PDF `FlateDecode` 解码。
+fn png_idat_stream(png: &[u8]) -> Option<Vec<u8>> {
+    const SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
+    if png.get(..8)? != SIGNATURE {
+        return None;
+    }
+    let mut pos = 8;
+    let mut zlib = Vec::new();
+    while pos + 8 <= png.len() {
+        let len = u32::from_be_bytes([png[pos], png[pos + 1], png[pos + 2], png[pos + 3]]) as usize;
+        let kind = &png[pos + 4..pos + 8];
+        let data_end = pos.checked_add(8)?.checked_add(len)?;
+        if data_end + 4 > png.len() {
+            return None;
+        }
+        if kind == b"IDAT" {
+            zlib.extend_from_slice(&png[pos + 8..data_end]);
+        } else if kind == b"IEND" {
+            break;
+        }
+        pos = data_end + 4;
+    }
+    (!zlib.is_empty()).then_some(zlib)
+}
+
+/// 把 RGB8 样本编码成 PNG（每行 NoFilter）并取出完整 zlib 流，供 PDF
+/// `FlateDecode` + `Predictor 15` 使用。返回 None 表示无需压缩（样本过小）、
+/// 通道数不符或编码失败，调用方应回退到原始写入。
+fn compress_image_samples(rgb: &[u8], w: u32, h: u32) -> Option<Vec<u8>> {
+    if rgb.len() < IMAGE_COMPRESS_MIN_BYTES {
+        return None;
+    }
+    // 只接受严格的 RGB8 行主序样本，通道数不一致时保守回退。
+    let expected = (w as usize).checked_mul(h as usize)?.checked_mul(3)?;
+    if rgb.len() != expected {
+        return None;
+    }
+
+    let mut png_bytes = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut png_bytes, w, h);
+        encoder.set_color(png::ColorType::Rgb);
+        encoder.set_depth(png::BitDepth::Eight);
+        // NoFilter 让每行以字节 0 开头，正是 PDF Predictor 15 的 PNG 行格式。
+        encoder.set_filter(png::Filter::NoFilter);
+        let mut writer = encoder.write_header().ok()?;
+        writer.write_image_data(rgb).ok()?;
+        writer.finish().ok()?;
+    }
+    png_idat_stream(&png_bytes)
+}
+
+/// 写入一张 RGB8 位图 XObject：≥64 KiB 的大图压成 FlateDecode + PNG predictor，
+/// 编码失败或小图回退原始写入，导出不因压缩失败而失败。
+fn write_image_xobject(pdf: &mut Pdf, image_ref: Ref, img: &ImageData) {
+    if let Some(samples) = compress_image_samples(&img.rgb, img.w, img.h) {
+        let mut x = pdf.image_xobject(image_ref, &samples);
+        x.width(img.w as i32)
+            .height(img.h as i32)
+            .color_space_name(Name(b"DeviceRGB"))
+            .bits_per_component(8)
+            .filter(Filter::FlateDecode);
+        let mut parms = x.decode_parms();
+        parms
+            .predictor(Predictor::PngOptimum)
+            .colors(3)
+            .bits_per_component(8)
+            .columns(img.w as i32);
+    } else {
+        let mut x = pdf.image_xobject(image_ref, &img.rgb);
+        x.width(img.w as i32)
+            .height(img.h as i32)
+            .color_space_name(Name(b"DeviceRGB"))
+            .bits_per_component(8);
     }
 }
 
@@ -1093,11 +1175,7 @@ pub fn render_pages(
 
     // —— 图片对象 ——
     for (i, img) in images.iter().enumerate() {
-        let mut x = pdf.image_xobject(image_refs[i], &img.rgb);
-        x.width(img.w as i32)
-            .height(img.h as i32)
-            .color_space_name(Name(b"DeviceRGB"))
-            .bits_per_component(8);
+        write_image_xobject(&mut pdf, image_refs[i], img);
     }
 
     // —— 字体 ——
@@ -1848,5 +1926,190 @@ mod tests {
         assert!(s.contains("/GoTo"), "内链使用 GoTo 动作");
         assert!(s.contains("/XYZ"), "内链目标须带 XYZ 坐标");
         assert_eq!(s.matches("/Rect").count(), 2, "每条注释须有矩形");
+    }
+
+    // =========================================================================
+    // 图片 Flate 压缩（Task 6.1）
+    // =========================================================================
+
+    /// 构造一张接近 Mermaid 输出的近平坦 RGB 图：浅色渐变底 + 少量深色块。
+    fn mermaid_like_rgb(w: u32, h: u32) -> Vec<u8> {
+        let (wu, hu) = (w as usize, h as usize);
+        let mut rgb = vec![0u8; wu * hu * 3];
+        for y in 0..hu {
+            for x in 0..wu {
+                let i = (y * wu + x) * 3;
+                let shade = (238 + x * 12 / wu.max(1)).min(255) as u8;
+                rgb[i] = shade;
+                rgb[i + 1] = shade.saturating_add(2);
+                rgb[i + 2] = 252;
+            }
+        }
+        let blocks = [
+            (100usize, 200usize, 600usize, 24usize, [32u8, 32, 32]),
+            (120, 600, 400, 40, [64, 64, 64]),
+            (300, 1200, 900, 16, [40, 90, 160]),
+        ];
+        for (bx, by, bw, bh, color) in blocks {
+            for y in by..(by + bh).min(hu) {
+                for x in bx..(bx + bw).min(wu) {
+                    let i = (y * wu + x) * 3;
+                    rgb[i..i + 3].copy_from_slice(&color);
+                }
+            }
+        }
+        rgb
+    }
+
+    /// 最坏情况：高噪声 RGB（deflate 几乎无法压缩）。
+    fn noise_rgb(w: u32, h: u32) -> Vec<u8> {
+        let mut state = 0x1234_5678u32;
+        let mut rgb = Vec::with_capacity(w as usize * h as usize * 3);
+        for _ in 0..(w as usize * h as usize * 3) {
+            state = state.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+            rgb.push((state >> 16) as u8);
+        }
+        rgb
+    }
+
+    fn crc32(data: &[u8]) -> u32 {
+        let mut crc = 0xFFFF_FFFFu32;
+        for &b in data {
+            crc ^= b as u32;
+            for _ in 0..8 {
+                let mask = (crc & 1).wrapping_neg();
+                crc = (crc >> 1) ^ (0xEDB8_8320 & mask);
+            }
+        }
+        !crc
+    }
+
+    fn png_chunk(kind: &[u8; 4], data: &[u8]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(12 + data.len());
+        out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+        out.extend_from_slice(kind);
+        out.extend_from_slice(data);
+        let mut crc_input = Vec::with_capacity(4 + data.len());
+        crc_input.extend_from_slice(kind);
+        crc_input.extend_from_slice(data);
+        out.extend_from_slice(&crc32(&crc_input).to_be_bytes());
+        out
+    }
+
+    /// 用生产代码产出的 zlib 流重新拼一个最小 PNG，供 `png::Decoder` 回读校验。
+    fn assemble_png(w: u32, h: u32, zlib: &[u8]) -> Vec<u8> {
+        let mut ihdr = Vec::new();
+        ihdr.extend_from_slice(&w.to_be_bytes());
+        ihdr.extend_from_slice(&h.to_be_bytes());
+        ihdr.extend_from_slice(&[8, 2, 0, 0, 0]); // 8-bit RGB / deflate / no interlace
+        let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+        png.extend_from_slice(&png_chunk(b"IHDR", &ihdr));
+        png.extend_from_slice(&png_chunk(b"IDAT", zlib));
+        png.extend_from_slice(&png_chunk(b"IEND", &[]));
+        png
+    }
+
+    fn decode_png_rgb(png: &[u8]) -> (u32, u32, Vec<u8>) {
+        let decoder = png::Decoder::new(std::io::Cursor::new(png));
+        let mut reader = decoder.read_info().expect("解析 PNG 头");
+        let mut buf = vec![0; reader.output_buffer_size().expect("输出缓冲大小")];
+        let info = reader.next_frame(&mut buf).expect("解码 PNG 帧");
+        buf.truncate(info.buffer_size());
+        (info.width, info.height, buf)
+    }
+
+    #[test]
+    fn large_flat_rgb_compresses_under_one_tenth_and_roundtrips() {
+        let (w, h) = (1520u32, 2190u32);
+        let rgb = mermaid_like_rgb(w, h);
+        assert_eq!(rgb.len(), 1520 * 2190 * 3);
+        let compressed = compress_image_samples(&rgb, w, h).expect("大图应产出 zlib 流");
+        assert!(
+            compressed.len() * 10 < rgb.len(),
+            "近平坦图压缩后应小于原始 1/10：{} vs {}",
+            compressed.len(),
+            rgb.len()
+        );
+        let (dw, dh, decoded) = decode_png_rgb(&assemble_png(w, h, &compressed));
+        assert_eq!((dw, dh), (w, h));
+        assert_eq!(decoded, rgb, "PNG 解码必须逐字节还原原始 RGB");
+    }
+
+    #[test]
+    fn noisy_rgb_compresses_losslessly_without_panic() {
+        let (w, h) = (256u32, 256u32);
+        let rgb = noise_rgb(w, h);
+        assert!(rgb.len() >= IMAGE_COMPRESS_MIN_BYTES);
+        let compressed = compress_image_samples(&rgb, w, h).expect("高噪声图仍应可编码");
+        let (_, _, decoded) = decode_png_rgb(&assemble_png(w, h, &compressed));
+        assert_eq!(decoded, rgb, "最坏情况的噪声图也必须无损回读");
+    }
+
+    #[test]
+    fn small_image_is_left_uncompressed() {
+        let rgb = vec![0u8; 32 * 32 * 3];
+        assert!(rgb.len() < IMAGE_COMPRESS_MIN_BYTES);
+        assert!(compress_image_samples(&rgb, 32, 32).is_none());
+    }
+
+    #[test]
+    fn pdf_image_xobject_uses_flate_and_png_predictor() {
+        let (w, h) = (1520u32, 2190u32);
+        let img = ImageData {
+            w,
+            h,
+            rgb: mermaid_like_rgb(w, h),
+            baseline_px: 0.0,
+            px_to_pt: 0.5,
+        };
+        let mut pdf = Pdf::new();
+        write_image_xobject(&mut pdf, Ref::new(1), &img);
+        let bytes = pdf.finish();
+        let s = String::from_utf8_lossy(&bytes);
+        assert!(s.contains("/Filter /FlateDecode"), "{s}");
+        assert!(s.contains("/Predictor 15"), "PNG predictor 应为 15: {s}");
+        assert!(s.contains("/Colors 3"), "{s}");
+        assert!(s.contains("/BitsPerComponent 8"), "{s}");
+        assert!(s.contains("/Columns 1520"), "{s}");
+        assert!(
+            !s.contains("/Length 9986400"),
+            "不得再写入未压缩的原始 RGB 流"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn render_pages_compresses_large_mermaid_like_image() {
+        let (w, h) = (1520u32, 2190u32);
+        let raw = mermaid_like_rgb(w, h);
+        let img = ImageData {
+            w,
+            h,
+            rgb: raw.clone(),
+            baseline_px: 0.0,
+            px_to_pt: 0.5,
+        };
+        let pages = vec![vec![DrawOp::Image {
+            x: 56.0,
+            y: 80.0,
+            w: 400.0,
+            h: 576.0,
+            id: 0,
+        }]];
+        let bytes = render_pages(
+            &pages,
+            &[img],
+            &[],
+            &[],
+            Path::new(find_cjk_font().unwrap()),
+        )
+        .expect("渲染 PDF");
+        assert!(
+            bytes.len() < 1024 * 1024,
+            "含大图的 PDF 应显著小于原始位图：{} vs {}",
+            bytes.len(),
+            raw.len()
+        );
+        assert!(String::from_utf8_lossy(&bytes).contains("/Predictor 15"));
     }
 }

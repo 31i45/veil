@@ -62,14 +62,33 @@
 ## 原生 PDF 导出的两个事实
 
 1. **版面几何**：4 页；第 2 页文字包围盒 `(56.7, 65.8) – (534.6, 815.9)`，左/右页边距 20 mm；目录页与正文页均存在；页脚 `n / total`。
-2. **体积**：4 页 **10,262,757 B**。原因是嵌入了 CJK 正文字体（`msyh`）与等宽字体（`consola`）的子集；功能与可搜索性正常，但体积明显大于打印输出的 401 KB。**本轮不修**，如实记录为后续优化项，不声称“体积已优化”。
+2. **体积（已更正）**：4 页 **10,262,757 B** 的主导项**不是字体子集**，而是一张 **1520×2190、DeviceRGB、完全未压缩**的图像 XObject：流长度 `1520×2190×3 = 9,986,400 B`，占整档 **97.3%**。
+   - 复核方法：按 PDF 对象解析该档的 `/Subtype /Image`，得到 `W=1520 H=2190 CS=DeviceRGB BPC=8 Filter=（无）Len=9986400`；另两张小图分别为 4,503 B（79×19）与 31,752 B（147×72）。
+   - 字体实际很小：`/FontFile2` 流仅 173,292 B（主 CJK 子集）与 31,592 B（回退/等宽子集），ToUnicode CMap 亦很小。此前“10.26 MB 主要来自 CJK/等宽字体子集”的结论**错误**，现予更正。
+   - 该位图来自 Mermaid 图在 PDF 路径上的 300 dpi 光栅化（`pdf_layout::mermaid_block` → `svg_to_bitmap(300/96*2)` → `ImageData` RGB8）；原实现直接把原始 RGB 写入 PDF Image XObject，未做任何压缩。
+
+## Task 6.1 修复：图像 Flate 压缩（本轮）
+
+- 代码位置：`crates/veil/src/platform/pdf.rs`，`write_image_xobject` / `compress_image_samples` / `png_idat_stream`。
+- 策略：原始 RGB 样本 ≥ 64 KiB 时，用已有 `png` crate 以 RGB8、`Filter::NoFilter` 编码到内存 PNG，拼接全部 IDAT 数据得到单一 zlib 流；以 `/Filter /FlateDecode` 写入，并设 `/DecodeParms << /Predictor 15 /Colors 3 /BitsPerComponent 8 /Columns <宽> >>`。小图或任何编码失败回退原始写入，导出不会因此失败。未改版面尺寸、DPI、字体子集策略、页数/页码。
+- 本轮可复现测量（合成 1520×2190、Mermaid-like 近平坦 RGB 图：渐变底 + 少量色块）：
+
+  | 项 | 数值 |
+  |---|---:|
+  | 原始 RGB 样本 | 9,986,400 B |
+  | PNG/IDAT 压缩后 zlib 流 | 80,765 B（约原始 0.81%，< 1/10） |
+  | 含该大图的合成 PDF（单页，含字体子集） | 106,318 B |
+  | 旧 `veil-export.pdf`（修复前历史件） | 10,262,757 B |
+
+- 复现命令：`cargo test -p veil --lib platform::pdf::tests`。新增测试：`large_flat_rgb_compresses_under_one_tenth_and_roundtrips`、`noisy_rgb_compresses_losslessly_without_panic`、`small_image_is_left_uncompressed`、`pdf_image_xobject_uses_flate_and_png_predictor`、`render_pages_compresses_large_mermaid_like_image`。表中数值由对应测试临时打印测得；测试断言阈值为「压缩后 < 原始 1/10」与「合成 PDF < 1 MiB」，并要求 PNG 解码逐字节还原原始 RGB。
+- 说明：`docs/qa/evidence/w10-2026-11-27/veil-export.pdf` 是**修复前历史件**，本轮**未重生成**，旧文件保持不变。真实整档复测（W10 样张 4 页、含真实 Mermaid 与完整字体子集）将在后续系统打印/导出真机任务中补做；本轮无可复现的整档数字，故不在此处填写。
 
 ## 结论
 
 | 链路 | 结论 | 证据 |
 |---|---|---|
 | 深色 HTML 导出 + Edge | 通过 | `veil-dark.html`、`dark-html-edge-full.png` |
-| 原生 PDF 导出 | 通过（体积偏大，已记录） | `veil-export.pdf`、`pdf-mupdf-p1..4.png` |
+| 原生 PDF 导出 | 通过（修复前历史件体积偏大；本次已将图像改为 Flate 压缩，见 Task 6.1） | `veil-export.pdf`、`pdf-mupdf-p1..4.png` |
 | Microsoft Print to PDF | 通过（存在驱动字体度量差异，已记录） | `print-to-pdf.pdf`、`print-dialog.png`、`print-pdf-mupdf-p1..4.png` |
 | PDF 在 Edge | 通过 | `pdf-edge-toc.png`、`pdf-edge-page3-mermaid.png` |
 | PDF 在 Sumatra | 通过（目录/CJK/书签；Mermaid 页未单独截图） | `pdf-sumatra-toc.png` |

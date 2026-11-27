@@ -1625,6 +1625,9 @@ fn write_report(rows: &[Row], total_cases: usize) {
     out.push_str("- 空态用例（CASE-EDGE-001..003）：语料的 `表面：N/A` 只说明「无可见内容」，不等于不可测。harness 在六个表面执行空态断言：UI 0 块且几何有限、HTML `<body>` 为空、PDF 恰 1 页空白且无版面文本（依据 `layout_document` 无条件 `new_page()`、`LayoutOpts::default().page_numbers == false`）、PRINT 恰 1 页且断点为 `[0.0]`（依据 `compute_page_breaks` 恒以 `vec![0.0]` 起步）。\n");
     out.push_str("- Mermaid 用例不做全文金样：SVG 内的路径/弧坐标由 dagre 布局与字体度量共同决定，跨进程运行存在浮点级差异（classDiagram / stateDiagram 的 `d` 属性实测会变），全文金样必然 flaky；改由结构断言证伪「未渲染却算通过」：`<body>` 必须含真实 `<svg`，且不得残留 `language-mermaid` / 「渲染数据不可用」降级围栏。\n");
     out.push_str("- 金样首次缺失时自动写入（引导），之后普通运行全文比对。\n");
+    out.push_str("\n## 交付事实\n\n");
+    out.push_str("- 本文件由 `cargo test -p veil --test syntax_matrix` 重生成，运行该测试会覆写全文；不要手工追加内容。\n");
+    out.push_str("- 工作区测试、clippy、release 体积与 SHA-256 等交付事实见 `docs/qa/release-facts-2026-11-27.md`。\n");
 
     if let Some(dir) = Path::new(REPORT).parent() {
         let _ = std::fs::create_dir_all(dir);

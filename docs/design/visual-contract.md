@@ -218,14 +218,14 @@ cap = [1.6, 1.4, 1.2, 1.1, 1.1, 1.1]（H1..H6）
 
 - 对比度：WCAG 2.x 相对亮度比 `(L1+0.05)/(L2+0.05)`，sRGB→线性用 `c ≤ 0.03928 ? c/12.92 : ((c+0.055)/1.055)^2.4`，系数 `0.2126/0.7152/0.0722`（`crates/veil-ui/src/theme_matrix_tests.rs` 已按此实现）。
 - 半透明色先做 src-over 合成到实际背景，再测合成结果。
-- 层级分离：用 OKLab 距离；**现状实现仍为 Lab 明度差 ΔL（整数）**（`tokens.rs` 的 `surface_hierarchy_is_perceptually_separated`），**标注为待修正项**。
+- 层级分离：OKLab 欧氏色差 ΔE_OK（含明度与色度三轴），CIELAB ΔE 2 ≈ ΔE_OK 0.02。工作区已有实现（`crates/veil-ui/src/tokens.rs` 的 `oklab` / `de_ok`，门禁 `surface_hierarchy_is_perceptually_separated`：card–popup ≥ 0.02，modal 与 popup/card 之一 ≥ 0.01）。若该实现未合入、退回为仅比明度差的 ΔL 版本，则按**待修正项**处理，不得以 ΔL 冒充感知色差。
 
 | 类别 | 目标 | 现状 / 门禁 |
 |---|---|---|
-| 正文文字 / 底色 | ≥ 7:1 | 浅色约 16.7:1、深色约 12.2:1，已达标；现有门禁只断言 4.5:1，**需补 7:1 断言** |
-| 次要文字（`muted`）/ 底色 | ≥ 4.5:1 | 门禁未单列，**待补** |
-| 语法 token / `code_bg` | ≥ 4.5:1 | 现有测试只断言 `fg`/`code_bg`，7 类 token 逐类**待补** |
-| 链接 / 底色 | ≥ 4.5:1 | 门禁未单列，**待补** |
+| 正文文字 / 底色 | ≥ 7:1 | 浅色约 16.7:1、深色约 12.2:1，实测达标；高对比度已有 7:1 断言（`high_contrast_meets_readability_floor`），浅/深色仅经 4.5 档间接校验，**需补 7:1 断言** |
+| 次要文字（`muted`）/ 底色 | ≥ 4.5:1 | 高对比度已断言，浅/深色**待补** |
+| 语法 token / `code_bg` | ≥ 4.5:1 | 工作区已加 3 主题 × 7 token 门禁（`theme_matrix_tests` 的 `syntax_tokens_meet_contrast_on_code_bg`）；合入前若缺失，按**待补**处理 |
+| 链接 / 底色 | ≥ 4.5:1 | 高对比度已断言，浅/深色**待补** |
 | mark 上正文 | ≥ 4.5:1 | 已断言通过 |
 | `kbd` 文字 / `kbd_bg` | ≥ 4.5:1 | 已断言通过 |
 | 表格线（`grid`）/ 底色 | ≥ 3:1 | 浅色约 3.4:1、深色约 3.4:1，已通过 |

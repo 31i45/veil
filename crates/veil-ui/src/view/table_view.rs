@@ -121,8 +121,52 @@ impl LayoutEngine {
                 )
             },
         );
+        // 折行测量必须与最终 shaping 使用同一套字形属性：混排（粗体/行内代码等）
+        // 若按默认比例字宽折行，等宽/粗体渲染会明显更宽，整行墨迹越过列宽并被画到
+        // 表格（乃至窗口）之外（issue #11「表格出格了」）。这里按样式段分别测量。
+        let wrap_runs: Vec<(usize, usize, Attrs<'static>)> = match styles {
+            Some(styles) if !styles.is_empty() => {
+                let mut runs = Vec::with_capacity(styles.len() + 1);
+                let mut cursor = 0usize;
+                for &(s, e, mut st) in styles {
+                    let s = s.min(text.len());
+                    let e = e.min(text.len());
+                    if s > cursor {
+                        runs.push((cursor, s, attrs.clone()));
+                    }
+                    let s = s.max(cursor);
+                    if e > s {
+                        st.bold |= bold;
+                        runs.push((
+                            s,
+                            e,
+                            attrs_of(
+                                BlockKind::Table,
+                                st,
+                                link_color,
+                                doc_font,
+                                doc_face,
+                                mono_family,
+                                metrics.font_size,
+                            ),
+                        ));
+                        cursor = e;
+                    }
+                }
+                if cursor < text.len() {
+                    runs.push((cursor, text.len(), attrs.clone()));
+                }
+                runs
+            }
+            _ => Vec::new(),
+        };
         let wrapped = match wrap_w {
-            Some(width) => wrap_cell_text(self.font_system(), metrics, &wrap_attrs, text, width),
+            Some(width) if wrap_runs.is_empty() => {
+                wrap_cell_text(self.font_system(), metrics, &wrap_attrs, &[], text, width)
+            }
+            Some(width) => {
+                wrap_cell_text(self.font_system(), metrics, &attrs, &wrap_runs, text, width)
+            }
             None => WrappedCell::identity(text),
         };
         let fs = self.font_system();
@@ -429,18 +473,32 @@ fn wrap_cell_text(
     fs: &mut FontSystem,
     metrics: Metrics,
     attrs: &Attrs,
+    runs: &[(usize, usize, Attrs<'static>)],
     text: &str,
     width: f32,
 ) -> WrappedCell {
+    // 逐行测量：cosmic-text 对含 `\n` 的多行缓冲区不保证字形偏移是全文口径，
+    // 按整段测量再切行会把第二行起的偏移算错（曾导致字节切片越界）。
     let mut display = String::with_capacity(text.len() + 8);
     let mut segs: Vec<(usize, usize, usize, usize)> = Vec::new();
     let mut src_base = 0usize;
+    let mut line_off = 0usize;
     for (i, line) in text.split('\n').enumerate() {
         if i > 0 {
             display.push('\n');
             src_base += 1;
         }
-        let (_, breaks) = wrap_one_line(fs, metrics, attrs, line, width);
+        let line_end = line_off + line.len();
+        let line_runs: Vec<(usize, usize, Attrs<'static>)> = runs
+            .iter()
+            .filter_map(|(s, e, a)| {
+                let s = (*s).max(line_off);
+                let e = (*e).min(line_end);
+                (e > s).then(|| (s - line_off, e - line_off, a.clone()))
+            })
+            .collect();
+        let clusters = measure_clusters_styled(fs, metrics, attrs, line, &line_runs);
+        let (_, breaks) = wrap_one_line(line, &clusters, width);
         let mut chunk = 0usize;
         for &brk in &breaks {
             push_display_seg(&mut display, &mut segs, line, src_base, chunk, brk);
@@ -449,6 +507,7 @@ fn wrap_cell_text(
         }
         push_display_seg(&mut display, &mut segs, line, src_base, chunk, line.len());
         src_base += line.len();
+        line_off = line_end + 1;
     }
     WrappedCell { display, segs }
 }
@@ -470,21 +529,14 @@ fn push_display_seg(
     segs.push((ds, display.len(), src_base + start, src_base + end));
 }
 
-fn wrap_one_line(
-    fs: &mut FontSystem,
-    metrics: Metrics,
-    attrs: &Attrs,
-    text: &str,
-    width: f32,
-) -> (String, Vec<usize>) {
+fn wrap_one_line(text: &str, clusters: &[(usize, usize, f32)], width: f32) -> (String, Vec<usize>) {
     if width <= 1.0 || text.is_empty() {
         return (text.to_owned(), Vec::new());
     }
-    let clusters = measure_clusters(fs, metrics, attrs, text);
     if clusters.is_empty() {
         return (text.to_owned(), Vec::new());
     }
-    let atomic = short_atomic_tokens(text, &clusters, width);
+    let atomic = short_atomic_tokens(text, clusters, width);
     let mut out = String::with_capacity(text.len() + 8);
     let mut breaks = Vec::new();
     let mut last_byte = 0usize;
@@ -613,6 +665,53 @@ fn measure_clusters(
         .collect()
 }
 
+/// 按样式段分别测量簇宽，返回全文口径的 `(start, end, w)`。
+/// 混排单元格（行内代码/粗体）必须按实际字形属性量宽，否则折行宽会小于
+/// 最终 shaping 宽度，墨迹会溢出列宽（issue #11）。
+fn measure_clusters_styled(
+    fs: &mut FontSystem,
+    metrics: Metrics,
+    fallback: &Attrs,
+    text: &str,
+    runs: &[(usize, usize, Attrs<'static>)],
+) -> Vec<(usize, usize, f32)> {
+    if runs.is_empty() {
+        return measure_clusters(fs, metrics, fallback, text);
+    }
+    let mut out: Vec<(usize, usize, f32)> = Vec::new();
+    let mut cursor = 0usize;
+    for (s, e, attrs) in runs {
+        let s = (*s).min(text.len());
+        let e = (*e).min(text.len());
+        if e <= s {
+            continue;
+        }
+        if s > cursor {
+            let mut part = measure_clusters(fs, metrics, fallback, &text[cursor..s]);
+            shift_clusters(&mut part, cursor);
+            out.extend(part);
+        }
+        let mut part = measure_clusters(fs, metrics, attrs, &text[s..e]);
+        shift_clusters(&mut part, s);
+        out.extend(part);
+        cursor = e;
+    }
+    if cursor < text.len() {
+        let mut part = measure_clusters(fs, metrics, fallback, &text[cursor..]);
+        shift_clusters(&mut part, cursor);
+        out.extend(part);
+    }
+    out.sort_by_key(|c| c.0);
+    out
+}
+
+fn shift_clusters(clusters: &mut [(usize, usize, f32)], by: usize) {
+    for c in clusters {
+        c.0 += by;
+        c.1 += by;
+    }
+}
+
 fn boundary_allowed(text: &str, left: &(usize, usize, f32), right: &(usize, usize, f32)) -> bool {
     let prev = text.get(left.0..left.1).and_then(|s| s.chars().next_back());
     let next = text.get(right.0..right.1).and_then(|s| s.chars().next());
@@ -633,7 +732,57 @@ fn nested_quote_marker_pos(line: &str) -> Option<usize> {
     (line.as_bytes().get(indent) == Some(&b'>')).then_some(indent)
 }
 
+/// 宽表横向滚动条的屏幕几何（物理像素）。绘制与拖动共用同一口径。
+pub(crate) struct TableScrollbarGeom {
+    pub(crate) track_x: f32,
+    pub(crate) y: f32,
+    pub(crate) track_w: f32,
+    pub(crate) bar_h: f32,
+    pub(crate) thumb_x: f32,
+    pub(crate) thumb_w: f32,
+    pub(crate) max_pan: f32,
+}
+
 impl App {
+    /// 宽表横向滚动条几何；不需要横滚（表宽 ≤ 容器可用宽）或打印态返回 `None`。
+    pub(crate) fn table_scrollbar_geom(
+        &self,
+        t: &crate::view::table::TableLayout,
+        top: i32,
+    ) -> Option<TableScrollbarGeom> {
+        if self.window_state.print.is_some() {
+            return None;
+        }
+        let avail = (self.content_width() - t.x).max(1.0);
+        if t.width <= avail + 0.5 {
+            return None;
+        }
+        let scale = self.input_state.scale;
+        let bar_h = (crate::tokens::doc::TABLE_SCROLL_H * scale).max(2.0);
+        let track_w = avail;
+        let max_pan = t.width - avail;
+        let min_thumb = (crate::tokens::doc::TABLE_SCROLL_MIN_THUMB * scale)
+            .min(track_w)
+            .max(2.0);
+        let thumb_w = (avail * avail / t.width).max(min_thumb).min(track_w);
+        let travel = (track_w - thumb_w).max(0.0);
+        let ratio = if max_pan > 0.0 {
+            (t.pan / max_pan).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let track_x = self.content_x() + t.x;
+        Some(TableScrollbarGeom {
+            track_x,
+            y: top as f32 + t.height.ceil(),
+            track_w,
+            bar_h,
+            thumb_x: track_x + travel * ratio,
+            thumb_w,
+            max_pan,
+        })
+    }
+
     /// 容器内表格的引用条：按引用层数在表格左侧画竖条（与引用块同色/同宽）。
     pub(crate) fn paint_quote_rails(&self, frame: &mut Frame, g: &BlockGeom, top: i32) {
         if g.container.quote_depth == 0 {
@@ -731,6 +880,13 @@ impl App {
         let x0 = (self.content_x() + t.x - t.pan) as i32;
         let theme = self.input_state.theme;
 
+        // 表格所有墨迹（底色、文本、网格、公式/图片）裁切在「容器可用宽 + 表格矩形」内：
+        // 折行/占位仍可能让单元格位图略宽于列宽，不裁切会画到版心与窗口之外。
+        let clip_x0 = (self.content_x() + t.x).floor() as i32;
+        let clip_x1 = (self.content_x() + self.content_width()).ceil() as i32;
+        let clip_h = t.height.ceil().max(1.0) as u32;
+        frame.set_clip(clip_x0, top, (clip_x1 - clip_x0).max(0) as u32, clip_h);
+
         // 活动单元格：排版键已记录 caret 命中的格（源码态显示），画选中色底色
         if let Some(cell_layout) = t.active.and_then(|idx| t.cells.get(idx)) {
             let cx = x0 + cell_layout.x.round() as i32;
@@ -769,34 +925,45 @@ impl App {
                 theme.grid,
             );
         }
-        self.paint_table_pan_indicator(frame, top, t);
+        frame.clear_clip();
+        self.paint_table_scrollbar(frame, id, top, t);
     }
 
-    /// 溢出表格底部的极简横向滚动指示：轨道 = 版心可用宽，滑块比例 = 可见宽/表宽。
-    /// 只提示「可 Shift+滚轮平移」，不是可拖拽控件；打印态与不溢出时不画。
-    fn paint_table_pan_indicator(
+    /// 宽表横向滚动条：轨道 = 容器可用宽，滑块长 = 可见宽/表宽，位置 = pan。
+    /// 仅在需要横滚（表宽 > 可用宽）时出现；可拖动滑块或 Shift+滚轮平移。
+    fn paint_table_scrollbar(
         &self,
         frame: &mut Frame,
+        id: BlockId,
         top: i32,
         t: &crate::view::table::TableLayout,
     ) {
-        if self.window_state.print.is_some() {
+        let Some(g) = self.table_scrollbar_geom(t, top) else {
             return;
-        }
-        let avail = (self.content_width() - t.x).max(1.0);
-        if t.width <= avail + 0.5 {
-            return;
-        }
-        let max_pan = t.width - avail;
+        };
         let theme = self.input_state.theme;
-        let track_x = (self.content_x() + t.x).round() as i32;
-        let track_w = avail.round().max(1.0) as u32;
-        let y = top + t.height.ceil() as i32;
-        let thumb_w = ((avail * avail / t.width).max(24.0)).min(avail).round() as u32;
-        let travel = (track_w as f32 - thumb_w as f32).max(0.0);
-        let thumb_x = track_x + (t.pan / max_pan).clamp(0.0, 1.0).mul_add(travel, 0.0) as i32;
-        frame.fill_rect(track_x, y, track_w, 2, theme.grid);
-        frame.fill_rect(thumb_x, y, thumb_w, 2, theme.thumb);
+        let radius = g.bar_h * 0.5;
+        // 轨道/滑块沿用滚动条 thumb 色，仅调整透明度以区分层级（主题化）。
+        let track = [theme.thumb[0], theme.thumb[1], theme.thumb[2], 40];
+        let active = matches!(self.ui_state.tables.scroll_drag, Some((d, _)) if d == id);
+        let alpha = if active { 220 } else { 160 };
+        let thumb = [theme.thumb[0], theme.thumb[1], theme.thumb[2], alpha];
+        frame.fill_rounded_rect(
+            g.track_x.round() as i32,
+            g.y.round() as i32,
+            g.track_w.round().max(1.0) as u32,
+            g.bar_h.round().max(2.0) as u32,
+            radius,
+            track,
+        );
+        frame.fill_rounded_rect(
+            g.thumb_x.round() as i32,
+            g.y.round() as i32,
+            g.thumb_w.round().max(2.0) as u32,
+            g.bar_h.round().max(2.0) as u32,
+            radius,
+            thumb,
+        );
     }
 
     /// 画给定单元格的文本位图 + 行内装饰 / 公式 / 图片（网格线由调用方负责）。
@@ -883,6 +1050,9 @@ impl App {
         let theme = self.input_state.theme;
         let w = t.width.ceil().max(1.0) as u32;
         let h = first.height.ceil().max(1.0) as u32;
+        let clip_x0 = (self.content_x() + t.x).floor() as i32;
+        let clip_x1 = (self.content_x() + self.content_width()).ceil() as i32;
+        frame.set_clip(clip_x0, top, (clip_x1 - clip_x0).max(0) as u32, h);
         frame.fill_rect(x0, top, w, h, crate::tokens::palette::table_head_bg(&theme));
         let ncols = t.cols.len().min(t.cells.len());
         self.paint_table_cells(frame, x0, top, &t.cells[..ncols]);
@@ -896,6 +1066,7 @@ impl App {
         }
         let right = t.width.round().max(1.0) as i32;
         frame.fill_rect(x0 + right - 1, top, 1, h, theme.grid);
+        frame.clear_clip();
     }
 }
 
@@ -979,10 +1150,10 @@ mod tests {
                 .map(|c| c.2)
                 .sum();
             let width = token_w + 1.0;
-            let w = wrap_cell_text(engine.font_system(), metrics, &attrs, &text, width);
+            let w = wrap_cell_text(engine.font_system(), metrics, &attrs, &[], &text, width);
             assert_eq!(w.display, format!("a \n{token}"), "短 token 不得内部断行");
 
-            let alone = wrap_cell_text(engine.font_system(), metrics, &attrs, token, token_w);
+            let alone = wrap_cell_text(engine.font_system(), metrics, &attrs, &[], token, token_w);
             assert_eq!(alone.display, token, "短 token 独占单元格时必须完整");
         }
     }
@@ -994,7 +1165,7 @@ mod tests {
         let attrs = Attrs::new();
         let text = "supercalifragilistic";
         let width = measured_width(&mut engine, metrics, text) / 3.0;
-        let w = wrap_cell_text(engine.font_system(), metrics, &attrs, text, width);
+        let w = wrap_cell_text(engine.font_system(), metrics, &attrs, &[], text, width);
         assert!(w.display.lines().count() > 1, "超宽英文词仍须逐字兜底");
         assert_eq!(w.display.replace('\n', ""), text);
         for line in w.display.lines() {
@@ -1012,7 +1183,7 @@ mod tests {
         let attrs = Attrs::new();
         let text = "中文中文中文中文中文";
         let width = measured_width(&mut engine, metrics, "中") * 2.5;
-        let w = wrap_cell_text(engine.font_system(), metrics, &attrs, text, width);
+        let w = wrap_cell_text(engine.font_system(), metrics, &attrs, &[], text, width);
         assert!(w.display.lines().count() > 1, "中文仍须正常折行");
         assert_eq!(w.display.replace('\n', ""), text);
         for line in w.display.lines() {
@@ -1027,7 +1198,7 @@ mod tests {
         let mut engine = LayoutEngine::new();
         let metrics = Metrics::new(BASE_FONT_SIZE, BASE_LINE_HEIGHT);
         let attrs = Attrs::new();
-        let w = wrap_cell_text(engine.font_system(), metrics, &attrs, text, width);
+        let w = wrap_cell_text(engine.font_system(), metrics, &attrs, &[], text, width);
         let mut covered = vec![false; w.display.len()];
         let (mut prev_d, mut prev_s) = (0usize, 0usize);
         for &(ds, de, ss, se) in &w.segs {

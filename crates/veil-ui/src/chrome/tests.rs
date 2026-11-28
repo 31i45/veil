@@ -48,9 +48,24 @@ fn action_enabled_only_gates_known_noop_items() {
         "空文档禁用导出 PDF"
     );
     assert!(!action_enabled(MenuAction::Print, none), "空文档禁用打印");
+    assert!(
+        !action_enabled(MenuAction::CopyCodeBlock, none),
+        "光标不在代码块内：复制代码块禁用"
+    );
     // 其余项恒可用（含剪贴板等不可静态判断的项）
     assert!(action_enabled(MenuAction::Copy, none));
     assert!(action_enabled(MenuAction::Open, none));
+
+    let in_code = MenuFlags {
+        can_copy_code: true,
+        ..none
+    };
+    assert!(action_enabled(MenuAction::CopyCodeBlock, in_code));
+    assert_eq!(
+        disabled_reason(MenuAction::CopyCodeBlock, none),
+        Some(Key::DisabledNoCodeBlock),
+        "禁用原因必须可读，不能静默置灰"
+    );
 
     let all = MenuFlags {
         can_save: true,
@@ -297,6 +312,7 @@ fn menu_definitions_cover_shortcuts() {
             MenuAction::ToggleBold,
             MenuAction::ToggleItalic,
             MenuAction::InsertLink,
+            MenuAction::CopyCodeBlock,
             MenuAction::Separator,
             MenuAction::Find,
             MenuAction::Replace,
@@ -340,6 +356,27 @@ fn menu_definitions_cover_shortcuts() {
     );
 }
 
+/// 「复制代码块」既有右键入口，也必须出现在编辑菜单与命令面板（同一能力三个入口）。
+#[test]
+fn edit_menu_and_command_palette_expose_copy_code_block() {
+    let entry = MENUS[1]
+        .items
+        .iter()
+        .find(|(_, _, a)| *a == MenuAction::CopyCodeBlock)
+        .expect("编辑菜单应含复制代码块");
+    assert_eq!(t(entry.0), "复制代码块");
+    assert_eq!(entry.1, Key::ShortcutCopyCode);
+    assert_eq!(t(entry.1), "Ctrl+Shift+C");
+
+    let commands = crate::view::quick_open::command_items();
+    let command = commands
+        .iter()
+        .find(|it| it.action == Some(MenuAction::CopyCodeBlock))
+        .expect("命令面板候选应含复制代码块");
+    assert_eq!(command.label, "复制代码块");
+    assert_eq!(command.hint, "Ctrl+Shift+C", "命令面板提示与菜单同源");
+}
+
 fn expected_input_action(action: MenuAction) -> crate::input::Action {
     use crate::editor::Intent;
     use crate::input::Action;
@@ -367,6 +404,7 @@ fn expected_input_action(action: MenuAction) -> crate::input::Action {
         MenuAction::ToggleBold => Action::Doc(Intent::ToggleWrap("**")),
         MenuAction::ToggleItalic => Action::Doc(Intent::ToggleWrap("*")),
         MenuAction::InsertLink => Action::Doc(Intent::InsertLink),
+        MenuAction::CopyCodeBlock => Action::CopyCodeBlock,
         MenuAction::ToggleSourceMode => Action::OpenSourceMode,
         MenuAction::ZoomIn => Action::ZoomIn,
         MenuAction::ZoomOut => Action::ZoomOut,
@@ -447,7 +485,46 @@ fn menu_shortcuts_match_winit_mapping_and_real_dispatch() {
             );
         }
     }
-    assert_eq!(with_shortcuts, 29, "全部 29 个显示快捷键都必须经过真实分发");
+    assert_eq!(with_shortcuts, 30, "全部 30 个显示快捷键都必须经过真实分发");
+}
+
+/// README 公开的快捷键提示逐条过 winit 映射 + `translate`，确保提示不是摆设。
+/// 表驱动而非遍历菜单：README 与菜单表各自可能遗漏，两边都必须对得上真实分发。
+#[test]
+fn documented_shortcuts_translate_to_expected_actions() {
+    use crate::editor::Intent;
+    use crate::input::Action;
+    let cases: &[(&str, Action)] = &[
+        ("Ctrl+N", Action::New),
+        ("Ctrl+O", Action::Open),
+        ("Ctrl+S", Action::Save),
+        ("Ctrl+Shift+S", Action::SaveAs),
+        ("Ctrl+E", Action::Export),
+        ("Ctrl+Shift+E", Action::ExportPdf),
+        ("Ctrl+F", Action::Find),
+        ("Ctrl+H", Action::Replace),
+        ("Ctrl+Shift+H", Action::VersionHistory),
+        ("Ctrl+P", Action::QuickOpen),
+        ("Ctrl+Shift+P", Action::CommandPalette),
+        ("Ctrl+Alt+P", Action::Print),
+        ("Ctrl+B", Action::Doc(Intent::ToggleWrap("**"))),
+        ("Ctrl+I", Action::Doc(Intent::ToggleWrap("*"))),
+        ("Ctrl+K", Action::Doc(Intent::InsertLink)),
+        ("Ctrl+Shift+C", Action::CopyCodeBlock),
+        ("Ctrl+/", Action::OpenSourceMode),
+        ("Ctrl+,", Action::OpenSettings),
+        ("Ctrl+=", Action::ZoomIn),
+        ("Ctrl+-", Action::ZoomOut),
+        ("Ctrl+0", Action::ZoomReset),
+        ("F11", Action::ToggleFullscreen),
+    ];
+    for (shortcut, want) in cases {
+        assert_eq!(
+            dispatch_shortcut(shortcut),
+            *want,
+            "README 快捷键 {shortcut} 未产生预期动作"
+        );
+    }
 }
 
 /// 命令矩阵（Task 3.3）：动作 → 快捷键 的唯一对照表。
@@ -474,6 +551,7 @@ fn menu_command_matrix_maps_each_action_to_its_real_shortcut() {
         (MenuAction::ToggleBold, Key::ShortcutBold),
         (MenuAction::ToggleItalic, Key::ShortcutItalic),
         (MenuAction::InsertLink, Key::ShortcutLink),
+        (MenuAction::CopyCodeBlock, Key::ShortcutCopyCode),
         (MenuAction::Find, Key::ShortcutFind),
         (MenuAction::Replace, Key::ShortcutReplace),
         (MenuAction::InsertImage, Key::ShortcutInsertImage),
@@ -531,8 +609,8 @@ fn menu_command_matrix_maps_each_action_to_its_real_shortcut() {
             }
         }
     }
-    assert_eq!(seen.len(), 39, "主菜单应覆盖 39 个静态动作");
-    assert_eq!(shown, 29, "矩阵内显示快捷键的动作数与既有红线一致");
+    assert_eq!(seen.len(), 40, "主菜单应覆盖 40 个静态动作");
+    assert_eq!(shown, 30, "矩阵内显示快捷键的动作数与既有红线一致");
 
     // 最近文件是动态项：出现在菜单里但没有（也不应有）快捷键提示。
     let rows = menu_rows(0, &["a.md".to_string()]);
@@ -554,6 +632,7 @@ fn disabled_menu_actions_always_explain_why() {
         can_export: true,
         can_undo: true,
         can_redo: true,
+        can_copy_code: true,
         ..MenuFlags::default()
     };
     let mut reasons = Vec::new();
@@ -581,13 +660,14 @@ fn disabled_menu_actions_always_explain_why() {
             );
         }
     }
-    // 保存 / 导出三件套 / 撤销 / 重做：默认态共 6 项禁用，原因只来自 4 个词条。
-    assert_eq!(reasons.len(), 6, "默认态应有 6 个禁用项: {reasons:?}");
+    // 保存 / 导出三件套 / 撤销 / 重做 / 复制代码块：默认态共 7 项禁用，原因来自 5 个词条。
+    assert_eq!(reasons.len(), 7, "默认态应有 7 个禁用项: {reasons:?}");
     for want in [
         Key::DisabledNoChanges,
         Key::DisabledEmptyDocument,
         Key::DisabledNothingToUndo,
         Key::DisabledNothingToRedo,
+        Key::DisabledNoCodeBlock,
     ] {
         assert!(reasons.contains(&want), "缺少禁用原因词条 {want:?}");
         assert!(!t(want).is_empty());

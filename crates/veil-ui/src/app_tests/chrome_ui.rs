@@ -743,6 +743,38 @@ fn ctrl_shift_c_copies_code_block_at_caret_without_editing() {
     assert!(b.ui_state.chrome.notice.contains("光标不在代码块内"));
 }
 
+/// 编辑菜单「复制代码块」与键盘/右键同一判据：仅光标在围栏代码块内可用；
+/// 不可用时置灰并给出可读原因，而不是点击后静默失败。
+#[test]
+fn copy_code_block_menu_item_is_enabled_only_inside_fenced_code() {
+    let (mut a, log) = app_code_copy(CODE_MULTILINE);
+    a.editor.set_caret(8); // 围栏后的正文内
+    assert!(a.menu_flags().can_copy_code, "代码块内应可用");
+    assert!(chrome::action_enabled(
+        MenuAction::CopyCodeBlock,
+        a.menu_flags()
+    ));
+    a.perform_menu(MenuAction::CopyCodeBlock);
+    assert_eq!(
+        log.borrow().as_slice(),
+        ["let x = 1;\nlet 中 = \"你好\";\n\nprintln!(\"{}\", 中);"]
+    );
+    assert!(a.ui_state.chrome.notice.contains("已复制代码块"));
+
+    let (mut b, _) = app_code_copy("普通段落\n");
+    b.editor.set_caret(0);
+    assert!(!b.menu_flags().can_copy_code, "代码块外应禁用");
+    assert!(!chrome::action_enabled(
+        MenuAction::CopyCodeBlock,
+        b.menu_flags()
+    ));
+    assert_eq!(
+        chrome::disabled_reason(MenuAction::CopyCodeBlock, b.menu_flags()),
+        Some(I18nKey::DisabledNoCodeBlock),
+        "禁用原因必须可读"
+    );
+}
+
 #[test]
 fn code_block_context_menu_copy_action_runs_from_keyboard() {
     let (mut a, log) = app_code_copy(CODE_MULTILINE);

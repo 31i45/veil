@@ -179,6 +179,8 @@ impl App {
             let width =
                 (width - indent).max(crate::view::table::MIN_COL_WIDTH * self.input_state.scale);
             let wide = key.wide;
+            // 自动宽表只影响本次布局与缓存键，不写回 pan（避免窗口变宽后仍停留宽表）。
+            let user_wide = self.ui_state.tables.pan.contains_key(&id);
             let mut l = self.engine.layout_table_opts_wide(
                 &t,
                 width,
@@ -204,7 +206,9 @@ impl App {
                     .unwrap_or(0.0)
                     .clamp(0.0, max_pan);
                 l.pan = pan;
-                self.ui_state.tables.pan.insert(id, pan);
+                if user_wide {
+                    self.ui_state.tables.pan.insert(id, pan);
+                }
             }
             self.cache.tables.insert(id, Memo { key, value: l });
             self.index.geometry_stale = true;
@@ -270,6 +274,111 @@ impl App {
         }
         self.request_redraw();
         true
+    }
+
+    /// 宽表横向滚动条按下：命中轨道（表格底部滚动条带）则开始拖动会话。
+    /// 点在滑块上按「抓取」处理（保持相对偏移）；点在轨道空白处先把滑块中心移过去。
+    pub(crate) fn try_start_table_scroll_drag(&mut self) -> bool {
+        if self.source_mode() || self.window_state.print.is_some() {
+            return false;
+        }
+        let vp = self.viewport();
+        let (mx, my) = (
+            self.input_state.mouse.x as f32,
+            self.input_state.mouse.y as f32,
+        );
+        let y = (my - vp.y + self.window_state.scroll_y).max(0.0);
+        let Some(idx) = self
+            .index
+            .blocks
+            .iter()
+            .rposition(|g| !self.block_hidden(g) && g.top <= y)
+        else {
+            return false;
+        };
+        let (id, kind, range, top) = {
+            let g = &self.index.blocks[idx];
+            (g.id, g.kind.clone(), g.range, g.top)
+        };
+        if kind != BlockKind::Table || !self.table_shows_grid(id, &range) {
+            return false;
+        }
+        let sy = (vp.y + top - self.window_state.scroll_y) as i32;
+        let Some((offset, target)) = self.table_scrollbar_hit(id, sy, mx, my) else {
+            return false;
+        };
+        if let Some(pan) = target {
+            self.apply_table_pan(id, pan);
+        }
+        self.ui_state.tables.scroll_drag = Some((id, offset));
+        self.request_redraw();
+        true
+    }
+
+    /// 滚动条命中检测：返回 (指针相对滑块左沿偏移, 需要直接跳转的 pan)。
+    fn table_scrollbar_hit(
+        &self,
+        id: BlockId,
+        sy: i32,
+        mx: f32,
+        my: f32,
+    ) -> Option<(f32, Option<f32>)> {
+        let t = self.cache.table(id, self.table_key(id))?;
+        let g = self.table_scrollbar_geom(t, sy)?;
+        if my < g.y || my > g.y + g.bar_h || mx < g.track_x || mx > g.track_x + g.track_w {
+            return None;
+        }
+        let on_thumb = mx >= g.thumb_x && mx <= g.thumb_x + g.thumb_w;
+        if on_thumb {
+            return Some((mx - g.thumb_x, None));
+        }
+        let offset = g.thumb_w * 0.5;
+        let travel = (g.track_w - g.thumb_w).max(1.0);
+        let left = (mx - offset).clamp(g.track_x, g.track_x + travel);
+        Some((offset, Some(((left - g.track_x) / travel) * g.max_pan)))
+    }
+
+    /// 拖动中：按指针位置换算 pan（与绘制/命中同一几何）。
+    pub(crate) fn drag_table_scroll_to(&mut self) -> bool {
+        let Some((id, offset)) = self.ui_state.tables.scroll_drag else {
+            return false;
+        };
+        let target = {
+            let Some(g) = self.index.blocks.iter().find(|g| g.id == id) else {
+                return false;
+            };
+            let sy = (self.viewport().y + g.top - self.window_state.scroll_y) as i32;
+            let Some(t) = self.cache.table(id, self.table_key(id)) else {
+                return false;
+            };
+            let Some(geo) = self.table_scrollbar_geom(t, sy) else {
+                return false;
+            };
+            let mx = self.input_state.mouse.x as f32;
+            let travel = (geo.track_w - geo.thumb_w).max(1.0);
+            let left = (mx - offset).clamp(geo.track_x, geo.track_x + travel);
+            Some(((left - geo.track_x) / travel) * geo.max_pan)
+        };
+        let Some(pan) = target else {
+            return false;
+        };
+        self.apply_table_pan(id, pan);
+        true
+    }
+
+    /// 写入宽表 pan（同一份状态供绘制/命中/缓存几何使用），并夹在合法范围。
+    fn apply_table_pan(&mut self, id: BlockId, pan: f32) {
+        let Some(m) = self.cache.tables.get(&id) else {
+            return;
+        };
+        let avail = (self.content_width() - m.value.x).max(1.0);
+        let max_pan = (m.value.width - avail).max(0.0);
+        let next = pan.clamp(0.0, max_pan);
+        self.ui_state.tables.pan.insert(id, next);
+        if let Some(m) = self.cache.tables.get_mut(&id) {
+            m.value.pan = next;
+        }
+        self.request_redraw();
     }
 
     /// 表格单元格内联公式：渲染（复用 inline_math 缓存）并整理成排版输入。
@@ -393,13 +502,31 @@ impl App {
             base: self.base_key(),
             active,
             widths: self.ui_state.tables.fingerprint(id),
-            wide: self.table_is_wide(id),
+            wide: self.table_is_wide(id) || self.table_auto_wide(id),
         }
     }
 
-    /// 该表当前是否处于「可读宽表 + 横向平移」模式（打印态恒 false）。
+    /// 用户显式进入的「可读宽表 + 横向平移」模式（打印态恒 false）。
     pub(crate) fn table_is_wide(&self, id: BlockId) -> bool {
         self.window_state.print.is_none() && self.ui_state.tables.pan.contains_key(&id)
+    }
+
+    /// 可读下限判据：列数 × MIN_COL_WIDTH × scale 都放不进可用宽时，
+    /// 即使压缩也无法保证列可读 → 自动按宽表布局并显示横向滚动条。
+    /// 不写入 `ui_state.tables.pan`（窗口变宽后自动回到压缩布局）。
+    pub(crate) fn table_auto_wide(&self, id: BlockId) -> bool {
+        if self.window_state.print.is_some() || self.source_mode() {
+            return false;
+        }
+        let Some(g) = self.index.blocks.iter().find(|g| g.id == id) else {
+            return false;
+        };
+        let Some(t) = self.editor.session().table(id) else {
+            return false;
+        };
+        let min = crate::view::table::MIN_COL_WIDTH * self.input_state.scale;
+        let width = (self.content_width() - self.table_indent(g.container)).max(min);
+        t.aligns.len() as f32 * min > width + 0.5
     }
 
     /// 仅排版视口内（含 overscan）的表格网格。

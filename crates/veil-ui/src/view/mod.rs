@@ -22,7 +22,7 @@ pub(crate) mod source_layout;
 mod style;
 pub(crate) mod table;
 mod table_strategy;
-mod table_view;
+pub(crate) mod table_view;
 
 pub use crate::geometry::{BASE_FONT_SIZE, BASE_LINE_HEIGHT};
 pub(crate) use cache::{Cache, LayoutKey, Memo, Revs, TableKey};

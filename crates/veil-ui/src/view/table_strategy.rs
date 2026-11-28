@@ -46,7 +46,12 @@ fn is_atomic_cell_text(text: &str) -> bool {
 }
 
 /// 用其他列在硬下限以上的空间补偿短原子 token，保护后总表宽不增加。
-fn protect_short_atomic_columns(cols: &mut [f32], hard_min: f32, preferred: &[f32]) {
+fn protect_short_atomic_columns(
+    cols: &mut [f32],
+    hard_min: f32,
+    readable_min: f32,
+    preferred: &[f32],
+) {
     let need: f32 = cols
         .iter()
         .zip(preferred)
@@ -70,12 +75,19 @@ fn protect_short_atomic_columns(cols: &mut [f32], hard_min: f32, preferred: &[f3
         *w += delta;
         boosted += delta;
     }
+    // 先只从「仍高于可读下限」的长列回收，避免把刚刚保住下限的窄列再压回去；
+    // 极窄窗口下长列余量不足时，才允许继续向 hard_min 回收。
     let mut remaining = boosted;
-    for (w, p) in cols.iter_mut().zip(preferred) {
-        let available = (*w - hard_min.max(*p)).max(0.0);
-        let taken = available.min(remaining);
-        *w -= taken;
-        remaining -= taken;
+    for floor in [readable_min, hard_min] {
+        for (w, p) in cols.iter_mut().zip(preferred) {
+            let available = (*w - floor.max(*p)).max(0.0);
+            let taken = available.min(remaining);
+            *w -= taken;
+            remaining -= taken;
+            if remaining <= 0.001 {
+                break;
+            }
+        }
         if remaining <= 0.001 {
             break;
         }
@@ -774,24 +786,70 @@ impl LayoutEngine {
                 *w = w.max(MIN_COL_WIDTH * scale);
             }
         } else {
+            let min = MIN_COL_WIDTH * scale;
             if total > width && total > 0.0 {
-                let k = width / total;
-                for w in &mut cols {
-                    *w = (*w * k).max(MIN_COL_WIDTH * scale);
+                // 可读下限优先的「注水」压缩：先把按比例会低于 MIN_COL_WIDTH 的短列
+                // 抬到下限并固定，缺口只由仍高于下限的长列承担。避免窄列被压到
+                // 内容宽 ≈0（逐字折行、墨迹越界），同时总宽仍严格收进可用宽。
+                let mut fixed = vec![false; ncols];
+                loop {
+                    let fixed_sum: f32 = cols
+                        .iter()
+                        .enumerate()
+                        .filter(|(i, _)| fixed[*i])
+                        .map(|(_, w)| *w)
+                        .sum();
+                    let flex_sum: f32 = cols
+                        .iter()
+                        .enumerate()
+                        .filter(|(i, _)| !fixed[*i])
+                        .map(|(_, w)| *w)
+                        .sum();
+                    let budget = (width - fixed_sum).max(0.0);
+                    if flex_sum <= budget + 0.01 || flex_sum <= 0.0 {
+                        if flex_sum > 0.0 {
+                            let k = (budget / flex_sum).max(0.0);
+                            for (i, w) in cols.iter_mut().enumerate() {
+                                if !fixed[i] {
+                                    *w *= k;
+                                }
+                            }
+                        }
+                        break;
+                    }
+                    let k = budget / flex_sum;
+                    let mut newly = false;
+                    for (i, w) in cols.iter_mut().enumerate() {
+                        if !fixed[i] && *w * k < min {
+                            *w = min;
+                            fixed[i] = true;
+                            newly = true;
+                        }
+                    }
+                    if !newly {
+                        for (i, w) in cols.iter_mut().enumerate() {
+                            if !fixed[i] {
+                                *w *= k;
+                            }
+                        }
+                        break;
+                    }
+                    if fixed.iter().all(|f| *f) {
+                        break;
+                    }
                 }
             }
-            // 极窄窗口 + 多列：MIN_COL_WIDTH 地板可能仍让总宽超出可用宽。再按比例压一次
-            // （绝对下限 0.4×MIN_COL_WIDTH），保证表格不横向溢出、后续块不被压住；
-            // 列宽变窄只增加折行，不改变表格语义。
+            // 极窄窗口 + 多列：所有列都到 MIN_COL_WIDTH 仍放不下时，只能继续按比例
+            // 压到 0.4×MIN，保证表格不横向溢出、后续块不被压住。
             let hard_min = MIN_COL_WIDTH * scale * 0.4;
             let sum: f32 = cols.iter().sum();
-            if sum > width && sum > 0.0 {
+            if sum > width + 0.01 && sum > 0.0 {
                 let k = width / sum;
                 for w in &mut cols {
                     *w = (*w * k).max(hard_min);
                 }
             }
-            protect_short_atomic_columns(&mut cols, hard_min, &atomic_min);
+            protect_short_atomic_columns(&mut cols, hard_min, min, &atomic_min);
         }
         // 用户拖动列宽（B2，纯视图态）：长度匹配即覆盖内在宽；
         // 默认模式总宽超出可用宽时按比例压回；可读宽表保留覆盖宽并由 pan 平移。

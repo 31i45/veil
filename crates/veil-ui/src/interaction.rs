@@ -1300,6 +1300,11 @@ impl App {
         if !self.input_state.mods.ctrl && self.try_open_image_preview() {
             return false;
         }
+        // 表格横向滚动条：位于表格底部，优先于列宽拖动与落光标。
+        if self.try_start_table_scroll_drag() {
+            self.request_redraw();
+            return false;
+        }
         // 表格列宽拖动（B2）：优先于落光标；命中分隔线则吞掉本次点击。
         if self.try_start_col_drag() {
             self.request_redraw();

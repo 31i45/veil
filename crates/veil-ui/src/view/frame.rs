@@ -9,6 +9,9 @@ pub struct Frame {
     pub pixels: Vec<u32>,
     pub width: u32,
     pub height: u32,
+    /// 当前裁切矩形（半开区间），`None` 表示不额外裁切。
+    /// 表格等复合内容在入口 `set_clip` 到自身矩形，保证单元格墨迹不越界。
+    clip: Option<(i32, i32, i32, i32)>,
 }
 
 /// RGBA8 → XRGB（窗口不透明，alpha 丢弃）。
@@ -23,6 +26,7 @@ impl Frame {
             pixels: vec![pack(bg); count],
             width,
             height,
+            clip: None,
         }
     }
 
@@ -33,6 +37,41 @@ impl Frame {
         self.height = height;
         self.pixels.resize(count, 0);
         self.pixels.fill(pack(bg));
+        self.clip = None;
+    }
+
+    /// 设置后续绘制（`blit` / `blit_scaled` / `fill_rect` / 圆角原语）的裁切矩形。
+    /// 与帧边界取交；空矩形下所有绘制为 no-op。
+    pub(crate) fn set_clip(&mut self, x: i32, y: i32, w: u32, h: u32) {
+        let x1 = (x as i64 + w as i64).clamp(i32::MIN as i64, i32::MAX as i64) as i32;
+        let y1 = (y as i64 + h as i64).clamp(i32::MIN as i64, i32::MAX as i64) as i32;
+        let x0 = x.max(0);
+        let y0 = y.max(0);
+        let x1 = x1.min(self.width as i32);
+        let y1 = y1.min(self.height as i32);
+        self.clip = if x1 > x0 && y1 > y0 {
+            Some((x0, y0, x1, y1))
+        } else {
+            Some((0, 0, 0, 0))
+        };
+    }
+
+    /// 清除裁切（恢复整帧可绘）。
+    pub(crate) fn clear_clip(&mut self) {
+        self.clip = None;
+    }
+
+    /// 当前有效裁切矩形（半开区间），与帧边界取交。
+    fn clip_rect(&self) -> (i32, i32, i32, i32) {
+        match self.clip {
+            Some(c) => (
+                c.0.max(0),
+                c.1.max(0),
+                c.2.min(self.width as i32),
+                c.3.min(self.height as i32),
+            ),
+            None => (0, 0, self.width as i32, self.height as i32),
+        }
     }
 
     /// 读取像素为 RGBA8（alpha 恒 255），测试与调试用。
@@ -48,14 +87,15 @@ impl Frame {
 
     /// src-over 混合位图到 (dx, dy)，越界部分裁剪。src 为 straight alpha RGBA8。
     pub fn blit(&mut self, src: &[u8], sw: u32, sh: u32, dx: i32, dy: i32) {
+        let (cx0, cy0, cx1, cy1) = self.clip_rect();
         for sy in 0..sh as i32 {
             let dy_ = dy + sy;
-            if dy_ < 0 || dy_ >= self.height as i32 {
+            if dy_ < cy0 || dy_ >= cy1 {
                 continue;
             }
             for sx in 0..sw as i32 {
                 let dx_ = dx + sx;
-                if dx_ < 0 || dx_ >= self.width as i32 {
+                if dx_ < cx0 || dx_ >= cx1 {
                     continue;
                 }
                 let si = ((sy as u32 * sw + sx as u32) * 4) as usize;
@@ -81,15 +121,16 @@ impl Frame {
         if sw == 0 || sh == 0 || dw == 0 || dh == 0 {
             return;
         }
+        let (cx0, cy0, cx1, cy1) = self.clip_rect();
         for y in 0..dh as i32 {
             let dy_ = dy + y;
-            if dy_ < 0 || dy_ >= self.height as i32 {
+            if dy_ < cy0 || dy_ >= cy1 {
                 continue;
             }
             let sy = (y as u64 * sh as u64 / dh as u64) as u32;
             for x in 0..dw as i32 {
                 let dx_ = dx + x;
-                if dx_ < 0 || dx_ >= self.width as i32 {
+                if dx_ < cx0 || dx_ >= cx1 {
                     continue;
                 }
                 let sx = (x as u64 * sw as u64 / dw as u64) as u32;
@@ -102,9 +143,10 @@ impl Frame {
 
     /// 矩形（光标、下划线、底色块）。越界裁剪；不透明色走直写快路径。
     pub fn fill_rect(&mut self, x: i32, y: i32, w: u32, h: u32, color: [u8; 4]) {
-        let (x0, y0) = (x.max(0), y.max(0));
-        let x1 = (x + w as i32).min(self.width as i32);
-        let y1 = (y + h as i32).min(self.height as i32);
+        let (cx0, cy0, cx1, cy1) = self.clip_rect();
+        let (x0, y0) = (x.max(cx0), y.max(cy0));
+        let x1 = (x + w as i32).min(cx1);
+        let y1 = (y + h as i32).min(cy1);
         let packed = pack(color);
         for py in y0..y1 {
             let row = (py as usize) * (self.width as usize);
@@ -289,7 +331,8 @@ impl Frame {
 
     /// 单像素覆盖率混合（圆角边缘抗锯齿用）：有效 alpha = color.a × cov，src-over。
     fn blend_px(&mut self, x: i32, y: i32, color: [u8; 4], cov: f32) {
-        if cov <= 0.0 || x < 0 || y < 0 || x >= self.width as i32 || y >= self.height as i32 {
+        let (cx0, cy0, cx1, cy1) = self.clip_rect();
+        if cov <= 0.0 || x < cx0 || y < cy0 || x >= cx1 || y >= cy1 {
             return;
         }
         let a = (color[3] as f32 * cov.min(1.0)).round() as u8;
@@ -388,6 +431,23 @@ mod tests {
         let mut f = Frame::new(1, 1, BLACK);
         f.fill_rect(0, 0, 1, 1, [255, 255, 255, 128]);
         assert_eq!(f.get(0, 0), [128, 128, 128, 255]);
+    }
+
+    #[test]
+    fn clip_limits_rect_and_bitmap_and_clears() {
+        let mut f = Frame::new(4, 2, BLACK);
+        f.set_clip(1, 0, 2, 2);
+        f.fill_rect(0, 0, 4, 2, WHITE);
+        assert_eq!(f.get(0, 0), BLACK, "裁切外不绘制");
+        assert_eq!(f.get(1, 0), WHITE);
+        assert_eq!(f.get(2, 1), WHITE);
+        assert_eq!(f.get(3, 0), BLACK);
+        let src = [9u8, 9, 9, 255];
+        f.blit(&src, 1, 1, 3, 0); // 裁切右界外
+        assert_eq!(f.get(3, 0), BLACK);
+        f.clear_clip();
+        f.fill_rect(0, 0, 4, 2, WHITE);
+        assert_eq!(f.get(3, 0), WHITE, "清除裁切后恢复整帧可绘");
     }
 
     #[test]

@@ -88,6 +88,8 @@ pub enum MenuAction {
     ToggleBold,
     ToggleItalic,
     InsertLink,
+    /// 复制光标所在围栏代码块的源码（Ctrl+Shift+C，与右键菜单同一能力）。
+    CopyCodeBlock,
     ThemeSystem,
     ThemeLight,
     ThemeDark,
@@ -186,6 +188,11 @@ pub const MENUS: [MenuDef; 4] = [
                 MenuAction::ToggleItalic,
             ),
             (Key::MenuEditLink, Key::ShortcutLink, MenuAction::InsertLink),
+            (
+                Key::MenuEditCopyCode,
+                Key::ShortcutCopyCode,
+                MenuAction::CopyCodeBlock,
+            ),
             (Key::Empty, Key::Empty, MenuAction::Separator),
             (Key::MenuEditFind, Key::ShortcutFind, MenuAction::Find),
             (
@@ -802,6 +809,8 @@ pub(crate) struct MenuFlags {
     pub(crate) can_export: bool,
     pub(crate) can_undo: bool,
     pub(crate) can_redo: bool,
+    /// 光标位于围栏代码块内：决定「复制代码块」可用性（与键盘/右键同一判据）。
+    pub(crate) can_copy_code: bool,
 }
 
 /// 开关项是否处于开启态（非开关项恒 false）：决定弹出菜单该行右侧是否显示「当前」。
@@ -826,6 +835,7 @@ pub(crate) fn disabled_reason_key(action: MenuAction) -> Option<Key> {
         }
         MenuAction::Undo => Some(Key::DisabledNothingToUndo),
         MenuAction::Redo => Some(Key::DisabledNothingToRedo),
+        MenuAction::CopyCodeBlock => Some(Key::DisabledNoCodeBlock),
         _ => None,
     }
 }
@@ -840,6 +850,7 @@ pub(crate) fn disabled_reason(action: MenuAction, flags: MenuFlags) -> Option<Ke
         MenuAction::Export | MenuAction::ExportPdf | MenuAction::Print => !flags.can_export,
         MenuAction::Undo => !flags.can_undo,
         MenuAction::Redo => !flags.can_redo,
+        MenuAction::CopyCodeBlock => !flags.can_copy_code,
         _ => false,
     };
     disabled.then_some(key)

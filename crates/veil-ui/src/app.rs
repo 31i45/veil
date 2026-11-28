@@ -593,6 +593,8 @@ pub(crate) struct TableView {
     /// 可读宽表平移：块 id → 横向平移量（物理像素）。出现即表示该表进入
     /// 「不压缩列宽 + 横向平移」模式；值为 `[0, 表宽 - 可用宽]`。
     pub(crate) pan: HashMap<veil_core::BlockId, f32>,
+    /// 横向滚动条拖动会话：(块 id, 指针相对滑块左沿的偏移)。
+    pub(crate) scroll_drag: Option<(veil_core::BlockId, f32)>,
 }
 
 impl TableView {
@@ -2461,6 +2463,9 @@ impl App {
                 if self.ui_state.tables.drag.is_some() {
                     // 表格列宽拖动（B2）：视图态即时重排，不触碰文档
                     self.drag_col_to();
+                } else if self.ui_state.tables.scroll_drag.is_some() {
+                    // 宽表横向滚动条拖动
+                    self.drag_table_scroll_to();
                 } else if let Some(off) = self.ui_state.chrome.scroll_drag {
                     // 拖动滚动条：按滑块顶边换算滚动量
                     let vp = self.viewport();
@@ -2507,6 +2512,7 @@ impl App {
             } => {
                 self.window_state.dragging = false;
                 self.ui_state.chrome.scroll_drag = None;
+                self.ui_state.tables.scroll_drag = None;
                 self.ui_state.search.pressed = None;
                 self.end_col_drag();
                 // 拖选结束：选区已定型，刷新快照供随后的 Esc 归还。
@@ -2590,6 +2596,7 @@ impl App {
     pub(crate) fn on_window_focus(&mut self, focused: bool) {
         if !focused {
             self.window_state.visible = false;
+            self.ui_state.tables.scroll_drag = None;
             self.end_col_drag();
         }
     }

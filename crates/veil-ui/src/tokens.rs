@@ -457,6 +457,10 @@ pub(crate) mod doc {
     /// 容器内表格/图片的额外水平缩进步长：引用层 / 列表层。
     pub const QUOTE_STEP: f32 = 14.0;
     pub const LIST_STEP: f32 = 6.0;
+    /// 宽表横向滚动条高度（逻辑像素）。
+    pub const TABLE_SCROLL_H: f32 = 8.0;
+    /// 横向滚动条滑块最小长度（逻辑像素）。
+    pub const TABLE_SCROLL_MIN_THUMB: f32 = 24.0;
 }
 
 /// 动效令牌（S1 / S6）：S6 的过渡实现只从这里取时长与缓动。

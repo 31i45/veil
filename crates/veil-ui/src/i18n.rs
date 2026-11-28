@@ -73,6 +73,7 @@ keys! {
     MenuEditBold => "menu.edit.bold", "加粗";
     MenuEditItalic => "menu.edit.italic", "斜体";
     MenuEditLink => "menu.edit.link", "链接";
+    MenuEditCopyCode => "menu.edit.copy_code", "复制代码块";
     MenuEditFind => "menu.edit.find", "查找";
     MenuEditReplace => "menu.edit.replace", "替换";
     MenuEditInsertImage => "menu.edit.insert_image", "插入图片…";
@@ -132,6 +133,7 @@ keys! {
     DisabledEmptyDocument => "disabled.empty_document", "空文档没有可导出的内容";
     DisabledNothingToUndo => "disabled.nothing_to_undo", "没有可撤销的操作";
     DisabledNothingToRedo => "disabled.nothing_to_redo", "没有可重做的操作";
+    DisabledNoCodeBlock => "disabled.no_code_block", "光标不在代码块内";
 
     // ---- 窗口标题 / 状态栏 ----
     WindowTitle => "title.window", "veil — {}";
@@ -857,6 +859,7 @@ fn main() {
     (Key::MenuEditBold, "Bold"),
     (Key::MenuEditItalic, "Italic"),
     (Key::MenuEditLink, "Link"),
+    (Key::MenuEditCopyCode, "Copy Code Block"),
     (Key::MenuEditFind, "Find"),
     (Key::MenuEditReplace, "Replace"),
     (Key::MenuEditInsertImage, "Insert Image…"),
@@ -914,6 +917,7 @@ fn main() {
     (Key::DisabledEmptyDocument, "Nothing to export in an empty document"),
     (Key::DisabledNothingToUndo, "Nothing to undo"),
     (Key::DisabledNothingToRedo, "Nothing to redo"),
+    (Key::DisabledNoCodeBlock, "Cursor is not inside a code block"),
 
     // ---- 窗口标题 / 状态栏 ----
     (Key::WindowTitle, "veil — {}"),

@@ -43,6 +43,7 @@ impl App {
             can_export: self.editor.session().text_len() > 0,
             can_undo: self.editor.session().undo_depth() > 0,
             can_redo: self.editor.session().redo_depth() > 0,
+            can_copy_code: self.code_block_at_caret().is_some(),
         }
     }
 
@@ -228,6 +229,7 @@ impl App {
             MenuAction::ToggleBold => self.perform_action(Action::Doc(Intent::ToggleWrap("**"))),
             MenuAction::ToggleItalic => self.perform_action(Action::Doc(Intent::ToggleWrap("*"))),
             MenuAction::InsertLink => self.perform_action(Action::Doc(Intent::InsertLink)),
+            MenuAction::CopyCodeBlock => self.copy_code_block_at_caret(),
             MenuAction::OpenRecent(i) => self.open_recent(i),
             MenuAction::QuickOpen => self.toggle_quick(),
             MenuAction::Separator => {}
@@ -260,11 +262,11 @@ impl App {
         self.request_redraw();
     }
 
-    /// 键盘路径（Ctrl+Shift+C）：复制光标所在围栏代码块；不在代码块内时给出提示。
-    pub(crate) fn copy_code_block_at_caret(&mut self) {
+    /// 光标所在的围栏代码块（含 Mermaid）：键盘复制、菜单可用性与执行共用同一判据，
+    /// 保证「菜单可点」等价于「复制会成功」，不出现置灰与静默失败各说各话。
+    pub(crate) fn code_block_at_caret(&self) -> Option<BlockId> {
         let off = self.editor.caret();
-        let id = self
-            .index
+        self.index
             .blocks
             .iter()
             .find(|g| {
@@ -272,8 +274,12 @@ impl App {
                     && off <= g.range.end
                     && matches!(&g.kind, BlockKind::FencedCode(_))
             })
-            .map(|g| g.id);
-        match id {
+            .map(|g| g.id)
+    }
+
+    /// 键盘路径（Ctrl+Shift+C）：复制光标所在围栏代码块；不在代码块内时给出提示。
+    pub(crate) fn copy_code_block_at_caret(&mut self) {
+        match self.code_block_at_caret() {
             Some(id) => self.copy_code_block(id),
             None => {
                 self.ui_state

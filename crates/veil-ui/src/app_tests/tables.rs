@@ -961,3 +961,297 @@ fn narrow_window_wide_table_readable_via_shift_wheel_pan() {
         "光标必须落在版心内：{cx}"
     );
 }
+
+// ===== issue #11「表格出格了」回归 =====
+
+/// 与 issue 截图同形：3 列，正文含行内代码/粗体等混排，第三列长句。
+const ISSUE11_DOC: &str = "前\n\n\
+    | 字段 | 参数 | 说明 |\n\
+    | --- | --- | --- |\n\
+    | remotePlay | {ids, start, position} | `{lrc, translation}`, or `{lines}` with timed words where type is mp3, flac, ogg, wav, m4a (ALAC, FLAC or AAC-LC, whole or in fragments as a DASH stream serves it) or aac (AAC-LC in ADTS) |\n\n\
+    后\n";
+
+fn issue11_app(scale: f32) -> (App, BlockId, f32, f32) {
+    let (mut a, _) = app_math(ISSUE11_DOC, false);
+    a.window_state.test_size = Some((840, 700));
+    a.input_state.set_dpi(scale);
+    a.editor.set_caret(ISSUE11_DOC.len());
+    a.refresh_index();
+    a.ensure_layouts_all();
+    a.ensure_tables();
+    a.recompute_geometry();
+    let id = a
+        .index
+        .blocks
+        .iter()
+        .find(|g| g.kind == BlockKind::Table)
+        .expect("应有表格块")
+        .id;
+    let (top, cw) = {
+        let g = a.index.blocks.iter().find(|g| g.id == id).unwrap();
+        (g.top, a.content_width())
+    };
+    (a, id, top, cw)
+}
+
+/// 默认模式：表宽 ≤ 版心、首列不低于可读下限、单元格墨迹与帧像素都不越出版心。
+#[test]
+fn issue11_default_table_fits_content_across_scale() {
+    for scale in [1.0f32, 1.25, 1.5, 2.0] {
+        let (mut a, id, top, content_w) = issue11_app(scale);
+        let (t_w, t_h, cols, cells_right) = {
+            let t = a.cache.tables.get(&id).expect("默认网格已排版");
+            (
+                t.width,
+                t.height,
+                t.cols.clone(),
+                t.cells
+                    .iter()
+                    .map(|c| t.x + c.x + c.pixel_w as f32)
+                    .fold(0.0f32, f32::max),
+            )
+        };
+        assert!(
+            t_w <= content_w + 0.5,
+            "scale={scale}: 表宽必须收进版心 {t_w} > {content_w}"
+        );
+        let min = crate::view::table::MIN_COL_WIDTH * a.input_state.scale;
+        assert!(
+            cols[0] >= min - 0.5,
+            "scale={scale}: 首列不得压到可读下限以下 {} < {min}",
+            cols[0]
+        );
+        assert!(
+            cells_right <= content_w + 0.6,
+            "scale={scale}: 单元格墨迹不得越过版心右界 {cells_right} > {content_w}"
+        );
+        assert_no_ink_right_of_content(&mut a, top, t_h, content_w);
+
+        // 不需要横滚 → 不绘制滚动条。
+        let t = a.cache.tables.get(&id).unwrap();
+        assert!(
+            a.table_scrollbar_geom(t, 0).is_none(),
+            "scale={scale}: 默认收纳后不应出现横向滚动条"
+        );
+    }
+}
+
+/// 渲染帧内、表格纵向范围内，版心右侧（不含竖向滚动条轨道）不得有任何墨迹。
+fn assert_no_ink_right_of_content(a: &mut App, top: f32, h: f32, content_w: f32) {
+    let vp = a.viewport();
+    let scroll = a.window_state.scroll_y;
+    let content_right = (a.content_x() + content_w) as u32;
+    let lane = (vp.x + vp.w - crate::chrome::SCROLL_W * a.input_state.scale) as u32;
+    let bg = a.input_state.theme.bg;
+    let y0 = (vp.y + top - scroll).max(vp.y) as u32 + 1;
+    let f = a.render();
+    let y1 = (vp.y + top - scroll + h)
+        .min(vp.y + vp.h)
+        .min(f.height as f32) as u32;
+    for y in y0..y1 {
+        for x in (content_right + 1)..f.width.min(lane) {
+            assert_eq!(f.get(x, y), bg, "表格墨迹越过版心右界: ({x},{y})");
+        }
+    }
+}
+
+/// 列表容器内：表宽 ≤ 版心 - 缩进，绘制右界仍在版心内。
+#[test]
+fn issue11_table_in_list_respects_indent() {
+    let doc = "p\n\n- | 字段 | 参数 | 说明 |\n  | --- | --- | --- |\n  | remotePlay | {ids, start, position} | `{lrc, translation}`, or `{lines}` with timed words where type is mp3, flac |\n\n后\n";
+    let (mut a, _) = app_math(doc, false);
+    a.window_state.test_size = Some((840, 700));
+    a.editor.set_caret(doc.len());
+    a.refresh_index();
+    a.ensure_layouts_all();
+    a.ensure_tables();
+    a.recompute_geometry();
+    let id = a
+        .index
+        .blocks
+        .iter()
+        .find(|g| g.kind == BlockKind::Table)
+        .expect("应有表格块")
+        .id;
+    let content_w = a.content_width();
+    let (t_w, indent) = {
+        let t = a.cache.tables.get(&id).unwrap();
+        (t.width, t.x)
+    };
+    assert!(indent > 0.5, "列表内表格应有缩进: {indent}");
+    assert!(
+        t_w <= content_w - indent + 0.5,
+        "容器缩进必须同时减宽：{t_w} > {} - {indent}",
+        content_w
+    );
+}
+
+/// 620px + 16 列：可读下限放不下 → 自动宽表 + 可见横向滚动条；
+/// 不需要用户 Shift+滚轮，拖动后同一单元格仍命中同一文档偏移。
+#[test]
+fn issue11_auto_wide_shows_scrollbar_when_readable_min_does_not_fit() {
+    let cols = 16;
+    let head = format!(
+        "| {} |",
+        (1..=cols)
+            .map(|i| format!("C{i:02}"))
+            .collect::<Vec<_>>()
+            .join(" | ")
+    );
+    let sep = format!("| {} |", vec!["---"; cols].join(" | "));
+    let row = format!(
+        "| {} |",
+        (1..=cols)
+            .map(|i| format!("列表{i:02}"))
+            .collect::<Vec<_>>()
+            .join(" | ")
+    );
+    let doc = format!("前\n\n{head}\n{sep}\n{row}\n\n后\n");
+    let (mut a, _) = app_math(&doc, false);
+    a.window_state.test_size = Some((620, 700));
+    a.editor.set_caret(doc.len());
+    a.refresh_index();
+    a.ensure_layouts_all();
+    a.ensure_tables();
+    a.recompute_geometry();
+    let (id, top) = {
+        let g = a
+            .index
+            .blocks
+            .iter()
+            .find(|g| g.kind == BlockKind::Table)
+            .expect("应有表格块");
+        (g.id, g.top)
+    };
+    let content_w = a.content_width();
+    let t_w = a.cache.tables.get(&id).expect("网格已排版").width;
+    assert!(
+        t_w > content_w + 0.5,
+        "可读下限放不下时应自动宽表：{t_w} 未超出版心 {content_w}"
+    );
+    assert!(
+        a.table_auto_wide(id) && !a.table_is_wide(id),
+        "自动宽表不得写入用户 pan"
+    );
+
+    let vp = a.viewport();
+    let scroll = a.window_state.scroll_y;
+    let sy = (vp.y + top - scroll) as i32;
+    let g = {
+        let t = a.cache.tables.get(&id).unwrap();
+        a.table_scrollbar_geom(t, sy)
+            .expect("自动宽表必须出现横向滚动条")
+    };
+    let target = a.editor.session().table(id).unwrap().rows[0][7].range.start;
+    let cell_screen = |a: &App| {
+        let t = a.cache.tables.get(&id).unwrap();
+        let c = &t.cells[23];
+        (
+            a.content_x() + t.x - t.pan + c.x + 0.5,
+            vp.y + top - scroll + c.y + c.h * 0.5,
+        )
+    };
+    let before = cell_screen(&a);
+    a.input_state.mouse = PhysicalPosition::new(before.0 as f64, before.1 as f64);
+    assert_eq!(a.hit_offset(), Some(target));
+
+    let thumb_mid = g.thumb_x + g.thumb_w * 0.5;
+    a.input_state.mouse = PhysicalPosition::new(thumb_mid as f64, (g.y + 1.0) as f64);
+    assert!(a.try_start_table_scroll_drag(), "应命中滚动条滑块");
+    a.input_state.mouse = PhysicalPosition::new((thumb_mid + 100.0) as f64, (g.y + 1.0) as f64);
+    assert!(a.drag_table_scroll_to());
+    assert!(
+        a.cache.tables.get(&id).unwrap().pan > 0.5,
+        "拖动后 pan 应大于 0"
+    );
+    assert!(a.ui_state.tables.pan.get(&id).copied().unwrap_or(0.0) > 0.0);
+
+    let after = cell_screen(&a);
+    a.input_state.mouse = PhysicalPosition::new(after.0 as f64, after.1 as f64);
+    assert_eq!(
+        a.hit_offset(),
+        Some(target),
+        "自动宽表拖动后同一单元格仍须命中同一文档偏移"
+    );
+}
+
+/// 宽表横向滚动条：可拖动；拖动后同一单元格在新位置仍命中同一文档偏移。
+#[test]
+fn issue11_wide_table_scrollbar_drag_keeps_hit() {
+    let doc = "前\n\n\
+        | 列一 | 列二 | 列三 | 列四 | 列五 | 列六 | 列七 | 列八 |\n\
+        | --- | --- | --- | --- | --- | --- | --- | --- |\n\
+        | 甲乙丙丁 | 甲乙丙丁 | 甲乙丙丁 | 甲乙丙丁 | 甲乙丙丁 | 甲乙丙丁 | 甲乙丙丁 | 最右列为可读内容 |\n\n\
+        后\n";
+    let (mut a, _) = app_math(doc, false);
+    a.window_state.test_size = Some((520, 700));
+    a.editor.set_caret(doc.len());
+    a.refresh_index();
+    a.ensure_layouts_all();
+    a.ensure_tables();
+    a.recompute_geometry();
+    let (id, top) = {
+        let g = a
+            .index
+            .blocks
+            .iter()
+            .find(|g| g.kind == BlockKind::Table)
+            .expect("应有表格块");
+        (g.id, g.top)
+    };
+    // 进入可读宽表模式（Shift+滚轮），此时表格超出版心。
+    let vp = a.viewport();
+    let scroll = a.window_state.scroll_y;
+    a.input_state.mouse = PhysicalPosition::new(
+        (a.content_x() + 20.0) as f64,
+        (vp.y + top + 8.0 - scroll) as f64,
+    );
+    let target = a.editor.session().table(id).unwrap().rows[0][5].range.start;
+    assert!(a.try_pan_table(0.0), "宽表应能进入可读平移模式");
+    let (before_pan, thumb, cell_screen) = {
+        let t = a.cache.tables.get(&id).expect("宽表网格已排版");
+        let sy = (vp.y + top - scroll) as i32;
+        let g = a
+            .table_scrollbar_geom(t, sy)
+            .expect("需要横滚时必须有滚动条");
+        let cell = &t.cells[13]; // 表体第 6 列
+        let cell_screen = (
+            a.content_x() + t.x - t.pan + cell.x + 0.5,
+            vp.y + top - scroll + cell.y + cell.h * 0.5,
+        );
+        (t.pan, g, cell_screen)
+    };
+    assert!(before_pan < 1.0, "初始 pan 应为 0：{before_pan}");
+    // 拖动前：该单元格命中目标偏移。
+    a.input_state.mouse = PhysicalPosition::new(cell_screen.0 as f64, cell_screen.1 as f64);
+    assert_eq!(a.hit_offset(), Some(target));
+
+    // 抓取滑块中部，向右拖 80px。
+    let thumb_mid = thumb.thumb_x + thumb.thumb_w * 0.5;
+    a.input_state.mouse = PhysicalPosition::new(thumb_mid as f64, (thumb.y + 1.0) as f64);
+    assert!(a.try_start_table_scroll_drag(), "应命中滚动条滑块");
+    a.input_state.mouse = PhysicalPosition::new((thumb_mid + 80.0) as f64, (thumb.y + 1.0) as f64);
+    assert!(a.drag_table_scroll_to());
+    let after_pan = a.cache.tables.get(&id).unwrap().pan;
+    assert!(
+        after_pan > before_pan + 0.5,
+        "滚动条拖动后 pan 应增大: {after_pan}"
+    );
+    assert!(a.ui_state.tables.pan.get(&id).copied().unwrap_or(0.0) > 0.0);
+
+    // 拖动后：同一单元格随 pan 左移，其新位置仍命中同一文档偏移。
+    let cell_screen = {
+        let t = a.cache.tables.get(&id).unwrap();
+        let cell = &t.cells[13];
+        (
+            a.content_x() + t.x - t.pan + cell.x + 0.5,
+            vp.y + top - scroll + cell.y + cell.h * 0.5,
+        )
+    };
+    a.input_state.mouse = PhysicalPosition::new(cell_screen.0 as f64, cell_screen.1 as f64);
+    assert_eq!(
+        a.hit_offset(),
+        Some(target),
+        "同一单元格在平移后的屏幕位置必须仍命中同一文档偏移"
+    );
+}

@@ -2010,10 +2010,11 @@ fn print_ignores_source_mode_and_screen_restores_it() {
 
 // ===== 排版（Task 5）：可读列宽上限 / H4–H6 缩进 / 标题段距 =====
 
-/// 420px 窄窗口 + 12 列：表格必须压回版心宽，块高覆盖所有单元格，
-/// 后续段落起点不早于表格底边（不得压字/视口异常）。
+/// 420px 窄窗口 + 12 列：可读下限（12 × MIN_COL_WIDTH）已放不进版心，
+/// 必须自动进入宽表布局（宽 > 版心）并显示可拖动的横向滚动条；
+/// 块高仍覆盖所有单元格，后续段落起点不早于表格底边（不得压字/视口异常）。
 #[test]
-fn narrow_twelve_column_table_fits_and_tail_does_not_overlap() {
+fn narrow_twelve_column_table_auto_wides_with_scrollbar() {
     let store = MemStore::default();
     let cols = 12;
     for scale in [1.0, 1.5] {
@@ -2052,44 +2053,81 @@ fn narrow_twelve_column_table_fits_and_tail_does_not_overlap() {
         a.ensure_layouts_all();
         a.ensure_tables();
         a.recompute_geometry();
-        let table = a
+        let (tid, ttop, trange) = {
+            let g = a
+                .index
+                .blocks
+                .iter()
+                .find(|g| g.kind == BlockKind::Table)
+                .expect("应有表格块");
+            (g.id, g.top, g.range)
+        };
+        let tail_top = a
             .index
             .blocks
             .iter()
-            .find(|g| g.kind == BlockKind::Table)
-            .expect("应有表格块");
-        let tail = a
-            .index
-            .blocks
-            .iter()
-            .find(|g| g.kind == BlockKind::Paragraph && g.range.start > table.range.start)
-            .expect("应有表格后的段落");
-        let tl = a
-            .cache
-            .table(table.id, a.table_key(table.id))
-            .expect("网格已排版");
+            .find(|g| g.kind == BlockKind::Paragraph && g.range.start > trange.start)
+            .expect("应有表格后的段落")
+            .top;
+        let content_w = a.content_width();
+        let (t_w, t_h, max_cell_h, tl_x) = {
+            let tl = a.cache.table(tid, a.table_key(tid)).expect("网格已排版");
+            (
+                tl.width,
+                tl.height,
+                tl.cells
+                    .iter()
+                    .map(|c| c.y + c.pixel_h as f32)
+                    .fold(0.0f32, f32::max),
+                tl.x,
+            )
+        };
         assert!(
-            tl.width <= a.content_width() + 0.5,
-            "scale={scale}: 表格宽 {} 超出可用宽 {}",
-            tl.width,
-            a.content_width()
+            t_w > content_w + 0.5,
+            "scale={scale}: 可读下限放不下时应进入宽表布局，宽 {t_w} 未超出版心 {content_w}"
         );
         assert!(
-            (a.block_height(table) - tl.height).abs() < 0.5,
+            a.table_auto_wide(tid) && !a.table_is_wide(tid),
+            "scale={scale}: 自动宽表不应写入用户 pan"
+        );
+        let block_h = {
+            let g = a.index.blocks.iter().find(|g| g.id == tid).expect("表格块");
+            a.block_height(g)
+        };
+        assert!(
+            (block_h - t_h).abs() < 0.5,
             "scale={scale}: 块高必须与网格高一致"
         );
         assert!(
-            table.top + tl.height <= tail.top + 0.5,
-            "scale={scale}: 后文起点 {} 早于表格底边 {}",
-            tail.top,
-            table.top + tl.height
+            ttop + t_h <= tail_top + 0.5,
+            "scale={scale}: 后文起点 {tail_top} 早于表格底边 {}",
+            ttop + t_h
         );
-        for c in &tl.cells {
-            assert!(
-                c.y + c.pixel_h as f32 <= tl.height + 0.5,
-                "scale={scale}: 单元格内容溢出表格高度"
-            );
-        }
+        assert!(
+            max_cell_h <= t_h + 0.5,
+            "scale={scale}: 单元格内容溢出表格高度"
+        );
+
+        // 自动宽表必须出现可见、可拖动的横向滚动条。
+        let vp = a.viewport();
+        let sy = (vp.y + ttop - a.window_state.scroll_y) as i32;
+        let g = {
+            let tl = a.cache.table(tid, a.table_key(tid)).expect("网格已排版");
+            a.table_scrollbar_geom(tl, sy)
+                .expect("需要横滚时必须显示横向滚动条")
+        };
+        assert!(g.track_w > 0.0 && g.thumb_w > 0.0);
+        assert_eq!(g.track_x, a.content_x() + tl_x);
+        let thumb_mid = g.thumb_x + g.thumb_w * 0.5;
+        let bar_y = g.y + 1.0;
+        a.input_state.mouse = PhysicalPosition::new(thumb_mid as f64, bar_y as f64);
+        assert!(a.try_start_table_scroll_drag(), "应命中滚动条滑块");
+        a.input_state.mouse = PhysicalPosition::new((thumb_mid + 60.0) as f64, bar_y as f64);
+        assert!(a.drag_table_scroll_to());
+        assert!(
+            a.cache.tables.get(&tid).unwrap().pan > 0.0,
+            "scale={scale}: 拖动滚动条后 pan 应大于 0"
+        );
     }
 }
 

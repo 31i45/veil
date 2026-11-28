@@ -538,6 +538,15 @@ mod tests {
             .expect("保存命令");
         assert_eq!(save.label, "保存");
         assert_eq!(save.hint, "Ctrl+S", "命令面板显示菜单快捷键提示");
+        let copy_code = items
+            .iter()
+            .find(|it| it.action == Some(MenuAction::CopyCodeBlock))
+            .expect("复制代码块命令");
+        assert_eq!(copy_code.label, "复制代码块");
+        assert_eq!(
+            copy_code.hint, "Ctrl+Shift+C",
+            "命令面板与编辑菜单/右键同一提示"
+        );
         let typewriter = items
             .iter()
             .find(|it| it.action == Some(MenuAction::ToggleTypewriter))

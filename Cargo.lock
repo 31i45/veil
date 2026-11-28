@@ -2897,7 +2897,7 @@ dependencies = [
 
 [[package]]
 name = "veil"
-version = "3.1.0"
+version = "3.1.1"
 dependencies = [
  "arboard",
  "base64",
@@ -2918,7 +2918,7 @@ dependencies = [
 
 [[package]]
 name = "veil-core"
-version = "3.1.0"
+version = "3.1.1"
 dependencies = [
  "lapce-xi-rope",
  "pulldown-cmark",
@@ -2928,7 +2928,7 @@ dependencies = [
 
 [[package]]
 name = "veil-mermaid-offline"
-version = "3.1.0"
+version = "3.1.1"
 dependencies = [
  "cosmic-text",
  "resvg",
@@ -2939,7 +2939,7 @@ dependencies = [
 
 [[package]]
 name = "veil-ui"
-version = "3.1.0"
+version = "3.1.1"
 dependencies = [
  "cosmic-text",
  "memchr",

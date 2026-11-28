@@ -11,7 +11,7 @@ Veil is for writers, thinkers, researchers, and engineers who want distraction-f
 - **Markdown with documented limits** — CommonMark 0.31.2 core + a GFM subset (Tables / TaskList / Strikethrough / Autolinks), with live incremental syntax highlighting. This is not a claim of complete Markdown compatibility; separate test corpora, conformance dimensions and known limits are documented in the [root README](../../README.md#historical-measurements-targets-vs-results)
 - **Single portable exe** — No separate application runtime or installer required; Windows system components and system DLLs are still used. Optional per-user installer available
 - **Mermaid diagrams rendered in-process** — No external network calls for graph rendering
-- **Evidence tied to builds** — Historical performance measurements retain their dates, builds and methods in the root README; this wording review did not rerun them for v3.1.0
+- **Evidence tied to builds** — Historical performance measurements retain their dates, builds and methods in the root README; this wording review did not rerun them for v3.1.1
 - **Zero telemetry upload** — No analytics or telemetry upload. Crash and diagnostic reports are generated locally and are not uploaded automatically
 - **MIT licensed** — Source open at [github.com/31i45/veil](https://github.com/31i45/veil)
 

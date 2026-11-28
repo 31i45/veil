@@ -2,6 +2,14 @@
 
 > 本页为人工维护的交付事实。`report-2026-11-27.md` 由语法矩阵测试生成，运行测试会覆写，请勿手工追加。
 
+## v3.1.1 发布轮（2026-11-28）
+
+> 补丁版：图标光学居中、编辑菜单补「复制代码块」、Issue #11 表格溢出修复。
+
+- workspace 版本：**3.1.1**；相对 v3.1.0 的提交见 `git log --oneline v3.1.0..v3.1.1`。
+- 本机门禁（2026-11-28）：`cargo test --workspace --release -- --test-threads=1` **2279 行合计 passed / 0 failed / 18 ignored**（套件 2277）；clippy 0；fmt 通过；`third_party_notices.ps1 -Check` OK（`产品：Veil 3.1.1`）。
+- 发布资产与 SHA-256：以 `v3.1.1` 的 Release 与 sidecar 为准（发布后回填本次 run id 与数值）。
+
 ## v3.1.0 发布轮（2026-11-28）
 
 > 本节记录 `v3.0.2` 之后首个真实推送与 tag 发布的门禁事实。数字来自本机真实命令输出；远端 CI 结论只认 Actions 运行记录。

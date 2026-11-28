@@ -1561,16 +1561,46 @@ fn explicit_latin_family_falls_back_for_chinese_glyphs() {
 #[test]
 fn source_mode_and_preview_use_same_custom_family() {
     let mut eng = LayoutEngine::new();
-    let Some((family, _)) = eng.installed_families().into_iter().find(|(_, cjk)| *cjk) else {
-        return;
-    };
-    eng.set_doc_typography(16.0, 24.0, DocFontFamily::Serif, Some(&family));
-
     let src = "**中文**\n";
     let s = Session::open(src);
     let (id, kind, range) = s.blocks()[0].clone();
     let inlines = s.block_inlines(id).unwrap();
     let text = &src[range.start..range.end];
+
+    // 任意被标记为 CJK 的字族不一定覆盖简体中文字形（例如只含日文汉字的族），
+    // 换台机器后「第一个 CJK 族」可能是这一类。先用探针布局挑一个真正覆盖
+    // 「中文」的字族；整个环境都没有时跳过，而不是把环境差异记成产品缺陷。
+    let families = eng.installed_families();
+    let mut covering = None;
+    for (family, is_cjk) in families {
+        if !is_cjk {
+            continue;
+        }
+        eng.set_doc_typography(16.0, 24.0, DocFontFamily::Serif, Some(&family));
+        let probe = eng.layout_block(
+            kind.clone(),
+            text,
+            range,
+            &inlines,
+            400.0,
+            usize::MAX,
+            &[],
+            false,
+        );
+        let resolved = {
+            let db = eng.font_system.db();
+            cjk_family_names(&probe, db).contains(&family)
+        };
+        if resolved {
+            covering = Some(family);
+            break;
+        }
+    }
+    let Some(family) = covering else {
+        eprintln!("skip: no installed CJK family shapes 中文 on this host");
+        return;
+    };
+
     let preview = eng.layout_block(
         kind.clone(),
         text,

@@ -10,7 +10,9 @@
 
 - workspace 版本：**3.1.0**（`Cargo.toml`）；`v3.0.2..HEAD` 共 **143** 个提交。
 - 发布资产：`veil.exe`、`veil.exe.sha256`、`veil-setup-3.1.0.exe`、`veil-setup-3.1.0.exe.sha256`（四件，SBOM 只作构建证据不上传）。
-- 推送：`main` 与 `v3.1.0` tag 推送至 `github.com/31i45/veil`；release workflow 由 tag 触发，结果以 Actions 运行记录为准。
+- 推送：`main` 与 `v3.1.0` tag 推送至 `github.com/31i45/veil`；release workflow 由 tag 触发。
+- GitHub Actions run **46089558590**：`core-linux` 与 `release` 全部 **success**；首轮 run `46087363522` 因 `view::layout::tests::source_mode_and_preview_use_same_custom_family` 的环境字体差异失败（runner 上第一个 CJK 字族不覆盖简体中文），修复为「探针选择真正覆盖中文的字族，环境无覆盖字体时跳过」后重打 v3.1.0。
+- Release：<https://github.com/31i45/veil/releases/tag/v3.1.0>，4 件资产（`veil.exe`、`veil.exe.sha256`、`veil-setup-3.1.0.exe`、`veil-setup-3.1.0.exe.sha256`）。
 
 ### 本机门禁（2026-11-28）
 
@@ -18,7 +20,7 @@
 - `cargo clippy --workspace --all-targets -- -D warnings`：**0 warnings**（exit 0）。
 - `cargo fmt --all -- --check`：**通过**（exit 0）。
 - `pwsh -NoProfile -File tools/third_party_notices.ps1 -Check`：**OK**（364 packages，`产品：Veil 3.1.0`）。
-- 发布产物大小与 SHA-256：由 GitHub Actions 的 release job 生成，写入 `veil.exe.sha256` 与 Release 正文；本机不重复构建发布包。
+- 发布产物大小与 SHA-256：`veil.exe` **14,332,416 B**（13.67 MiB），SHA-256 `a74c5ea50136c10814b008ac1cabd1d33f1aebbddc4c7f26109d126e49e66068`；`veil-setup-3.1.0.exe` **6,884,843 B**，SHA-256 `c9abb35d9c835d2d0bc0d72badc26d57e19ed963f49e34b97964c5bba6b356a1`（均取自对应 Release 的 sidecar）。
 
 ### 清理（同轮）
 

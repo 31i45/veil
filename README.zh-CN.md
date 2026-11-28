@@ -152,7 +152,7 @@ Veil 不宣称所有 Markdown / Mermaid 语法在渲染模式、源码模式、H
 
 除渲染与导出外，本节同时记录未验证项与既定产品决策：
 
-- **人工项（assisted 流程，用户只做物理动作）**：两项必测（DPI、真机 IME）已于 2026-11-28 执行，一项可选冒烟（实体打印）保留；三条流程统一为「一条命令启动、分步提示、自动截图/落盘、自动生成判定表」，脚本在 `tools/verify/assisted/{dpi,print,ime}.ps1`，说明见 `tools/verify/assisted/README.md`。当前状态：系统 DPI 100/125/150/200 四档**首帧 PASS**，逐档点按/拖选命中经用户人工执行并确认 **PASS（2026-11-28，未落盘 jsonl）**；实体打印机出纸**不做**（用户决定：PDF 就是打印产物，Print-to-PDF 已覆盖分页）；真机微软拼音六步 **PASS**；微软五笔**不做**（用户决定）。未执行项一律不构成 PASS。其余未验证项：Linux 桌面；真实断网抓包归因；无 CJK 字体的系统与只读导出目标。本提交远端 GitHub Actions 由 v3.1.1 tag 触发；release workflow 完成后以 Actions 运行记录为准，不在此预判。高对比度已有一次真实系统切换 PASS（228 ms）与强制高对比度复验截图（见 `docs/qa/release-facts-2026-11-27.md`），但极端主题的实际观感仍需人工确认。无障碍支持已移除，见下方「无障碍」章节。
+- **人工项（assisted 流程，用户只做物理动作）**：两项必测（DPI、真机 IME）已于 2026-11-28 执行，一项可选冒烟（实体打印）保留；三条流程统一为「一条命令启动、分步提示、自动截图/落盘、自动生成判定表」，脚本在 `tools/verify/assisted/{dpi,print,ime}.ps1`，说明见 `tools/verify/assisted/README.md`。当前状态：系统 DPI 100/125/150/200 四档**首帧 PASS**，逐档点按/拖选命中经用户人工执行并确认 **PASS（2026-11-28，未落盘 jsonl）**；实体打印机出纸**不做**（用户决定：PDF 就是打印产物，Print-to-PDF 已覆盖分页）；真机微软拼音六步 **PASS**；微软五笔**不做**（用户决定）。未执行项一律不构成 PASS。其余未验证项：Linux 桌面；真实断网抓包归因；无 CJK 字体的系统与只读导出目标。本提交远端 GitHub Actions 已由 v3.1.1 tag 触发并 **PASS**（run `46159504267`：`core-linux` + `release`），Release 含预期四件资产。高对比度已有一次真实系统切换 PASS（228 ms）与强制高对比度复验截图（见 `docs/qa/release-facts-2026-11-27.md`），但极端主题的实际观感仍需人工确认。无障碍支持已移除，见下方「无障碍」章节。
 - **断行依赖：`unicode-linebreak` 结论为 NO-GO（决策记录，不是待办）**：现有断行逻辑已覆盖 99%+ 的真实文本，评估后不引入 `unicode-linebreak`——收益不足以抵消新增依赖。这是已记录的决策，请勿理解为「即将支持」。
 - **字体来自系统，仓库不内嵌**：正文按 `fontdb` 枚举出的已安装字体排版；仓库与产物都不内嵌任何字体文件，因此字族选择不会改变 `veil.exe` 的体积。可在「设置 → 正文字体族」中选择任意已安装字族；所选字族缺少某个字形时（例如只含拉丁字形的字族用于中文），自动回退到系统 CJK 字体，不出现方块。
 - **源码模式的两种排版**：源码模式对同一份字节提供两种排版。默认是「纯文本行视图」：每个物理行（含空行）都是可寻址行，↑/↓ 会停在空行上。关闭「设置 → 源码模式：纯文本行视图」后回到「块布局 + 显示标记」：块间空行不是独立可寻址行，按 ↑/↓ 会直接跳到相邻块（空行仍可删除：在下一段开头按 Backspace 删掉一个换行，`Ctrl+Z` 可恢复）。两种排版的保存字节完全相同。
@@ -344,7 +344,7 @@ pwsh -File tools/smoke_launch.ps1 -ExePath target/release/veil.exe -ExpectedTitl
 
 ## 隐私、安全与支持
 
-Veil 以 MIT 许可证免费分发。**设计上不包含遥测，也没有后台更新检查**。**帮助 → 检查更新**只用系统浏览器打开官方 Release 页，不在进程内发起更新请求。远程图片默认关闭，开关状态持久保存：开启后，之后打开含远程图片的文档可按需发起请求，不再逐次提示。外部链接与 mermaid.live 需要用户显式操作。崩溃与诊断报告在本地生成、不自动上传；只有你主动提交时才离开本机。可信生产签名与真实 SmartScreen 仍为 **NOT RUN**；本提交远端 GitHub Actions 由 v3.1.1 tag 触发；Gate 与资产清单以发布完成后的运行记录为准。历史本机范围受限抓包记录见 [PRIVACY.md](PRIVACY.md)，不代表全场景零出站已验证。
+Veil 以 MIT 许可证免费分发。**设计上不包含遥测，也没有后台更新检查**。**帮助 → 检查更新**只用系统浏览器打开官方 Release 页，不在进程内发起更新请求。远程图片默认关闭，开关状态持久保存：开启后，之后打开含远程图片的文档可按需发起请求，不再逐次提示。外部链接与 mermaid.live 需要用户显式操作。崩溃与诊断报告在本地生成、不自动上传；只有你主动提交时才离开本机。可信生产签名与真实 SmartScreen 仍为 **NOT RUN**；本提交远端 GitHub Actions 由 v3.1.1 tag 触发并 PASS（run `46159504267`），Gate 与资产清单以该次运行记录为准。历史本机范围受限抓包记录见 [PRIVACY.md](PRIVACY.md)，不代表全场景零出站已验证。
 
 - [PRIVACY.md](PRIVACY.md) — 收集与不收集什么、本地文件位置、网络能力与默认值、远程图片、诊断报告、如何删除数据
 - [SECURITY.md](SECURITY.md) — 支持版本（3.x）、私密漏洞报告渠道、报告内容与范围
@@ -359,7 +359,7 @@ Veil 当前使用自签名开发证书 `CN=Veil Development (Long-term)`（SHA-1
 
 - **可信生产签名**：三条候选路径已评估，并在本地文件 `evidence/renewal/production-signing-options.md`（未随仓库发布）中有详细文档：SignPath Foundation（合格开源项目免费 OV）、Azure Artifact Signing（US$9.99/月）、商业 OV/EV（US$129+/年）。所有路径都需要只能由你亲自完成的身份验证和/或付费。尚未申请或购买任何生产证书。
 - **真实 SmartScreen + MotW 下载**：需要先有上面的可信生产证书。Microsoft SmartScreen 信誉系统随时间累积；即使有可信签名，首次发布仍可能警告。
-- **本提交远端 GitHub Actions 证据**：v3.1.1 的 `v*` tag 触发 release workflow；以 Actions 运行记录与 Release 资产为准。上一次 v3.1.0 run `46089558590` 已通过（`core-linux` + `release`，四件资产）。
+- **本提交远端 GitHub Actions 证据**：v3.1.1 的 `v*` tag 触发 run `46159504267`，`core-linux` 与 `release` 均通过；Release 含 `veil.exe`、其 sidecar、安装包及其 sidecar（大小与 SHA 取 sidecar）。上一次 v3.1.0 run `46089558590` 同样通过。
 - **跨机信任吊销演练**：依赖于真实 CRL/AIA 基础设施，这只有在可信公共 CA 或企业 PKI 下才有。自签名证书没有公共同名吊销机制。
 
 ### 建议的下一步（当你准备好时）

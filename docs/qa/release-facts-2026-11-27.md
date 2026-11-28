@@ -8,7 +8,10 @@
 
 - workspace 版本：**3.1.1**；相对 v3.1.0 的提交见 `git log --oneline v3.1.0..v3.1.1`。
 - 本机门禁（2026-11-28）：`cargo test --workspace --release -- --test-threads=1` **2279 行合计 passed / 0 failed / 18 ignored**（套件 2277）；clippy 0；fmt 通过；`third_party_notices.ps1 -Check` OK（`产品：Veil 3.1.1`）。
-- 发布资产与 SHA-256：以 `v3.1.1` 的 Release 与 sidecar 为准（发布后回填本次 run id 与数值）。
+- 发布资产与 SHA-256：Release <https://github.com/31i45/veil/releases/tag/v3.1.1>，4 件（`veil.exe`、`veil.exe.sha256`、`veil-setup-3.1.1.exe`、`veil-setup-3.1.1.exe.sha256`）。
+  - `veil.exe` **14,345,216 B**，SHA-256 `9b7c26bc6b8133f438603700ec18541dd9c8a9d71384aa4c7d72df231850c1aa`
+  - `veil-setup-3.1.1.exe` **6,886,888 B**，SHA-256 `5f6611b83b8252077f91742dab42da63490ca3b044eb3a6ae3f894b2ccb5a431`
+- GitHub Actions run **46159504267**：`core-linux` 与 `release` 均 **success**；`CI`（main）同样 success。
 
 ## v3.1.0 发布轮（2026-11-28）
 

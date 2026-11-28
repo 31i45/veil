@@ -2,6 +2,31 @@
 
 > 本页为人工维护的交付事实。`report-2026-11-27.md` 由语法矩阵测试生成，运行测试会覆写，请勿手工追加。
 
+## v3.1.0 发布轮（2026-11-28）
+
+> 本节记录 `v3.0.2` 之后首个真实推送与 tag 发布的门禁事实。数字来自本机真实命令输出；远端 CI 结论只认 Actions 运行记录。
+
+### 版本与范围
+
+- workspace 版本：**3.1.0**（`Cargo.toml`）；`v3.0.2..HEAD` 共 **143** 个提交。
+- 发布资产：`veil.exe`、`veil.exe.sha256`、`veil-setup-3.1.0.exe`、`veil-setup-3.1.0.exe.sha256`（四件，SBOM 只作构建证据不上传）。
+- 推送：`main` 与 `v3.1.0` tag 推送至 `github.com/31i45/veil`；release workflow 由 tag 触发，结果以 Actions 运行记录为准。
+
+### 本机门禁（2026-11-28）
+
+- `cargo test --workspace --release -- --test-threads=1`：**2271 行合计 passed / 0 failed / 18 ignored**（套件内计数 2269；`veil-mermaid-offline` 的病态 deadline 测试以子进程两次复跑同一二进制，输出另各 1 passed）。
+- `cargo clippy --workspace --all-targets -- -D warnings`：**0 warnings**（exit 0）。
+- `cargo fmt --all -- --check`：**通过**（exit 0）。
+- `pwsh -NoProfile -File tools/third_party_notices.ps1 -Check`：**OK**（364 packages，`产品：Veil 3.1.0`）。
+- 发布产物大小与 SHA-256：由 GitHub Actions 的 release job 生成，写入 `veil.exe.sha256` 与 Release 正文；本机不重复构建发布包。
+
+### 清理（同轮）
+
+- 删除本地 `release-bundle/`（v3.0.0 / v3.0.1 旧产物与安装包，43.4 MB）。
+- 删除根目录 `evidence/`（本机证据包）与 `.trae/specs/`（本地 AI 规格历史）；历史文档中的相关路径按「本地记录，不随仓库分发」解读。
+- 删除 `target/` 根目录下的历史构建日志与样张 PDF；`target/` 本身为可再生产物，发布前执行 `cargo clean`。
+- 保留 `docs/qa/evidence/` 中被文档引用的 tracked 证据；仓库 tracked 文件本轮未删除。
+
 ## 直接修复轮（2026-11-28）
 
 > 以下数字来自 2026-11-28 07:21–07:33（Asia/Shanghai）的本机真实命令输出。

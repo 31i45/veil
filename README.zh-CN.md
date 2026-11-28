@@ -18,7 +18,7 @@
 
 Veil 的灵感来自 Typedown — Typedown 是我最喜欢的 Windows Markdown 编辑器，没有之一，但是它启动需要几十秒到数分钟，每次都让人崩溃。Typedown 是 WinUI 框架实现的应用，冷启动快过你完成一杯咖啡的时间本该是理所当然的事，但现实并非如此。
 
-所以，我决定自己复刻。纯 Rust 实现，无 webview、无 Chromium/WebView2 进程、无需单独安装应用运行时。单文件 exe。历史性能数字保留在[历史测量](#历史测量目标值与结果)，并绑定各自构建、日期与测量口径；它们不是当前 v3.0.2 的复测结果。**单机单用户 · 无后台同步、遥测或更新检查 · 永不协作**。
+所以，我决定自己复刻。纯 Rust 实现，无 webview、无 Chromium/WebView2 进程、无需单独安装应用运行时。单文件 exe。历史性能数字保留在[历史测量](#历史测量目标值与结果)，并绑定各自构建、日期与测量口径；它们不是当前 v3.1.0 的复测结果。**单机单用户 · 无后台同步、遥测或更新检查 · 永不协作**。
 
 ## 下载与使用
 
@@ -111,7 +111,7 @@ veil.exe /unregister   # 只撤销 /register 创建、且当前值仍属于自�
 22. 光标表达焦点：窗口聚焦时实心、失焦时空心，零定时器、零空闲唤醒
 23. 状态过渡：菜单栏、菜单项、大纲、快速打开、右键菜单、查找栏与对话框按钮的悬停/按下高亮以 120 ms ease-out cubic 淡入淡出；仅在动画进行中推进，空闲路径仍然零定时器、不唤醒进程；系统关闭「显示动画」时直接跳到终态
 24. 远程图片（v1.4）：http/https 图片默认关闭；「视图 → 允许远程图片」是持久的全局开关，开启后，之后打开的含远程图片文档可按需抓取，不再逐次提示；抓取失败降级为 alt 占位并在状态栏提示一次。请求不携带 Cookie、`Referer` 或任何凭据，UA 固定为 `Veil/<version>`，连接/读取超时 10 s，响应体上限 20 MiB，最多跟随 3 次重定向且拒绝 https→http 降级，拒绝 localhost / 回环 / 私有 / 链路本地地址。导出与 PDF 永不包含远程资源
-25. 编辑手感（v1.5）：`()` `[]` `{}` `"` `'` 五类自动配对，支持选中包裹与成对退格；光标 600 ms 闪烁在 IME 预编辑与打印时暂停；`Ctrl+,` 打开设置面板（13 项：12 个可编辑设置 + 只读窗口几何，改动立即生效）
+25. 编辑手感（v1.5）：`()` `[]` `{}` `"` `'` 五类自动配对，支持选中包裹与成对退格；光标 600 ms 闪烁在 IME 预编辑与打印时暂停；`Ctrl+,` 打开设置面板（14 项：13 个可编辑设置 + 只读窗口几何，改动立即生效）
 26. 大纲与目录：`[TOC]` 行渲染为带标题锚点的嵌套有序列表，并随编辑自动刷新
 27. 图片工作流（v1.6 + 本轮）：alt 文本作为题注；独立图支持 `<img align="left|center|right">` 与显式 `width`/`height`；单击独立图片打开放大预览（滚轮平移、`Ctrl+滚轮` 或 `+`/`-` 缩放、`0` 适应、方向键/翻页平移、`Esc`/遮罩关闭；`Ctrl+单击` 仍落光标显示源码）
 28. 阅读与导航：折叠的 Front Matter 卡片可点击展开；标题/TOC 锚点可跳转；可交互 chrome 带指针反馈
@@ -152,10 +152,10 @@ Veil 不宣称所有 Markdown / Mermaid 语法在渲染模式、源码模式、H
 
 除渲染与导出外，本节同时记录未验证项与既定产品决策：
 
-- **人工项（assisted 流程，用户只做物理动作）**：两项必测（DPI、真机 IME）已于 2026-11-28 执行，一项可选冒烟（实体打印）保留；三条流程统一为「一条命令启动、分步提示、自动截图/落盘、自动生成判定表」，脚本在 `tools/verify/assisted/{dpi,print,ime}.ps1`，说明见 `tools/verify/assisted/README.md`。当前状态：系统 DPI 100/125/150/200 四档**首帧 PASS**（逐档点按/拖选命中未执行）；实体打印机出纸为**可选冒烟、不是门禁**（NOT RUN；Print-to-PDF 已覆盖分页正确性，样张、驱动清单与六项核对表已自动生成）；真机微软拼音六步 **PASS**（五笔未安装，NOT RUN）。未执行项一律不构成 PASS。其余未验证项：远端 GitHub Actions 与 Linux 桌面；真实断网抓包归因；无 CJK 字体的系统与只读导出目标。高对比度已有一次真实系统切换 PASS（228 ms）与强制高对比度复验截图（见 `docs/qa/release-facts-2026-11-27.md`），但极端主题的实际观感仍需人工确认。无障碍支持已移除，见下方「无障碍」章节。
+- **人工项（assisted 流程，用户只做物理动作）**：两项必测（DPI、真机 IME）已于 2026-11-28 执行，一项可选冒烟（实体打印）保留；三条流程统一为「一条命令启动、分步提示、自动截图/落盘、自动生成判定表」，脚本在 `tools/verify/assisted/{dpi,print,ime}.ps1`，说明见 `tools/verify/assisted/README.md`。当前状态：系统 DPI 100/125/150/200 四档**首帧 PASS**（逐档点按/拖选命中未执行）；实体打印机出纸为**可选冒烟、不是门禁**（NOT RUN；Print-to-PDF 已覆盖分页正确性，样张、驱动清单与六项核对表已自动生成）；真机微软拼音六步 **PASS**（五笔未安装，NOT RUN）。未执行项一律不构成 PASS。其余未验证项：Linux 桌面；真实断网抓包归因；无 CJK 字体的系统与只读导出目标。本提交远端 GitHub Actions 已由 v3.1.0 tag 触发，是否 PASS 以 Actions 运行记录为准。高对比度已有一次真实系统切换 PASS（228 ms）与强制高对比度复验截图（见 `docs/qa/release-facts-2026-11-27.md`），但极端主题的实际观感仍需人工确认。无障碍支持已移除，见下方「无障碍」章节。
 - **断行依赖：`unicode-linebreak` 结论为 NO-GO（决策记录，不是待办）**：现有断行逻辑已覆盖 99%+ 的真实文本，评估后不引入 `unicode-linebreak`——收益不足以抵消新增依赖。这是已记录的决策，请勿理解为「即将支持」。
 - **字体来自系统，仓库不内嵌**：正文按 `fontdb` 枚举出的已安装字体排版；仓库与产物都不内嵌任何字体文件，因此字族选择不会改变 `veil.exe` 的体积。可在「设置 → 正文字体族」中选择任意已安装字族；所选字族缺少某个字形时（例如只含拉丁字形的字族用于中文），自动回退到系统 CJK 字体，不出现方块。
-- **源码模式的两种排版**：源码模式对同一份字节提供两种排版。默认是「块布局 + 显示标记」：块间空行不是独立可寻址行，按 ↑/↓ 会直接跳到相邻块（空行仍可删除：在下一段开头按 Backspace 删掉一个换行，`Ctrl+Z` 可恢复）。开启「设置 → 源码模式：纯文本行视图」（默认关）后，每个物理行（含空行）都是可寻址行，↑/↓ 会停在空行上。两种排版的保存字节完全相同。
+- **源码模式的两种排版**：源码模式对同一份字节提供两种排版。默认是「纯文本行视图」：每个物理行（含空行）都是可寻址行，↑/↓ 会停在空行上。关闭「设置 → 源码模式：纯文本行视图」后回到「块布局 + 显示标记」：块间空行不是独立可寻址行，按 ↑/↓ 会直接跳到相邻块（空行仍可删除：在下一段开头按 Backspace 删掉一个换行，`Ctrl+Z` 可恢复）。两种排版的保存字节完全相同。
 
 ## 无障碍
 
@@ -181,7 +181,7 @@ cargo build --release --bin veil
 cargo test -p veil-mermaid-offline
 ```
 
-历史发布门禁（v3.0.0 时期记录，**不是当前 v3.0.2 验收**）：串行 `cargo test --workspace --release -- --test-threads=1` 在 commit `0d229eb` 通过（`evidence/release/release-record.json`，`tests.status=passed`）；记录的 `veil-ui` lib 分项为 **1281 passed / 11 ignored**。此前 commit `97d3a60` 记录为 1919 passed / 0 failed / 15 ignored（远程 SVG mock 使用 20 ms 墙钟截止，并行执行可能假超时）；同一历史记录还列出默认特性下 `cargo test -p veil --lib` 为 221 passed / 1 ignored，`cargo clippy --workspace --all-targets -- -D warnings` 零警告。本轮文档纠偏未重建或复跑当前 v3.0.2 发布证据。
+历史发布门禁（v3.0.0 时期记录，**不是当前 v3.1.0 验收**）：串行 `cargo test --workspace --release -- --test-threads=1` 在 commit `0d229eb` 通过（`evidence/release/release-record.json`，`tests.status=passed`）；记录的 `veil-ui` lib 分项为 **1281 passed / 11 ignored**。此前 commit `97d3a60` 记录为 1919 passed / 0 failed / 15 ignored（远程 SVG mock 使用 20 ms 墙钟截止，并行执行可能假超时）；同一历史记录还列出默认特性下 `cargo test -p veil --lib` 为 221 passed / 1 ignored，`cargo clippy --workspace --all-targets -- -D warnings` 零警告。当前 v3.1.0 门禁（2026-11-28 本机串行运行）：**2269 passed / 0 failed / 18 ignored**；`cargo clippy --workspace --all-targets -- -D warnings` 零警告。产物大小与 SHA-256 以对应 Release 与侧车文件为准。
 
 `#[ignore]` 探针不再是没人解释的黑洞。现存 18 条 ignored 测试（13 条 release 优化级别性能探针、4 条病态/超大单块探针、1 条 CJK PDF 证据生成器）与 1 条已晋级的诊断器逐条登记在 `docs/qa/ignored-tests-2026-11-27.md`，写明为何 ignore、如何判定。一条命令即可对 release 构建跑完全部探针：
 
@@ -207,7 +207,7 @@ pwsh -File tools/smoke_launch.ps1 -ExePath target/release/veil.exe -ExpectedTitl
 
 ## 历史测量（目标值与结果）
 
-**以下是历史记录，不是 v3.0.2 的发布 PASS。** 本轮文档纠偏未对当前 v3.0.2 复测启动、击键、Working Set/RSS、Private Bytes 或产物体积；这些当前测量均为 **NOT RUN**。每项结果只属于其标明的日期、构建与提交。当前产物大小和 SHA-256 必须取自对应 Release 及随包 `veil.exe.sha256`，不得使用此处历史数字核验。复现命令：`cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo run --release -p veil --example bench_typing`、`cargo test -p veil-ui --release --lib -- --ignored --nocapture --test-threads=1 perf_20k_blocks`、`cargo build --release -p veil` + `(Get-Item target\release\veil.exe).Length`，依赖计数用 `cargo tree -p veil --edges normal --prefix none`。方法与明细见 `docs/review/keystroke-attribution.md`。
+**以下是历史记录，不是 v3.1.0 的发布 PASS。** 本轮文档纠偏未对当前 v3.1.0 复测启动、击键、Working Set/RSS、Private Bytes 或产物体积；这些当前测量均为 **NOT RUN**。每项结果只属于其标明的日期、构建与提交。当前产物大小和 SHA-256 必须取自对应 Release 及随包 `veil.exe.sha256`，不得使用此处历史数字核验。复现命令：`cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo run --release -p veil --example bench_typing`、`cargo test -p veil-ui --release --lib -- --ignored --nocapture --test-threads=1 perf_20k_blocks`、`cargo build --release -p veil` + `(Get-Item target\release\veil.exe).Length`，依赖计数用 `cargo tree -p veil --edges normal --prefix none`。方法与明细见 `docs/review/keystroke-attribution.md`。
 
 一致性维度不可混用：**A** 比较顶层 Markdown 生成块序列；**B_EXPORT_EXACT** 精确比较导出 HTML；**B_CANON** 比较规范化后的 HTML；**C** 与参照比较行内节点计数；**D** 比较行内前序森林签名。A/C/D 通过不代表 HTML 精确兼容。CommonMark 的 652 个官方用例与 GFM 的独立 23 例属于不同语料，不得合并为一个兼容率。
 
@@ -220,11 +220,11 @@ pwsh -File tools/smoke_launch.ps1 -ExePath target/release/veil.exe -ExpectedTitl
 | 冷启动（窗口句柄口径；P2 对比口径） | — | 30 ms（2026-10-30，`tools/bench/measure.ps1`；只是窗口句柄代理，不代表首帧或可交互延迟） |
 | 10 万字文档击键→提交上屏延迟 p95 | ≤ 16 ms | p50 2.231–2.268 ms · p95 2.556–2.615 ms · max ≤3.468 ms（`perf_20k_blocks` 21,000 块 / 300 样本，2 次，历史构建 2026-11-21 commit `0d229eb`；最差 p95 2.615 ms ≤ 16 ms。早期 10k 记录：0.973 / 1.566 ms） |
 | 10 万字文档内存（**Working Set / RSS**） | ≤ 150 MB | 40.76 MB（20 页深滚动后的单点观察；2026-11-05，pre-v3 构建；公开摘要未保留精确 commit；**不是 Private Bytes**） |
-| 当前 v3.0.2 的 Private Bytes | — | 本轮文档纠偏 **NOT RUN**；不得用上方的 Working Set/RSS 数值替代 |
-| 单文件 `veil.exe` 体积 | ≤ 14 MiB = 14,680,064 B | 当前 v3.0.2 体积在此 **NOT RUN**；以对应 Release 与侧车文件为准。不同历史构建不可混用（单一产物：离线 Mermaid 引擎 + 完整 `mermaid.js` + resvg，引擎惰性初始化） |
-| `veil-core` 单元+属性测试数 | ≥ 80 | 347（历史摘要，非 v3.0.2 复测） |
+| 当前 v3.1.0 的 Private Bytes | — | 本轮文档纠偏 **NOT RUN**；不得用上方的 Working Set/RSS 数值替代 |
+| 单文件 `veil.exe` 体积 | ≤ 14 MiB = 14,680,064 B | 当前 v3.1.0 体积在此 **NOT RUN**；以对应 Release 与侧车文件为准。不同历史构建不可混用（单一产物：离线 Mermaid 引擎 + 完整 `mermaid.js` + resvg，引擎惰性初始化） |
+| `veil-core` 单元+属性测试数 | ≥ 80 | 347（历史摘要，非 v3.1.0 复测） |
 | e2e 断言数 | ≥ 20 | 41（历史摘要：打开→保存→重开、表格+图片粘贴落盘、查找替换→崩溃恢复→自清） |
-| Markdown 往返一致率（无编辑时输出 == 输入字节；按字节比较） | 100% | 100%（历史摘要，非 v3.0.2 复测） |
+| Markdown 往返一致率（无编辑时输出 == 输入字节；按字节比较） | 100% | 100%（历史摘要，非 v3.1.0 复测） |
 | CommonMark 0.31.2 — 652 个官方用例，A / C / D 维 | — | 历史公开摘要（2026-10-28，pre-v3）：A 652/652 · C 652/652 · D 652/652 |
 | CommonMark 0.31.2 — 同一组 652 例，B 维 | — | 历史公开摘要（2026-10-28，pre-v3）：B_EXPORT_EXACT 629/652 · B_CANON 630/652（**不是完整精确/规范化 HTML 兼容**） |
 | GFM — 独立 23 例（Tables 8 / TaskList 2 / Strikethrough 2 / Autolinks 11） | — | 历史公开摘要（2026-10-28，pre-v3）：A/C/D 23/23；B_CANON 12/23；其中 11 个 autolink 用例在该摘要中仅作观察。**不代表完整 GFM 兼容** |
@@ -242,7 +242,7 @@ pwsh -File tools/smoke_launch.ps1 -ExePath target/release/veil.exe -ExpectedTitl
 | 产物 / 安装占用（**定义不同**） | 5.46 MiB，单个 `veil.exe` | 488.95 MB，安装目录总量 | **不计算倍率**：单 exe 与安装目录不是同一产物口径 |
 | 冷启动（进程创建→主窗口句柄；5 轮中位数） | 30 ms | 30 ms | 仅此代理指标打平；**不代表首帧或可交互时间相同** |
 
-以上是历史 P2 测量，不是当前 v3.0.2 的对比。尤其不得把上方 40.76 MB 的 Working Set/RSS 观察值与本表 Private Bytes 混比。当前产物请以对应 Release 与 `veil.exe.sha256` 为准。
+以上是历史 P2 测量，不是当前 v3.1.0 的对比。尤其不得把上方 40.76 MB 的 Working Set/RSS 观察值与本表 Private Bytes 混比。当前产物请以对应 Release 与 `veil.exe.sha256` 为准。
 
 依赖黑名单：`tokio`、`wasmtime`、一切 webview crate（`webview2-com`/`wry` 等），引入即视为违规。
 
@@ -260,7 +260,7 @@ pwsh -File tools/smoke_launch.ps1 -ExePath target/release/veil.exe -ExpectedTitl
 
 ## 设置项（评审）
 
-基线：2026-11-25，源码版本 3.0.2。下表逐一列出 17 个独立的顶层键。`doc_font_face` 并入 `doc_font_family`：它是同一设置行的「显式已安装字族」表示，不是额外的用户可见设置项。
+基线：2026-11-28，源码版本 3.1.0（键集自 2026-11-25 审计以来未变化）。下表逐一列出 17 个独立的顶层键。`doc_font_face` 并入 `doc_font_family`：它是同一设置行的「显式已安装字族」表示，不是额外的用户可见设置项。
 
 | # | 键 | 界面文案 | 是否语义重复 | 结论 | 理由 |
 |---:|---|---|---|---|---|
@@ -268,11 +268,11 @@ pwsh -File tools/smoke_launch.ps1 -ExePath target/release/veil.exe -ExpectedTitl
 | 2 | `ui_language` | 界面语言 | 否 | 保留 | 与正文内容无关；按设计仅在重启后生效。 |
 | 3 | `doc_font_family`（+ `doc_font_face`） | 正文字体族 | 同一设置行的两种表示 | 保留 | 预置枚举与显式已安装字族互斥；删任一个都会丢失能力。设置面板已合并为一行。 |
 | 4 | `doc_font_size` | 正文字号（10–32） | 否 | 保留 | 独立排版值，有自身夹取范围。 |
-| 5 | `doc_line_height` | （仅配置文件） | 否 | 保留 | 独立排版值；面板未暴露，读取时也不由字号推导。 |
+| 5 | `doc_line_height` | 正文行高 | 否 | 保留 | 独立排版值；自 v3.1.0 起在设置面板暴露，读取时不由字号推导。 |
 | 6 | `doc_margin` | 版心 | 否 | 保留 | 屏幕版心档位，与 PDF 页边距无关。 |
 | 7 | `doc_margin_px` | 自定义版心边距 | 是 `doc_margin = custom` 的参数 | 保留 | 仅在自定义档生效，但仍是独立数值，无法由四个固定档位推导。 |
 | 8 | `allow_remote_images` | 允许远程图片 | 同一键也在视图菜单出现 | 保留 | 一个持久状态、两个入口，不是重复键。 |
-| 9 | `source_plain_lines` | 源码模式：纯文本行视图 | 仅修饰源码模式 | 保留 | 可选的源码行排版；保留它才能同时维持默认的块布局源码视图。 |
+| 9 | `source_plain_lines` | 源码模式：纯文本行视图 | 仅修饰源码模式 | 保留 | 源码模式内的行排版；默认开启，关闭后保留块布局源码视图。 |
 | 10 | `tab_width` | 制表符宽度（2 或 4） | 否 | 保留 | 独立编辑偏好。 |
 | 11 | `export_margin_mm` | 导出 PDF 页边距（毫米，0–50） | 与 `doc_margin` 不同 | 保留 | 页边距对应纸面，版心对应屏幕：单位、作用面与用途都不同。 |
 | 12 | `export_page_numbers` | 导出 PDF 时显示页码 | 否 | 保留 | 独立 PDF 选项。 |
@@ -286,17 +286,20 @@ pwsh -File tools/smoke_launch.ps1 -ExePath target/release/veil.exe -ExpectedTitl
 
 ## 文档状态与措辞对照
 
-本轮措辞纠偏的状态基线：**源码版本 3.0.2，2026-11-24**。本表用于防止把历史证据误读为当前验收。
+本轮措辞纠偏的状态基线：**源码版本 3.1.0，2026-11-28**。本表用于防止把历史证据误读为当前验收。
 
 | 材料 | 状态与允许的解读 |
 |---|---|
-| `README.md` / `README.zh-CN.md` | 当前功能与默认值文档。上述测量与发布数字均为历史；本轮未复测当前 v3.0.2 性能，也未重新执行发布验收。 |
+| `README.md` / `README.zh-CN.md` | 当前功能与默认值文档。上述测量与发布数字均为历史；本轮未复测当前 v3.1.0 性能，也未重新执行发布验收。 |
 | `docs/commercial/LANDING.md` / `LANDING.zh-CN.md` | 当前公开摘要，不使用未复测的体积或性能数字；能力限制链接回双 README。 |
 | `docs/commercial/RELEASE-ARTICLE-3.0.zh-CN.md` | v3.0.1 历史快照（2026-11-23），不是当前发布证据。 |
 | `PRIVACY.md` / `SUPPORT.md` | 当前数据与支持边界：本地报告不自动上传、远程图片开关持久保存、检查更新仅打开 Release 页。 |
 | `SECURITY.md` | 安全策略由并行安全工作负责；本轮措辞纠偏未修改。 |
 | `docs/review/evaluation/EVALUATION-FINAL-v3.0.md` | 仅是 v3.0.1 历史工程门禁评价；不证明审美、声望、采用度、营收或市场地位。 |
-| `evidence/release/v3-build.md` / `release-record.json` | v3.0.0 历史构建记录；不可用于 v3.0.2 的体积、SHA-256 或发布 PASS。JSON 保持未改。 |
+| `docs/review/evaluation/EVALUATION-v3.1.0.md` | 当前 v3.1.0 评价：逐维度评级、未闭合项与本版不得宣称的内容。 |
+| `docs/review/external-matters.md` | 发布阻塞项、生产签名状态、证书续期计划与 P1/P2/P3 待办分层。 |
+| `evidence/release/v3-build.md` / `release-record.json` | v3.0.0 历史构建记录；不可用于 v3.1.0 的体积、SHA-256 或发布 PASS。JSON 保持未改。 |
+| `evidence/`（本机证据包）与 `.trae/`（本地 AI 工作区） | 已于 2026-11-28 按清理决定删除。历史文档中引用的路径是「证据曾经所在的本地记录」，不是随仓库分发的文件。 |
 | `docs/review/P2-benchmark.md` | 2026-10-30 的 Veil 0.1.0 / MarkText 0.23.0 历史对比；引用时保留其机器、语料、轮数、指标与产物定义。 |
 
 ## 文档导航
@@ -341,7 +344,7 @@ pwsh -File tools/smoke_launch.ps1 -ExePath target/release/veil.exe -ExpectedTitl
 
 ## 隐私、安全与支持
 
-Veil 以 MIT 许可证免费分发。**设计上不包含遥测，也没有后台更新检查**。**帮助 → 检查更新**只用系统浏览器打开官方 Release 页，不在进程内发起更新请求。远程图片默认关闭，开关状态持久保存：开启后，之后打开含远程图片的文档可按需发起请求，不再逐次提示。外部链接与 mermaid.live 需要用户显式操作。崩溃与诊断报告在本地生成、不自动上传；只有你主动提交时才离开本机。可信生产签名与真实 SmartScreen 仍为 **NOT RUN**；本轮未查看当前 v3.0.2 的远端 GitHub Actions 证据。历史本机范围受限抓包记录见 [PRIVACY.md](PRIVACY.md)，不代表全场景零出站已验证。
+Veil 以 MIT 许可证免费分发。**设计上不包含遥测，也没有后台更新检查**。**帮助 → 检查更新**只用系统浏览器打开官方 Release 页，不在进程内发起更新请求。远程图片默认关闭，开关状态持久保存：开启后，之后打开含远程图片的文档可按需发起请求，不再逐次提示。外部链接与 mermaid.live 需要用户显式操作。崩溃与诊断报告在本地生成、不自动上传；只有你主动提交时才离开本机。可信生产签名与真实 SmartScreen 仍为 **NOT RUN**；本提交远端 GitHub Actions 由 v3.1.0 tag 触发，其 PASS/FAIL 以 Actions 运行记录为准，不在此断言。历史本机范围受限抓包记录见 [PRIVACY.md](PRIVACY.md)，不代表全场景零出站已验证。
 
 - [PRIVACY.md](PRIVACY.md) — 收集与不收集什么、本地文件位置、网络能力与默认值、远程图片、诊断报告、如何删除数据
 - [SECURITY.md](SECURITY.md) — 支持版本（3.x）、私密漏洞报告渠道、报告内容与范围
@@ -356,7 +359,7 @@ Veil 当前使用自签名开发证书 `CN=Veil Development (Long-term)`（SHA-1
 
 - **可信生产签名**：三条候选路径已评估，并在本地文件 `evidence/renewal/production-signing-options.md`（未随仓库发布）中有详细文档：SignPath Foundation（合格开源项目免费 OV）、Azure Artifact Signing（US$9.99/月）、商业 OV/EV（US$129+/年）。所有路径都需要只能由你亲自完成的身份验证和/或付费。尚未申请或购买任何生产证书。
 - **真实 SmartScreen + MotW 下载**：需要先有上面的可信生产证书。Microsoft SmartScreen 信誉系统随时间累积；即使有可信签名，首次发布仍可能警告。
-- **本提交远端 GitHub Actions 证据**：本轮文档纠偏未查看（此处 **NOT RUN**）。工作流文件已静态验证，包含 `workflow_dispatch` 入口且默认 `dry_run=true`；不得由静态检查推导当前 CI 结果。
+- **本提交远端 GitHub Actions 证据**：v3.1.0 的 `v*` tag 已推送并触发 release workflow；本文件不预设 PASS/FAIL，结果以 GitHub Actions 运行记录为准。工作流文件已静态验证，包含 `workflow_dispatch` 入口且默认 `dry_run=true`；不得由静态检查推导 CI 结果。
 - **跨机信任吊销演练**：依赖于真实 CRL/AIA 基础设施，这只有在可信公共 CA 或企业 PKI 下才有。自签名证书没有公共同名吊销机制。
 
 ### 建议的下一步（当你准备好时）

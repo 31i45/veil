@@ -1,9 +1,0 @@
-dialog=hwnd=2951404 1281x720
-foreground=7013308 target=7013308 focused=True
-pick_file=D:\VSCode\Veil\evidence\ux\after-v5\_work\l2\image-notice\notimage.txt
-client=1350x1050 outer=1372x1106
-printwindow_t0=True printwindow_t7=True
-interval_seconds=7
-sha256_t0=9E0F379E293096317AF1F6A5FE1E06DF2F099E6EDC4F0337E1D1F044AF308F55
-sha256_t7=9E0F379E293096317AF1F6A5FE1E06DF2F099E6EDC4F0337E1D1F044AF308F55
-byte_identical=True

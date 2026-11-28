@@ -1,9 +1,0 @@
-method=config_restore_480x360_logical
-dpi=144 scale=1.5
-config=window_width=480 window_height=360 window_x=40 window_y=60
-outer_px=802x596 at 40,60
-client_px=780x540
-client_logical=520x360
-clamped_to_min_520x360_logical=True
-client_equals_expected_min_px=True
-printwindow_ok=True

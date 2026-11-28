@@ -1,9 +1,0 @@
-WindowRect=60,60,222,276 outer=162x216
-Client=140 x 160 at physical DPI 144
-PrintWindowOk=True
-DarkTextBands=15..29,58..76,90..96,137..137,146..147
-OverlayCardY=55..121 (66 high)
-LineH=27
-RowsY=61..88,88..115 (2 slots)
-ClientBox=0,0,140,160 : rows inside=true; above status(121)
-Note=At physical 140x160 only first slot shows text "保存失败"; second slot renders blank, no "另存为". This is below the tested 140x160 LOGICAL case (210x240 physical); recorded as extra, not used for PASS.

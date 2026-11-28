@@ -1,6 +1,6 @@
 # 第三方许可清单
 
-产品：Veil 3.0.2
+产品：Veil 3.1.0
 生成命令：`pwsh -NoProfile -File tools/third_party_notices.ps1`
 校验命令：`pwsh -NoProfile -File tools/third_party_notices.ps1 -Check`
 
@@ -15,7 +15,7 @@
 - 由 manifest license_file 指定的全文：0
 - 由 workspace 根 LICENSE 覆盖的包：4
 - 无独立许可证文件的包（按 SPDX 标准全文与元数据归属补全）：40
-- 许可证全文条目（本地文件按内容 SHA-256 去重）：203
+- 许可证全文条目（本地文件按内容 SHA-256 去重）：204
 - 按 SPDX 标准全文补全的许可证组：3
 
 ## Rust 依赖组件
@@ -27,6 +27,7 @@
 | adler2 | 2.0.1 | 0BSD OR MIT OR Apache-2.0 | https://github.com/oyvindln/adler2 |
 | ahash | 0.8.13 | MIT OR Apache-2.0 | https://github.com/tkaitchuck/ahash |
 | aho-corasick | 1.1.5 | Unlicense OR MIT | https://github.com/BurntSushi/aho-corasick |
+| allocator-api2 | 0.2.21 | MIT OR Apache-2.0 | https://github.com/zakarumych/allocator-api2 |
 | android-activity | 0.6.1 | MIT OR Apache-2.0 | https://github.com/rust-mobile/android-activity |
 | android-properties | 0.2.2 | MIT | https://github.com/miklelappo/android-properties |
 | arboard | 3.7.0 | MIT OR Apache-2.0 | https://github.com/1Password/arboard |
@@ -159,7 +160,7 @@
 | ndk | 0.9.0 | MIT OR Apache-2.0 | https://github.com/rust-mobile/ndk |
 | ndk-context | 0.1.1 | MIT OR Apache-2.0 | https://github.com/rust-windowing/android-ndk-rs |
 | ndk-sys | 0.6.0+11769913 | MIT OR Apache-2.0 | https://github.com/rust-mobile/ndk |
-| notify | 8.2.2 | CC0-1.0 | https://github.com/notify-rs/notify.git |
+| notify | 9.0.0 | CC0-1.0 | https://github.com/notify-rs/notify.git |
 | notify-types | 2.3.1 | MIT OR Apache-2.0 | https://github.com/notify-rs/notify.git |
 | num-conv | 0.2.2 | MIT OR Apache-2.0 | https://github.com/jhpratt/num-conv |
 | num-traits | 0.2.19 | MIT OR Apache-2.0 | https://github.com/rust-num/num-traits |
@@ -237,13 +238,14 @@
 | regex | 1.13.2 | MIT OR Apache-2.0 | https://github.com/rust-lang/regex |
 | regex-automata | 0.4.19 | MIT OR Apache-2.0 | https://github.com/rust-lang/regex |
 | regex-syntax | 0.8.12 | MIT OR Apache-2.0 | https://github.com/rust-lang/regex |
+| relative-path | 2.0.3 | MIT OR Apache-2.0 | https://github.com/udoprog/relative-path |
 | resvg | 0.50.0 | Apache-2.0 OR MIT | https://github.com/linebender/resvg |
 | rgb | 0.8.53 | MIT | https://github.com/kornelski/rust-rgb |
 | roxmltree | 0.20.0 | MIT OR Apache-2.0 | https://github.com/RazrFalcon/roxmltree |
 | roxmltree | 0.21.2 | MIT OR Apache-2.0 | https://github.com/RazrFalcon/roxmltree |
-| rquickjs | 0.9.0 | MIT | https://github.com/DelSkayn/rquickjs.git |
-| rquickjs-core | 0.9.0 | MIT | https://github.com/DelSkayn/rquickjs.git |
-| rquickjs-sys | 0.9.0 | MIT | https://github.com/DelSkayn/rquickjs.git |
+| rquickjs | 0.14.0 | MIT | https://github.com/DelSkayn/rquickjs.git |
+| rquickjs-core | 0.14.0 | MIT | https://github.com/DelSkayn/rquickjs.git |
+| rquickjs-sys | 0.14.0 | MIT | https://github.com/DelSkayn/rquickjs.git |
 | rustc-hash | 2.1.3 | Apache-2.0 OR MIT | https://github.com/rust-lang/rustc-hash |
 | rustc_version | 0.4.1 | MIT OR Apache-2.0 | https://github.com/djc/rustc-version-rs |
 | rustix | 0.38.44 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | https://github.com/bytecodealliance/rustix |
@@ -305,12 +307,10 @@
 | tiny-xlib | 0.2.5 | MIT OR Apache-2.0 OR Zlib | https://github.com/rust-windowing/tiny-xlib |
 | tinyvec | 1.13.3 | Zlib OR Apache-2.0 OR MIT | https://github.com/Lokathor/tinyvec |
 | tokio | 1.54.1 | MIT | https://github.com/tokio-rs/tokio |
-| toml_datetime | 0.6.11 | MIT OR Apache-2.0 | https://github.com/toml-rs/toml |
 | toml_datetime | 1.1.3+spec-1.1.0 | MIT OR Apache-2.0 | https://github.com/toml-rs/toml |
-| toml_edit | 0.22.27 | MIT OR Apache-2.0 | https://github.com/toml-rs/toml |
-| toml_edit | 0.25.20+spec-1.1.0 | MIT OR Apache-2.0 | https://github.com/toml-rs/toml |
-| toml_parser | 1.1.6+spec-1.1.0 | MIT OR Apache-2.0 | https://github.com/toml-rs/toml |
-| toml_write | 0.1.2 | MIT OR Apache-2.0 | https://github.com/toml-rs/toml |
+| toml_edit | 0.25.21+spec-1.1.0 | MIT OR Apache-2.0 | https://github.com/toml-rs/toml |
+| toml_parser | 1.1.7+spec-1.1.0 | MIT OR Apache-2.0 | https://github.com/toml-rs/toml |
+| toml_writer | 1.2.0+spec-1.1.0 | MIT OR Apache-2.0 | https://github.com/toml-rs/toml |
 | tracing | 0.1.44 | MIT | https://github.com/tokio-rs/tracing |
 | tracing-core | 0.1.36 | MIT | https://github.com/tokio-rs/tracing |
 | ttf-parser | 0.25.1 | MIT OR Apache-2.0 | https://github.com/harfbuzz/ttf-parser |
@@ -324,10 +324,10 @@
 | unicode-vo | 0.1.0 | MIT/Apache-2.0 | https://github.com/RazrFalcon/unicode-vo |
 | unicode-width | 0.2.3 | MIT OR Apache-2.0 | https://github.com/unicode-rs/unicode-width |
 | usvg | 0.50.0 | Apache-2.0 OR MIT | https://github.com/linebender/resvg |
-| veil | 3.0.2 | MIT (workspace) | - |
-| veil-core | 3.0.2 | MIT (workspace) | - |
-| veil-mermaid-offline | 3.0.2 | MIT (workspace) | - |
-| veil-ui | 3.0.2 | MIT (workspace) | - |
+| veil | 3.1.0 | MIT (workspace) | - |
+| veil-core | 3.1.0 | MIT (workspace) | - |
+| veil-mermaid-offline | 3.1.0 | MIT (workspace) | - |
+| veil-ui | 3.1.0 | MIT (workspace) | - |
 | version_check | 0.9.5 | MIT/Apache-2.0 | https://github.com/SergioBenitez/version_check |
 | wait-timeout | 0.2.1 | MIT/Apache-2.0 | https://github.com/alexcrichton/wait-timeout |
 | walkdir | 2.5.1 | Unlicense/MIT | https://github.com/BurntSushi/walkdir |
@@ -364,7 +364,6 @@
 | windows_x86_64_gnullvm | 0.52.6 | MIT OR Apache-2.0 | https://github.com/microsoft/windows-rs |
 | windows_x86_64_msvc | 0.52.6 | MIT OR Apache-2.0 | https://github.com/microsoft/windows-rs |
 | winit | 0.30.13 | Apache-2.0 | https://github.com/rust-windowing/winit |
-| winnow | 0.7.15 | MIT | https://github.com/winnow-rs/winnow |
 | winnow | 1.0.5 | MIT | https://github.com/winnow-rs/winnow |
 | write-fonts | 0.48.1 | MIT OR Apache-2.0 | https://github.com/googlefonts/fontations |
 | x11-dl | 2.21.0 | MIT | https://github.com/AltF02/x11-rs.git |
@@ -374,6 +373,7 @@
 | xkbcommon-dl | 0.4.2 | MIT | https://github.com/rust-windowing/xkbcommon-dl |
 | xkeysym | 0.2.1 | MIT OR Apache-2.0 OR Zlib | https://github.com/notgull/xkeysym |
 | xmlwriter | 0.1.0 | MIT | https://github.com/RazrFalcon/xmlwriter |
+| xxhash-rust | 0.8.21 | BSL-1.0 | https://github.com/DoumanAsh/xxhash-rust |
 | yazi | 0.2.2 | Apache-2.0 OR MIT | https://github.com/dfrg/yazi |
 | yoke | 0.8.4 | Unicode-3.0 | https://github.com/unicode-org/icu4x |
 | yoke-derive | 0.8.4 | Unicode-3.0 | https://github.com/unicode-org/icu4x |
@@ -448,19 +448,19 @@ cytoscape/dist/cytoscape.esm.mjs:
 ### QuickJS（bundled）
 
 - 许可证：MIT
-- 来源：经 rquickjs-sys 0.9.0 捆绑；QuickJS 源码经 Rust 依赖 `rquickjs` 编译进 `veil.exe`
+- 来源：经 rquickjs-sys 0.14.0 捆绑；QuickJS 源码经 Rust 依赖 `rquickjs` 编译进 `veil.exe`
 - 版本：bundled（由 rquickjs-sys 随 crate 固定，具体版本见 Cargo.lock）
 - `rquickjs-sys` crate 元数据：
-  - 版本：0.9.0
+  - 版本：0.14.0
   - 许可证：MIT
   - repository：https://github.com/DelSkayn/rquickjs.git
   - authors：Mees Delzenne (mees.delzenne@gmail.com)
-- 版权行（原文引自 `rquickjs-sys 0.9.0/quickjs/LICENSE`（cargo registry 源目录））：
+- 版权行（原文引自 `rquickjs-sys 0.14.0/quickjs/LICENSE`（cargo registry 源目录））：
 
-  Copyright (c) 2017-2021 Fabrice Bellard
-  Copyright (c) 2017-2021 Charlie Gordon
-  Copyright (c) 2023 Ben Noordhuis
-  Copyright (c) 2023 Saúl Ibarra Corretgé
+  Copyright (c) 2017-2026 Fabrice Bellard
+  Copyright (c) 2017-2024 Charlie Gordon
+  Copyright (c) 2023-2026 Ben Noordhuis
+  Copyright (c) 2023-2026 Saúl Ibarra Corretgé
 
 - 该 crate 以 MIT 分发，捆绑 QuickJS；上述 QuickJS 版权行来自其内置 LICENSE。
 - 上游项目：https://bellard.org/quickjs/
@@ -1183,35 +1183,6 @@ acceptance of support, warranty, indemnity, or other liability obligations
 and/or rights consistent with this License.
 ~~~
 
-### 0517c7f76916dcc6557b3c0e1c077f14dd05bfe8e0d7d2a2fa298fe0d49a790a
-
-适用包：
-- `rquickjs` 0.9.0 (`LICENSE`)
-
-~~~text
-MIT License
-
-Copyright (c) 2020 Mees Delzenne
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-~~~
-
 ### 058f01fe181608d027fcde7e528fc03ea3cf90f30903c407644b0a9bbc54f500
 
 适用包：
@@ -1244,8 +1215,9 @@ SOFTWARE.
 
 适用包：
 - `toml_datetime` 1.1.3+spec-1.1.0 (`LICENSE-APACHE`)
-- `toml_edit` 0.25.20+spec-1.1.0 (`LICENSE-APACHE`)
-- `toml_parser` 1.1.6+spec-1.1.0 (`LICENSE-APACHE`)
+- `toml_edit` 0.25.21+spec-1.1.0 (`LICENSE-APACHE`)
+- `toml_parser` 1.1.7+spec-1.1.0 (`LICENSE-APACHE`)
+- `toml_writer` 1.2.0+spec-1.1.0 (`LICENSE-APACHE`)
 
 ~~~text
                                  Apache License
@@ -1559,6 +1531,40 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
+~~~
+
+### 0a0e814a210338c57b9d65eb516546045c0ca8caa308bf29aa3736236b08346b
+
+适用包：
+- `rquickjs-sys` 0.14.0 (`vendor/wasi-libc/NOTICE.md`)
+
+~~~text
+# Vendored wasi-libc
+
+`include/` and `lib/libc.a` in this directory are vendored from the
+wasi-sdk-24 release (`wasi-sysroot-24.0.tar.gz`,
+sha256 `35172f7d2799485b15a46b1d87f50a585d915ec662080f005d99153a50888f08`)
+by `scripts/vendor-wasm-libc.sh`. Do not hand-edit them; re-run the script.
+
+- `lib/libc.a`: the wasm32-wasi build of wasi-libc, unmodified.
+- `include/`: the subset of wasi-libc's public headers that quickjs's C
+  sources need to compile against `libc.a` for `wasm32-unknown-unknown`.
+  `wasi/api.h` carries one commented-out `#error` (see the patch step in
+  `vendor-wasm-libc.sh`) so it can be included outside an actual wasi
+  target; the rest are otherwise unmodified aside from the provenance
+  comment the script prepends to each file.
+
+wasi-libc is licensed MIT / Apache-2.0 WITH LLVM-exception / Apache-2.0
+(https://github.com/WebAssembly/wasi-libc/blob/main/LICENSE); wasi-sdk,
+which builds and publishes this compiled artifact, is Apache-2.0 WITH
+LLVM-exception (https://github.com/WebAssembly/wasi-sdk/blob/main/LICENSE).
+Both are permissive with no copyleft terms; only `libc.a`'s object code and
+the headers above are vendored here, not wasi-sdk's clang/LLVM toolchain.
+
+To update: bump `WASI_SDK_VERSION_MAJOR`/`MINOR` and `WASI_SYSROOT_SHA256`
+at the top of `vendor-wasm-libc.sh` (the checksum is published on the
+release page, https://github.com/WebAssembly/wasi-sdk/releases/tag/wasi-sdk-(major)),
+then re-run `sh scripts/vendor-wasm-libc.sh` from the repo root.
 ~~~
 
 ### 0a54e647fe54104658b5e563c04c6f9edf251710e47bce692e0bd990a4ddaa39
@@ -2903,6 +2909,7 @@ DEALINGS IN THE SOFTWARE.
 
 适用包：
 - `adler2` 2.0.1 (`LICENSE-MIT`)
+- `allocator-api2` 0.2.21 (`LICENSE-MIT`)
 - `atomic-waker` 1.1.2 (`LICENSE-MIT`)
 - `borsh` 1.8.1 (`LICENSE-MIT`)
 - `borsh-derive` 1.8.1 (`LICENSE-MIT`)
@@ -3330,7 +3337,7 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 ### 29f359024dacaa3361dcddf5a9316e8458028ff062b63105a61e04a16566f968
 
 适用包：
-- `notify` 8.2.2 (`LICENSE-CC0`)
+- `notify` 9.0.0 (`LICENSE-CC0`)
 
 ~~~text
 Creative Commons CC0 1.0 Universal
@@ -3408,10 +3415,10 @@ SOFTWARE.
 ### 2cf6ff8b378634e65ac1e092f9c64aaa315a79b056dcbbc75a05a2c817c57fba
 
 适用包：
-- `veil` 3.0.2 (`LICENSE (workspace root)`)
-- `veil-core` 3.0.2 (`LICENSE (workspace root)`)
-- `veil-mermaid-offline` 3.0.2 (`LICENSE (workspace root)`)
-- `veil-ui` 3.0.2 (`LICENSE (workspace root)`)
+- `veil` 3.1.0 (`LICENSE (workspace root)`)
+- `veil-core` 3.1.0 (`LICENSE (workspace root)`)
+- `veil-mermaid-offline` 3.1.0 (`LICENSE (workspace root)`)
+- `veil-ui` 3.1.0 (`LICENSE (workspace root)`)
 
 ~~~text
 MIT License
@@ -5346,6 +5353,7 @@ SOFTWARE.
 ### 62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a
 
 适用包：
+- `allocator-api2` 0.2.21 (`LICENSE-APACHE`)
 - `itoa` 1.0.19 (`LICENSE-APACHE`)
 - `libc` 0.2.191 (`LICENSE-APACHE`)
 - `num_enum` 0.7.6 (`LICENSE-APACHE`)
@@ -5560,6 +5568,7 @@ END OF TERMS AND CONDITIONS
 - `regex` 1.13.2 (`LICENSE-MIT`)
 - `regex-automata` 0.4.19 (`LICENSE-MIT`)
 - `regex-syntax` 0.8.12 (`LICENSE-MIT`)
+- `relative-path` 2.0.3 (`LICENSE-MIT`)
 
 ~~~text
 Copyright (c) 2014 The Rust Project Developers
@@ -5986,12 +5995,10 @@ APPENDIX: How to apply the Apache License to your work.
 ### 6efb0476a1cc085077ed49357026d8c173bf33017278ef440f222fb9cbcb66e6
 
 适用包：
-- `toml_datetime` 0.6.11 (`LICENSE-MIT`)
 - `toml_datetime` 1.1.3+spec-1.1.0 (`LICENSE-MIT`)
-- `toml_edit` 0.22.27 (`LICENSE-MIT`)
-- `toml_edit` 0.25.20+spec-1.1.0 (`LICENSE-MIT`)
-- `toml_parser` 1.1.6+spec-1.1.0 (`LICENSE-MIT`)
-- `toml_write` 0.1.2 (`LICENSE-MIT`)
+- `toml_edit` 0.25.21+spec-1.1.0 (`LICENSE-MIT`)
+- `toml_parser` 1.1.7+spec-1.1.0 (`LICENSE-MIT`)
+- `toml_writer` 1.2.0+spec-1.1.0 (`LICENSE-MIT`)
 
 ~~~text
 Copyright (c) Individual contributors
@@ -8624,6 +8631,68 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ~~~
 
+### 96f73f9d2a16c21a36b418f06073be26e7d6d5e7c1bc99756b21a4f2c74ef171
+
+适用包：
+- `rquickjs-sys` 0.14.0 (`quickjs/LICENSE`)
+
+~~~text
+The MIT License (MIT)
+ 
+Copyright (c) 2017-2026 Fabrice Bellard
+Copyright (c) 2017-2024 Charlie Gordon
+Copyright (c) 2023-2026 Ben Noordhuis
+Copyright (c) 2023-2026 Saúl Ibarra Corretgé
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
+THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
+~~~
+
+### 976ad3d07927343ab99b31510625acba89eac8e0e517c712925620ddeda91b70
+
+适用包：
+- `rquickjs` 0.14.0 (`LICENSE`)
+
+~~~text
+MIT License
+
+Copyright (c) 2020 Mees Delzenne
+Copyright (c) 2025 Rquickjs Contributors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+~~~
+
 ### 9885fa029a2925a4cb30a3f9d7cd2d7b7e627ddc8d3ffaafd4583332d026a5b4
 
 适用包：
@@ -9164,6 +9233,7 @@ SOFTWARE.
 - `regex` 1.13.2 (`LICENSE-APACHE`)
 - `regex-automata` 0.4.19 (`LICENSE-APACHE`)
 - `regex-syntax` 0.8.12 (`LICENSE-APACHE`)
+- `relative-path` 2.0.3 (`LICENSE-APACHE`)
 - `roxmltree` 0.20.0 (`LICENSE-APACHE`)
 - `roxmltree` 0.21.2 (`LICENSE-APACHE`)
 - `rustc_version` 0.4.1 (`LICENSE-APACHE`)
@@ -10606,9 +10676,6 @@ DEALINGS IN THE SOFTWARE.
 - `jni-sys` 0.4.1 (`LICENSE-APACHE`)
 - `quick-error` 1.2.3 (`LICENSE-APACHE`)
 - `quick-error` 2.0.1 (`LICENSE-APACHE`)
-- `toml_datetime` 0.6.11 (`LICENSE-APACHE`)
-- `toml_edit` 0.22.27 (`LICENSE-APACHE`)
-- `toml_write` 0.1.2 (`LICENSE-APACHE`)
 
 ~~~text
                                  Apache License
@@ -12095,6 +12162,7 @@ DEALINGS IN THE SOFTWARE.
 适用包：
 - `error-code` 3.4.0 (`LICENSE`)
 - `ryu` 1.0.23 (`LICENSE-BOOST`)
+- `xxhash-rust` 0.8.21 (`LICENSE`)
 
 ~~~text
 Boost Software License - Version 1.0 - August 17th, 2003
@@ -12155,7 +12223,6 @@ THE SOFTWARE.
 ### cb5aedb296c5246d1f22e9099f925a65146f9f0d6b4eebba97fd27a6cdbbab2d
 
 适用包：
-- `winnow` 0.7.15 (`LICENSE-MIT`)
 - `winnow` 1.0.5 (`LICENSE-MIT`)
 
 ~~~text
@@ -13611,38 +13678,6 @@ dealings in these Data Files or Software without prior written
 authorization of the copyright holder.
 ~~~
 
-### f8ff566e562ab34733a732fb8bdbc353652bb7240d8bf45f1516b7c7b698c014
-
-适用包：
-- `rquickjs-sys` 0.9.0 (`quickjs/LICENSE`)
-
-~~~text
-The MIT License (MIT)
- 
-Copyright (c) 2017-2021 Fabrice Bellard
-Copyright (c) 2017-2021 Charlie Gordon
-Copyright (c) 2023 Ben Noordhuis
-Copyright (c) 2023 Saúl Ibarra Corretgé
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in
-all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
-THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
-THE SOFTWARE.
-~~~
-
 ### f9c4c77baa3828004ee54b8a4f2db2e88ed44a6237a493965bf551fac0fcb62d
 
 适用包：
@@ -14103,7 +14138,7 @@ DEALINGS IN THE SOFTWARE.
 - `objc2-uniform-type-identifiers` 0.2.2 — SPDX：`MIT` — repository：https://github.com/madsmtm/objc2 — authors：未声明
 - `objc2-user-notifications` 0.2.2 — SPDX：`MIT` — repository：https://github.com/madsmtm/objc2 — authors：未声明
 - `r-efi` 6.0.0 — SPDX：`MIT OR Apache-2.0 OR LGPL-2.1-or-later` — repository：https://github.com/r-efi/r-efi — authors：未声明
-- `rquickjs-core` 0.9.0 — SPDX：`MIT` — repository：https://github.com/DelSkayn/rquickjs.git — authors：Mees Delzenne (mees.delzenne@gmail.com)；K. (kayo@illumium.org)
+- `rquickjs-core` 0.14.0 — SPDX：`MIT` — repository：https://github.com/DelSkayn/rquickjs.git — authors：Mees Delzenne (mees.delzenne@gmail.com)；K. (kayo@illumium.org)
 
 ~~~text
 MIT License

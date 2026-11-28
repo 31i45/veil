@@ -1,2 +1,0 @@
-WorkArea=0,0,2560,1368 size=2560x1368
-WindowRect=593,127,1965,1233 outer=1372x1106 client=1350x1050 dpi=144

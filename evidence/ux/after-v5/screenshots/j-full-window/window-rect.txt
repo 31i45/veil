@@ -1,9 +1,0 @@
-method=default_launch_window_rect
-dpi=144 scale=1.5
-config=no config (default 900x700 logical)
-outer_px=1372x1106 at 593,127
-client_px=1350x1050
-client_logical=900x700
-clamped_to_min_520x360_logical=True
-client_equals_expected_min_px=False
-printwindow_ok=True
